@@ -1,0 +1,24 @@
+# ============================================================================
+# Quantiloom Test Configuration (M0 Milestone)
+# ============================================================================
+
+[renderer]
+resolution = [1280, 720]
+spp = 1
+preset = "MS-RT"
+seconds_per_frame = true
+
+[spectral]
+band_samples = 1
+bands = [
+    { name = "VIS_550",  center_nm = 550.0, fwhm_nm = 40.0 },
+    { name = "NIR_850",  center_nm = 850.0, fwhm_nm = 30.0 },
+]
+
+[atmosphere]
+mode = "LUT_FAST"
+lut = "modtran_fast.h5"
+
+[denoise]
+method = "SVGF"
+biased_clamp = { enable = true, percentile = 0.99 }

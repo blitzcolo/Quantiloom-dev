@@ -1,0 +1,157 @@
+cmake_minimum_required(VERSION 3.21)
+
+# ============================================================================
+# Project Definition
+# ============================================================================
+project(Quantiloom
+    VERSION 0.1.0
+    DESCRIPTION "Unified Spectral Path Tracing System on Vulkan Ray Tracing"
+    LANGUAGES CXX
+)
+
+# ============================================================================
+# C++20 Standard & Compiler Requirements
+# ============================================================================
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Export compile_commands.json for clangd/IDEs
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ============================================================================
+# Build Type Configuration
+# ============================================================================
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose build type" FORCE)
+    set_property(CACHE CMAKE_BUILD_TYPE PROPERTY STRINGS "Debug" "Release" "RelWithDebInfo" "MinSizeRel")
+endif()
+
+message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
+message(STATUS "C++ Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+
+# ============================================================================
+# CPM.cmake Integration (Dependency Management)
+# ============================================================================
+set(CPM_DOWNLOAD_VERSION 0.40.2)
+set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm_cache" CACHE PATH "CPM source cache directory")
+
+if(NOT EXISTS "${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
+    message(STATUS "Downloading CPM.cmake v${CPM_DOWNLOAD_VERSION}...")
+    file(DOWNLOAD
+        "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
+        "${CMAKE_BINARY_DIR}/cmake/CPM.cmake"
+        EXPECTED_HASH SHA256=c8cdc32c03816538ce22781ed72964dc864b2a34a310d3b7104812a5ca2d835d
+    )
+endif()
+
+include("${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
+
+# ============================================================================
+# Platform Detection & Cross-Platform Macros
+# ============================================================================
+if(WIN32)
+    set(QUANTILOOM_PLATFORM_WINDOWS 1)
+    add_compile_definitions(QUANTILOOM_PLATFORM_WINDOWS)
+elseif(UNIX AND NOT APPLE)
+    set(QUANTILOOM_PLATFORM_LINUX 1)
+    add_compile_definitions(QUANTILOOM_PLATFORM_LINUX)
+elseif(APPLE)
+    set(QUANTILOOM_PLATFORM_MACOS 1)
+    add_compile_definitions(QUANTILOOM_PLATFORM_MACOS)
+endif()
+
+# ============================================================================
+# Compiler-Specific Flags
+# ============================================================================
+if(MSVC)
+    # MSVC: Enable UTF-8, modern conformance, and high warning level
+    add_compile_options(
+        /utf-8
+        /W4
+        /permissive-
+        /Zc:__cplusplus
+    )
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+else()
+    # GCC/Clang: Enable comprehensive warnings
+    add_compile_options(
+        -Wall
+        -Wextra
+        -Wpedantic
+        -Wconversion
+        -Wsign-conversion
+    )
+endif()
+
+# ============================================================================
+# Project-Wide Options
+# ============================================================================
+option(QUANTILOOM_BUILD_TESTS "Build unit tests" ON)
+option(QUANTILOOM_BUILD_EXAMPLES "Build example applications" ON)
+option(QUANTILOOM_ENABLE_VALIDATION "Enable Vulkan validation layers" ON)
+
+# ============================================================================
+# Third-Party Dependencies (via CPM.cmake)
+# ============================================================================
+
+# spdlog: Fast C++ logging library (uses bundled fmt)
+CPMAddPackage(
+    NAME spdlog
+    VERSION 1.14.1
+    GITHUB_REPOSITORY gabime/spdlog
+    OPTIONS
+        "SPDLOG_BUILD_SHARED OFF"
+        "SPDLOG_BUILD_EXAMPLE OFF"
+        "SPDLOG_BUILD_TESTS OFF"
+        "SPDLOG_FMT_EXTERNAL OFF"  # Use bundled fmt
+)
+
+# tomlplusplus: TOML config parser (header-only)
+CPMAddPackage(
+    NAME tomlplusplus
+    VERSION 3.4.0
+    GITHUB_REPOSITORY marzer/tomlplusplus
+    OPTIONS
+        "BUILD_SHARED_LIBS OFF"
+        "BUILD_TESTS OFF"
+        "BUILD_EXAMPLES OFF"
+)
+
+message(STATUS "Dependencies resolved via CPM.cmake")
+
+# ============================================================================
+# Subdirectories
+# ============================================================================
+
+# Core library
+add_subdirectory(src/libQuantiloom)
+
+# Main application
+add_subdirectory(src/app)
+
+# Examples (optional)
+if(QUANTILOOM_BUILD_EXAMPLES)
+    # add_subdirectory(examples)  # TODO: M2+
+endif()
+
+# Tests (optional)
+if(QUANTILOOM_BUILD_TESTS)
+    enable_testing()
+    # add_subdirectory(tests)  # TODO: M1.5+
+endif()
+
+# ============================================================================
+# Summary
+# ============================================================================
+message(STATUS "========================================")
+message(STATUS "  Quantiloom Configuration Summary")
+message(STATUS "========================================")
+message(STATUS "  Version:        ${PROJECT_VERSION}")
+message(STATUS "  Build Type:     ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C++ Standard:   C++${CMAKE_CXX_STANDARD}")
+message(STATUS "  Platform:       ${CMAKE_SYSTEM_NAME}")
+message(STATUS "  Compiler:       ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "  Build Tests:    ${QUANTILOOM_BUILD_TESTS}")
+message(STATUS "  Build Examples: ${QUANTILOOM_BUILD_EXAMPLES}")
+message(STATUS "========================================")
