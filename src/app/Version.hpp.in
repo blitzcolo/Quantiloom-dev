@@ -1,0 +1,21 @@
+#pragma once
+
+// ============================================================================
+// Quantiloom Application Version Info (Auto-generated from CMake)
+// ============================================================================
+
+#define QUANTILOOM_APP_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define QUANTILOOM_APP_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define QUANTILOOM_APP_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define QUANTILOOM_APP_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace quantiloom {
+namespace version {
+
+inline constexpr int AppVersionMajor = QUANTILOOM_APP_VERSION_MAJOR;
+inline constexpr int AppVersionMinor = QUANTILOOM_APP_VERSION_MINOR;
+inline constexpr int AppVersionPatch = QUANTILOOM_APP_VERSION_PATCH;
+inline constexpr const char* AppVersionString = QUANTILOOM_APP_VERSION_STRING;
+
+} // namespace version
+} // namespace quantiloom

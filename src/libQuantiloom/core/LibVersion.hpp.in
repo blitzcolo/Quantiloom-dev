@@ -1,0 +1,21 @@
+#pragma once
+
+// ============================================================================
+// libQuantiloom Version Info (Auto-generated from CMake)
+// ============================================================================
+
+#define QUANTILOOM_LIB_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define QUANTILOOM_LIB_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define QUANTILOOM_LIB_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define QUANTILOOM_LIB_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace quantiloom {
+namespace version {
+
+inline constexpr int LibVersionMajor = QUANTILOOM_LIB_VERSION_MAJOR;
+inline constexpr int LibVersionMinor = QUANTILOOM_LIB_VERSION_MINOR;
+inline constexpr int LibVersionPatch = QUANTILOOM_LIB_VERSION_PATCH;
+inline constexpr const char* LibVersionString = QUANTILOOM_LIB_VERSION_STRING;
+
+} // namespace version
+} // namespace quantiloom

@@ -105,7 +105,13 @@ CPMAddPackage(
         "SPDLOG_BUILD_EXAMPLE OFF"
         "SPDLOG_BUILD_TESTS OFF"
         "SPDLOG_FMT_EXTERNAL OFF"  # Use bundled fmt
+        "CMAKE_POSITION_INDEPENDENT_CODE ON"  # Enable -fPIC for static library
 )
+
+# Ensure spdlog is built with PIC
+if(TARGET spdlog)
+    set_target_properties(spdlog PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 
 # tomlplusplus: TOML config parser (header-only)
 CPMAddPackage(
