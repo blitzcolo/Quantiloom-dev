@@ -17,7 +17,18 @@ add_library(libQuantiloom SHARED
     core/Config.hpp
     core/Platform.hpp
     core/Types.hpp
+    core/Image.hpp
+    core/SpectralCube.hpp
+    core/LUT.hpp
     libQuantiloom.rc
+
+    # IO module
+    io/ImageIO.cpp
+    io/ImageIO.hpp
+    io/SpectralIO.cpp
+    io/SpectralIO.hpp
+    io/LUTLoader.cpp
+    io/LUTLoader.hpp
 
     # Generated files
     ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
@@ -44,7 +55,14 @@ target_link_libraries(libQuantiloom
     PUBLIC
         spdlog::spdlog
         tomlplusplus::tomlplusplus
+        OpenEXR::OpenEXR
+        $<IF:$<TARGET_EXISTS:hdf5-static>,hdf5-static,${HDF5_CXX_LIBRARIES}>
 )
+
+# Add HDF5 include directories if using find_package
+if(HDF5_FOUND AND NOT hdf5_ADDED)
+    target_include_directories(libQuantiloom PUBLIC ${HDF5_INCLUDE_DIRS})
+endif()
 
 # Compiler-specific flags
 if(MSVC)
