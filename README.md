@@ -40,7 +40,7 @@ Quantiloom/
 │   ├── luts/               # MODTRAN LUTs (HDF5, SKYLUT6)
 │   └── configs/            # TOML configuration files
 │
-├── build/                  # (In .gitignore) CMake generated build files
+├── build/                  # (In .gitignore) CMake generated build files (for Windows)
 │
 ├── docs/                   # Documentation (including API documentation)
 │
@@ -48,6 +48,8 @@ Quantiloom/
 │   ├── 01_load_scene/      # Demonstrates how to load a scene
 │   ├── 02_run_ms_rt/       # Demonstrates how to run MS-RT preview
 │   └── 03_run_hs_off/      # Demonstrates how to run HS-OFF per-band point rendering
+│
+├── out/                    # (In .gitignore) CMake build output (for Linux)
 │
 ├── scripts/                # Automation and validation scripts
 │   ├── validation/         # Validation benchmark suite (Python)

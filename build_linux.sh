@@ -1,4 +1,6 @@
-cmake -B build -G "Ninja" -A x64 -DCMAKE_BUILD_TYPE=Debug -DCMAKE_GENERATOR_PLATFORM=x64
-cmake -B build -G "Ninja" -A x64 -DCMAKE_BUILD_TYPE=Release -DCMAKE_GENERATOR_PLATFORM=x64
-cmake --build build --config Debug --target ALL_BUILD -j
-cmake --build build --config Release --target ALL_BUILD -j
+cmake -B out -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++
+cmake -B out -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=g++
+cmake --build out --config Debug --target libQuantiloom -j
+cmake --build out --config Release --target libQuantiloom -j
+cmake --build out --config Debug --target Quantiloom -j
+cmake --build out --config Release --target Quantiloom -j
