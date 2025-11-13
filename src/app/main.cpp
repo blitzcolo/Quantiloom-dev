@@ -19,7 +19,7 @@ int main(int argc, char* argv[]) {
     Log::Init("quantiloom.log", Log::Level::Info);
 
     QL_LOG_INFO("========================================");
-    QL_LOG_INFO("  Quantiloom v{}", "0.1.0");
+    QL_LOG_INFO("  Quantiloom v{}", "0.0.1");
     QL_LOG_INFO("  Unified Spectral Path Tracing System");
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("Platform: {}", GetPlatformName());
