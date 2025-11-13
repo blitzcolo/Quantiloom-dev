@@ -27,20 +27,26 @@ target_link_libraries(Quantiloom
         libQuantiloom
 )
 
-# C++20 standard
+target_compile_definitions(Quantiloom PRIVATE QL_USE_SHARED)
+
+# C++20 standard and RPATH set to executable directory
 set_target_properties(Quantiloom PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
+    BUILD_RPATH_USE_ORIGIN ON
+    INSTALL_RPATH "$ORIGIN"
 )
 
 # Copy the library to the executable directory
-add_custom_command(
-    TARGET Quantiloom POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "$<TARGET_FILE:libQuantiloom>" # DLL/shared library file
-        "$<TARGET_FILE_DIR:Quantiloom>"  # Executable output directory
-    COMMENT "Copying Quantiloom.dll to executable directory"
-)
+if(WIN32)
+    add_custom_command(
+        TARGET Quantiloom POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:libQuantiloom>"
+            "$<TARGET_FILE_DIR:Quantiloom>"
+        COMMENT "Copying Quantiloom.dll to executable directory"
+    )
+endif()
 
 # Install target (optional, for packaging)
 install(TARGETS Quantiloom

@@ -30,6 +30,8 @@ set_target_properties(libQuantiloom PROPERTIES
     CXX_STANDARD_REQUIRED ON
 )
 
+target_compile_definitions(libQuantiloom PRIVATE QL_BUILD_SHARED)
+
 # Include directories
 target_include_directories(libQuantiloom
     PUBLIC
