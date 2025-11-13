@@ -125,6 +125,41 @@ CPMAddPackage(
         "BUILD_EXAMPLES OFF"
 )
 
+# OpenEXR: High dynamic range image I/O (for multi-channel EXR)
+CPMAddPackage(
+    NAME openexr
+    VERSION 3.2.4
+    GITHUB_REPOSITORY AcademySoftwareFoundation/openexr
+    OPTIONS
+        "BUILD_SHARED_LIBS OFF"
+        "BUILD_TESTING OFF"
+        "OPENEXR_BUILD_TOOLS OFF"
+        "OPENEXR_INSTALL_EXAMPLES OFF"
+        "OPENEXR_INSTALL_PKG_CONFIG OFF"
+)
+
+# HDF5: Hierarchical Data Format for hyperspectral cubes
+# Try CPM first, fall back to find_package if available
+CPMAddPackage(
+    NAME hdf5
+    VERSION 1.14.5
+    GITHUB_REPOSITORY HDFGroup/hdf5
+    OPTIONS
+        "BUILD_SHARED_LIBS OFF"
+        "BUILD_TESTING OFF"
+        "HDF5_BUILD_EXAMPLES OFF"
+        "HDF5_BUILD_TOOLS OFF"
+        "HDF5_ENABLE_Z_LIB_SUPPORT ON"
+        "HDF5_BUILD_CPP_LIB ON"
+        "HDF5_BUILD_HL_LIB OFF"
+)
+
+# If CPM failed to fetch HDF5, try system package
+if(NOT hdf5_ADDED)
+    message(STATUS "HDF5 not found via CPM, trying find_package...")
+    find_package(HDF5 REQUIRED COMPONENTS CXX)
+endif()
+
 message(STATUS "Dependencies resolved via CPM.cmake")
 
 # ============================================================================
