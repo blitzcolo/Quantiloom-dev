@@ -2,6 +2,8 @@
 #include "core/Config.hpp"
 #include "core/Platform.hpp"
 #include "core/Types.hpp"
+#include "core/LibVersion.hpp"
+#include "Version.hpp"
 
 #include <iostream>
 #include <filesystem>
@@ -19,9 +21,11 @@ int main(int argc, char* argv[]) {
     Log::Init("quantiloom.log", Log::Level::Info);
 
     QL_LOG_INFO("========================================");
-    QL_LOG_INFO("  Quantiloom v{}", "0.1.0");
+    QL_LOG_INFO("  Quantiloom v{}", version::AppVersionString);
     QL_LOG_INFO("  Unified Spectral Path Tracing System");
     QL_LOG_INFO("========================================");
+    QL_LOG_INFO("Application Version: {}", version::AppVersionString);
+    QL_LOG_INFO("libQuantiloom Version: {}", version::LibVersionString);
     QL_LOG_INFO("Platform: {}", GetPlatformName());
     QL_LOG_INFO("Compiler: {}", GetCompilerName());
     QL_LOG_INFO("Config:   {}", GetBuildConfig());

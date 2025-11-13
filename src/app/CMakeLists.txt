@@ -2,9 +2,23 @@
 # Quantiloom Application (Main Executable)
 # ============================================================================
 
+# Generate version header from template
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/Version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/Version.hpp"
+    @ONLY
+)
+
 add_executable(Quantiloom
     main.cpp
     Quantiloom.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
+)
+
+# Include directories for generated files
+target_include_directories(Quantiloom
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "Version.hpp"
 )
 
 # Link against the core library

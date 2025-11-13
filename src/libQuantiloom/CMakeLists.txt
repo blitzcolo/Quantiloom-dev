@@ -2,6 +2,13 @@
 # libQuantiloom - Core Library
 # ============================================================================
 
+# Generate version header from template
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/core/LibVersion.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp"
+    @ONLY
+)
+
 add_library(libQuantiloom SHARED
     # Core module
     core/Log.cpp
@@ -11,6 +18,9 @@ add_library(libQuantiloom SHARED
     core/Platform.hpp
     core/Types.hpp
     libQuantiloom.rc
+
+    # Generated files
+    ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
 )
 
 # Set library output name (remove "lib" prefix for cleaner names)
@@ -24,6 +34,7 @@ set_target_properties(libQuantiloom PROPERTIES
 target_include_directories(libQuantiloom
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}  # Allows #include "core/Log.hpp"
+        ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "core/LibVersion.hpp"
 )
 
 # Link dependencies (from CPM.cmake)
