@@ -2,7 +2,7 @@
 # libQuantiloom - Core Library
 # ============================================================================
 
-add_library(libQuantiloom STATIC
+add_library(libQuantiloom SHARED
     # Core module
     core/Log.cpp
     core/Log.hpp
@@ -10,6 +10,7 @@ add_library(libQuantiloom STATIC
     core/Config.hpp
     core/Platform.hpp
     core/Types.hpp
+    libQuantiloom.rc
 )
 
 # Set library output name (remove "lib" prefix for cleaner names)

@@ -1,0 +1,35 @@
+#include <windows.h>
+
+// Attention: The 1 must be the ID of VS_VERSION_INFO
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    0,0,1,0  // 4 numbers: Major, Minor, Patch, Revision
+ PRODUCTVERSION 0,0,1,0  // Same as FILEVERSION
+ FILEFLAGSMASK  0x3fL    // Recommended mask
+#ifdef _DEBUG
+ FILEFLAGS      0x1L     // VS_FF_DEBUG (Debug version)
+#else
+ FILEFLAGS      0x0L     // 0 (Release version)
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_DLL  // <-- Indicates this is a DLL
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0" // 0409: en-US, 04b0: Unicode
+        BEGIN
+            VALUE "CompanyName",      "wtflmao\0"
+            VALUE "FileDescription",  "Quantiloom Core Library\0"
+            VALUE "FileVersion",      "0.0.1.0\0"
+            VALUE "InternalName",     "libQuantiloom\0"
+            VALUE "LegalCopyright",   "Copyright (C) 2025 wtflmao. All rights reserved.\0"
+            VALUE "OriginalFilename", "Quantiloom.dll\0"
+            VALUE "ProductName",      "Quantiloom Core Library\0"
+            VALUE "ProductVersion",   "0.0.1.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200 // 0x409 = en-US, 1200 = Unicode (UTF-16)
+    END
+END

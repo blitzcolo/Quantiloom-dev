@@ -1,0 +1,34 @@
+#include <windows.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION    0,0,1,0
+ PRODUCTVERSION 0,0,1,0
+ FILEFLAGSMASK  0x3fL
+#ifdef _DEBUG
+ FILEFLAGS      0x1L
+#else
+ FILEFLAGS      0x0L
+#endif
+ FILEOS         VOS_NT_WINDOWS32
+ FILETYPE       VFT_APP  // <-- Indicates this is a APP (EXE)
+ FILESUBTYPE    VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0" // 0409: en-US, 04b0: Unicode
+        BEGIN
+            VALUE "CompanyName",      "wtflmao\0"
+            VALUE "FileDescription",  "Quantiloom Main Program\0"
+            VALUE "FileVersion",      "0.0.1.0\0"
+            VALUE "InternalName",     "Quantiloom\0"
+            VALUE "LegalCopyright",   "Copyright (C) 2025 wtflmao. All rights reserved.\0"
+            VALUE "OriginalFilename", "Quantiloom.exe\0"
+            VALUE "ProductName",      "Quantiloom Application\0"
+            VALUE "ProductVersion",   "0.0.1.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

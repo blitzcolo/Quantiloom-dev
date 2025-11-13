@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.21)
 # Project Definition
 # ============================================================================
 project(Quantiloom
-    VERSION 0.1.0
+    VERSION 0.0.1
     DESCRIPTION "Unified Spectral Path Tracing System on Vulkan Ray Tracing"
     LANGUAGES CXX
 )
@@ -33,7 +33,7 @@ message(STATUS "C++ Compiler: ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERS
 # ============================================================================
 # CPM.cmake Integration (Dependency Management)
 # ============================================================================
-set(CPM_DOWNLOAD_VERSION 0.40.2)
+set(CPM_DOWNLOAD_VERSION 0.42.0)
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm_cache" CACHE PATH "CPM source cache directory")
 
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
@@ -41,7 +41,7 @@ if(NOT EXISTS "${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
     file(DOWNLOAD
         "https://github.com/cpm-cmake/CPM.cmake/releases/download/v${CPM_DOWNLOAD_VERSION}/CPM.cmake"
         "${CMAKE_BINARY_DIR}/cmake/CPM.cmake"
-        EXPECTED_HASH SHA256=c8cdc32c03816538ce22781ed72964dc864b2a34a310d3b7104812a5ca2d835d
+        EXPECTED_HASH SHA256=2020b4fc42dba44817983e06342e682ecfc3d2f484a581f11cc5731fbe4dce8a
     )
 endif()
 
