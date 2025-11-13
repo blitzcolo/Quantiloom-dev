@@ -2,7 +2,7 @@
 
 // ============================================================================
 // Platform Detection & Abstraction Layer
-// Quantiloom M0 - Cross-platform compatibility macros
+// Cross-platform compatibility macros
 // ============================================================================
 
 // Platform identification macros (defined by CMake)
@@ -23,6 +23,8 @@
     #define QL_COMPILER_CLANG 1
 #elif defined(__GNUC__)
     #define QL_COMPILER_GCC 1
+#elif defined(__INTEL_COMPILER)
+    #define QL_COMPILER_INTEL 1
 #else
     #error "Unsupported compiler! C++20 support required."
 #endif
@@ -76,6 +78,9 @@
         _Pragma("GCC diagnostic ignored \"-Wall\"") \
         _Pragma("GCC diagnostic ignored \"-Wextra\"")
     #define QL_DISABLE_WARNINGS_POP _Pragma("GCC diagnostic pop")
+#elif defined(QL_COMPILER_INTEL)
+    #define QL_DISABLE_WARNINGS_PUSH __pragma(warning(push, 0))
+    #define QL_DISABLE_WARNINGS_POP  __pragma(warning(pop))
 #endif
 
 // Assert macro (active in debug builds)
@@ -90,6 +95,12 @@
                 assert(condition); \
             } \
         } while (false)
+#elif defined(QL_RELEASE)
+    #define QL_ASSERT(condition, message) ((void)0)
+#elif defined(QL_RELWITHDEBINFO)
+    #define QL_ASSERT(condition, message) ((void)0)
+#elif defined(QL_MINSIZEREL)
+    #define QL_ASSERT(condition, message) ((void)0)
 #else
     #define QL_ASSERT(condition, message) ((void)0)
 #endif
@@ -104,6 +115,8 @@ constexpr const char* GetPlatformName() {
         return "Linux";
     #elif defined(QL_MACOS)
         return "macOS";
+    #else
+        return "Unknown";
     #endif
 }
 
@@ -115,6 +128,8 @@ constexpr const char* GetCompilerName() {
         return "Clang";
     #elif defined(QL_COMPILER_GCC)
         return "GCC";
+    #elif defined(QL_COMPILER_INTEL)
+        return "Intel";
     #endif
 }
 
@@ -122,8 +137,14 @@ constexpr const char* GetCompilerName() {
 constexpr const char* GetBuildConfig() {
     #if defined(QL_DEBUG)
         return "Debug";
-    #else
+    #elif defined(QL_RELEASE)
         return "Release";
+    #elif defined(QL_RELWITHDEBINFO)
+        return "RelWithDebInfo";
+    #elif defined(QL_MINSIZEREL)
+        return "MinSizeRel";
+    #else
+        return "Unknown";
     #endif
 }
 

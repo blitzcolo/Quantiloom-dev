@@ -11,7 +11,7 @@
 using namespace quantiloom;
 
 // ============================================================================
-// Quantiloom Entry Point (M0: Basic Skeleton)
+// Quantiloom Entry Point
 // ============================================================================
 
 int main(int argc, char* argv[]) {
@@ -70,7 +70,7 @@ int main(int argc, char* argv[]) {
     }
 
     // ========================================================================
-    // M0 Milestone: Basic Infrastructure Test
+    // Basic Infrastructure Test
     // ========================================================================
     QL_LOG_INFO("");
     QL_LOG_INFO("M0 Milestone Checklist:");

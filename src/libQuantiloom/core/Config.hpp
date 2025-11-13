@@ -11,7 +11,7 @@ QL_DISABLE_WARNINGS_POP
 
 // ============================================================================
 // Configuration Loader (TOML)
-// Quantiloom M0 - Parse and validate TOML configuration files
+// Parse and validate TOML configuration files
 // ============================================================================
 
 namespace quantiloom {

@@ -67,10 +67,11 @@ endif()
 if(MSVC)
     # MSVC: Enable UTF-8, modern conformance, and high warning level
     add_compile_options(
-        /utf-8
         /W4
         /permissive-
         /Zc:__cplusplus
+        /source-charset:utf-8
+        /execution-charset:gbk
     )
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
