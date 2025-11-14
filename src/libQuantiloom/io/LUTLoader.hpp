@@ -21,7 +21,7 @@ namespace quantiloom {
 // future MODTRAN export scripts.
 // ============================================================================
 
-class LUTLoader {
+class QL_API LUTLoader {
 public:
     // ========================================================================
     // LUT Loading

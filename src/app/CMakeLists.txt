@@ -29,7 +29,7 @@ target_link_libraries(Quantiloom
 
 target_compile_definitions(Quantiloom
     PRIVATE
-        QL_USE_SHARED
+        QL_USE_STATIC
 )
 
 # C++20 standard and RPATH set to executable directory

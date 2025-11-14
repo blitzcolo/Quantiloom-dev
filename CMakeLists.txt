@@ -125,10 +125,20 @@ CPMAddPackage(
         "BUILD_EXAMPLES OFF"
 )
 
+# Imath: Dependency for OpenEXR
+CPMAddPackage(
+    NAME Imath
+    VERSION 3.2.2
+    GITHUB_REPOSITORY AcademySoftwareFoundation/Imath
+    OPTIONS
+        "BUILD_SHARED_LIBS OFF"
+        "CMAKE_POSITION_INDEPENDENT_CODE ON"
+)
+
 # OpenEXR: High dynamic range image I/O (for multi-channel EXR)
 CPMAddPackage(
     NAME openexr
-    VERSION 3.2.4
+    VERSION 3.4.3
     GITHUB_REPOSITORY AcademySoftwareFoundation/openexr
     OPTIONS
         "BUILD_SHARED_LIBS OFF"
@@ -138,14 +148,22 @@ CPMAddPackage(
         "OPENEXR_INSTALL_PKG_CONFIG OFF"
 )
 
+# --- WORKAROUND for OpenEXR include paths ---
+# Forcefully add OpenEXR include directories to the global path
+# This is needed because the library's CMake target does not propagate them correctly.
+include_directories(SYSTEM "${openexr_SOURCE_DIR}/src/lib")
+include_directories(SYSTEM "${openexr_BINARY_DIR}/src/lib/OpenEXRCore")
+# --- END WORKAROUND ---
+
 # HDF5: Hierarchical Data Format for hyperspectral cubes
 # Try CPM first, fall back to find_package if available
 CPMAddPackage(
     NAME hdf5
-    VERSION 1.14.5
+    GIT_TAG hdf5-1.14.5
     GITHUB_REPOSITORY HDFGroup/hdf5
     OPTIONS
         "BUILD_SHARED_LIBS OFF"
+        "HDF5_USE_STATIC_LIBRARIES ON"
         "BUILD_TESTING OFF"
         "HDF5_BUILD_EXAMPLES OFF"
         "HDF5_BUILD_TOOLS OFF"

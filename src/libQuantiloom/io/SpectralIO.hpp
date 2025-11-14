@@ -25,7 +25,7 @@ namespace quantiloom {
 // - HDF5 is standard in scientific computing (MODTRAN, hyperspectral sensors)
 // ============================================================================
 
-class SpectralIO {
+class QL_API SpectralIO {
 public:
     // ========================================================================
     // HDF5 Writing

@@ -9,7 +9,7 @@ configure_file(
     @ONLY
 )
 
-add_library(libQuantiloom SHARED
+add_library(libQuantiloom STATIC
     # Core module
     core/Log.cpp
     core/Log.hpp
@@ -36,7 +36,7 @@ add_library(libQuantiloom SHARED
 
 target_compile_definitions(libQuantiloom
     PRIVATE
-        QL_BUILD_SHARED
+        QL_BUILD_STATIC
         QUANTILOOM_LIB_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         QUANTILOOM_LIB_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         QUANTILOOM_LIB_VERSION_PATCH=${PROJECT_VERSION_PATCH}
@@ -66,7 +66,9 @@ target_link_libraries(libQuantiloom
         spdlog::spdlog
         tomlplusplus::tomlplusplus
         OpenEXR::OpenEXR
-        $<IF:$<TARGET_EXISTS:hdf5-static>,hdf5-static,${HDF5_CXX_LIBRARIES}>
+        Imath::Imath
+        hdf5-static
+        hdf5_cpp-static
 )
 
 # Add HDF5 include directories if using find_package

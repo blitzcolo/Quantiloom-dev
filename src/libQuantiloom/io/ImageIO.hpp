@@ -20,7 +20,7 @@ namespace quantiloom {
 // - Metadata is stored as string attributes in EXR header
 // ============================================================================
 
-class ImageIO {
+class QL_API ImageIO {
 public:
     // ========================================================================
     // EXR Writing
