@@ -70,14 +70,37 @@ static bool Write1DArray(
 static void ReadMetadata(H5::H5File& file, AtmosphereLUT& lut) {
     try {
         H5::Group metaGroup = file.openGroup("/metadata");
-        H5::StrType strType(H5::PredType::C_S1, H5T_VARIABLE);
 
         for (hsize_t i = 0; i < metaGroup.getNumAttrs(); ++i) {
             H5::Attribute attr = metaGroup.openAttribute(i);
             std::string name = attr.getName();
-            std::string value;
-            attr.read(strType, value);
-            lut.metadata[name] = value;
+
+            // Query the actual datatype instead of assuming
+            H5::DataType dtype = attr.getDataType();
+
+            if (dtype.getClass() == H5T_STRING) {
+                H5::StrType strType = attr.getStrType();
+                std::string value;
+
+                if (strType.isVariableStr()) {
+                    // Variable-length string: use char* buffer
+                    char* c_str = nullptr;
+                    attr.read(strType, &c_str);
+                    if (c_str != nullptr) {
+                        value = std::string(c_str);
+                        // CRITICAL: free memory allocated by HDF5 for variable-length strings
+                        H5free_memory(c_str);
+                    }
+                } else {
+                    // Fixed-length string: allocate buffer of exact size
+                    size_t str_len = strType.getSize();
+                    std::vector<char> buffer(str_len + 1, '\0');
+                    attr.read(strType, buffer.data());
+                    value = std::string(buffer.data());
+                }
+
+                lut.metadata[name] = value;
+            }
         }
 
     } catch (const H5::Exception& e) {
