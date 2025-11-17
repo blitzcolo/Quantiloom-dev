@@ -8,6 +8,7 @@
 
 #include "scene/Mesh.hpp"
 #include <glm/glm.hpp>
+#include <glm/gtc/constants.hpp>  // For glm::pi<T>()
 #include <vector>
 
 namespace quantiloom {
