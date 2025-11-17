@@ -1,0 +1,68 @@
+// ============================================================================
+// Quantiloom M1 - Ray Generation Shader
+// ============================================================================
+// Generates primary camera rays and writes output to storage image
+// ============================================================================
+
+#include "common.hlsli"
+
+// ============================================================================
+// Bindings
+// ============================================================================
+
+[[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
+[[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
+[[vk::binding(2, 0)]] StructuredBuffer<LUTData> skyLUT;
+
+// ============================================================================
+// Ray Generation Entry Point
+// ============================================================================
+
+[shader("raygeneration")]
+void main() {
+    // Get pixel coordinates
+    uint2 launchID = DispatchRaysIndex().xy;
+    uint2 launchSize = DispatchRaysDimensions().xy;
+
+    // Convert to normalized device coordinates [0, 1]
+    float2 pixelCenter = float2(launchID) + 0.5;
+    float2 uv = pixelCenter / float2(launchSize);
+
+    // M1: Simple pinhole camera (hardcoded for testing)
+    // Camera at origin, looking down +Z, FOV ~53 degrees
+    float3 origin = float3(0.0, 0.0, -5.0);
+
+    // Convert UV to NDC [-1, 1]
+    float2 ndc = uv * 2.0 - 1.0;
+
+    // Simple perspective projection
+    float aspectRatio = float(launchSize.x) / float(launchSize.y);
+    float3 direction = normalize(float3(ndc.x * aspectRatio, -ndc.y, 1.0));
+
+    // Setup ray
+    RayDesc ray;
+    ray.Origin = origin;
+    ray.Direction = direction;
+    ray.TMin = 0.001;   // Avoid self-intersection
+    ray.TMax = 10000.0; // Far plane
+
+    // Initialize payload
+    Payload payload;
+    payload.radiance = float3(0.0, 0.0, 0.0);
+
+    // Trace ray (hit group index 0, miss index 0)
+    TraceRay(
+        scene,              // Acceleration structure
+        RAY_FLAG_NONE,      // Ray flags
+        0xFF,               // Instance mask (all instances visible)
+        0,                  // SBT ray contribution offset
+        0,                  // SBT multiplier
+        0,                  // Miss index
+        ray,                // Ray descriptor
+        payload             // Ray payload
+    );
+
+    // Write output (clamp for sanity)
+    float3 color = clamp(payload.radiance, 0.0, 100.0);
+    outputImage[launchID] = float4(color, 1.0);
+}

@@ -65,6 +65,11 @@ public:
     // Check if Ray Tracing is supported
     bool IsRayTracingSupported() const { return m_rayTracingSupported; }
 
+    // Get Ray Tracing properties (only valid if IsRayTracingSupported() == true)
+    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& GetRayTracingProperties() const {
+        return m_rtPipelineProperties;
+    }
+
 private:
     // ========================================================================
     // Initialization Steps
@@ -105,6 +110,10 @@ private:
 
     VkPhysicalDeviceProperties m_deviceProperties{};
     bool m_rayTracingSupported = false;
+
+    // Ray Tracing properties (if supported)
+    VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtPipelineProperties{};
+    VkPhysicalDeviceAccelerationStructurePropertiesKHR m_asProperties{};
 
     VmaAllocator m_allocator = VK_NULL_HANDLE;  // Last created, first destroyed
 

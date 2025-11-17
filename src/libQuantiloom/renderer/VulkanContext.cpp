@@ -145,8 +145,15 @@ void VulkanContext::SelectPhysicalDevice() {
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
 
     if (deviceCount == 0) {
-        throw std::runtime_error("No Vulkan-compatible GPUs found");
+        throw std::runtime_error(
+            "No Vulkan-compatible GPUs found. Please ensure:\n"
+            "  1. Latest GPU drivers are installed\n"
+            "  2. Vulkan SDK is properly configured\n"
+            "  3. GPU supports Vulkan 1.3+"
+        );
     }
+
+    QL_LOG_INFO("Found {} Vulkan device(s), checking compatibility...", deviceCount);
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
@@ -157,16 +164,52 @@ void VulkanContext::SelectPhysicalDevice() {
             m_physicalDevice = device;
             vkGetPhysicalDeviceProperties(m_physicalDevice, &m_deviceProperties);
 
+            // Query Ray Tracing properties
+            m_rtPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+            m_asProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+            m_asProperties.pNext = &m_rtPipelineProperties;
+
+            VkPhysicalDeviceProperties2 props2{};
+            props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+            props2.pNext = &m_asProperties;
+
+            vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2);
+
+            // Log detailed info
+            QL_LOG_INFO("========================================");
             QL_LOG_INFO("Selected GPU: {}", m_deviceProperties.deviceName);
+            QL_LOG_INFO("  API version: {}.{}.{}",
+                VK_VERSION_MAJOR(m_deviceProperties.apiVersion),
+                VK_VERSION_MINOR(m_deviceProperties.apiVersion),
+                VK_VERSION_PATCH(m_deviceProperties.apiVersion));
             QL_LOG_INFO("  Driver version: {}.{}.{}",
                 VK_VERSION_MAJOR(m_deviceProperties.driverVersion),
                 VK_VERSION_MINOR(m_deviceProperties.driverVersion),
                 VK_VERSION_PATCH(m_deviceProperties.driverVersion));
+            QL_LOG_INFO("Ray Tracing Capabilities:");
+            QL_LOG_INFO("  Max recursion depth: {}", m_rtPipelineProperties.maxRayRecursionDepth);
+            QL_LOG_INFO("  Shader group handle size: {}", m_rtPipelineProperties.shaderGroupHandleSize);
+            QL_LOG_INFO("  Max geometry count: {}", m_asProperties.maxGeometryCount);
+            QL_LOG_INFO("========================================");
+
             return;
         }
     }
 
-    throw std::runtime_error("No suitable GPU found");
+    // No suitable device found - provide helpful error message
+    std::string errorMsg =
+        "No GPU with Ray Tracing support found.\n\n"
+        "Quantiloom requires a GPU with the following:\n"
+        "  - Vulkan Ray Tracing (VK_KHR_ray_tracing_pipeline)\n"
+        "  - Acceleration Structure (VK_KHR_acceleration_structure)\n"
+        "  - Vulkan 1.3 or newer\n\n"
+        "Supported GPUs:\n"
+        "  - NVIDIA RTX 20xx series or newer (driver 450+)\n"
+        "  - AMD RX 6000 series or newer (driver 21.10+)\n"
+        "  - Intel Arc A-series (driver 30.0.100+)\n\n"
+        "Please update your GPU drivers or use a compatible GPU.";
+
+    throw std::runtime_error(errorMsg);
 }
 
 // ============================================================================
@@ -309,15 +352,66 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) const {
 
     // Require discrete GPU for performance (can be relaxed later)
     if (deviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+        QL_LOG_WARN("  Skipping {}: Not a discrete GPU", deviceProperties.deviceName);
         return false;
     }
 
     // Check for graphics queue
     auto queueFamily = FindGraphicsQueueFamily(device);
     if (!queueFamily.has_value()) {
+        QL_LOG_WARN("  Skipping {}: No suitable queue family", deviceProperties.deviceName);
         return false;
     }
 
+    // Check for required Ray Tracing extensions
+    u32 extensionCount = 0;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
+
+    std::set<std::string> requiredExtensions = {
+        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
+        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
+        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
+        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
+    };
+
+    for (const auto& extension : availableExtensions) {
+        requiredExtensions.erase(extension.extensionName);
+    }
+
+    if (!requiredExtensions.empty()) {
+        QL_LOG_WARN("  Skipping {}: Missing Ray Tracing extensions:", deviceProperties.deviceName);
+        for (const auto& missing : requiredExtensions) {
+            QL_LOG_WARN("    - {}", missing);
+        }
+        return false;
+    }
+
+    // Check for Ray Tracing features
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
+    rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
+    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+    asFeatures.pNext = &rtPipelineFeatures;
+
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &asFeatures;
+
+    vkGetPhysicalDeviceFeatures2(device, &features2);
+
+    if (!asFeatures.accelerationStructure || !rtPipelineFeatures.rayTracingPipeline) {
+        QL_LOG_WARN("  Skipping {}: Ray Tracing features not supported", deviceProperties.deviceName);
+        QL_LOG_WARN("    - Acceleration Structure: {}", asFeatures.accelerationStructure ? "YES" : "NO");
+        QL_LOG_WARN("    - Ray Tracing Pipeline: {}", rtPipelineFeatures.rayTracingPipeline ? "YES" : "NO");
+        return false;
+    }
+
+    QL_LOG_INFO("  Checking {}: All requirements met", deviceProperties.deviceName);
     return true;
 }
 
