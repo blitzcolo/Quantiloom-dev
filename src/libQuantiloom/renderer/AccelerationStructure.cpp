@@ -207,6 +207,23 @@ void BLAS::Build(VkCommandBuffer cmd) {
 
     vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
 
+    // CRITICAL: Insert memory barrier to ensure BLAS build completes before TLAS reads it
+    // Without this barrier, TLAS may reference incomplete BLAS data
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
+
     m_built = true;
     QL_LOG_INFO("  BLAS built successfully (device address: 0x{:x})", m_deviceAddress);
 }
@@ -410,6 +427,23 @@ void TLAS::Build(VkCommandBuffer cmd) {
     const VkAccelerationStructureBuildRangeInfoKHR* pBuildRange = &buildRange;
 
     vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
+
+    // CRITICAL: Insert memory barrier to ensure TLAS build completes before ray tracing shaders use it
+    // Without this barrier, vkCmdTraceRaysKHR may read incomplete TLAS data
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,  // TLAS is read by ray tracing shaders
+        0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
 
     m_built = true;
     QL_LOG_INFO("  TLAS built successfully with {} instance(s)", m_instances.size());

@@ -43,6 +43,8 @@ add_library(libQuantiloom STATIC
     renderer/RayTracingPipeline.hpp
     renderer/AccelerationStructure.cpp
     renderer/AccelerationStructure.hpp
+    renderer/CommandHelper.cpp
+    renderer/CommandHelper.hpp
 
     # Scene module
     scene/Camera.hpp
