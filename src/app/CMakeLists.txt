@@ -58,4 +58,33 @@ install(TARGETS Quantiloom
     RUNTIME DESTINATION bin
 )
 
-message(STATUS "Quantiloom executable configured successfully")
+# ============================================================================
+# Quantiloom M1 Test (Standalone Ray Tracing Test)
+# ============================================================================
+
+add_executable(QuantiloomM1Test
+    main_m1_test.cpp
+    ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
+)
+
+target_include_directories(QuantiloomM1Test
+    PRIVATE
+        ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+target_link_libraries(QuantiloomM1Test
+    PRIVATE
+        libQuantiloom
+)
+
+target_compile_definitions(QuantiloomM1Test
+    PRIVATE
+        QL_USE_STATIC
+)
+
+set_target_properties(QuantiloomM1Test PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
+
+message(STATUS "Quantiloom executables configured successfully")
