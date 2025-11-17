@@ -2,14 +2,16 @@
 // Quantiloom M1 - End-to-End Ray Tracing Test
 // ============================================================================
 // This is a standalone test program for M1 milestone.
-// It renders a single frame using the Cornell Box scene.
+// It renders a single frame using parametric scene generation.
 //
 // Prerequisites:
 // - Compiled shaders: raygen.spv, closesthit.spv, miss.spv (in working dir)
-// - Cornell Box: assets/scenes/cornell_box.obj
 //
 // Output:
 // - m1_output.exr (ray traced image)
+//
+// Configuration:
+// - Change SCENE_PRESET, CAMERA_PRESET, LIGHTING_PRESET below to test
 // ============================================================================
 
 #include "core/Log.hpp"
@@ -22,6 +24,7 @@
 #include "renderer/GpuImage.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "scene/Mesh.hpp"
+#include "SceneBuilder.hpp"
 
 #include <glm/glm.hpp>
 #include <iostream>
@@ -30,7 +33,35 @@
 using namespace quantiloom;
 
 // ============================================================================
-// Hardcoded LUT Data (matches shader LUTData structure)
+// Scene Configuration Presets (Change these to test different setups)
+// ============================================================================
+
+enum class ScenePreset {
+    CornellBox,      // Minimal: ground + single cube
+    MultiObject,     // Ground + tall box + cube + sphere
+    LightingTest     // Ground + row of 5 cubes
+};
+
+enum class CameraPreset {
+    DefaultOverview, // Elevated, behind scene
+    GroundLevel,     // Low, human eye height
+    TopDown          // Directly above scene
+};
+
+enum class LightingPreset {
+    Standard,        // 3-point key light from upper-left
+    Morning,         // Warm, low-angle light
+    Noon,            // Overhead, very bright
+    Backlight        // Strong rim lighting from behind
+};
+
+// === SELECT YOUR TEST CONFIGURATION HERE ===
+constexpr ScenePreset    SCENE_PRESET    = ScenePreset::MultiObject;
+constexpr CameraPreset   CAMERA_PRESET   = CameraPreset::DefaultOverview;
+constexpr LightingPreset LIGHTING_PRESET = LightingPreset::Standard;
+
+// ============================================================================
+// LUT Data Structure (matches shader LUTData structure)
 // ============================================================================
 
 struct LUTData {
@@ -43,45 +74,71 @@ struct LUTData {
 };
 
 // ============================================================================
-// Create Simple Box Mesh (Procedural Cornell Box)
+// Scene Generation Functions
 // ============================================================================
 
-Mesh CreateSimpleBox() {
-    Mesh mesh;
-    mesh.name = "simple_box";
+Mesh CreateSceneGeometry(ScenePreset preset) {
+    switch (preset) {
+        case ScenePreset::CornellBox:
+            QL_LOG_INFO("  Scene: Cornell Box (ground + cube)");
+            return TestScenes::CreateCornellBoxScene();
 
-    // 8 vertices of a unit cube [-1, 1]^3
-    mesh.positions = {
-        // Bottom face (Y = -1)
-        {-1.0f, -1.0f, -1.0f},  // 0
-        { 1.0f, -1.0f, -1.0f},  // 1
-        { 1.0f, -1.0f,  1.0f},  // 2
-        {-1.0f, -1.0f,  1.0f},  // 3
+        case ScenePreset::MultiObject:
+            QL_LOG_INFO("  Scene: Multi-Object (ground + tall box + cube + sphere)");
+            return TestScenes::CreateMultiObjectScene();
 
-        // Top face (Y = 1)
-        {-1.0f,  1.0f, -1.0f},  // 4
-        { 1.0f,  1.0f, -1.0f},  // 5
-        { 1.0f,  1.0f,  1.0f},  // 6
-        {-1.0f,  1.0f,  1.0f},  // 7
-    };
+        case ScenePreset::LightingTest:
+            QL_LOG_INFO("  Scene: Lighting Test (ground + 5 cubes in a row)");
+            return TestScenes::CreateLightingTestScene();
 
-    // Indices (2 triangles per face = 6 faces * 2 = 12 triangles)
-    mesh.indices = {
-        // Bottom face (floor, Y = -1)
-        0, 1, 2,  0, 2, 3,
-        // Top face (ceiling, Y = 1)
-        4, 7, 6,  4, 6, 5,
-        // Back face (Z = -1)
-        0, 4, 5,  0, 5, 1,
-        // Front face (Z = 1) - facing camera
-        3, 2, 6,  3, 6, 7,
-        // Left face (X = -1)
-        0, 3, 7,  0, 7, 4,
-        // Right face (X = 1)
-        1, 5, 6,  1, 6, 2,
-    };
+        default:
+            QL_LOG_WARN("  Unknown scene preset, defaulting to Cornell Box");
+            return TestScenes::CreateCornellBoxScene();
+    }
+}
 
-    return mesh;
+CameraConfig GetCameraConfig(CameraPreset preset) {
+    switch (preset) {
+        case CameraPreset::DefaultOverview:
+            QL_LOG_INFO("  Camera: Default Overview (elevated, behind scene)");
+            return CameraConfig::DefaultOverview();
+
+        case CameraPreset::GroundLevel:
+            QL_LOG_INFO("  Camera: Ground Level (human eye height)");
+            return CameraConfig::GroundLevel();
+
+        case CameraPreset::TopDown:
+            QL_LOG_INFO("  Camera: Top-Down (bird's eye view)");
+            return CameraConfig::TopDown();
+
+        default:
+            QL_LOG_WARN("  Unknown camera preset, defaulting to Overview");
+            return CameraConfig::DefaultOverview();
+    }
+}
+
+LightingConfig GetLightingConfig(LightingPreset preset) {
+    switch (preset) {
+        case LightingPreset::Standard:
+            QL_LOG_INFO("  Lighting: Standard 3-Point (key light from upper-left)");
+            return LightingConfig::Standard3Point();
+
+        case LightingPreset::Morning:
+            QL_LOG_INFO("  Lighting: Morning Light (warm, low angle)");
+            return LightingConfig::MorningLight();
+
+        case LightingPreset::Noon:
+            QL_LOG_INFO("  Lighting: Noon Overhead (bright, harsh)");
+            return LightingConfig::NoonOverhead();
+
+        case LightingPreset::Backlight:
+            QL_LOG_INFO("  Lighting: Backlight (rim lighting, silhouette)");
+            return LightingConfig::Backlight();
+
+        default:
+            QL_LOG_WARN("  Unknown lighting preset, defaulting to Standard");
+            return LightingConfig::Standard3Point();
+    }
 }
 
 // ============================================================================
@@ -108,19 +165,30 @@ int main(int argc, char* argv[]) {
         }
 
         // ====================================================================
-        // Step 2: Create Scene Geometry
+        // Step 2: Create Scene Geometry and Camera
         // ====================================================================
-        QL_LOG_INFO("Step 2: Creating scene geometry...");
-        Mesh boxMesh = CreateSimpleBox();
-        QL_LOG_INFO("  Mesh: {} vertices, {} triangles", 
-                    boxMesh.positions.size(), boxMesh.indices.size() / 3);
+        QL_LOG_INFO("Step 2: Creating scene geometry and camera...");
+        Mesh sceneMesh = CreateSceneGeometry(SCENE_PRESET);
+        QL_LOG_INFO("  Mesh: {} vertices, {} triangles",
+                    sceneMesh.positions.size(), sceneMesh.indices.size() / 3);
+
+        // Get camera configuration (M1: informational only, camera is hardcoded in shader)
+        CameraConfig camera = GetCameraConfig(CAMERA_PRESET);
+        QL_LOG_INFO("  Camera configuration:");
+        QL_LOG_INFO("    position: [{:.2f}, {:.2f}, {:.2f}]",
+                    camera.position.x, camera.position.y, camera.position.z);
+        QL_LOG_INFO("    lookAt:   [{:.2f}, {:.2f}, {:.2f}]",
+                    camera.lookAt.x, camera.lookAt.y, camera.lookAt.z);
+        QL_LOG_INFO("    fovY:     {:.1f} degrees", camera.fovYDegrees);
+        QL_LOG_INFO("  NOTE: M1 uses hardcoded camera in raygen shader");
+        QL_LOG_INFO("        For custom camera, see M1_Scene_Construction_Guide.md");
 
         // ====================================================================
         // Step 3: Build Acceleration Structures
         // ====================================================================
         QL_LOG_INFO("Step 3: Building acceleration structures...");
-        
-        BLAS blas(context, boxMesh);
+
+        BLAS blas(context, sceneMesh);
         TLAS tlas(context);
 
         // Build BLAS and TLAS in a single command buffer
@@ -164,13 +232,14 @@ int main(int argc, char* argv[]) {
         // Step 5: Create LUT Buffer
         // ====================================================================
         QL_LOG_INFO("Step 5: Creating LUT buffer...");
-        
+
+        // Get lighting configuration from preset
+        LightingConfig lighting = GetLightingConfig(LIGHTING_PRESET);
+
         LUTData lutData;
-        // Sun from upper-left (standard 3-point lighting key light position)
-        // Direction points FROM surface TO sun (not from sun to surface)
-        lutData.sunDirection = glm::normalize(glm::vec3(-0.5f, 0.8f, -0.3f));
-        lutData.sunRadiance = glm::vec3(3.0f, 3.0f, 3.0f);  // Bright sun
-        lutData.skyRadiance = glm::vec3(0.3f, 0.5f, 0.8f);  // Blue sky
+        lutData.sunDirection = lighting.sunDirection;
+        lutData.sunRadiance = lighting.sunRadiance;
+        lutData.skyRadiance = lighting.skyRadiance;
 
         GpuBuffer lutBuffer(
             context.GetAllocator(),
@@ -180,8 +249,12 @@ int main(int argc, char* argv[]) {
         );
 
         lutBuffer.Upload(&lutData, sizeof(LUTData));
-        QL_LOG_INFO("  LUT uploaded: sun=[{:.2f},{:.2f},{:.2f}], sky=[{:.2f},{:.2f},{:.2f}]",
-                    lutData.sunDirection.x, lutData.sunDirection.y, lutData.sunDirection.z,
+        QL_LOG_INFO("  LUT uploaded:");
+        QL_LOG_INFO("    sunDirection: [{:.2f}, {:.2f}, {:.2f}]",
+                    lutData.sunDirection.x, lutData.sunDirection.y, lutData.sunDirection.z);
+        QL_LOG_INFO("    sunRadiance:  [{:.2f}, {:.2f}, {:.2f}]",
+                    lutData.sunRadiance.x, lutData.sunRadiance.y, lutData.sunRadiance.z);
+        QL_LOG_INFO("    skyRadiance:  [{:.2f}, {:.2f}, {:.2f}]",
                     lutData.skyRadiance.x, lutData.skyRadiance.y, lutData.skyRadiance.z);
 
         // ====================================================================
@@ -263,6 +336,17 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  M1 Test COMPLETED");
         QL_LOG_INFO("========================================");
+        QL_LOG_INFO("  Scene:    {}",
+                    SCENE_PRESET == ScenePreset::CornellBox ? "Cornell Box" :
+                    SCENE_PRESET == ScenePreset::MultiObject ? "Multi-Object" : "Lighting Test");
+        QL_LOG_INFO("  Camera:   {}",
+                    CAMERA_PRESET == CameraPreset::DefaultOverview ? "Default Overview" :
+                    CAMERA_PRESET == CameraPreset::GroundLevel ? "Ground Level" : "Top-Down");
+        QL_LOG_INFO("  Lighting: {}",
+                    LIGHTING_PRESET == LightingPreset::Standard ? "Standard 3-Point" :
+                    LIGHTING_PRESET == LightingPreset::Morning ? "Morning Light" :
+                    LIGHTING_PRESET == LightingPreset::Noon ? "Noon Overhead" : "Backlight");
+        QL_LOG_INFO("");
         QL_LOG_INFO("  All ray tracing components initialized");
         QL_LOG_INFO("  BLAS/TLAS built with memory barriers");
         QL_LOG_INFO("  Pipeline executed without errors");
