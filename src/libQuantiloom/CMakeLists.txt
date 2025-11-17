@@ -31,6 +31,7 @@ add_library(libQuantiloom STATIC
     io/LUTLoader.hpp
 
     # Renderer module (Vulkan + VMA wrappers)
+    renderer/VmaImpl.cpp
     renderer/VulkanContext.cpp
     renderer/VulkanContext.hpp
     renderer/GpuBuffer.cpp
