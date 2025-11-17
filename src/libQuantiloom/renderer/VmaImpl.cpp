@@ -8,10 +8,6 @@
 // This file serves that purpose. Do NOT define VMA_IMPLEMENTATION anywhere else.
 // ============================================================================
 
-#define VMA_IMPLEMENTATION
-#define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
-
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4100) // unreferenced parameter

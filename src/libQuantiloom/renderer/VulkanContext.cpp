@@ -236,6 +236,7 @@ void VulkanContext::CreateDevice() {
     std::vector<const char*> deviceExtensions = {
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,  // Required if shaders use RayQuery capability
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
         VK_KHR_SPIRV_1_4_EXTENSION_NAME,
@@ -262,10 +263,16 @@ void VulkanContext::CreateDevice() {
     rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
     rtPipelineFeatures.pNext = &features12;
 
+    // Enable Ray Query features (required if shaders declare RayQueryKHR capability)
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rayQueryFeatures.rayQuery = VK_TRUE;
+    rayQueryFeatures.pNext = &rtPipelineFeatures;
+
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
     asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     asFeatures.accelerationStructure = VK_TRUE;
-    asFeatures.pNext = &rtPipelineFeatures;
+    asFeatures.pNext = &rayQueryFeatures;
 
     // Device features
     VkPhysicalDeviceFeatures2 deviceFeatures{};
@@ -372,6 +379,7 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) const {
     std::set<std::string> requiredExtensions = {
         VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
         VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
+        VK_KHR_RAY_QUERY_EXTENSION_NAME,
         VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
         VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
         VK_KHR_SPIRV_1_4_EXTENSION_NAME,
