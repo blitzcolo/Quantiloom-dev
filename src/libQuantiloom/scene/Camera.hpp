@@ -1,60 +1,72 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Config.hpp"
 #include <glm/glm.hpp>
-#include <glm/gtc/matrix_transform.hpp>  // For lookAt, perspective
 
 // ============================================================================
-// Camera - Pinhole camera model
+// Camera - Pinhole camera for ray tracing
 // ============================================================================
-// Defines:
-// - Position and orientation (position, lookAt, up)
-// - Field of view (fov) and aspect ratio
-// - Image resolution (width, height)
-//
-// Usage in rendering:
-// - Used to compute ray generation parameters in raygen shader
-// - Camera transformations applied on CPU side before rendering
+// Supports perspective projection with look-at interface
+// Used to generate camera rays in ray tracing shaders
 // ============================================================================
 
 namespace quantiloom {
 
-struct Camera {
-    // Spatial parameters
-    glm::vec3 position{0.0f, 0.0f, 5.0f};  // Camera position in world space
-    glm::vec3 lookAt{0.0f, 0.0f, 0.0f};    // Look-at point
-    glm::vec3 up{0.0f, 1.0f, 0.0f};        // Up vector (world space)
+// Camera data structure (matches shader push constants)
+struct CameraData {
+    glm::vec3 origin;        // Camera position (world space)
+    f32 fovScale;            // tan(fovY / 2)
+    glm::vec3 forward;       // Forward vector (normalized)
+    f32 aspectRatio;         // Width / height
+    glm::vec3 right;         // Right vector (normalized)
+    f32 _pad0;               // Padding for alignment
+    glm::vec3 up;            // Up vector (normalized)
+    f32 _pad1;               // Padding for alignment
+};
 
-    // Optical parameters
-    f32 fov = 45.0f;  // Vertical field of view (degrees)
+class QL_API Camera {
+public:
+    Camera() = default;
 
-    // Image resolution
-    u32 width = 1280;
-    u32 height = 720;
+    // Construct camera from position and look-at target
+    Camera(const glm::vec3& position, const glm::vec3& lookAt,
+           const glm::vec3& up = glm::vec3(0, 1, 0),
+           f32 fovYDegrees = 60.0f, f32 aspectRatio = 16.0f / 9.0f);
 
-    // ========================================================================
-    // Derived Properties
-    // ========================================================================
+    // Setters
+    void SetPosition(const glm::vec3& position);
+    void SetLookAt(const glm::vec3& lookAt);
+    void SetUp(const glm::vec3& up);
+    void SetFovY(f32 fovYDegrees);
+    void SetAspectRatio(f32 aspectRatio);
 
-    // Get aspect ratio
-    f32 GetAspectRatio() const {
-        return static_cast<f32>(width) / static_cast<f32>(height);
-    }
+    // Accessors
+    glm::vec3 GetPosition() const { return m_position; }
+    glm::vec3 GetLookAt() const { return m_lookAt; }
+    glm::vec3 GetUp() const { return m_up; }
+    glm::vec3 GetForward() const { return m_forward; }
+    glm::vec3 GetRight() const { return m_right; }
+    f32 GetFovY() const { return m_fovYDegrees; }
+    f32 GetAspectRatio() const { return m_aspectRatio; }
 
-    // Get view matrix (right-handed, looking down -Z)
-    glm::mat4 GetViewMatrix() const {
-        return glm::lookAt(position, lookAt, up);
-    }
+    // Get camera data for GPU (push constants)
+    CameraData GetCameraData() const;
 
-    // Get projection matrix (perspective, right-handed)
-    glm::mat4 GetProjectionMatrix() const {
-        return glm::perspective(glm::radians(fov), GetAspectRatio(), 0.1f, 1000.0f);
-    }
+    // Load camera from TOML config
+    static Result<Camera, String> FromConfig(const Config& config, f32 aspectRatio);
 
-    // Get view direction (normalized)
-    glm::vec3 GetForward() const {
-        return glm::normalize(lookAt - position);
-    }
+private:
+    void UpdateVectors();  // Recompute forward/right/up from position/lookAt
+
+    glm::vec3 m_position{0, 2, -8};
+    glm::vec3 m_lookAt{0, 1, 0};
+    glm::vec3 m_up{0, 1, 0};
+    glm::vec3 m_forward{0, 0, 1};
+    glm::vec3 m_right{1, 0, 0};
+
+    f32 m_fovYDegrees = 60.0f;
+    f32 m_aspectRatio = 16.0f / 9.0f;
 };
 
 } // namespace quantiloom

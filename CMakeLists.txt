@@ -223,6 +223,9 @@ message(STATUS "Dependencies resolved via CPM.cmake")
 # Subdirectories
 # ============================================================================
 
+# Shaders (compile before libraries/apps)
+add_subdirectory(src/shaders)
+
 # Core library
 add_subdirectory(src/libQuantiloom)
 

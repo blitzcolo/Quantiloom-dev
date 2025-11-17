@@ -97,28 +97,82 @@ void BLAS::Build(VkCommandBuffer cmd) {
         throw std::runtime_error("Failed to load acceleration structure functions");
     }
 
-    // Upload vertex and index data to GPU
+    // Upload vertex and index data to GPU using staging buffers
     const VkDeviceSize vertexBufferSize = m_mesh.positions.size() * sizeof(glm::vec3);
     const VkDeviceSize indexBufferSize = m_mesh.indices.size() * sizeof(u32);
 
+    // Step 1: Create staging buffers (CPU-accessible)
+    GpuBuffer vertexStaging(
+        allocator,
+        vertexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    GpuBuffer indexStaging(
+        allocator,
+        indexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    // Step 2: Upload data to staging buffers
+    vertexStaging.Upload(m_mesh.positions.data(), vertexBufferSize);
+    indexStaging.Upload(m_mesh.indices.data(), indexBufferSize);
+
+    // Step 3: Create device-local buffers (GPU-only, fastest for AS build and shader access)
     m_vertexBuffer = std::make_unique<GpuBuffer>(
         allocator,
         vertexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
+        VMA_MEMORY_USAGE_GPU_ONLY  // CORRECT: Device-local memory
     );
 
     m_indexBuffer = std::make_unique<GpuBuffer>(
         allocator,
         indexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
+        VMA_MEMORY_USAGE_GPU_ONLY  // CORRECT: Device-local memory
     );
 
-    m_vertexBuffer->Upload(m_mesh.positions.data(), vertexBufferSize);
-    m_indexBuffer->Upload(m_mesh.indices.data(), indexBufferSize);
+    // Step 4: Copy staging → device-local
+    VkBufferCopy vertexCopyRegion{};
+    vertexCopyRegion.srcOffset = 0;
+    vertexCopyRegion.dstOffset = 0;
+    vertexCopyRegion.size = vertexBufferSize;
+
+    VkBufferCopy indexCopyRegion{};
+    indexCopyRegion.srcOffset = 0;
+    indexCopyRegion.dstOffset = 0;
+    indexCopyRegion.size = indexBufferSize;
+
+    vkCmdCopyBuffer(cmd, vertexStaging.GetHandle(), m_vertexBuffer->GetHandle(), 1, &vertexCopyRegion);
+    vkCmdCopyBuffer(cmd, indexStaging.GetHandle(), m_indexBuffer->GetHandle(), 1, &indexCopyRegion);
+
+    // Step 5: Insert barrier - transfer writes must complete before AS build reads
+    VkMemoryBarrier transferBarrier{};
+    transferBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    transferBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    transferBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        0,
+        1, &transferBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    QL_LOG_INFO("  Uploaded geometry via staging buffers: {} vertices, {} indices",
+                m_mesh.positions.size(), m_mesh.indices.size());
+
+    // Note: Staging buffers are automatically destroyed when exiting scope
 
     // Define geometry (triangles)
     VkAccelerationStructureGeometryKHR geometry{};

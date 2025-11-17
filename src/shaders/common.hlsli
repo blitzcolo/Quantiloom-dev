@@ -33,4 +33,22 @@ struct LUTData {
     float  _pad2;
 };
 
+// ============================================================================
+// Camera Data Structure (Push Constants)
+// ============================================================================
+// Camera parameters for ray generation
+// Must match CPU-side CameraData structure
+// ============================================================================
+
+struct CameraData {
+    float3 origin;         // Camera position (world space)
+    float  fovScale;       // tan(fovY / 2)
+    float3 forward;        // Forward vector (normalized)
+    float  aspectRatio;    // Width / height
+    float3 right;          // Right vector (normalized)
+    float  _pad0;
+    float3 up;             // Up vector (normalized)
+    float  _pad1;
+};
+
 #endif // QUANTILOOM_COMMON_HLSLI
