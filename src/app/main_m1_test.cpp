@@ -67,13 +67,14 @@ Mesh CreateSimpleBox() {
 
     // Indices (2 triangles per face = 6 faces * 2 = 12 triangles)
     mesh.indices = {
-        // Bottom face (floor)
+        // Bottom face (floor, Y = -1)
         0, 1, 2,  0, 2, 3,
-        // Top face (ceiling)
+        // Top face (ceiling, Y = 1)
         4, 7, 6,  4, 6, 5,
         // Back face (Z = -1)
         0, 4, 5,  0, 5, 1,
-        // Front face (Z = 1) - skip for open box
+        // Front face (Z = 1) - facing camera
+        3, 2, 6,  3, 6, 7,
         // Left face (X = -1)
         0, 3, 7,  0, 7, 4,
         // Right face (X = 1)
@@ -165,8 +166,10 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("Step 5: Creating LUT buffer...");
         
         LUTData lutData;
-        lutData.sunDirection = glm::normalize(glm::vec3(0.7f, -0.7f, -0.3f));
-        lutData.sunRadiance = glm::vec3(2.0f, 2.0f, 2.0f);  // Moderate sun
+        // Sun from upper-left (standard 3-point lighting key light position)
+        // Direction points FROM surface TO sun (not from sun to surface)
+        lutData.sunDirection = glm::normalize(glm::vec3(-0.5f, 0.8f, -0.3f));
+        lutData.sunRadiance = glm::vec3(3.0f, 3.0f, 3.0f);  // Bright sun
         lutData.skyRadiance = glm::vec3(0.3f, 0.5f, 0.8f);  // Blue sky
 
         GpuBuffer lutBuffer(
