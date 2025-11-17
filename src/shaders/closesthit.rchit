@@ -58,13 +58,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Compute geometric normal via cross product (CCW winding)
     float3 geometricNormal = normalize(cross(edge1, edge2));
 
-    // Ensure normal faces the ray (front-facing)
-    // If ray hits back face, flip the normal
-    float3 rayDir = WorldRayDirection();
-    if (dot(geometricNormal, rayDir) > 0.0) {
-        geometricNormal = -geometricNormal;
-    }
-
+    // Use geometric normal directly (trust CCW winding order)
+    // With correct winding, cross(edge1, edge2) produces outward-facing normals
     float3 normal = geometricNormal;
 
     // ========================================================================
