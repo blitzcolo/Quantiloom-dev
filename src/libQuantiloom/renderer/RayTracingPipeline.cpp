@@ -25,14 +25,46 @@ RayTracingPipeline::RayTracingPipeline(
     // Cache RT properties
     m_rtProperties = m_context.GetRayTracingProperties();
 
-    // Create pipeline in order
-    CreateDescriptorSetLayout();
-    CreatePipelineLayout();
-    LoadShaders();
-    CreatePipeline();
-    CreateShaderBindingTable();
+    // Create pipeline in order with exception safety
+    try {
+        CreateDescriptorSetLayout();
+        CreatePipelineLayout();
+        LoadShaders();
+        CreatePipeline();
+        CreateShaderBindingTable();
 
-    QL_LOG_INFO("Ray Tracing pipeline created successfully");
+        QL_LOG_INFO("Ray Tracing pipeline created successfully");
+    }
+    catch (const std::exception& e) {
+        // Clean up partially created resources before rethrowing
+        VkDevice device = m_context.GetDevice();
+
+        // Destroy shader modules if they were created
+        for (auto module : m_shaderModules) {
+            if (module != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, module, nullptr);
+            }
+        }
+
+        if (m_pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, m_pipeline, nullptr);
+        }
+
+        if (m_pipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
+        }
+
+        if (m_descriptorPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
+        }
+
+        if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
+        }
+
+        QL_LOG_ERROR("Failed to create Ray Tracing pipeline: {}", e.what());
+        throw;  // Rethrow the exception
+    }
 }
 
 RayTracingPipeline::~RayTracingPipeline() {
