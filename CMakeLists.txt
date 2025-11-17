@@ -178,6 +178,45 @@ if(NOT hdf5_ADDED)
     find_package(HDF5 REQUIRED COMPONENTS CXX)
 endif()
 
+# ============================================================================
+# Vulkan SDK (required for M1+)
+# ============================================================================
+find_package(Vulkan REQUIRED)
+
+if(Vulkan_FOUND)
+    message(STATUS "Vulkan SDK found: ${Vulkan_VERSION}")
+    message(STATUS "Vulkan Include: ${Vulkan_INCLUDE_DIRS}")
+    message(STATUS "Vulkan Library: ${Vulkan_LIBRARIES}")
+else()
+    message(FATAL_ERROR "Vulkan SDK not found. Please install Vulkan SDK from https://vulkan.lunarg.com/")
+endif()
+
+# VMA (Vulkan Memory Allocator): Single-header memory management library
+CPMAddPackage(
+    NAME VulkanMemoryAllocator
+    VERSION 3.1.0
+    GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
+    DOWNLOAD_ONLY YES
+)
+
+# VMA is header-only, create interface library
+if(VulkanMemoryAllocator_ADDED)
+    add_library(VMA INTERFACE)
+    target_include_directories(VMA INTERFACE
+        ${VulkanMemoryAllocator_SOURCE_DIR}/include
+    )
+    target_link_libraries(VMA INTERFACE Vulkan::Vulkan)
+    message(STATUS "VMA (Vulkan Memory Allocator) v3.1.0 added")
+endif()
+
+# GLM: Mathematics library for graphics (header-only)
+CPMAddPackage(
+    NAME glm
+    VERSION 1.0.1
+    GITHUB_REPOSITORY g-truc/glm
+    GIT_TAG 1.0.1
+)
+
 message(STATUS "Dependencies resolved via CPM.cmake")
 
 # ============================================================================
