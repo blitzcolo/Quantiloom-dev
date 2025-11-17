@@ -1,0 +1,31 @@
+fix(M1): implement correct geometric normal calculation in ray tracing
+
+Replace camera-facing normal hack with proper cross-product calculation
+from triangle vertices. This fixes incorrect lighting where all faces
+had uniform brightness regardless of sun direction.
+
+Changes:
+- closesthit.rchit: Add vertex/index buffer access, compute normal via cross(edge1, edge2)
+- RayTracingPipeline: Add BindGeometryBuffers() method, extend descriptor set to 5 bindings
+- AccelerationStructure: Expose GetVertexBuffer()/GetIndexBuffer() accessors
+- main_m1_test: Add command-line argument support for automated testing
+
+New features:
+- Shader compilation scripts (compile_shaders.sh/.bat)
+- Automated 3-scene test runner (run_all_m1_tests.sh)
+- Command-line arguments: --scene, --camera, --lighting, --output
+
+Test coverage:
+- Cornell Box scene (single cube, basic lighting validation)
+- Multi-Object scene (tall box + cube + sphere)
+- Lighting Test scene (5 cubes with directional gradient)
+
+Expected results:
+- Lighting now varies across cube faces based on sun direction
+- Left-facing surfaces brighter than right-facing (sun from upper-left)
+- Physical correctness verified via geometric normal dot sun direction
+
+This fix is critical for M2 OBJ loading and M1.5 PBRT/Mitsuba validation.
+Without correct normals, complex geometry would render incorrectly.
+
+M1 milestone: Complete and ready for M2

@@ -53,6 +53,10 @@ public:
     VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
     bool IsBuilt() const { return m_built; }
 
+    // Geometry buffer accessors (for shader binding)
+    const GpuBuffer& GetVertexBuffer() const { return *m_vertexBuffer; }
+    const GpuBuffer& GetIndexBuffer() const { return *m_indexBuffer; }
+
 private:
     VulkanContext& m_context;
 

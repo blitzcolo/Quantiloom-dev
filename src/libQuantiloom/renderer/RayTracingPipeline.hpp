@@ -70,6 +70,9 @@ public:
     // Bind LUT buffer (binding 2)
     void BindLUTBuffer(const GpuBuffer& buffer);
 
+    // Bind geometry buffers (binding 3: vertex, binding 4: index)
+    void BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer);
+
     // Update all bindings (call after all Bind* calls)
     void UpdateDescriptorSets();
 

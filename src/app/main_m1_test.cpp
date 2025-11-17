@@ -55,10 +55,10 @@ enum class LightingPreset {
     Backlight        // Strong rim lighting from behind
 };
 
-// === SELECT YOUR TEST CONFIGURATION HERE ===
-constexpr ScenePreset    SCENE_PRESET    = ScenePreset::MultiObject;
-constexpr CameraPreset   CAMERA_PRESET   = CameraPreset::DefaultOverview;
-constexpr LightingPreset LIGHTING_PRESET = LightingPreset::Standard;
+// === DEFAULT TEST CONFIGURATION (can be overridden by command line) ===
+ScenePreset    g_scenePreset    = ScenePreset::MultiObject;
+CameraPreset   g_cameraPreset   = CameraPreset::DefaultOverview;
+LightingPreset g_lightingPreset = LightingPreset::Standard;
 
 // ============================================================================
 // LUT Data Structure (matches shader LUTData structure)
@@ -145,8 +145,74 @@ LightingConfig GetLightingConfig(LightingPreset preset) {
 // Main M1 Test
 // ============================================================================
 
+void PrintUsage(const char* programName) {
+    std::cout << "Usage: " << programName << " [options]\n";
+    std::cout << "\n";
+    std::cout << "Options:\n";
+    std::cout << "  --scene <name>      Scene preset: cornell, multiobject, lighting\n";
+    std::cout << "  --camera <name>     Camera preset: overview, ground, topdown\n";
+    std::cout << "  --lighting <name>   Lighting preset: standard, morning, noon, backlight\n";
+    std::cout << "  --output <path>     Output EXR file path (default: m1_output.exr)\n";
+    std::cout << "  --help              Show this help message\n";
+    std::cout << "\n";
+    std::cout << "Examples:\n";
+    std::cout << "  " << programName << " --scene cornell --output m1_cornell.exr\n";
+    std::cout << "  " << programName << " --scene lighting --lighting morning\n";
+}
+
 int main(int argc, char* argv[]) {
     Log::Init("quantiloom_m1.log", Log::Level::Info);
+
+    // Parse command-line arguments
+    std::string outputPath = "m1_output.exr";
+
+    for (int i = 1; i < argc; ++i) {
+        std::string arg = argv[i];
+
+        if (arg == "--help" || arg == "-h") {
+            PrintUsage(argv[0]);
+            return 0;
+        }
+        else if (arg == "--scene" && i + 1 < argc) {
+            std::string scene = argv[++i];
+            if (scene == "cornell") g_scenePreset = ScenePreset::CornellBox;
+            else if (scene == "multiobject") g_scenePreset = ScenePreset::MultiObject;
+            else if (scene == "lighting") g_scenePreset = ScenePreset::LightingTest;
+            else {
+                std::cerr << "Unknown scene preset: " << scene << std::endl;
+                return 1;
+            }
+        }
+        else if (arg == "--camera" && i + 1 < argc) {
+            std::string camera = argv[++i];
+            if (camera == "overview") g_cameraPreset = CameraPreset::DefaultOverview;
+            else if (camera == "ground") g_cameraPreset = CameraPreset::GroundLevel;
+            else if (camera == "topdown") g_cameraPreset = CameraPreset::TopDown;
+            else {
+                std::cerr << "Unknown camera preset: " << camera << std::endl;
+                return 1;
+            }
+        }
+        else if (arg == "--lighting" && i + 1 < argc) {
+            std::string lighting = argv[++i];
+            if (lighting == "standard") g_lightingPreset = LightingPreset::Standard;
+            else if (lighting == "morning") g_lightingPreset = LightingPreset::Morning;
+            else if (lighting == "noon") g_lightingPreset = LightingPreset::Noon;
+            else if (lighting == "backlight") g_lightingPreset = LightingPreset::Backlight;
+            else {
+                std::cerr << "Unknown lighting preset: " << lighting << std::endl;
+                return 1;
+            }
+        }
+        else if (arg == "--output" && i + 1 < argc) {
+            outputPath = argv[++i];
+        }
+        else {
+            std::cerr << "Unknown argument: " << arg << std::endl;
+            PrintUsage(argv[0]);
+            return 1;
+        }
+    }
 
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("  Quantiloom M1 - Ray Tracing Test");
@@ -168,12 +234,12 @@ int main(int argc, char* argv[]) {
         // Step 2: Create Scene Geometry and Camera
         // ====================================================================
         QL_LOG_INFO("Step 2: Creating scene geometry and camera...");
-        Mesh sceneMesh = CreateSceneGeometry(SCENE_PRESET);
+        Mesh sceneMesh = CreateSceneGeometry(g_scenePreset);
         QL_LOG_INFO("  Mesh: {} vertices, {} triangles",
                     sceneMesh.positions.size(), sceneMesh.indices.size() / 3);
 
         // Get camera configuration (M1: informational only, camera is hardcoded in shader)
-        CameraConfig camera = GetCameraConfig(CAMERA_PRESET);
+        CameraConfig camera = GetCameraConfig(g_cameraPreset);
         QL_LOG_INFO("  Camera configuration:");
         QL_LOG_INFO("    position: [{:.2f}, {:.2f}, {:.2f}]",
                     camera.position.x, camera.position.y, camera.position.z);
@@ -234,7 +300,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("Step 5: Creating LUT buffer...");
 
         // Get lighting configuration from preset
-        LightingConfig lighting = GetLightingConfig(LIGHTING_PRESET);
+        LightingConfig lighting = GetLightingConfig(g_lightingPreset);
 
         LUTData lutData;
         lutData.sunDirection = lighting.sunDirection;
@@ -273,6 +339,7 @@ int main(int argc, char* argv[]) {
         pipeline.BindOutputImage(outputImage);
         pipeline.BindAccelerationStructure(tlas.GetHandle());
         pipeline.BindLUTBuffer(lutBuffer);
+        pipeline.BindGeometryBuffers(blas.GetVertexBuffer(), blas.GetIndexBuffer());
 
         QL_LOG_INFO("  Pipeline created and resources bound");
 
@@ -320,8 +387,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Save as EXR
-        const std::string outputPath = "m1_output.exr";
+        // Save as EXR (use command-line specified path)
         if (ImageIO::WriteEXR(outputPath, img)) {
             QL_LOG_INFO("  [OK] Saved ray traced image to {}", outputPath);
         } else {
@@ -337,15 +403,15 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  M1 Test COMPLETED");
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  Scene:    {}",
-                    SCENE_PRESET == ScenePreset::CornellBox ? "Cornell Box" :
-                    SCENE_PRESET == ScenePreset::MultiObject ? "Multi-Object" : "Lighting Test");
+                    g_scenePreset == ScenePreset::CornellBox ? "Cornell Box" :
+                    g_scenePreset == ScenePreset::MultiObject ? "Multi-Object" : "Lighting Test");
         QL_LOG_INFO("  Camera:   {}",
-                    CAMERA_PRESET == CameraPreset::DefaultOverview ? "Default Overview" :
-                    CAMERA_PRESET == CameraPreset::GroundLevel ? "Ground Level" : "Top-Down");
+                    g_cameraPreset == CameraPreset::DefaultOverview ? "Default Overview" :
+                    g_cameraPreset == CameraPreset::GroundLevel ? "Ground Level" : "Top-Down");
         QL_LOG_INFO("  Lighting: {}",
-                    LIGHTING_PRESET == LightingPreset::Standard ? "Standard 3-Point" :
-                    LIGHTING_PRESET == LightingPreset::Morning ? "Morning Light" :
-                    LIGHTING_PRESET == LightingPreset::Noon ? "Noon Overhead" : "Backlight");
+                    g_lightingPreset == LightingPreset::Standard ? "Standard 3-Point" :
+                    g_lightingPreset == LightingPreset::Morning ? "Morning Light" :
+                    g_lightingPreset == LightingPreset::Noon ? "Noon Overhead" : "Backlight");
         QL_LOG_INFO("");
         QL_LOG_INFO("  All ray tracing components initialized");
         QL_LOG_INFO("  BLAS/TLAS built with memory barriers");

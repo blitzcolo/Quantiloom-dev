@@ -45,6 +45,8 @@ These SPIR-V files are loaded by the `RayTracingPipeline` class at runtime.
 | 0 | RWTexture2D | Raygen | Output image (RGBA32F) |
 | 1 | AccelerationStructure | Raygen | TLAS (scene) |
 | 2 | StructuredBuffer | ClosestHit, Miss | LUT data (sun/sky) |
+| 3 | StructuredBuffer<float3> | ClosestHit | Vertex buffer (positions) |
+| 4 | StructuredBuffer<uint> | ClosestHit | Index buffer (triangle indices) |
 
 ### Payload
 

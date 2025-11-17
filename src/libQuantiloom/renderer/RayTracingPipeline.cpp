@@ -100,7 +100,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     VkDevice device = m_context.GetDevice();
 
     // Define bindings (matches shader layout)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(3);
+    std::vector<VkDescriptorSetLayoutBinding> bindings(5);
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -120,6 +120,18 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
 
+    // Binding 3: Vertex buffer (StructuredBuffer<float3>)
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
+    // Binding 4: Index buffer (StructuredBuffer<uint>)
+    bindings[4].binding = 4;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = static_cast<u32>(bindings.size());
@@ -137,7 +149,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 1;
+    poolSizes[2].descriptorCount = 3;  // LUT + vertex + index buffers
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -484,6 +496,42 @@ void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) {
     write.pBufferInfo = &bufferInfo;
 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer) {
+    VkDevice device = m_context.GetDevice();
+
+    VkDescriptorBufferInfo vertexInfo{};
+    vertexInfo.buffer = vertexBuffer.GetHandle();
+    vertexInfo.offset = 0;
+    vertexInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo indexInfo{};
+    indexInfo.buffer = indexBuffer.GetHandle();
+    indexInfo.offset = 0;
+    indexInfo.range = VK_WHOLE_SIZE;
+
+    std::vector<VkWriteDescriptorSet> writes(2);
+
+    // Binding 3: Vertex buffer
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_descriptorSet;
+    writes[0].dstBinding = 3;
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].descriptorCount = 1;
+    writes[0].pBufferInfo = &vertexInfo;
+
+    // Binding 4: Index buffer
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_descriptorSet;
+    writes[1].dstBinding = 4;
+    writes[1].dstArrayElement = 0;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[1].descriptorCount = 1;
+    writes[1].pBufferInfo = &indexInfo;
+
+    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::UpdateDescriptorSets() {
