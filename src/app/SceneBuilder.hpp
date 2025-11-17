@@ -157,25 +157,25 @@ public:
             {min.x, max.y, max.z},  // 7
         };
 
-        // 12 triangles (6 faces, 2 triangles each, CCW winding)
+        // 12 triangles (6 faces, 2 triangles each, CCW winding from outside)
         mesh.indices = {
-            // Bottom face (Y = min, normal = -Y)
-            0, 2, 1,  0, 3, 2,
+            // Bottom face (Y = min, normal = -Y, looking from below)
+            0, 1, 2,  0, 2, 3,
 
-            // Top face (Y = max, normal = +Y)
-            4, 5, 6,  4, 6, 7,
+            // Top face (Y = max, normal = +Y, looking from above)
+            4, 6, 5,  4, 7, 6,
 
-            // Front face (Z = max, normal = +Z)
-            3, 6, 2,  3, 7, 6,
+            // Front face (Z = max, normal = +Z, looking from front)
+            3, 2, 6,  3, 6, 7,
 
-            // Back face (Z = min, normal = -Z)
-            0, 1, 5,  0, 5, 4,
+            // Back face (Z = min, normal = -Z, looking from back)
+            0, 5, 1,  0, 4, 5,
 
-            // Left face (X = min, normal = -X)
-            0, 7, 3,  0, 4, 7,
+            // Left face (X = min, normal = -X, looking from left)
+            0, 3, 7,  0, 7, 4,
 
-            // Right face (X = max, normal = +X)
-            1, 2, 6,  1, 6, 5,
+            // Right face (X = max, normal = +X, looking from right)
+            1, 6, 2,  1, 5, 6,
         };
 
         return mesh;
@@ -220,21 +220,26 @@ public:
             }
         }
 
-        // Generate indices (quads as 2 triangles)
+        // Generate indices (quads as 2 triangles, CCW from outside)
         for (u32 lat = 0; lat < latSegments; ++lat) {
             for (u32 lon = 0; lon < lonSegments; ++lon) {
                 u32 first = lat * (lonSegments + 1) + lon;
                 u32 second = first + lonSegments + 1;
 
-                // First triangle (CCW)
-                mesh.indices.push_back(first);
-                mesh.indices.push_back(second);
-                mesh.indices.push_back(first + 1);
+                // Quad layout (from outside looking at sphere):
+                //   first+1 ---- second+1
+                //      |             |
+                //   first   ---- second
 
-                // Second triangle (CCW)
-                mesh.indices.push_back(second);
-                mesh.indices.push_back(second + 1);
+                // First triangle (CCW from outside)
+                mesh.indices.push_back(first);
                 mesh.indices.push_back(first + 1);
+                mesh.indices.push_back(second);
+
+                // Second triangle (CCW from outside)
+                mesh.indices.push_back(first + 1);
+                mesh.indices.push_back(second + 1);
+                mesh.indices.push_back(second);
             }
         }
 
