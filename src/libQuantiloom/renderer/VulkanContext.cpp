@@ -175,6 +175,12 @@ void VulkanContext::SelectPhysicalDevice() {
 
             vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2);
 
+            // CRITICAL: Clear pNext pointers after query to prevent stack corruption detection
+            // The pNext chain is only needed during the query; keeping it alive can confuse
+            // MSVC's stack guard in debug builds, as it detects cross-member pointers
+            m_asProperties.pNext = nullptr;
+            m_rtPipelineProperties.pNext = nullptr;
+
             // Log detailed info
             QL_LOG_INFO("========================================");
             QL_LOG_INFO("Selected GPU: {}", m_deviceProperties.deviceName);
