@@ -194,7 +194,7 @@ endif()
 # VMA (Vulkan Memory Allocator): Single-header memory management library
 CPMAddPackage(
     NAME VulkanMemoryAllocator
-    VERSION 3.1.0
+    VERSION 3.3.0
     GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
     DOWNLOAD_ONLY YES
 )
@@ -206,15 +206,15 @@ if(VulkanMemoryAllocator_ADDED)
         ${VulkanMemoryAllocator_SOURCE_DIR}/include
     )
     target_link_libraries(VMA INTERFACE Vulkan::Vulkan)
-    message(STATUS "VMA (Vulkan Memory Allocator) v3.1.0 added")
+    message(STATUS "VMA (Vulkan Memory Allocator) v3.3.0 added")
 endif()
 
 # GLM: Mathematics library for graphics (header-only)
 CPMAddPackage(
     NAME glm
-    VERSION 1.0.1
+    VERSION 1.0.2
     GITHUB_REPOSITORY g-truc/glm
-    GIT_TAG 1.0.1
+    GIT_TAG 1.0.2
 )
 
 message(STATUS "Dependencies resolved via CPM.cmake")
