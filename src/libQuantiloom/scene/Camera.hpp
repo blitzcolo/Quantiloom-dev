@@ -2,6 +2,7 @@
 
 #include "core/Types.hpp"
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>  // For lookAt, perspective
 
 // ============================================================================
 // Camera - Pinhole camera model
