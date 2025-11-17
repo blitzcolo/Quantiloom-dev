@@ -59,6 +59,22 @@ public:
         VkImageLayout newLayout,
         u32 mipLevels = 1
     );
+
+    // ========================================================================
+    // Image Readback
+    // ========================================================================
+
+    // Read back image from GPU to CPU memory (synchronous)
+    // Returns pixel data in row-major order: [R,G,B,A, R,G,B,A, ...]
+    // Only supports VK_FORMAT_R32G32B32A32_SFLOAT for M1
+    // Image must be in GENERAL or TRANSFER_SRC_OPTIMAL layout
+    static std::vector<f32> ReadbackImage(
+        VulkanContext& context,
+        VkImage image,
+        VkFormat format,
+        u32 width,
+        u32 height
+    );
 };
 
 } // namespace quantiloom

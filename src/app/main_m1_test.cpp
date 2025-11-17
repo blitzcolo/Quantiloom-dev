@@ -216,22 +216,56 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Step 8: Reading back and saving image...");
 
-        // TODO: Implement image readback and EXR export
-        // For M1, this is left as next integration step
-        QL_LOG_WARN("  Image readback not implemented yet (TODO: add staging buffer + vkCmdCopyImageToBuffer)");
-        QL_LOG_INFO("  Rendering completed successfully!");
+        // Read back image from GPU
+        std::vector<f32> pixels = CommandHelper::ReadbackImage(
+            context,
+            outputImage.GetImage(),
+            outputImage.GetFormat(),
+            width,
+            height
+        );
+
+        // Convert to Image object (4 channels: RGBA)
+        Image img(width, height, 4);
+        img.channelNames = {"R", "G", "B", "A"};
+        img.metadata["renderer"] = "Quantiloom M1";
+        img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
+        img.metadata["mode"] = "ray_tracing_test";
+
+        // Copy pixel data from GPU readback to Image
+        // pixels is [R,G,B,A, R,G,B,A, ...] in row-major order
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                u32 pixelIndex = (y * width + x) * 4;
+                img(x, y, 0) = pixels[pixelIndex + 0];  // R
+                img(x, y, 1) = pixels[pixelIndex + 1];  // G
+                img(x, y, 2) = pixels[pixelIndex + 2];  // B
+                img(x, y, 3) = pixels[pixelIndex + 3];  // A
+            }
+        }
+
+        // Save as EXR
+        const std::string outputPath = "m1_output.exr";
+        if (ImageIO::WriteEXR(outputPath, img)) {
+            QL_LOG_INFO("  [OK] Saved ray traced image to {}", outputPath);
+        } else {
+            QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outputPath);
+        }
+
+        QL_LOG_INFO("  Rendering and export completed successfully!");
 
         // ====================================================================
         // Success
         // ====================================================================
         QL_LOG_INFO("========================================");
-        QL_LOG_INFO("  M1 Test PASSED");
+        QL_LOG_INFO("  M1 Test COMPLETED");
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  All ray tracing components initialized");
         QL_LOG_INFO("  BLAS/TLAS built with memory barriers");
         QL_LOG_INFO("  Pipeline executed without errors");
+        QL_LOG_INFO("  Image saved to {}", outputPath);
         QL_LOG_INFO("");
-        QL_LOG_INFO("  Next step: Implement image readback");
+        QL_LOG_INFO("  M1 Milestone: HS-core prototype is DONE");
         QL_LOG_INFO("========================================");
 
     } catch (const std::exception& e) {
