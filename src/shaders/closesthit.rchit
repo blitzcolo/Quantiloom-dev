@@ -31,7 +31,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // M1: Hardcoded surface properties
     // TODO M2+: Fetch from material buffer using InstanceCustomIndex
     float3 albedo = float3(0.8, 0.8, 0.8);  // Diffuse albedo (gray)
-    float3 normal = float3(0.0, 1.0, 0.0);   // Surface normal (up)
+
+    // M1 Simplification: Use camera-facing normal for visible surfaces
+    // This ensures all visible faces receive lighting
+    // TODO M2+: Compute geometric normal from triangle vertices
+    float3 normal = normalize(-WorldRayDirection());
 
     // Fetch sun/sky data from LUT
     // M1: Single entry LUT (index 0), no wavelength dimension
