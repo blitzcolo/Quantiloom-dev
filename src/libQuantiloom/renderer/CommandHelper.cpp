@@ -1,6 +1,8 @@
 #include "CommandHelper.hpp"
+#include "GpuBuffer.hpp"
 #include "core/Log.hpp"
 #include <stdexcept>
+#include <cstring>
 
 namespace quantiloom {
 
@@ -158,6 +160,86 @@ void CommandHelper::TransitionImageLayoutImmediate(
 
     QL_LOG_INFO("Image layout transition: {} -> {} (immediate)",
                 static_cast<int>(oldLayout), static_cast<int>(newLayout));
+}
+
+// ============================================================================
+// Image Readback
+// ============================================================================
+
+std::vector<f32> CommandHelper::ReadbackImage(
+    VulkanContext& context,
+    VkImage image,
+    VkFormat format,
+    u32 width,
+    u32 height)
+{
+    // Validate format (M1: only support RGBA32F)
+    if (format != VK_FORMAT_R32G32B32A32_SFLOAT) {
+        throw std::runtime_error("ReadbackImage: Only VK_FORMAT_R32G32B32A32_SFLOAT is supported in M1");
+    }
+
+    // Calculate buffer size (4 channels * 4 bytes per float)
+    const u32 bytesPerPixel = 4 * sizeof(f32);
+    const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
+
+    QL_LOG_INFO("Reading back image ({}x{}, {} bytes)...", width, height, bufferSize);
+
+    // Create staging buffer (GPU -> CPU)
+    GpuBuffer stagingBuffer(
+        context.GetAllocator(),
+        bufferSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_TO_CPU
+    );
+
+    // Execute copy command
+    ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+        // Transition image to TRANSFER_SRC_OPTIMAL (if currently in GENERAL)
+        TransitionImageLayout(cmd, image, format,
+                              VK_IMAGE_LAYOUT_GENERAL,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+        // Define copy region (entire image, mip level 0)
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;   // Tightly packed
+        region.bufferImageHeight = 0; // Tightly packed
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {width, height, 1};
+
+        // Copy image to buffer
+        vkCmdCopyImageToBuffer(
+            cmd,
+            image,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            stagingBuffer.GetHandle(),
+            1,
+            &region
+        );
+
+        // Transition image back to GENERAL (restore original layout)
+        TransitionImageLayout(cmd, image, format,
+                              VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                              VK_IMAGE_LAYOUT_GENERAL);
+    });
+
+    // Map staging buffer and read pixel data
+    std::vector<f32> pixels(width * height * 4);
+    void* mappedData = stagingBuffer.Map();
+    if (mappedData == nullptr) {
+        throw std::runtime_error("Failed to map staging buffer for readback");
+    }
+
+    std::memcpy(pixels.data(), mappedData, bufferSize);
+    stagingBuffer.Unmap();
+
+    QL_LOG_INFO("  Readback complete ({} pixels)", width * height);
+
+    return pixels;
 }
 
 } // namespace quantiloom
