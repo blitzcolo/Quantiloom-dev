@@ -67,6 +67,8 @@ public:
 
     // Rendering configuration
     Camera camera;
+    u32 width = 1280;   // Render resolution width
+    u32 height = 720;   // Render resolution height
 
     // Geometry and materials
     std::vector<Mesh> meshes;

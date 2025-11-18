@@ -100,7 +100,7 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     QL_LOG_INFO("  LookAt:   ({:.2f}, {:.2f}, {:.2f})", lookAt.x, lookAt.y, lookAt.z);
     QL_LOG_INFO("  FOV:      {:.1f}°", fovY);
 
-    return Result<Camera, String>::Ok(camera);
+    return camera;  // Direct construction of Result
 }
 
 } // namespace quantiloom

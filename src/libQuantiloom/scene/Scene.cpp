@@ -22,31 +22,40 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
             const Config& cam = *cameraTable;
 
             // Position
+            glm::vec3 position = scene.camera.GetPosition();
             if (cam.Has("position")) {
                 auto pos = cam.GetArray<f32>("position");
                 if (pos.size() == 3) {
-                    scene.camera.position = glm::vec3(pos[0], pos[1], pos[2]);
+                    position = glm::vec3(pos[0], pos[1], pos[2]);
                 }
             }
 
             // Look-at
+            glm::vec3 lookAt = scene.camera.GetLookAt();
             if (cam.Has("look_at")) {
-                auto lookAt = cam.GetArray<f32>("look_at");
-                if (lookAt.size() == 3) {
-                    scene.camera.lookAt = glm::vec3(lookAt[0], lookAt[1], lookAt[2]);
+                auto lookAtArr = cam.GetArray<f32>("look_at");
+                if (lookAtArr.size() == 3) {
+                    lookAt = glm::vec3(lookAtArr[0], lookAtArr[1], lookAtArr[2]);
                 }
             }
 
             // Up vector
+            glm::vec3 up = scene.camera.GetUp();
             if (cam.Has("up")) {
-                auto up = cam.GetArray<f32>("up");
-                if (up.size() == 3) {
-                    scene.camera.up = glm::vec3(up[0], up[1], up[2]);
+                auto upArr = cam.GetArray<f32>("up");
+                if (upArr.size() == 3) {
+                    up = glm::vec3(upArr[0], upArr[1], upArr[2]);
                 }
             }
 
             // Field of view
-            scene.camera.fov = cam.Get<f32>("fov", 45.0f);
+            f32 fov = cam.Get<f32>("fov", 45.0f);
+
+            // Update camera with new values
+            scene.camera.SetPosition(position);
+            scene.camera.SetLookAt(lookAt);
+            scene.camera.SetUp(up);
+            scene.camera.SetFovY(fov);
         }
     }
 
@@ -57,8 +66,11 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     if (config.Has("renderer.resolution")) {
         auto res = config.GetArray<i32>("renderer.resolution");
         if (res.size() == 2) {
-            scene.camera.width = static_cast<u32>(res[0]);
-            scene.camera.height = static_cast<u32>(res[1]);
+            scene.width = static_cast<u32>(res[0]);
+            scene.height = static_cast<u32>(res[1]);
+            // Update camera aspect ratio
+            f32 aspectRatio = static_cast<f32>(scene.width) / static_cast<f32>(scene.height);
+            scene.camera.SetAspectRatio(aspectRatio);
         }
     }
 
@@ -161,8 +173,8 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
 // ============================================================================
 
 bool Scene::IsValid() const {
-    // Camera resolution must be non-zero
-    if (camera.width == 0 || camera.height == 0) {
+    // Resolution must be non-zero
+    if (width == 0 || height == 0) {
         return false;
     }
 
@@ -210,11 +222,11 @@ void Scene::PrintSummary() const {
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("Camera:");
     QL_LOG_INFO("  Position: ({:.2f}, {:.2f}, {:.2f})",
-                camera.position.x, camera.position.y, camera.position.z);
+                camera.GetPosition().x, camera.GetPosition().y, camera.GetPosition().z);
     QL_LOG_INFO("  Look-at:  ({:.2f}, {:.2f}, {:.2f})",
-                camera.lookAt.x, camera.lookAt.y, camera.lookAt.z);
-    QL_LOG_INFO("  FOV: {:.1f} deg", camera.fov);
-    QL_LOG_INFO("  Resolution: {}x{}", camera.width, camera.height);
+                camera.GetLookAt().x, camera.GetLookAt().y, camera.GetLookAt().z);
+    QL_LOG_INFO("  FOV: {:.1f} deg", camera.GetFovY());
+    QL_LOG_INFO("  Resolution: {}x{}", width, height);
 
     QL_LOG_INFO("Geometry:");
     QL_LOG_INFO("  Meshes: {}", meshes.size());
