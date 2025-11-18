@@ -32,7 +32,10 @@ void main() {
     float2 uv = pixelCenter / float2(launchSize);
 
     // Convert UV to NDC [-1, 1]
+    // Note: Flip Y because screen coordinates are top-down (Y increases downward)
+    // but camera up vector points upward
     float2 ndc = uv * 2.0 - 1.0;
+    ndc.y = -ndc.y;  // Flip Y axis
 
     // Compute ray direction using camera parameters
     float3 direction = normalize(
