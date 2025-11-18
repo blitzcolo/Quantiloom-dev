@@ -248,11 +248,11 @@ int main(int argc, char* argv[]) {
         if (!configPath.empty()) {
             // Load from TOML config
             auto configResult = Config::Load(configPath);
-            if (!configResult.IsOk()) {
-                QL_LOG_ERROR("Failed to load config '{}': {}", configPath, configResult.GetError());
+            if (!configResult.has_value()) {
+                QL_LOG_ERROR("Failed to load config '{}': {}", configPath, configResult.error());
                 return 1;
             }
-            Config config = configResult.Unwrap();
+            Config config = configResult.value();
 
             // Get resolution from config (optional)
             auto resArray = config.GetArray<u32>("renderer.resolution");
@@ -264,11 +264,11 @@ int main(int argc, char* argv[]) {
             // Create camera from config
             f32 aspectRatio = static_cast<f32>(width) / static_cast<f32>(height);
             auto cameraResult = Camera::FromConfig(config, aspectRatio);
-            if (!cameraResult.IsOk()) {
-                QL_LOG_ERROR("Failed to load camera from config: {}", cameraResult.GetError());
+            if (!cameraResult.has_value()) {
+                QL_LOG_ERROR("Failed to load camera from config: {}", cameraResult.error());
                 return 1;
             }
-            camera = cameraResult.Unwrap();
+            camera = cameraResult.value();
         } else {
             // Use command-line presets (backward compatibility)
             CameraConfig cameraConfig = GetCameraConfig(g_cameraPreset);
