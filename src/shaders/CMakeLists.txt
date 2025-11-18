@@ -49,6 +49,7 @@ set(DXC_FLAGS
     -fspv-target-env=vulkan1.3      # Target Vulkan 1.3
     -WX                             # Treat warnings as errors
     -Qembed_debug                   # Embed debug info
+    -Zi                             # Generate PDB file, -Qembed_debug requires it
 )
 
 # Create custom targets for each shader

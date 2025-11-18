@@ -12,7 +12,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOLS_DIR="$PROJECT_ROOT/tools"
 DXC_DIR="$TOOLS_DIR/dxc"
 
-DXC_VERSION="v1.8.2407"  # Latest stable release as of 2024
+DXC_VERSION="v1.8.2505.1"  # Latest stable release as of Nov. 2025
+DXC_ARCHIVE_NAME="2025_07_14"
 PLATFORM="$(uname -s)"
 
 echo "[DXC Setup] Detecting platform: $PLATFORM"
@@ -20,12 +21,12 @@ echo "[DXC Setup] Detecting platform: $PLATFORM"
 # Determine download URL based on platform
 case "$PLATFORM" in
     Linux*)
-        DXC_ARCHIVE="linux-dxc-$DXC_VERSION.x86_64.tar.gz"
+        DXC_ARCHIVE="linux-dxc-$DXC_ARCHIVE_NAME.x86_64.tar.gz"
         DXC_URL="https://github.com/microsoft/DirectXShaderCompiler/releases/download/$DXC_VERSION/$DXC_ARCHIVE"
         DXC_BIN_PATH="$DXC_DIR/bin/dxc"
         ;;
     Darwin*)
-        DXC_ARCHIVE="macos-dxc-$DXC_VERSION.tar.gz"
+        DXC_ARCHIVE="macos-dxc-$DXC_ARCHIVE_NAME.tar.gz"
         DXC_URL="https://github.com/microsoft/DirectXShaderCompiler/releases/download/$DXC_VERSION/$DXC_ARCHIVE"
         DXC_BIN_PATH="$DXC_DIR/bin/dxc"
         ;;
