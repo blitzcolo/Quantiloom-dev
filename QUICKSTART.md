@@ -104,6 +104,12 @@ cmake --build .
 - `Unwrap()` → `value()`
 - **文件**: `main_m1_test.cpp:251-271`
 
+### ✅ 8. 图像坐标系修复（Y 轴翻转）
+- 修复输出图像旋转 180 度的问题
+- 原因：屏幕坐标 Y 轴向下，相机 up 向量向上
+- 解决：在 raygen shader 中翻转 ndc.y
+- **文件**: `raygen.rgen:38`
+
 ---
 
 ## TOML 配置示例
