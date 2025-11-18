@@ -97,6 +97,13 @@ cmake --build .
   - `Scene.hpp:70-71`
   - `Scene.cpp:25-58, 165-229`
 
+### ✅ 7. Result API 使用修复
+- 更新 main_m1_test.cpp 使用正确的 Result API
+- `IsOk()` → `has_value()`
+- `GetError()` → `error()`
+- `Unwrap()` → `value()`
+- **文件**: `main_m1_test.cpp:251-271`
+
 ---
 
 ## TOML 配置示例
