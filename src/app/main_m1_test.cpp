@@ -164,6 +164,7 @@ int main(int argc, char* argv[]) {
     Log::Init("quantiloom_m1.log", Log::Level::Info);
 
     // Parse command-line arguments
+    std::string configPath = "";  // Empty means use command-line presets
     std::string outputPath = "m1_output.exr";
 
     for (int i = 1; i < argc; ++i) {
@@ -172,6 +173,9 @@ int main(int argc, char* argv[]) {
         if (arg == "--help" || arg == "-h") {
             PrintUsage(argv[0]);
             return 0;
+        }
+        else if (arg == "--config" && i + 1 < argc) {
+            configPath = argv[++i];
         }
         else if (arg == "--scene" && i + 1 < argc) {
             std::string scene = argv[++i];
@@ -234,20 +238,55 @@ int main(int argc, char* argv[]) {
         // Step 2: Create Scene Geometry and Camera
         // ====================================================================
         QL_LOG_INFO("Step 2: Creating scene geometry and camera...");
+
+        // Resolution
+        u32 width = 1280;
+        u32 height = 720;
+
+        // Load camera from config or use preset
+        Camera camera;
+        if (!configPath.empty()) {
+            // Load from TOML config
+            auto configResult = Config::Load(configPath);
+            if (!configResult.IsOk()) {
+                QL_LOG_ERROR("Failed to load config '{}': {}", configPath, configResult.GetError());
+                return 1;
+            }
+            Config config = configResult.Unwrap();
+
+            // Get resolution from config (optional)
+            auto resArray = config.GetArray<u32>("renderer.resolution");
+            if (resArray.size() >= 2) {
+                width = resArray[0];
+                height = resArray[1];
+            }
+
+            // Create camera from config
+            f32 aspectRatio = static_cast<f32>(width) / static_cast<f32>(height);
+            auto cameraResult = Camera::FromConfig(config, aspectRatio);
+            if (!cameraResult.IsOk()) {
+                QL_LOG_ERROR("Failed to load camera from config: {}", cameraResult.GetError());
+                return 1;
+            }
+            camera = cameraResult.Unwrap();
+        } else {
+            // Use command-line presets (backward compatibility)
+            CameraConfig cameraConfig = GetCameraConfig(g_cameraPreset);
+            f32 aspectRatio = static_cast<f32>(width) / static_cast<f32>(height);
+            camera = Camera(cameraConfig.position, cameraConfig.lookAt, cameraConfig.up,
+                          cameraConfig.fovYDegrees, aspectRatio);
+        }
+
+        QL_LOG_INFO("  Camera:");
+        QL_LOG_INFO("    position: [{:.2f}, {:.2f}, {:.2f}]",
+                    camera.GetPosition().x, camera.GetPosition().y, camera.GetPosition().z);
+        QL_LOG_INFO("    lookAt:   [{:.2f}, {:.2f}, {:.2f}]",
+                    camera.GetLookAt().x, camera.GetLookAt().y, camera.GetLookAt().z);
+        QL_LOG_INFO("    fovY:     {:.1f} degrees", camera.GetFovY());
+
         Mesh sceneMesh = CreateSceneGeometry(g_scenePreset);
         QL_LOG_INFO("  Mesh: {} vertices, {} triangles",
                     sceneMesh.positions.size(), sceneMesh.indices.size() / 3);
-
-        // Get camera configuration (M1: informational only, camera is hardcoded in shader)
-        CameraConfig camera = GetCameraConfig(g_cameraPreset);
-        QL_LOG_INFO("  Camera configuration:");
-        QL_LOG_INFO("    position: [{:.2f}, {:.2f}, {:.2f}]",
-                    camera.position.x, camera.position.y, camera.position.z);
-        QL_LOG_INFO("    lookAt:   [{:.2f}, {:.2f}, {:.2f}]",
-                    camera.lookAt.x, camera.lookAt.y, camera.lookAt.z);
-        QL_LOG_INFO("    fovY:     {:.1f} degrees", camera.fovYDegrees);
-        QL_LOG_INFO("  NOTE: M1 uses hardcoded camera in raygen shader");
-        QL_LOG_INFO("        For custom camera, see M1_Scene_Construction_Guide.md");
 
         // ====================================================================
         // Step 3: Build Acceleration Structures
@@ -270,9 +309,7 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         // Step 4: Create Output Image
         // ====================================================================
-        QL_LOG_INFO("Step 4: Creating output image...");
-        const u32 width = 800;
-        const u32 height = 600;
+        QL_LOG_INFO("Step 4: Creating output image ({}x{})...", width, height);
 
         GpuImage outputImage(
             context.GetAllocator(),
@@ -340,6 +377,9 @@ int main(int argc, char* argv[]) {
         pipeline.BindAccelerationStructure(tlas.GetHandle());
         pipeline.BindLUTBuffer(lutBuffer);
         pipeline.BindGeometryBuffers(blas.GetVertexBuffer(), blas.GetIndexBuffer());
+
+        // Set camera parameters (push constants)
+        pipeline.SetCameraData(camera.GetCameraData());
 
         QL_LOG_INFO("  Pipeline created and resources bound");
 

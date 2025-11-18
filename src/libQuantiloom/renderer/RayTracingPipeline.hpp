@@ -4,6 +4,7 @@
 #include "VulkanContext.hpp"
 #include "GpuBuffer.hpp"
 #include "GpuImage.hpp"
+#include "scene/Camera.hpp"
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
@@ -80,6 +81,9 @@ public:
     // Rendering
     // ========================================================================
 
+    // Set camera parameters (call before TraceRays)
+    void SetCameraData(const struct CameraData& cameraData);
+
     // Record trace rays command into provided command buffer
     void TraceRays(VkCommandBuffer cmd, u32 width, u32 height);
 
@@ -146,6 +150,9 @@ private:
 
     // Ray Tracing properties (cached from context)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
+
+    // Camera data (for push constants)
+    CameraData m_cameraData{};
 };
 
 } // namespace quantiloom

@@ -48,6 +48,7 @@ add_library(libQuantiloom STATIC
     renderer/CommandHelper.hpp
 
     # Scene module
+    scene/Camera.cpp
     scene/Camera.hpp
     scene/Mesh.hpp
     scene/Material.hpp

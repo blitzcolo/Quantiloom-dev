@@ -184,18 +184,25 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
 void RayTracingPipeline::CreatePipelineLayout() {
     VkDevice device = m_context.GetDevice();
 
+    // Push constant range for camera data
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(CameraData);
+
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount = 1;
     layoutInfo.pSetLayouts = &m_descriptorSetLayout;
-    layoutInfo.pushConstantRangeCount = 0;  // No push constants for M1
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &pushConstantRange;
 
     VkResult result = vkCreatePipelineLayout(device, &layoutInfo, nullptr, &m_pipelineLayout);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create pipeline layout");
     }
 
-    QL_LOG_INFO("  Pipeline layout created");
+    QL_LOG_INFO("  Pipeline layout created with push constants (camera data)");
 }
 
 // ============================================================================
@@ -565,6 +572,16 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
         nullptr
     );
 
+    // Push camera constants
+    vkCmdPushConstants(
+        cmd,
+        m_pipelineLayout,
+        VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+        0,
+        sizeof(CameraData),
+        &m_cameraData
+    );
+
     // Trace rays
     vkCmdTraceRaysKHR(
         cmd,
@@ -576,6 +593,10 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
         height,
         1  // depth
     );
+}
+
+void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
+    m_cameraData = cameraData;
 }
 
 } // namespace quantiloom
