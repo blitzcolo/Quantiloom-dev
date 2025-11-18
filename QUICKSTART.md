@@ -88,6 +88,15 @@ cmake --build .
   - `main_m1_test.cpp`
   - `CMakeLists.txt`
 
+### ✅ 6. Camera API 编译错误修复
+- Result 类型直接构造（不使用 Ok() 方法）
+- Scene 类添加 width/height 成员（分离分辨率）
+- Scene.cpp 使用 Camera getter/setter 方法
+- **文件**:
+  - `Camera.cpp:103`
+  - `Scene.hpp:70-71`
+  - `Scene.cpp:25-58, 165-229`
+
 ---
 
 ## TOML 配置示例
