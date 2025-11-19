@@ -31,11 +31,11 @@ using namespace quantiloom;
 // ============================================================================
 
 struct LUTData {
-    glm::vec3 sunDirection;
+    glm::vec3 sunDirection;        // FROM surface TO sun (normalized)
+    f32 sunRadiance_spectral;       // Spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
+    f32 skyRadiance_spectral;       // Spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
     f32 _pad0;
-    glm::vec3 sunRadiance;
     f32 _pad1;
-    glm::vec3 skyRadiance;
     f32 _pad2;
 };
 
@@ -44,8 +44,10 @@ struct LUTData {
 // ============================================================================
 
 struct MaterialDataCPU {
-    glm::vec3 albedo;
+    f32 albedo_spectral;  // Spectral reflectance at current λ [0, 1]
     f32 _pad0;
+    f32 _pad1;
+    f32 _pad2;
 };
 
 // ============================================================================
@@ -261,14 +263,22 @@ int main(int argc, char* argv[]) {
         );
 
         // ====================================================================
-        // Create LUT Buffer
+        // Create LUT Buffer (Spectral)
         // ====================================================================
-        QL_LOG_INFO("Creating LUT buffer...");
+        QL_LOG_INFO("Creating spectral LUT buffer...");
+
+        // Convert RGB radiance to spectral radiance (average of RGB channels)
+        // For single-wavelength mode, we approximate spectral radiance from RGB config
+        f32 sunRadiance_spectral = (sunRadiance.r + sunRadiance.g + sunRadiance.b) / 3.0f;
+        f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
+
+        QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", sunRadiance_spectral);
+        QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", skyRadiance_spectral);
 
         LUTData lutData;
         lutData.sunDirection = sunDirection;
-        lutData.sunRadiance = sunRadiance;
-        lutData.skyRadiance = skyRadiance;
+        lutData.sunRadiance_spectral = sunRadiance_spectral;
+        lutData.skyRadiance_spectral = skyRadiance_spectral;
 
         GpuBuffer lutBuffer(
             context.GetAllocator(),
@@ -280,13 +290,18 @@ int main(int argc, char* argv[]) {
         lutBuffer.Upload(&lutData, sizeof(LUTData));
 
         // ====================================================================
-        // Create Material Buffer
+        // Create Material Buffer (Spectral)
         // ====================================================================
-        QL_LOG_INFO("Creating material buffer...");
+        QL_LOG_INFO("Creating spectral material buffer...");
+
+        // Convert RGB albedo to spectral albedo (average of RGB channels)
+        // For single-wavelength mode, we approximate spectral reflectance from RGB config
+        f32 albedo_spectral = (albedo.r + albedo.g + albedo.b) / 3.0f;
+
+        QL_LOG_INFO("  Material spectral albedo: {:.3f}", albedo_spectral);
 
         MaterialDataCPU defaultMaterial;
-        defaultMaterial.albedo = albedo;
-        defaultMaterial._pad0 = 0.0f;
+        defaultMaterial.albedo_spectral = albedo_spectral;
 
         GpuBuffer materialBuffer(
             context.GetAllocator(),

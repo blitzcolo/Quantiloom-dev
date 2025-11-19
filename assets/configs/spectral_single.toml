@@ -11,6 +11,8 @@ output = "spectral_output.exr"  # Output file path
 [spectral]
 mode = "single_wavelength"      # Rendering mode: single wavelength
 wavelength_nm = 550.0           # Wavelength in nanometers (550nm = green light)
+                                 # NOTE: RGB values below are converted to scalar spectral values
+                                 # by averaging (R+G+B)/3 for single-wavelength rendering
 
 [scene]
 preset = "cornell_box"          # Built-in scene: "cornell_box", "multi_object", "lighting_test"
@@ -24,9 +26,9 @@ fov_y = 60.0                    # Vertical field of view (degrees)
 
 [lighting]
 sun_direction = [-0.5, 0.8, -0.3]  # FROM surface TO sun (normalized)
-sun_radiance = [3.0, 3.0, 3.0]     # Sun radiance (W·sr⁻¹·m⁻²)
-sky_radiance = [0.3, 0.5, 0.8]     # Sky background radiance (W·sr⁻¹·m⁻²)
+sun_radiance = [3.0, 3.0, 3.0]     # Sun radiance (RGB placeholder, averaged to scalar)
+sky_radiance = [0.3, 0.5, 0.8]     # Sky radiance (RGB placeholder, averaged to scalar)
 
 [material]
-albedo = [0.8, 0.8, 0.8]        # Default material albedo (diffuse reflectance)
-                                 # (M1: single material for all geometry)
+albedo = [0.8, 0.8, 0.8]        # Material albedo (RGB placeholder, averaged to scalar)
+                                 # Single material for all geometry in current version

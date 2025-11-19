@@ -25,16 +25,20 @@ struct Payload {
 // ============================================================================
 // LUT Data Structure
 // ============================================================================
-// Simplified atmospheric lookup table for M1
+// Atmospheric lookup table for spectral rendering
 // Must match CPU-side LUT data layout
+//
+// SPECTRAL MODE:
+// - sunRadiance_spectral: Spectral radiance at current wavelength (W·sr⁻¹·m⁻²·nm⁻¹)
+// - skyRadiance_spectral: Spectral radiance at current wavelength (W·sr⁻¹·m⁻²·nm⁻¹)
 // ============================================================================
 
 struct LUTData {
-    float3 sunDirection;   // Normalized sun direction vector
+    float3 sunDirection;        // Normalized sun direction vector (FROM surface TO sun)
+    float  sunRadiance_spectral; // Sun spectral radiance at current λ
+    float  skyRadiance_spectral; // Sky spectral radiance at current λ
     float  _pad0;
-    float3 sunRadiance;    // Direct sun radiance (W·sr⁻¹·m⁻²)
     float  _pad1;
-    float3 skyRadiance;    // Hemispherical sky radiance (W·sr⁻¹·m⁻²)
     float  _pad2;
 };
 
@@ -59,13 +63,18 @@ struct CameraData {
 // ============================================================================
 // Material Data Structure
 // ============================================================================
-// Surface material properties
+// Surface material properties for spectral rendering
 // Must match CPU-side Material structure (see Material.hpp)
+//
+// SPECTRAL MODE:
+// - albedo_spectral: Spectral reflectance at current wavelength [0, 1]
 // ============================================================================
 
 struct MaterialData {
-    float3 albedo;   // Diffuse reflectance [0, 1]
-    float  _pad0;    // Align to 16 bytes (vec4 boundary)
+    float albedo_spectral;  // Spectral reflectance at current λ [0, 1]
+    float _pad0;
+    float _pad1;
+    float _pad2;
 };
 
 #endif // QUANTILOOM_COMMON_HLSLI
