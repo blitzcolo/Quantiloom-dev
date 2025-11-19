@@ -388,34 +388,6 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Material buffer uploaded (albedo: [{:.2f}, {:.2f}, {:.2f}])",
                     defaultMaterial.albedo.x, defaultMaterial.albedo.y, defaultMaterial.albedo.z);
 
-        
-        // ====================================================================
-        // Step 5.5: Create Material Buffer
-        // ====================================================================
-        QL_LOG_INFO("Step 5.5: Creating material buffer...");
-
-        // Material data structure (must match MaterialData in common.hlsli)
-        struct MaterialDataCPU {
-            glm::vec3 albedo;
-            f32 _pad0;
-        };
-
-        // Create default material (gray diffuse)
-        MaterialDataCPU defaultMaterial;
-        defaultMaterial.albedo = glm::vec3(0.8f, 0.8f, 0.8f);  // Gray
-        defaultMaterial._pad0 = 0.0f;
-
-        GpuBuffer materialBuffer(
-            context.GetAllocator(),
-            sizeof(MaterialDataCPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-
-        materialBuffer.Upload(&defaultMaterial, sizeof(MaterialDataCPU));
-        QL_LOG_INFO("  Material buffer uploaded:");
-        QL_LOG_INFO("    albedo: [{:.2f}, {:.2f}, {:.2f}]",
-                    defaultMaterial.albedo.x, defaultMaterial.albedo.y, defaultMaterial.albedo.z);
 
         // ====================================================================
         // Step 6: Create Ray Tracing Pipeline
