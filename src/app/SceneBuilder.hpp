@@ -120,9 +120,10 @@ public:
         };
 
         // 2 triangles (CCW winding for upward normal)
+        // When viewed from above (Y+), vertices go counter-clockwise
         mesh.indices = {
-            0, 1, 2,  // First triangle
-            0, 2, 3   // Second triangle
+            0, 2, 1,  // First triangle: CCW from above
+            0, 3, 2   // Second triangle: CCW from above
         };
 
         return mesh;
