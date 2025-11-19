@@ -212,7 +212,7 @@ endif()
 # tinygltf: glTF 2.0 loader (header-only)
 CPMAddPackage(
     NAME tinygltf
-    VERSION 2.9.3
+    VERSION 2.9.7
     GITHUB_REPOSITORY syoyo/tinygltf
     DOWNLOAD_ONLY YES
 )
@@ -227,7 +227,7 @@ if(tinygltf_ADDED)
     target_compile_definitions(tinygltf INTERFACE
         TINYGLTF_NO_EXTERNAL_IMAGE  # Use built-in stb_image
     )
-    message(STATUS "tinygltf v2.9.3 added (header-only glTF 2.0 loader)")
+    message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
 endif()
 
 # GLM: Mathematics library for graphics (header-only)
