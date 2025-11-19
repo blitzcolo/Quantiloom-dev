@@ -62,12 +62,10 @@ static glm::mat4 TRSToMatrix(const std::vector<double>& translation,
 }
 
 // ============================================================================
-// ParseNodeTransform
+// ParseNodeTransform (helper function for scene graph flattening)
 // ============================================================================
 
-glm::mat4 GltfLoader::ParseNodeTransform(const void* gltfNodePtr) {
-    const auto& node = *static_cast<const tinygltf::Node*>(gltfNodePtr);
-
+static glm::mat4 ParseNodeTransform(const tinygltf::Node& node) {
     // glTF supports two forms: matrix or TRS (translation/rotation/scale)
     if (!node.matrix.empty()) {
         return MatrixFromGltf(node.matrix);
@@ -419,7 +417,7 @@ static void TraverseNode(const tinygltf::Model& model, int nodeIndex,
     const auto& gltfNode = model.nodes[nodeIndex];
 
     // Compute local transform
-    glm::mat4 localTransform = GltfLoader::ParseNodeTransform(&gltfNode);
+    glm::mat4 localTransform = ParseNodeTransform(gltfNode);
 
     // Compute world transform
     glm::mat4 worldTransform = parentTransform * localTransform;
@@ -536,7 +534,7 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
                 scene.name, scene.meshes.size(), scene.nodes.size(),
                 scene.materials.size(), scene.textures.size());
 
-    return Result<Scene, String>::Ok(std::move(scene));
+    return std::move(scene);
 }
 
 } // namespace quantiloom

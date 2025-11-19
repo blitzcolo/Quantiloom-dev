@@ -71,10 +71,6 @@ private:
     // Loads embedded image data (PNG/JPEG)
     static Texture ParseTexture(const void* gltfModel, int textureIndex);
 
-    // Parse glTF node transform to glm::mat4
-    // Handles TRS (translation/rotation/scale) and matrix forms
-    static glm::mat4 ParseNodeTransform(const void* gltfNode);
-
     // Flatten glTF scene graph to world-space nodes
     // Computes accumulated transforms for each node
     static std::vector<SceneNode> FlattenSceneGraph(const void* gltfModel);
