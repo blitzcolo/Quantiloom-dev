@@ -31,9 +31,10 @@ struct HitAttributes {
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
-    // Fetch material properties from buffer using instance custom index
-    // InstanceCustomIndex is set per-instance in TLAS (see main_m1_test.cpp)
-    uint materialID = InstanceCustomIndex();
+    // Fetch material properties from buffer using instance ID
+    // InstanceID() returns the instanceCustomIndex set in TLAS (see main_m1_test.cpp)
+    // Note: In Vulkan HLSL, InstanceID() corresponds to gl_InstanceCustomIndexEXT
+    uint materialID = InstanceID();
     MaterialData material = materials[materialID];
     float3 albedo = material.albedo;
 
