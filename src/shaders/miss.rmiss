@@ -1,7 +1,8 @@
 // ============================================================================
-// Quantiloom M1 - Miss Shader
+// Quantiloom M1 - Miss Shader (Spectral Rendering)
 // ============================================================================
 // Returns sky background radiance when ray misses all geometry
+// Uses spectral radiance from LUT (single wavelength)
 // ============================================================================
 
 #include "common.hlsli"
@@ -18,10 +19,11 @@
 
 [shader("miss")]
 void main(inout Payload payload) {
-    // Fetch sky radiance from LUT
+    // Fetch sky spectral radiance from LUT
     // M1: Single entry LUT (index 0), hemispherical average
     LUTData lut = skyLUT[0];
 
-    // Return sky background
-    payload.radiance = lut.skyRadiance;
+    // Return sky background (spectral mode: scalar to grayscale RGB)
+    float radiance_spectral = lut.skyRadiance_spectral;
+    payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 }
