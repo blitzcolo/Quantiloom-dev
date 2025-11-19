@@ -88,7 +88,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
             return Result<Scene, String>::Err("Failed to load glTF: " + result.error());
         }
 
-        return Result<Scene, String>::Ok(std::move(result.value()));
+        return std::move(result.value());
     }
 
     // Check for procedural preset
@@ -119,7 +119,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
         node.name = "SceneRoot";
         scene.nodes.push_back(node);
 
-        return Result<Scene, String>::Ok(std::move(scene));
+        return std::move(scene);
     }
 
     // Default: Cornell box
@@ -134,7 +134,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
     node.name = "SceneRoot";
     scene.nodes.push_back(node);
 
-    return Result<Scene, String>::Ok(std::move(scene));
+    return std::move(scene);
 }
 
 // ============================================================================

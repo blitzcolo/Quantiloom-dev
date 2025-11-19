@@ -286,20 +286,25 @@ int main(int argc, char* argv[]) {
 
         Mesh sceneMesh = CreateSceneGeometry(g_scenePreset);
         QL_LOG_INFO("  Mesh: {} vertices, {} triangles",
-                    sceneMesh.positions.size(), sceneMesh.indices.size() / 3);
+                    sceneMesh.GetTotalVertexCount(), sceneMesh.GetTotalTriangleCount());
 
         // ====================================================================
         // Step 3: Build Acceleration Structures
         // ====================================================================
         QL_LOG_INFO("Step 3: Building acceleration structures...");
 
-        BLAS blas(context, sceneMesh);
+        // M1 test uses single mesh with single primitive
+        if (sceneMesh.primitives.empty()) {
+            throw std::runtime_error("Scene mesh has no primitives");
+        }
+
+        BLAS blas(context, sceneMesh.primitives[0]);
         TLAS tlas(context);
 
         // Build BLAS and TLAS in a single command buffer
         CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
             blas.Build(cmd);
-            tlas.AddInstance(blas);
+            tlas.AddInstance(blas, 0);  // materialId = 0, identity transform
             tlas.Build(cmd);
         });
 
