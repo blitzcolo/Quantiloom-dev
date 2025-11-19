@@ -51,4 +51,16 @@ struct CameraData {
     float  _pad1;
 };
 
+// ============================================================================
+// Material Data Structure
+// ============================================================================
+// Surface material properties
+// Must match CPU-side Material structure (see Material.hpp)
+// ============================================================================
+
+struct MaterialData {
+    float3 albedo;   // Diffuse reflectance [0, 1]
+    float  _pad0;    // Align to 16 bytes (vec4 boundary)
+};
+
 #endif // QUANTILOOM_COMMON_HLSLI

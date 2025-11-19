@@ -74,6 +74,9 @@ public:
     // Bind geometry buffers (binding 3: vertex, binding 4: index)
     void BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer);
 
+    // Bind material buffer (binding 5)
+    void BindMaterialBuffer(const GpuBuffer& buffer);
+
     // Update all bindings (call after all Bind* calls)
     void UpdateDescriptorSets();
 

@@ -11,8 +11,9 @@
 // ============================================================================
 
 [[vk::binding(2, 0)]] StructuredBuffer<LUTData> skyLUT;
-[[vk::binding(3, 0)]] StructuredBuffer<float3> vertexBuffer;  // Vertex positions
-[[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;      // Triangle indices
+[[vk::binding(3, 0)]] StructuredBuffer<float3> vertexBuffer;    // Vertex positions
+[[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
+[[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
 
 // ============================================================================
 // Hit Attributes
@@ -30,9 +31,11 @@ struct HitAttributes {
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
-    // M1: Hardcoded surface properties
-    // TODO M2+: Fetch from material buffer using InstanceCustomIndex
-    float3 albedo = float3(0.8, 0.8, 0.8);  // Diffuse albedo (gray)
+    // Fetch material properties from buffer using instance custom index
+    // InstanceCustomIndex is set per-instance in TLAS (see main_m1_test.cpp)
+    uint materialID = InstanceCustomIndex();
+    MaterialData material = materials[materialID];
+    float3 albedo = material.albedo;
 
     // ========================================================================
     // Compute geometric normal from triangle vertices
@@ -69,6 +72,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     LUTData lut = skyLUT[0];
     float3 sunDir = normalize(lut.sunDirection);
     float3 sunRadiance = lut.sunRadiance;
+    float3 skyRadiance = lut.skyRadiance;
 
     // ========================================================================
     // Lambert BRDF shading
@@ -77,10 +81,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Lambert BRDF: f = albedo / pi
     float3 brdf = albedo / 3.14159265;
 
-    // Direct lighting: L_out = BRDF * L_in * (N · L)
+    // Direct sun lighting: L_out = BRDF * L_sun * (N · L)
     float NdotL = max(dot(normal, sunDir), 0.0);
-    float3 directLight = brdf * sunRadiance * NdotL;
+    float3 directSun = brdf * sunRadiance * NdotL;
 
-    // M1: No shadow rays, no indirect lighting
-    payload.radiance = directLight;
+    // Sky ambient lighting (hemispherical integration approximation)
+    // For uniform sky: ∫(albedo/π) * L_sky * cos(θ) dω ≈ albedo * L_sky
+    float3 skyAmbient = albedo * skyRadiance;
+
+    // Total outgoing radiance: direct sun + sky ambient
+    // M1: No shadow rays (all surfaces receive sun), no indirect bounces
+    payload.radiance = directSun + skyAmbient;
 }
