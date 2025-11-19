@@ -7,6 +7,7 @@
 #define TINYGLTF_NO_STB_IMAGE_WRITE  // We don't need write functionality
 #include <tiny_gltf.h>
 
+#define GLM_ENABLE_EXPERIMENTAL  // Required for GLM experimental extensions
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <filesystem>

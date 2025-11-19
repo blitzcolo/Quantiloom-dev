@@ -31,18 +31,20 @@ namespace quantiloom {
 // Vertex Buffer Upload
 // ============================================================================
 
-// Upload mesh vertex positions to GPU buffer
+// Upload GeometryPrimitive vertex positions to GPU buffer
 // Returns GPU buffer containing vertex data (vec3 positions)
+// NOTE: In M2, BLAS handles this internally. These functions are for manual buffer creation.
 std::unique_ptr<GpuBuffer> UploadVertexBuffer(
     const VulkanContext& ctx,
-    const Mesh& mesh
+    const GeometryPrimitive& primitive
 );
 
-// Upload mesh indices to GPU buffer
+// Upload GeometryPrimitive indices to GPU buffer
 // Returns GPU buffer containing index data (uint32 indices)
+// NOTE: In M2, BLAS handles this internally. These functions are for manual buffer creation.
 std::unique_ptr<GpuBuffer> UploadIndexBuffer(
     const VulkanContext& ctx,
-    const Mesh& mesh
+    const GeometryPrimitive& primitive
 );
 
 // ============================================================================

@@ -72,14 +72,14 @@ VkCommandPool CreateTransferCommandPool(VkDevice device, u32 queueFamily) {
 
 std::unique_ptr<GpuBuffer> UploadVertexBuffer(
     const VulkanContext& ctx,
-    const Mesh& mesh) {
+    const GeometryPrimitive& primitive) {
 
-    if (mesh.positions.empty()) {
-        QL_LOG_WARN("Mesh has no vertices, skipping vertex buffer upload");
+    if (primitive.positions.empty()) {
+        QL_LOG_WARN("GeometryPrimitive has no vertices, skipping vertex buffer upload");
         return nullptr;
     }
 
-    VkDeviceSize bufferSize = sizeof(glm::vec3) * mesh.positions.size();
+    VkDeviceSize bufferSize = sizeof(glm::vec3) * primitive.positions.size();
 
     // Create staging buffer (HOST_VISIBLE for CPU write)
     GpuBuffer stagingBuffer(
@@ -91,7 +91,7 @@ std::unique_ptr<GpuBuffer> UploadVertexBuffer(
 
     // Upload data to staging buffer
     void* data = stagingBuffer.Map();
-    std::memcpy(data, mesh.positions.data(), bufferSize);
+    std::memcpy(data, primitive.positions.data(), bufferSize);
     stagingBuffer.Unmap();
 
     // Create device-local buffer (GPU_ONLY for optimal performance)
@@ -120,7 +120,7 @@ std::unique_ptr<GpuBuffer> UploadVertexBuffer(
     vkDestroyCommandPool(ctx.GetDevice(), commandPool, nullptr);
 
     QL_LOG_INFO("Uploaded vertex buffer: {} vertices ({} bytes)",
-                mesh.positions.size(), bufferSize);
+                primitive.positions.size(), bufferSize);
 
     return deviceBuffer;
 }
@@ -131,14 +131,14 @@ std::unique_ptr<GpuBuffer> UploadVertexBuffer(
 
 std::unique_ptr<GpuBuffer> UploadIndexBuffer(
     const VulkanContext& ctx,
-    const Mesh& mesh) {
+    const GeometryPrimitive& primitive) {
 
-    if (mesh.indices.empty()) {
-        QL_LOG_WARN("Mesh has no indices, skipping index buffer upload");
+    if (primitive.indices.empty()) {
+        QL_LOG_WARN("GeometryPrimitive has no indices, skipping index buffer upload");
         return nullptr;
     }
 
-    VkDeviceSize bufferSize = sizeof(u32) * mesh.indices.size();
+    VkDeviceSize bufferSize = sizeof(u32) * primitive.indices.size();
 
     // Create staging buffer
     GpuBuffer stagingBuffer(
@@ -150,7 +150,7 @@ std::unique_ptr<GpuBuffer> UploadIndexBuffer(
 
     // Upload data to staging buffer
     void* data = stagingBuffer.Map();
-    std::memcpy(data, mesh.indices.data(), bufferSize);
+    std::memcpy(data, primitive.indices.data(), bufferSize);
     stagingBuffer.Unmap();
 
     // Create device-local buffer
@@ -179,7 +179,7 @@ std::unique_ptr<GpuBuffer> UploadIndexBuffer(
     vkDestroyCommandPool(ctx.GetDevice(), commandPool, nullptr);
 
     QL_LOG_INFO("Uploaded index buffer: {} indices ({} bytes)",
-                mesh.indices.size(), bufferSize);
+                primitive.indices.size(), bufferSize);
 
     return deviceBuffer;
 }

@@ -203,7 +203,7 @@ bool Scene::IsValid() const {
 u32 Scene::GetTotalTriangleCount() const {
     u32 total = 0;
     for (const auto& mesh : meshes) {
-        total += mesh.GetTriangleCount();
+        total += mesh.GetTotalTriangleCount();
     }
     return total;
 }
@@ -211,7 +211,7 @@ u32 Scene::GetTotalTriangleCount() const {
 u32 Scene::GetTotalVertexCount() const {
     u32 total = 0;
     for (const auto& mesh : meshes) {
-        total += mesh.GetVertexCount();
+        total += mesh.GetTotalVertexCount();
     }
     return total;
 }
