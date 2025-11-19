@@ -3,6 +3,7 @@
 #include "Camera.hpp"
 #include "Mesh.hpp"
 #include "Material.hpp"
+#include "Texture.hpp"
 #include "core/Types.hpp"
 #include "core/Config.hpp"
 #include "core/LUT.hpp"
@@ -70,9 +71,11 @@ public:
     u32 width = 1280;   // Render resolution width
     u32 height = 720;   // Render resolution height
 
-    // Geometry and materials
-    std::vector<Mesh> meshes;
-    std::vector<Material> materials;
+    // Scene graph and resources
+    std::vector<Mesh> meshes;            // Mesh definitions (geometry primitives)
+    std::vector<SceneNode> nodes;        // Scene instances (mesh + transform)
+    std::vector<Material> materials;     // Material definitions
+    std::vector<Texture> textures;       // Texture images (CPU-side data)
 
     // Spectral configuration
     std::vector<SpectralBand> bands;  // For MS-RT mode

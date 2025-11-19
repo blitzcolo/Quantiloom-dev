@@ -105,14 +105,18 @@ public:
     // Create horizontal ground plane (Y=0)
     // size: side length in meters (e.g., 10.0 = 10x10 m)
     // y: vertical offset (default 0.0)
-    static Mesh CreateGroundPlane(float size = 10.0f, float y = 0.0f) {
+    // materialId: index into Scene::materials
+    static Mesh CreateGroundPlane(float size = 10.0f, float y = 0.0f, u32 materialId = 0) {
         Mesh mesh;
         mesh.name = "ground_plane";
+
+        GeometryPrimitive primitive;
+        primitive.materialId = materialId;
 
         float half = size * 0.5f;
 
         // 4 vertices forming a quad
-        mesh.positions = {
+        primitive.positions = {
             {-half, y, -half},  // 0: Far-left
             { half, y, -half},  // 1: Far-right
             { half, y,  half},  // 2: Near-right
@@ -121,11 +125,12 @@ public:
 
         // 2 triangles (CCW winding for upward normal)
         // When viewed from above (Y+), vertices go counter-clockwise
-        mesh.indices = {
+        primitive.indices = {
             0, 2, 1,  // First triangle: CCW from above
             0, 3, 2   // Second triangle: CCW from above
         };
 
+        mesh.primitives.push_back(std::move(primitive));
         return mesh;
     }
 
@@ -136,16 +141,20 @@ public:
     // Create axis-aligned box
     // size: dimensions (width, height, depth)
     // center: box center position
-    static Mesh CreateBox(glm::vec3 size, glm::vec3 center = glm::vec3(0.0f)) {
+    // materialId: index into Scene::materials
+    static Mesh CreateBox(glm::vec3 size, glm::vec3 center = glm::vec3(0.0f), u32 materialId = 0) {
         Mesh mesh;
         mesh.name = "box";
+
+        GeometryPrimitive primitive;
+        primitive.materialId = materialId;
 
         glm::vec3 half = size * 0.5f;
         glm::vec3 min = center - half;
         glm::vec3 max = center + half;
 
         // 8 vertices of box
-        mesh.positions = {
+        primitive.positions = {
             // Bottom face (Y = min.y)
             {min.x, min.y, min.z},  // 0
             {max.x, min.y, min.z},  // 1
@@ -160,7 +169,7 @@ public:
         };
 
         // 12 triangles (6 faces, 2 triangles each, CCW winding from outside)
-        mesh.indices = {
+        primitive.indices = {
             // Bottom face (Y = min, normal = -Y, looking from below)
             0, 1, 2,  0, 2, 3,
 
@@ -180,12 +189,13 @@ public:
             1, 6, 2,  1, 5, 6,
         };
 
+        mesh.primitives.push_back(std::move(primitive));
         return mesh;
     }
 
     // Convenience: Create unit cube
-    static Mesh CreateCube(float size, glm::vec3 center = glm::vec3(0.0f)) {
-        return CreateBox(glm::vec3(size), center);
+    static Mesh CreateCube(float size, glm::vec3 center = glm::vec3(0.0f), u32 materialId = 0) {
+        return CreateBox(glm::vec3(size), center, materialId);
     }
 
     // ========================================================================
@@ -196,10 +206,14 @@ public:
     // radius: sphere radius
     // center: sphere center position
     // subdivisions: number of subdivisions (0 = 20 triangles, 1 = 80, 2 = 320, etc.)
+    // materialId: index into Scene::materials
     static Mesh CreateSphere(float radius, glm::vec3 center = glm::vec3(0.0f),
-                             u32 subdivisions = 2) {
+                             u32 subdivisions = 2, u32 materialId = 0) {
         Mesh mesh;
         mesh.name = "icosphere";
+
+        GeometryPrimitive primitive;
+        primitive.materialId = materialId;
 
         // Golden ratio constant
         constexpr float phi = 1.618033988749895f;  // (1 + sqrt(5)) / 2
@@ -233,12 +247,12 @@ public:
         };
 
         // Step 2: Subdivide triangles
-        mesh.positions = baseVertices;
-        mesh.indices = baseIndices;
+        primitive.positions = baseVertices;
+        primitive.indices = baseIndices;
 
         for (u32 sub = 0; sub < subdivisions; ++sub) {
             std::vector<u32> newIndices;
-            newIndices.reserve(mesh.indices.size() * 4);
+            newIndices.reserve(primitive.indices.size() * 4);
 
             // Cache for midpoint vertices to avoid duplicates
             std::map<std::pair<u32, u32>, u32> midpointCache;
@@ -254,22 +268,22 @@ public:
                 }
 
                 // Create new midpoint vertex
-                glm::vec3 v0 = mesh.positions[i0];
-                glm::vec3 v1 = mesh.positions[i1];
+                glm::vec3 v0 = primitive.positions[i0];
+                glm::vec3 v1 = primitive.positions[i1];
                 glm::vec3 midpoint = glm::normalize((v0 + v1) * 0.5f);  // Project to sphere
 
-                u32 newIndex = static_cast<u32>(mesh.positions.size());
-                mesh.positions.push_back(midpoint);
+                u32 newIndex = static_cast<u32>(primitive.positions.size());
+                primitive.positions.push_back(midpoint);
                 midpointCache[key] = newIndex;
 
                 return newIndex;
             };
 
             // Subdivide each triangle into 4 smaller triangles
-            for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-                u32 v0 = mesh.indices[i + 0];
-                u32 v1 = mesh.indices[i + 1];
-                u32 v2 = mesh.indices[i + 2];
+            for (size_t i = 0; i < primitive.indices.size(); i += 3) {
+                u32 v0 = primitive.indices[i + 0];
+                u32 v1 = primitive.indices[i + 1];
+                u32 v2 = primitive.indices[i + 2];
 
                 // Get midpoints of edges
                 u32 m01 = GetMidpoint(v0, v1);
@@ -289,14 +303,15 @@ public:
                 newIndices.push_back(m01);  newIndices.push_back(m12); newIndices.push_back(m20);
             }
 
-            mesh.indices = std::move(newIndices);
+            primitive.indices = std::move(newIndices);
         }
 
         // Step 3: Scale to desired radius and translate to center
-        for (auto& v : mesh.positions) {
+        for (auto& v : primitive.positions) {
             v = center + v * radius;
         }
 
+        mesh.primitives.push_back(std::move(primitive));
         return mesh;
     }
 
@@ -304,21 +319,16 @@ public:
     // Multi-Mesh Scene Composition
     // ========================================================================
 
-    // Merge multiple meshes into one (for single BLAS)
+    // Merge multiple meshes into one (for compatibility with M1 tests)
+    // New behavior: Collects all primitives into a single mesh
     static Mesh MergeMeshes(const std::vector<Mesh>& meshes) {
         Mesh merged;
         merged.name = "merged_scene";
 
+        // Collect all primitives from all meshes
         for (const auto& mesh : meshes) {
-            u32 indexOffset = static_cast<u32>(merged.positions.size());
-
-            // Append positions
-            merged.positions.insert(merged.positions.end(),
-                                    mesh.positions.begin(), mesh.positions.end());
-
-            // Append indices (with offset)
-            for (u32 idx : mesh.indices) {
-                merged.indices.push_back(idx + indexOffset);
+            for (const auto& prim : mesh.primitives) {
+                merged.primitives.push_back(prim);
             }
         }
 

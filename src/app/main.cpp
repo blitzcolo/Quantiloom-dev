@@ -216,24 +216,58 @@ int main(int argc, char* argv[]) {
         }
 
         // ====================================================================
+        // Create Materials
+        // ====================================================================
+        QL_LOG_INFO("Creating materials...");
+
+        // Create default Lambertian material from config
+        Material defaultMaterial = Material::CreateLambertian(albedo, "DefaultMaterial");
+        std::vector<Material> materials = { defaultMaterial };
+
+        QL_LOG_INFO("  Material 0: {} (spectral albedo: {:.3f})",
+                    defaultMaterial.name, defaultMaterial.spectralAlbedo);
+
+        // ====================================================================
         // Load Scene Geometry
         // ====================================================================
         QL_LOG_INFO("Loading scene geometry...");
         Mesh sceneMesh = LoadSceneFromConfig(config);
-        QL_LOG_INFO("  Mesh: {} vertices, {} triangles",
-                    sceneMesh.positions.size(), sceneMesh.indices.size() / 3);
+        QL_LOG_INFO("  Mesh: {} primitives, {} total triangles",
+                    sceneMesh.primitives.size(), sceneMesh.GetTotalTriangleCount());
+
+        // M1 simplification: Merge all primitives into a single primitive for single-BLAS rendering
+        // This will be replaced with multi-BLAS support in M2 for glTF
+        GeometryPrimitive mergedPrimitive;
+        mergedPrimitive.materialId = 0;  // All geometry uses material 0
+
+        for (const auto& prim : sceneMesh.primitives) {
+            u32 indexOffset = static_cast<u32>(mergedPrimitive.positions.size());
+
+            // Append vertex data
+            mergedPrimitive.positions.insert(mergedPrimitive.positions.end(),
+                                             prim.positions.begin(), prim.positions.end());
+
+            // Append index data (with offset)
+            for (u32 idx : prim.indices) {
+                mergedPrimitive.indices.push_back(idx + indexOffset);
+            }
+        }
+
+        QL_LOG_INFO("  Merged into single primitive: {} vertices, {} triangles",
+                    mergedPrimitive.positions.size(), mergedPrimitive.indices.size() / 3);
 
         // ====================================================================
         // Build Acceleration Structures
         // ====================================================================
         QL_LOG_INFO("Building acceleration structures...");
 
-        BLAS blas(context, sceneMesh);
+        // Create single BLAS for merged geometry
+        BLAS blas(context, mergedPrimitive);
         TLAS tlas(context);
 
         CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
             blas.Build(cmd);
-            tlas.AddInstance(blas);
+            tlas.AddInstance(blas, 0, glm::mat4(1.0f));  // Material 0, identity transform
             tlas.Build(cmd);
         });
 

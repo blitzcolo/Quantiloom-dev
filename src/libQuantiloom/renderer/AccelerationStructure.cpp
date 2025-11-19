@@ -10,16 +10,16 @@ namespace quantiloom {
 // BLAS Implementation
 // ============================================================================
 
-BLAS::BLAS(VulkanContext& context, const Mesh& mesh)
+BLAS::BLAS(VulkanContext& context, const GeometryPrimitive& primitive)
     : m_context(context)
-    , m_mesh(mesh)
+    , m_primitive(primitive)
 {
-    if (mesh.positions.empty()) {
-        throw std::runtime_error("Cannot create BLAS from empty mesh");
+    if (primitive.positions.empty()) {
+        throw std::runtime_error("Cannot create BLAS from empty primitive");
     }
 
-    QL_LOG_INFO("Creating BLAS for mesh with {} vertices, {} triangles",
-                mesh.positions.size(), mesh.indices.size() / 3);
+    QL_LOG_INFO("Creating BLAS for primitive with {} vertices, {} triangles",
+                primitive.positions.size(), primitive.indices.size() / 3);
 }
 
 BLAS::~BLAS() {
@@ -42,7 +42,7 @@ BLAS::BLAS(BLAS&& other) noexcept
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
     , m_deviceAddress(other.m_deviceAddress)
     , m_built(other.m_built)
-    , m_mesh(other.m_mesh)
+    , m_primitive(other.m_primitive)
 {
     other.m_as = VK_NULL_HANDLE;
     other.m_deviceAddress = 0;
@@ -98,8 +98,8 @@ void BLAS::Build(VkCommandBuffer cmd) {
     }
 
     // Upload vertex and index data to GPU using staging buffers
-    const VkDeviceSize vertexBufferSize = m_mesh.positions.size() * sizeof(glm::vec3);
-    const VkDeviceSize indexBufferSize = m_mesh.indices.size() * sizeof(u32);
+    const VkDeviceSize vertexBufferSize = m_primitive.positions.size() * sizeof(glm::vec3);
+    const VkDeviceSize indexBufferSize = m_primitive.indices.size() * sizeof(u32);
 
     // Step 1: Create staging buffers (CPU-accessible)
     GpuBuffer vertexStaging(
@@ -117,8 +117,8 @@ void BLAS::Build(VkCommandBuffer cmd) {
     );
 
     // Step 2: Upload data to staging buffers
-    vertexStaging.Upload(m_mesh.positions.data(), vertexBufferSize);
-    indexStaging.Upload(m_mesh.indices.data(), indexBufferSize);
+    vertexStaging.Upload(m_primitive.positions.data(), vertexBufferSize);
+    indexStaging.Upload(m_primitive.indices.data(), indexBufferSize);
 
     // Step 3: Create device-local buffers (GPU-only, fastest for AS build and shader access)
     m_vertexBuffer = std::make_unique<GpuBuffer>(
@@ -170,7 +170,7 @@ void BLAS::Build(VkCommandBuffer cmd) {
     );
 
     QL_LOG_INFO("  Uploaded geometry via staging buffers: {} vertices, {} indices",
-                m_mesh.positions.size(), m_mesh.indices.size());
+                m_primitive.positions.size(), m_primitive.indices.size());
 
     // Note: Staging buffers are automatically destroyed when exiting scope
 
@@ -184,7 +184,7 @@ void BLAS::Build(VkCommandBuffer cmd) {
     geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
     geometry.geometry.triangles.vertexData.deviceAddress = m_vertexBuffer->GetDeviceAddress(device);
     geometry.geometry.triangles.vertexStride = sizeof(glm::vec3);
-    geometry.geometry.triangles.maxVertex = static_cast<u32>(m_mesh.positions.size() - 1);
+    geometry.geometry.triangles.maxVertex = static_cast<u32>(m_primitive.positions.size() - 1);
     geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
     geometry.geometry.triangles.indexData.deviceAddress = m_indexBuffer->GetDeviceAddress(device);
 
@@ -198,7 +198,7 @@ void BLAS::Build(VkCommandBuffer cmd) {
     buildInfo.pGeometries = &geometry;
 
     // Query build sizes
-    u32 primitiveCount = static_cast<u32>(m_mesh.indices.size() / 3);
+    u32 primitiveCount = static_cast<u32>(m_primitive.indices.size() / 3);
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
     sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 
@@ -343,7 +343,7 @@ TLAS& TLAS::operator=(TLAS&& other) noexcept {
     return *this;
 }
 
-void TLAS::AddInstance(const BLAS& blas, const glm::mat4& transform) {
+void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform) {
     if (m_built) {
         throw std::runtime_error("Cannot add instance to already-built TLAS");
     }
@@ -359,16 +359,16 @@ void TLAS::AddInstance(const BLAS& blas, const glm::mat4& transform) {
 
     VkAccelerationStructureInstanceKHR instance{};
     instance.transform = vkTransform;
-    instance.instanceCustomIndex = static_cast<u32>(m_instances.size());
+    instance.instanceCustomIndex = materialId;  // Material ID accessible in shader via InstanceID()
     instance.mask = 0xFF;  // Visible to all rays
-    instance.instanceShaderBindingTableRecordOffset = 0;  // M1: single hit group
+    instance.instanceShaderBindingTableRecordOffset = 0;  // Single hit group
     instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
     instance.accelerationStructureReference = blas.GetDeviceAddress();
 
     m_instances.push_back(instance);
 
-    QL_LOG_INFO("  Added instance {} to TLAS (BLAS addr: 0x{:x})",
-                m_instances.size() - 1, blas.GetDeviceAddress());
+    QL_LOG_INFO("  Added instance {} to TLAS (material {}, BLAS addr: 0x{:x})",
+                m_instances.size() - 1, materialId, blas.GetDeviceAddress());
 }
 
 void TLAS::Build(VkCommandBuffer cmd) {
