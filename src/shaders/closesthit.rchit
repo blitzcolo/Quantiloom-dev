@@ -60,11 +60,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 edge2 = v2 - v0;
 
     // Compute geometric normal via cross product (CCW winding)
-    float3 geometricNormal = normalize(cross(edge1, edge2));
+    // Note: This normal is in Object Space (vertex positions are in object space)
+    float3 objectNormal = normalize(cross(edge1, edge2));
 
-    // Use geometric normal directly (trust CCW winding order)
-    // With correct winding, cross(edge1, edge2) produces outward-facing normals
-    float3 normal = geometricNormal;
+    // Transform normal from Object Space to World Space
+    // Use transpose of WorldToObject for proper normal transformation
+    // (Normals transform by inverse-transpose of model matrix)
+    float3x3 normalTransform = (float3x3)WorldToObject3x4();
+    float3 worldNormal = normalize(mul(objectNormal, normalTransform));
+
+    // M1: Single-sided geometry, use world normal directly
+    // (No faceforward needed - that's for double-sided materials in M2+)
+    float3 normal = worldNormal;
 
     // ========================================================================
     // Fetch sun/sky data from LUT
