@@ -1,0 +1,34 @@
+# ============================================================================
+# Quantiloom - Metallic-Roughness Test (Metal Spheres)
+# ============================================================================
+# Tests full range of metallic/roughness parameters with glTF model
+# ============================================================================
+
+[renderer]
+resolution = [1920, 1080]
+spp = 1
+output = "metal_spheres_output.exr"
+
+[spectral]
+mode = "single_wavelength"
+wavelength_nm = 550.0
+
+[scene]
+# Metal-Roughness spheres grid (tests metallic 0.0-1.0, roughness 0.0-1.0)
+gltf = "assets/models/glTF-Sample-Models/2.0/MetalRoughSpheres/glTF/MetalRoughSpheres.gltf"
+
+[camera]
+# View the sphere grid from above
+position = [0.0, 1.5, 4.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 60.0
+
+[lighting]
+# Strong directional sun to see specular highlights
+sun_direction = [-0.3, 0.9, 0.3]
+sun_radiance = [8.0, 8.0, 8.0]
+sky_radiance = [0.3, 0.5, 0.8]
+
+[material]
+albedo = [0.8, 0.8, 0.8]
