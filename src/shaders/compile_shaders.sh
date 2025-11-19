@@ -10,6 +10,7 @@ set -e  # Exit on error
 echo "========================================="
 echo "  Quantiloom Shader Compilation"
 echo "========================================="
+echo "You need to run it from the root folder of the project (where the main CMakeLists.txt is located)"
 
 # Check if DXC is available
 if ! command -v dxc &> /dev/null; then
@@ -31,31 +32,31 @@ FLAGS="-spirv -T lib_6_3 -fspv-target-env=vulkan1.3"
 
 # Compile raygen shader
 echo "[1/3] Compiling raygen.rgen..."
-dxc $FLAGS -Fo raygen.spv raygen.rgen
+dxc $FLAGS -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if [ $? -eq 0 ]; then
-    echo "      ✓ raygen.spv created"
+    echo "      ✓ src/shaders/raygen.spv created"
 else
-    echo "      ✗ Failed to compile raygen.rgen"
+    echo "      ✗ Failed to compile src/shaders/raygen.rgen"
     exit 1
 fi
 
 # Compile closesthit shader
 echo "[2/3] Compiling closesthit.rchit..."
-dxc $FLAGS -Fo closesthit.spv closesthit.rchit
+dxc $FLAGS -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if [ $? -eq 0 ]; then
-    echo "      ✓ closesthit.spv created"
+    echo "      ✓ src/shaders/closesthit.spv created"
 else
-    echo "      ✗ Failed to compile closesthit.rchit"
+    echo "      ✗ Failed to compile src/shaders/closesthit.rchit"
     exit 1
 fi
 
 # Compile miss shader
 echo "[3/3] Compiling miss.rmiss..."
-dxc $FLAGS -Fo miss.spv miss.rmiss
+dxc $FLAGS -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if [ $? -eq 0 ]; then
-    echo "      ✓ miss.spv created"
+    echo "      ✓ src/shaders/miss.spv created"
 else
-    echo "      ✗ Failed to compile miss.rmiss"
+    echo "      ✗ Failed to compile src/shaders/miss.rmiss"
     exit 1
 fi
 
@@ -63,9 +64,5 @@ echo ""
 echo "========================================="
 echo "  All shaders compiled successfully!"
 echo "========================================="
-echo ""
-echo "Output files:"
-ls -lh *.spv
-
 echo ""
 echo "You can now run the M1 test application."
