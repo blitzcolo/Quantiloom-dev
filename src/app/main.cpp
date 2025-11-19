@@ -9,6 +9,7 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "io/ImageIO.hpp"
+#include "io/GltfLoader.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/AccelerationStructure.hpp"
@@ -54,36 +55,69 @@ struct MaterialDataCPU {
 // Scene Loading Helper
 // ============================================================================
 
-Mesh LoadSceneFromConfig(const Config& config) {
-    // Check if preset is specified
-    if (config.Has("scene.preset")) {
-        String preset = config.Get<String>("scene.preset", "cornell_box");
+// Load scene from config file
+// Returns either procedural scene or glTF-loaded scene
+// For glTF scenes, also populates materials and textures
+Result<Scene, String> LoadSceneFromConfig(const Config& config) {
+    Scene scene;
 
-        QL_LOG_INFO("Loading built-in scene preset: {}", preset);
+    // Check for glTF file
+    if (config.Has("scene.gltf")) {
+        String gltfPath = config.Get<String>("scene.gltf");
+        QL_LOG_INFO("Loading glTF model: {}", gltfPath);
 
-        if (preset == "cornell_box") {
-            return TestScenes::CreateCornellBoxScene();
-        } else if (preset == "multi_object") {
-            return TestScenes::CreateMultiObjectScene();
-        } else if (preset == "lighting_test") {
-            return TestScenes::CreateLightingTestScene();
-        } else {
-            QL_LOG_WARN("Unknown scene preset '{}', defaulting to cornell_box", preset);
-            return TestScenes::CreateCornellBoxScene();
+        auto result = GltfLoader::LoadFromFile(gltfPath);
+        if (!result.has_value()) {
+            return Result<Scene, String>::Err("Failed to load glTF: " + result.error());
         }
+
+        return Result<Scene, String>::Ok(std::move(result.value()));
     }
 
-    // M2+: Load from external OBJ file
-    if (config.Has("scene.geometry")) {
-        String geometryPath = config.Get<String>("scene.geometry");
-        QL_LOG_ERROR("External geometry loading not yet implemented (M2)");
-        QL_LOG_INFO("Falling back to cornell_box preset");
-        return TestScenes::CreateCornellBoxScene();
+    // Check for procedural preset
+    if (config.Has("scene.preset")) {
+        String preset = config.Get<String>("scene.preset", "cornell_box");
+        QL_LOG_INFO("Loading built-in scene preset: {}", preset);
+
+        Mesh mesh;
+        if (preset == "cornell_box") {
+            mesh = TestScenes::CreateCornellBoxScene();
+        } else if (preset == "multi_object") {
+            mesh = TestScenes::CreateMultiObjectScene();
+        } else if (preset == "lighting_test") {
+            mesh = TestScenes::CreateLightingTestScene();
+        } else {
+            QL_LOG_WARN("Unknown scene preset '{}', defaulting to cornell_box", preset);
+            mesh = TestScenes::CreateCornellBoxScene();
+        }
+
+        // Wrap in Scene
+        scene.name = preset;
+        scene.meshes.push_back(std::move(mesh));
+
+        // Create single node with identity transform
+        SceneNode node;
+        node.meshIndex = 0;
+        node.transform = glm::mat4(1.0f);
+        node.name = "SceneRoot";
+        scene.nodes.push_back(node);
+
+        return Result<Scene, String>::Ok(std::move(scene));
     }
 
     // Default: Cornell box
     QL_LOG_WARN("No scene specified in config, using cornell_box preset");
-    return TestScenes::CreateCornellBoxScene();
+    Mesh mesh = TestScenes::CreateCornellBoxScene();
+    scene.name = "cornell_box";
+    scene.meshes.push_back(std::move(mesh));
+
+    SceneNode node;
+    node.meshIndex = 0;
+    node.transform = glm::mat4(1.0f);
+    node.name = "SceneRoot";
+    scene.nodes.push_back(node);
+
+    return Result<Scene, String>::Ok(std::move(scene));
 }
 
 // ============================================================================
@@ -216,63 +250,84 @@ int main(int argc, char* argv[]) {
         }
 
         // ====================================================================
-        // Create Materials
-        // ====================================================================
-        QL_LOG_INFO("Creating materials...");
-
-        // Create default Lambertian material from config
-        Material defaultMaterial = Material::CreateLambertian(albedo, "DefaultMaterial");
-        std::vector<Material> materials = { defaultMaterial };
-
-        QL_LOG_INFO("  Material 0: {} (spectral albedo: {:.3f})",
-                    defaultMaterial.name, defaultMaterial.spectralAlbedo);
-
-        // ====================================================================
         // Load Scene Geometry
         // ====================================================================
-        QL_LOG_INFO("Loading scene geometry...");
-        Mesh sceneMesh = LoadSceneFromConfig(config);
-        QL_LOG_INFO("  Mesh: {} primitives, {} total triangles",
-                    sceneMesh.primitives.size(), sceneMesh.GetTotalTriangleCount());
+        QL_LOG_INFO("Loading scene...");
 
-        // M1 simplification: Merge all primitives into a single primitive for single-BLAS rendering
-        // This will be replaced with multi-BLAS support in M2 for glTF
-        GeometryPrimitive mergedPrimitive;
-        mergedPrimitive.materialId = 0;  // All geometry uses material 0
+        auto sceneResult = LoadSceneFromConfig(config);
+        if (!sceneResult.has_value()) {
+            QL_LOG_ERROR("Failed to load scene: {}", sceneResult.error());
+            return 1;
+        }
 
-        for (const auto& prim : sceneMesh.primitives) {
-            u32 indexOffset = static_cast<u32>(mergedPrimitive.positions.size());
+        Scene loadedScene = sceneResult.value();
 
-            // Append vertex data
-            mergedPrimitive.positions.insert(mergedPrimitive.positions.end(),
-                                             prim.positions.begin(), prim.positions.end());
+        // If scene has no materials (procedural), create default from config
+        if (loadedScene.materials.empty()) {
+            Material defaultMaterial = Material::CreateLambertian(albedo, "DefaultMaterial");
+            loadedScene.materials.push_back(defaultMaterial);
+            QL_LOG_INFO("  Created default material (spectral albedo: {:.3f})",
+                        defaultMaterial.spectralAlbedo);
+        }
 
-            // Append index data (with offset)
-            for (u32 idx : prim.indices) {
-                mergedPrimitive.indices.push_back(idx + indexOffset);
+        QL_LOG_INFO("  Scene loaded: {} meshes, {} nodes, {} materials",
+                    loadedScene.meshes.size(), loadedScene.nodes.size(),
+                    loadedScene.materials.size());
+
+        // M2: Build BLAS for each primitive in each mesh
+        // This allows per-primitive materials and proper glTF support
+        std::vector<BLAS> blasList;
+        std::vector<u32> primitiveMaterialIds;  // Track material ID for each BLAS
+
+        for (const auto& mesh : loadedScene.meshes) {
+            for (const auto& primitive : mesh.primitives) {
+                blasList.emplace_back(context, primitive);
+                primitiveMaterialIds.push_back(primitive.materialId);
             }
         }
 
-        QL_LOG_INFO("  Merged into single primitive: {} vertices, {} triangles",
-                    mergedPrimitive.positions.size(), mergedPrimitive.indices.size() / 3);
+        u32 totalTriangles = 0;
+        for (const auto& mesh : loadedScene.meshes) {
+            totalTriangles += mesh.GetTotalTriangleCount();
+        }
+
+        QL_LOG_INFO("  Created {} BLAS(es) for {} total triangles",
+                    blasList.size(), totalTriangles);
 
         // ====================================================================
         // Build Acceleration Structures
         // ====================================================================
         QL_LOG_INFO("Building acceleration structures...");
 
-        // Create single BLAS for merged geometry
-        BLAS blas(context, mergedPrimitive);
+        // Build TLAS with all instances
         TLAS tlas(context);
 
         CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-            blas.Build(cmd);
-            tlas.AddInstance(blas, 0, glm::mat4(1.0f));  // Material 0, identity transform
+            // Build all BLAS
+            for (auto& blas : blasList) {
+                blas.Build(cmd);
+            }
+
+            // Add instances to TLAS
+            size_t blasIndex = 0;
+            for (const auto& node : loadedScene.nodes) {
+                const Mesh& mesh = loadedScene.meshes[node.meshIndex];
+
+                for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+                    const auto& primitive = mesh.primitives[primIdx];
+                    tlas.AddInstance(
+                        blasList[blasIndex],
+                        primitive.materialId,
+                        node.transform
+                    );
+                    ++blasIndex;
+                }
+            }
+
             tlas.Build(cmd);
         });
 
-        QL_LOG_INFO("  BLAS device address: 0x{:x}", blas.GetDeviceAddress());
-        QL_LOG_INFO("  TLAS built with 1 instance");
+        QL_LOG_INFO("  TLAS built with {} instance(s)", loadedScene.nodes.size());
 
         // ====================================================================
         // Create Output Image
@@ -328,23 +383,26 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Creating spectral material buffer...");
 
-        // Convert RGB albedo to spectral albedo (average of RGB channels)
-        // For single-wavelength mode, we approximate spectral reflectance from RGB config
-        f32 albedo_spectral = (albedo.r + albedo.g + albedo.b) / 3.0f;
+        // Upload all materials
+        std::vector<MaterialDataCPU> materialData;
+        materialData.reserve(loadedScene.materials.size());
 
-        QL_LOG_INFO("  Material spectral albedo: {:.3f}", albedo_spectral);
-
-        MaterialDataCPU defaultMaterial;
-        defaultMaterial.albedo_spectral = albedo_spectral;
+        for (const auto& mat : loadedScene.materials) {
+            MaterialDataCPU cpuMat;
+            cpuMat.albedo_spectral = mat.spectralAlbedo;
+            materialData.push_back(cpuMat);
+            QL_LOG_INFO("  Material '{}': spectral albedo = {:.3f}",
+                        mat.name, mat.spectralAlbedo);
+        }
 
         GpuBuffer materialBuffer(
             context.GetAllocator(),
-            sizeof(MaterialDataCPU),
+            materialData.size() * sizeof(MaterialDataCPU),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
 
-        materialBuffer.Upload(&defaultMaterial, sizeof(MaterialDataCPU));
+        materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
 
         // ====================================================================
         // Create Ray Tracing Pipeline
@@ -363,7 +421,11 @@ int main(int argc, char* argv[]) {
         pipeline.BindAccelerationStructure(tlas.GetHandle());
         pipeline.BindLUTBuffer(lutBuffer);
         pipeline.BindMaterialBuffer(materialBuffer);
-        pipeline.BindGeometryBuffers(blas.GetVertexBuffer(), blas.GetIndexBuffer());
+
+        // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
+        if (!blasList.empty()) {
+            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer());
+        }
 
         // Set camera parameters (with spectral wavelength)
         CameraData cameraData = camera.GetCameraData();
