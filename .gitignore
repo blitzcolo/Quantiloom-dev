@@ -77,4 +77,5 @@ conan/
 # other
 
 src/shaders/*.exr
+src/shaders/*.spv
 .agent/
