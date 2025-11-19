@@ -1,7 +1,12 @@
 // ============================================================================
-// Quantiloom M1 - Common Shader Definitions
+// Quantiloom - Common Shader Definitions
 // ============================================================================
 // Shared types and structures for ray tracing shaders
+//
+// SPECTRAL RENDERING NOTES:
+// - wavelength_nm in CameraData specifies current wavelength (nanometers)
+// - For single-wavelength mode: render at one λ, output as grayscale RGB
+// - For multi-wavelength mode (M2+): render multiple λ separately
 // ============================================================================
 
 #ifndef QUANTILOOM_COMMON_HLSLI
@@ -46,7 +51,7 @@ struct CameraData {
     float3 forward;        // Forward vector (normalized)
     float  aspectRatio;    // Width / height
     float3 right;          // Right vector (normalized)
-    float  _pad0;
+    float  wavelength_nm;  // Current wavelength (nanometers) for spectral rendering
     float3 up;             // Up vector (normalized)
     float  _pad1;
 };

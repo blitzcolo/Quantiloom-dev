@@ -46,6 +46,7 @@ CameraData Camera::GetCameraData() const {
     data.up = m_up;
     data.fovScale = glm::tan(glm::radians(m_fovYDegrees) * 0.5f);
     data.aspectRatio = m_aspectRatio;
+    data.wavelength_nm = 550.0f;  // Default wavelength (will be overridden by renderer)
     return data;
 }
 

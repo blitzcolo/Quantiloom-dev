@@ -1,7 +1,12 @@
 // ============================================================================
-// Quantiloom M1 - Closest Hit Shader
+// Quantiloom - Closest Hit Shader
 // ============================================================================
 // Computes Lambert BRDF shading with direct sun lighting from LUT
+//
+// SPECTRAL RENDERING:
+// - Currently: Lambert BRDF is wavelength-independent (albedo / π)
+// - Future (M2+): Support wavelength-dependent BRDF (albedo(λ) / π)
+// - Wavelength available via camera.wavelength_nm (push constants)
 // ============================================================================
 
 #include "common.hlsli"

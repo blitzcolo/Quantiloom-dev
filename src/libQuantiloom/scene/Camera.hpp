@@ -20,7 +20,7 @@ struct CameraData {
     glm::vec3 forward;       // Forward vector (normalized)
     f32 aspectRatio;         // Width / height
     glm::vec3 right;         // Right vector (normalized)
-    f32 _pad0;               // Padding for alignment
+    f32 wavelength_nm;       // Current wavelength (nanometers) for spectral rendering
     glm::vec3 up;            // Up vector (normalized)
     f32 _pad1;               // Padding for alignment
 };

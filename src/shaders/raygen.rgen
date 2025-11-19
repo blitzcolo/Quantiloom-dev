@@ -1,7 +1,11 @@
 // ============================================================================
-// Quantiloom M1 - Ray Generation Shader
+// Quantiloom - Ray Generation Shader
 // ============================================================================
 // Generates primary camera rays and writes output to storage image
+//
+// SPECTRAL RENDERING:
+// - Wavelength is set via camera.wavelength_nm (push constants)
+// - Output is RGB (for single λ, grayscale; for multi-λ, accumulated bands)
 // ============================================================================
 
 #include "common.hlsli"

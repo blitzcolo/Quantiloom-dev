@@ -1,0 +1,32 @@
+# ============================================================================
+# Quantiloom Spectral Rendering Configuration
+# Single-Wavelength Mode (M1 Spectral)
+# ============================================================================
+
+[renderer]
+resolution = [1280, 720]
+spp = 1                         # Samples per pixel
+output = "spectral_output.exr"  # Output file path
+
+[spectral]
+mode = "single_wavelength"      # Rendering mode: single wavelength
+wavelength_nm = 550.0           # Wavelength in nanometers (550nm = green light)
+
+[scene]
+preset = "cornell_box"          # Built-in scene: "cornell_box", "multi_object", "lighting_test"
+# geometry = "assets/scenes/cube.obj"  # (M2+) External OBJ file (uncomment to use)
+
+[camera]
+position = [0.0, 2.0, -8.0]     # Camera position (world space, meters)
+look_at = [0.0, 1.0, 0.0]       # Look-at point (world space)
+up = [0.0, 1.0, 0.0]            # Up vector (usually Y-up)
+fov_y = 60.0                    # Vertical field of view (degrees)
+
+[lighting]
+sun_direction = [-0.5, 0.8, -0.3]  # FROM surface TO sun (normalized)
+sun_radiance = [3.0, 3.0, 3.0]     # Sun radiance (W·sr⁻¹·m⁻²)
+sky_radiance = [0.3, 0.5, 0.8]     # Sky background radiance (W·sr⁻¹·m⁻²)
+
+[material]
+albedo = [0.8, 0.8, 0.8]        # Default material albedo (diffuse reflectance)
+                                 # (M1: single material for all geometry)
