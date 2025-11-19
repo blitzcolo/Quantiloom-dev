@@ -111,7 +111,7 @@ C_pixel = N_bands × S_spatial × S_spectral × C_path
 
 ### 4.1 共用
 
-* 场景与资产：OBJ/FBX/GLTF；实例化与层级；面元材质 ID 与 UV；Assimp/tinygltf 导入。
+* 场景与资产：OBJ(.obj且不考虑.mtl因为mtl能描述的材质有限)、glTF 2.0 (.glb/.gltf)；实例化与层级；面元材质 ID 与 UV；Assimp/tinygltf 导入。
 * 材质与光谱：可见段 BRDF；IR 段 ε(λ)/ρ(λ)/τ(λ) 曲线或纹理；温度场 T(x)。
 * 光源：MODTRAN LUT 提供太阳直达与天空辐亮度；太阳角大小可设。
 * 几何与可见性：Vulkan RT TLAS/BLAS；Raygen/ClosestHit/AnyHit/Miss；纹理 LOD 与边界 AA。
@@ -175,7 +175,7 @@ PDF 设计 p(λ) = α p_ref(λ) + β p_uniform(λ) + γ p_mat(λ)，α+β+γ=1
 
 ## 7 数据与格式
 
-* 输入：模型 OBJ/FBX/GLTF；材质 HDF5/CSV/EXR；温度 EXR/HDF5；LUT HDF5（lambda、T_sun、L_sky、系数与注释）；传感器曲线。
+* 输入：模型 OBJ(.obj且不考虑.mtl因为mtl能描述的材质有限)、glTF 2.0 (.glb/.gltf)；材质 HDF5/CSV/EXR；温度 EXR/HDF5；LUT HDF5（lambda、T_sun、L_sky、系数与注释）；传感器曲线。
 * 输出：MS-RT 多光谱 EXR/TIFF 与 DN；HS-OFF 高光谱 EXR/HDF5 与 DN；分量图可选；
 * 运行日志：记录 N、spp、Sλ、秒/帧、样本方差、萤火虫比例、MIS 组件占比、随机种子。
 

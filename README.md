@@ -35,7 +35,7 @@ Quantiloom operates in two distinct modes from a single, configurable codebase:
 Quantiloom/
 │
 ├── assets/
-│   ├── scenes/             # 3D Scene objects (OBJ, GLTF, FBX, ...)
+│   ├── scenes/             # 3D Scene objects (OBJ, GLTF)
 │   ├── materials/          # Materials and temperatures data (HDF5, CSV)
 │   ├── luts/               # MODTRAN LUTs (HDF5, SKYLUT6)
 │   └── configs/            # TOML configuration files
