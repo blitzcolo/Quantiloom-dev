@@ -61,20 +61,40 @@ struct CameraData {
 };
 
 // ============================================================================
-// Material Data Structure
+// Material Data Structure (PBR)
 // ============================================================================
-// Surface material properties for spectral rendering
+// Full glTF 2.0 metallic-roughness PBR material
 // Must match CPU-side Material structure (see Material.hpp)
 //
-// SPECTRAL MODE:
-// - albedo_spectral: Spectral reflectance at current wavelength [0, 1]
+// Memory layout (std430 / SSBO):
+// - Texture indices: -1 = no texture, >=0 = index into texture array
+// - Alpha modes: 0 = Opaque, 1 = Mask, 2 = Blend
+// - spectralAlbedo: M1 compatibility for single-wavelength rendering
 // ============================================================================
 
 struct MaterialData {
-    float albedo_spectral;  // Spectral reflectance at current λ [0, 1]
-    float _pad0;
-    float _pad1;
-    float _pad2;
+    // Base color (PBR albedo)
+    float4 baseColorFactor;          // RGBA [0, 1]
+    int    baseColorTextureIndex;    // -1 = no texture
+    float  metallicFactor;           // [0, 1] (0 = dielectric, 1 = metal)
+    float  roughnessFactor;          // [0, 1] (0 = smooth, 1 = rough)
+    int    metallicRoughnessTextureIndex; // -1 = no texture (G=roughness, B=metallic)
+
+    // Normal mapping
+    int    normalTextureIndex;       // -1 = no normal map
+    float  normalScale;              // Normal intensity [0, inf]
+
+    // Emissive
+    float3 emissiveFactor;           // RGB [0, inf] (HDR allowed)
+    int    emissiveTextureIndex;     // -1 = no texture
+
+    // Alpha blending
+    uint   alphaMode;                // 0=Opaque, 1=Mask, 2=Blend
+    float  alphaCutoff;              // Threshold for Mask mode [0, 1]
+
+    // Spectral mode (M1 compatibility)
+    float  spectralAlbedo;           // Scalar reflectance at current λ [0, 1]
+    float  _pad0;                    // Padding to 16-byte alignment
 };
 
 #endif // QUANTILOOM_COMMON_HLSLI

@@ -77,6 +77,12 @@ public:
     // Bind material buffer (binding 5)
     void BindMaterialBuffer(const GpuBuffer& buffer);
 
+    // Bind texture arrays (binding 6: textures, binding 7: samplers)
+    // Uses bindless descriptor indexing (VK_EXT_descriptor_indexing)
+    // If imageViews is empty, binds a single dummy white texture
+    void BindTextures(const std::vector<VkImageView>& imageViews,
+                      const std::vector<VkSampler>& samplers);
+
     // Update all bindings (call after all Bind* calls)
     void UpdateDescriptorSets();
 

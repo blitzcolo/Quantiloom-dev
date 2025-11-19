@@ -15,8 +15,10 @@
 #include "renderer/AccelerationStructure.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuImage.hpp"
+#include "renderer/TextureManager.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "scene/Mesh.hpp"
+#include "scene/Material.hpp"
 #include "scene/Camera.hpp"
 #include "SceneBuilder.hpp"
 
@@ -43,12 +45,27 @@ struct LUTData {
 // ============================================================================
 // Material Data Structure (matches shader MaterialData structure)
 // ============================================================================
+// Must match the layout in common.hlsli exactly for GPU upload
+// ============================================================================
 
 struct MaterialDataCPU {
-    f32 albedo_spectral;  // Spectral reflectance at current λ [0, 1]
+    glm::vec4 baseColorFactor;
+    i32 baseColorTextureIndex;
+    f32 metallicFactor;
+    f32 roughnessFactor;
+    i32 metallicRoughnessTextureIndex;
+
+    i32 normalTextureIndex;
+    f32 normalScale;
+
+    glm::vec3 emissiveFactor;
+    i32 emissiveTextureIndex;
+
+    u32 alphaMode;
+    f32 alphaCutoff;
+
+    f32 spectralAlbedo;
     f32 _pad0;
-    f32 _pad1;
-    f32 _pad2;
 };
 
 // ============================================================================
@@ -379,20 +396,58 @@ int main(int argc, char* argv[]) {
         lutBuffer.Upload(&lutData, sizeof(LUTData));
 
         // ====================================================================
-        // Create Material Buffer (Spectral)
+        // Upload Textures to GPU
         // ====================================================================
-        QL_LOG_INFO("Creating spectral material buffer...");
+        QL_LOG_INFO("Uploading textures to GPU...");
 
-        // Upload all materials
+        TextureManager textureManager(context);
+        textureManager.UploadTextures(loadedScene.textures);
+
+        QL_LOG_INFO("  {} textures uploaded", textureManager.GetTextureCount());
+
+        // ====================================================================
+        // Create Material Buffer (PBR)
+        // ====================================================================
+        QL_LOG_INFO("Creating PBR material buffer...");
+
+        // Upload all materials with full PBR parameters
         std::vector<MaterialDataCPU> materialData;
         materialData.reserve(loadedScene.materials.size());
 
         for (const auto& mat : loadedScene.materials) {
             MaterialDataCPU cpuMat;
-            cpuMat.albedo_spectral = mat.spectralAlbedo;
+
+            // Base color
+            cpuMat.baseColorFactor = mat.baseColorFactor;
+            cpuMat.baseColorTextureIndex = mat.baseColorTextureIndex;
+
+            // Metallic-Roughness
+            cpuMat.metallicFactor = mat.metallicFactor;
+            cpuMat.roughnessFactor = mat.roughnessFactor;
+            cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
+
+            // Normal mapping
+            cpuMat.normalTextureIndex = mat.normalTextureIndex;
+            cpuMat.normalScale = mat.normalScale;
+
+            // Emissive
+            cpuMat.emissiveFactor = mat.emissiveFactor;
+            cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
+
+            // Alpha mode
+            cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
+            cpuMat.alphaCutoff = mat.alphaCutoff;
+
+            // Spectral (M1 compatibility)
+            cpuMat.spectralAlbedo = mat.spectralAlbedo;
+            cpuMat._pad0 = 0.0f;
+
             materialData.push_back(cpuMat);
-            QL_LOG_INFO("  Material '{}': spectral albedo = {:.3f}",
-                        mat.name, mat.spectralAlbedo);
+
+            QL_LOG_INFO("  Material '{}': base=[{:.2f},{:.2f},{:.2f},{:.2f}] metal={:.2f} rough={:.2f}",
+                        mat.name,
+                        mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b, mat.baseColorFactor.a,
+                        mat.metallicFactor, mat.roughnessFactor);
         }
 
         GpuBuffer materialBuffer(
@@ -421,6 +476,9 @@ int main(int argc, char* argv[]) {
         pipeline.BindAccelerationStructure(tlas.GetHandle());
         pipeline.BindLUTBuffer(lutBuffer);
         pipeline.BindMaterialBuffer(materialBuffer);
+
+        // Bind textures (bindless arrays)
+        pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers());
 
         // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
         if (!blasList.empty()) {

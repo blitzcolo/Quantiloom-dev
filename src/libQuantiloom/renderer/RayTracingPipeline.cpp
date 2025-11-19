@@ -100,46 +100,83 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     VkDevice device = m_context.GetDevice();
 
     // Define bindings (matches shader layout)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(6);
+    // NOTE: Using fixed array size for textures (max 1024) for simplicity
+    // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
+    constexpr u32 MAX_TEXTURES = 1024;
+
+    std::vector<VkDescriptorSetLayoutBinding> bindings(8);
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     bindings[0].descriptorCount = 1;
     bindings[0].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[0].pImmutableSamplers = nullptr;
 
     // Binding 1: Acceleration structure (TLAS)
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[1].descriptorCount = 1;
     bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[1].pImmutableSamplers = nullptr;
 
     // Binding 2: LUT buffer (StructuredBuffer)
     bindings[2].binding = 2;
     bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[2].descriptorCount = 1;
     bindings[2].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
+    bindings[2].pImmutableSamplers = nullptr;
 
     // Binding 3: Vertex buffer (StructuredBuffer<float3>)
     bindings[3].binding = 3;
     bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[3].descriptorCount = 1;
     bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[3].pImmutableSamplers = nullptr;
 
     // Binding 4: Index buffer (StructuredBuffer<uint>)
     bindings[4].binding = 4;
     bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[4].descriptorCount = 1;
     bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[4].pImmutableSamplers = nullptr;
 
     // Binding 5: Material buffer (StructuredBuffer<MaterialData>)
     bindings[5].binding = 5;
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[5].descriptorCount = 1;
     bindings[5].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[5].pImmutableSamplers = nullptr;
+
+    // Binding 6: Texture array (Texture2D[])
+    // Uses VK_EXT_descriptor_indexing for runtime array indexing
+    bindings[6].binding = 6;
+    bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[6].descriptorCount = MAX_TEXTURES;
+    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[6].pImmutableSamplers = nullptr;
+
+    // Binding 7: Sampler array (SamplerState[])
+    bindings[7].binding = 7;
+    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[7].descriptorCount = MAX_TEXTURES;
+    bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[7].pImmutableSamplers = nullptr;
+
+    // Enable descriptor indexing flags for texture arrays
+    // This allows runtime indexing and partially bound descriptors
+    std::vector<VkDescriptorBindingFlags> bindingFlags(8, 0);
+    bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
+    bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
+
+    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
+    bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+    bindingFlagsInfo.bindingCount = static_cast<u32>(bindingFlags.size());
+    bindingFlagsInfo.pBindingFlags = bindingFlags.data();
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.pNext = &bindingFlagsInfo;
     layoutInfo.bindingCount = static_cast<u32>(bindings.size());
     layoutInfo.pBindings = bindings.data();
 
@@ -149,13 +186,17 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     }
 
     // Create descriptor pool
-    std::vector<VkDescriptorPoolSize> poolSizes(3);
+    std::vector<VkDescriptorPoolSize> poolSizes(5);
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     poolSizes[0].descriptorCount = 1;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = 4;  // LUT + vertex + index + material buffers
+    poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    poolSizes[3].descriptorCount = MAX_TEXTURES;  // Texture array
+    poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
+    poolSizes[4].descriptorCount = MAX_TEXTURES;  // Sampler array
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -565,6 +606,64 @@ void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) {
     write.pBufferInfo = &bufferInfo;
 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews,
+                                       const std::vector<VkSampler>& samplers) {
+    VkDevice device = m_context.GetDevice();
+
+    if (imageViews.size() != samplers.size()) {
+        QL_LOG_ERROR("Texture binding failed: imageViews.size() ({}) != samplers.size() ({})",
+                     imageViews.size(), samplers.size());
+        throw std::runtime_error("Mismatched texture and sampler array sizes");
+    }
+
+    if (imageViews.empty()) {
+        QL_LOG_WARN("No textures to bind (TextureManager should provide at least a dummy texture)");
+        return;
+    }
+
+    u32 textureCount = static_cast<u32>(imageViews.size());
+    QL_LOG_INFO("Binding {} textures to descriptor set", textureCount);
+
+    // Build descriptor image info array for textures
+    std::vector<VkDescriptorImageInfo> imageInfos(textureCount);
+    for (u32 i = 0; i < textureCount; ++i) {
+        imageInfos[i].imageView = imageViews[i];
+        imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        imageInfos[i].sampler = VK_NULL_HANDLE;  // Sampler is separate
+    }
+
+    // Build descriptor image info array for samplers
+    std::vector<VkDescriptorImageInfo> samplerInfos(textureCount);
+    for (u32 i = 0; i < textureCount; ++i) {
+        samplerInfos[i].sampler = samplers[i];
+        samplerInfos[i].imageView = VK_NULL_HANDLE;  // Image view is separate
+        samplerInfos[i].imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Not used for samplers
+    }
+
+    // Update descriptor set
+    std::vector<VkWriteDescriptorSet> writes(2);
+
+    // Binding 6: Texture array (SAMPLED_IMAGE)
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_descriptorSet;
+    writes[0].dstBinding = 6;
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].descriptorCount = textureCount;
+    writes[0].pImageInfo = imageInfos.data();
+
+    // Binding 7: Sampler array
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_descriptorSet;
+    writes[1].dstBinding = 7;
+    writes[1].dstArrayElement = 0;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].descriptorCount = textureCount;
+    writes[1].pImageInfo = samplerInfos.data();
+
+    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::UpdateDescriptorSets() {
