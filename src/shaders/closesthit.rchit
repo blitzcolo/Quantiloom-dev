@@ -1,7 +1,12 @@
 // ============================================================================
-// Quantiloom M1 - Closest Hit Shader
+// Quantiloom - Closest Hit Shader
 // ============================================================================
 // Computes Lambert BRDF shading with direct sun lighting from LUT
+//
+// SPECTRAL RENDERING:
+// - Currently: Lambert BRDF is wavelength-independent (albedo / π)
+// - Future (M2+): Support wavelength-dependent BRDF (albedo(λ) / π)
+// - Wavelength available via camera.wavelength_nm (push constants)
 // ============================================================================
 
 #include "common.hlsli"
@@ -32,11 +37,11 @@ struct HitAttributes {
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
     // Fetch material properties from buffer using instance ID
-    // InstanceID() returns the instanceCustomIndex set in TLAS (see main_m1_test.cpp)
+    // InstanceID() returns the instanceCustomIndex set in TLAS (see main.cpp)
     // Note: In Vulkan HLSL, InstanceID() corresponds to gl_InstanceCustomIndexEXT
     uint materialID = InstanceID();
     MaterialData material = materials[materialID];
-    float3 albedo = material.albedo;
+    float albedo_spectral = material.albedo_spectral;  // Spectral reflectance at current λ
 
     // ========================================================================
     // Compute geometric normal from triangle vertices
@@ -74,30 +79,34 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 normal = worldNormal;
 
     // ========================================================================
-    // Fetch sun/sky data from LUT
+    // Fetch sun/sky spectral data from LUT
     // ========================================================================
 
     LUTData lut = skyLUT[0];
     float3 sunDir = normalize(lut.sunDirection);
-    float3 sunRadiance = lut.sunRadiance;
-    float3 skyRadiance = lut.skyRadiance;
+    float sunRadiance_spectral = lut.sunRadiance_spectral;  // Spectral radiance at current λ
+    float skyRadiance_spectral = lut.skyRadiance_spectral;  // Spectral radiance at current λ
 
     // ========================================================================
-    // Lambert BRDF shading
+    // Spectral Lambert BRDF shading
     // ========================================================================
 
-    // Lambert BRDF: f = albedo / pi
-    float3 brdf = albedo / 3.14159265;
+    // Lambert BRDF: f(λ) = albedo(λ) / π
+    float brdf_spectral = albedo_spectral / 3.14159265;
 
-    // Direct sun lighting: L_out = BRDF * L_sun * (N · L)
+    // Direct sun lighting: L_out(λ) = BRDF(λ) * L_sun(λ) * (N · L)
     float NdotL = max(dot(normal, sunDir), 0.0);
-    float3 directSun = brdf * sunRadiance * NdotL;
+    float directSun_spectral = brdf_spectral * sunRadiance_spectral * NdotL;
 
     // Sky ambient lighting (hemispherical integration approximation)
-    // For uniform sky: ∫(albedo/π) * L_sky * cos(θ) dω ≈ albedo * L_sky
-    float3 skyAmbient = albedo * skyRadiance;
+    // For uniform sky: ∫(albedo(λ)/π) * L_sky(λ) * cos(θ) dω ≈ albedo(λ) * L_sky(λ)
+    float skyAmbient_spectral = albedo_spectral * skyRadiance_spectral;
 
-    // Total outgoing radiance: direct sun + sky ambient
-    // M1: No shadow rays (all surfaces receive sun), no indirect bounces
-    payload.radiance = directSun + skyAmbient;
+    // Total outgoing spectral radiance: direct sun + sky ambient
+    // Single-wavelength mode: No shadow rays, no indirect bounces
+    float radiance_spectral = directSun_spectral + skyAmbient_spectral;
+
+    // Output as grayscale RGB (all three channels have same value)
+    // This allows visualization of single-wavelength renders
+    payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 }
