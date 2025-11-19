@@ -40,12 +40,13 @@ struct HitAttributes {
 // ============================================================================
 
 // Sample texture with fallback for invalid indices
+// Note: Use SampleLevel instead of Sample for ray tracing shaders (explicit LOD required)
 float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
     if (textureIndex < 0) {
         return fallback;
     }
-    return textures[NonUniformResourceIndex(textureIndex)].Sample(
-        samplers[NonUniformResourceIndex(samplerIndex)], uv
+    return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(
+        samplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0  // LOD 0 (no mipmapping in M1)
     );
 }
 
