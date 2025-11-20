@@ -66,7 +66,7 @@ void CommandHelper::ExecuteImmediate(
     result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
         vkDestroyCommandPool(device, commandPool, nullptr);
-        throw std::runtime_error("Failed to submit command buffer");
+        throw std::runtime_error("Failed to submit command buffer (VkResult: " + std::to_string(result) + ")");
     }
 
     // Wait for completion (synchronous)

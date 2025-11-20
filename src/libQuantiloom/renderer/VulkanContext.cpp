@@ -48,6 +48,11 @@ VulkanContext::VulkanContext() {
 VulkanContext::~VulkanContext() {
     QL_LOG_INFO("Destroying Vulkan context...");
 
+    // Wait for all GPU operations to complete before destroying resources
+    if (m_device != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device);
+    }
+
     // Destruction order: reverse of construction
     // VMA allocator must be destroyed BEFORE device
     if (m_allocator != VK_NULL_HANDLE) {
