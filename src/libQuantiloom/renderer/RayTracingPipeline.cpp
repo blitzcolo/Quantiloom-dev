@@ -3,8 +3,48 @@
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
+#include <filesystem>
+
+#if defined(_WIN32)
+    #include <windows.h>
+#elif defined(__linux__)
+    #include <unistd.h>
+    #include <limits.h>
+#elif defined(__APPLE__)
+    #include <mach-o/dyld.h>
+#endif
 
 namespace quantiloom {
+
+// ============================================================================
+// Helper: Get executable directory
+// ============================================================================
+
+static std::filesystem::path GetExecutableDirectory() {
+#if defined(_WIN32)
+    wchar_t buffer[MAX_PATH];
+    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    std::filesystem::path exePath(buffer);
+    return exePath.parent_path();
+#elif defined(__linux__)
+    char buffer[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (len != -1) {
+        buffer[len] = '\0';
+        return std::filesystem::path(buffer).parent_path();
+    }
+    return std::filesystem::current_path();
+#elif defined(__APPLE__)
+    char buffer[PATH_MAX];
+    uint32_t size = sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size) == 0) {
+        return std::filesystem::path(buffer).parent_path();
+    }
+    return std::filesystem::current_path();
+#else
+    return std::filesystem::current_path();
+#endif
+}
 
 // ============================================================================
 // Constructor / Destructor
@@ -274,9 +314,26 @@ void RayTracingPipeline::LoadShaders() {
 }
 
 std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    // Try multiple search paths
+    std::vector<std::filesystem::path> searchPaths = {
+        path,  // Original path (relative to CWD or absolute)
+        GetExecutableDirectory() / path,  // Relative to executable directory
+    };
+
+    std::ifstream file;
+    std::filesystem::path foundPath;
+
+    for (const auto& tryPath : searchPaths) {
+        file.open(tryPath, std::ios::binary | std::ios::ate);
+        if (file.is_open()) {
+            foundPath = tryPath;
+            break;
+        }
+    }
+
     if (!file.is_open()) {
-        throw std::runtime_error("Failed to open shader file: " + path);
+        throw std::runtime_error("Failed to open shader file: " + path +
+            " (searched in CWD and executable directory)");
     }
 
     size_t fileSize = static_cast<size_t>(file.tellg());
