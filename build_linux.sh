@@ -1,3 +1,4 @@
+./src/shaders/compile_shaders.sh
 cmake -B out/Debug -G "Ninja" -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++
 cmake --build out/Debug -j
 
