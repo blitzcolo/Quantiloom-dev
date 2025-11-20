@@ -471,22 +471,20 @@ int main(int argc, char* argv[]) {
             "miss.spv"
         );
 
-        // Bind resources
-        pipeline.BindOutputImage(outputImage);
-        pipeline.BindAccelerationStructure(tlas.GetHandle());
-        pipeline.BindLUTBuffer(lutBuffer);
-        pipeline.BindMaterialBuffer(materialBuffer);
-
-        // Bind textures (bindless arrays)
-        pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers());
+        // Bind resources in correct order (bindings 0-7)
+        pipeline.BindOutputImage(outputImage);                          // Binding 0
+        pipeline.BindAccelerationStructure(tlas.GetHandle());           // Binding 1
+        pipeline.BindLUTBuffer(lutBuffer);                              // Binding 2
 
         // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
         if (!blasList.empty()) {
-            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer());
+            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer()); // Binding 3, 4
         }
 
-        // CRITICAL: Update descriptor sets after all bindings
-        pipeline.UpdateDescriptorSets();
+        pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
+
+        // Bind textures (bindless arrays)
+        pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers()); // Binding 6, 7
 
         // Set camera parameters (with spectral wavelength)
         CameraData cameraData = camera.GetCameraData();
