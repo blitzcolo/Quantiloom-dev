@@ -74,9 +74,9 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     glm::vec3 position(posArray[0], posArray[1], posArray[2]);
 
     // Read look-at target
-    auto lookAtArray = config.GetArray<f32>("camera.lookAt");
+    auto lookAtArray = config.GetArray<f32>("camera.look_at");
     if (lookAtArray.size() != 3) {
-        return Result<Camera, String>::Err("camera.lookAt must be array of 3 floats, but got " + std::to_string(lookAtArray.size()));
+        return Result<Camera, String>::Err("camera.look_at must be array of 3 floats, but got " + std::to_string(lookAtArray.size()));
     }
     glm::vec3 lookAt(lookAtArray[0], lookAtArray[1], lookAtArray[2]);
 
@@ -91,7 +91,7 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     }
 
     // Read FOV (optional, defaults to 60 degrees)
-    f32 fovY = config.Get<f32>("camera.fovY", 60.0f);
+    f32 fovY = config.Get<f32>("camera.fov_y", 60.0f);
 
     // Create camera
     Camera camera(position, lookAt, up, fovY, aspectRatio);
