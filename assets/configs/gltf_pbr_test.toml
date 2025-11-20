@@ -23,7 +23,7 @@ wavelength_nm = 550.0          # Target wavelength (550nm = green, visible spect
 #   gltf = "assets/models/glTF-Sample-Models/2.0/MetalRoughSpheres/glTF/MetalRoughSpheres.gltf"
 #   gltf = "assets/models/glTF-Sample-Models/2.0/BoxTextured/glTF/BoxTextured.gltf"
 # ============================================================================
-gltf = "assets/models/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf"
+gltf = "assets/models/glTF-Sample-Models/2.0/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
 
 # ============================================================================
 # Alternative: Use procedural preset (comment out 'gltf' above to use preset)
