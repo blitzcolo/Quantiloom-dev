@@ -320,18 +320,34 @@ public:
     // ========================================================================
 
     // Merge multiple meshes into one (for compatibility with M1 tests)
-    // New behavior: Collects all primitives into a single mesh
+    // PROPERLY merges all vertices and indices into a single primitive
     static Mesh MergeMeshes(const std::vector<Mesh>& meshes) {
         Mesh merged;
         merged.name = "merged_scene";
 
-        // Collect all primitives from all meshes
+        GeometryPrimitive mergedPrim;
+        mergedPrim.materialId = 0;  // Use default material
+
+        // Merge all vertices and indices from all primitives
         for (const auto& mesh : meshes) {
             for (const auto& prim : mesh.primitives) {
-                merged.primitives.push_back(prim);
+                u32 baseVertex = static_cast<u32>(mergedPrim.positions.size());
+
+                // Append vertices
+                mergedPrim.positions.insert(
+                    mergedPrim.positions.end(),
+                    prim.positions.begin(),
+                    prim.positions.end()
+                );
+
+                // Append indices (offset by baseVertex)
+                for (u32 idx : prim.indices) {
+                    mergedPrim.indices.push_back(idx + baseVertex);
+                }
             }
         }
 
+        merged.primitives.push_back(std::move(mergedPrim));
         return merged;
     }
 };
