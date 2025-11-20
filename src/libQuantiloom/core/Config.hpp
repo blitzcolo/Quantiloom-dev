@@ -166,6 +166,10 @@ Vector<T> Config::GetArray(StringView key) const {
             if (auto val = elem.value<int64_t>()) {
                 result.push_back(static_cast<i32>(*val));
             }
+        } else if constexpr (std::is_same_v<T, u32>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<u32>(*val));
+            }
         } else if constexpr (std::is_same_v<T, f32>) {
             if (auto val = elem.value<double>()) {
                 result.push_back(static_cast<f32>(*val));
