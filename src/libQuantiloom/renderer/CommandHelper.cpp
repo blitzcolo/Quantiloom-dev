@@ -70,7 +70,11 @@ void CommandHelper::ExecuteImmediate(
     }
 
     // Wait for completion (synchronous)
-    vkQueueWaitIdle(queue);
+    result = vkQueueWaitIdle(queue);
+    if (result != VK_SUCCESS) {
+        vkDestroyCommandPool(device, commandPool, nullptr);
+        throw std::runtime_error("Failed to wait for queue idle (VkResult: " + std::to_string(result) + ")");
+    }
 
     // Cleanup
     vkDestroyCommandPool(device, commandPool, nullptr);
