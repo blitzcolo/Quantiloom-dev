@@ -184,7 +184,7 @@ int main(int argc, char* argv[]) {
         // Renderer settings
         auto resArray = config.GetArray<u32>("renderer.resolution");
         if (resArray.size() != 2) {
-            QL_LOG_ERROR("renderer.resolution must be array of 2 integers");
+            QL_LOG_ERROR("renderer.resolution must be array of 2 integers, but got {} and they are {} {}", resArray.size(), resArray[0], resArray[1]);
             return 1;
         }
         u32 width = resArray[0];
@@ -220,21 +220,21 @@ int main(int argc, char* argv[]) {
         // Lighting settings
         auto sunDirArray = config.GetArray<f32>("lighting.sun_direction");
         if (sunDirArray.size() != 3) {
-            QL_LOG_ERROR("lighting.sun_direction must be array of 3 floats");
+            QL_LOG_ERROR("lighting.sun_direction must be array of 3 float, but got " + std::to_string(sunDirArray.size()));
             return 1;
         }
         glm::vec3 sunDirection = glm::normalize(glm::vec3(sunDirArray[0], sunDirArray[1], sunDirArray[2]));
 
         auto sunRadArray = config.GetArray<f32>("lighting.sun_radiance");
         if (sunRadArray.size() != 3) {
-            QL_LOG_ERROR("lighting.sun_radiance must be array of 3 floats");
+            QL_LOG_ERROR("lighting.sun_radiance must be array of 3 floats, but got " + std::to_string(sunRadArray.size()));
             return 1;
         }
         glm::vec3 sunRadiance(sunRadArray[0], sunRadArray[1], sunRadArray[2]);
 
         auto skyRadArray = config.GetArray<f32>("lighting.sky_radiance");
         if (skyRadArray.size() != 3) {
-            QL_LOG_ERROR("lighting.sky_radiance must be array of 3 floats");
+            QL_LOG_ERROR("lighting.sky_radiance must be array of 3 floats, but got " + std::to_string(skyRadArray.size()));
             return 1;
         }
         glm::vec3 skyRadiance(skyRadArray[0], skyRadArray[1], skyRadArray[2]);
@@ -249,7 +249,7 @@ int main(int argc, char* argv[]) {
         // Material settings
         auto albedoArray = config.GetArray<f32>("material.albedo");
         if (albedoArray.size() != 3) {
-            QL_LOG_ERROR("material.albedo must be array of 3 floats");
+            QL_LOG_ERROR("material.albedo must be array of 3 floats, but got " + std::to_string(albedoArray.size()));
             return 1;
         }
         glm::vec3 albedo(albedoArray[0], albedoArray[1], albedoArray[2]);

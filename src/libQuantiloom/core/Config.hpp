@@ -162,13 +162,37 @@ Vector<T> Config::GetArray(StringView key) const {
             if (auto val = elem.value<std::string>()) {
                 result.push_back(*val);
             }
+        } else if constexpr (std::is_same_v<T, i8>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<i8>(*val));
+            }
+        } else if constexpr (std::is_same_v<T, i16>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<i16>(*val));
+            }
         } else if constexpr (std::is_same_v<T, i32>) {
             if (auto val = elem.value<int64_t>()) {
                 result.push_back(static_cast<i32>(*val));
             }
+        } else if constexpr (std::is_same_v<T, i64>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<i64>(*val));
+            }
+        } else if constexpr (std::is_same_v<T, u8>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<u8>(*val));
+            }
+        } else if constexpr (std::is_same_v<T, u16>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<u16>(*val));
+            }
         } else if constexpr (std::is_same_v<T, u32>) {
             if (auto val = elem.value<int64_t>()) {
                 result.push_back(static_cast<u32>(*val));
+            }
+        } else if constexpr (std::is_same_v<T, u64>) {
+            if (auto val = elem.value<int64_t>()) {
+                result.push_back(static_cast<u64>(*val));
             }
         } else if constexpr (std::is_same_v<T, f32>) {
             if (auto val = elem.value<double>()) {
@@ -178,6 +202,12 @@ Vector<T> Config::GetArray(StringView key) const {
             if (auto val = elem.value<double>()) {
                 result.push_back(*val);
             }
+        } else if constexpr (std::is_same_v<T, bool>) {
+            if (auto val = elem.value<bool>()) {
+                result.push_back(*val);
+            }
+        } else {
+            return Result<Vector<T>, String>::Err("Unsupported type: " + std::string(typeid(T).name()));
         }
     }
 

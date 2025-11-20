@@ -69,14 +69,14 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     // Read camera position
     auto posArray = config.GetArray<f32>("camera.position");
     if (posArray.size() != 3) {
-        return Result<Camera, String>::Err("camera.position must be array of 3 floats");
+        return Result<Camera, String>::Err("camera.position must be array of 3 floats, but got " + std::to_string(posArray.size()));
     }
     glm::vec3 position(posArray[0], posArray[1], posArray[2]);
 
     // Read look-at target
     auto lookAtArray = config.GetArray<f32>("camera.lookAt");
     if (lookAtArray.size() != 3) {
-        return Result<Camera, String>::Err("camera.lookAt must be array of 3 floats");
+        return Result<Camera, String>::Err("camera.lookAt must be array of 3 floats, but got " + std::to_string(lookAtArray.size()));
     }
     glm::vec3 lookAt(lookAtArray[0], lookAtArray[1], lookAtArray[2]);
 
@@ -85,7 +85,7 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     glm::vec3 up(0.0f, 1.0f, 0.0f);  // Default: Y-up
     if (!upArray.empty()) {
         if (upArray.size() != 3) {
-            return Result<Camera, String>::Err("camera.up must be array of 3 floats");
+            return Result<Camera, String>::Err("camera.up must be array of 3 floats, but got " + std::to_string(upArray.size()));
         }
         up = glm::vec3(upArray[0], upArray[1], upArray[2]);
     }
