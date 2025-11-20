@@ -485,6 +485,9 @@ int main(int argc, char* argv[]) {
             pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer());
         }
 
+        // CRITICAL: Update descriptor sets after all bindings
+        pipeline.UpdateDescriptorSets();
+
         // Set camera parameters (with spectral wavelength)
         CameraData cameraData = camera.GetCameraData();
         cameraData.wavelength_nm = wavelength_nm;  // Override with config wavelength
