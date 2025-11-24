@@ -63,14 +63,14 @@ foreach(SHADER_SOURCE ${SHADER_SOURCES})
     set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
 
     # Add custom command to compile shader
-    add_custom_command(
-        OUTPUT ${SHADER_OUTPUT}
-        COMMAND ${DXC_EXECUTABLE} ${DXC_FLAGS} -Fo ${SHADER_OUTPUT} ${SHADER_SOURCE}
-        DEPENDS ${SHADER_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/common.hlsli
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        COMMENT "Compiling shader: ${SHADER_NAME}"
-        VERBATIM
-    )
+    #add_custom_command(
+    #    OUTPUT ${SHADER_OUTPUT}
+    #    COMMAND ${DXC_EXECUTABLE} ${DXC_FLAGS} -Fo ${SHADER_OUTPUT} ${SHADER_SOURCE}
+    #    DEPENDS ${SHADER_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/common.hlsli
+    #    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+    #    COMMENT "Compiling shader: ${SHADER_NAME}"
+    #    VERBATIM
+    #)
 
     list(APPEND COMPILED_SHADERS ${SHADER_OUTPUT})
 endforeach()
