@@ -258,10 +258,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
     float2 uv = hitPoint.xy * 0.1;
 
-    // TEST: Sample base color texture if available
+    // Sample base color texture
     float3 albedo = material.baseColorFactor.rgb;
     if (material.baseColorTextureIndex >= 0) {
-        // CRITICAL: Test texture sampling - this is likely where crash happens
         float4 texColor = SampleTexture(
             material.baseColorTextureIndex,
             material.baseColorTextureIndex,
@@ -271,12 +270,38 @@ void main(inout Payload payload, in HitAttributes attribs) {
         albedo = texColor.rgb * material.baseColorFactor.rgb;
     }
 
-    // Simple Lambert shading
+    // Get metallic and roughness (no texture sampling for now to isolate issue)
+    float roughness = material.roughnessFactor;
+    float metallic = material.metallicFactor;
+
+    // Fetch sun/sky data
     LUTData lut = skyLUT[0];
     float3 sunDir = normalize(lut.sunDirection);
-    float NdotL = max(dot(worldNormal, sunDir), 0.0);
-    float3 color = albedo * NdotL + albedo * 0.1;
+    float sunRadiance_spectral = lut.sunRadiance_spectral;
+    float skyRadiance_spectral = lut.skyRadiance_spectral;
 
-    payload.radiance = color;
+    // View direction
+    float3 V = -normalize(WorldRayDirection());
+    float3 L = sunDir;
+
+    // CRITICAL TEST: Full PBR BRDF - this likely causes GPU timeout
+    float3 brdf = CookTorranceBRDF(worldNormal, V, L, albedo, metallic, roughness);
+
+    // Direct sun lighting
+    float NdotL = max(dot(worldNormal, L), 0.0);
+    float3 directSun = brdf * sunRadiance_spectral * NdotL;
+
+    // Sky ambient (simplified)
+    float3 kD = (1.0 - FresnelSchlick(
+        lerp(float3(0.04, 0.04, 0.04), albedo, metallic),
+        max(dot(worldNormal, V), 0.0)
+    )) * (1.0 - metallic);
+    float3 skyAmbient = kD * albedo / PI * skyRadiance_spectral;
+
+    // Total radiance
+    float3 radiance = directSun + skyAmbient;
+    float radiance_spectral_out = (radiance.r + radiance.g + radiance.b) / 3.0;
+
+    payload.radiance = float3(radiance_spectral_out, radiance_spectral_out, radiance_spectral_out);
     #endif
 }
