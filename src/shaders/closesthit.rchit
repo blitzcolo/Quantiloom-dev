@@ -122,7 +122,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 uv = hitPoint.xy * 0.1;  // Simple planar mapping
 
     // Fake tangent (will be replaced with proper vertex tangent in M2+)
-    float3 worldTangent = normalize(cross(worldNormal, float3(0, 1, 0)));
+    // CRITICAL: Choose reference vector based on normal direction to avoid degenerate cross product
+    float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+    float3 worldTangent = normalize(cross(worldNormal, refVector));
 
     // ========================================================================
     // Sample textures
