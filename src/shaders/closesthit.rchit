@@ -229,7 +229,30 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     #else
-    // DEBUG: Just return red color to indicate hit
-    payload.radiance = float3(1.0, 0.0, 0.0);  // Red for hits
+    // DEBUG LEVEL 1: Test vertex/index buffer access and normal computation
+    uint primitiveID = PrimitiveIndex();
+
+    // Read triangle indices
+    uint idx0 = indexBuffer[primitiveID * 3 + 0];
+    uint idx1 = indexBuffer[primitiveID * 3 + 1];
+    uint idx2 = indexBuffer[primitiveID * 3 + 2];
+
+    // Read vertex positions
+    float3 v0 = vertexBuffer[idx0];
+    float3 v1 = vertexBuffer[idx1];
+    float3 v2 = vertexBuffer[idx2];
+
+    // Compute geometric normal
+    float3 edge1 = v1 - v0;
+    float3 edge2 = v2 - v0;
+    float3 objectNormal = normalize(cross(edge1, edge2));
+
+    // Transform to world space
+    float3x3 normalTransform = (float3x3)WorldToObject3x4();
+    float3 worldNormal = normalize(mul(objectNormal, normalTransform));
+
+    // Visualize normal as color (map [-1,1] to [0,1])
+    float3 normalColor = worldNormal * 0.5 + 0.5;
+    payload.radiance = normalColor;
     #endif
 }
