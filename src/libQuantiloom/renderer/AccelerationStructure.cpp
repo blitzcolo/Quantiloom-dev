@@ -1,4 +1,5 @@
 #include "AccelerationStructure.hpp"
+#include "CommandHelper.hpp"
 #include "core/Log.hpp"
 #include <glm/gtc/type_ptr.hpp>
 #include <stdexcept>
