@@ -39,6 +39,21 @@ struct HitAttributes {
 // Helper Functions
 // ============================================================================
 
+// Safe normalize: returns fallback if vector is near-zero to prevent NaN/Inf
+// This is CRITICAL for GPU stability - normalize() on zero vectors causes crashes
+float3 SafeNormalize(float3 v, float3 fallback) {
+    float lenSq = dot(v, v);
+    if (lenSq < 1e-8) {
+        return fallback;
+    }
+    return v * rsqrt(lenSq);
+}
+
+// Safe normalize with default fallback to up vector
+float3 SafeNormalize(float3 v) {
+    return SafeNormalize(v, float3(0.0, 1.0, 0.0));
+}
+
 // Sample texture with fallback for invalid indices
 // Note: Use SampleLevel instead of Sample for ray tracing shaders (explicit LOD required)
 float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
@@ -52,25 +67,38 @@ float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallb
 
 // Compute TBN matrix for normal mapping (Gram-Schmidt orthogonalization)
 // N: geometric normal, T: tangent, returns orthonormal TBN matrix
+// FIXED: Use SafeNormalize to prevent NaN when vectors are near-parallel
 float3x3 ComputeTBN(float3 N, float3 T) {
     // Orthogonalize tangent with respect to normal (Gram-Schmidt)
-    T = normalize(T - N * dot(N, T));
+    // Use SafeNormalize to handle edge case where T is parallel to N
+    float3 T_ortho = T - N * dot(N, T);
+    T = SafeNormalize(T_ortho, T);  // Fallback to original T if orthogonalized is zero
 
-    // Compute bitangent
-    float3 B = cross(N, T);
+    // Compute bitangent and NORMALIZE it
+    // FIXED: cross(N, T) must be normalized for correct TBN transform
+    float3 B = SafeNormalize(cross(N, T), cross(N, float3(1.0, 0.0, 0.0)));
 
     return float3x3(T, B, N);
 }
 
 // Transform normal from tangent space to world space
+// FIXED: Added safety checks to prevent NaN propagation
 float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTangent) {
+    // Validate tangent normal before transformation
+    // If tangent normal is degenerate, return geometric normal
+    float tangentLenSq = dot(tangentNormal, tangentNormal);
+    if (tangentLenSq < 1e-8 || !isfinite(tangentLenSq)) {
+        return worldNormal;
+    }
+
     // Build TBN matrix
     float3x3 TBN = ComputeTBN(worldNormal, worldTangent);
 
     // Transform tangent-space normal to world space
     float3 normal = mul(tangentNormal, TBN);
 
-    return normalize(normal);
+    // Use SafeNormalize with geometric normal as fallback
+    return SafeNormalize(normal, worldNormal);
 }
 
 // ============================================================================
@@ -107,11 +135,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 edge2 = v2 - v0;
 
     // Compute geometric normal (object space)
-    float3 objectNormal = normalize(cross(edge1, edge2));
+    // FIXED: Use SafeNormalize to handle degenerate triangles (collinear vertices)
+    float3 crossProduct = cross(edge1, edge2);
+    float3 objectNormal = SafeNormalize(crossProduct, float3(0.0, 1.0, 0.0));
 
     // Transform normal to world space
+    // FIXED: Use SafeNormalize to prevent NaN propagation
     float3x3 normalTransform = (float3x3)WorldToObject3x4();
-    float3 worldNormal = normalize(mul(objectNormal, normalTransform));
+    float3 worldNormal = SafeNormalize(mul(objectNormal, normalTransform), float3(0.0, 1.0, 0.0));
 
     // TODO (Phase 3.5): UVs and normals are not yet in vertex buffer
     // For M1, we use geometric normals and fake UVs
@@ -124,7 +155,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Fake tangent (will be replaced with proper vertex tangent in M2+)
     // CRITICAL: Choose reference vector based on normal direction to avoid degenerate cross product
     float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
-    float3 worldTangent = normalize(cross(worldNormal, refVector));
+    // FIXED: Use SafeNormalize to prevent crash when cross product is near-zero
+    float3 worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
 
     // ========================================================================
     // Sample textures
@@ -164,8 +196,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Convert [0,1] to [-1,1]
         tangentNormal = tangentNormal * 2.0 - 1.0;
-        tangentNormal.xy *= material.normalScale;
-        tangentNormal = normalize(tangentNormal);
+
+        // Clamp normalScale to reasonable range to prevent extreme values
+        float clampedNormalScale = clamp(material.normalScale, 0.0, 10.0);
+        tangentNormal.xy *= clampedNormalScale;
+
+        // FIXED: Use SafeNormalize to handle edge case where tangent normal becomes near-zero
+        // This can happen with extreme normalScale values or degenerate texture data
+        tangentNormal = SafeNormalize(tangentNormal, float3(0.0, 0.0, 1.0));
 
         // Transform to world space
         normal = ApplyNormalMap(tangentNormal, worldNormal, worldTangent);
@@ -187,7 +225,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     LUTData lut = skyLUT[0];
-    float3 sunDir = normalize(lut.sunDirection);
+    // FIXED: Use SafeNormalize in case LUT data is invalid
+    float3 sunDir = SafeNormalize(lut.sunDirection, float3(0.0, 1.0, 0.0));
     float sunRadiance_spectral = lut.sunRadiance_spectral;
     float skyRadiance_spectral = lut.skyRadiance_spectral;
 
@@ -196,10 +235,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     // View direction (FROM surface TO camera)
-    float3 V = -normalize(WorldRayDirection());
+    // FIXED: Use SafeNormalize to handle edge cases
+    float3 V = SafeNormalize(-WorldRayDirection(), float3(0.0, 0.0, 1.0));
 
     // Light direction (FROM surface TO sun)
     float3 L = sunDir;
+
+    // FIXED: Final validation of normal - if still invalid, use geometric normal
+    if (!isfinite(dot(normal, normal)) || dot(normal, normal) < 1e-8) {
+        normal = worldNormal;
+    }
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
@@ -224,6 +269,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Spectral mode: Convert to grayscale for visualization
     // (All channels should have similar values for spectral rendering)
     float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+
+    // FIXED: Final validation - clamp and sanitize output to prevent NaN/Inf propagation
+    // NaN/Inf values can cause GPU hangs or corrupt the entire output image
+    if (!isfinite(radiance_spectral)) {
+        radiance_spectral = 0.0;  // Fallback to black for invalid pixels
+    }
+    radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);  // Reasonable HDR range
 
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 }
