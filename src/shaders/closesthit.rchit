@@ -229,7 +229,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     #else
-    // DEBUG LEVEL 1: Test vertex/index buffer access and normal computation
+    // DEBUG LEVEL 2: Test simple lighting without texture sampling
+    uint materialID = InstanceID();
+    MaterialData material = materials[materialID];
+
     uint primitiveID = PrimitiveIndex();
 
     // Read triangle indices
@@ -251,8 +254,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3x3 normalTransform = (float3x3)WorldToObject3x4();
     float3 worldNormal = normalize(mul(objectNormal, normalTransform));
 
-    // Visualize normal as color (map [-1,1] to [0,1])
-    float3 normalColor = worldNormal * 0.5 + 0.5;
-    payload.radiance = normalColor;
+    // Simple Lambert shading (no textures, no PBR)
+    // Use base color from material directly (no texture sampling)
+    float3 albedo = material.baseColorFactor.rgb;
+
+    // Fetch sun direction from LUT
+    LUTData lut = skyLUT[0];
+    float3 sunDir = normalize(lut.sunDirection);
+
+    // Simple diffuse lighting: I = albedo * max(N·L, 0)
+    float NdotL = max(dot(worldNormal, sunDir), 0.0);
+    float3 color = albedo * NdotL + albedo * 0.1;  // Add small ambient
+
+    payload.radiance = color;
     #endif
 }
