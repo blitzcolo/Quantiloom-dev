@@ -58,6 +58,9 @@ public:
     const GpuBuffer& GetIndexBuffer() const { return *m_indexBuffer; }
 
 private:
+    // Helper: Upload vertex and index data to GPU buffers
+    void UploadGeometryBuffers();
+
     VulkanContext& m_context;
 
     // Acceleration structure handle

@@ -266,6 +266,8 @@ void VulkanContext::CreateDevice() {
     features12.bufferDeviceAddress = VK_TRUE;
     features12.descriptorIndexing = VK_TRUE;
     features12.runtimeDescriptorArray = VK_TRUE;
+    features12.descriptorBindingPartiallyBound = VK_TRUE;  // Required for PARTIALLY_BOUND_BIT
+    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;  // Required for NonUniformResourceIndex
     features12.pNext = &features13;
 
     // Enable Ray Tracing features
