@@ -497,10 +497,19 @@ int main(int argc, char* argv[]) {
         // Render Frame
         // ====================================================================
         QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm...", wavelength_nm);
+        QL_LOG_INFO("  [DEBUG] Starting TraceRays command submission...");
 
-        CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-            pipeline.TraceRays(cmd, width, height);
-        });
+        try {
+            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+                QL_LOG_INFO("  [DEBUG] Recording TraceRays commands...");
+                pipeline.TraceRays(cmd, width, height);
+                QL_LOG_INFO("  [DEBUG] TraceRays commands recorded successfully");
+            });
+            QL_LOG_INFO("  [DEBUG] GPU execution completed successfully");
+        } catch (const std::exception& e) {
+            QL_LOG_ERROR("  [DEBUG] GPU execution FAILED: {}", e.what());
+            throw;
+        }
 
         QL_LOG_INFO("  Frame rendered ({}x{})", width, height);
 
@@ -508,6 +517,7 @@ int main(int argc, char* argv[]) {
         // Readback and Save
         // ====================================================================
         QL_LOG_INFO("Reading back and saving image...");
+        QL_LOG_INFO("  [DEBUG] Starting image readback...");
 
         std::vector<f32> pixels = CommandHelper::ReadbackImage(
             context,

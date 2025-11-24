@@ -775,6 +775,23 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
         height,
         1  // depth
     );
+
+    // CRITICAL: Add memory barrier after ray tracing to ensure output image writes are visible
+    // Without this, subsequent readback may read stale/incomplete data, or GPU may hang
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        1, &barrier,
+        0, nullptr,
+        0, nullptr
+    );
 }
 
 void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
