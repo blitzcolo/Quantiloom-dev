@@ -107,6 +107,19 @@ float GeometrySmith(float NdotV, float NdotL, float roughness) {
 // - BRDF value (unitless, multiply by incident radiance and NdotL for final color)
 // ============================================================================
 
+// Safe half-vector computation: returns fallback (normal) if V and L are opposite
+// This prevents NaN from normalize(zero_vector) which can cause GPU hangs
+float3 SafeHalfVector(float3 V, float3 L, float3 N) {
+    float3 sum = V + L;
+    float lenSq = dot(sum, sum);
+    // If V and L are nearly opposite, fall back to surface normal
+    // This is physically plausible (grazing angle case)
+    if (lenSq < 1e-8) {
+        return N;
+    }
+    return sum * rsqrt(lenSq);
+}
+
 float3 CookTorranceBRDF(
     float3 N,
     float3 V,
@@ -115,8 +128,9 @@ float3 CookTorranceBRDF(
     float metallic,
     float roughness
 ) {
-    // Compute half vector
-    float3 H = normalize(V + L);
+    // Compute half vector (with safety check for opposite V and L)
+    // FIXED: Use SafeHalfVector to prevent NaN when V + L is near-zero
+    float3 H = SafeHalfVector(V, L, N);
 
     // Compute dot products (clamped to avoid negative values)
     float NdotV = max(dot(N, V), EPSILON);

@@ -26,6 +26,7 @@
 #include <iostream>
 #include <filesystem>
 #include <stdexcept>
+#include <cstddef>  // For offsetof
 
 using namespace quantiloom;
 
@@ -49,24 +50,32 @@ struct LUTData {
 // ============================================================================
 
 struct MaterialDataCPU {
-    glm::vec4 baseColorFactor;
-    i32 baseColorTextureIndex;
-    f32 metallicFactor;
-    f32 roughnessFactor;
-    i32 metallicRoughnessTextureIndex;
+    glm::vec4 baseColorFactor;           // offset 0, size 16
+    i32 baseColorTextureIndex;           // offset 16, size 4
+    f32 metallicFactor;                  // offset 20, size 4
+    f32 roughnessFactor;                 // offset 24, size 4
+    i32 metallicRoughnessTextureIndex;   // offset 28, size 4
 
-    i32 normalTextureIndex;
-    f32 normalScale;
+    i32 normalTextureIndex;              // offset 32, size 4
+    f32 normalScale;                     // offset 36, size 4
 
-    glm::vec3 emissiveFactor;
-    i32 emissiveTextureIndex;
+    glm::vec3 emissiveFactor;            // offset 40, size 12
+    i32 emissiveTextureIndex;            // offset 52, size 4
 
-    u32 alphaMode;
-    f32 alphaCutoff;
+    u32 alphaMode;                       // offset 56, size 4
+    f32 alphaCutoff;                     // offset 60, size 4
 
-    f32 spectralAlbedo;
-    f32 _pad0;
-};
+    f32 spectralAlbedo;                  // offset 64, size 4
+    f32 _pad0;                           // offset 68, size 4
+};  // Total: 72 bytes (must match GPU MaterialData in common.hlsli)
+
+// Verify struct layout matches shader expectations
+// If this fails, the CPU/GPU struct layouts are mismatched, which WILL cause GPU crashes
+static_assert(sizeof(MaterialDataCPU) == 72, "MaterialDataCPU size mismatch! Expected 72 bytes to match GPU MaterialData struct");
+static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 40, "emissiveFactor offset mismatch");
+static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 52, "emissiveTextureIndex offset mismatch");
 
 // ============================================================================
 // Scene Loading Helper

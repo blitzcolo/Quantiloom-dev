@@ -54,10 +54,22 @@ float3 SafeNormalize(float3 v) {
     return SafeNormalize(v, float3(0.0, 1.0, 0.0));
 }
 
+// Maximum valid texture index (must match MAX_TEXTURES in RayTracingPipeline.cpp)
+// CRITICAL: This bounds check prevents GPU hangs from invalid descriptor access
+static const int MAX_TEXTURE_INDEX = 1024;
+
 // Sample texture with fallback for invalid indices
 // Note: Use SampleLevel instead of Sample for ray tracing shaders (explicit LOD required)
+// FIXED: Added upper bound check to prevent access to unbound descriptors
+// If texture index is garbage (e.g., due to struct misalignment), this prevents GPU hang
 float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
-    if (textureIndex < 0) {
+    // Check both lower AND upper bounds to prevent invalid descriptor access
+    // Invalid indices (negative or out-of-range) can cause GPU hangs with PARTIALLY_BOUND descriptors
+    if (textureIndex < 0 || textureIndex >= MAX_TEXTURE_INDEX) {
+        return fallback;
+    }
+    // Ensure sampler index is also valid (use same index as texture for 1:1 mapping)
+    if (samplerIndex < 0 || samplerIndex >= MAX_TEXTURE_INDEX) {
         return fallback;
     }
     return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(
