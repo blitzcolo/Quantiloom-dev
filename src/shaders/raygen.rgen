@@ -60,7 +60,7 @@ void main() {
 
     // TEMPORARY DEBUG: Test if GPU can write to output without ray tracing
     // This will help identify if the problem is in TraceRay or elsewhere
-    #if 0
+    #if 1
     // Initialize payload
     Payload payload;
     payload.radiance = float3(0.0, 0.0, 0.0);

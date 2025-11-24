@@ -79,6 +79,8 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
+    // TEMPORARY DEBUG: Simplified closesthit - just return red color
+    #if 0
     // ========================================================================
     // Fetch material properties
     // ========================================================================
@@ -226,4 +228,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
 
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+    #else
+    // DEBUG: Just return red color to indicate hit
+    payload.radiance = float3(1.0, 0.0, 0.0);  // Red for hits
+    #endif
 }

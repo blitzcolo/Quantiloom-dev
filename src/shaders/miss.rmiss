@@ -19,6 +19,8 @@
 
 [shader("miss")]
 void main(inout Payload payload) {
+    // TEMPORARY DEBUG: Simplified miss shader
+    #if 0
     // Fetch sky spectral radiance from LUT
     // M1: Single entry LUT (index 0), hemispherical average
     LUTData lut = skyLUT[0];
@@ -26,4 +28,8 @@ void main(inout Payload payload) {
     // Return sky background (spectral mode: scalar to grayscale RGB)
     float radiance_spectral = lut.skyRadiance_spectral;
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+    #else
+    // DEBUG: Just return blue color to indicate miss
+    payload.radiance = float3(0.0, 0.0, 1.0);  // Blue sky
+    #endif
 }
