@@ -229,7 +229,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     #else
-    // DEBUG LEVEL 2: Test simple lighting without texture sampling
+    // DEBUG LEVEL 3: Test texture sampling with simple lighting
     uint materialID = InstanceID();
     MaterialData material = materials[materialID];
 
@@ -254,17 +254,28 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3x3 normalTransform = (float3x3)WorldToObject3x4();
     float3 worldNormal = normalize(mul(objectNormal, normalTransform));
 
-    // Simple Lambert shading (no textures, no PBR)
-    // Use base color from material directly (no texture sampling)
-    float3 albedo = material.baseColorFactor.rgb;
+    // Compute UVs (fake planar projection)
+    float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    float2 uv = hitPoint.xy * 0.1;
 
-    // Fetch sun direction from LUT
+    // TEST: Sample base color texture if available
+    float3 albedo = material.baseColorFactor.rgb;
+    if (material.baseColorTextureIndex >= 0) {
+        // CRITICAL: Test texture sampling - this is likely where crash happens
+        float4 texColor = SampleTexture(
+            material.baseColorTextureIndex,
+            material.baseColorTextureIndex,
+            uv,
+            material.baseColorFactor
+        );
+        albedo = texColor.rgb * material.baseColorFactor.rgb;
+    }
+
+    // Simple Lambert shading
     LUTData lut = skyLUT[0];
     float3 sunDir = normalize(lut.sunDirection);
-
-    // Simple diffuse lighting: I = albedo * max(N·L, 0)
     float NdotL = max(dot(worldNormal, sunDir), 0.0);
-    float3 color = albedo * NdotL + albedo * 0.1;  // Add small ambient
+    float3 color = albedo * NdotL + albedo * 0.1;
 
     payload.radiance = color;
     #endif
