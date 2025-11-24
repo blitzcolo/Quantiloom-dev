@@ -67,7 +67,7 @@ void CommandHelper::ExecuteImmediate(
     result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
     if (result != VK_SUCCESS) {
         vkDestroyCommandPool(device, commandPool, nullptr);
-        QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueSubmit FAILED with VkResult: {}", result);
+        QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueSubmit FAILED with VkResult: {}", static_cast<int>(result));
         throw std::runtime_error("Failed to submit command buffer (VkResult: " + std::to_string(result) + ")");
     }
     QL_LOG_INFO("  [DEBUG CommandHelper] Commands submitted successfully, waiting for GPU...");
@@ -76,7 +76,7 @@ void CommandHelper::ExecuteImmediate(
     result = vkQueueWaitIdle(queue);
     if (result != VK_SUCCESS) {
         vkDestroyCommandPool(device, commandPool, nullptr);
-        QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueWaitIdle FAILED with VkResult: {} (GPU CRASHED)", result);
+        QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueWaitIdle FAILED with VkResult: {} (GPU CRASHED)", static_cast<int>(result));
         throw std::runtime_error("Failed to wait for queue idle (VkResult: " + std::to_string(result) + ")");
     }
     QL_LOG_INFO("  [DEBUG CommandHelper] GPU execution completed successfully");
