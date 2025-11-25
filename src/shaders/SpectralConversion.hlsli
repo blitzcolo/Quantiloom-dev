@@ -177,11 +177,11 @@ float3 ConvertXYZToLinearRGB(float3 XYZ) {
 // This is NOT needed for intermediate HDR buffers - only apply at final output!
 // ============================================================================
 
-float LinearToSRGB_Component(float linear) {
-    if (linear <= 0.0031308) {
-        return 12.92 * linear;
+float LinearToSRGB_Component(float linear_value) {
+    if (linear_value <= 0.0031308) {
+        return 12.92 * linear_value;
     } else {
-        return 1.055 * pow(linear, 1.0 / 2.4) - 0.055;
+        return 1.055 * pow(linear_value, 1.0 / 2.4) - 0.055;
     }
 }
 
