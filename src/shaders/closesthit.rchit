@@ -26,6 +26,7 @@
 [[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
 [[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
+[[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
 
 // ============================================================================
 // Push Constants
@@ -166,13 +167,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3x3 normalTransform = (float3x3)WorldToObject3x4();
     float3 worldNormal = SafeNormalize(mul(objectNormal, normalTransform), float3(0.0, 1.0, 0.0));
 
-    // TODO (Phase 3.5): UVs and normals are not yet in vertex buffer
-    // For M1, we use geometric normals and fake UVs
-    // This will be fixed when vertex buffer includes full vertex attributes
-
-    // Fake UVs (planar projection for testing)
-    float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-    float2 uv = hitPoint.xy * 0.1;  // Simple planar mapping
+    // UV coordinates: Use real UVs from buffer (interpolated with barycentrics)
+    // Barycentric interpolation: uv = u0 * (1 - b1 - b2) + u1 * b1 + u2 * b2
+    float2 uv0 = uvBuffer[idx0];
+    float2 uv1 = uvBuffer[idx1];
+    float2 uv2 = uvBuffer[idx2];
+    float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
 
     // Fake tangent (will be replaced with proper vertex tangent in M2+)
     // CRITICAL: Choose reference vector based on normal direction to avoid degenerate cross product

@@ -55,6 +55,22 @@ void BLAS::UploadGeometryBuffers() {
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
+    // Create UV buffer if UVs are present (optional)
+    const bool hasUVs = !m_primitive.uvs.empty();
+    if (hasUVs) {
+        const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
+        m_uvBuffer = std::make_unique<GpuBuffer>(
+            allocator,
+            uvBufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+        QL_LOG_INFO("  [DEBUG] Created UV buffer: {} UVs ({} bytes)", m_primitive.uvs.size(), uvBufferSize);
+    } else {
+        QL_LOG_INFO("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
+    }
+
     // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
         // Create staging buffers (CPU-accessible)
@@ -84,6 +100,24 @@ void BLAS::UploadGeometryBuffers() {
         VkBufferCopy indexCopyRegion{};
         indexCopyRegion.size = indexBufferSize;
         vkCmdCopyBuffer(cmd, indexStaging.GetHandle(), m_indexBuffer->GetHandle(), 1, &indexCopyRegion);
+
+        // Upload UV data if present
+        if (hasUVs) {
+            const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
+            GpuBuffer uvStaging(
+                allocator,
+                uvBufferSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VMA_MEMORY_USAGE_CPU_ONLY
+            );
+            uvStaging.Upload(m_primitive.uvs.data(), uvBufferSize);
+
+            VkBufferCopy uvCopyRegion{};
+            uvCopyRegion.size = uvBufferSize;
+            vkCmdCopyBuffer(cmd, uvStaging.GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
+
+            QL_LOG_INFO("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
+        }
 
         // Insert barrier - transfer writes must complete before AS build reads
         VkMemoryBarrier barrier{};
@@ -123,6 +157,7 @@ BLAS::BLAS(BLAS&& other) noexcept
     , m_asBuffer(std::move(other.m_asBuffer))
     , m_vertexBuffer(std::move(other.m_vertexBuffer))
     , m_indexBuffer(std::move(other.m_indexBuffer))
+    , m_uvBuffer(std::move(other.m_uvBuffer))
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
     , m_deviceAddress(other.m_deviceAddress)
     , m_built(other.m_built)
@@ -150,6 +185,7 @@ BLAS& BLAS::operator=(BLAS&& other) noexcept {
         m_asBuffer = std::move(other.m_asBuffer);
         m_vertexBuffer = std::move(other.m_vertexBuffer);
         m_indexBuffer = std::move(other.m_indexBuffer);
+        m_uvBuffer = std::move(other.m_uvBuffer);
         m_scratchBuffer = std::move(other.m_scratchBuffer);
         m_deviceAddress = other.m_deviceAddress;
         m_built = other.m_built;

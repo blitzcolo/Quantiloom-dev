@@ -144,7 +144,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
     constexpr u32 MAX_TEXTURES = 1024;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(8);
+    std::vector<VkDescriptorSetLayoutBinding> bindings(9);  // Added UV buffer binding
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -203,9 +203,16 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[7].pImmutableSamplers = nullptr;
 
+    // Binding 8: UV buffer (StructuredBuffer<float2>) - Optional
+    bindings[8].binding = 8;
+    bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[8].descriptorCount = 1;
+    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[8].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(8, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(9, 0);  // Updated for UV buffer
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -609,7 +616,7 @@ void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer) {
+void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer, const GpuBuffer* uvBuffer) {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorBufferInfo vertexInfo{};
@@ -622,25 +629,53 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, cons
     indexInfo.offset = 0;
     indexInfo.range = VK_WHOLE_SIZE;
 
-    std::vector<VkWriteDescriptorSet> writes(2);
+    VkDescriptorBufferInfo uvInfo{};
+    if (uvBuffer) {
+        uvInfo.buffer = uvBuffer->GetHandle();
+        uvInfo.offset = 0;
+        uvInfo.range = VK_WHOLE_SIZE;
+    }
+
+    std::vector<VkWriteDescriptorSet> writes;
+    writes.reserve(3);
 
     // Binding 3: Vertex buffer
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_descriptorSet;
-    writes[0].dstBinding = 3;
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].descriptorCount = 1;
-    writes[0].pBufferInfo = &vertexInfo;
+    VkWriteDescriptorSet vertexWrite{};
+    vertexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    vertexWrite.dstSet = m_descriptorSet;
+    vertexWrite.dstBinding = 3;
+    vertexWrite.dstArrayElement = 0;
+    vertexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    vertexWrite.descriptorCount = 1;
+    vertexWrite.pBufferInfo = &vertexInfo;
+    writes.push_back(vertexWrite);
 
     // Binding 4: Index buffer
-    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_descriptorSet;
-    writes[1].dstBinding = 4;
-    writes[1].dstArrayElement = 0;
-    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[1].descriptorCount = 1;
-    writes[1].pBufferInfo = &indexInfo;
+    VkWriteDescriptorSet indexWrite{};
+    indexWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    indexWrite.dstSet = m_descriptorSet;
+    indexWrite.dstBinding = 4;
+    indexWrite.dstArrayElement = 0;
+    indexWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    indexWrite.descriptorCount = 1;
+    indexWrite.pBufferInfo = &indexInfo;
+    writes.push_back(indexWrite);
+
+    // Binding 8: UV buffer (optional)
+    if (uvBuffer) {
+        VkWriteDescriptorSet uvWrite{};
+        uvWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        uvWrite.dstSet = m_descriptorSet;
+        uvWrite.dstBinding = 8;
+        uvWrite.dstArrayElement = 0;
+        uvWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        uvWrite.descriptorCount = 1;
+        uvWrite.pBufferInfo = &uvInfo;
+        writes.push_back(uvWrite);
+        QL_LOG_INFO("  [DEBUG] Bound UV buffer to binding 8");
+    } else {
+        QL_LOG_INFO("  [DEBUG] No UV buffer provided, skipping binding 8");
+    }
 
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }

@@ -505,7 +505,8 @@ int main(int argc, char* argv[]) {
 
         // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
         if (!blasList.empty()) {
-            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer()); // Binding 3, 4
+            const GpuBuffer* uvBuffer = blasList[0].HasUVs() ? &blasList[0].GetUVBuffer() : nullptr;
+            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer(), uvBuffer); // Binding 3, 4, 8
         }
 
         pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
