@@ -545,7 +545,7 @@ int main(int argc, char* argv[]) {
         Image img(width, height, 4);
         img.channelNames = {"R", "G", "B", "A"};
         img.metadata["renderer"] = "Quantiloom Spectral";
-        img.metadata["mode"] = spectralMode;
+        img.metadata["mode"] = spectralModeStr;
         img.metadata["wavelength_nm"] = std::to_string(wavelength_nm);
         img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
         img.metadata["spp"] = std::to_string(spp);
@@ -574,7 +574,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  Rendering COMPLETED");
         QL_LOG_INFO("========================================");
-        QL_LOG_INFO("  Spectral mode: {}", spectralMode);
+        QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
         QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
         QL_LOG_INFO("  Output: {}", outputPath);
         QL_LOG_INFO("========================================");
