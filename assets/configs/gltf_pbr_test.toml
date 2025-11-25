@@ -21,7 +21,7 @@ output = "gltf_pbr_output.exr" # Output file path (OpenEXR format)
 #   - "multispectral": Hyperspectral cube output - TBD
 # ============================================================================
 mode = "rgb"                   # RGB mode for full color rendering
-wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
+# wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
 [scene]
 # ============================================================================
