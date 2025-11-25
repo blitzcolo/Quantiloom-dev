@@ -298,7 +298,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
     // Total outgoing radiance: direct sun + sky ambient + emissive
-    float3 radiance = directSun + skyAmbient + emissive;
+    // DEBUG: Temporarily disable emissive to test if it's causing red color
+    float3 radiance = directSun + skyAmbient; // + emissive;
 
     // ========================================================================
     // Spectral Mode Selection: Choose rendering pipeline based on mode
@@ -316,6 +317,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // NOTE: Full spectral RGB pipeline (with RGB→Spectrum→XYZ→RGB) is
         // TBD as a future enhancement. Current implementation outputs linear RGB.
         // ====================================================================
+
+        // DEBUG: Directly output baseColor texture to verify texture sampling
+        // Uncomment to bypass all lighting and see raw texture color
+        // output_radiance = baseColor.rgb;
 
         output_radiance = radiance;
 
