@@ -475,6 +475,9 @@ int main(int argc, char* argv[]) {
                         mat.name,
                         mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b, mat.baseColorFactor.a,
                         mat.metallicFactor, mat.roughnessFactor);
+            QL_LOG_INFO("    [DEBUG] Texture indices: baseColor={} metallicRough={} normal={} emissive={}",
+                        mat.baseColorTextureIndex, mat.metallicRoughnessTextureIndex,
+                        mat.normalTextureIndex, mat.emissiveTextureIndex);
         }
 
         GpuBuffer materialBuffer(
