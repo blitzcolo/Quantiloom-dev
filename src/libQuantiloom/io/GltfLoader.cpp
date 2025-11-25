@@ -267,6 +267,8 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         mat.metallicFactor = 0.0f;
         mat.roughnessFactor = 1.0f;
         mat.ComputeSpectralAlbedo();
+        // Mark as RGB-upsampled (not suitable for quantitative HS-OFF)
+        mat.spectralSource = Material::SpectralSource::RGBUpsampled;
         return mat;
     }
 
@@ -330,6 +332,38 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
     // Compute spectral albedo for M1 compatibility
     mat.ComputeSpectralAlbedo();
+
+    // Mark as RGB-upsampled (not suitable for quantitative HS-OFF)
+    mat.spectralSource = Material::SpectralSource::RGBUpsampled;
+
+    // ========================================================================
+    // Check for custom IR material extension (QUANTILOOM_material_ir)
+    // ========================================================================
+    // TODO (P1.2): Implement IR extension loading
+    // Expected glTF extension format:
+    //   "extensions": {
+    //     "QUANTILOOM_material_ir": {
+    //       "emissivityCurve": "path/to/emissivity.csv",
+    //       "reflectanceCurve": "path/to/reflectance.csv",
+    //       "transmittanceCurve": "path/to/transmittance.csv",
+    //       "temperature_K": 300.0
+    //     }
+    //   }
+    //
+    // Implementation steps:
+    //   1. Check if gltfMaterial.extensions.count("QUANTILOOM_material_ir") > 0
+    //   2. Parse extension JSON object
+    //   3. Load CSV files using SpectralIO::LoadSpectralCurveCSV()
+    //   4. Populate mat.irEmissivityCurve, irReflectanceCurve, irTransmittanceCurve
+    //   5. Set mat.irTemperature_K
+    //   6. Mark mat.spectralSource = Material::SpectralSource::Measured
+    //
+    // PLACEHOLDER: Extension loading not implemented
+    if (gltfMaterial.extensions.find("QUANTILOOM_material_ir") != gltfMaterial.extensions.end()) {
+        QL_LOG_WARN("  Material '{}' has QUANTILOOM_material_ir extension, but loading is not yet implemented (placeholder).",
+                    mat.name);
+        QL_LOG_WARN("  IR extension will be ignored. To implement, see GltfLoader.cpp:350");
+    }
 
     QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
                 mat.name, mat.metallicFactor, mat.roughnessFactor);

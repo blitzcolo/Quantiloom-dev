@@ -265,4 +265,37 @@ std::optional<std::tuple<u32, u32, u32>> SpectralIO::GetDimensions(
     }
 }
 
+// ============================================================================
+// Public API: LoadSpectralCurveCSV
+// ============================================================================
+
+Result<std::vector<std::pair<f32, f32>>, String>
+SpectralIO::LoadSpectralCurveCSV(const std::filesystem::path& csvPath) {
+    // TODO (P1.2 - IR materials): Implement CSV parsing
+    // Expected format:
+    //   # Comments start with #
+    //   wavelength_nm, value
+    //   400.0, 0.12
+    //   410.0, 0.15
+    //   ...
+    //
+    // Requirements:
+    //   1. Skip lines starting with '#'
+    //   2. Parse two comma-separated floats per line
+    //   3. Validate wavelengths are monotonically increasing
+    //   4. Return error if file not found or parse fails
+    //
+    // Implementation steps:
+    //   - Open file with std::ifstream
+    //   - Read line by line
+    //   - Skip comments and empty lines
+    //   - Parse floats with std::stof or sscanf
+    //   - Validate monotonicity
+    //
+    // PLACEHOLDER: Return error for now
+    return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+        "LoadSpectralCurveCSV not yet implemented (placeholder for P1.2)"
+    );
+}
+
 } // namespace quantiloom

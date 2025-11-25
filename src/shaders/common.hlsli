@@ -109,7 +109,7 @@ struct MaterialData {
 
     // Spectral mode (M1 compatibility)
     float  spectralAlbedo;           // Scalar reflectance at current λ [0, 1]
-    float  _pad0;                    // Padding to 16-byte alignment
+    float  irTemperature_K;          // IR surface temperature (K) for blackbody emission (0 = no emission)
 };
 
 #endif // QUANTILOOM_COMMON_HLSLI

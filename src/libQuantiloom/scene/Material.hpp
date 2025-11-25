@@ -76,6 +76,38 @@ struct Material {
     f32 spectralAlbedo = 0.8f;
 
     // ========================================================================
+    // Spectral Data Source Tracking (for HS-OFF validation)
+    // ========================================================================
+    // Tracks the origin of spectral data to enforce quality gates
+    enum class SpectralSource : u32 {
+        Unknown = 0,           // Default: unspecified
+        Measured = 1,          // Physically measured spectral data (quantitative)
+        RGBUpsampled = 2,      // Upsampled from RGB (sRGB or linear) - NOT quantitative
+        Procedural = 3         // Procedurally generated (e.g., metal Fresnel)
+    };
+    SpectralSource spectralSource = SpectralSource::Unknown;
+
+    // ========================================================================
+    // Infrared Material Properties (for MWIR/LWIR modes)
+    // ========================================================================
+    // Spectral curves for infrared rendering (3-12μm wavelength range)
+    // Used for quantitative thermal imaging simulation
+
+    // Emissivity curve ε(λ): fraction of blackbody radiation emitted [0, 1]
+    // By Kirchhoff's law: ε(λ) = α(λ) = 1 - ρ(λ) - τ(λ) in thermal equilibrium
+    Vector<std::pair<f32, f32>> irEmissivityCurve;  // (wavelength_nm, emissivity)
+
+    // Reflectance curve ρ(λ): fraction of incident radiation reflected [0, 1]
+    Vector<std::pair<f32, f32>> irReflectanceCurve;  // (wavelength_nm, reflectance)
+
+    // Transmittance curve τ(λ): fraction of incident radiation transmitted [0, 1]
+    Vector<std::pair<f32, f32>> irTransmittanceCurve;  // (wavelength_nm, transmittance)
+
+    // Surface temperature (K) for self-emission calculation
+    // If <= 0, no thermal emission (or use scene ambient temperature)
+    f32 irTemperature_K = 0.0f;
+
+    // ========================================================================
     // Metadata
     // ========================================================================
     String name;  // Material name (for debugging)
@@ -119,6 +151,33 @@ struct Material {
                emissiveTextureIndex != -1;
     }
 
+    // ========================================================================
+    // Infrared Material Property Helpers
+    // ========================================================================
+
+    // Get IR emissivity at specific wavelength (linear interpolation)
+    // Returns 0.0 if curve is empty or wavelength out of range
+    f32 GetIREmissivity(f32 lambda_nm) const;
+
+    // Get IR reflectance at specific wavelength (linear interpolation)
+    // Returns spectralAlbedo fallback if curve is empty
+    f32 GetIRReflectance(f32 lambda_nm) const;
+
+    // Get IR transmittance at specific wavelength (linear interpolation)
+    // Returns 0.0 if curve is empty (opaque)
+    f32 GetIRTransmittance(f32 lambda_nm) const;
+
+    // Validate Kirchhoff's law: ε + ρ + τ ≤ 1 at all wavelengths
+    // Returns true if valid, false if energy conservation violated
+    bool ValidateIRKirchhoffLaw() const;
+
+    // Check if material has IR data
+    bool HasIRData() const {
+        return !irEmissivityCurve.empty() ||
+               !irReflectanceCurve.empty() ||
+               !irTransmittanceCurve.empty();
+    }
+
     // Create simple Lambertian material (for procedural geometry)
     static Material CreateLambertian(const glm::vec3& albedo, const String& name = "Lambertian") {
         Material mat;
@@ -127,6 +186,7 @@ struct Material {
         mat.metallicFactor = 0.0f;   // Non-metal
         mat.roughnessFactor = 1.0f;  // Fully rough (Lambertian limit)
         mat.ComputeSpectralAlbedo();
+        mat.spectralSource = SpectralSource::RGBUpsampled;  // Mark as upsampled
         return mat;
     }
 };

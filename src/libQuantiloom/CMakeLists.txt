@@ -55,6 +55,7 @@ add_library(libQuantiloom STATIC
     scene/Camera.cpp
     scene/Camera.hpp
     scene/Mesh.hpp
+    scene/Material.cpp
     scene/Material.hpp
     scene/Texture.hpp
     scene/Scene.cpp
