@@ -243,6 +243,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         ).rgb;
     }
 
+    // TEMP FIX: Scale down emissive to prevent overpowering other lighting
+    // DamagedHelmet has emissiveFactor=[1,1,1] which is very strong
+    // TODO: Check if glTF emissiveFactor should be in [0,1] range or can be HDR
+    emissive *= 0.1;  // Reduce emissive strength by 90%
+
     // ========================================================================
     // Fetch sun/sky lighting data from LUT
     // ========================================================================
@@ -297,9 +302,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
     )) * (1.0 - metallic);
     float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
-    // Total outgoing radiance: direct sun + sky ambient + emissive
-    // DEBUG: Temporarily disable emissive to test if it's causing red color
-    float3 radiance = directSun + skyAmbient; // + emissive;
+    // HACK: Add simple ambient for metallic surfaces (proper solution needs IBL)
+    // Metallic surfaces with kD≈0 get almost no ambient, causing black regions
+    // Add a small constant ambient term to provide base illumination
+    float3 simpleAmbient = albedo * skyRadiance * 0.15;  // 15% ambient
+
+    // Total outgoing radiance: direct sun + sky ambient + simple ambient + emissive
+    float3 radiance = directSun + skyAmbient + simpleAmbient + emissive;
 
     // ========================================================================
     // Spectral Mode Selection: Choose rendering pipeline based on mode
