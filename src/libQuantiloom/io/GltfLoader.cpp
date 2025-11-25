@@ -378,6 +378,9 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         auto uvIt = gltfPrimitive.attributes.find("TEXCOORD_0");
         if (uvIt != gltfPrimitive.attributes.end()) {
             primitive.uvs = ReadAccessor<glm::vec2>(gltfModelPtr, uvIt->second);
+            QL_LOG_INFO("    [DEBUG] Loaded {} UV coordinates from TEXCOORD_0", primitive.uvs.size());
+        } else {
+            QL_LOG_INFO("    [DEBUG] No UV coordinates found (TEXCOORD_0 missing)");
         }
 
         // Indices (required for indexed geometry)
