@@ -4,6 +4,7 @@
 #include "core/Log.hpp"
 #include <string>
 #include <optional>
+#include <filesystem>
 
 namespace quantiloom {
 
