@@ -184,15 +184,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Sample textures
     // ========================================================================
 
-    // Base color texture
+    // Base color texture (glTF: baseColor = baseColorTexture * baseColorFactor)
+    // Use white (1,1,1,1) as fallback so multiplication with factor works correctly
     float4 baseColor = SampleTexture(
         material.baseColorTextureIndex,
         material.baseColorTextureIndex,  // Use same index for sampler (1:1 mapping)
         uv,
-        material.baseColorFactor
+        float4(1.0, 1.0, 1.0, 1.0)  // White fallback for correct factor multiplication
     );
 
-    // Modulate with base color factor
+    // Modulate with base color factor (texture * factor, or 1 * factor if no texture)
     baseColor *= material.baseColorFactor;
 
     // Metallic-Roughness texture (G=roughness, B=metallic)
