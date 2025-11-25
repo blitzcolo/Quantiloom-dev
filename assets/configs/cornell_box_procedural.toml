@@ -11,6 +11,14 @@ spp = 1
 output = "cornell_box_output.exr"
 
 [spectral]
+# ============================================================================
+# ⚠️  WARNING: PREVIEW MODE ONLY - NOT SUITABLE FOR QUANTITATIVE ANALYSIS
+# ============================================================================
+# Single wavelength mode uses RGB-averaged spectral albedo, NOT physically
+# measured spectral reflectance. This is intended for visualization ONLY.
+#
+# For quantitative results, use mode = "hs_off" with measured spectral material data.
+# ============================================================================
 mode = "single_wavelength"
 wavelength_nm = 550.0
 

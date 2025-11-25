@@ -15,6 +15,7 @@
 #include "common.hlsli"
 #include "pbr.hlsli"
 #include "SpectralConversion.hlsli"
+#include "blackbody.hlsli"
 
 // ============================================================================
 // Bindings
@@ -355,18 +356,37 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
-        // MWIR/LWIR Fusion Mode: Infrared band fusion
+        // MWIR/LWIR Fusion Mode: Infrared band fusion with blackbody emission
         // ====================================================================
-        // For infrared modes, use spectralAlbedo directly (wavelength-independent)
-        // TODO: Implement proper IR material properties
+        // Compute self-emission (ε × L_blackbody) + reflected radiance (ρ × L_incident)
+        // Uses simplified model: emissivity ≈ spectralAlbedo (Kirchhoff's law approximation)
+        // For full quantitative IR, use measured ε(λ)/ρ(λ)/τ(λ) curves (future work)
         // ====================================================================
 
-        float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+        float lambda_nm = camera.wavelength_nm;
+
+        // Use spectralAlbedo as IR emissivity (simplified approximation)
+        // For quantitative IR, replace with GetIREmissivity(lambda_nm) from IR curve
+        float emissivity = material.spectralAlbedo;
+        float reflectance = material.spectralAlbedo;
+
+        // Self-emission: ε(λ) × L_blackbody(T, λ)
+        float selfEmission = 0.0;
+        if (material.irTemperature_K > 0.0) {
+            float blackbodyRadiance = IRPlanckRadiance(material.irTemperature_K, lambda_nm);
+            selfEmission = emissivity * blackbodyRadiance;
+        }
+
+        // Reflected radiance: ρ(λ) × L_incident
+        // Convert RGB radiance to scalar for IR (simple average)
+        float reflected = (radiance.r + radiance.g + radiance.b) / 3.0 * reflectance;
+
+        float radiance_spectral = selfEmission + reflected;
 
         if (!isfinite(radiance_spectral)) {
             radiance_spectral = 0.0;
         }
-        radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+        radiance_spectral = clamp(radiance_spectral, 0.0, 1e6);  // Allow high dynamic range for IR
 
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 

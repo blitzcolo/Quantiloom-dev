@@ -70,7 +70,7 @@ struct MaterialDataCPU {
     f32 alphaCutoff;                     // offset 60, size 4
 
     f32 spectralAlbedo;                  // offset 64, size 4
-    f32 _pad0;                           // offset 68, size 4
+    f32 irTemperature_K;                 // offset 68, size 4
 };  // Total: 72 bytes (must match GPU MaterialData in common.hlsli)
 
 // Verify struct layout matches shader expectations
@@ -80,6 +80,8 @@ static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColor
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 40, "emissiveFactor offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 52, "emissiveTextureIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 64, "spectralAlbedo offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 68, "irTemperature_K offset mismatch");
 
 // ============================================================================
 // Scene Loading Helper
@@ -315,6 +317,65 @@ int main(int argc, char* argv[]) {
                     loadedScene.meshes.size(), loadedScene.nodes.size(),
                     loadedScene.materials.size());
 
+        // ====================================================================
+        // Validate Material Spectral Sources (sRGB upsampling gate - R5)
+        // ====================================================================
+        bool requireQuantitative = (spectral_mode == SpectralMode::Multispectral ||
+                                     spectral_mode == SpectralMode::MWIR_Fused ||
+                                     spectral_mode == SpectralMode::LWIR_Fused);
+
+        bool failOnSRGB = config.Get<bool>("quality.fail_on_srgb_upsample", false);
+        bool logSources = config.Get<bool>("quality.log_material_sources", false);
+
+        if (requireQuantitative && (failOnSRGB || logSources)) {
+            QL_LOG_INFO("Validating material spectral sources for quantitative mode...");
+
+            bool hasInvalidMaterials = false;
+            for (const auto& mat : loadedScene.materials) {
+                const char* sourceStr = "Unknown";
+                switch (mat.spectralSource) {
+                    case Material::SpectralSource::Measured:
+                        sourceStr = "Measured (quantitative)";
+                        break;
+                    case Material::SpectralSource::RGBUpsampled:
+                        sourceStr = "RGB-upsampled (NOT quantitative)";
+                        hasInvalidMaterials = true;
+                        break;
+                    case Material::SpectralSource::Procedural:
+                        sourceStr = "Procedural";
+                        break;
+                    default:
+                        sourceStr = "Unknown";
+                        break;
+                }
+
+                if (logSources) {
+                    QL_LOG_INFO("  Material '{}': source = {}", mat.name, sourceStr);
+                }
+
+                if (mat.spectralSource == Material::SpectralSource::RGBUpsampled) {
+                    QL_LOG_WARN("  ⚠️  Material '{}' uses RGB-upsampled spectra (not quantitative)",
+                                mat.name);
+                }
+            }
+
+            if (hasInvalidMaterials && failOnSRGB) {
+                QL_LOG_ERROR("========================================");
+                QL_LOG_ERROR("  ABORTED: RGB-upsampled materials detected");
+                QL_LOG_ERROR("========================================");
+                QL_LOG_ERROR("RGB-upsampled materials are NOT suitable for quantitative analysis.");
+                QL_LOG_ERROR("To proceed (non-quantitative preview), set 'quality.fail_on_srgb_upsample = false'.");
+                QL_LOG_ERROR("For quantitative results, provide measured spectral material data.");
+                QL_LOG_ERROR("========================================");
+                Log::Shutdown();
+                return 1;
+            }
+
+            if (hasInvalidMaterials && !failOnSRGB) {
+                QL_LOG_WARN("⚠️  WARNING: Proceeding with RGB-upsampled materials (non-quantitative preview).");
+            }
+        }
+
         // M2: Build BLAS for each primitive in each mesh
         // This allows per-primitive materials and proper glTF support
         std::vector<BLAS> blasList;
@@ -474,7 +535,9 @@ int main(int argc, char* argv[]) {
 
             // Spectral (M1 compatibility)
             cpuMat.spectralAlbedo = mat.spectralAlbedo;
-            cpuMat._pad0 = 0.0f;
+
+            // Infrared temperature
+            cpuMat.irTemperature_K = mat.irTemperature_K;
 
             materialData.push_back(cpuMat);
 
@@ -541,6 +604,9 @@ int main(int argc, char* argv[]) {
             spectral_mode == SpectralMode::MWIR_Fused ||
             spectral_mode == SpectralMode::LWIR_Fused) {
             QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm...", wavelength_nm);
+            QL_LOG_WARN("  ⚠️  PREVIEW MODE: Using RGB-averaged spectral albedo.");
+            QL_LOG_WARN("  ⚠️  NOT suitable for quantitative analysis.");
+            QL_LOG_WARN("  ⚠️  For quantitative results, use mode=\"hs_off\" with measured spectral data.");
         } else {
             QL_LOG_INFO("Rendering frame in RGB mode...");
         }
@@ -583,6 +649,12 @@ int main(int argc, char* argv[]) {
             spectral_mode == SpectralMode::MWIR_Fused ||
             spectral_mode == SpectralMode::LWIR_Fused) {
             img.metadata["wavelength_nm"] = std::to_string(wavelength_nm);
+            img.metadata["quality_level"] = "PREVIEW_ONLY";
+            img.metadata["warning"] = "RGB-averaged spectral albedo, not quantitative";
+            img.metadata["note"] = "For quantitative results use mode=hs_off with measured spectra";
+        } else if (spectral_mode == SpectralMode::RGB) {
+            img.metadata["quality_level"] = "PREVIEW";
+            img.metadata["note"] = "RGB rendering, preview quality";
         }
         img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
         img.metadata["spp"] = std::to_string(spp);

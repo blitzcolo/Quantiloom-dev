@@ -50,6 +50,22 @@ public:
 
     // Get cube dimensions without loading data (fast peek)
     static std::optional<std::tuple<u32, u32, u32>> GetDimensions(const std::string& filepath);
+
+    // ========================================================================
+    // Spectral Curve Loading (for material properties)
+    // ========================================================================
+
+    // Load spectral curve from CSV file
+    // Format: wavelength_nm, value (e.g., reflectance, emissivity, transmittance)
+    // Example CSV:
+    //   400.0, 0.12
+    //   410.0, 0.15
+    //   ...
+    //
+    // Returns: Vector of (wavelength_nm, value) pairs
+    // NOTE: Wavelengths must be monotonically increasing
+    static Result<std::vector<std::pair<f32, f32>>, String>
+    LoadSpectralCurveCSV(const std::filesystem::path& csvPath);
 };
 
 } // namespace quantiloom
