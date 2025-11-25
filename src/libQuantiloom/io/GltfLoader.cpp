@@ -130,6 +130,32 @@ std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModel
     return result;
 }
 
+template<>
+std::vector<glm::vec4> GltfLoader::ReadAccessor<glm::vec4>(const void* gltfModelPtr, int accessorIndex) {
+    const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
+
+    if (accessorIndex < 0 || accessorIndex >= static_cast<int>(model.accessors.size())) {
+        return {};
+    }
+
+    const auto& accessor = model.accessors[accessorIndex];
+    const auto& bufferView = model.bufferViews[accessor.bufferView];
+    const auto& buffer = model.buffers[bufferView.buffer];
+
+    const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
+    size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 4;
+
+    std::vector<glm::vec4> result;
+    result.reserve(accessor.count);
+
+    for (size_t i = 0; i < accessor.count; ++i) {
+        const float* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
+        result.emplace_back(floatPtr[0], floatPtr[1], floatPtr[2], floatPtr[3]);
+    }
+
+    return result;
+}
+
 // ============================================================================
 // ReadIndices
 // ============================================================================
