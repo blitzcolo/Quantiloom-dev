@@ -29,11 +29,11 @@ wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 # ============================================================================
 # Specify the path to your glTF file (.gltf or .glb)
 # Examples:
-#   gltf = "assets/models/glTF-Sample-Models/2.0/DamagedHelmet/glTF/DamagedHelmet.gltf"
-#   gltf = "assets/models/glTF-Sample-Models/2.0/MetalRoughSpheres/glTF/MetalRoughSpheres.gltf"
-#   gltf = "assets/models/glTF-Sample-Models/2.0/BoxTextured/glTF/BoxTextured.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
 # ============================================================================
-gltf = "assets/models/glTF-Sample-Models/2.0/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
+gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
 
 # ============================================================================
 # Alternative: Use procedural preset (comment out 'gltf' above to use preset)

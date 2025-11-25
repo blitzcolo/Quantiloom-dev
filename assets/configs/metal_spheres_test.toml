@@ -6,18 +6,40 @@
 
 [renderer]
 resolution = [1920, 1080]
-spp = 1
-output = "metal_spheres_output.exr"
+spp = 1                        # Samples per pixel (M1: single sample)
+output = "metal_spheres_output.exr" # Output file path (OpenEXR format)
 
 [spectral]
-mode = "single_wavelength"
-wavelength_nm = 550.0
+# ============================================================================
+# Spectral Rendering Mode
+# ============================================================================
+# Available modes:
+#   - "rgb"          : RGB rendering with full color (DEFAULT)
+#   - "single"       : Single wavelength (grayscale spectral rendering)
+#   - "mwir_fused"   : Mid-wave IR fusion (3000-5000nm) - TBD
+#   - "lwir_fused"   : Long-wave IR fusion (8000-12000nm) - TBD
+#   - "multispectral": Hyperspectral cube output - TBD
+# ============================================================================
+mode = "rgb"                   # RGB mode for full color rendering
+wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
 [scene]
+# ============================================================================
+# glTF Model Path
+# ============================================================================
+# Specify the path to your glTF file (.gltf or .glb)
+# Examples:
+#   gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
+# ============================================================================
 # Metal-Roughness spheres grid (tests metallic 0.0-1.0, roughness 0.0-1.0)
-gltf = "assets/models/glTF-Sample-Models/2.0/MetalRoughSpheres/glTF/MetalRoughSpheres.gltf"
+gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
 
 [camera]
+# Camera setup for viewing the glTF model
+# Adjust position and look_at based on your model's size and location
+
 # View the sphere grid from above
 position = [0.0, 1.5, 4.0]
 look_at = [0.0, 0.0, 0.0]
@@ -25,10 +47,18 @@ up = [0.0, 1.0, 0.0]
 fov_y = 60.0
 
 [lighting]
+# ============================================================================
+# Lighting Configuration
+# ============================================================================
+# Sun: directional light source (Cook-Torrance specular highlights)
+# Sky: ambient hemispherical lighting (diffuse approximation)
+# ============================================================================
+
 # Strong directional sun to see specular highlights
-sun_direction = [-0.3, 0.9, 0.3]
-sun_radiance = [8.0, 8.0, 8.0]
-sky_radiance = [0.3, 0.5, 0.8]
+sun_direction = [-0.3, 0.9, 0.3] # FROM surface TO sun (normalized automatically)
+sun_radiance = [8.0, 8.0, 8.0]   # Sun radiance (RGB, averaged to spectral scalar)
+sky_radiance = [0.3, 0.5, 0.8]   # Sky radiance (RGB, averaged to spectral scalar)
 
 [material]
+# Fallback material for procedural geometry (not used for glTF models)
 albedo = [0.8, 0.8, 0.8]
