@@ -71,18 +71,22 @@ void BLAS::UploadGeometryBuffers() {
         QL_LOG_INFO("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
     }
 
-    // Create tangent buffer if tangents are present (optional)
+    // Create tangent buffer (always create, use fallback if not present)
+    // CRITICAL: Always bind tangent buffer to prevent GPU crash when shader accesses it
     const bool hasTangents = !m_primitive.tangents.empty();
+    const size_t tangentCount = hasTangents ? m_primitive.tangents.size() : m_primitive.positions.size();
+    const VkDeviceSize tangentBufferSize = tangentCount * sizeof(glm::vec4);
+    m_tangentBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        tangentBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
     if (hasTangents) {
-        const VkDeviceSize tangentBufferSize = m_primitive.tangents.size() * sizeof(glm::vec4);
-        m_tangentBuffer = std::make_unique<GpuBuffer>(
-            allocator,
-            tangentBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-        QL_LOG_DEBUG("  BLAS: Created tangent buffer: {} tangents ({} bytes)", m_primitive.tangents.size(), tangentBufferSize);
+        QL_LOG_DEBUG("  BLAS: Created tangent buffer: {} tangents ({} bytes)", tangentCount, tangentBufferSize);
+    } else {
+        QL_LOG_DEBUG("  BLAS: Created fallback tangent buffer: {} vertices ({} bytes)", tangentCount, tangentBufferSize);
     }
 
     // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
@@ -133,23 +137,29 @@ void BLAS::UploadGeometryBuffers() {
             QL_LOG_INFO("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
         }
 
-        // Upload tangent data if present
+        // Upload tangent data (use fallback if not present)
+        const VkDeviceSize tangentBufferSize = tangentCount * sizeof(glm::vec4);
+        GpuBuffer tangentStaging(
+            allocator,
+            tangentBufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_ONLY
+        );
+
         if (hasTangents) {
-            const VkDeviceSize tangentBufferSize = m_primitive.tangents.size() * sizeof(glm::vec4);
-            GpuBuffer tangentStaging(
-                allocator,
-                tangentBufferSize,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VMA_MEMORY_USAGE_CPU_ONLY
-            );
+            // Upload real tangent data
             tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
-
-            VkBufferCopy tangentCopyRegion{};
-            tangentCopyRegion.size = tangentBufferSize;
-            vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
-
-            QL_LOG_DEBUG("  BLAS: Uploaded {} tangents to GPU", m_primitive.tangents.size());
+            QL_LOG_DEBUG("  BLAS: Uploaded {} real tangents to GPU", tangentCount);
+        } else {
+            // Upload fallback tangent data (X-axis tangent with positive handedness)
+            std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+            tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
+            QL_LOG_DEBUG("  BLAS: Uploaded {} fallback tangents to GPU", tangentCount);
         }
+
+        VkBufferCopy tangentCopyRegion{};
+        tangentCopyRegion.size = tangentBufferSize;
+        vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
 
         // Insert barrier - transfer writes must complete before AS build reads
         VkMemoryBarrier barrier{};

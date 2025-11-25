@@ -583,10 +583,8 @@ int main(int argc, char* argv[]) {
             const GpuBuffer* uvBuffer = blasList[0].HasUVs() ? &blasList[0].GetUVBuffer() : nullptr;
             pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer(), uvBuffer); // Binding 3, 4, 8
 
-            // Bind tangent buffer if available
-            if (blasList[0].HasTangents()) {
-                pipeline.BindTangentBuffer(blasList[0].GetTangentBuffer());  // Binding 9
-            }
+            // Bind tangent buffer (always present, uses fallback data if model has no tangents)
+            pipeline.BindTangentBuffer(blasList[0].GetTangentBuffer());  // Binding 9
         }
 
         pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
