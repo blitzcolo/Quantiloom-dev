@@ -38,21 +38,23 @@ struct Payload {
 // ============================================================================
 // LUT Data Structure
 // ============================================================================
-// Atmospheric lookup table for spectral rendering
+// Atmospheric lookup table for spectral and RGB rendering
 // Must match CPU-side LUT data layout
 //
-// SPECTRAL MODE:
-// - sunRadiance_spectral: Spectral radiance at current wavelength (W·sr⁻¹·m⁻²·nm⁻¹)
-// - skyRadiance_spectral: Spectral radiance at current wavelength (W·sr⁻¹·m⁻²·nm⁻¹)
+// DUAL MODE SUPPORT:
+// - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb (float3)
+// - Spectral mode: Use sunRadiance_spectral and skyRadiance_spectral (float)
 // ============================================================================
 
 struct LUTData {
-    float3 sunDirection;        // Normalized sun direction vector (FROM surface TO sun)
-    float  sunRadiance_spectral; // Sun spectral radiance at current λ
-    float  skyRadiance_spectral; // Sky spectral radiance at current λ
-    float  _pad0;
-    float  _pad1;
-    float  _pad2;
+    float3 sunDirection;         // Normalized sun direction vector (FROM surface TO sun)
+    float  sunRadiance_spectral; // Sun spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
+
+    float3 sunRadiance_rgb;      // Sun RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
+    float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
+
+    float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
+    float  _pad0;                // Padding for alignment
 };
 
 // ============================================================================

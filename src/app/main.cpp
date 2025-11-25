@@ -33,15 +33,19 @@ using namespace quantiloom;
 // ============================================================================
 // LUT Data Structure (matches shader LUTData structure)
 // ============================================================================
+// Dual mode support: RGB and spectral
+// ============================================================================
 
 struct LUTData {
-    glm::vec3 sunDirection;        // FROM surface TO sun (normalized)
-    f32 sunRadiance_spectral;       // Spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
-    f32 skyRadiance_spectral;       // Spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
-    f32 _pad0;
-    f32 _pad1;
-    f32 _pad2;
-};
+    glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
+    f32 sunRadiance_spectral;       // Spectral radiance at current λ, offset 12
+
+    glm::vec3 sunRadiance_rgb;      // RGB radiance for RGB mode, offset 16
+    f32 skyRadiance_spectral;       // Spectral radiance at current λ, offset 28
+
+    glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode, offset 32
+    f32 _pad0;                      // Padding, offset 44
+};  // Total: 48 bytes
 
 // ============================================================================
 // Material Data Structure (matches shader MaterialData structure)
@@ -382,22 +386,32 @@ int main(int argc, char* argv[]) {
         );
 
         // ====================================================================
-        // Create LUT Buffer (Spectral)
+        // Create LUT Buffer (Dual Mode: RGB + Spectral)
         // ====================================================================
-        QL_LOG_INFO("Creating spectral LUT buffer...");
+        QL_LOG_INFO("Creating LUT buffer...");
 
-        // Convert RGB radiance to spectral radiance (average of RGB channels)
-        // For single-wavelength mode, we approximate spectral radiance from RGB config
+        // For spectral mode: Convert RGB to scalar (average of RGB channels)
         f32 sunRadiance_spectral = (sunRadiance.r + sunRadiance.g + sunRadiance.b) / 3.0f;
         f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
-        QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", sunRadiance_spectral);
-        QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", skyRadiance_spectral);
+        if (spectral_mode == SpectralMode::RGB) {
+            QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr⁻¹·m⁻²",
+                        sunRadiance.r, sunRadiance.g, sunRadiance.b);
+            QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr⁻¹·m⁻²",
+                        skyRadiance.r, skyRadiance.g, skyRadiance.b);
+        } else {
+            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", sunRadiance_spectral);
+            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", skyRadiance_spectral);
+        }
 
         LUTData lutData;
         lutData.sunDirection = sunDirection;
+
+        // Fill both spectral and RGB fields for flexibility
         lutData.sunRadiance_spectral = sunRadiance_spectral;
         lutData.skyRadiance_spectral = skyRadiance_spectral;
+        lutData.sunRadiance_rgb = sunRadiance;
+        lutData.skyRadiance_rgb = skyRadiance;
 
         GpuBuffer lutBuffer(
             context.GetAllocator(),

@@ -243,14 +243,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // ========================================================================
-    // Fetch sun/sky spectral data from LUT
+    // Fetch sun/sky lighting data from LUT
     // ========================================================================
 
     LUTData lut = skyLUT[0];
     // FIXED: Use SafeNormalize in case LUT data is invalid
     float3 sunDir = SafeNormalize(lut.sunDirection, float3(0.0, 1.0, 0.0));
-    float sunRadiance_spectral = lut.sunRadiance_spectral;
-    float skyRadiance_spectral = lut.skyRadiance_spectral;
+
+    // Choose lighting based on spectral mode
+    float3 sunRadiance;
+    float3 skyRadiance;
+
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+        // RGB mode: Use full RGB lighting
+        sunRadiance = lut.sunRadiance_rgb;
+        skyRadiance = lut.skyRadiance_rgb;
+    } else {
+        // Spectral modes: Use scalar spectral radiance (replicate to RGB)
+        sunRadiance = float3(lut.sunRadiance_spectral, lut.sunRadiance_spectral, lut.sunRadiance_spectral);
+        skyRadiance = float3(lut.skyRadiance_spectral, lut.skyRadiance_spectral, lut.skyRadiance_spectral);
+    }
 
     // ========================================================================
     // PBR Shading
@@ -274,7 +286,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Direct sun lighting: L_out = BRDF * L_sun * (N · L)
     float NdotL = max(dot(normal, L), 0.0);
-    float3 directSun = brdf * sunRadiance_spectral * NdotL;
+    float3 directSun = brdf * sunRadiance * NdotL;
 
     // Sky ambient lighting (approximate hemispherical integration)
     // For PBR, we use the diffuse term only (specular requires IBL in M2+)
@@ -282,7 +294,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         lerp(float3(0.04, 0.04, 0.04), albedo, metallic),
         max(dot(normal, V), 0.0)
     )) * (1.0 - metallic);
-    float3 skyAmbient = kD * albedo / PI * skyRadiance_spectral;
+    float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
     // Total outgoing radiance: direct sun + sky ambient + emissive
     float3 radiance = directSun + skyAmbient + emissive;
