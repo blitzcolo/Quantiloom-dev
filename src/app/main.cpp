@@ -482,6 +482,8 @@ int main(int argc, char* argv[]) {
                         mat.name,
                         mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b, mat.baseColorFactor.a,
                         mat.metallicFactor, mat.roughnessFactor);
+            QL_LOG_INFO("    [DEBUG] emissive=[{:.3f},{:.3f},{:.3f}]",
+                        mat.emissiveFactor.r, mat.emissiveFactor.g, mat.emissiveFactor.b);
             QL_LOG_INFO("    [DEBUG] Texture indices: baseColor={} metallicRough={} normal={} emissive={}",
                         mat.baseColorTextureIndex, mat.metallicRoughnessTextureIndex,
                         mat.normalTextureIndex, mat.emissiveTextureIndex);
