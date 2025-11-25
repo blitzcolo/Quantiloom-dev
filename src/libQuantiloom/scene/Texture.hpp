@@ -52,6 +52,9 @@ struct Texture {
     // Pixel data (CPU memory, row-major, RGBA8 format)
     std::vector<u8> pixels;
 
+    // Color space (glTF 2.0 spec requires baseColor/emissive in sRGB, others in linear)
+    bool isSRGB = false;  // Default to linear
+
     // Sampler parameters
     TextureSampler sampler;
 

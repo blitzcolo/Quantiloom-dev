@@ -98,8 +98,13 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         throw std::runtime_error("Texture pixel data size mismatch");
     }
 
-    QL_LOG_INFO("  Uploading texture '{}': {}x{} RGBA8 ({} bytes)",
-                texture.name, texture.width, texture.height, bufferSize);
+    // Choose format based on color space (glTF 2.0 spec)
+    // sRGB textures (baseColor, emissive) need gamma-correct sampling
+    VkFormat format = texture.isSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+    const char* formatName = texture.isSRGB ? "RGBA8_SRGB" : "RGBA8_UNORM";
+
+    QL_LOG_INFO("  Uploading texture '{}': {}x{} {} ({} bytes)",
+                texture.name, texture.width, texture.height, formatName, bufferSize);
 
     // Step 1: Create staging buffer (CPU-accessible)
     GpuBuffer stagingBuffer(
@@ -114,13 +119,13 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
     std::memcpy(data, texture.pixels.data(), bufferSize);
     stagingBuffer.Unmap();
 
-    // Step 3: Create device-local GPU image (RGBA8_UNORM)
+    // Step 3: Create device-local GPU image with correct format
     auto gpuImage = std::make_unique<GpuImage>(
         m_context.GetAllocator(),
         m_context.GetDevice(),
         texture.width,
         texture.height,
-        VK_FORMAT_R8G8B8A8_UNORM,  // Standard 8-bit RGBA format
+        format,  // sRGB or UNORM based on texture usage
         VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY,
         1  // mipLevels (no mipmapping for M1)
@@ -132,7 +137,7 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         CommandHelper::TransitionImageLayout(
             cmd,
             gpuImage->GetImage(),
-            VK_FORMAT_R8G8B8A8_UNORM,
+            format,  // Use correct format (SRGB or UNORM)
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             1  // mipLevels
@@ -164,7 +169,7 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         CommandHelper::TransitionImageLayout(
             cmd,
             gpuImage->GetImage(),
-            VK_FORMAT_R8G8B8A8_UNORM,
+            format,  // Use correct format (SRGB or UNORM)
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             1  // mipLevels
