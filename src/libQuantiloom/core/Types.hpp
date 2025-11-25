@@ -58,23 +58,6 @@ enum class SpectralMode : u32 {
     LWIR_Fused   = 4   // Long-wave IR fusion (8000-12000nm)
 };
 
-// Convert string from config to SpectralMode
-inline Result<SpectralMode, String> ParseSpectralMode(StringView mode_str) {
-    if (mode_str == "single" || mode_str == "single_wavelength") {
-        return SpectralMode::Single;
-    } else if (mode_str == "rgb" || mode_str == "RGB") {
-        return SpectralMode::RGB;
-    } else if (mode_str == "multispectral") {
-        return SpectralMode::Multispectral;
-    } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
-        return SpectralMode::MWIR_Fused;
-    } else if (mode_str == "lwir_fused" || mode_str == "LWIR") {
-        return SpectralMode::LWIR_Fused;
-    } else {
-        return Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str));
-    }
-}
-
 // ============================================================================
 // String Types
 // ============================================================================
@@ -153,6 +136,29 @@ private:
 template<typename E>
 auto Err(E&& error) {
     return typename Result<int, E>::Err(std::forward<E>(error));
+}
+
+// ============================================================================
+// Spectral Mode Parsing
+// ============================================================================
+// Convert string from config to SpectralMode
+// Defined here (after String/Result) to avoid forward reference issues
+// ============================================================================
+
+inline Result<SpectralMode, String> ParseSpectralMode(StringView mode_str) {
+    if (mode_str == "single" || mode_str == "single_wavelength") {
+        return SpectralMode::Single;
+    } else if (mode_str == "rgb" || mode_str == "RGB") {
+        return SpectralMode::RGB;
+    } else if (mode_str == "multispectral") {
+        return SpectralMode::Multispectral;
+    } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
+        return SpectralMode::MWIR_Fused;
+    } else if (mode_str == "lwir_fused" || mode_str == "LWIR") {
+        return SpectralMode::LWIR_Fused;
+    } else {
+        return Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str));
+    }
 }
 
 /// Error codes for Quantiloom operations
