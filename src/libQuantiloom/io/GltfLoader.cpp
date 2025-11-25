@@ -524,6 +524,20 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
         scene.materials.push_back(Material::CreateLambertian(glm::vec3(0.8f), "DefaultMaterial"));
     }
 
+    // Mark textures as sRGB based on usage (glTF 2.0 color space spec)
+    // - baseColor and emissive textures: sRGB (gamma-encoded)
+    // - metallic/roughness, normal, occlusion: Linear
+    for (const auto& mat : scene.materials) {
+        if (mat.baseColorTextureIndex >= 0 && mat.baseColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.baseColorTextureIndex].isSRGB = true;
+            QL_LOG_INFO("  [DEBUG] Marked texture {} (baseColor) as sRGB", mat.baseColorTextureIndex);
+        }
+        if (mat.emissiveTextureIndex >= 0 && mat.emissiveTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.emissiveTextureIndex].isSRGB = true;
+            QL_LOG_INFO("  [DEBUG] Marked texture {} (emissive) as sRGB", mat.emissiveTextureIndex);
+        }
+    }
+
     // Load meshes
     scene.meshes.reserve(model.meshes.size());
     for (size_t i = 0; i < model.meshes.size(); ++i) {
