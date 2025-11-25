@@ -44,6 +44,38 @@ using f64 = double;
 using Wavelength = f32;
 
 // ============================================================================
+// Spectral Rendering Modes
+// ============================================================================
+// Defines different spectral rendering pipelines supported by Quantiloom
+// IMPORTANT: Must match shader defines in common.hlsli!
+// ============================================================================
+
+enum class SpectralMode : u32 {
+    Single       = 0,  // Single wavelength (grayscale output)
+    RGB          = 1,  // RGB rendering with spectral conversions
+    Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
+    MWIR_Fused   = 3,  // Mid-wave IR fusion (3000-5000nm)
+    LWIR_Fused   = 4   // Long-wave IR fusion (8000-12000nm)
+};
+
+// Convert string from config to SpectralMode
+inline Result<SpectralMode, String> ParseSpectralMode(StringView mode_str) {
+    if (mode_str == "single" || mode_str == "single_wavelength") {
+        return SpectralMode::Single;
+    } else if (mode_str == "rgb" || mode_str == "RGB") {
+        return SpectralMode::RGB;
+    } else if (mode_str == "multispectral") {
+        return SpectralMode::Multispectral;
+    } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
+        return SpectralMode::MWIR_Fused;
+    } else if (mode_str == "lwir_fused" || mode_str == "LWIR") {
+        return SpectralMode::LWIR_Fused;
+    } else {
+        return Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str));
+    }
+}
+
+// ============================================================================
 // String Types
 // ============================================================================
 using String = std::string;

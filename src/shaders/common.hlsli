@@ -5,12 +5,25 @@
 //
 // SPECTRAL RENDERING NOTES:
 // - wavelength_nm in CameraData specifies current wavelength (nanometers)
-// - For single-wavelength mode: render at one λ, output as grayscale RGB
+// - spectral_mode determines rendering pipeline: single, RGB, MWIR, LWIR, etc.
 // - For multi-wavelength mode (M2+): render multiple λ separately
 // ============================================================================
 
 #ifndef QUANTILOOM_COMMON_HLSLI
 #define QUANTILOOM_COMMON_HLSLI
+
+// ============================================================================
+// Spectral Rendering Modes
+// ============================================================================
+// Defines different spectral rendering pipelines supported by Quantiloom
+// ============================================================================
+
+// IMPORTANT: These values MUST match SpectralMode enum in C++ code!
+#define SPECTRAL_MODE_SINGLE       0  // Single wavelength (grayscale output)
+#define SPECTRAL_MODE_RGB          1  // RGB rendering with spectral conversions
+#define SPECTRAL_MODE_MULTISPECTRAL 2  // Multiple wavelengths (hyperspectral cube) - TBD
+#define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
+#define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)
 
 // ============================================================================
 // Ray Payload
@@ -57,7 +70,7 @@ struct CameraData {
     float3 right;          // Right vector (normalized)
     float  wavelength_nm;  // Current wavelength (nanometers) for spectral rendering
     float3 up;             // Up vector (normalized)
-    float  _pad1;
+    uint   spectral_mode;  // Spectral rendering mode (see SPECTRAL_MODE_* defines)
 };
 
 // ============================================================================

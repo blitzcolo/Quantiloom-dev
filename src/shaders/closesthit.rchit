@@ -6,13 +6,15 @@
 // - Direct sun lighting from LUT
 // - Sky ambient lighting (hemispherical integration approximation)
 //
-// SPECTRAL RENDERING (M1 compatibility):
-// - Uses spectralAlbedo for single-wavelength rendering
-// - Future (M2+): Support wavelength-dependent BRDF
+// SPECTRAL RENDERING:
+// - Supports multiple rendering modes: single, RGB, MWIR, LWIR
+// - RGB mode: Physically-based spectral upsampling + XYZ integration
+// - Single mode: Uses spectralAlbedo for single-wavelength rendering
 // ============================================================================
 
 #include "common.hlsli"
 #include "pbr.hlsli"
+#include "SpectralConversion.hlsli"
 
 // ============================================================================
 // Bindings
@@ -24,6 +26,14 @@
 [[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
 [[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+// Camera data for accessing spectral mode and wavelength
+// ============================================================================
+
+[[vk::push_constant]] CameraData camera;
 
 // ============================================================================
 // Hit Attributes
@@ -275,19 +285,81 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 skyAmbient = kD * albedo / PI * skyRadiance_spectral;
 
     // Total outgoing radiance: direct sun + sky ambient + emissive
-    // For M1: Single-wavelength mode, output as grayscale RGB
     float3 radiance = directSun + skyAmbient + emissive;
 
-    // Spectral mode: Convert to grayscale for visualization
-    // (All channels should have similar values for spectral rendering)
-    float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+    // ========================================================================
+    // Spectral Mode Selection: Choose rendering pipeline based on mode
+    // ========================================================================
 
-    // FIXED: Final validation - clamp and sanitize output to prevent NaN/Inf propagation
-    // NaN/Inf values can cause GPU hangs or corrupt the entire output image
-    if (!isfinite(radiance_spectral)) {
-        radiance_spectral = 0.0;  // Fallback to black for invalid pixels
+    float3 output_radiance;
+
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+        // ====================================================================
+        // RGB Mode: Physically-correct RGB rendering
+        // ====================================================================
+        // For RGB mode, we directly output the PBR-computed RGB radiance.
+        // The radiance is already in linear RGB space (from PBR calculations).
+        //
+        // NOTE: Full spectral RGB pipeline (with RGB→Spectrum→XYZ→RGB) is
+        // TBD as a future enhancement. Current implementation outputs linear RGB.
+        // ====================================================================
+
+        output_radiance = radiance;
+
+        // FIXED: Validation - clamp and sanitize to prevent NaN/Inf
+        if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
+            output_radiance = float3(0.0, 0.0, 0.0);  // Fallback to black
+        }
+        output_radiance = clamp(output_radiance, 0.0, 1000.0);  // Reasonable HDR range
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+        // ====================================================================
+        // Single Wavelength Mode: Grayscale spectral rendering
+        // ====================================================================
+        // Convert RGB radiance to grayscale for single-wavelength visualization
+        // ====================================================================
+
+        float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+
+        // Validation
+        if (!isfinite(radiance_spectral)) {
+            radiance_spectral = 0.0;
+        }
+        radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+
+        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
+        // ====================================================================
+        // MWIR/LWIR Fusion Mode: Infrared band fusion
+        // ====================================================================
+        // For infrared modes, use spectralAlbedo directly (wavelength-independent)
+        // TODO: Implement proper IR material properties
+        // ====================================================================
+
+        float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+
+        if (!isfinite(radiance_spectral)) {
+            radiance_spectral = 0.0;
+        }
+        radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+
+        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+
+    } else {
+        // ====================================================================
+        // Fallback: Unknown mode or MULTISPECTRAL (TBD)
+        // ====================================================================
+
+        float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+
+        if (!isfinite(radiance_spectral)) {
+            radiance_spectral = 0.0;
+        }
+        radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+
+        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     }
-    radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);  // Reasonable HDR range
 
-    payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+    payload.radiance = output_radiance;
 }

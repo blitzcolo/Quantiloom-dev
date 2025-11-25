@@ -22,7 +22,7 @@ struct CameraData {
     glm::vec3 right;         // Right vector (normalized)
     f32 wavelength_nm;       // Current wavelength (nanometers) for spectral rendering
     glm::vec3 up;            // Up vector (normalized)
-    f32 _pad1;               // Padding for alignment
+    u32 spectral_mode;       // Spectral rendering mode (see SpectralMode enum)
 };
 
 class QL_API Camera {

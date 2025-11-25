@@ -206,16 +206,20 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Output: {}", outputPath);
 
         // Spectral settings
-        String spectralMode = config.Get<String>("spectral.mode", "single_wavelength");
+        String spectralModeStr = config.Get<String>("spectral.mode", "rgb");  // Default to RGB
         f32 wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
 
-        QL_LOG_INFO("  Spectral mode: {}", spectralMode);
-        QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
-
-        if (spectralMode != "single_wavelength") {
-            QL_LOG_ERROR("Only 'single_wavelength' mode is supported in this version");
+        // Parse spectral mode
+        auto spectralModeResult = ParseSpectralMode(spectralModeStr);
+        if (!spectralModeResult.has_value()) {
+            QL_LOG_ERROR("Invalid spectral mode: {}", spectralModeStr);
+            QL_LOG_ERROR("Supported modes: single, rgb, mwir_fused, lwir_fused");
             return 1;
         }
+        SpectralMode spectral_mode = *spectralModeResult;
+
+        QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
+        QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
 
         // Camera settings
         f32 aspectRatio = static_cast<f32>(width) / static_cast<f32>(height);
@@ -495,9 +499,10 @@ int main(int argc, char* argv[]) {
         // Bind textures (bindless arrays)
         pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers()); // Binding 6, 7
 
-        // Set camera parameters (with spectral wavelength)
+        // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();
         cameraData.wavelength_nm = wavelength_nm;  // Override with config wavelength
+        cameraData.spectral_mode = static_cast<u32>(spectral_mode);  // Set rendering mode
         pipeline.SetCameraData(cameraData);
 
         QL_LOG_INFO("  Pipeline created and resources bound");
