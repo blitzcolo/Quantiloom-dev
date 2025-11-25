@@ -223,10 +223,11 @@ if(tinygltf_ADDED)
     target_include_directories(tinygltf INTERFACE
         ${tinygltf_SOURCE_DIR}
     )
-    # tinygltf requires stb_image for texture loading (already bundled)
-    target_compile_definitions(tinygltf INTERFACE
-        TINYGLTF_NO_EXTERNAL_IMAGE  # Use built-in stb_image
-    )
+    # tinygltf uses bundled stb_image for texture loading (PNG/JPEG decoding)
+    # No additional compile definitions needed - defaults are correct:
+    #   - External images (URI) will be loaded automatically
+    #   - Embedded images (DataURI) will be decoded
+    #   - Binary buffers will be loaded from .bin files
     message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
 endif()
 

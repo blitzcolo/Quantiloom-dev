@@ -15,15 +15,19 @@
 // - Parse glTF 2.0 files using tinygltf library
 // - Convert glTF meshes to Quantiloom Mesh/GeometryPrimitive format
 // - Convert glTF PBR materials to Quantiloom Material format
-// - Load embedded textures (PNG/JPEG) to Quantiloom Texture format
+// - Load textures (embedded/external PNG/JPEG) to Quantiloom Texture format
 // - Build Scene hierarchy with nodes and transforms
 //
 // Supported Features:
 // - Meshes with multiple primitives
 // - PBR metallic-roughness materials
-// - Embedded textures (PNG/JPEG via base64 or binary glb)
+// - Textures (all glTF 2.0 formats):
+//   * Embedded textures (base64 DataURI in .gltf)
+//   * External textures (PNG/JPEG files via URI)
+//   * Binary embedded textures (.glb format)
 // - Scene graph transforms (flattened to world space)
 // - Normal maps, emissive maps
+// - File formats: .gltf (JSON + external resources), .glb (binary)
 //
 // Not Supported (M2):
 // - Animations

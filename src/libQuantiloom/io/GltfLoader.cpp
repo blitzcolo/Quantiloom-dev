@@ -217,7 +217,7 @@ Texture GltfLoader::ParseTexture(const void* gltfModelPtr, int textureIndex) {
     tex.height = static_cast<u32>(gltfImage.height);
     tex.channels = static_cast<u32>(gltfImage.component);
 
-    // Copy pixel data (tinygltf already decoded PNG/JPEG)
+    // Copy pixel data (tinygltf loaded and decoded PNG/JPEG from DataURI, external file, or .glb)
     tex.pixels = gltfImage.image;
 
     // Parse sampler parameters
