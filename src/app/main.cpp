@@ -211,7 +211,6 @@ int main(int argc, char* argv[]) {
 
         // Spectral settings
         String spectralModeStr = config.Get<String>("spectral.mode", "rgb");  // Default to RGB
-        f32 wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
 
         // Parse spectral mode
         auto spectralModeResult = ParseSpectralMode(spectralModeStr);
@@ -223,7 +222,15 @@ int main(int argc, char* argv[]) {
         SpectralMode spectral_mode = *spectralModeResult;
 
         QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
-        QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
+
+        // Only read wavelength_nm for modes that require it (single, MWIR, LWIR)
+        f32 wavelength_nm = 550.0f;  // Default value (unused in RGB mode)
+        if (spectral_mode == SpectralMode::Single ||
+            spectral_mode == SpectralMode::MWIR_Fused ||
+            spectral_mode == SpectralMode::LWIR_Fused) {
+            wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
+            QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
+        }
 
         // Camera settings
         f32 aspectRatio = static_cast<f32>(width) / static_cast<f32>(height);
@@ -524,7 +531,13 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         // Render Frame
         // ====================================================================
-        QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm...", wavelength_nm);
+        if (spectral_mode == SpectralMode::Single ||
+            spectral_mode == SpectralMode::MWIR_Fused ||
+            spectral_mode == SpectralMode::LWIR_Fused) {
+            QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm...", wavelength_nm);
+        } else {
+            QL_LOG_INFO("Rendering frame in RGB mode...");
+        }
         QL_LOG_INFO("  [DEBUG] Starting TraceRays command submission...");
 
         try {
@@ -560,7 +573,11 @@ int main(int argc, char* argv[]) {
         img.channelNames = {"R", "G", "B", "A"};
         img.metadata["renderer"] = "Quantiloom Spectral";
         img.metadata["mode"] = spectralModeStr;
-        img.metadata["wavelength_nm"] = std::to_string(wavelength_nm);
+        if (spectral_mode == SpectralMode::Single ||
+            spectral_mode == SpectralMode::MWIR_Fused ||
+            spectral_mode == SpectralMode::LWIR_Fused) {
+            img.metadata["wavelength_nm"] = std::to_string(wavelength_nm);
+        }
         img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
         img.metadata["spp"] = std::to_string(spp);
 
@@ -589,7 +606,11 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Rendering COMPLETED");
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
-        QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
+        if (spectral_mode == SpectralMode::Single ||
+            spectral_mode == SpectralMode::MWIR_Fused ||
+            spectral_mode == SpectralMode::LWIR_Fused) {
+            QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
+        }
         QL_LOG_INFO("  Output: {}", outputPath);
         QL_LOG_INFO("========================================");
 
