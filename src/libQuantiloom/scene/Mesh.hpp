@@ -34,6 +34,7 @@ struct GeometryPrimitive {
     std::vector<glm::vec3> positions;  // Vertex positions (object space)
     std::vector<glm::vec3> normals;    // Vertex normals (normalized, object space)
     std::vector<glm::vec2> uvs;        // Texture coordinates [0, 1]
+    std::vector<glm::vec4> tangents;   // Tangent vectors (xyz = tangent, w = handedness ±1)
 
     // Triangle indices (3 per triangle)
     std::vector<u32> indices;
@@ -55,6 +56,11 @@ struct GeometryPrimitive {
         return static_cast<u32>(indices.size()) / 3;
     }
 
+    // Check if primitive has tangent data
+    bool HasTangents() const {
+        return !tangents.empty();
+    }
+
     // Check if primitive is valid
     bool IsValid() const {
         // Must have at least 3 vertices forming 1 triangle
@@ -62,11 +68,14 @@ struct GeometryPrimitive {
             return false;
         }
 
-        // Normals and UVs must match vertex count (if present)
+        // Normals, UVs, and tangents must match vertex count (if present)
         if (!normals.empty() && normals.size() != positions.size()) {
             return false;
         }
         if (!uvs.empty() && uvs.size() != positions.size()) {
+            return false;
+        }
+        if (!tangents.empty() && tangents.size() != positions.size()) {
             return false;
         }
 

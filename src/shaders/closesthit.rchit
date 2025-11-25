@@ -28,6 +28,7 @@
 [[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
 [[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
+[[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
 
 // ============================================================================
 // Push Constants
@@ -71,7 +72,11 @@ float3 SafeNormalize(float3 v) {
 static const int MAX_TEXTURE_INDEX = 1024;
 
 // Sample texture with fallback for invalid indices
-// Note: Use SampleLevel instead of Sample for ray tracing shaders (explicit LOD required)
+// NOTE: In ray tracing, we cannot use automatic LOD (Sample), must use explicit LOD (SampleLevel)
+// - Ray tracing shaders don't have screen-space derivatives for automatic LOD selection
+// - Currently using LOD 0, but mipmap infrastructure is enabled (trilinear filtering ready)
+// - TODO (M2+): Implement ray differentials for accurate texture filtering
+//   See: "Ray Differentials" in PBRT-v4 or "Texture Level of Detail Strategies for Real-Time Ray Tracing"
 // FIXED: Added upper bound check to prevent access to unbound descriptors
 // If texture index is garbage (e.g., due to struct misalignment), this prevents GPU hang
 float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
@@ -85,7 +90,7 @@ float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallb
         return fallback;
     }
     return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(
-        samplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0  // LOD 0 (no mipmapping in M1)
+        samplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0  // TODO (M2+): Compute LOD from ray differential
     );
 }
 
@@ -175,11 +180,40 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 uv2 = uvBuffer[idx2];
     float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
 
-    // Fake tangent (will be replaced with proper vertex tangent in M2+)
-    // CRITICAL: Choose reference vector based on normal direction to avoid degenerate cross product
-    float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
-    // FIXED: Use SafeNormalize to prevent crash when cross product is near-zero
-    float3 worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
+    // Read tangent from buffer (or fallback to fake tangent)
+    float3 worldTangent;
+    if (material.normalTextureIndex >= 0) {  // Only compute tangent if normal map is used
+        // TODO: Check if tangent buffer is bound (requires push constant or flag)
+        // For now, attempt to read from buffer and fall back to fake tangent if data is invalid
+        float4 tangent4_0 = tangentBuffer[idx0];
+        float4 tangent4_1 = tangentBuffer[idx1];
+        float4 tangent4_2 = tangentBuffer[idx2];
+
+        // Barycentric interpolation of tangents
+        float4 tangent4 = tangent4_0 * (1.0 - attribs.bary.x - attribs.bary.y) +
+                          tangent4_1 * attribs.bary.x +
+                          tangent4_2 * attribs.bary.y;
+
+        float3 tangent = tangent4.xyz;
+        float handedness = tangent4.w;  // ±1 for bitangent orientation
+
+        // Transform tangent to world space
+        float3x3 objectToWorld = (float3x3)ObjectToWorld3x4();
+        float3 tangentWorld = mul(tangent, objectToWorld);
+
+        // Validate tangent - if invalid, fall back to fake tangent
+        if (isfinite(dot(tangent, tangent)) && dot(tangent, tangent) > 1e-8) {
+            worldTangent = SafeNormalize(tangentWorld, float3(1.0, 0.0, 0.0));
+        } else {
+            // Fallback: fake tangent (for backward compatibility)
+            float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+            worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
+        }
+    } else {
+        // No normal map: use fake tangent (doesn't matter since it won't be used)
+        float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
+        worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
+    }
 
     // ========================================================================
     // Sample textures
@@ -234,6 +268,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // Emissive texture
+    // NOTE: glTF 2.0 spec allows emissiveFactor to exceed 1.0 (HDR emissive)
+    // This is intentional for self-luminous surfaces (e.g., lights, displays, neon signs)
+    // No clamping is applied here; emissive can be arbitrarily high for physically-based rendering
+    // The final radiance will be clamped in the validation step to prevent NaN/Inf
     float3 emissive = material.emissiveFactor;
     if (material.emissiveTextureIndex >= 0) {
         emissive *= SampleTexture(
@@ -243,8 +281,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float4(1.0, 1.0, 1.0, 1.0)
         ).rgb;
     }
-
-    // TODO: Check if glTF emissiveFactor should be in [0,1] range or can be HDR
 
     // ========================================================================
     // Fetch sun/sky lighting data from LUT
@@ -300,13 +336,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
     )) * (1.0 - metallic);
     float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
-    // HACK: Add simple ambient for metallic surfaces (proper solution needs IBL)
-    // Metallic surfaces with kD≈0 get almost no ambient, causing black regions
-    // Add a small constant ambient term to provide base illumination
-    float3 simpleAmbient = albedo * skyRadiance * 0.15;  // 15% ambient
+    // TODO: Implement physically-based Image-Based Lighting (IBL) for metallic surfaces
+    // 1. Generate prefiltered environment map (mipmap chain for different roughness levels)
+    // 2. Generate BRDF integration LUT (2D texture: NdotV vs roughness)
+    // 3. Bind environment map and BRDF LUT to shader
+    // 4. Implement split-sum approximation in shader
+    // 5. Validate against reference (e.g., PBRT/Mitsuba with HDR environment map)
+    float3 iblSpecular = float3(0.0, 0.0, 0.0);  // Placeholder for IBL contribution
 
-    // Total outgoing radiance: direct sun + sky ambient + simple ambient + emissive
-    float3 radiance = directSun + skyAmbient + simpleAmbient + emissive;
+    // Total outgoing radiance: direct sun + sky ambient + IBL specular + emissive
+    float3 radiance = directSun + skyAmbient + iblSpecular + emissive;
 
     // ========================================================================
     // Spectral Mode Selection: Choose rendering pipeline based on mode

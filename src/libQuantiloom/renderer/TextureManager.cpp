@@ -119,28 +119,29 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
     std::memcpy(data, texture.pixels.data(), bufferSize);
     stagingBuffer.Unmap();
 
-    // Step 3: Create device-local GPU image with correct format
+    // Step 3: Create device-local GPU image with correct format and full mipmap chain
+    u32 mipLevels = static_cast<u32>(std::floor(std::log2(std::max(texture.width, texture.height)))) + 1;
     auto gpuImage = std::make_unique<GpuImage>(
         m_context.GetAllocator(),
         m_context.GetDevice(),
         texture.width,
         texture.height,
         format,  // sRGB or UNORM based on texture usage
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY,
-        1  // mipLevels (no mipmapping for M1)
+        mipLevels  // Full mipmap chain
     );
 
     // Step 4: Execute upload via command buffer
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL
+        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL (base level only, for upload)
         CommandHelper::TransitionImageLayout(
             cmd,
             gpuImage->GetImage(),
             format,  // Use correct format (SRGB or UNORM)
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1  // mipLevels
+            1  // Only base level for initial upload
         );
 
         // Define copy region (buffer -> image)
@@ -155,7 +156,7 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         region.imageOffset = {0, 0, 0};
         region.imageExtent = {texture.width, texture.height, 1};
 
-        // Copy staging buffer to GPU image
+        // Copy staging buffer to GPU image (base level only)
         vkCmdCopyBufferToImage(
             cmd,
             stagingBuffer.GetHandle(),
@@ -165,15 +166,99 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
             &region
         );
 
-        // Transition: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-        CommandHelper::TransitionImageLayout(
-            cmd,
-            gpuImage->GetImage(),
-            format,  // Use correct format (SRGB or UNORM)
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            1  // mipLevels
-        );
+        // Generate mipmaps using vkCmdBlitImage
+        // Transition base level to TRANSFER_SRC for blit source
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.image = gpuImage->GetImage();
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.subresourceRange.levelCount = 1;
+
+        u32 mipWidth = texture.width;
+        u32 mipHeight = texture.height;
+
+        for (u32 i = 1; i < mipLevels; ++i) {
+            // Transition previous level to TRANSFER_SRC_OPTIMAL
+            barrier.subresourceRange.baseMipLevel = i - 1;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                0, nullptr,
+                0, nullptr,
+                1, &barrier);
+
+            // Blit from level i-1 to level i
+            VkImageBlit blit{};
+            blit.srcOffsets[0] = {0, 0, 0};
+            blit.srcOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = i - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+
+            if (mipWidth > 1) mipWidth /= 2;
+            if (mipHeight > 1) mipHeight /= 2;
+
+            blit.dstOffsets[0] = {0, 0, 0};
+            blit.dstOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = i;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+
+            // Transition current level to TRANSFER_DST before blit
+            barrier.subresourceRange.baseMipLevel = i;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            barrier.srcAccessMask = 0;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                0, nullptr,
+                0, nullptr,
+                1, &barrier);
+
+            vkCmdBlitImage(cmd,
+                gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &blit,
+                VK_FILTER_LINEAR);
+
+            // Transition previous level to SHADER_READ_ONLY
+            barrier.subresourceRange.baseMipLevel = i - 1;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+            vkCmdPipelineBarrier(cmd,
+                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                0, nullptr,
+                0, nullptr,
+                1, &barrier);
+        }
+
+        // Transition last mip level to SHADER_READ_ONLY
+        barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
     });
 
     return gpuImage;
@@ -206,11 +291,11 @@ VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) {
     samplerCreateInfo.compareEnable = VK_FALSE;
     samplerCreateInfo.compareOp = VK_COMPARE_OP_ALWAYS;
 
-    // Mipmapping (disabled for M1)
+    // Mipmapping (trilinear filtering)
     samplerCreateInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
     samplerCreateInfo.mipLodBias = 0.0f;
     samplerCreateInfo.minLod = 0.0f;
-    samplerCreateInfo.maxLod = 0.0f;  // No mipmaps
+    samplerCreateInfo.maxLod = VK_LOD_CLAMP_NONE;  // Use all mip levels
 
     VkSampler sampler;
     VkResult result = vkCreateSampler(m_context.GetDevice(), &samplerCreateInfo, nullptr, &sampler);

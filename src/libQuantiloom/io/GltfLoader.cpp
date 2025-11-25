@@ -422,6 +422,19 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
             QL_LOG_INFO("    [DEBUG] No UV coordinates found (TEXCOORD_0 missing)");
         }
 
+        // Tangents (optional)
+        auto tangIt = gltfPrimitive.attributes.find("TANGENT");
+        if (tangIt != gltfPrimitive.attributes.end()) {
+            const auto& tangentAccessor = gltfModelPtr->accessors[tangIt->second];
+
+            if (tangentAccessor.type != TINYGLTF_TYPE_VEC4) {
+                QL_LOG_WARN("    Tangent accessor is not VEC4, skipping tangents for primitive {}", primIdx);
+            } else {
+                primitive.tangents = ReadAccessor<glm::vec4>(gltfModelPtr, tangIt->second);
+                QL_LOG_INFO("    Loaded {} tangents", primitive.tangents.size());
+            }
+        }
+
         // Indices (required for indexed geometry)
         if (gltfPrimitive.indices >= 0) {
             primitive.indices = ReadIndices(gltfModelPtr, gltfPrimitive.indices);
