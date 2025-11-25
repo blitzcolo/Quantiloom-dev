@@ -309,6 +309,11 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         static_cast<float>(gltfMaterial.emissiveFactor[2])
     );
 
+    QL_LOG_INFO("  [DEBUG] Raw glTF emissiveFactor: [{:.3f}, {:.3f}, {:.3f}]",
+                gltfMaterial.emissiveFactor[0],
+                gltfMaterial.emissiveFactor[1],
+                gltfMaterial.emissiveFactor[2]);
+
     if (gltfMaterial.emissiveTexture.index >= 0) {
         mat.emissiveTextureIndex = gltfMaterial.emissiveTexture.index;
     }
