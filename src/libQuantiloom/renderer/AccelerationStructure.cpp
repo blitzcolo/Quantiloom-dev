@@ -71,6 +71,20 @@ void BLAS::UploadGeometryBuffers() {
         QL_LOG_INFO("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
     }
 
+    // Create tangent buffer if tangents are present (optional)
+    const bool hasTangents = !m_primitive.tangents.empty();
+    if (hasTangents) {
+        const VkDeviceSize tangentBufferSize = m_primitive.tangents.size() * sizeof(glm::vec4);
+        m_tangentBuffer = std::make_unique<GpuBuffer>(
+            allocator,
+            tangentBufferSize,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+        QL_LOG_DEBUG("  BLAS: Created tangent buffer: {} tangents ({} bytes)", m_primitive.tangents.size(), tangentBufferSize);
+    }
+
     // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
         // Create staging buffers (CPU-accessible)
@@ -117,6 +131,24 @@ void BLAS::UploadGeometryBuffers() {
             vkCmdCopyBuffer(cmd, uvStaging.GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
 
             QL_LOG_INFO("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
+        }
+
+        // Upload tangent data if present
+        if (hasTangents) {
+            const VkDeviceSize tangentBufferSize = m_primitive.tangents.size() * sizeof(glm::vec4);
+            GpuBuffer tangentStaging(
+                allocator,
+                tangentBufferSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VMA_MEMORY_USAGE_CPU_ONLY
+            );
+            tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
+
+            VkBufferCopy tangentCopyRegion{};
+            tangentCopyRegion.size = tangentBufferSize;
+            vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
+
+            QL_LOG_DEBUG("  BLAS: Uploaded {} tangents to GPU", m_primitive.tangents.size());
         }
 
         // Insert barrier - transfer writes must complete before AS build reads

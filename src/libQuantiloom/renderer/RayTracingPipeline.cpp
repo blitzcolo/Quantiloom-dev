@@ -144,7 +144,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
     constexpr u32 MAX_TEXTURES = 1024;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(9);  // Added UV buffer binding
+    std::vector<VkDescriptorSetLayoutBinding> bindings(10);  // Added UV buffer and tangent buffer bindings
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -210,9 +210,16 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[8].pImmutableSamplers = nullptr;
 
+    // Binding 9: Tangent buffer (StructuredBuffer<float4>) - Optional
+    bindings[9].binding = 9;
+    bindings[9].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[9].descriptorCount = 1;
+    bindings[9].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[9].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(9, 0);  // Updated for UV buffer
+    std::vector<VkDescriptorBindingFlags> bindingFlags(10, 0);  // Updated for UV and tangent buffers
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -239,7 +246,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 4;  // LUT + vertex + index + material buffers
+    poolSizes[2].descriptorCount = 6;  // LUT + vertex + index + material + UV + tangent buffers
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = MAX_TEXTURES;  // Texture array
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -698,6 +705,27 @@ void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) {
     write.pBufferInfo = &bufferInfo;
 
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) {
+    VkDevice device = m_context.GetDevice();
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 9;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    QL_LOG_DEBUG("  [DEBUG] Bound tangent buffer to binding 9");
 }
 
 void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews,
