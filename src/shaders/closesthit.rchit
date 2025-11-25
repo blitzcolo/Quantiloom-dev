@@ -243,10 +243,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         ).rgb;
     }
 
-    // TEMP FIX: Scale down emissive to prevent overpowering other lighting
-    // DamagedHelmet has emissiveFactor=[1,1,1] which is very strong
     // TODO: Check if glTF emissiveFactor should be in [0,1] range or can be HDR
-    emissive *= 0.1;  // Reduce emissive strength by 90%
 
     // ========================================================================
     // Fetch sun/sky lighting data from LUT

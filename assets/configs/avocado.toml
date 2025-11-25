@@ -1,0 +1,63 @@
+# ============================================================================
+# Quantiloom - Avocado glTF 2.0
+# ============================================================================
+# Tests full range of metallic/roughness parameters with glTF model
+# ============================================================================
+
+[renderer]
+resolution = [1920, 1080]
+spp = 1                        # Samples per pixel (M1: single sample)
+output = "avocado.exr" # Output file path (OpenEXR format)
+
+[spectral]
+# ============================================================================
+# Spectral Rendering Mode
+# ============================================================================
+# Available modes:
+#   - "rgb"          : RGB rendering with full color (DEFAULT)
+#   - "single"       : Single wavelength (grayscale spectral rendering)
+#   - "mwir_fused"   : Mid-wave IR fusion (3000-5000nm) - TBD
+#   - "lwir_fused"   : Long-wave IR fusion (8000-12000nm) - TBD
+#   - "multispectral": Hyperspectral cube output - TBD
+# ============================================================================
+mode = "rgb"                   # RGB mode for full color rendering
+
+[scene]
+# ============================================================================
+# glTF Model Path
+# ============================================================================
+# Specify the path to your glTF file (.gltf or .glb)
+# Examples:
+#   gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
+#   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
+# ============================================================================
+# Metal-Roughness spheres grid (tests metallic 0.0-1.0, roughness 0.0-1.0)
+gltf = "assets/models/glTF-Sample-Assets/Models/Avocado/glTF/Avocado.gltf"
+
+[camera]
+# Camera setup for viewing the glTF model
+# Adjust position and look_at based on your model's size and location
+
+# View the sphere grid from above
+position = [0.0, 0.0, 3.0]     # Camera position (world space, meters)
+look_at = [0.0, 0.0, 0.0]      # Look-at target (usually model center)
+up = [0.0, 1.0, 0.0]           # Up vector (Y-up coordinate system)
+fov_y = 45.0                   # Vertical field of view (degrees)
+
+[lighting]
+# ============================================================================
+# Lighting Configuration
+# ============================================================================
+# Sun: directional light source (Cook-Torrance specular highlights)
+# Sky: ambient hemispherical lighting (diffuse approximation)
+# ============================================================================
+
+# Strong directional sun to see specular highlights
+sun_direction = [0.5, 0.8, 0.3]   # FROM surface TO sun (normalized automatically)
+sun_radiance = [5.0, 5.0, 5.0]    # Sun radiance (RGB, averaged to spectral scalar)
+sky_radiance = [0.5, 0.7, 1.0]    # Sky radiance (RGB, averaged to spectral scalar)
+
+[material]
+# Fallback material for procedural geometry (not used for glTF models)
+albedo = [0.8, 0.8, 0.8]
