@@ -425,7 +425,7 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         // Tangents (optional)
         auto tangIt = gltfPrimitive.attributes.find("TANGENT");
         if (tangIt != gltfPrimitive.attributes.end()) {
-            const auto& tangentAccessor = gltfModelPtr->accessors[tangIt->second];
+            const auto& tangentAccessor = model.accessors[tangIt->second];
 
             if (tangentAccessor.type != TINYGLTF_TYPE_VEC4) {
                 QL_LOG_WARN("    Tangent accessor is not VEC4, skipping tangents for primitive {}", primIdx);
