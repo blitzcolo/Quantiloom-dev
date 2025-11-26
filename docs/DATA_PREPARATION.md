@@ -4,17 +4,29 @@
 
 ## 📦 必需数据 (Required Data)
 
-### 1. **BRDF Integration LUT** ✅ 已自动缓存
+### 1. **BRDF Integration LUT** ⚠️ 每次生成（可优化）
 **用途**: IBL镜面反射的split-sum approximation
-**格式**: EXR (RG32F, 512×512)
-**生成时间**: 首次生成约6秒，之后从缓存加载 <100ms
-**缓存位置**: `cache/brdf_lut_512x1024.exr`
+**格式**: 内存中的Image结构 (RG32F, 512×512)
+**生成时间**: 约6秒（每次运行都会重新生成）
+**优化方案**: TODO - 添加磁盘缓存
 
-**说明**:
-- 代码已自动处理缓存逻辑
-- 首次运行会生成并保存到`cache/`目录
-- 后续运行直接加载，启动速度提升60倍
-- 无需手动准备
+**当前状态**:
+- ⚠️ 每次运行都会重新生成（耗时6秒）
+- ✅ 生成使用蒙特卡洛积分（1024采样/像素）
+- 🔧 **待优化**: 添加HDF5或二进制缓存（见 `main.cpp:586` TODO注释）
+
+**手动预生成方案** (高级用户):
+如果需要预生成BRDF LUT以节省启动时间，可以：
+1. 运行一次渲染器生成LUT
+2. 修改`BRDFLutGenerator`添加保存功能
+3. 保存为HDF5格式（与大气LUT一致）
+4. 在`main.cpp`中添加加载逻辑
+
+**为什么暂时没有缓存？**
+- `Image`类当前没有EXR/HDF5 IO功能
+- 保持代码简洁，优先实现核心渲染功能
+- 6秒对于开发阶段可以接受
+- 后续可以轻松添加（参考 `SpectralIO::LoadHDF5`）
 
 ---
 
@@ -266,25 +278,24 @@ model_path = "models/thermal_scene.gltf"  # 带IR extension的场景
 
 ## ⚡ 性能优化
 
-### BRDF LUT缓存 (已实现)
-- **首次运行**: 6秒生成 + 保存
-- **后续运行**: <100ms 加载
-- **加速**: ~60倍
+### BRDF LUT缓存 (待实现)
+- **当前**: 每次运行生成6秒
+- **计划**: 添加HDF5缓存（<100ms加载）
+- **潜在加速**: ~60倍
+- **实现难度**: 低（参考 `SpectralIO::LoadHDF5`）
 
-### 建议的缓存策略
+### 建议的数据目录结构
 ```
 项目目录/
-├── cache/
-│   ├── brdf_lut_512x1024.exr        # BRDF LUT (自动)
-│   └── atmosphere_lut.h5             # 大气LUT (手动准备)
-├── data/
-│   ├── solar_spectrum_am15.csv       # 太阳光谱
-│   └── materials/                    # IR材质曲线
+├── data/                             # ⚠️ 可选：高精度数据
+│   ├── atmosphere_lut.h5             # 大气LUT (libRadtran生成)
+│   ├── solar_spectrum_am15.csv       # 太阳光谱 (NREL下载)
+│   └── materials/                    # IR材质曲线 (ASTER库)
 │       ├── aluminum_emissivity.csv
 │       ├── concrete_emissivity.csv
 │       └── glass_transmittance.csv
-└── models/
-    └── scene.gltf                    # 3D模型
+└── models/                           # ✅ 必需：3D场景
+    └── scene.gltf                    # 带IR extension的glTF模型
 ```
 
 ---

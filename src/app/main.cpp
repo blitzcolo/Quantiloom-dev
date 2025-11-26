@@ -581,51 +581,26 @@ int main(int argc, char* argv[]) {
         materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
 
         // ====================================================================
-        // Generate/Load BRDF Integration LUT for IBL
+        // Generate BRDF Integration LUT for IBL
         // ====================================================================
-        // BRDF LUT is expensive to generate (6+ seconds), so we cache it to disk
-        String brdfLutCachePath = "cache/brdf_lut_512x1024.exr";
-        Image brdfLutImage;
+        // TODO (Optimization): Add disk caching to avoid 6-second regeneration on each run
+        // Potential cache format: Binary (.dat) or HDF5 (.h5) with metadata
+        // Cache key: resolution + sampleCount + BRDF model (GGX)
+        // See docs/DATA_PREPARATION.md for caching strategy
+        QL_LOG_INFO("Generating BRDF integration LUT for IBL (this may take 5-10 seconds)...");
 
-        // Try to load from cache first
-        if (std::filesystem::exists(brdfLutCachePath)) {
-            QL_LOG_INFO("Loading cached BRDF LUT from: {}", brdfLutCachePath);
-            auto loadResult = Image::LoadFromEXR(brdfLutCachePath);
-            if (loadResult.has_value()) {
-                brdfLutImage = loadResult.value();
-                QL_LOG_INFO("  Loaded BRDF LUT from cache (512x512)");
-            } else {
-                QL_LOG_WARN("  Failed to load cached BRDF LUT: {}", loadResult.error());
-                QL_LOG_INFO("  Regenerating BRDF LUT...");
-                brdfLutImage = Image();  // Force regeneration
-            }
-        }
-
-        // Generate if cache miss or load failed
-        if (brdfLutImage.width == 0) {
-            QL_LOG_INFO("Generating BRDF integration LUT for IBL (this may take 5-10 seconds)...");
-
-            BRDFLutGenerator::Config brdfConfig;
-            brdfConfig.resolution = 512;
-            brdfConfig.sampleCount = 1024;
-            brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
-
-            // Save to cache for next time
-            std::filesystem::create_directories("cache");
-            if (brdfLutImage.SaveToEXR(brdfLutCachePath)) {
-                QL_LOG_INFO("  Saved BRDF LUT to cache: {}", brdfLutCachePath);
-            } else {
-                QL_LOG_WARN("  Failed to save BRDF LUT to cache");
-            }
-        }
+        BRDFLutGenerator::Config brdfConfig;
+        brdfConfig.resolution = 512;
+        brdfConfig.sampleCount = 1024;
+        Image brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
 
         // Upload BRDF LUT to GPU
         QL_LOG_INFO("  Uploading BRDF LUT to GPU...");
         GpuImage brdfLutTexture(
             context.GetAllocator(),
             context.GetDevice(),
-            brdfConfig.resolution,
-            brdfConfig.resolution,
+            512,  // width
+            512,  // height
             VK_FORMAT_R32G32_SFLOAT,  // RG32F (2 channels, 32-bit float each)
             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY
@@ -643,10 +618,10 @@ int main(int argc, char* argv[]) {
         // Upload LUT data
         {
             // Convert Image to raw buffer (RG32F format)
-            std::vector<f32> lutData(brdfConfig.resolution * brdfConfig.resolution * 2);
-            for (u32 y = 0; y < brdfConfig.resolution; ++y) {
-                for (u32 x = 0; x < brdfConfig.resolution; ++x) {
-                    u32 idx = (y * brdfConfig.resolution + x) * 2;
+            std::vector<f32> lutData(512 * 512 * 2);
+            for (u32 y = 0; y < 512; ++y) {
+                for (u32 x = 0; x < 512; ++x) {
+                    u32 idx = (y * 512 + x) * 2;
                     lutData[idx + 0] = brdfLutImage(x, y, 0);  // R channel (scale)
                     lutData[idx + 1] = brdfLutImage(x, y, 1);  // G channel (bias)
                 }
@@ -673,7 +648,7 @@ int main(int argc, char* argv[]) {
                 region.imageSubresource.baseArrayLayer = 0;
                 region.imageSubresource.layerCount = 1;
                 region.imageOffset = {0, 0, 0};
-                region.imageExtent = {brdfConfig.resolution, brdfConfig.resolution, 1};
+                region.imageExtent = {512, 512, 1};
 
                 vkCmdCopyBufferToImage(
                     cmd,
