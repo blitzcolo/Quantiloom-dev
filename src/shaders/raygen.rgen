@@ -128,9 +128,4 @@ void main() {
     // Write output (clamp for sanity)
     float3 color = clamp(payload.radiance, 0.0, 100.0);
     outputImage[launchID] = float4(color, 1.0);
-    #else
-    // DEBUG: Just write UV as color (red = X, green = Y, blue = 0)
-    float3 debugColor = float3(uv.x, uv.y, 0.0);
-    outputImage[launchID] = float4(debugColor, 1.0);
-    #endif
 }

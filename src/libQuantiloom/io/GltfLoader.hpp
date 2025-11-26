@@ -69,7 +69,8 @@ private:
     // Parse glTF material to Quantiloom Material
     // Converts PBR metallic-roughness to our format
     static Material ParseMaterial(const void* gltfModel, int materialIndex,
-                                   const std::vector<Texture>& textures);
+                                   const std::vector<Texture>& textures,
+                                   const String& gltfFilePath);
 
     // Parse glTF texture to Quantiloom Texture
     // Loads embedded image data (PNG/JPEG)

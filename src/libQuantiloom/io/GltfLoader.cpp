@@ -282,7 +282,8 @@ Texture GltfLoader::ParseTexture(const void* gltfModelPtr, int textureIndex) {
 // ============================================================================
 
 Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
-                                    const std::vector<Texture>& textures) {
+                                    const std::vector<Texture>& textures,
+                                    const String& gltfFilePath) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
 
     Material mat;
@@ -382,7 +383,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         const tinygltf::Value& irExt = irExtIt->second;
 
         // Get glTF file directory for resolving relative paths
-        std::filesystem::path gltfDir = std::filesystem::path(filepath).parent_path();
+        std::filesystem::path gltfDir = std::filesystem::path(gltfFilePath).parent_path();
 
         // Load emissivity curve
         if (irExt.Has("emissivityCurve")) {
@@ -390,13 +391,13 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             std::filesystem::path fullPath = gltfDir / curvePath;
 
             auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.IsOk()) {
-                mat.irEmissivityCurve = result.Unwrap();
+            if (result.has_value()) {
+                mat.irEmissivityCurve = result.value();
                 QL_LOG_INFO("    Loaded emissivity curve: {} ({} points)",
                             curvePath, mat.irEmissivityCurve.size());
             } else {
                 QL_LOG_ERROR("    Failed to load emissivity curve '{}': {}",
-                             curvePath, result.UnwrapErr());
+                             curvePath, result.error());
             }
         }
 
@@ -406,13 +407,13 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             std::filesystem::path fullPath = gltfDir / curvePath;
 
             auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.IsOk()) {
-                mat.irReflectanceCurve = result.Unwrap();
+            if (result.has_value()) {
+                mat.irReflectanceCurve = result.value();
                 QL_LOG_INFO("    Loaded reflectance curve: {} ({} points)",
                             curvePath, mat.irReflectanceCurve.size());
             } else {
                 QL_LOG_ERROR("    Failed to load reflectance curve '{}': {}",
-                             curvePath, result.UnwrapErr());
+                             curvePath, result.error());
             }
         }
 
@@ -422,13 +423,13 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             std::filesystem::path fullPath = gltfDir / curvePath;
 
             auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.IsOk()) {
-                mat.irTransmittanceCurve = result.Unwrap();
+            if (result.has_value()) {
+                mat.irTransmittanceCurve = result.value();
                 QL_LOG_INFO("    Loaded transmittance curve: {} ({} points)",
                             curvePath, mat.irTransmittanceCurve.size());
             } else {
                 QL_LOG_ERROR("    Failed to load transmittance curve '{}': {}",
-                             curvePath, result.UnwrapErr());
+                             curvePath, result.error());
             }
         }
 
@@ -652,7 +653,7 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
     // Load materials
     scene.materials.reserve(model.materials.size());
     for (size_t i = 0; i < model.materials.size(); ++i) {
-        scene.materials.push_back(ParseMaterial(&model, static_cast<int>(i), scene.textures));
+        scene.materials.push_back(ParseMaterial(&model, static_cast<int>(i), scene.textures, path));
     }
 
     // Ensure at least one default material exists

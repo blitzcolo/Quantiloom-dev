@@ -276,17 +276,17 @@ Result<std::vector<std::pair<f32, f32>>, String>
 SpectralIO::LoadSpectralCurveCSV(const std::filesystem::path& csvPath) {
     // Check if file exists
     if (!std::filesystem::exists(csvPath)) {
-        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err{
             "File not found: " + csvPath.string()
-        );
+        };
     }
 
     // Open CSV file
     std::ifstream file(csvPath);
     if (!file.is_open()) {
-        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err{
             "Failed to open file: " + csvPath.string()
-        );
+        };
     }
 
     std::vector<std::pair<f32, f32>> curve;
@@ -324,24 +324,24 @@ SpectralIO::LoadSpectralCurveCSV(const std::filesystem::path& csvPath) {
         }
 
         if (parsed != 2) {
-            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err{
                 "Parse error at line " + std::to_string(lineNumber) + ": '" + line + "'"
-            );
+            };
         }
 
         // Validate monotonicity
         if (wavelength <= lastWavelength) {
-            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err{
                 "Wavelengths not monotonically increasing at line " + std::to_string(lineNumber) +
                 ": " + std::to_string(wavelength) + " <= " + std::to_string(lastWavelength)
-            );
+            };
         }
 
         // Validate wavelength is positive
         if (wavelength <= 0.0f) {
-            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err{
                 "Invalid wavelength at line " + std::to_string(lineNumber) + ": " + std::to_string(wavelength)
-            );
+            };
         }
 
         // Validate value is in [0, 1] for material properties (emissivity, reflectance, transmittance)
@@ -357,15 +357,15 @@ SpectralIO::LoadSpectralCurveCSV(const std::filesystem::path& csvPath) {
 
     // Validate that we loaded at least 2 points for interpolation
     if (curve.size() < 2) {
-        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err{
             "Spectral curve must have at least 2 data points, got " + std::to_string(curve.size())
-        );
+        };
     }
 
     QL_LOG_INFO("SpectralIO::LoadSpectralCurveCSV: Loaded {} points from {} (λ: {:.1f}-{:.1f} nm)",
                 curve.size(), csvPath.filename().string(), curve.front().first, curve.back().first);
 
-    return Result<std::vector<std::pair<f32, f32>>, String>::Ok(std::move(curve));
+    return std::move(curve);
 }
 
 } // namespace quantiloom
