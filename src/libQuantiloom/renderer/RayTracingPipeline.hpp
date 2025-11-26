@@ -86,6 +86,9 @@ public:
     void BindTextures(const std::vector<VkImageView>& imageViews,
                       const std::vector<VkSampler>& samplers);
 
+    // Bind BRDF integration LUT for IBL (binding 10: texture, binding 11: sampler)
+    void BindBRDFLut(VkImageView imageView, VkSampler sampler);
+
     // Update all bindings (call after all Bind* calls)
     void UpdateDescriptorSets();
 

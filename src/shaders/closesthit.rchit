@@ -29,6 +29,8 @@
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
 [[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
 [[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
+[[vk::binding(10, 0)]] Texture2D<float2> brdfLUT;               // BRDF integration LUT for IBL
+[[vk::binding(11, 0)]] SamplerState brdfLUTSampler;             // Sampler for BRDF LUT
 
 // ============================================================================
 // Push Constants
@@ -328,21 +330,48 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float NdotL = max(dot(normal, L), 0.0);
     float3 directSun = brdf * sunRadiance * NdotL;
 
-    // Sky ambient lighting (approximate hemispherical integration)
-    // For PBR, we use the diffuse term only (specular requires IBL in M2+)
-    float3 kD = (1.0 - FresnelSchlick(
-        lerp(float3(0.04, 0.04, 0.04), albedo, metallic),
-        max(dot(normal, V), 0.0)
-    )) * (1.0 - metallic);
+    // ========================================================================
+    // Image-Based Lighting (IBL) - Diffuse and Specular
+    // ========================================================================
+
+    // Compute F0 (reflectance at normal incidence) for Fresnel calculations
+    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+
+    // ------------------------------------------------------------------------
+    // IBL Diffuse (Sky Ambient)
+    // ------------------------------------------------------------------------
+    // For diffuse IBL, use hemispherical integration approximation
+    // kD = energy not reflected specularly (energy conservation)
+    float3 kD = (1.0 - FresnelSchlick(F0, max(dot(normal, V), 0.0))) * (1.0 - metallic);
     float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
-    // TODO: Implement physically-based Image-Based Lighting (IBL) for metallic surfaces
-    // 1. Generate prefiltered environment map (mipmap chain for different roughness levels)
-    // 2. Generate BRDF integration LUT (2D texture: NdotV vs roughness)
-    // 3. Bind environment map and BRDF LUT to shader
-    // 4. Implement split-sum approximation in shader
-    // 5. Validate against reference (e.g., PBRT/Mitsuba with HDR environment map)
-    float3 iblSpecular = float3(0.0, 0.0, 0.0);  // Placeholder for IBL contribution
+    // ------------------------------------------------------------------------
+    // IBL Specular (Environment Reflection)
+    // ------------------------------------------------------------------------
+    // For specular IBL, use split-sum approximation with BRDF LUT
+    // Since we don't have a full environment cubemap, we use skyRadiance
+    // as a uniform environment (simplified but physically plausible)
+
+    // Compute reflection direction (mirror reflection around normal)
+    float3 R = ComputeReflectionDirection(V, normal);
+
+    // Sample environment at reflection direction
+    // NOTE: For full IBL, this would sample a prefiltered environment cubemap
+    // based on roughness. Here we use uniform skyRadiance (simplified).
+    // For rough surfaces, the reflection should be more diffuse, but without
+    // a proper environment map, we approximate with uniform sky color.
+    float3 prefilteredColor = skyRadiance;  // Simplified: uniform environment
+
+    // Evaluate IBL specular using split-sum approximation with BRDF LUT
+    float3 iblSpecular = EvaluateIBLSpecular(
+        normal,              // Surface normal
+        V,                   // View direction
+        F0,                  // Reflectance at normal incidence
+        roughness,           // Surface roughness
+        prefilteredColor,    // Environment radiance (simplified: uniform sky)
+        brdfLUT,             // BRDF integration lookup table
+        brdfLUTSampler       // Sampler for BRDF LUT
+    );
 
     // Total outgoing radiance: direct sun + sky ambient + IBL specular + emissive
     float3 radiance = directSun + skyAmbient + iblSpecular + emissive;

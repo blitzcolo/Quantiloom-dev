@@ -204,4 +204,100 @@ float CookTorranceBRDF_Spectral(
     return (brdf.r + brdf.g + brdf.b) / 3.0;
 }
 
+// ============================================================================
+// Image-Based Lighting (IBL) Functions
+// ============================================================================
+// Split-sum approximation for environment map specular reflection
+//
+// References:
+// - "Real Shading in Unreal Engine 4" (Brian Karis, Epic Games, 2013)
+// - "Moving Frostbite to PBR" (Sébastien Lagarde, EA Frostbite, 2014)
+//
+// Split-Sum Approximation:
+//   ∫ L(ωi) * f(ωo, ωi) * (n·ωi) dωi
+//   ≈ ∫ L(ωi) dωi * ∫ f(ωo, ωi) * (n·ωi) dωi
+//   = prefilteredColor * BRDF_LUT(NdotV, roughness)
+//
+// BRDF_LUT stores pre-integrated Fresnel term:
+//   BRDF_LUT.r = scale term (for F0)
+//   BRDF_LUT.g = bias term (for (1-F0)^5)
+//
+// Final IBL specular:
+//   L_ibl = prefilteredColor * (F0 * brdfLUT.r + brdfLUT.g)
+// ============================================================================
+
+// Fresnel-Schlick with roughness correction for IBL
+// Accounts for energy loss at grazing angles for rough surfaces
+float3 FresnelSchlickRoughness(float3 F0, float cosTheta, float roughness) {
+    cosTheta = saturate(cosTheta);
+    float oneMinusCos = 1.0 - cosTheta;
+    float oneMinusCos5 = pow(oneMinusCos, 5.0);
+
+    // Roughness correction: interpolate between F0 and 1 based on roughness
+    // At grazing angles, rough surfaces still show full Fresnel reflection
+    float3 maxReflection = max(float3(1.0 - roughness, 1.0 - roughness, 1.0 - roughness), F0);
+    return F0 + (maxReflection - F0) * oneMinusCos5;
+}
+
+// Compute specular reflection direction (mirror reflection)
+// Reflects V (view direction) around N (surface normal)
+// Returns normalized reflection vector
+float3 ComputeReflectionDirection(float3 V, float3 N) {
+    // R = 2 * (N·V) * N - V
+    return reflect(-V, N);  // Note: reflect() expects incident vector pointing TO surface
+}
+
+// Sample BRDF integration LUT for IBL
+// Returns (scale, bias) for split-sum approximation
+//
+// Texture format: RG16F or RG32F
+//   R channel: scale term (multiply by F0)
+//   G channel: bias term (add as is)
+//
+// Inputs:
+//   NdotV: dot(N, V), range [0, 1]
+//   roughness: surface roughness, range [0, 1]
+float2 SampleBRDF_LUT(Texture2D<float2> brdfLUT, SamplerState sampler, float NdotV, float roughness) {
+    // BRDF LUT is parameterized by (NdotV, roughness)
+    // x-axis: NdotV (0 = grazing, 1 = normal incidence)
+    // y-axis: roughness (0 = smooth, 1 = rough)
+    float2 uv = float2(saturate(NdotV), saturate(roughness));
+    return brdfLUT.SampleLevel(sampler, uv, 0.0);
+}
+
+// Evaluate IBL specular contribution (split-sum approximation)
+//
+// Inputs:
+//   N: surface normal (world space, normalized)
+//   V: view direction (FROM surface TO camera, normalized)
+//   F0: reflectance at normal incidence (specular color)
+//   roughness: surface roughness [0, 1]
+//   prefilteredColor: environment radiance from reflection direction
+//   brdfLUT: pre-integrated BRDF lookup texture
+//   samplerState: sampler for BRDF LUT
+//
+// Output:
+//   IBL specular radiance (W·sr⁻¹·m⁻²)
+float3 EvaluateIBLSpecular(
+    float3 N,
+    float3 V,
+    float3 F0,
+    float roughness,
+    float3 prefilteredColor,
+    Texture2D<float2> brdfLUT,
+    SamplerState samplerState
+) {
+    float NdotV = max(dot(N, V), 0.0);
+
+    // Sample BRDF LUT (pre-integrated Fresnel term)
+    float2 brdf = SampleBRDF_LUT(brdfLUT, samplerState, NdotV, roughness);
+
+    // Split-sum approximation: prefilteredColor * (F0 * scale + bias)
+    // brdf.r = scale term (multiply by F0)
+    // brdf.g = bias term (add directly)
+    float3 iblSpecular = prefilteredColor * (F0 * brdf.r + brdf.g);
+
+    return iblSpecular;
+}
+
 #endif // QUANTILOOM_PBR_HLSLI

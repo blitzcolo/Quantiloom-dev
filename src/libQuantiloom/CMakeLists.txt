@@ -50,6 +50,8 @@ add_library(libQuantiloom STATIC
     renderer/AccelerationStructure.hpp
     renderer/CommandHelper.cpp
     renderer/CommandHelper.hpp
+    renderer/BRDFLutGenerator.cpp
+    renderer/BRDFLutGenerator.hpp
 
     # Scene module
     scene/Camera.cpp

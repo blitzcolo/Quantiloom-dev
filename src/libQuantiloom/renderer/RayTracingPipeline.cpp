@@ -144,7 +144,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
     constexpr u32 MAX_TEXTURES = 1024;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(10);  // Added UV buffer and tangent buffer bindings
+    std::vector<VkDescriptorSetLayoutBinding> bindings(12);  // Added UV, tangent buffers, BRDF LUT texture + sampler
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -217,9 +217,23 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[9].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[9].pImmutableSamplers = nullptr;
 
+    // Binding 10: BRDF integration LUT texture (Texture2D<float2>)
+    bindings[10].binding = 10;
+    bindings[10].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    bindings[10].descriptorCount = 1;
+    bindings[10].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[10].pImmutableSamplers = nullptr;
+
+    // Binding 11: BRDF LUT sampler (SamplerState)
+    bindings[11].binding = 11;
+    bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[11].descriptorCount = 1;
+    bindings[11].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[11].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(10, 0);  // Updated for UV and tangent buffers
+    std::vector<VkDescriptorBindingFlags> bindingFlags(12, 0);  // Updated for all bindings including BRDF LUT
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -248,9 +262,9 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = 6;  // LUT + vertex + index + material + UV + tangent buffers
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[3].descriptorCount = MAX_TEXTURES;  // Texture array
+    poolSizes[3].descriptorCount = MAX_TEXTURES + 1;  // Texture array + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[4].descriptorCount = MAX_TEXTURES;  // Sampler array
+    poolSizes[4].descriptorCount = MAX_TEXTURES + 1;  // Sampler array + BRDF LUT sampler
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -782,6 +796,47 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     writes[1].descriptorCount = textureCount;
     writes[1].pImageInfo = samplerInfos.data();
+
+    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+}
+
+void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_INFO("Binding BRDF integration LUT to descriptor set");
+
+    // Build descriptor info for BRDF LUT texture
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = imageView;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    imageInfo.sampler = VK_NULL_HANDLE;  // Sampler is separate
+
+    // Build descriptor info for BRDF LUT sampler
+    VkDescriptorImageInfo samplerInfo{};
+    samplerInfo.sampler = sampler;
+    samplerInfo.imageView = VK_NULL_HANDLE;  // Image view is separate
+    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Not used for samplers
+
+    // Update descriptor set
+    std::vector<VkWriteDescriptorSet> writes(2);
+
+    // Binding 10: BRDF LUT texture (SAMPLED_IMAGE)
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_descriptorSet;
+    writes[0].dstBinding = 10;
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].descriptorCount = 1;
+    writes[0].pImageInfo = &imageInfo;
+
+    // Binding 11: BRDF LUT sampler
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_descriptorSet;
+    writes[1].dstBinding = 11;
+    writes[1].dstArrayElement = 0;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].descriptorCount = 1;
+    writes[1].pImageInfo = &samplerInfo;
 
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }

@@ -17,6 +17,7 @@
 #include "renderer/GpuImage.hpp"
 #include "renderer/TextureManager.hpp"
 #include "renderer/CommandHelper.hpp"
+#include "renderer/BRDFLutGenerator.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
@@ -562,6 +563,118 @@ int main(int argc, char* argv[]) {
         materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
 
         // ====================================================================
+        // Generate BRDF Integration LUT for IBL
+        // ====================================================================
+        QL_LOG_INFO("Generating BRDF integration LUT for IBL...");
+
+        // Generate BRDF LUT (512x512, 1024 samples per pixel)
+        BRDFLutGenerator::Config brdfConfig;
+        brdfConfig.resolution = 512;
+        brdfConfig.sampleCount = 1024;
+        Image brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
+
+        // Upload BRDF LUT to GPU
+        QL_LOG_INFO("  Uploading BRDF LUT to GPU...");
+        GpuImage brdfLutTexture(
+            context.GetAllocator(),
+            context.GetDevice(),
+            brdfConfig.resolution,
+            brdfConfig.resolution,
+            VK_FORMAT_R32G32_SFLOAT,  // RG32F (2 channels, 32-bit float each)
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+
+        // Transition image to TRANSFER_DST for upload
+        CommandHelper::TransitionImageLayoutImmediate(
+            context,
+            brdfLutTexture.GetImage(),
+            brdfLutTexture.GetFormat(),
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        );
+
+        // Upload LUT data
+        {
+            // Convert Image to raw buffer (RG32F format)
+            std::vector<f32> lutData(brdfConfig.resolution * brdfConfig.resolution * 2);
+            for (u32 y = 0; y < brdfConfig.resolution; ++y) {
+                for (u32 x = 0; x < brdfConfig.resolution; ++x) {
+                    u32 idx = (y * brdfConfig.resolution + x) * 2;
+                    lutData[idx + 0] = brdfLutImage(x, y, 0);  // R channel (scale)
+                    lutData[idx + 1] = brdfLutImage(x, y, 1);  // G channel (bias)
+                }
+            }
+
+            // Create staging buffer
+            VkDeviceSize bufferSize = lutData.size() * sizeof(f32);
+            GpuBuffer stagingBuffer(
+                context.GetAllocator(),
+                bufferSize,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            stagingBuffer.Upload(lutData.data(), bufferSize);
+
+            // Copy buffer to image
+            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+                VkBufferImageCopy region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = 0;  // Tightly packed
+                region.bufferImageHeight = 0;
+                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                region.imageSubresource.mipLevel = 0;
+                region.imageSubresource.baseArrayLayer = 0;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {brdfConfig.resolution, brdfConfig.resolution, 1};
+
+                vkCmdCopyBufferToImage(
+                    cmd,
+                    stagingBuffer.GetHandle(),
+                    brdfLutTexture.GetImage(),
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1,
+                    &region
+                );
+            });
+        }
+
+        // Transition image to SHADER_READ_ONLY for sampling
+        CommandHelper::TransitionImageLayoutImmediate(
+            context,
+            brdfLutTexture.GetImage(),
+            brdfLutTexture.GetFormat(),
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        );
+
+        // Create sampler for BRDF LUT (linear filtering, clamp to edge)
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;  // No mipmaps
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.mipLodBias = 0.0f;
+        samplerInfo.anisotropyEnable = VK_FALSE;
+        samplerInfo.compareEnable = VK_FALSE;
+        samplerInfo.minLod = 0.0f;
+        samplerInfo.maxLod = 0.0f;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        samplerInfo.unnormalizedCoordinates = VK_FALSE;
+
+        VkSampler brdfLutSampler = VK_NULL_HANDLE;
+        VkResult samplerResult = vkCreateSampler(context.GetDevice(), &samplerInfo, nullptr, &brdfLutSampler);
+        if (samplerResult != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create BRDF LUT sampler");
+        }
+
+        QL_LOG_INFO("  BRDF LUT uploaded successfully");
+
+        // ====================================================================
         // Create Ray Tracing Pipeline
         // ====================================================================
         QL_LOG_INFO("Creating ray tracing pipeline...");
@@ -591,6 +704,9 @@ int main(int argc, char* argv[]) {
 
         // Bind textures (bindless arrays)
         pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers()); // Binding 6, 7
+
+        // Bind BRDF integration LUT for IBL
+        pipeline.BindBRDFLut(brdfLutTexture.GetView(), brdfLutSampler);  // Binding 10, 11
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();
