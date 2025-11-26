@@ -72,7 +72,7 @@ struct LUTData {
     float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
 
     float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
-    float  _pad0;                // Padding for alignment
+    float  transmittance;        // Atmospheric transmittance τ(λ) [0, 1] (vertical path)
 };
 
 // ============================================================================

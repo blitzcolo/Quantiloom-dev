@@ -46,7 +46,7 @@ struct LUTData {
     f32 skyRadiance_spectral;       // Spectral radiance at current λ, offset 28
 
     glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode, offset 32
-    f32 _pad0;                      // Padding, offset 44
+    f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
 };  // Total: 48 bytes
 
 // ============================================================================
@@ -274,12 +274,18 @@ int main(int argc, char* argv[]) {
         }
         glm::vec3 skyRadiance(skyRadArray[0], skyRadArray[1], skyRadArray[2]);
 
+        // Atmospheric transmittance (Beer-Lambert law)
+        // Default: 0.9 (relatively clear atmosphere, ~10% attenuation)
+        f32 transmittance = config.Get<f32>("lighting.transmittance", 0.9f);
+        transmittance = std::clamp(transmittance, 0.0f, 1.0f);
+
         QL_LOG_INFO("  Sun direction: [{:.2f}, {:.2f}, {:.2f}]",
                     sunDirection.x, sunDirection.y, sunDirection.z);
         QL_LOG_INFO("  Sun radiance: [{:.2f}, {:.2f}, {:.2f}]",
                     sunRadiance.x, sunRadiance.y, sunRadiance.z);
         QL_LOG_INFO("  Sky radiance: [{:.2f}, {:.2f}, {:.2f}]",
                     skyRadiance.x, skyRadiance.y, skyRadiance.z);
+        QL_LOG_INFO("  Atmospheric transmittance: {:.3f}", transmittance);
 
         // Material settings
         auto albedoArray = config.GetArray<f32>("material.albedo");
@@ -489,6 +495,7 @@ int main(int argc, char* argv[]) {
         lutData.skyRadiance_spectral = skyRadiance_spectral;
         lutData.sunRadiance_rgb = sunRadiance;
         lutData.skyRadiance_rgb = skyRadiance;
+        lutData.transmittance = transmittance;
 
         GpuBuffer lutBuffer(
             context.GetAllocator(),

@@ -401,9 +401,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 albedo = baseColor.rgb;
     float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness);
 
-    // Direct sun lighting: L_out = BRDF * L_sun * (N · L)
+    // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
+    // L_out = BRDF * L_sun * τ(λ) * (N · L)
+    // where τ(λ) is atmospheric transmittance from LUT
     float NdotL = max(dot(normal, L), 0.0);
-    float3 directSun = brdf * sunRadiance * NdotL;
+    float3 directSun = brdf * sunRadiance * lut.transmittance * NdotL;
 
     // ========================================================================
     // Image-Based Lighting (IBL) - Diffuse and Specular
