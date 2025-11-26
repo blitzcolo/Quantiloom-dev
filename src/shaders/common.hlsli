@@ -29,10 +29,28 @@
 // Ray Payload
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline
+//
+// Ray Differentials:
+// Used for computing texture LOD (level of detail) for proper filtering
+// Tracks how ray direction changes between adjacent pixels
+//
+// References:
+// - "Ray Differentials" in PBRT-v4 §10.1
+// - Igehy, "Tracing Ray Differentials" (1999)
 // ============================================================================
 
 struct Payload {
     float3 radiance;  // Accumulated radiance (W·sr⁻¹·m⁻²)
+
+    // Ray differentials for texture filtering
+    // dDdx: change in ray direction per pixel in X direction
+    // dDdy: change in ray direction per pixel in Y direction
+    float3 dDdx;  // ∂D/∂x (ray direction differential)
+    float3 dDdy;  // ∂D/∂y (ray direction differential)
+
+    // Ray origin differentials (for perspective projection)
+    float3 dOdx;  // ∂O/∂x (ray origin differential)
+    float3 dOdy;  // ∂O/∂y (ray origin differential)
 };
 
 // ============================================================================

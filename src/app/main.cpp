@@ -18,6 +18,7 @@
 #include "renderer/TextureManager.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
+#include "renderer/PerformanceLogger.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
@@ -717,6 +718,16 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Pipeline created and resources bound");
 
         // ====================================================================
+        // Initialize Performance Logger
+        // ====================================================================
+        QL_LOG_INFO("Initializing performance logger...");
+
+        PerformanceLogger::Config perfConfig;
+        perfConfig.csvFilePath = "quantiloom_performance.csv";
+        perfConfig.enableLogging = true;
+        PerformanceLogger perfLogger(context, perfConfig);
+
+        // ====================================================================
         // Render Frame
         // ====================================================================
         if (spectral_mode == SpectralMode::Single ||
@@ -734,16 +745,33 @@ int main(int argc, char* argv[]) {
         try {
             CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
                 QL_LOG_INFO("  [DEBUG] Recording TraceRays commands...");
+
+                // Begin performance timing
+                perfLogger.BeginFrame(cmd);
+
+                // Execute ray tracing
                 pipeline.TraceRays(cmd, width, height);
+
+                // End performance timing
+                perfLogger.EndFrame(cmd);
+
                 QL_LOG_INFO("  [DEBUG] TraceRays commands recorded successfully");
             });
             QL_LOG_INFO("  [DEBUG] GPU execution completed successfully");
+
+            // Log performance metrics (after GPU completes)
+            perfLogger.LogFrame(0, width, height, spp, wavelength_nm, spectralModeStr);
+            perfLogger.Flush();
+
         } catch (const std::exception& e) {
             QL_LOG_ERROR("  [DEBUG] GPU execution FAILED: {}", e.what());
             throw;
         }
 
-        QL_LOG_INFO("  Frame rendered ({}x{})", width, height);
+        QL_LOG_INFO("  Frame rendered ({}x{}) - GPU: {:.2f} ms, {:.2f} Mrays/s",
+                    width, height,
+                    perfLogger.GetLastFrameGpuMs(),
+                    perfLogger.GetLastFrameRaysPerSec() / 1e6);
 
         // ====================================================================
         // Readback and Save
