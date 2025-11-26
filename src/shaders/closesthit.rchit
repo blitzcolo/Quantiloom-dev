@@ -508,10 +508,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         float lambda_nm = camera.wavelength_nm;
 
-        // Use spectralAlbedo as IR emissivity (simplified approximation)
-        // For quantitative IR, replace with GetIREmissivity(lambda_nm) from IR curve
-        float emissivity = material.spectralAlbedo;
-        float reflectance = material.spectralAlbedo;
+        // Use IR material properties (evaluated from curves at current wavelength)
+        // If no IR data available, fallback to spectralAlbedo approximation
+        float emissivity = material.irEmissivity;
+        float reflectance = material.irReflectance;
+        float transmittance = material.irTransmittance;
+
+        // Kirchhoff's law validation: ε + ρ + τ ≤ 1
+        // Note: GPU already receives pre-evaluated values from CPU-side curves
+        float energySum = emissivity + reflectance + transmittance;
+        if (energySum > 1.0) {
+            // Normalize to conserve energy if curves violate Kirchhoff's law
+            float normFactor = 1.0 / energySum;
+            emissivity *= normFactor;
+            reflectance *= normFactor;
+            transmittance *= normFactor;
+        }
 
         // Self-emission: ε(λ) × L_blackbody(T, λ)
         float selfEmission = 0.0;

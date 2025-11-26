@@ -1,4 +1,5 @@
 #include "GltfLoader.hpp"
+#include "SpectralIO.hpp"
 #include "core/Log.hpp"
 
 #define TINYGLTF_IMPLEMENTATION
@@ -365,7 +366,6 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     // ========================================================================
     // Check for custom IR material extension (QUANTILOOM_material_ir)
     // ========================================================================
-    // TODO (P1.2): Implement IR extension loading
     // Expected glTF extension format:
     //   "extensions": {
     //     "QUANTILOOM_material_ir": {
@@ -375,20 +375,78 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     //       "temperature_K": 300.0
     //     }
     //   }
-    //
-    // Implementation steps:
-    //   1. Check if gltfMaterial.extensions.count("QUANTILOOM_material_ir") > 0
-    //   2. Parse extension JSON object
-    //   3. Load CSV files using SpectralIO::LoadSpectralCurveCSV()
-    //   4. Populate mat.irEmissivityCurve, irReflectanceCurve, irTransmittanceCurve
-    //   5. Set mat.irTemperature_K
-    //   6. Mark mat.spectralSource = Material::SpectralSource::Measured
-    //
-    // PLACEHOLDER: Extension loading not implemented
-    if (gltfMaterial.extensions.find("QUANTILOOM_material_ir") != gltfMaterial.extensions.end()) {
-        QL_LOG_WARN("  Material '{}' has QUANTILOOM_material_ir extension, but loading is not yet implemented (placeholder).",
-                    mat.name);
-        QL_LOG_WARN("  IR extension will be ignored. To implement, see GltfLoader.cpp:350");
+    auto irExtIt = gltfMaterial.extensions.find("QUANTILOOM_material_ir");
+    if (irExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading QUANTILOOM_material_ir extension for material '{}'", mat.name);
+
+        const tinygltf::Value& irExt = irExtIt->second;
+
+        // Get glTF file directory for resolving relative paths
+        std::filesystem::path gltfDir = std::filesystem::path(filepath).parent_path();
+
+        // Load emissivity curve
+        if (irExt.Has("emissivityCurve")) {
+            std::string curvePath = irExt.Get("emissivityCurve").Get<std::string>();
+            std::filesystem::path fullPath = gltfDir / curvePath;
+
+            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
+            if (result.IsOk()) {
+                mat.irEmissivityCurve = result.Unwrap();
+                QL_LOG_INFO("    Loaded emissivity curve: {} ({} points)",
+                            curvePath, mat.irEmissivityCurve.size());
+            } else {
+                QL_LOG_ERROR("    Failed to load emissivity curve '{}': {}",
+                             curvePath, result.UnwrapErr());
+            }
+        }
+
+        // Load reflectance curve
+        if (irExt.Has("reflectanceCurve")) {
+            std::string curvePath = irExt.Get("reflectanceCurve").Get<std::string>();
+            std::filesystem::path fullPath = gltfDir / curvePath;
+
+            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
+            if (result.IsOk()) {
+                mat.irReflectanceCurve = result.Unwrap();
+                QL_LOG_INFO("    Loaded reflectance curve: {} ({} points)",
+                            curvePath, mat.irReflectanceCurve.size());
+            } else {
+                QL_LOG_ERROR("    Failed to load reflectance curve '{}': {}",
+                             curvePath, result.UnwrapErr());
+            }
+        }
+
+        // Load transmittance curve
+        if (irExt.Has("transmittanceCurve")) {
+            std::string curvePath = irExt.Get("transmittanceCurve").Get<std::string>();
+            std::filesystem::path fullPath = gltfDir / curvePath;
+
+            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
+            if (result.IsOk()) {
+                mat.irTransmittanceCurve = result.Unwrap();
+                QL_LOG_INFO("    Loaded transmittance curve: {} ({} points)",
+                            curvePath, mat.irTransmittanceCurve.size());
+            } else {
+                QL_LOG_ERROR("    Failed to load transmittance curve '{}': {}",
+                             curvePath, result.UnwrapErr());
+            }
+        }
+
+        // Load IR temperature
+        if (irExt.Has("temperature_K")) {
+            mat.irTemperature_K = static_cast<f32>(irExt.Get("temperature_K").GetNumberAsDouble());
+            QL_LOG_INFO("    IR temperature: {:.1f} K", mat.irTemperature_K);
+        }
+
+        // If we loaded any IR curves, mark as measured spectral data
+        if (mat.HasIRData()) {
+            mat.spectralSource = Material::SpectralSource::Measured;
+
+            // Validate Kirchhoff's law
+            if (!mat.ValidateIRKirchhoffLaw()) {
+                QL_LOG_WARN("    Material '{}' violates Kirchhoff's law (ε+ρ+τ > 1)", mat.name);
+            }
+        }
     }
 
     QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",

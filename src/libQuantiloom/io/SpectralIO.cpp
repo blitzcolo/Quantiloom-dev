@@ -2,6 +2,9 @@
 
 #include <H5Cpp.h>
 #include <filesystem>
+#include <fstream>
+#include <limits>
+#include <algorithm>
 
 namespace quantiloom {
 
@@ -271,31 +274,98 @@ std::optional<std::tuple<u32, u32, u32>> SpectralIO::GetDimensions(
 
 Result<std::vector<std::pair<f32, f32>>, String>
 SpectralIO::LoadSpectralCurveCSV(const std::filesystem::path& csvPath) {
-    // TODO (P1.2 - IR materials): Implement CSV parsing
-    // Expected format:
-    //   # Comments start with #
-    //   wavelength_nm, value
-    //   400.0, 0.12
-    //   410.0, 0.15
-    //   ...
-    //
-    // Requirements:
-    //   1. Skip lines starting with '#'
-    //   2. Parse two comma-separated floats per line
-    //   3. Validate wavelengths are monotonically increasing
-    //   4. Return error if file not found or parse fails
-    //
-    // Implementation steps:
-    //   - Open file with std::ifstream
-    //   - Read line by line
-    //   - Skip comments and empty lines
-    //   - Parse floats with std::stof or sscanf
-    //   - Validate monotonicity
-    //
-    // PLACEHOLDER: Return error for now
-    return Result<std::vector<std::pair<f32, f32>>, String>::Err(
-        "LoadSpectralCurveCSV not yet implemented (placeholder for P1.2)"
-    );
+    // Check if file exists
+    if (!std::filesystem::exists(csvPath)) {
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            "File not found: " + csvPath.string()
+        );
+    }
+
+    // Open CSV file
+    std::ifstream file(csvPath);
+    if (!file.is_open()) {
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            "Failed to open file: " + csvPath.string()
+        );
+    }
+
+    std::vector<std::pair<f32, f32>> curve;
+    std::string line;
+    u32 lineNumber = 0;
+    f32 lastWavelength = -std::numeric_limits<f32>::infinity();
+
+    while (std::getline(file, line)) {
+        ++lineNumber;
+
+        // Trim leading whitespace
+        size_t start = line.find_first_not_of(" \t\r\n");
+        if (start == std::string::npos) {
+            continue;  // Empty line
+        }
+
+        // Skip comments
+        if (line[start] == '#') {
+            continue;
+        }
+
+        // Parse two floats: wavelength_nm, value
+        f32 wavelength = 0.0f;
+        f32 value = 0.0f;
+
+        // Use sscanf for robust parsing
+        int parsed = std::sscanf(line.c_str(), "%f , %f", &wavelength, &value);
+        if (parsed != 2) {
+            // Try without spaces around comma
+            parsed = std::sscanf(line.c_str(), "%f, %f", &wavelength, &value);
+        }
+        if (parsed != 2) {
+            // Try with only space after comma
+            parsed = std::sscanf(line.c_str(), "%f ,%f", &wavelength, &value);
+        }
+
+        if (parsed != 2) {
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+                "Parse error at line " + std::to_string(lineNumber) + ": '" + line + "'"
+            );
+        }
+
+        // Validate monotonicity
+        if (wavelength <= lastWavelength) {
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+                "Wavelengths not monotonically increasing at line " + std::to_string(lineNumber) +
+                ": " + std::to_string(wavelength) + " <= " + std::to_string(lastWavelength)
+            );
+        }
+
+        // Validate wavelength is positive
+        if (wavelength <= 0.0f) {
+            return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+                "Invalid wavelength at line " + std::to_string(lineNumber) + ": " + std::to_string(wavelength)
+            );
+        }
+
+        // Validate value is in [0, 1] for material properties (emissivity, reflectance, transmittance)
+        if (value < 0.0f || value > 1.0f) {
+            QL_LOG_WARN("SpectralIO::LoadSpectralCurveCSV: Value {} out of [0, 1] range at line {} (clamping)",
+                        value, lineNumber);
+            value = std::clamp(value, 0.0f, 1.0f);
+        }
+
+        curve.emplace_back(wavelength, value);
+        lastWavelength = wavelength;
+    }
+
+    // Validate that we loaded at least 2 points for interpolation
+    if (curve.size() < 2) {
+        return Result<std::vector<std::pair<f32, f32>>, String>::Err(
+            "Spectral curve must have at least 2 data points, got " + std::to_string(curve.size())
+        );
+    }
+
+    QL_LOG_INFO("SpectralIO::LoadSpectralCurveCSV: Loaded {} points from {} (λ: {:.1f}-{:.1f} nm)",
+                curve.size(), csvPath.filename().string(), curve.front().first, curve.back().first);
+
+    return Result<std::vector<std::pair<f32, f32>>, String>::Ok(std::move(curve));
 }
 
 } // namespace quantiloom

@@ -127,6 +127,11 @@ struct MaterialData {
 
     // Spectral mode (M1 compatibility)
     float  spectralAlbedo;           // Scalar reflectance at current λ [0, 1]
+
+    // Infrared material properties (evaluated at current wavelength)
+    float  irEmissivity;             // IR emissivity ε(λ) [0, 1]
+    float  irReflectance;            // IR reflectance ρ(λ) [0, 1]
+    float  irTransmittance;          // IR transmittance τ(λ) [0, 1]
     float  irTemperature_K;          // IR surface temperature (K) for blackbody emission (0 = no emission)
 };
 

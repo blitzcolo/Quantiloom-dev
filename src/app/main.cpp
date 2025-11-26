@@ -72,18 +72,25 @@ struct MaterialDataCPU {
     f32 alphaCutoff;                     // offset 60, size 4
 
     f32 spectralAlbedo;                  // offset 64, size 4
-    f32 irTemperature_K;                 // offset 68, size 4
-};  // Total: 72 bytes (must match GPU MaterialData in common.hlsli)
+
+    f32 irEmissivity;                    // offset 68, size 4
+    f32 irReflectance;                   // offset 72, size 4
+    f32 irTransmittance;                 // offset 76, size 4
+    f32 irTemperature_K;                 // offset 80, size 4
+};  // Total: 84 bytes (must match GPU MaterialData in common.hlsli)
 
 // Verify struct layout matches shader expectations
 // If this fails, the CPU/GPU struct layouts are mismatched, which WILL cause GPU crashes
-static_assert(sizeof(MaterialDataCPU) == 72, "MaterialDataCPU size mismatch! Expected 72 bytes to match GPU MaterialData struct");
+static_assert(sizeof(MaterialDataCPU) == 84, "MaterialDataCPU size mismatch! Expected 84 bytes to match GPU MaterialData struct");
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 40, "emissiveFactor offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 52, "emissiveTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 64, "spectralAlbedo offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 68, "irTemperature_K offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irEmissivity) == 68, "irEmissivity offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irReflectance) == 72, "irReflectance offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTransmittance) == 76, "irTransmittance offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 80, "irTemperature_K offset mismatch");
 
 // ============================================================================
 // Scene Loading Helper
@@ -538,7 +545,10 @@ int main(int argc, char* argv[]) {
             // Spectral (M1 compatibility)
             cpuMat.spectralAlbedo = mat.spectralAlbedo;
 
-            // Infrared temperature
+            // Infrared material properties (evaluate curves at current wavelength)
+            cpuMat.irEmissivity = mat.GetIREmissivity(wavelength_nm);
+            cpuMat.irReflectance = mat.GetIRReflectance(wavelength_nm);
+            cpuMat.irTransmittance = mat.GetIRTransmittance(wavelength_nm);
             cpuMat.irTemperature_K = mat.irTemperature_K;
 
             materialData.push_back(cpuMat);
