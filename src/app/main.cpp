@@ -581,15 +581,43 @@ int main(int argc, char* argv[]) {
         materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
 
         // ====================================================================
-        // Generate BRDF Integration LUT for IBL
+        // Generate/Load BRDF Integration LUT for IBL
         // ====================================================================
-        QL_LOG_INFO("Generating BRDF integration LUT for IBL...");
+        // BRDF LUT is expensive to generate (6+ seconds), so we cache it to disk
+        String brdfLutCachePath = "cache/brdf_lut_512x1024.exr";
+        Image brdfLutImage;
 
-        // Generate BRDF LUT (512x512, 1024 samples per pixel)
-        BRDFLutGenerator::Config brdfConfig;
-        brdfConfig.resolution = 512;
-        brdfConfig.sampleCount = 1024;
-        Image brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
+        // Try to load from cache first
+        if (std::filesystem::exists(brdfLutCachePath)) {
+            QL_LOG_INFO("Loading cached BRDF LUT from: {}", brdfLutCachePath);
+            auto loadResult = Image::LoadFromEXR(brdfLutCachePath);
+            if (loadResult.has_value()) {
+                brdfLutImage = loadResult.value();
+                QL_LOG_INFO("  Loaded BRDF LUT from cache (512x512)");
+            } else {
+                QL_LOG_WARN("  Failed to load cached BRDF LUT: {}", loadResult.error());
+                QL_LOG_INFO("  Regenerating BRDF LUT...");
+                brdfLutImage = Image();  // Force regeneration
+            }
+        }
+
+        // Generate if cache miss or load failed
+        if (brdfLutImage.width == 0) {
+            QL_LOG_INFO("Generating BRDF integration LUT for IBL (this may take 5-10 seconds)...");
+
+            BRDFLutGenerator::Config brdfConfig;
+            brdfConfig.resolution = 512;
+            brdfConfig.sampleCount = 1024;
+            brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
+
+            // Save to cache for next time
+            std::filesystem::create_directories("cache");
+            if (brdfLutImage.SaveToEXR(brdfLutCachePath)) {
+                QL_LOG_INFO("  Saved BRDF LUT to cache: {}", brdfLutCachePath);
+            } else {
+                QL_LOG_WARN("  Failed to save BRDF LUT to cache");
+            }
+        }
 
         // Upload BRDF LUT to GPU
         QL_LOG_INFO("  Uploading BRDF LUT to GPU...");
