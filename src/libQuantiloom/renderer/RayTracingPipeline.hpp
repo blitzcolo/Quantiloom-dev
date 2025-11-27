@@ -99,6 +99,9 @@ public:
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
 
+    // Set accumulation sampling parameters (call before TraceRays)
+    void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed);
+
     // Record trace rays command into provided command buffer
     void TraceRays(VkCommandBuffer cmd, u32 width, u32 height);
 
@@ -166,8 +169,8 @@ private:
     // Ray Tracing properties (cached from context)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
 
-    // Camera data (for push constants)
-    CameraData m_cameraData{};
+    // Push constants (camera + sampling parameters)
+    PushConstantsRayGen m_pushConstants{};
 };
 
 } // namespace quantiloom

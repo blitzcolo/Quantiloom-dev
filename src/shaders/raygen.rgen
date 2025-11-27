@@ -185,28 +185,49 @@ void main() {
     );
 
     // ========================================================================
-    // Output: Linear HDR Radiance (EXR-ready)
+    // Output: Accumulative Sampling with Progressive Refinement
     // ========================================================================
-    // The payload.radiance is in linear HDR space (float32).
-    // We output it AS-IS for EXR saving (no tone mapping, no gamma correction).
+    // Implements temporal accumulation for multi-sample anti-aliasing (MSAA)
+    // and Monte Carlo path tracing convergence.
     //
-    // IMPORTANT: This is the CORRECT approach for EXR output!
-    // - EXR expects linear HDR data (preserves full dynamic range)
-    // - Tone mapping and gamma correction should ONLY be applied when:
-    //   1. Saving to LDR formats (JPG/PNG) - apply in CPU code before save
-    //   2. Displaying to screen (Swapchain) - apply in post-process shader
-    //   3. Real-time preview - apply in compute shader or fragment shader
+    // ACCUMULATION STRATEGY:
+    // - First sample (sampleIndex == 0): Initialize with current radiance
+    // - Subsequent samples: Blend with previous accumulated value using
+    //   incremental averaging: new_avg = old_avg + (sample - old_avg) / (N+1)
     //
-    // For viewing EXR files, use HDR-capable viewers (e.g., OpenImageIO's iv,
-    // Photoshop, Nuke) which will apply their own tone mapping.
+    // This approach:
+    // 1. Avoids numerical instability from sum overflow (no large accumulator)
+    // 2. Provides progressive refinement (each sample improves the estimate)
+    // 3. Enables real-time preview during rendering
+    // 4. Mathematically equivalent to: final = sum(samples) / N
+    //
+    // OUTPUT FORMAT:
+    // - Linear HDR radiance (W·sr⁻¹·m⁻²) in RGB or spectral mode
+    // - Values can exceed 1.0 (HDR, stored as float32)
+    // - Ready for EXR export (no tone mapping, no gamma correction)
     // ========================================================================
 
     float3 linearHDR = payload.radiance;
 
-    // Clamp to reasonable HDR range (prevents fireflies from dominating)
+    // Clamp to reasonable HDR range (prevents fireflies from dominating accumulation)
     linearHDR = clamp(linearHDR, 0.0, 10000.0);
 
-    // Write linear HDR to output image (no post-processing)
-    // NOTE: Values can exceed 1.0 (this is expected for HDR)
-    outputImage[launchID] = float4(linearHDR, 1.0);
+    if (pushConsts.sampleIndex == 0) {
+        // First sample: Initialize output with current radiance
+        outputImage[launchID] = float4(linearHDR, 1.0);
+    } else {
+        // Subsequent samples: Incremental averaging
+        // Formula: new_avg = old_avg + (sample - old_avg) / (N+1)
+        // This is numerically stable and avoids overflow
+        float4 previousAccum = outputImage[launchID];
+        float3 previousRadiance = previousAccum.rgb;
+
+        // Compute weight for current sample (1 / totalSamplesProcessed)
+        float weight = 1.0 / float(pushConsts.sampleIndex + 1);
+
+        // Incremental blend: blend current sample into accumulated average
+        float3 newRadiance = previousRadiance + (linearHDR - previousRadiance) * weight;
+
+        outputImage[launchID] = float4(newRadiance, 1.0);
+    }
 }
