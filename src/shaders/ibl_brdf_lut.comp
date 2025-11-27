@@ -1,0 +1,184 @@
+// ============================================================================
+// Quantiloom - BRDF Integration LUT Generator (Compute Shader)
+// ============================================================================
+// Generates 2D lookup table for split-sum approximation of specular IBL
+//
+// LUT axes:
+// - X: NdotV (dot(normal, view))
+// - Y: roughness
+//
+// LUT outputs (RG channels):
+// - R: Scale factor for F0 (Fresnel reflectance at normal incidence)
+// - G: Bias term
+//
+// Usage in shader:
+//   vec2 brdf = texture(brdfLUT, vec2(NdotV, roughness)).rg;
+//   vec3 specular = (F0 * brdf.x + brdf.y) * prefilteredColor;
+//
+// Algorithm: Importance sampling with GGX + Smith geometry term
+// Reference: "Real Shading in Unreal Engine 4" (Brian Karis, 2013)
+// ============================================================================
+
+#version 460
+
+// ============================================================================
+// Bindings
+// ============================================================================
+
+layout(binding = 0, rg16f) uniform writeonly image2D outputLUT;
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    uint numSamples;  // Number of Monte Carlo samples (default: 1024)
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} params;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+const float EPSILON = 1e-6;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Hammersley low-discrepancy sequence
+vec2 Hammersley(uint i, uint N) {
+    uint bits = i;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    float radicalInverse = float(bits) * 2.3283064365386963e-10;
+    return vec2(float(i) / float(N), radicalInverse);
+}
+
+// Importance sample GGX distribution
+vec3 ImportanceSampleGGX(vec2 Xi, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+
+    float phi = TWO_PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a2 - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    vec3 H;
+    H.x = sinTheta * cos(phi);
+    H.y = sinTheta * sin(phi);
+    H.z = cosTheta;
+
+    return H;
+}
+
+// Smith GGX geometric shadowing term (single direction)
+float GeometrySchlickGGX(float NdotV, float roughness) {
+    // Remap roughness for IBL (k = a/2, where a = roughness^2)
+    float a = roughness * roughness;
+    float k = a / 2.0;
+
+    float denom = NdotV * (1.0 - k) + k;
+    return NdotV / max(denom, EPSILON);
+}
+
+// Smith GGX geometry term (combined shadowing-masking)
+float GeometrySmith(float NdotV, float NdotL, float roughness) {
+    float ggx1 = GeometrySchlickGGX(NdotL, roughness);
+    float ggx2 = GeometrySchlickGGX(NdotV, roughness);
+    return ggx1 * ggx2;
+}
+
+// ============================================================================
+// BRDF Integration
+// ============================================================================
+// Integrates the specular BRDF over the hemisphere
+// Returns (scale, bias) for split-sum approximation
+// ============================================================================
+
+vec2 IntegrateBRDF(float NdotV, float roughness) {
+    // Assume view direction is in the +Z direction in tangent space
+    vec3 V;
+    V.x = sqrt(1.0 - NdotV * NdotV);  // sin(theta)
+    V.y = 0.0;
+    V.z = NdotV;                       // cos(theta)
+
+    // Monte Carlo integration
+    float A = 0.0;  // Scale (for F0)
+    float B = 0.0;  // Bias
+
+    vec3 N = vec3(0.0, 0.0, 1.0);  // Normal points up in tangent space
+
+    for (uint i = 0; i < params.numSamples; i++) {
+        vec2 Xi = Hammersley(i, params.numSamples);
+        vec3 H = ImportanceSampleGGX(Xi, roughness);
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+
+        float NdotL = max(L.z, 0.0);
+        float NdotH = max(H.z, 0.0);
+        float VdotH = max(dot(V, H), 0.0);
+
+        if (NdotL > 0.0) {
+            // Geometry term
+            float G = GeometrySmith(NdotV, NdotL, roughness);
+
+            // Visibility term (G * VdotH) / (NdotH * NdotV)
+            float G_Vis = (G * VdotH) / max(NdotH * NdotV, EPSILON);
+
+            // Fresnel term: F = F0 + (1 - F0) * (1 - VdotH)^5
+            // We split this into: F0 * A + B
+            // where A = 1 - (1 - VdotH)^5, B = (1 - VdotH)^5
+            float Fc = pow(1.0 - VdotH, 5.0);
+
+            A += (1.0 - Fc) * G_Vis;
+            B += Fc * G_Vis;
+        }
+    }
+
+    // Normalize by sample count
+    A /= float(params.numSamples);
+    B /= float(params.numSamples);
+
+    return vec2(A, B);
+}
+
+// ============================================================================
+// Main Compute Shader
+// ============================================================================
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+void main() {
+    ivec2 coord = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(outputLUT);
+
+    // Bounds check
+    if (coord.x >= size.x || coord.y >= size.y) {
+        return;
+    }
+
+    // Map pixel coordinates to [0, 1]
+    vec2 uv = (vec2(coord) + 0.5) / vec2(size);
+
+    // X axis: NdotV [0, 1]
+    float NdotV = uv.x;
+
+    // Y axis: roughness [0, 1]
+    float roughness = uv.y;
+
+    // Clamp NdotV to avoid edge artifacts
+    NdotV = max(NdotV, EPSILON);
+
+    // Integrate BRDF
+    vec2 brdf = IntegrateBRDF(NdotV, roughness);
+
+    // Write to LUT
+    imageStore(outputLUT, coord, vec4(brdf, 0.0, 1.0));
+}

@@ -29,8 +29,16 @@
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
 [[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
 [[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
-[[vk::binding(10, 0)]] Texture2D<float2> brdfLUT;               // BRDF integration LUT for IBL
-[[vk::binding(11, 0)]] SamplerState brdfLUTSampler;             // Sampler for BRDF LUT
+
+// ============================================================================
+// IBL (Image-Based Lighting) Resources
+// ============================================================================
+// Added for physically-based specular reflections on metallic surfaces
+// ============================================================================
+
+[[vk::binding(10, 0)]] TextureCube<float4> prefilteredEnvMap;  // Prefiltered environment cubemap (with mipmaps)
+[[vk::binding(11, 0)]] Texture2D<float2> brdfLUT;              // BRDF integration lookup table
+[[vk::binding(12, 0)]] SamplerState iblSampler;                // Linear sampler for IBL textures
 
 // ============================================================================
 // Push Constants
@@ -422,33 +430,54 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 kD = (1.0 - FresnelSchlick(F0, max(dot(normal, V), 0.0))) * (1.0 - metallic);
     float3 skyAmbient = kD * albedo / PI * skyRadiance;
 
-    // ------------------------------------------------------------------------
-    // IBL Specular (Environment Reflection)
-    // ------------------------------------------------------------------------
-    // For specular IBL, use split-sum approximation with BRDF LUT
-    // Since we don't have a full environment cubemap, we use skyRadiance
-    // as a uniform environment (simplified but physically plausible)
+    // ========================================================================
+    // Image-Based Lighting (IBL) Specular Reflection
+    // ========================================================================
+    // Implements split-sum approximation for physically-based environment reflections
+    // References:
+    // - "Real Shading in Unreal Engine 4" (Brian Karis, Epic Games, 2013)
+    // - glTF 2.0 specification (KHR_lights_punctual + IBL extension)
+    // ========================================================================
 
-    // Compute reflection direction (mirror reflection around normal)
-    float3 R = ComputeReflectionDirection(V, normal);
+    float3 iblSpecular = float3(0.0, 0.0, 0.0);
 
-    // Sample environment at reflection direction
-    // NOTE: For full IBL, this would sample a prefiltered environment cubemap
-    // based on roughness. Here we use uniform skyRadiance (simplified).
-    // For rough surfaces, the reflection should be more diffuse, but without
-    // a proper environment map, we approximate with uniform sky color.
-    float3 prefilteredColor = skyRadiance;  // Simplified: uniform environment
+    // Only compute IBL for surfaces with non-zero metallic or roughness < 1.0
+    // This optimization skips perfectly diffuse surfaces (no specular reflection)
+    if (metallic > 0.01 || roughness < 0.99) {
+        // 1. Compute reflection vector R = reflect(-V, N)
+        //    This is the direction we would see a perfect mirror reflection
+        float3 R = reflect(-V, normal);
 
-    // Evaluate IBL specular using split-sum approximation with BRDF LUT
-    float3 iblSpecular = EvaluateIBLSpecular(
-        normal,              // Surface normal
-        V,                   // View direction
-        F0,                  // Reflectance at normal incidence
-        roughness,           // Surface roughness
-        prefilteredColor,    // Environment radiance (simplified: uniform sky)
-        brdfLUT,             // BRDF integration lookup table
-        brdfLUTSampler       // Sampler for BRDF LUT
-    );
+        // 2. Select mipmap level based on roughness
+        //    Rougher surfaces sample blurrier reflections (higher mip levels)
+        //    Query number of mip levels at runtime (shader intrinsic)
+        uint width, height, numMips;
+        prefilteredEnvMap.GetDimensions(0, width, height, numMips);
+        float lod = roughness * float(numMips - 1);
+
+        // 3. Sample prefiltered environment map
+        //    SampleLevel = explicit LOD (required in ray tracing shaders)
+        float3 prefilteredColor = prefilteredEnvMap.SampleLevel(iblSampler, R, lod).rgb;
+
+        // 4. Sample BRDF integration LUT
+        //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
+        float NdotV_clamped = max(dot(normal, V), 0.0);
+        float2 envBRDF = brdfLUT.SampleLevel(iblSampler, float2(NdotV_clamped, roughness), 0.0).rg;
+
+        // 5. Split-sum approximation
+        //    L_ibl = ∫ L(l) * BRDF(l,v) * (n·l) dl
+        //          ≈ (∫ L(l) * (n·l) dl) * (∫ BRDF(l,v) * (n·l) dl)
+        //          ≈ prefilteredColor * (F0 * envBRDF.x + envBRDF.y)
+        //
+        //    Where:
+        //    - envBRDF.x (scale): multiplies F0 (Fresnel at normal incidence)
+        //    - envBRDF.y (bias): constant offset for grazing angles
+        float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+        iblSpecular = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+
+        // 6. Energy conservation: for metals, reduce diffuse contribution
+        //    (already handled by kD term in skyAmbient calculation above)
+    }
 
     // Total outgoing radiance: direct sun + sky ambient + IBL specular + emissive
     float3 radiance = directSun + skyAmbient + iblSpecular + emissive;
