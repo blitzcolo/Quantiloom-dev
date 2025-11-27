@@ -6,7 +6,7 @@
 
 [renderer]
 resolution = [1920, 1080]      # Output resolution
-spp = 1                        # Samples per pixel (M1: single sample)
+spp = 128                        # Samples per pixel (M1: single sample)
 output = "gltf_pbr_output.exr" # Output file path (OpenEXR format)
 
 [spectral]
