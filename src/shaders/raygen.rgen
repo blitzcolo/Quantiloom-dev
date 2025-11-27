@@ -144,15 +144,15 @@ void main() {
 
     // Compute adjacent ray directions
     float3 directionXp1 = normalize(
-        camera.forward +
-        ndcXp1.x * camera.right * camera.fovScale * camera.aspectRatio +
-        ndcXp1.y * camera.up * camera.fovScale
+        pushConsts.camera.forward +
+        ndcXp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
+        ndcXp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
     );
 
     float3 directionYp1 = normalize(
-        camera.forward +
-        ndcYp1.x * camera.right * camera.fovScale * camera.aspectRatio +
-        ndcYp1.y * camera.up * camera.fovScale
+        pushConsts.camera.forward +
+        ndcYp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
+        ndcYp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
     );
 
     // Compute differentials (change in direction per pixel)
