@@ -5,3 +5,6 @@
 [submodule "assets/models/glTF-Sample-Assets"]
 	path = assets/models/glTF-Sample-Assets
 	url = https://github.com/KhronosGroup/glTF-Sample-Assets.git
+[submodule "reference-only/vk_gltf_renderer"]
+	path = reference-only/vk_gltf_renderer
+	url = https://github.com/nvpro-samples/vk_gltf_renderer.git
