@@ -78,35 +78,27 @@ void main() {
     );
 
     // ========================================================================
-    // Post-Processing: Tone Mapping + Gamma Correction (Spectral Mode Aware)
+    // Output: Linear HDR Radiance (EXR-ready)
     // ========================================================================
-    // The payload.radiance is in linear HDR space (can exceed 1.0).
-    // Processing depends on spectral mode:
-    // - RGB/SINGLE (visible light): Apply Tone Mapping + sRGB Gamma
-    // - MWIR/LWIR (infrared): Apply Tone Mapping only (no sRGB gamma for IR)
+    // The payload.radiance is in linear HDR space (float32).
+    // We output it AS-IS for EXR saving (no tone mapping, no gamma correction).
+    //
+    // IMPORTANT: This is the CORRECT approach for EXR output!
+    // - EXR expects linear HDR data (preserves full dynamic range)
+    // - Tone mapping and gamma correction should ONLY be applied when:
+    //   1. Saving to LDR formats (JPG/PNG) - apply in CPU code before save
+    //   2. Displaying to screen (Swapchain) - apply in post-process shader
+    //   3. Real-time preview - apply in compute shader or fragment shader
+    //
+    // For viewing EXR files, use HDR-capable viewers (e.g., OpenImageIO's iv,
+    // Photoshop, Nuke) which will apply their own tone mapping.
     // ========================================================================
 
-    float3 linearColor = payload.radiance;
-    float3 outputColor;
+    float3 linearHDR = payload.radiance;
 
-    // 1. Tone Mapping (Reinhard operator: L / (L + 1))
-    //    Applied to all modes to map HDR → LDR [0, 1] range
-    //    TODO (M2+): Replace with ACES for visible light, custom curve for IR
-    float3 mappedColor = linearColor / (linearColor + 1.0);
-
-    // 2. Gamma Correction (mode-dependent)
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB || camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
-        // Visible light modes: Apply sRGB gamma for display
-        // Displays expect sRGB encoded values (~gamma 2.2)
-        outputColor = pow(max(mappedColor, 0.0), float3(1.0 / 2.2));
-    } else {
-        // Infrared modes (MWIR/LWIR): No sRGB gamma
-        // IR false-color mapping is TBD (M2+: implement temperature-based colormap)
-        outputColor = mappedColor;
-    }
-
-    // Write final color to output image
-    outputImage[launchID] = float4(outputColor, 1.0);
+    // Write linear HDR to output image (no post-processing)
+    // NOTE: Values can exceed 1.0 (this is expected for HDR)
+    outputImage[launchID] = float4(linearHDR, 1.0);
     #else
     // DEBUG: Just write UV as color (red = X, green = Y, blue = 0)
     float3 debugColor = float3(uv.x, uv.y, 0.0);
