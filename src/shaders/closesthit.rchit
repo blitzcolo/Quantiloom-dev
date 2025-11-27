@@ -524,7 +524,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)
-        float3 F0_scalar = lerp(float3(0.04), float3(spectralAlbedo), metallic);
+        float3 F0_scalar = lerp(float3(0.04, 0.04, 0.04), float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
         float3 F_scalar = FresnelSchlick(F0_scalar, max(dot(normal, V), 0.0));
         float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
         float skyIntensity_scalar = lut.skyRadiance_spectral;

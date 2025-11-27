@@ -147,9 +147,4 @@ void main() {
     // Write linear HDR to output image (no post-processing)
     // NOTE: Values can exceed 1.0 (this is expected for HDR)
     outputImage[launchID] = float4(linearHDR, 1.0);
-    #else
-    // DEBUG: Just write UV as color (red = X, green = Y, blue = 0)
-    float3 debugColor = float3(uv.x, uv.y, 0.0);
-    outputImage[launchID] = float4(debugColor, 1.0);
-    #endif
 }
