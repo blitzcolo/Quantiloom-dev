@@ -13,7 +13,7 @@
 
 namespace quantiloom {
 
-// Camera data structure (matches shader push constants)
+// Camera data structure (matches shader CameraData in common.hlsli)
 struct CameraData {
     glm::vec3 origin;        // Camera position (world space)
     f32 fovScale;            // tan(fovY / 2)
@@ -23,6 +23,17 @@ struct CameraData {
     f32 wavelength_nm;       // Current wavelength (nanometers) for spectral rendering
     glm::vec3 up;            // Up vector (normalized)
     u32 spectral_mode;       // Spectral rendering mode (see SpectralMode enum)
+};
+
+// Push constants structure for ray generation shader
+// Includes camera data + accumulation sampling parameters
+// Must match PushConstantsRayGen in raygen.rgen
+struct PushConstantsRayGen {
+    CameraData camera;       // Camera parameters
+    u32 frameIndex;          // Frame counter (for temporal effects)
+    u32 sampleIndex;         // Current sample index (0 to spp-1)
+    u32 totalSamples;        // Total samples per pixel (spp)
+    u32 randomSeed;          // Random seed for this frame
 };
 
 class QL_API Camera {

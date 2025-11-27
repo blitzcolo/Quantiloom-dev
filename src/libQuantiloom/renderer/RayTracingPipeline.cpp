@@ -299,11 +299,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
 void RayTracingPipeline::CreatePipelineLayout() {
     VkDevice device = m_context.GetDevice();
 
-    // Push constant range for camera data
+    // Push constant range for camera data + sampling parameters
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(CameraData);
+    pushConstantRange.size = sizeof(PushConstantsRayGen);
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -872,14 +872,14 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
         nullptr
     );
 
-    // Push camera constants
+    // Push constants (camera + sampling parameters)
     vkCmdPushConstants(
         cmd,
         m_pipelineLayout,
         VK_SHADER_STAGE_RAYGEN_BIT_KHR,
         0,
-        sizeof(CameraData),
-        &m_cameraData
+        sizeof(PushConstantsRayGen),
+        &m_pushConstants
     );
 
     // Trace rays
@@ -913,7 +913,14 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
 }
 
 void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
-    m_cameraData = cameraData;
+    m_pushConstants.camera = cameraData;
+}
+
+void RayTracingPipeline::SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed) {
+    m_pushConstants.frameIndex = frameIndex;
+    m_pushConstants.sampleIndex = sampleIndex;
+    m_pushConstants.totalSamples = totalSamples;
+    m_pushConstants.randomSeed = randomSeed;
 }
 
 } // namespace quantiloom

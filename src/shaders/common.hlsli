@@ -76,10 +76,10 @@ struct LUTData {
 };
 
 // ============================================================================
-// Camera Data Structure (Push Constants)
+// Camera Data Structure
 // ============================================================================
 // Camera parameters for ray generation
-// Must match CPU-side CameraData structure
+// Must match CPU-side CameraData structure in Camera.hpp
 // ============================================================================
 
 struct CameraData {
@@ -92,6 +92,29 @@ struct CameraData {
     float3 up;             // Up vector (normalized)
     uint   spectral_mode;  // Spectral rendering mode (see SPECTRAL_MODE_* defines)
 };
+
+// ============================================================================
+// Push Constants for Ray Generation Shader
+// ============================================================================
+// Extended camera data with accumulation sampling parameters
+// Must match CPU-side PushConstantsRayGen structure in Camera.hpp
+//
+// ACCUMULATION SAMPLING:
+// - frameIndex: Frame counter for temporal effects (animation, motion blur)
+// - sampleIndex: Current sample index (0 to totalSamples-1) for this pixel
+// - totalSamples: Total samples per pixel (spp) for averaging
+// - randomSeed: Random seed for this frame/sample (ensures unique jitter)
+//
+// This structure enables:
+// 1. Multi-sample anti-aliasing (MSAA) via subpixel jittering
+// 2. Monte Carlo path tracing convergence via multiple samples
+// 3. Progressive refinement (each sample improves image quality)
+// 4. Future extensions: temporal anti-aliasing, motion blur, etc.
+// ============================================================================
+//
+// NOTE: This structure is defined in raygen.rgen as it is specific to that shader.
+// Other shaders (closest hit, miss) do not receive these push constants.
+// The definition here serves as documentation for cross-reference with C++ code.
 
 // ============================================================================
 // Material Data Structure (PBR)

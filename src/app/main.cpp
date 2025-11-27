@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <cstddef>  // For offsetof
+#include <cstdlib>  // For std::rand (random seed generation)
 
 using namespace quantiloom;
 
@@ -748,50 +749,86 @@ int main(int argc, char* argv[]) {
         PerformanceLogger perfLogger(context, perfConfig);
 
         // ====================================================================
-        // Render Frame
+        // Render Frame with Accumulative Sampling
         // ====================================================================
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
             spectral_mode == SpectralMode::LWIR_Fused) {
-            QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm...", wavelength_nm);
+            QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm with {} samples per pixel...", wavelength_nm, spp);
             QL_LOG_WARN("  ⚠️  PREVIEW MODE: Using RGB-averaged spectral albedo.");
             QL_LOG_WARN("  ⚠️  NOT suitable for quantitative analysis.");
             QL_LOG_WARN("  ⚠️  For quantitative results, use mode=\"hs_off\" with measured spectral data.");
         } else {
-            QL_LOG_INFO("Rendering frame in RGB mode...");
+            QL_LOG_INFO("Rendering frame in RGB mode with {} samples per pixel...", spp);
         }
-        QL_LOG_INFO("  [DEBUG] Starting TraceRays command submission...");
 
         try {
-            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-                QL_LOG_INFO("  [DEBUG] Recording TraceRays commands...");
+            // Frame index for temporal effects (set to 0 for single-frame renders)
+            u32 frameIndex = 0;
 
-                // Begin performance timing
-                perfLogger.BeginFrame(cmd);
+            // Total accumulated GPU time and rays for all samples
+            f32 totalGpuMs = 0.0f;
+            f64 totalRays = 0.0;
 
-                // Execute ray tracing
-                pipeline.TraceRays(cmd, width, height);
+            // ================================================================
+            // SPP Loop: Accumulative Sampling
+            // ================================================================
+            // Each iteration traces rays with a different random seed and
+            // subpixel jitter, accumulating results in the output image.
+            // This implements progressive refinement for anti-aliasing and
+            // Monte Carlo convergence.
+            // ================================================================
 
-                // End performance timing
-                perfLogger.EndFrame(cmd);
+            for (u32 sampleIndex = 0; sampleIndex < spp; ++sampleIndex) {
+                // Generate unique random seed for this sample
+                // Uses system random to ensure different patterns per sample
+                u32 randomSeed = static_cast<u32>(std::rand()) ^ (frameIndex * 997 + sampleIndex * 1009);
 
-                QL_LOG_INFO("  [DEBUG] TraceRays commands recorded successfully");
-            });
-            QL_LOG_INFO("  [DEBUG] GPU execution completed successfully");
+                // Update sampling parameters in pipeline
+                pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
 
-            // Log performance metrics (after GPU completes)
+                QL_LOG_INFO("  [SPP {}/{}] Tracing rays (seed: {})...", sampleIndex + 1, spp, randomSeed);
+
+                // Execute ray tracing for this sample
+                CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+                    // Begin performance timing
+                    perfLogger.BeginFrame(cmd);
+
+                    // Execute ray tracing
+                    pipeline.TraceRays(cmd, width, height);
+
+                    // End performance timing
+                    perfLogger.EndFrame(cmd);
+                });
+
+                // Accumulate performance metrics
+                totalGpuMs += perfLogger.GetLastFrameGpuMs();
+                totalRays += perfLogger.GetLastFrameRaysPerSec();
+
+                QL_LOG_INFO("  [SPP {}/{}] Completed - GPU: {:.2f} ms, Progress: {:.1f}%",
+                            sampleIndex + 1, spp,
+                            perfLogger.GetLastFrameGpuMs(),
+                            100.0f * (sampleIndex + 1) / spp);
+            }
+
+            // Log aggregated performance metrics
             perfLogger.LogFrame(0, width, height, spp, wavelength_nm, spectralModeStr);
             perfLogger.Flush();
+
+            QL_LOG_INFO("  All samples completed!");
+            QL_LOG_INFO("  Total GPU time: {:.2f} ms ({:.2f} ms/sample)",
+                        totalGpuMs, totalGpuMs / spp);
+            QL_LOG_INFO("  Average throughput: {:.2f} Mrays/s",
+                        (totalRays / spp) / 1e6);
 
         } catch (const std::exception& e) {
             QL_LOG_ERROR("  [DEBUG] GPU execution FAILED: {}", e.what());
             throw;
         }
 
-        QL_LOG_INFO("  Frame rendered ({}x{}) - GPU: {:.2f} ms, {:.2f} Mrays/s",
-                    width, height,
-                    perfLogger.GetLastFrameGpuMs(),
-                    perfLogger.GetLastFrameRaysPerSec() / 1e6);
+        QL_LOG_INFO("  Frame rendered ({}x{}) with {} spp - Total GPU: {:.2f} ms",
+                    width, height, spp,
+                    perfLogger.GetLastFrameGpuMs() * spp);
 
         // ====================================================================
         // Readback and Save
