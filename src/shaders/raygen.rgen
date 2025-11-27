@@ -125,7 +125,31 @@ void main() {
         payload             // Ray payload
     );
 
-    // Write output (clamp for sanity)
-    float3 color = clamp(payload.radiance, 0.0, 100.0);
-    outputImage[launchID] = float4(color, 1.0);
+    // ========================================================================
+    // Output: Linear HDR Radiance (EXR-ready)
+    // ========================================================================
+    // The payload.radiance is in linear HDR space (float32).
+    // We output it AS-IS for EXR saving (no tone mapping, no gamma correction).
+    //
+    // IMPORTANT: This is the CORRECT approach for EXR output!
+    // - EXR expects linear HDR data (preserves full dynamic range)
+    // - Tone mapping and gamma correction should ONLY be applied when:
+    //   1. Saving to LDR formats (JPG/PNG) - apply in CPU code before save
+    //   2. Displaying to screen (Swapchain) - apply in post-process shader
+    //   3. Real-time preview - apply in compute shader or fragment shader
+    //
+    // For viewing EXR files, use HDR-capable viewers (e.g., OpenImageIO's iv,
+    // Photoshop, Nuke) which will apply their own tone mapping.
+    // ========================================================================
+
+    float3 linearHDR = payload.radiance;
+
+    // Write linear HDR to output image (no post-processing)
+    // NOTE: Values can exceed 1.0 (this is expected for HDR)
+    outputImage[launchID] = float4(linearHDR, 1.0);
+    #else
+    // DEBUG: Just write UV as color (red = X, green = Y, blue = 0)
+    float3 debugColor = float3(uv.x, uv.y, 0.0);
+    outputImage[launchID] = float4(debugColor, 1.0);
+    #endif
 }
