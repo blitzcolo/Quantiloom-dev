@@ -77,9 +77,36 @@ void main() {
         payload             // Ray payload
     );
 
-    // Write output (clamp for sanity)
-    float3 color = clamp(payload.radiance, 0.0, 100.0);
-    outputImage[launchID] = float4(color, 1.0);
+    // ========================================================================
+    // Post-Processing: Tone Mapping + Gamma Correction (Spectral Mode Aware)
+    // ========================================================================
+    // The payload.radiance is in linear HDR space (can exceed 1.0).
+    // Processing depends on spectral mode:
+    // - RGB/SINGLE (visible light): Apply Tone Mapping + sRGB Gamma
+    // - MWIR/LWIR (infrared): Apply Tone Mapping only (no sRGB gamma for IR)
+    // ========================================================================
+
+    float3 linearColor = payload.radiance;
+    float3 outputColor;
+
+    // 1. Tone Mapping (Reinhard operator: L / (L + 1))
+    //    Applied to all modes to map HDR → LDR [0, 1] range
+    //    TODO (M2+): Replace with ACES for visible light, custom curve for IR
+    float3 mappedColor = linearColor / (linearColor + 1.0);
+
+    // 2. Gamma Correction (mode-dependent)
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB || camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+        // Visible light modes: Apply sRGB gamma for display
+        // Displays expect sRGB encoded values (~gamma 2.2)
+        outputColor = pow(max(mappedColor, 0.0), float3(1.0 / 2.2));
+    } else {
+        // Infrared modes (MWIR/LWIR): No sRGB gamma
+        // IR false-color mapping is TBD (M2+: implement temperature-based colormap)
+        outputColor = mappedColor;
+    }
+
+    // Write final color to output image
+    outputImage[launchID] = float4(outputColor, 1.0);
     #else
     // DEBUG: Just write UV as color (red = X, green = Y, blue = 0)
     float3 debugColor = float3(uv.x, uv.y, 0.0);

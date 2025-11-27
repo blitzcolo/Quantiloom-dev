@@ -378,12 +378,54 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
         // ====================================================================
-        // Single Wavelength Mode: Grayscale spectral rendering
+        // Single Wavelength Mode: True Spectral Rendering (Visible Light)
         // ====================================================================
-        // Convert RGB radiance to grayscale for single-wavelength visualization
+        // For single wavelength, we:
+        // 1. Convert RGB albedo → spectral reflectance at camera.wavelength_nm
+        // 2. Compute scalar PBR BRDF with spectral reflectance
+        // 3. Use scalar sun radiance (sunRadiance_spectral)
+        //
+        // IMPORTANT: This is ONLY valid for visible light (380-780 nm).
+        // For IR wavelengths, use MWIR/LWIR modes instead.
         // ====================================================================
 
-        float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
+        float lambda = camera.wavelength_nm;
+
+        // 1. Convert RGB albedo to spectral reflectance at wavelength λ
+        //    Uses Gaussian-based RGB→Spectrum upsampling (SpectralConversion.hlsli)
+        //    NOTE: baseColor.rgb is already in linear space (glTF textures are sRGB-decoded)
+        float spectralAlbedo = GetSpectralReflectanceFromRGBTexture(
+            baseColor.rgb,
+            lambda,
+            false  // Already in linear space (not sRGB)
+        );
+
+        // 2. Compute scalar PBR BRDF with spectral albedo
+        //    Uses the same Cook-Torrance model, but with scalar reflectance
+        float brdf_scalar = CookTorranceBRDF_Spectral(
+            normal,
+            V,
+            L,
+            spectralAlbedo,
+            metallic,
+            roughness
+        );
+
+        // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L)
+        //    Use scalar sun radiance at wavelength λ
+        float sunIntensity_scalar = lut.sunRadiance_spectral;
+        float directSun_scalar = brdf_scalar * sunIntensity_scalar * NdotL;
+
+        // 4. Sky ambient lighting (scalar)
+        //    Use simplified diffuse approximation (same as RGB mode)
+        float3 F0_scalar = lerp(float3(0.04), float3(spectralAlbedo), metallic);
+        float3 F_scalar = FresnelSchlick(F0_scalar, max(dot(normal, V), 0.0));
+        float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
+        float skyIntensity_scalar = lut.skyRadiance_spectral;
+        float skyAmbient_scalar = kD_scalar * spectralAlbedo / PI * skyIntensity_scalar;
+
+        // 5. Total spectral radiance (scalar)
+        float radiance_spectral = directSun_scalar + skyAmbient_scalar + emissive.r;  // Assume emissive is grayscale in spectral mode
 
         // Validation
         if (!isfinite(radiance_spectral)) {
@@ -391,6 +433,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
 
+        // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
