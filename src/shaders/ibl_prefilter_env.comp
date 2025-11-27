@@ -1,0 +1,179 @@
+// ============================================================================
+// Quantiloom - IBL Prefilter Environment Map (Compute Shader)
+// ============================================================================
+// Generates prefiltered environment cubemap for specular IBL
+// Each mip level corresponds to a different roughness value
+//
+// Algorithm: Importance sampling with GGX distribution
+// Reference: "Real Shading in Unreal Engine 4" (Brian Karis, 2013)
+// ============================================================================
+
+#version 460
+#extension GL_EXT_samplerless_texture_functions : enable
+
+// ============================================================================
+// Bindings
+// ============================================================================
+
+layout(binding = 0) uniform textureCube inputEnvCube;      // Input environment cubemap
+layout(binding = 1, rgba16f) uniform writeonly imageCube outputCube;  // Output prefiltered cubemap (current mip)
+layout(binding = 2) uniform sampler linearSampler;
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    float roughness;     // Roughness for current mip level [0, 1]
+    uint numSamples;     // Number of Monte Carlo samples
+    uint resolution;     // Output resolution for current mip
+    uint _pad;
+} params;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+const float EPSILON = 1e-6;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Convert 2D pixel coordinates + face index to 3D cubemap direction
+vec3 CubemapDirection(ivec3 coord, uint resolution) {
+    // Normalize coordinates to [-1, 1]
+    vec2 uv = (vec2(coord.xy) + 0.5) / float(resolution);
+    uv = uv * 2.0 - 1.0;
+
+    // Map to cubemap face direction
+    vec3 dir;
+    switch (coord.z) {  // Face index
+        case 0: dir = vec3( 1.0, -uv.y, -uv.x); break;  // +X
+        case 1: dir = vec3(-1.0, -uv.y,  uv.x); break;  // -X
+        case 2: dir = vec3( uv.x,  1.0,  uv.y); break;  // +Y
+        case 3: dir = vec3( uv.x, -1.0, -uv.y); break;  // -Y
+        case 4: dir = vec3( uv.x, -uv.y,  1.0); break;  // +Z
+        case 5: dir = vec3(-uv.x, -uv.y, -1.0); break;  // -Z
+    }
+
+    return normalize(dir);
+}
+
+// Hammersley low-discrepancy sequence
+vec2 Hammersley(uint i, uint N) {
+    uint bits = i;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    float radicalInverse = float(bits) * 2.3283064365386963e-10;  // / 0x100000000
+    return vec2(float(i) / float(N), radicalInverse);
+}
+
+// Importance sample GGX distribution (Trowbridge-Reitz)
+// Returns half-vector H in tangent space
+vec3 ImportanceSampleGGX(vec2 Xi, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+
+    // Spherical coordinates
+    float phi = TWO_PI * Xi.x;
+    float cosTheta = sqrt((1.0 - Xi.y) / (1.0 + (a2 - 1.0) * Xi.y));
+    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+
+    // Convert to Cartesian coordinates (tangent space)
+    vec3 H;
+    H.x = sinTheta * cos(phi);
+    H.y = sinTheta * sin(phi);
+    H.z = cosTheta;
+
+    return H;
+}
+
+// Build orthonormal basis from normal vector
+void BuildTangentBasis(vec3 N, out vec3 T, out vec3 B) {
+    // Choose arbitrary tangent vector
+    vec3 up = abs(N.z) < 0.999 ? vec3(0, 0, 1) : vec3(1, 0, 0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+// Transform vector from tangent space to world space
+vec3 TangentToWorld(vec3 v, vec3 N, vec3 T, vec3 B) {
+    return v.x * T + v.y * B + v.z * N;
+}
+
+// GGX normal distribution function
+float DistributionGGX(float NdotH, float roughness) {
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float NdotH2 = NdotH * NdotH;
+
+    float denom = NdotH2 * (a2 - 1.0) + 1.0;
+    denom = PI * denom * denom;
+
+    return a2 / max(denom, EPSILON);
+}
+
+// ============================================================================
+// Main Compute Shader
+// ============================================================================
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec3 coord = ivec3(gl_GlobalInvocationID);
+
+    // Bounds check
+    if (coord.x >= params.resolution || coord.y >= params.resolution || coord.z >= 6) {
+        return;
+    }
+
+    // Get cubemap direction for this pixel
+    vec3 N = CubemapDirection(coord, params.resolution);
+    vec3 R = N;  // Reflection vector (assume view = normal for prefiltering)
+    vec3 V = R;
+
+    // Build tangent basis
+    vec3 T, B;
+    BuildTangentBasis(N, T, B);
+
+    // Monte Carlo integration: convolve environment map with GGX lobe
+    vec3 prefilteredColor = vec3(0.0);
+    float totalWeight = 0.0;
+
+    for (uint i = 0; i < params.numSamples; i++) {
+        // Generate sample
+        vec2 Xi = Hammersley(i, params.numSamples);
+        vec3 H_tangent = ImportanceSampleGGX(Xi, params.roughness);
+        vec3 H = TangentToWorld(H_tangent, N, T, B);
+
+        // Compute light direction from half-vector
+        vec3 L = normalize(2.0 * dot(V, H) * H - V);
+
+        float NdotL = max(dot(N, L), 0.0);
+
+        if (NdotL > 0.0) {
+            // Sample environment map
+            // For rough surfaces (high mip), sample lower resolution to reduce noise
+            float lod = params.roughness * 4.0;  // Heuristic: roughness → mip level
+            vec3 sampleColor = textureLod(samplerCube(inputEnvCube, linearSampler), L, lod).rgb;
+
+            // Weight by NdotL (cosine-weighted hemisphere)
+            prefilteredColor += sampleColor * NdotL;
+            totalWeight += NdotL;
+        }
+    }
+
+    // Normalize
+    if (totalWeight > EPSILON) {
+        prefilteredColor /= totalWeight;
+    }
+
+    // Write output
+    imageStore(outputCube, coord, vec4(prefilteredColor, 1.0));
+}

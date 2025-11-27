@@ -1,0 +1,94 @@
+// ============================================================================
+// Quantiloom - Equirectangular to Cubemap Converter (Compute Shader)
+// ============================================================================
+// Converts HDR equirectangular environment map to cubemap format
+// ============================================================================
+
+#version 460
+
+// ============================================================================
+// Bindings
+// ============================================================================
+
+layout(binding = 0) uniform sampler2D inputEquirect;  // Input HDR equirectangular map
+layout(binding = 1, rgba16f) uniform writeonly imageCube outputCube;  // Output cubemap
+
+// ============================================================================
+// Push Constants
+// ============================================================================
+
+layout(push_constant) uniform PushConstants {
+    uint resolution;  // Output cubemap resolution (per face)
+} params;
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+const float PI = 3.14159265359;
+const float TWO_PI = 6.28318530718;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+// Convert 3D direction to equirectangular UV coordinates
+vec2 DirectionToEquirectUV(vec3 dir) {
+    // Convert Cartesian to spherical coordinates
+    // phi: [0, 2π] (longitude)
+    // theta: [0, π] (latitude, 0 = top, π = bottom)
+    float phi = atan(dir.z, dir.x);
+    float theta = acos(dir.y);
+
+    // Map to [0, 1] UV space
+    vec2 uv;
+    uv.x = phi / TWO_PI + 0.5;  // Wrap longitude
+    uv.y = theta / PI;          // Latitude from top to bottom
+
+    return uv;
+}
+
+// Convert 2D pixel coordinates + face index to 3D cubemap direction
+vec3 CubemapDirection(ivec3 coord, uint resolution) {
+    vec2 uv = (vec2(coord.xy) + 0.5) / float(resolution);
+    uv = uv * 2.0 - 1.0;
+
+    vec3 dir;
+    switch (coord.z) {  // Face index
+        case 0: dir = vec3( 1.0, -uv.y, -uv.x); break;  // +X
+        case 1: dir = vec3(-1.0, -uv.y,  uv.x); break;  // -X
+        case 2: dir = vec3( uv.x,  1.0,  uv.y); break;  // +Y
+        case 3: dir = vec3( uv.x, -1.0, -uv.y); break;  // -Y
+        case 4: dir = vec3( uv.x, -uv.y,  1.0); break;  // +Z
+        case 5: dir = vec3(-uv.x, -uv.y, -1.0); break;  // -Z
+    }
+
+    return normalize(dir);
+}
+
+// ============================================================================
+// Main Compute Shader
+// ============================================================================
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+void main() {
+    ivec3 coord = ivec3(gl_GlobalInvocationID);
+
+    // Bounds check
+    if (coord.x >= params.resolution || coord.y >= params.resolution || coord.z >= 6) {
+        return;
+    }
+
+    // Get cubemap direction for this pixel
+    vec3 dir = CubemapDirection(coord, params.resolution);
+
+    // Convert to equirectangular UV
+    vec2 uv = DirectionToEquirectUV(dir);
+
+    // Sample equirectangular map
+    vec4 color = texture(inputEquirect, uv);
+
+    // Write to cubemap
+    imageStore(outputCube, coord, color);
+}
