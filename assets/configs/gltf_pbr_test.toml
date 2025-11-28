@@ -6,8 +6,9 @@
 
 [renderer]
 resolution = [1920, 1080]      # Output resolution
-spp = 128                        # Samples per pixel (M1: single sample)
+spp = 16                        # Samples per pixel (M1: single sample)
 output = "gltf_pbr_output.exr" # Output file path (OpenEXR format)
+environment_map = "assets/maps/blue_photo_studio_4k.exr"  # EXR environment map
 
 [spectral]
 # ============================================================================
