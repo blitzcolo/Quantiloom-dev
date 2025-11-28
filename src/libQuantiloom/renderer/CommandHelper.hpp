@@ -47,7 +47,8 @@ public:
         VkFormat format,
         VkImageLayout oldLayout,
         VkImageLayout newLayout,
-        u32 mipLevels = 1
+        u32 mipLevels = 1,
+        u32 arrayLayers = 1  // Added for cubemap support (6 layers)
     );
 
     // Immediate layout transition (creates and submits command buffer)
@@ -57,7 +58,8 @@ public:
         VkFormat format,
         VkImageLayout oldLayout,
         VkImageLayout newLayout,
-        u32 mipLevels = 1
+        u32 mipLevels = 1,
+        u32 arrayLayers = 1  // Added for cubemap support (6 layers)
     );
 
     // ========================================================================

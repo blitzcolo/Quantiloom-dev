@@ -95,7 +95,8 @@ void CommandHelper::TransitionImageLayout(
     VkFormat format,
     VkImageLayout oldLayout,
     VkImageLayout newLayout,
-    u32 mipLevels)
+    u32 mipLevels,
+    u32 arrayLayers)
 {
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -108,7 +109,7 @@ void CommandHelper::TransitionImageLayout(
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = mipLevels;
     barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+    barrier.subresourceRange.layerCount = arrayLayers;  // Support cubemaps (6 layers)
 
     // Determine access masks and pipeline stages based on layouts
     VkPipelineStageFlags srcStage = 0;
@@ -175,14 +176,15 @@ void CommandHelper::TransitionImageLayoutImmediate(
     VkFormat format,
     VkImageLayout oldLayout,
     VkImageLayout newLayout,
-    u32 mipLevels)
+    u32 mipLevels,
+    u32 arrayLayers)
 {
     ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        TransitionImageLayout(cmd, image, format, oldLayout, newLayout, mipLevels);
+        TransitionImageLayout(cmd, image, format, oldLayout, newLayout, mipLevels, arrayLayers);
     });
 
-    QL_LOG_INFO("Image layout transition: {} -> {} (immediate)",
-                static_cast<int>(oldLayout), static_cast<int>(newLayout));
+    QL_LOG_INFO("Image layout transition: {} -> {} (immediate, mips={}, layers={})",
+                static_cast<int>(oldLayout), static_cast<int>(newLayout), mipLevels, arrayLayers);
 }
 
 // ============================================================================
