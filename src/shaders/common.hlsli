@@ -54,6 +54,29 @@ struct Payload {
 };
 
 // ============================================================================
+// Spectral Curve Data Structure (GPU)
+// ============================================================================
+// Fixed-size spectral curve for wavelength-dependent material properties
+// Enables physically-based spectral path tracing with measured reflectance curves
+//
+// DESIGN:
+// - Fixed-size array (64 samples) for efficient GPU memory layout
+// - Supports linear interpolation for continuous wavelength queries
+// - Must match CPU-side SpectralCurveGPU structure
+//
+// SIZE: 64*4 + 64*4 + 4 + 12 = 528 bytes per curve
+// ============================================================================
+
+#define MAX_SPECTRAL_SAMPLES 64
+
+struct SpectralCurveGPU {
+    float wavelengths[MAX_SPECTRAL_SAMPLES];  // Wavelength in nm (monotonic increasing)
+    float values[MAX_SPECTRAL_SAMPLES];       // Spectral values (reflectance, emissivity, etc.)
+    uint  numSamples;                         // Actual number of valid samples (0 to MAX_SPECTRAL_SAMPLES)
+    uint  _padding[3];                        // Padding for 16-byte alignment
+};
+
+// ============================================================================
 // LUT Data Structure
 // ============================================================================
 // Atmospheric lookup table for spectral and RGB rendering
@@ -148,8 +171,9 @@ struct MaterialData {
     uint   alphaMode;                // 0=Opaque, 1=Mask, 2=Blend
     float  alphaCutoff;              // Threshold for Mask mode [0, 1]
 
-    // Spectral mode (M1 compatibility)
-    float  spectralAlbedo;           // Scalar reflectance at current λ [0, 1]
+    // Spectral mode (M1 compatibility and M2+ full spectral)
+    float  spectralAlbedo;           // LEGACY: Scalar reflectance at current λ [0, 1] (M1 fallback)
+    int    spectralReflectanceCurveIndex;  // Index into spectralCurves buffer (-1 = use spectralAlbedo)
 
     // Infrared material properties (evaluated at current wavelength)
     float  irEmissivity;             // IR emissivity ε(λ) [0, 1]

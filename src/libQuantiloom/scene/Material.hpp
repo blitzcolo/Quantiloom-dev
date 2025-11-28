@@ -68,12 +68,19 @@ struct Material {
     f32 alphaCutoff = 0.5f;  // Threshold for AlphaMode::Mask
 
     // ========================================================================
-    // Spectral Mode (M1 compatibility)
+    // Spectral Mode (M1 compatibility and M2+ full spectral)
     // ========================================================================
-    // Scalar spectral reflectance for single-wavelength rendering
+    // LEGACY (M1): Scalar spectral reflectance for single-wavelength rendering
     // Computed from baseColorFactor during scene loading:
     //   spectralAlbedo = (R + G + B) / 3.0
+    // This field is kept for backward compatibility with M1 test scenes
     f32 spectralAlbedo = 0.8f;
+
+    // NEW (M2+): Index into Scene::spectralReflectanceCurves array
+    // -1 = no spectral curve (fallback to spectralAlbedo scalar)
+    // >=0 = index into spectral curve buffer for physically-based spectral rendering
+    // This enables full spectral fidelity for HS-OFF quantitative mode
+    i32 spectralReflectanceCurveIndex = -1;
 
     // ========================================================================
     // Spectral Data Source Tracking (for HS-OFF validation)

@@ -72,26 +72,28 @@ struct MaterialDataCPU {
     u32 alphaMode;                       // offset 56, size 4
     f32 alphaCutoff;                     // offset 60, size 4
 
-    f32 spectralAlbedo;                  // offset 64, size 4
+    f32 spectralAlbedo;                  // offset 64, size 4 (LEGACY M1)
+    i32 spectralReflectanceCurveIndex;   // offset 68, size 4 (NEW M2+)
 
-    f32 irEmissivity;                    // offset 68, size 4
-    f32 irReflectance;                   // offset 72, size 4
-    f32 irTransmittance;                 // offset 76, size 4
-    f32 irTemperature_K;                 // offset 80, size 4
-};  // Total: 84 bytes (must match GPU MaterialData in common.hlsli)
+    f32 irEmissivity;                    // offset 72, size 4
+    f32 irReflectance;                   // offset 76, size 4
+    f32 irTransmittance;                 // offset 80, size 4
+    f32 irTemperature_K;                 // offset 84, size 4
+};  // Total: 88 bytes (must match GPU MaterialData in common.hlsli)
 
 // Verify struct layout matches shader expectations
 // If this fails, the CPU/GPU struct layouts are mismatched, which WILL cause GPU crashes
-static_assert(sizeof(MaterialDataCPU) == 84, "MaterialDataCPU size mismatch! Expected 84 bytes to match GPU MaterialData struct");
+static_assert(sizeof(MaterialDataCPU) == 88, "MaterialDataCPU size mismatch! Expected 88 bytes to match GPU MaterialData struct");
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 40, "emissiveFactor offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 52, "emissiveTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 64, "spectralAlbedo offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irEmissivity) == 68, "irEmissivity offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irReflectance) == 72, "irReflectance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTransmittance) == 76, "irTransmittance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 80, "irTemperature_K offset mismatch");
+static_assert(offsetof(MaterialDataCPU, spectralReflectanceCurveIndex) == 68, "spectralReflectanceCurveIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irEmissivity) == 72, "irEmissivity offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irReflectance) == 76, "irReflectance offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTransmittance) == 80, "irTransmittance offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 84, "irTemperature_K offset mismatch");
 
 // ============================================================================
 // Environment Map Helpers
