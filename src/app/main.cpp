@@ -697,6 +697,146 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  BRDF LUT uploaded successfully");
 
         // ====================================================================
+        // Create Prefiltered Environment Map for IBL Specular
+        // ====================================================================
+        // TODO (M2): Load HDR environment map and generate mip chain for roughness
+        // For M1, use simple fallback: single-mip sky-blue cubemap
+        QL_LOG_INFO("Creating prefiltered environment map (fallback: sky-blue cubemap)...");
+
+        // Create cubemap image (256x256 per face, 5 mip levels for different roughness)
+        constexpr u32 envMapSize = 256;
+        constexpr u32 envMapMips = 5;  // Mip chain for roughness levels (roughness 0.0 to 1.0)
+
+        // Manually create cubemap image (GpuImage doesn't support cubemaps yet)
+        VkImage envMapImage = VK_NULL_HANDLE;
+        VkImageView envMapView = VK_NULL_HANDLE;
+        VmaAllocation envMapAllocation = VK_NULL_HANDLE;
+
+        {
+            // Create cubemap image
+            VkImageCreateInfo imageInfo{};
+            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            imageInfo.imageType = VK_IMAGE_TYPE_2D;
+            imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;  // RGBA32F (HDR)
+            imageInfo.extent = {envMapSize, envMapSize, 1};
+            imageInfo.mipLevels = envMapMips;
+            imageInfo.arrayLayers = 6;  // Cubemap faces: +X, -X, +Y, -Y, +Z, -Z
+            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+            imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;  // Enable cubemap view
+
+            VmaAllocationCreateInfo allocInfo{};
+            allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+
+            VkResult result = vmaCreateImage(context.GetAllocator(), &imageInfo, &allocInfo,
+                                              &envMapImage, &envMapAllocation, nullptr);
+            if (result != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create environment cubemap image");
+            }
+
+            // Create cubemap view
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = envMapImage;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;  // Cubemap view
+            viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = 0;
+            viewInfo.subresourceRange.levelCount = envMapMips;
+            viewInfo.subresourceRange.baseArrayLayer = 0;
+            viewInfo.subresourceRange.layerCount = 6;  // All 6 faces
+
+            result = vkCreateImageView(context.GetDevice(), &viewInfo, nullptr, &envMapView);
+            if (result != VK_SUCCESS) {
+                vmaDestroyImage(context.GetAllocator(), envMapImage, envMapAllocation);
+                throw std::runtime_error("Failed to create environment cubemap view");
+            }
+        }
+
+        // Transition image to TRANSFER_DST for upload
+        CommandHelper::TransitionImageLayoutImmediate(
+            context,
+            envMapImage,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            envMapMips,
+            6  // All 6 cubemap faces
+        );
+
+        // Upload simple sky-blue color to all faces and all mip levels
+        {
+            // Sky-blue color: soft blue gradient (approximates clear sky)
+            constexpr f32 skyColor[4] = {0.5f, 0.7f, 1.0f, 1.0f};  // Light blue
+
+            // Upload each mip level with progressively smaller resolution
+            for (u32 mip = 0; mip < envMapMips; ++mip) {
+                u32 mipSize = envMapSize >> mip;  // Divide by 2^mip
+                if (mipSize == 0) mipSize = 1;
+
+                // Create pixel data (all pixels same color)
+                std::vector<f32> pixelData(mipSize * mipSize * 4);
+                for (u32 i = 0; i < mipSize * mipSize; ++i) {
+                    pixelData[i * 4 + 0] = skyColor[0];
+                    pixelData[i * 4 + 1] = skyColor[1];
+                    pixelData[i * 4 + 2] = skyColor[2];
+                    pixelData[i * 4 + 3] = skyColor[3];
+                }
+
+                // Create staging buffer
+                VkDeviceSize bufferSize = pixelData.size() * sizeof(f32);
+                GpuBuffer stagingBuffer(
+                    context.GetAllocator(),
+                    bufferSize,
+                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VMA_MEMORY_USAGE_CPU_TO_GPU
+                );
+                stagingBuffer.Upload(pixelData.data(), bufferSize);
+
+                // Copy to all 6 cubemap faces
+                CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+                    for (u32 face = 0; face < 6; ++face) {
+                        VkBufferImageCopy region{};
+                        region.bufferOffset = 0;
+                        region.bufferRowLength = 0;  // Tightly packed
+                        region.bufferImageHeight = 0;
+                        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                        region.imageSubresource.mipLevel = mip;
+                        region.imageSubresource.baseArrayLayer = face;
+                        region.imageSubresource.layerCount = 1;
+                        region.imageOffset = {0, 0, 0};
+                        region.imageExtent = {mipSize, mipSize, 1};
+
+                        vkCmdCopyBufferToImage(
+                            cmd,
+                            stagingBuffer.GetHandle(),
+                            envMapImage,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                            1,
+                            &region
+                        );
+                    }
+                });
+            }
+        }
+
+        // Transition image to SHADER_READ_ONLY for sampling
+        CommandHelper::TransitionImageLayoutImmediate(
+            context,
+            envMapImage,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            envMapMips,
+            6  // All 6 cubemap faces
+        );
+
+        QL_LOG_INFO("  Prefiltered environment map created (fallback: sky-blue cubemap, 5 mip levels)");
+
+        // ====================================================================
         // Create Ray Tracing Pipeline
         // ====================================================================
         QL_LOG_INFO("Creating ray tracing pipeline...");
@@ -727,8 +867,14 @@ int main(int argc, char* argv[]) {
         // Bind textures (bindless arrays)
         pipeline.BindTextures(textureManager.GetImageViews(), textureManager.GetSamplers()); // Binding 6, 7
 
-        // Bind BRDF integration LUT for IBL
-        pipeline.BindBRDFLut(brdfLutTexture.GetView(), brdfLutSampler);  // Binding 10, 11
+        // ====================================================================
+        // Bind IBL (Image-Based Lighting) resources
+        // ====================================================================
+        // Binding 10: Prefiltered environment cubemap (with mip chain for roughness)
+        // Binding 11: BRDF integration LUT (2D texture)
+        // Binding 12: IBL sampler (shared by both textures)
+        pipeline.BindPrefilteredEnvMap(envMapView);                      // Binding 10
+        pipeline.BindBRDFLut(brdfLutTexture.GetView(), brdfLutSampler);  // Binding 11, 12
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();

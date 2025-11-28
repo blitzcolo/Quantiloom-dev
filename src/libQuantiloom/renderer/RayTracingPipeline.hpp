@@ -86,7 +86,19 @@ public:
     void BindTextures(const std::vector<VkImageView>& imageViews,
                       const std::vector<VkSampler>& samplers);
 
-    // Bind BRDF integration LUT for IBL (binding 10: texture, binding 11: sampler)
+    // ========================================================================
+    // IBL (Image-Based Lighting) Bindings
+    // ========================================================================
+    // Bind IBL textures for physically-based specular reflections
+    // - Binding 10: Prefiltered environment cubemap (with mipmaps for roughness)
+    // - Binding 11: BRDF integration LUT (2D texture)
+    // - Binding 12: IBL sampler (shared)
+    // ========================================================================
+
+    // Bind prefiltered environment cubemap (binding 10)
+    void BindPrefilteredEnvMap(VkImageView imageView);
+
+    // Bind BRDF integration LUT for IBL (binding 11: texture, binding 12: sampler)
     void BindBRDFLut(VkImageView imageView, VkSampler sampler);
 
     // Update all bindings (call after all Bind* calls)
