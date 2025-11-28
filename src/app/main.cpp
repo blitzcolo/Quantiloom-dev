@@ -94,6 +94,109 @@ static_assert(offsetof(MaterialDataCPU, irTransmittance) == 76, "irTransmittance
 static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 80, "irTemperature_K offset mismatch");
 
 // ============================================================================
+// Environment Map Helpers
+// ============================================================================
+
+// Convert equirectangular (latitude-longitude) to cubemap face direction
+// face: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+// u, v: normalized coordinates [0, 1] within the face
+// Returns: 3D direction vector (unnormalized)
+inline glm::vec3 CubemapFaceDirection(u32 face, f32 u, f32 v) {
+    // Convert UV to [-1, +1] range
+    f32 x = 2.0f * u - 1.0f;
+    f32 y = 2.0f * v - 1.0f;
+
+    glm::vec3 dir;
+    switch (face) {
+        case 0: dir = glm::vec3( 1.0f,    -y,    -x); break;  // +X
+        case 1: dir = glm::vec3(-1.0f,    -y,     x); break;  // -X
+        case 2: dir = glm::vec3(    x,  1.0f,     y); break;  // +Y
+        case 3: dir = glm::vec3(    x, -1.0f,    -y); break;  // -Y
+        case 4: dir = glm::vec3(    x,    -y,  1.0f); break;  // +Z
+        case 5: dir = glm::vec3(   -x,    -y, -1.0f); break;  // -Z
+        default: dir = glm::vec3(0.0f, 0.0f, 0.0f); break;
+    }
+    return dir;
+}
+
+// Sample equirectangular map using direction vector
+// Returns RGB color from the equirect map
+inline glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
+    glm::vec3 normalized = glm::normalize(dir);
+
+    // Convert Cartesian direction to spherical coordinates (θ, φ)
+    // θ (theta): polar angle [0, π], φ (phi): azimuthal angle [0, 2π]
+    f32 theta = std::acos(normalized.y);         // [0, π]
+    f32 phi = std::atan2(normalized.z, normalized.x);  // [-π, π]
+
+    // Convert to UV coordinates [0, 1]
+    f32 u = (phi + glm::pi<f32>()) / (2.0f * glm::pi<f32>());  // [0, 1]
+    f32 v = theta / glm::pi<f32>();                             // [0, 1]
+
+    // Sample equirect with bilinear filtering
+    u32 width = equirect.width;
+    u32 height = equirect.height;
+
+    f32 fx = u * static_cast<f32>(width - 1);
+    f32 fy = v * static_cast<f32>(height - 1);
+
+    u32 x0 = static_cast<u32>(fx) % width;
+    u32 y0 = static_cast<u32>(fy) % height;
+    u32 x1 = (x0 + 1) % width;
+    u32 y1 = std::min(y0 + 1, height - 1);
+
+    f32 wx = fx - std::floor(fx);
+    f32 wy = fy - std::floor(fy);
+
+    // Bilinear interpolation (assume RGB channels = 3)
+    auto lerp = [](f32 a, f32 b, f32 t) { return a * (1.0f - t) + b * t; };
+
+    glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
+    glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
+    glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
+    glm::vec3 c11(equirect(x1, y1, 0), equirect(x1, y1, 1), equirect(x1, y1, 2));
+
+    glm::vec3 c0 = c00 * (1.0f - wx) + c10 * wx;
+    glm::vec3 c1 = c01 * (1.0f - wx) + c11 * wx;
+
+    return c0 * (1.0f - wy) + c1 * wy;
+}
+
+// Convert equirectangular image to cubemap faces
+// Returns vector of 6 images (one per face), each with faceSize×faceSize resolution
+std::vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize) {
+    QL_LOG_INFO("Converting equirectangular map to cubemap ({}x{} per face)...", faceSize, faceSize);
+
+    std::vector<Image> faces(6);
+
+    for (u32 face = 0; face < 6; ++face) {
+        faces[face] = Image(faceSize, faceSize, 3);  // RGB
+
+        for (u32 y = 0; y < faceSize; ++y) {
+            for (u32 x = 0; x < faceSize; ++x) {
+                // Convert pixel to UV [0, 1]
+                f32 u = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(faceSize);
+                f32 v = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(faceSize);
+
+                // Get 3D direction for this pixel
+                glm::vec3 dir = CubemapFaceDirection(face, u, v);
+
+                // Sample equirect map
+                glm::vec3 color = SampleEquirect(equirect, dir);
+
+                // Store in face
+                faces[face](x, y, 0) = color.r;
+                faces[face](x, y, 1) = color.g;
+                faces[face](x, y, 2) = color.b;
+            }
+        }
+    }
+
+    QL_LOG_INFO("  Cubemap conversion complete");
+    return faces;
+}
+
+// ============================================================================
 // Scene Loading Helper
 // ============================================================================
 
@@ -699,13 +802,55 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         // Create Prefiltered Environment Map for IBL Specular
         // ====================================================================
-        // TODO (M2): Load HDR environment map and generate mip chain for roughness
-        // For M1, use simple fallback: single-mip sky-blue cubemap
-        QL_LOG_INFO("Creating prefiltered environment map (fallback: sky-blue cubemap)...");
+        QL_LOG_INFO("Creating prefiltered environment map for IBL...");
 
-        // Create cubemap image (256x256 per face, 5 mip levels for different roughness)
-        constexpr u32 envMapSize = 256;
+        // Load environment map (equirectangular EXR)
+        String envMapPath = config.Get<String>("renderer.environment_map", "");
+        std::vector<Image> cubemapFaces;
+        u32 envMapSize = 256;  // Default cubemap face size
         constexpr u32 envMapMips = 5;  // Mip chain for roughness levels (roughness 0.0 to 1.0)
+
+        if (!envMapPath.empty() && ImageIO::FileExists(envMapPath)) {
+            QL_LOG_INFO("  Loading environment map from: {}", envMapPath);
+
+            auto equirectOpt = ImageIO::ReadEXR(envMapPath);
+            if (equirectOpt.has_value()) {
+                Image& equirect = equirectOpt.value();
+                QL_LOG_INFO("  Environment map loaded: {}x{}, {} channels",
+                           equirect.width, equirect.height, equirect.channels);
+
+                // Convert to cubemap (use 512x512 per face for EXR input)
+                envMapSize = 512;
+                cubemapFaces = EquirectToCubemap(equirect, envMapSize);
+            } else {
+                QL_LOG_WARN("  Failed to load environment map from {}, using fallback", envMapPath);
+                envMapPath = "";  // Trigger fallback
+            }
+        } else {
+            if (!envMapPath.empty()) {
+                QL_LOG_WARN("  Environment map not found: {}, using fallback", envMapPath);
+            } else {
+                QL_LOG_INFO("  No environment map specified in config, using fallback");
+            }
+        }
+
+        // Fallback: sky-blue cubemap if no EXR loaded
+        if (envMapPath.empty()) {
+            QL_LOG_INFO("  Creating fallback sky-blue cubemap ({}x{} per face)...", envMapSize, envMapSize);
+            cubemapFaces.resize(6);
+            for (u32 face = 0; face < 6; ++face) {
+                cubemapFaces[face] = Image(envMapSize, envMapSize, 3);
+                // Sky-blue color: soft blue gradient
+                constexpr f32 skyColor[3] = {0.5f, 0.7f, 1.0f};
+                for (u32 y = 0; y < envMapSize; ++y) {
+                    for (u32 x = 0; x < envMapSize; ++x) {
+                        cubemapFaces[face](x, y, 0) = skyColor[0];
+                        cubemapFaces[face](x, y, 1) = skyColor[1];
+                        cubemapFaces[face](x, y, 2) = skyColor[2];
+                    }
+                }
+            }
+        }
 
         // Manually create cubemap image (GpuImage doesn't support cubemaps yet)
         VkImage envMapImage = VK_NULL_HANDLE;
@@ -767,26 +912,25 @@ int main(int argc, char* argv[]) {
             6  // All 6 cubemap faces
         );
 
-        // Upload simple sky-blue color to all faces and all mip levels
+        // Upload cubemap faces to GPU (mip level 0 only; TODO: generate mipchain for roughness)
+        QL_LOG_INFO("  Uploading cubemap to GPU ({} faces, {}x{} per face)...", cubemapFaces.size(), envMapSize, envMapSize);
         {
-            // Sky-blue color: soft blue gradient (approximates clear sky)
-            constexpr f32 skyColor[4] = {0.5f, 0.7f, 1.0f, 1.0f};  // Light blue
+            for (u32 face = 0; face < 6; ++face) {
+                const Image& faceImage = cubemapFaces[face];
 
-            // Upload each mip level with progressively smaller resolution
-            for (u32 mip = 0; mip < envMapMips; ++mip) {
-                u32 mipSize = envMapSize >> mip;  // Divide by 2^mip
-                if (mipSize == 0) mipSize = 1;
-
-                // Create pixel data (all pixels same color)
-                std::vector<f32> pixelData(mipSize * mipSize * 4);
-                for (u32 i = 0; i < mipSize * mipSize; ++i) {
-                    pixelData[i * 4 + 0] = skyColor[0];
-                    pixelData[i * 4 + 1] = skyColor[1];
-                    pixelData[i * 4 + 2] = skyColor[2];
-                    pixelData[i * 4 + 3] = skyColor[3];
+                // Convert RGB to RGBA (add alpha = 1.0)
+                std::vector<f32> pixelData(envMapSize * envMapSize * 4);
+                for (u32 y = 0; y < envMapSize; ++y) {
+                    for (u32 x = 0; x < envMapSize; ++x) {
+                        u32 idx = (y * envMapSize + x) * 4;
+                        pixelData[idx + 0] = faceImage(x, y, 0);  // R
+                        pixelData[idx + 1] = faceImage(x, y, 1);  // G
+                        pixelData[idx + 2] = faceImage(x, y, 2);  // B
+                        pixelData[idx + 3] = 1.0f;                // A
+                    }
                 }
 
-                // Create staging buffer
+                // Create staging buffer for this face
                 VkDeviceSize bufferSize = pixelData.size() * sizeof(f32);
                 GpuBuffer stagingBuffer(
                     context.GetAllocator(),
@@ -796,12 +940,85 @@ int main(int argc, char* argv[]) {
                 );
                 stagingBuffer.Upload(pixelData.data(), bufferSize);
 
-                // Copy to all 6 cubemap faces
+                // Upload to mip level 0
                 CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-                    for (u32 face = 0; face < 6; ++face) {
+                    VkBufferImageCopy region{};
+                    region.bufferOffset = 0;
+                    region.bufferRowLength = 0;  // Tightly packed
+                    region.bufferImageHeight = 0;
+                    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                    region.imageSubresource.mipLevel = 0;  // Base mip level
+                    region.imageSubresource.baseArrayLayer = face;
+                    region.imageSubresource.layerCount = 1;
+                    region.imageOffset = {0, 0, 0};
+                    region.imageExtent = {envMapSize, envMapSize, 1};
+
+                    vkCmdCopyBufferToImage(
+                        cmd,
+                        stagingBuffer.GetHandle(),
+                        envMapImage,
+                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                        1,
+                        &region
+                    );
+                });
+            }
+
+            // Generate mipmaps for remaining levels (simple box filter)
+            // TODO (M2): Replace with proper GGX prefiltering for PBR
+            QL_LOG_INFO("  Generating mipmap chain (simple downsampling)...");
+            for (u32 mip = 1; mip < envMapMips; ++mip) {
+                u32 mipSize = envMapSize >> mip;  // Divide by 2^mip
+                if (mipSize == 0) mipSize = 1;
+
+                // For now, just copy the base level (no actual filtering)
+                // TODO: Implement proper mipmap generation with GGX kernel
+                for (u32 face = 0; face < 6; ++face) {
+                    // Create downsampled data (simple box filter)
+                    std::vector<f32> mipData(mipSize * mipSize * 4);
+                    u32 prevMipSize = envMapSize >> (mip - 1);
+
+                    for (u32 y = 0; y < mipSize; ++y) {
+                        for (u32 x = 0; x < mipSize; ++x) {
+                            // Sample 2x2 region from previous mip level
+                            u32 srcX = x * 2;
+                            u32 srcY = y * 2;
+                            glm::vec4 sum(0.0f);
+                            for (u32 dy = 0; dy < 2 && (srcY + dy) < prevMipSize; ++dy) {
+                                for (u32 dx = 0; dx < 2 && (srcX + dx) < prevMipSize; ++dx) {
+                                    u32 srcIdx = ((srcY + dy) * prevMipSize + (srcX + dx));
+                                    if (srcIdx < cubemapFaces[face].PixelCount()) {
+                                        sum.r += cubemapFaces[face].data[srcIdx * 3 + 0];
+                                        sum.g += cubemapFaces[face].data[srcIdx * 3 + 1];
+                                        sum.b += cubemapFaces[face].data[srcIdx * 3 + 2];
+                                        sum.a += 1.0f;
+                                    }
+                                }
+                            }
+                            sum /= 4.0f;
+
+                            u32 dstIdx = (y * mipSize + x) * 4;
+                            mipData[dstIdx + 0] = sum.r;
+                            mipData[dstIdx + 1] = sum.g;
+                            mipData[dstIdx + 2] = sum.b;
+                            mipData[dstIdx + 3] = 1.0f;
+                        }
+                    }
+
+                    // Upload this mip level
+                    VkDeviceSize bufferSize = mipData.size() * sizeof(f32);
+                    GpuBuffer stagingBuffer(
+                        context.GetAllocator(),
+                        bufferSize,
+                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                        VMA_MEMORY_USAGE_CPU_TO_GPU
+                    );
+                    stagingBuffer.Upload(mipData.data(), bufferSize);
+
+                    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
                         VkBufferImageCopy region{};
                         region.bufferOffset = 0;
-                        region.bufferRowLength = 0;  // Tightly packed
+                        region.bufferRowLength = 0;
                         region.bufferImageHeight = 0;
                         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                         region.imageSubresource.mipLevel = mip;
@@ -818,8 +1035,8 @@ int main(int argc, char* argv[]) {
                             1,
                             &region
                         );
-                    }
-                });
+                    });
+                }
             }
         }
 
@@ -834,7 +1051,8 @@ int main(int argc, char* argv[]) {
             6  // All 6 cubemap faces
         );
 
-        QL_LOG_INFO("  Prefiltered environment map created (fallback: sky-blue cubemap, 5 mip levels)");
+        QL_LOG_INFO("  Prefiltered environment map created ({}x{} per face, {} mip levels)",
+                    envMapSize, envMapSize, envMapMips);
 
         // ====================================================================
         // Create Ray Tracing Pipeline
