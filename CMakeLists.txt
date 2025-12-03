@@ -70,8 +70,8 @@ if(MSVC)
         /W4
         /permissive-
         /Zc:__cplusplus
-        /source-charset:utf-8
-        /execution-charset:gbk
+        #/source-charset:utf-8
+        #/execution-charset:gbk
     )
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
@@ -89,6 +89,11 @@ endif()
 # Project-Wide Options
 # ============================================================================
 option(QUANTILOOM_BUILD_TESTS "Build unit tests" ON)
+
+# Support standard CMake BUILD_TESTING option
+if(BUILD_TESTING)
+    set(QUANTILOOM_BUILD_TESTS ON CACHE BOOL "Build unit tests" FORCE)
+endif()
 option(QUANTILOOM_BUILD_EXAMPLES "Build example applications" ON)
 option(QUANTILOOM_ENABLE_VALIDATION "Enable Vulkan validation layers" ON)
 
@@ -262,7 +267,8 @@ endif()
 # Tests (optional)
 if(QUANTILOOM_BUILD_TESTS)
     enable_testing()
-    # add_subdirectory(tests)  # TODO: M1.5+
+    add_subdirectory(tests)
+    message(STATUS "Unit tests enabled - target: libquantiloom_tests")
 endif()
 
 # ============================================================================

@@ -45,10 +45,12 @@ public:
 
     // Generate BRDF integration LUT (CPU-side Monte Carlo)
     // Returns Image with 2 channels (R=scale, G=bias)
-    static Image Generate(const Config& config = Config{});
+    static Image Generate(const Config& config);
+    static Image Generate();  // Uses default Config
 
     // Generate and save to file (EXR format)
-    static bool GenerateAndSave(const String& filepath, const Config& config = Config{});
+    static bool GenerateAndSave(const String& filepath, const Config& config);
+    static bool GenerateAndSave(const String& filepath);  // Uses default Config
 
 private:
     // ========================================================================

@@ -51,6 +51,10 @@ Image BRDFLutGenerator::Generate(const Config& config) {
     return lut;
 }
 
+Image BRDFLutGenerator::Generate() {
+    return Generate(Config{});
+}
+
 bool BRDFLutGenerator::GenerateAndSave(const String& filepath, const Config& config) {
     Image lut = Generate(config);
 
@@ -61,6 +65,10 @@ bool BRDFLutGenerator::GenerateAndSave(const String& filepath, const Config& con
         QL_LOG_ERROR("  Failed to save BRDF LUT to {}", filepath);
         return false;
     }
+}
+
+bool BRDFLutGenerator::GenerateAndSave(const String& filepath) {
+    return GenerateAndSave(filepath, Config{});
 }
 
 // ============================================================================

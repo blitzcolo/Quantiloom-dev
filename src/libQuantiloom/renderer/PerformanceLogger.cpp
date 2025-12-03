@@ -51,6 +51,11 @@ PerformanceLogger::PerformanceLogger(VulkanContext& context, const Config& confi
     QL_LOG_INFO("  Performance logger initialized");
 }
 
+PerformanceLogger::PerformanceLogger(VulkanContext& context)
+    : PerformanceLogger(context, Config{})
+{
+}
+
 PerformanceLogger::~PerformanceLogger() {
     if (m_csvFile.is_open()) {
         m_csvFile.close();

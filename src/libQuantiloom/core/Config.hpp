@@ -88,9 +88,17 @@ T Config::Get(StringView key, const T& defaultValue) const {
         if (auto val = node->value<int64_t>()) {
             return static_cast<i32>(*val);
         }
+    } else if constexpr (std::is_same_v<T, i64>) {
+        if (auto val = node->value<int64_t>()) {
+            return *val;
+        }
     } else if constexpr (std::is_same_v<T, u32>) {
         if (auto val = node->value<int64_t>()) {
             return static_cast<u32>(*val);
+        }
+    } else if constexpr (std::is_same_v<T, u64>) {
+        if (auto val = node->value<int64_t>()) {
+            return static_cast<u64>(*val);
         }
     } else if constexpr (std::is_same_v<T, f32>) {
         if (auto val = node->value<double>()) {
@@ -111,9 +119,10 @@ T Config::Get(StringView key, const T& defaultValue) const {
 
 template<typename T>
 Result<T, String> Config::GetRequired(StringView key) const {
+    using ResultType = Result<T, String>;
     const toml::node* node = Navigate(key);
     if (!node) {
-        return Result<T, String>::Err("Missing required key: " + String(key));
+        return typename ResultType::Err("Missing required key: " + String(key));
     }
 
     if constexpr (std::is_same_v<T, String>) {
@@ -124,9 +133,17 @@ Result<T, String> Config::GetRequired(StringView key) const {
         if (auto val = node->value<int64_t>()) {
             return static_cast<i32>(*val);
         }
+    } else if constexpr (std::is_same_v<T, i64>) {
+        if (auto val = node->value<int64_t>()) {
+            return *val;
+        }
     } else if constexpr (std::is_same_v<T, u32>) {
         if (auto val = node->value<int64_t>()) {
             return static_cast<u32>(*val);
+        }
+    } else if constexpr (std::is_same_v<T, u64>) {
+        if (auto val = node->value<int64_t>()) {
+            return static_cast<u64>(*val);
         }
     } else if constexpr (std::is_same_v<T, f32>) {
         if (auto val = node->value<double>()) {
@@ -142,7 +159,7 @@ Result<T, String> Config::GetRequired(StringView key) const {
         }
     }
 
-    return Result<T, String>::Err("Type mismatch for key: " + String(key));
+    return typename ResultType::Err("Type mismatch for key: " + String(key));
 }
 
 template<typename T>
@@ -206,8 +223,6 @@ Vector<T> Config::GetArray(StringView key) const {
             if (auto val = elem.value<bool>()) {
                 result.push_back(*val);
             }
-        } else {
-            return Result<Vector<T>, String>::Err("Unsupported type: " + std::string(typeid(T).name()));
         }
     }
 

@@ -46,7 +46,8 @@ public:
     // Lifecycle
     // ========================================================================
 
-    PerformanceLogger(VulkanContext& context, const Config& config = Config{});
+    PerformanceLogger(VulkanContext& context, const Config& config);
+    explicit PerformanceLogger(VulkanContext& context);  // Uses default Config
     ~PerformanceLogger();
 
     // Non-copyable, non-movable
