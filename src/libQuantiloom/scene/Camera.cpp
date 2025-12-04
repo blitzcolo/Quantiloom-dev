@@ -39,7 +39,7 @@ void Camera::SetAspectRatio(f32 aspectRatio) {
 }
 
 CameraData Camera::GetCameraData() const {
-    CameraData data;
+    CameraData data{};
     data.origin = m_position;
     data.forward = m_forward;
     data.right = m_right;
@@ -69,14 +69,18 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     // Read camera position
     auto posArray = config.GetArray<f32>("camera.position");
     if (posArray.size() != 3) {
-        return Result<Camera, String>::Err("camera.position must be array of 3 floats, but got " + std::to_string(posArray.size()));
+        return Result<Camera>(
+            Result<Camera>::Err(
+                "camera.position must be array of 3 floats, but got " + std::to_string(posArray.size())));
     }
     glm::vec3 position(posArray[0], posArray[1], posArray[2]);
 
     // Read look-at target
     auto lookAtArray = config.GetArray<f32>("camera.look_at");
     if (lookAtArray.size() != 3) {
-        return Result<Camera, String>::Err("camera.look_at must be array of 3 floats, but got " + std::to_string(lookAtArray.size()));
+        return Result<Camera>(
+            Result<Camera>::Err(
+                "camera.look_at must be array of 3 floats, but got " + std::to_string(lookAtArray.size())));
     }
     glm::vec3 lookAt(lookAtArray[0], lookAtArray[1], lookAtArray[2]);
 
@@ -85,7 +89,8 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     glm::vec3 up(0.0f, 1.0f, 0.0f);  // Default: Y-up
     if (!upArray.empty()) {
         if (upArray.size() != 3) {
-            return Result<Camera, String>::Err("camera.up must be array of 3 floats, but got " + std::to_string(upArray.size()));
+            return Result<Camera>(
+                Result<Camera>::Err("camera.up must be array of 3 floats, but got " + std::to_string(upArray.size())));
         }
         up = glm::vec3(upArray[0], upArray[1], upArray[2]);
     }
@@ -101,7 +106,7 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     QL_LOG_INFO("  LookAt:   ({:.2f}, {:.2f}, {:.2f})", lookAt.x, lookAt.y, lookAt.z);
     QL_LOG_INFO("  FOV:      {:.1f}°", fovY);
 
-    return camera;  // Direct construction of Result
+    return Result(camera);  // Direct construction of Result
 }
 
 } // namespace quantiloom

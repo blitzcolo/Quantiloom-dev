@@ -50,7 +50,7 @@ struct SpectralCurve {
 
     // Evaluate curve at specific wavelength using linear interpolation
     // Returns 0.0 if wavelength is out of range or curve is empty
-    f32 Evaluate(f32 lambda_nm) const {
+    [[nodiscard]] f32 Evaluate(const f32 lambda_nm) const {
         if (samples.empty()) return 0.0f;
 
         // Out of range - return edge values
@@ -59,15 +59,14 @@ struct SpectralCurve {
 
         // Binary search for surrounding samples
         for (size_t i = 0; i < samples.size() - 1; ++i) {
-            f32 lambda0 = samples[i].first;
-            f32 lambda1 = samples[i + 1].first;
+            const f32 lambda0 = samples[i].first;
 
-            if (lambda_nm >= lambda0 && lambda_nm <= lambda1) {
-                f32 value0 = samples[i].second;
-                f32 value1 = samples[i + 1].second;
+            if (const f32 lambda1 = samples[i + 1].first; lambda_nm >= lambda0 && lambda_nm <= lambda1) {
+                const f32 value0 = samples[i].second;
+                const f32 value1 = samples[i + 1].second;
 
                 // Linear interpolation
-                f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+                const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
                 return value0 * (1.0f - t) + value1 * t;
             }
         }
@@ -76,7 +75,7 @@ struct SpectralCurve {
     }
 
     // Check if curve is valid (non-empty, monotonic wavelengths)
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         if (samples.empty()) return false;
 
         for (size_t i = 1; i < samples.size(); ++i) {
@@ -88,7 +87,7 @@ struct SpectralCurve {
     }
 
     // Get wavelength range
-    std::pair<f32, f32> GetWavelengthRange() const {
+    [[nodiscard]] std::pair<f32, f32> GetWavelengthRange() const {
         if (samples.empty()) return {0.0f, 0.0f};
         return {samples.front().first, samples.back().first};
     }
@@ -109,10 +108,10 @@ struct SpectralCurve {
 static constexpr u32 MAX_SPECTRAL_SAMPLES = 64;
 
 struct SpectralCurveGPU {
-    f32 wavelengths[MAX_SPECTRAL_SAMPLES];  // Wavelength in nm (must be monotonic increasing)
-    f32 values[MAX_SPECTRAL_SAMPLES];       // Spectral values (dimensionless or W/sr/m²/nm)
+    f32 wavelengths[MAX_SPECTRAL_SAMPLES]{};  // Wavelength in nm (must be monotonic increasing)
+    f32 values[MAX_SPECTRAL_SAMPLES]{};       // Spectral values (dimensionless or W/sr/m²/nm)
     u32 numSamples;                         // Actual number of valid samples (0 to MAX_SPECTRAL_SAMPLES)
-    u32 _padding[3];                        // Align to 16 bytes for std430 layout
+    u32 _padding[3]{};                        // Align to 16 bytes for std430 layout
 
     // Default constructor: empty curve
     SpectralCurveGPU() : numSamples(0) {
@@ -142,12 +141,12 @@ struct SpectralCurveGPU {
         } else {
             // Downsample uniformly to fit in MAX_SPECTRAL_SAMPLES
             gpu.numSamples = MAX_SPECTRAL_SAMPLES;
-            f32 lambda_min = curve.samples.front().first;
-            f32 lambda_max = curve.samples.back().first;
+            const f32 lambda_min = curve.samples.front().first;
+            const f32 lambda_max = curve.samples.back().first;
 
             for (u32 i = 0; i < MAX_SPECTRAL_SAMPLES; ++i) {
-                f32 t = static_cast<f32>(i) / static_cast<f32>(MAX_SPECTRAL_SAMPLES - 1);
-                f32 lambda = lambda_min + t * (lambda_max - lambda_min);
+                const f32 t = static_cast<f32>(i) / static_cast<f32>(MAX_SPECTRAL_SAMPLES - 1);
+                const f32 lambda = lambda_min + t * (lambda_max - lambda_min);
 
                 gpu.wavelengths[i] = lambda;
                 gpu.values[i] = curve.Evaluate(lambda);

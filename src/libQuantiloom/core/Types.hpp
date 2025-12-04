@@ -97,7 +97,7 @@ using Optional = std::optional<T>;
 template<typename T, typename E = String>
 class Result {
 public:
-    // Construct from success value
+    // Construct from success value (implicit for convenient return)
     Result(T&& value) : m_data(std::move(value)) {}
     Result(const T& value) : m_data(value) {}
 
@@ -111,12 +111,12 @@ public:
     Result(Err&& err) : m_data(std::move(err.error)) {}
 
     // Check if result holds a value
-    bool has_value() const { return std::holds_alternative<T>(m_data); }
+    [[nodiscard]] bool has_value() const { return std::holds_alternative<T>(m_data); }
     explicit operator bool() const { return has_value(); }
 
     // Access value (throws if error)
     T& value() & { return std::get<T>(m_data); }
-    const T& value() const & { return std::get<T>(m_data); }
+    [[nodiscard]] const T& value() const & { return std::get<T>(m_data); }
     T&& value() && { return std::get<T>(std::move(m_data)); }
 
     T& operator*() & { return value(); }
@@ -124,7 +124,7 @@ public:
     T&& operator*() && { return std::move(value()); }
 
     // Access error (throws if value)
-    const E& error() const & { return std::get<E>(m_data); }
+    [[nodiscard]] const E& error() const & { return std::get<E>(m_data); }
     E& error() & { return std::get<E>(m_data); }
     E&& error() && { return std::get<E>(std::move(m_data)); }
 
@@ -145,19 +145,19 @@ auto Err(E&& error) {
 // Defined here (after String/Result) to avoid forward reference issues
 // ============================================================================
 
-inline Result<SpectralMode, String> ParseSpectralMode(StringView mode_str) {
+inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str) {
     if (mode_str == "single" || mode_str == "single_wavelength") {
-        return SpectralMode::Single;
+        return Result(SpectralMode::Single);
     } else if (mode_str == "rgb" || mode_str == "RGB") {
-        return SpectralMode::RGB;
+        return Result(SpectralMode::RGB);
     } else if (mode_str == "multispectral") {
-        return SpectralMode::Multispectral;
+        return Result(SpectralMode::Multispectral);
     } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
-        return SpectralMode::MWIR_Fused;
+        return Result(SpectralMode::MWIR_Fused);
     } else if (mode_str == "lwir_fused" || mode_str == "LWIR") {
-        return SpectralMode::LWIR_Fused;
+        return Result(SpectralMode::LWIR_Fused);
     } else {
-        return Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str));
+        return Result<SpectralMode>(Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str)));
     }
 }
 

@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "core/Log.hpp"
+
 // ============================================================================
 // MODTRAN LUT Loader Interface
 // ============================================================================
@@ -84,21 +86,21 @@ struct MODTRANLUT {
 
     // Query sun radiance at specific wavelength (linear interpolation)
     // Returns 0.0 if wavelength is out of range or LUT is empty
-    f32 QuerySunRadiance(f32 lambda_nm) const {
+    f32 QuerySunRadiance(const f32 lambda_nm) const {
         return InterpolateSpectrum(wavelengths_nm, sun_radiance, lambda_nm);
     }
 
     // Query sky radiance at specific wavelength (linear interpolation)
     // Returns 0.0 if wavelength is out of range or LUT is empty
-    f32 QuerySkyRadiance(f32 lambda_nm) const {
+    f32 QuerySkyRadiance(const f32 lambda_nm) const {
         return InterpolateSpectrum(wavelengths_nm, sky_radiance, lambda_nm);
     }
 
     // Query transmittance at specific wavelength (linear interpolation)
     // Returns 1.0 (no attenuation) if wavelength is out of range or LUT is empty
-    f32 QueryTransmittance(f32 lambda_nm) const {
+    f32 QueryTransmittance(const f32 lambda_nm) const {
         if (wavelengths_nm.empty()) return 1.0f;
-        f32 result = InterpolateSpectrum(wavelengths_nm, transmittance, lambda_nm);
+        const f32 result = InterpolateSpectrum(wavelengths_nm, transmittance, lambda_nm);
         return (result > 0.0f) ? result : 1.0f;  // Fallback to no attenuation
     }
 
@@ -112,7 +114,7 @@ private:
     // Helper: Linear interpolation of spectrum
     static f32 InterpolateSpectrum(const Vector<f32>& wavelengths,
                                    const Vector<f32>& values,
-                                   f32 lambda_nm) {
+                                   const f32 lambda_nm) {
         if (wavelengths.empty()) return 0.0f;
 
         // Out of range - return edge values
@@ -121,15 +123,15 @@ private:
 
         // Binary search for surrounding samples (efficient for large LUTs)
         for (size_t i = 0; i < wavelengths.size() - 1; ++i) {
-            f32 lambda0 = wavelengths[i];
-            f32 lambda1 = wavelengths[i + 1];
+            const f32 lambda0 = wavelengths[i];
+            const f32 lambda1 = wavelengths[i + 1];
 
             if (lambda_nm >= lambda0 && lambda_nm <= lambda1) {
-                f32 value0 = values[i];
-                f32 value1 = values[i + 1];
+                const f32 value0 = values[i];
+                const f32 value1 = values[i + 1];
 
                 // Linear interpolation
-                f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+                const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
                 return value0 * (1.0f - t) + value1 * t;
             }
         }
@@ -156,7 +158,7 @@ public:
     // - Validate data consistency
     //
     // PLACEHOLDER: Returns empty LUT with warning message
-    MODTRANLUT Load(const String& filepath) {
+    static MODTRANLUT Load(const String& filepath) {
         MODTRANLUT lut;
 
         // ====================================================================
@@ -189,10 +191,10 @@ public:
         // ====================================================================
 
         // PLACEHOLDER WARNING
-        LOG_WARN("MODTRANLoader::Load() is a PLACEHOLDER - no implementation yet!");
-        LOG_WARN("  Requested file: {}", filepath);
-        LOG_WARN("  Returning EMPTY LUT. User must implement HDF5 loading logic.");
-        LOG_WARN("  See src/libQuantiloom/io/MODTRANLoader.hpp for interface details.");
+        QL_LOG_WARN("MODTRANLoader::Load() is a PLACEHOLDER - no implementation yet!");
+        QL_LOG_WARN("  Requested file: {}", filepath);
+        QL_LOG_WARN("  Returning EMPTY LUT. User must implement HDF5 loading logic.");
+        QL_LOG_WARN("  See src/libQuantiloom/io/MODTRANLoader.hpp for interface details.");
 
         return lut;  // Returns empty LUT
     }
@@ -208,7 +210,7 @@ public:
             lut.wavelengths_nm.push_back(lambda);
         }
 
-        size_t n = lut.wavelengths_nm.size();
+        const size_t n = lut.wavelengths_nm.size();
 
         // Dummy sun radiance (constant 1000 W·sr⁻¹·m⁻²·nm⁻¹)
         lut.sun_radiance.resize(n, 1000.0f);

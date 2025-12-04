@@ -10,16 +10,15 @@ namespace quantiloom {
 // ============================================================================
 
 static bool Read1DArray(
-    H5::H5File& file,
+    const H5::H5File& file,
     const std::string& datasetName,
     std::vector<f32>& outArray)
 {
     try {
-        H5::DataSet dataset = file.openDataSet(datasetName);
-        H5::DataSpace dataspace = dataset.getSpace();
+        const H5::DataSet dataset = file.openDataSet(datasetName);
+        const H5::DataSpace dataspace = dataset.getSpace();
 
-        int rank = dataspace.getSimpleExtentNdims();
-        if (rank != 1) {
+        if (int rank = dataspace.getSimpleExtentNdims(); rank != 1) {
             QL_LOG_ERROR("LUTLoader: Expected 1D dataset for {}, got rank {}", datasetName, rank);
             return false;
         }
@@ -43,15 +42,15 @@ static bool Read1DArray(
 // ============================================================================
 
 static bool Write1DArray(
-    H5::H5File& file,
+    const H5::H5File& file,
     const std::string& datasetName,
     const std::vector<f32>& data)
 {
     try {
         hsize_t dims[1] = {data.size()};
-        H5::DataSpace dataspace(1, dims);
+        const H5::DataSpace dataspace(1, dims);
 
-        H5::DataSet dataset = file.createDataSet(
+        const H5::DataSet dataset = file.createDataSet(
             datasetName, H5::PredType::NATIVE_FLOAT, dataspace);
 
         dataset.write(data.data(), H5::PredType::NATIVE_FLOAT);
@@ -67,18 +66,17 @@ static bool Write1DArray(
 // Helper: Read metadata from /metadata group
 // ============================================================================
 
-static void ReadMetadata(H5::H5File& file, AtmosphereLUT& lut) {
+static void ReadMetadata(const H5::H5File& file, AtmosphereLUT& lut) {
     try {
-        H5::Group metaGroup = file.openGroup("/metadata");
+        const H5::Group metaGroup = file.openGroup("/metadata");
 
         for (hsize_t i = 0; i < metaGroup.getNumAttrs(); ++i) {
             H5::Attribute attr = metaGroup.openAttribute(i);
             std::string name = attr.getName();
 
             // Query the actual datatype instead of assuming
-            H5::DataType dtype = attr.getDataType();
 
-            if (dtype.getClass() == H5T_STRING) {
+            if (H5::DataType dtype = attr.getDataType(); dtype.getClass() == H5T_STRING) {
                 H5::StrType strType = attr.getStrType();
                 std::string value;
 
@@ -112,11 +110,11 @@ static void ReadMetadata(H5::H5File& file, AtmosphereLUT& lut) {
 // Helper: Write metadata to /metadata group
 // ============================================================================
 
-static void WriteMetadata(H5::H5File& file, const AtmosphereLUT& lut) {
+static void WriteMetadata(const H5::H5File& file, const AtmosphereLUT& lut) {
     try {
-        H5::Group metaGroup = file.createGroup("/metadata");
-        H5::StrType strType(H5::PredType::C_S1, H5T_VARIABLE);
-        H5::DataSpace scalar(H5S_SCALAR);
+        const H5::Group metaGroup = file.createGroup("/metadata");
+        const H5::StrType strType(H5::PredType::C_S1, H5T_VARIABLE);
+        const H5::DataSpace scalar(H5S_SCALAR);
 
         for (const auto& [key, value] : lut.metadata) {
             H5::Attribute attr = metaGroup.createAttribute(key, strType, scalar);
@@ -139,7 +137,7 @@ std::optional<AtmosphereLUT> LUTLoader::LoadHDF5(const std::string& filepath) {
     }
 
     try {
-        H5::H5File file(filepath, H5F_ACC_RDONLY);
+        const H5::H5File file(filepath, H5F_ACC_RDONLY);
 
         AtmosphereLUT lut;
 
@@ -191,7 +189,7 @@ bool LUTLoader::SaveHDF5(const std::string& filepath, const AtmosphereLUT& lut) 
     }
 
     try {
-        H5::H5File file(filepath, H5F_ACC_TRUNC);
+        const H5::H5File file(filepath, H5F_ACC_TRUNC);
 
         // Write datasets
         if (!Write1DArray(file, "/wavelengths", lut.wavelengths)) {
@@ -245,9 +243,9 @@ std::optional<std::pair<f32, f32>> LUTLoader::GetWavelengthRange(
     }
 
     try {
-        H5::H5File file(filepath, H5F_ACC_RDONLY);
-        H5::DataSet dataset = file.openDataSet("/wavelengths");
-        H5::DataSpace dataspace = dataset.getSpace();
+        const H5::H5File file(filepath, H5F_ACC_RDONLY);
+        const H5::DataSet dataset = file.openDataSet("/wavelengths");
+        const H5::DataSpace dataspace = dataset.getSpace();
 
         hsize_t dims[1];
         dataspace.getSimpleExtentDims(dims);

@@ -53,16 +53,16 @@ public:
     void SetAspectRatio(f32 aspectRatio);
 
     // Accessors
-    glm::vec3 GetPosition() const { return m_position; }
-    glm::vec3 GetLookAt() const { return m_lookAt; }
-    glm::vec3 GetUp() const { return m_up; }
-    glm::vec3 GetForward() const { return m_forward; }
-    glm::vec3 GetRight() const { return m_right; }
-    f32 GetFovY() const { return m_fovYDegrees; }
-    f32 GetAspectRatio() const { return m_aspectRatio; }
+    [[nodiscard]] glm::vec3 GetPosition() const { return m_position; }
+    [[nodiscard]] glm::vec3 GetLookAt() const { return m_lookAt; }
+    [[nodiscard]] glm::vec3 GetUp() const { return m_up; }
+    [[nodiscard]] glm::vec3 GetForward() const { return m_forward; }
+    [[nodiscard]] glm::vec3 GetRight() const { return m_right; }
+    [[nodiscard]] f32 GetFovY() const { return m_fovYDegrees; }
+    [[nodiscard]] f32 GetAspectRatio() const { return m_aspectRatio; }
 
     // Get camera data for GPU (push constants)
-    CameraData GetCameraData() const;
+    [[nodiscard]] CameraData GetCameraData() const;
 
     // Load camera from TOML config
     static Result<Camera, String> FromConfig(const Config& config, f32 aspectRatio);

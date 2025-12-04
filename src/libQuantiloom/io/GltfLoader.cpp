@@ -55,9 +55,9 @@ static glm::mat4 TRSToMatrix(const std::vector<double>& translation,
         : glm::vec3(1.0f);
 
     // Compose: T * R * S
-    glm::mat4 matT = glm::translate(glm::mat4(1.0f), t);
-    glm::mat4 matR = glm::mat4_cast(r);
-    glm::mat4 matS = glm::scale(glm::mat4(1.0f), s);
+    const glm::mat4 matT = glm::translate(glm::mat4(1.0f), t);
+    const glm::mat4 matR = glm::mat4_cast(r);
+    const glm::mat4 matS = glm::scale(glm::mat4(1.0f), s);
 
     return matT * matR * matS;
 }
@@ -80,7 +80,7 @@ static glm::mat4 ParseNodeTransform(const tinygltf::Node& node) {
 // ============================================================================
 
 template<>
-std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModelPtr, int accessorIndex) {
+std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModelPtr, const int accessorIndex) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
 
     if (accessorIndex < 0 || accessorIndex >= static_cast<int>(model.accessors.size())) {
@@ -92,13 +92,13 @@ std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
 
     std::vector<glm::vec3> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const float* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
+        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
         result.emplace_back(floatPtr[0], floatPtr[1], floatPtr[2]);
     }
 
@@ -106,7 +106,7 @@ std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModel
 }
 
 template<>
-std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModelPtr, int accessorIndex) {
+std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModelPtr, const int accessorIndex) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
 
     if (accessorIndex < 0 || accessorIndex >= static_cast<int>(model.accessors.size())) {
@@ -118,13 +118,13 @@ std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 2;
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 2;
 
     std::vector<glm::vec2> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const float* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
+        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
         result.emplace_back(floatPtr[0], floatPtr[1]);
     }
 
@@ -132,7 +132,7 @@ std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModel
 }
 
 template<>
-std::vector<glm::vec4> GltfLoader::ReadAccessor<glm::vec4>(const void* gltfModelPtr, int accessorIndex) {
+std::vector<glm::vec4> GltfLoader::ReadAccessor<glm::vec4>(const void* gltfModelPtr, const int accessorIndex) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
 
     if (accessorIndex < 0 || accessorIndex >= static_cast<int>(model.accessors.size())) {
@@ -144,13 +144,13 @@ std::vector<glm::vec4> GltfLoader::ReadAccessor<glm::vec4>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 4;
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 4;
 
     std::vector<glm::vec4> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const float* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
+        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
         result.emplace_back(floatPtr[0], floatPtr[1], floatPtr[2], floatPtr[3]);
     }
 
@@ -183,12 +183,12 @@ std::vector<u32> GltfLoader::ReadIndices(const void* gltfModelPtr, int accessorI
             result.push_back(static_cast<u32>(dataPtr[i]));
         }
     } else if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) {
-        const u16* indices = reinterpret_cast<const u16*>(dataPtr);
+        auto indices = reinterpret_cast<const u16*>(dataPtr);
         for (size_t i = 0; i < accessor.count; ++i) {
             result.push_back(static_cast<u32>(indices[i]));
         }
     } else if (accessor.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT) {
-        const u32* indices = reinterpret_cast<const u32*>(dataPtr);
+        auto indices = reinterpret_cast<const u32*>(dataPtr);
         for (size_t i = 0; i < accessor.count; ++i) {
             result.push_back(indices[i]);
         }
@@ -376,8 +376,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     //       "temperature_K": 300.0
     //     }
     //   }
-    auto irExtIt = gltfMaterial.extensions.find("QUANTILOOM_material_ir");
-    if (irExtIt != gltfMaterial.extensions.end()) {
+    if (auto irExtIt = gltfMaterial.extensions.find("QUANTILOOM_material_ir"); irExtIt != gltfMaterial.extensions.end()) {
         QL_LOG_INFO("  Loading QUANTILOOM_material_ir extension for material '{}'", mat.name);
 
         const tinygltf::Value& irExt = irExtIt->second;
@@ -390,8 +389,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             std::string curvePath = irExt.Get("emissivityCurve").Get<std::string>();
             std::filesystem::path fullPath = gltfDir / curvePath;
 
-            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.has_value()) {
+            if (auto result = SpectralIO::LoadSpectralCurveCSV(fullPath); result.has_value()) {
                 mat.irEmissivityCurve = result.value();
                 QL_LOG_INFO("    Loaded emissivity curve: {} ({} points)",
                             curvePath, mat.irEmissivityCurve.size());
@@ -403,11 +401,10 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
         // Load reflectance curve
         if (irExt.Has("reflectanceCurve")) {
-            std::string curvePath = irExt.Get("reflectanceCurve").Get<std::string>();
-            std::filesystem::path fullPath = gltfDir / curvePath;
+            auto curvePath = irExt.Get("reflectanceCurve").Get<std::string>();
+            auto fullPath = gltfDir / curvePath;
 
-            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.has_value()) {
+            if (auto result = SpectralIO::LoadSpectralCurveCSV(fullPath); result.has_value()) {
                 mat.irReflectanceCurve = result.value();
                 QL_LOG_INFO("    Loaded reflectance curve: {} ({} points)",
                             curvePath, mat.irReflectanceCurve.size());
@@ -422,8 +419,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             std::string curvePath = irExt.Get("transmittanceCurve").Get<std::string>();
             std::filesystem::path fullPath = gltfDir / curvePath;
 
-            auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-            if (result.has_value()) {
+            if (auto result = SpectralIO::LoadSpectralCurveCSV(fullPath); result.has_value()) {
                 mat.irTransmittanceCurve = result.value();
                 QL_LOG_INFO("    Loaded transmittance curve: {} ({} points)",
                             curvePath, mat.irTransmittanceCurve.size());
@@ -484,8 +480,7 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         primitive.materialId = (gltfPrimitive.material >= 0) ? gltfPrimitive.material : 0;
 
         // Positions (required)
-        auto posIt = gltfPrimitive.attributes.find("POSITION");
-        if (posIt != gltfPrimitive.attributes.end()) {
+        if (auto posIt = gltfPrimitive.attributes.find("POSITION"); posIt != gltfPrimitive.attributes.end()) {
             primitive.positions = ReadAccessor<glm::vec3>(gltfModelPtr, posIt->second);
         } else {
             QL_LOG_ERROR("Primitive {} in mesh '{}' has no POSITION attribute", primIdx, mesh.name);
@@ -493,14 +488,12 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         }
 
         // Normals (optional)
-        auto normIt = gltfPrimitive.attributes.find("NORMAL");
-        if (normIt != gltfPrimitive.attributes.end()) {
+        if (auto normIt = gltfPrimitive.attributes.find("NORMAL"); normIt != gltfPrimitive.attributes.end()) {
             primitive.normals = ReadAccessor<glm::vec3>(gltfModelPtr, normIt->second);
         }
 
         // UVs (optional, use TEXCOORD_0)
-        auto uvIt = gltfPrimitive.attributes.find("TEXCOORD_0");
-        if (uvIt != gltfPrimitive.attributes.end()) {
+        if (auto uvIt = gltfPrimitive.attributes.find("TEXCOORD_0"); uvIt != gltfPrimitive.attributes.end()) {
             primitive.uvs = ReadAccessor<glm::vec2>(gltfModelPtr, uvIt->second);
             QL_LOG_INFO("    [DEBUG] Loaded {} UV coordinates from TEXCOORD_0", primitive.uvs.size());
         } else {
@@ -508,11 +501,8 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         }
 
         // Tangents (optional)
-        auto tangIt = gltfPrimitive.attributes.find("TANGENT");
-        if (tangIt != gltfPrimitive.attributes.end()) {
-            const auto& tangentAccessor = model.accessors[tangIt->second];
-
-            if (tangentAccessor.type != TINYGLTF_TYPE_VEC4) {
+        if (auto tangIt = gltfPrimitive.attributes.find("TANGENT"); tangIt != gltfPrimitive.attributes.end()) {
+            if (const auto& tangentAccessor = model.accessors[tangIt->second]; tangentAccessor.type != TINYGLTF_TYPE_VEC4) {
                 QL_LOG_WARN("    Tangent accessor is not VEC4, skipping tangents for primitive {}", primIdx);
             } else {
                 primitive.tangents = ReadAccessor<glm::vec4>(gltfModelPtr, tangIt->second);
@@ -546,7 +536,7 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
 // FlattenSceneGraph
 // ============================================================================
 
-static void TraverseNode(const tinygltf::Model& model, int nodeIndex,
+static void TraverseNode(const tinygltf::Model& model, const int nodeIndex,
                           const glm::mat4& parentTransform,
                           std::vector<SceneNode>& outNodes,
                           const std::vector<Mesh>& meshes) {
@@ -557,10 +547,10 @@ static void TraverseNode(const tinygltf::Model& model, int nodeIndex,
     const auto& gltfNode = model.nodes[nodeIndex];
 
     // Compute local transform
-    glm::mat4 localTransform = ParseNodeTransform(gltfNode);
+    const glm::mat4 localTransform = ParseNodeTransform(gltfNode);
 
     // Compute world transform
-    glm::mat4 worldTransform = parentTransform * localTransform;
+    const glm::mat4 worldTransform = parentTransform * localTransform;
 
     // If this node has a mesh, add a SceneNode
     if (gltfNode.mesh >= 0) {
@@ -572,7 +562,7 @@ static void TraverseNode(const tinygltf::Model& model, int nodeIndex,
     }
 
     // Recursively traverse children
-    for (int childIndex : gltfNode.children) {
+    for (const int childIndex : gltfNode.children) {
         TraverseNode(model, childIndex, worldTransform, outNodes, meshes);
     }
 }
@@ -583,7 +573,7 @@ std::vector<SceneNode> GltfLoader::FlattenSceneGraph(const void* gltfModelPtr) {
     std::vector<SceneNode> nodes;
 
     // glTF can have multiple scenes, use the default scene
-    int sceneIndex = (model.defaultScene >= 0) ? model.defaultScene : 0;
+    const int sceneIndex = (model.defaultScene >= 0) ? model.defaultScene : 0;
     if (sceneIndex < 0 || sceneIndex >= static_cast<int>(model.scenes.size())) {
         QL_LOG_WARN("No valid scene found in glTF file");
         return nodes;
@@ -595,7 +585,7 @@ std::vector<SceneNode> GltfLoader::FlattenSceneGraph(const void* gltfModelPtr) {
     std::vector<Mesh> meshes;
 
     // Traverse all root nodes
-    for (int rootNodeIndex : scene.nodes) {
+    for (const int rootNodeIndex : scene.nodes) {
         TraverseNode(model, rootNodeIndex, glm::mat4(1.0f), nodes, meshes);
     }
 
@@ -612,20 +602,20 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
     QL_LOG_INFO("Loading glTF model from: {}", path);
 
     if (!std::filesystem::exists(path)) {
-        return Result<Scene, String>::Err("File not found: " + path);
+        return Result<Scene>(Result<Scene>::Err("File not found: " + path));
     }
 
     // Determine file type (.gltf or .glb)
     std::filesystem::path filePath(path);
-    String ext = filePath.extension().string();
-    bool isBinary = (ext == ".glb" || ext == ".GLB");
+    const String ext = filePath.extension().string();
+    const bool isBinary = (ext == ".glb" || ext == ".GLB");
 
     // Load glTF using tinygltf
     tinygltf::Model model;
     tinygltf::TinyGLTF loader;
     String error, warning;
 
-    bool success = isBinary
+    const bool success = isBinary
         ? loader.LoadBinaryFromFile(&model, &error, &warning, path)
         : loader.LoadASCIIFromFile(&model, &error, &warning, path);
 
@@ -634,7 +624,7 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
     }
 
     if (!success || !error.empty()) {
-        return Result<Scene, String>::Err("Failed to load glTF: " + error);
+        return Result<Scene>(Result<Scene>::Err("Failed to load glTF: " + error));
     }
 
     QL_LOG_INFO("  glTF loaded: {} meshes, {} materials, {} textures",
@@ -688,7 +678,7 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
                 scene.name, scene.meshes.size(), scene.nodes.size(),
                 scene.materials.size(), scene.textures.size());
 
-    return std::move(scene);
+    return Result(std::move(scene));
 }
 
 } // namespace quantiloom

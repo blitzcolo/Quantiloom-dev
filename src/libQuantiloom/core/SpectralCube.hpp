@@ -51,7 +51,7 @@ struct SpectralCube {
 
     SpectralCube() = default;
 
-    SpectralCube(u32 w, u32 h, u32 nb, f32 lmin, f32 lmax)
+    SpectralCube(const u32 w, const u32 h, const u32 nb, const f32 lmin, const f32 lmax)
         : width(w), height(h), nbands(nb),
           lambda_min(lmin), lambda_max(lmax) {
 
@@ -64,7 +64,7 @@ struct SpectralCube {
         // Generate wavelength array
         wavelengths.resize(nb);
         for (u32 b = 0; b < nb; ++b) {
-            wavelengths[b] = lmin + b * delta_lambda;
+            wavelengths[b] = lmin + static_cast<float>(b) * delta_lambda;
         }
     }
 
@@ -73,20 +73,20 @@ struct SpectralCube {
     // ========================================================================
 
     // Get pixel value at (x, y, band)
-    inline f32& operator()(u32 x, u32 y, u32 b) {
+    inline f32& operator()(const u32 x, const u32 y, const u32 b) {
         return data[b * height * width + y * width + x];
     }
 
-    inline const f32& operator()(u32 x, u32 y, u32 b) const {
+    inline const f32& operator()(const u32 x, const u32 y, const u32 b) const {
         return data[b * height * width + y * width + x];
     }
 
     // Get pointer to entire band (useful for per-band processing)
-    inline f32* BandPtr(u32 b) {
+    inline f32* BandPtr(const u32 b) {
         return &data[b * height * width];
     }
 
-    inline const f32* BandPtr(u32 b) const {
+    [[nodiscard]] inline const f32* BandPtr(const u32 b) const {
         return &data[b * height * width];
     }
 
@@ -95,13 +95,13 @@ struct SpectralCube {
     // ========================================================================
 
     // Total number of pixels per band
-    inline u32 PixelsPerBand() const { return width * height; }
+    [[nodiscard]] inline u32 PixelsPerBand() const { return width * height; }
 
     // Total number of elements
-    inline u32 TotalElements() const { return width * height * nbands; }
+    [[nodiscard]] inline u32 TotalElements() const { return width * height * nbands; }
 
     // Check if cube is valid
-    inline bool IsValid() const {
+    [[nodiscard]] inline bool IsValid() const {
         return width > 0 && height > 0 && nbands > 0 &&
                data.size() == TotalElements() &&
                wavelengths.size() == nbands &&
@@ -113,20 +113,19 @@ struct SpectralCube {
     void Clear() { std::fill(data.begin(), data.end(), 0.0f); }
 
     // Get wavelength for band index
-    inline f32 GetWavelength(u32 b) const {
+    [[nodiscard]] inline f32 GetWavelength(const u32 b) const {
         return wavelengths[b];
     }
 
     // Find band index closest to given wavelength (nm)
-    u32 FindClosestBand(f32 target_nm) const {
+    [[nodiscard]] u32 FindClosestBand(const f32 target_nm) const {
         if (nbands == 0) return 0;
 
         u32 closest = 0;
         f32 minDist = std::abs(wavelengths[0] - target_nm);
 
         for (u32 b = 1; b < nbands; ++b) {
-            f32 dist = std::abs(wavelengths[b] - target_nm);
-            if (dist < minDist) {
+            if (const f32 dist = std::abs(wavelengths[b] - target_nm); dist < minDist) {
                 minDist = dist;
                 closest = b;
             }

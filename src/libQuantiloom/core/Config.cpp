@@ -10,43 +10,43 @@ Config::Config(toml::table&& root) : m_Root(std::move(root)) {}
 
 Result<Config, String> Config::Load(const std::filesystem::path& filePath) {
     if (!std::filesystem::exists(filePath)) {
-        return Result<Config, String>::Err("Config file not found: " + filePath.string());
+        return Result<Config>(Result<Config>::Err("Config file not found: " + filePath.string()));
     }
 
     try {
         toml::table table = toml::parse_file(filePath.string());
         Log::Info("Loaded configuration from: {}", filePath.string());
-        return Config(std::move(table));
+        return Result(Config(std::move(table)));
     }
     catch (const toml::parse_error& err) {
         std::ostringstream oss;
         oss << "TOML parse error: " << err.description()
             << " at line " << err.source().begin.line
             << ", column " << err.source().begin.column;
-        return Result<Config, String>::Err(oss.str());
+        return Result<Config>(Result<Config>::Err(oss.str()));
     }
     catch (const std::exception& ex) {
-        return Result<Config, String>::Err(String("Failed to load config: ") + ex.what());
+        return Result<Config>(Result<Config>::Err(String("Failed to load config: ") + ex.what()));
     }
 }
 
-bool Config::Has(StringView key) const {
+bool Config::Has(const StringView key) const {
     return Navigate(key) != nullptr;
 }
 
-Result<Config, String> Config::GetTable(StringView key) const {
+Result<Config, String> Config::GetTable(const StringView key) const {
     const toml::node* node = Navigate(key);
     if (!node) {
-        return Result<Config, String>::Err("Table not found: " + String(key));
+        return Result<Config>(Result<Config>::Err("Table not found: " + String(key)));
     }
 
     if (!node->is_table()) {
-        return Result<Config, String>::Err("Key is not a table: " + String(key));
+        return Result<Config>(Result<Config>::Err("Key is not a table: " + String(key)));
     }
 
     // Clone the table (toml++ doesn't provide a non-const access pattern here)
     toml::table clonedTable = *node->as_table();
-    return Config(std::move(clonedTable));
+    return Result(Config(std::move(clonedTable)));
 }
 
 void Config::Print() const {

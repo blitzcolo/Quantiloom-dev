@@ -138,7 +138,6 @@ void BLAS::UploadGeometryBuffers() {
         }
 
         // Upload tangent data (use fallback if not present)
-        const VkDeviceSize tangentBufferSize = tangentCount * sizeof(glm::vec4);
         GpuBuffer tangentStaging(
             allocator,
             tangentBufferSize,
@@ -152,7 +151,7 @@ void BLAS::UploadGeometryBuffers() {
             QL_LOG_DEBUG("  BLAS: Uploaded {} real tangents to GPU", tangentCount);
         } else {
             // Upload fallback tangent data (X-axis tangent with positive handedness)
-            std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+            const std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
             tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
             QL_LOG_DEBUG("  BLAS: Uploaded {} fallback tangents to GPU", tangentCount);
         }
@@ -184,8 +183,8 @@ void BLAS::UploadGeometryBuffers() {
 
 BLAS::~BLAS() {
     if (m_as != VK_NULL_HANDLE) {
-        auto vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)
-            vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR");
+        const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(vkGetDeviceProcAddr(
+            m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
 
         if (vkDestroyAccelerationStructureKHR) {
             vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
@@ -214,8 +213,8 @@ BLAS& BLAS::operator=(BLAS&& other) noexcept {
     if (this != &other) {
         // Destroy current resources
         if (m_as != VK_NULL_HANDLE) {
-            auto vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)
-                vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR");
+            const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(vkGetDeviceProcAddr(
+                m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
 
             if (vkDestroyAccelerationStructureKHR) {
                 vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
@@ -250,14 +249,14 @@ void BLAS::Build(VkCommandBuffer cmd) {
     }
 
     // Get function pointers
-    auto vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
-    auto vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)
-        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
-    auto vkGetAccelerationStructureDeviceAddressKHR = (PFN_vkGetAccelerationStructureDeviceAddressKHR)
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR");
-    auto vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)
-        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
+    auto vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
+    auto vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR"));
+    auto vkGetAccelerationStructureDeviceAddressKHR = reinterpret_cast<PFN_vkGetAccelerationStructureDeviceAddressKHR>(
+        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureDeviceAddressKHR"));
+    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
 
     if (!vkGetAccelerationStructureBuildSizesKHR || !vkCreateAccelerationStructureKHR ||
         !vkGetAccelerationStructureDeviceAddressKHR || !vkCmdBuildAccelerationStructuresKHR) {
@@ -318,8 +317,8 @@ void BLAS::Build(VkCommandBuffer cmd) {
     createInfo.size = sizeInfo.accelerationStructureSize;
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
 
-    VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as);
-    if (result != VK_SUCCESS) {
+    if (VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as);
+        result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create BLAS");
     }
 
@@ -384,8 +383,8 @@ TLAS::TLAS(VulkanContext& context)
 
 TLAS::~TLAS() {
     if (m_as != VK_NULL_HANDLE) {
-        auto vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)
-            vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR");
+        const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+            vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
 
         if (vkDestroyAccelerationStructureKHR) {
             vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
@@ -410,8 +409,8 @@ TLAS& TLAS::operator=(TLAS&& other) noexcept {
     if (this != &other) {
         // Destroy current resources
         if (m_as != VK_NULL_HANDLE) {
-            auto vkDestroyAccelerationStructureKHR = (PFN_vkDestroyAccelerationStructureKHR)
-                vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR");
+            const auto vkDestroyAccelerationStructureKHR = reinterpret_cast<PFN_vkDestroyAccelerationStructureKHR>(
+                vkGetDeviceProcAddr(m_context.GetDevice(), "vkDestroyAccelerationStructureKHR"));
 
             if (vkDestroyAccelerationStructureKHR) {
                 vkDestroyAccelerationStructureKHR(m_context.GetDevice(), m_as, nullptr);
@@ -470,12 +469,12 @@ void TLAS::Build(VkCommandBuffer cmd) {
     VmaAllocator allocator = m_context.GetAllocator();
 
     // Get function pointers
-    auto vkGetAccelerationStructureBuildSizesKHR = (PFN_vkGetAccelerationStructureBuildSizesKHR)
-        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR");
-    auto vkCreateAccelerationStructureKHR = (PFN_vkCreateAccelerationStructureKHR)
-        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR");
-    auto vkCmdBuildAccelerationStructuresKHR = (PFN_vkCmdBuildAccelerationStructuresKHR)
-        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR");
+    auto vkGetAccelerationStructureBuildSizesKHR = reinterpret_cast<PFN_vkGetAccelerationStructureBuildSizesKHR>(
+        vkGetDeviceProcAddr(device, "vkGetAccelerationStructureBuildSizesKHR"));
+    auto vkCreateAccelerationStructureKHR = reinterpret_cast<PFN_vkCreateAccelerationStructureKHR>(
+        vkGetDeviceProcAddr(device, "vkCreateAccelerationStructureKHR"));
+    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
 
     if (!vkGetAccelerationStructureBuildSizesKHR || !vkCreateAccelerationStructureKHR ||
         !vkCmdBuildAccelerationStructuresKHR) {
@@ -545,8 +544,7 @@ void TLAS::Build(VkCommandBuffer cmd) {
     createInfo.size = sizeInfo.accelerationStructureSize;
     createInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
 
-    VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as);
-    if (result != VK_SUCCESS) {
+    if (VkResult result = vkCreateAccelerationStructureKHR(device, &createInfo, nullptr, &m_as); result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create TLAS");
     }
 

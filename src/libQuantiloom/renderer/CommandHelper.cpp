@@ -11,12 +11,12 @@ namespace quantiloom {
 // ============================================================================
 
 void CommandHelper::ExecuteImmediate(
-    VulkanContext& context,
-    std::function<void(VkCommandBuffer)> recordFunc)
+    const VulkanContext& context,
+    const std::function<void(VkCommandBuffer)> &recordFunc)
 {
     VkDevice device = context.GetDevice();
     VkQueue queue = context.GetGraphicsQueue();
-    u32 queueFamily = context.GetGraphicsQueueFamily();
+    const u32 queueFamily = context.GetGraphicsQueueFamily();
 
     // Create temporary command pool
     VkCommandPoolCreateInfo poolInfo{};
@@ -92,11 +92,11 @@ void CommandHelper::ExecuteImmediate(
 void CommandHelper::TransitionImageLayout(
     VkCommandBuffer cmd,
     VkImage image,
-    VkFormat format,
-    VkImageLayout oldLayout,
-    VkImageLayout newLayout,
-    u32 mipLevels,
-    u32 arrayLayers)
+    const VkFormat format,
+    const VkImageLayout oldLayout,
+    const VkImageLayout newLayout,
+    const u32 mipLevels,
+    const u32 arrayLayers)
 {
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -171,11 +171,11 @@ void CommandHelper::TransitionImageLayout(
 }
 
 void CommandHelper::TransitionImageLayoutImmediate(
-    VulkanContext& context,
+    const VulkanContext& context,
     VkImage image,
-    VkFormat format,
-    VkImageLayout oldLayout,
-    VkImageLayout newLayout,
+    const VkFormat format,
+    const VkImageLayout oldLayout,
+    const VkImageLayout newLayout,
     u32 mipLevels,
     u32 arrayLayers)
 {
@@ -192,9 +192,9 @@ void CommandHelper::TransitionImageLayoutImmediate(
 // ============================================================================
 
 std::vector<f32> CommandHelper::ReadbackImage(
-    VulkanContext& context,
+    const VulkanContext& context,
     VkImage image,
-    VkFormat format,
+    const VkFormat format,
     u32 width,
     u32 height)
 {
@@ -204,7 +204,7 @@ std::vector<f32> CommandHelper::ReadbackImage(
     }
 
     // Calculate buffer size (4 channels * 4 bytes per float)
-    const u32 bytesPerPixel = 4 * sizeof(f32);
+    constexpr u32 bytesPerPixel = 4 * sizeof(f32);
     const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
 
     QL_LOG_INFO("Reading back image ({}x{}, {} bytes)...", width, height, bufferSize);
@@ -254,7 +254,7 @@ std::vector<f32> CommandHelper::ReadbackImage(
 
     // Map staging buffer and read pixel data
     std::vector<f32> pixels(width * height * 4);
-    void* mappedData = stagingBuffer.Map();
+    const void* mappedData = stagingBuffer.Map();
     if (mappedData == nullptr) {
         throw std::runtime_error("Failed to map staging buffer for readback");
     }

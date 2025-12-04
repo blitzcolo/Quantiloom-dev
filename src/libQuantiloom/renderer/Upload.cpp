@@ -49,15 +49,15 @@ void EndSingleTimeCommands(VkDevice device, VkCommandPool commandPool,
 }
 
 // Create a temporary command pool (for upload operations)
-VkCommandPool CreateTransferCommandPool(VkDevice device, u32 queueFamily) {
+VkCommandPool CreateTransferCommandPool(VkDevice device, const u32 queueFamily) {
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.queueFamilyIndex = queueFamily;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;  // Short-lived commands
 
     VkCommandPool commandPool;
-    VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
+        result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create transfer command pool");
     }
 

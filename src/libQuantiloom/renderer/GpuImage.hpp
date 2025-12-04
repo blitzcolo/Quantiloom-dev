@@ -58,12 +58,12 @@ public:
     // Accessors
     // ========================================================================
 
-    VkImage GetImage() const { return m_image; }
-    VkImageView GetView() const { return m_view; }
-    VkFormat GetFormat() const { return m_format; }
-    VkExtent2D GetExtent() const { return m_extent; }
-    u32 GetMipLevels() const { return m_mipLevels; }
-    bool IsValid() const { return m_image != VK_NULL_HANDLE; }
+    [[nodiscard]] VkImage GetImage() const { return m_image; }
+    [[nodiscard]] VkImageView GetView() const { return m_view; }
+    [[nodiscard]] VkFormat GetFormat() const { return m_format; }
+    [[nodiscard]] VkExtent2D GetExtent() const { return m_extent; }
+    [[nodiscard]] u32 GetMipLevels() const { return m_mipLevels; }
+    [[nodiscard]] bool IsValid() const { return m_image != VK_NULL_HANDLE; }
 
 private:
     VmaAllocator m_allocator = VK_NULL_HANDLE;

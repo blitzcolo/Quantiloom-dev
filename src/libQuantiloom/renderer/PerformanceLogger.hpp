@@ -77,10 +77,10 @@ public:
     // ========================================================================
 
     // Get last frame GPU time in milliseconds
-    f32 GetLastFrameGpuMs() const { return m_lastFrameGpuMs; }
+    [[nodiscard]] f32 GetLastFrameGpuMs() const { return m_lastFrameGpuMs; }
 
     // Get last frame rays per second
-    f64 GetLastFrameRaysPerSec() const { return m_lastFrameRaysPerSec; }
+    [[nodiscard]] f64 GetLastFrameRaysPerSec() const { return m_lastFrameRaysPerSec; }
 
 private:
     // ========================================================================

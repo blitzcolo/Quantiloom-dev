@@ -54,9 +54,9 @@ public:
     // Accessors
     // ========================================================================
 
-    VkBuffer GetHandle() const { return m_buffer; }
-    VkDeviceSize GetSize() const { return m_size; }
-    bool IsValid() const { return m_buffer != VK_NULL_HANDLE; }
+    [[nodiscard]] VkBuffer GetHandle() const { return m_buffer; }
+    [[nodiscard]] VkDeviceSize GetSize() const { return m_size; }
+    [[nodiscard]] bool IsValid() const { return m_buffer != VK_NULL_HANDLE; }
 
     // ========================================================================
     // Memory Access (only for HOST_VISIBLE buffers)

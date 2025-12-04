@@ -124,7 +124,7 @@ struct Material {
     // ========================================================================
 
     // Check if material is valid
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         // Base color must be in valid range
         if (baseColorFactor.r < 0.0f || baseColorFactor.g < 0.0f ||
             baseColorFactor.b < 0.0f || baseColorFactor.a < 0.0f) {
@@ -151,7 +151,7 @@ struct Material {
     }
 
     // Check if material has any textures
-    bool HasTextures() const {
+    [[nodiscard]] bool HasTextures() const {
         return baseColorTextureIndex != -1 ||
                metallicRoughnessTextureIndex != -1 ||
                normalTextureIndex != -1 ||
@@ -164,22 +164,22 @@ struct Material {
 
     // Get IR emissivity at specific wavelength (linear interpolation)
     // Returns 0.0 if curve is empty or wavelength out of range
-    f32 GetIREmissivity(f32 lambda_nm) const;
+    [[nodiscard]] f32 GetIREmissivity(f32 lambda_nm) const;
 
     // Get IR reflectance at specific wavelength (linear interpolation)
     // Returns spectralAlbedo fallback if curve is empty
-    f32 GetIRReflectance(f32 lambda_nm) const;
+    [[nodiscard]] f32 GetIRReflectance(f32 lambda_nm) const;
 
     // Get IR transmittance at specific wavelength (linear interpolation)
     // Returns 0.0 if curve is empty (opaque)
-    f32 GetIRTransmittance(f32 lambda_nm) const;
+    [[nodiscard]] f32 GetIRTransmittance(f32 lambda_nm) const;
 
     // Validate Kirchhoff's law: ε + ρ + τ ≤ 1 at all wavelengths
     // Returns true if valid, false if energy conservation violated
-    bool ValidateIRKirchhoffLaw() const;
+    [[nodiscard]] bool ValidateIRKirchhoffLaw() const;
 
     // Check if material has IR data
-    bool HasIRData() const {
+    [[nodiscard]] bool HasIRData() const {
         return !irEmissivityCurve.empty() ||
                !irReflectanceCurve.empty() ||
                !irTransmittanceCurve.empty();

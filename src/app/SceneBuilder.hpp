@@ -106,7 +106,7 @@ public:
     // size: side length in meters (e.g., 10.0 = 10x10 m)
     // y: vertical offset (default 0.0)
     // materialId: index into Scene::materials
-    static Mesh CreateGroundPlane(float size = 10.0f, float y = 0.0f, u32 materialId = 0) {
+    static Mesh CreateGroundPlane(float size = 10.0f, float y = 0.0f, const u32 materialId = 0) {
         Mesh mesh;
         mesh.name = "ground_plane";
 
@@ -194,7 +194,7 @@ public:
     }
 
     // Convenience: Create unit cube
-    static Mesh CreateCube(float size, glm::vec3 center = glm::vec3(0.0f), u32 materialId = 0) {
+    static Mesh CreateCube(const float size, const glm::vec3 center = glm::vec3(0.0f), const u32 materialId = 0) {
         return CreateBox(glm::vec3(size), center, materialId);
     }
 
@@ -220,8 +220,8 @@ public:
 
         // Step 1: Create base icosahedron (12 vertices, 20 triangles)
         // Vertices arranged on 3 perpendicular golden rectangles
-        const float a = 1.0f;
-        const float b = 1.0f / phi;
+        constexpr float a = 1.0f;
+        constexpr float b = 1.0f / phi;
 
         std::vector<glm::vec3> baseVertices = {
             {-b,  a,  0}, { b,  a,  0}, {-b, -a,  0}, { b, -a,  0},  // Rectangle in XY plane

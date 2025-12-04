@@ -44,7 +44,7 @@ struct Image {
 
     Image() = default;
 
-    Image(u32 w, u32 h, u32 c)
+    Image(const u32 w, const u32 h, const u32 c)
         : width(w), height(h), channels(c), data(w * h * c, 0.0f) {
         channelNames.resize(c);
         for (u32 i = 0; i < c; ++i) {
@@ -58,20 +58,20 @@ struct Image {
 
     // Get pixel value at (x, y, channel)
     // No bounds checking in release mode for performance
-    inline f32& operator()(u32 x, u32 y, u32 c) {
+    inline f32& operator()(const u32 x, const u32 y, const u32 c) {
         return data[y * width * channels + x * channels + c];
     }
 
-    inline const f32& operator()(u32 x, u32 y, u32 c) const {
+    inline const f32& operator()(const u32 x, const u32 y, const u32 c) const {
         return data[y * width * channels + x * channels + c];
     }
 
     // Get pointer to pixel (x, y) - useful for bulk operations
-    inline f32* PixelPtr(u32 x, u32 y) {
+    inline f32* PixelPtr(const u32 x, const u32 y) {
         return &data[y * width * channels + x * channels];
     }
 
-    inline const f32* PixelPtr(u32 x, u32 y) const {
+    [[nodiscard]] inline const f32* PixelPtr(const u32 x, const u32 y) const {
         return &data[y * width * channels + x * channels];
     }
 
@@ -80,13 +80,13 @@ struct Image {
     // ========================================================================
 
     // Total number of pixels
-    inline u32 PixelCount() const { return width * height; }
+    [[nodiscard]] inline u32 PixelCount() const { return width * height; }
 
     // Total number of elements (pixels * channels)
-    inline u32 TotalElements() const { return width * height * channels; }
+    [[nodiscard]] inline u32 TotalElements() const { return width * height * channels; }
 
     // Check if image is valid
-    inline bool IsValid() const {
+    [[nodiscard]] inline bool IsValid() const {
         return width > 0 && height > 0 && channels > 0 &&
                data.size() == TotalElements();
     }
@@ -95,7 +95,7 @@ struct Image {
     void Clear() { std::fill(data.begin(), data.end(), 0.0f); }
 
     // Resize image (will clear existing data)
-    void Resize(u32 w, u32 h, u32 c) {
+    void Resize(const u32 w, const u32 h, const u32 c) {
         width = w;
         height = h;
         channels = c;

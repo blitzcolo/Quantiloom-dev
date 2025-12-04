@@ -9,11 +9,11 @@ namespace quantiloom {
 // ============================================================================
 
 GpuImage::GpuImage(VmaAllocator allocator, VkDevice device,
-                   u32 width, u32 height,
-                   VkFormat format,
-                   VkImageUsageFlags usage,
-                   VmaMemoryUsage memUsage,
-                   u32 mipLevels)
+                   const u32 width, const u32 height,
+                   const VkFormat format,
+                   const VkImageUsageFlags usage,
+                   const VmaMemoryUsage memUsage,
+                   const u32 mipLevels)
     : m_allocator(allocator),
       m_device(device),
       m_format(format),

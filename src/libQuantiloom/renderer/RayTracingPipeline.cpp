@@ -80,7 +80,7 @@ RayTracingPipeline::RayTracingPipeline(
         VkDevice device = m_context.GetDevice();
 
         // Destroy shader modules if they were created
-        for (auto module : m_shaderModules) {
+        for (const auto module : m_shaderModules) {
             if (module != VK_NULL_HANDLE) {
                 vkDestroyShaderModule(device, module, nullptr);
             }
@@ -317,8 +317,11 @@ void RayTracingPipeline::CreatePipelineLayout() {
     VkDevice device = m_context.GetDevice();
 
     // Push constant range for camera data + sampling parameters
+    // IMPORTANT: Include all shader stages that access push constants
     VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                                    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                                    VK_SHADER_STAGE_MISS_BIT_KHR;
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(PushConstantsRayGen);
 
@@ -345,9 +348,9 @@ void RayTracingPipeline::LoadShaders() {
     VkDevice device = m_context.GetDevice();
 
     // Load all shaders
-    auto raygenSpirv = LoadSPIRV(m_raygenPath);
-    auto chitSpirv = LoadSPIRV(m_closestHitPath);
-    auto missSpirv = LoadSPIRV(m_missPath);
+    const auto raygenSpirv = LoadSPIRV(m_raygenPath);
+    const auto chitSpirv = LoadSPIRV(m_closestHitPath);
+    const auto missSpirv = LoadSPIRV(m_missPath);
 
     // Create shader modules (will be destroyed after pipeline creation)
     m_shaderModules.resize(3);
@@ -360,7 +363,7 @@ void RayTracingPipeline::LoadShaders() {
 
 std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
     // Try multiple search paths
-    std::vector<std::filesystem::path> searchPaths = {
+    const std::vector<std::filesystem::path> searchPaths = {
         path,  // Original path (relative to CWD or absolute)
         GetExecutableDirectory() / path,  // Relative to executable directory
     };
@@ -381,17 +384,19 @@ std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
             " (searched in CWD and executable directory)");
     }
 
-    size_t fileSize = static_cast<size_t>(file.tellg());
+    const size_t fileSize = static_cast<size_t>(file.tellg());
     std::vector<u32> buffer(fileSize / sizeof(u32));
 
     file.seekg(0);
     file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
     file.close();
 
+    QL_LOG_DEBUG("  Loaded shader from: {}", foundPath.string());
+
     return buffer;
 }
 
-VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& spirv) {
+VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& spirv) const {
     VkDevice device = m_context.GetDevice();
 
     VkShaderModuleCreateInfo createInfo{};
@@ -400,8 +405,8 @@ VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& sp
     createInfo.pCode = spirv.data();
 
     VkShaderModule shaderModule;
-    VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vkCreateShaderModule(device, &createInfo, nullptr, &shaderModule);
+        result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create shader module");
     }
 
@@ -474,14 +479,14 @@ void RayTracingPipeline::CreatePipeline() {
     pipelineInfo.layout = m_pipelineLayout;
 
     // Get function pointer for vkCreateRayTracingPipelinesKHR
-    auto vkCreateRayTracingPipelinesKHR = (PFN_vkCreateRayTracingPipelinesKHR)
-        vkGetDeviceProcAddr(device, "vkCreateRayTracingPipelinesKHR");
+    const auto vkCreateRayTracingPipelinesKHR = reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
+        vkGetDeviceProcAddr(device, "vkCreateRayTracingPipelinesKHR"));
 
     if (!vkCreateRayTracingPipelinesKHR) {
         throw std::runtime_error("Failed to load vkCreateRayTracingPipelinesKHR");
     }
 
-    VkResult result = vkCreateRayTracingPipelinesKHR(
+    const VkResult result = vkCreateRayTracingPipelinesKHR(
         device,
         VK_NULL_HANDLE,  // No pipeline cache for M1
         VK_NULL_HANDLE,
@@ -496,7 +501,7 @@ void RayTracingPipeline::CreatePipeline() {
     }
 
     // Destroy shader modules (no longer needed)
-    for (auto module : m_shaderModules) {
+    for (const auto module : m_shaderModules) {
         vkDestroyShaderModule(device, module, nullptr);
     }
     m_shaderModules.clear();
@@ -512,8 +517,9 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     VkDevice device = m_context.GetDevice();
 
     // Get function pointer for vkGetRayTracingShaderGroupHandlesKHR
-    auto vkGetRayTracingShaderGroupHandlesKHR = (PFN_vkGetRayTracingShaderGroupHandlesKHR)
-        vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupHandlesKHR");
+    const auto vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
+        vkGetDeviceProcAddr(
+        device, "vkGetRayTracingShaderGroupHandlesKHR"));
 
     if (!vkGetRayTracingShaderGroupHandlesKHR) {
         throw std::runtime_error("Failed to load vkGetRayTracingShaderGroupHandlesKHR");
@@ -533,10 +539,10 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     const u32 sbtSize = raygenSize + missSize + hitSize;
 
     // Get shader group handles
-    const u32 groupCount = 3;
+    constexpr u32 groupCount = 3;
     std::vector<u8> handleData(groupCount * handleSize);
 
-    VkResult result = vkGetRayTracingShaderGroupHandlesKHR(
+    const VkResult result = vkGetRayTracingShaderGroupHandlesKHR(
         device,
         m_pipeline,
         0,
@@ -568,7 +574,7 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     m_sbtBuffer->Upload(sbtData.data(), sbtSize);
 
     // Define SBT regions
-    VkDeviceAddress sbtAddress = m_sbtBuffer->GetDeviceAddress(device);
+    const VkDeviceAddress sbtAddress = m_sbtBuffer->GetDeviceAddress(device);
 
     m_raygenRegion.deviceAddress = sbtAddress;
     m_raygenRegion.stride = raygenSize;
@@ -587,7 +593,7 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     QL_LOG_INFO("  Shader Binding Table created (size: {} bytes)", sbtSize);
 }
 
-u32 RayTracingPipeline::AlignedSize(u32 size, u32 alignment) const {
+u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {
     return (size + alignment - 1) & ~(alignment - 1);
 }
 
@@ -595,7 +601,7 @@ u32 RayTracingPipeline::AlignedSize(u32 size, u32 alignment) const {
 // Descriptor Binding
 // ============================================================================
 
-void RayTracingPipeline::BindOutputImage(const GpuImage& image) {
+void RayTracingPipeline::BindOutputImage(const GpuImage& image) const {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorImageInfo imageInfo{};
@@ -614,7 +620,7 @@ void RayTracingPipeline::BindOutputImage(const GpuImage& image) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tlas) {
+void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tlas) const {
     VkDevice device = m_context.GetDevice();
 
     VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
@@ -634,7 +640,7 @@ void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tl
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) {
+void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) const {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -654,7 +660,8 @@ void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer, const GpuBuffer* uvBuffer) {
+void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, const GpuBuffer &indexBuffer,
+                                             const GpuBuffer *uvBuffer) const {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorBufferInfo vertexInfo{};
@@ -718,7 +725,7 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer& vertexBuffer, cons
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) {
+void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) const {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -738,7 +745,7 @@ void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) {
+void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) const {
     VkDevice device = m_context.GetDevice();
 
     VkDescriptorBufferInfo bufferInfo{};
@@ -760,7 +767,7 @@ void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) {
 }
 
 void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews,
-                                       const std::vector<VkSampler>& samplers) {
+                                       const std::vector<VkSampler>& samplers) const {
     VkDevice device = m_context.GetDevice();
 
     if (imageViews.size() != samplers.size()) {
@@ -817,7 +824,7 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView) {
+void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView) const {
     VkDevice device = m_context.GetDevice();
 
     QL_LOG_INFO("Binding prefiltered environment map to descriptor set (binding 10)");
@@ -841,7 +848,7 @@ void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView) {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
-void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) {
+void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) const {
     VkDevice device = m_context.GetDevice();
 
     QL_LOG_INFO("Binding BRDF integration LUT to descriptor set (bindings 11, 12)");
@@ -891,10 +898,10 @@ void RayTracingPipeline::UpdateDescriptorSets() {
 // Rendering
 // ============================================================================
 
-void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, u32 width, u32 height) {
+void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height) const {
     // Get function pointer for vkCmdTraceRaysKHR
-    auto vkCmdTraceRaysKHR = (PFN_vkCmdTraceRaysKHR)
-        vkGetDeviceProcAddr(m_context.GetDevice(), "vkCmdTraceRaysKHR");
+    const auto vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(
+        m_context.GetDevice(), "vkCmdTraceRaysKHR"));
 
     if (!vkCmdTraceRaysKHR) {
         throw std::runtime_error("Failed to load vkCmdTraceRaysKHR");
@@ -957,7 +964,8 @@ void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
     m_pushConstants.camera = cameraData;
 }
 
-void RayTracingPipeline::SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed) {
+void RayTracingPipeline::SetSamplingParams(const u32 frameIndex, const u32 sampleIndex, const u32 totalSamples,
+                                           const u32 randomSeed) {
     m_pushConstants.frameIndex = frameIndex;
     m_pushConstants.sampleIndex = sampleIndex;
     m_pushConstants.totalSamples = totalSamples;

@@ -43,7 +43,7 @@ static void SetupFrameBufferForWrite(
             channelName,
             Imf::Slice(
                 Imf::FLOAT,                                  // type
-                (char*)buffers[c].data(),                    // base
+                reinterpret_cast<char *>(buffers[c].data()), // base
                 sizeof(float),                               // xStride
                 sizeof(float) * img.width                    // yStride
             )
@@ -77,7 +77,7 @@ static void ReadFrameBufferToImage(
             channelNames[c].c_str(),
             Imf::Slice(
                 Imf::FLOAT,
-                (char*)buffers[c].data(),
+                reinterpret_cast<char *>(buffers[c].data()),
                 sizeof(float),
                 sizeof(float) * img.width
             )
@@ -85,7 +85,7 @@ static void ReadFrameBufferToImage(
     }
 
     file.setFrameBuffer(fb);
-    file.readPixels(0, img.height - 1);
+    file.readPixels(0, static_cast<int>(img.height) - 1);
 
     // Interleave channels into image data (channel-last format)
     for (u32 y = 0; y < img.height; ++y) {
@@ -109,7 +109,7 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
 
     try {
         // Create EXR header
-        Imf::Header header(image.width, image.height);
+        Imf::Header header(static_cast<int>(image.width), static_cast<int>(image.height));
 
         // Add channels to header
         for (u32 c = 0; c < image.channels; ++c) {
@@ -133,7 +133,7 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
         SetupFrameBufferForWrite(fb, image, buffers);
 
         file.setFrameBuffer(fb);
-        file.writePixels(image.height);
+        file.writePixels(static_cast<int>(image.height));
 
         QL_LOG_INFO("ImageIO::WriteEXR: Wrote {}x{} image with {} channels to {}",
                     image.width, image.height, image.channels, filepath);
@@ -160,7 +160,7 @@ std::optional<Image> ImageIO::ReadEXR(const std::string& filepath) {
         const Imf::Header& header = file.header();
 
         // Get dimensions
-        Imath::Box2i dw = header.dataWindow();
+        const Imath::Box2i dw = header.dataWindow();
         u32 width = dw.max.x - dw.min.x + 1;
         u32 height = dw.max.y - dw.min.y + 1;
 
@@ -168,7 +168,7 @@ std::optional<Image> ImageIO::ReadEXR(const std::string& filepath) {
         std::vector<std::string> channelNames;
         const Imf::ChannelList& channels = header.channels();
         for (auto it = channels.begin(); it != channels.end(); ++it) {
-            channelNames.push_back(it.name());
+            channelNames.emplace_back(it.name());
         }
 
         if (channelNames.empty()) {
@@ -186,7 +186,7 @@ std::optional<Image> ImageIO::ReadEXR(const std::string& filepath) {
 
         // Read metadata (string attributes)
         for (auto it = header.begin(); it != header.end(); ++it) {
-            if (const Imf::StringAttribute* attr =
+            if (const auto* attr =
                 header.findTypedAttribute<Imf::StringAttribute>(it.name())) {
                 img.metadata[it.name()] = attr->value();
             }
@@ -221,10 +221,10 @@ std::optional<std::tuple<u32, u32, u32>> ImageIO::GetDimensions(const std::strin
     }
 
     try {
-        Imf::InputFile file(filepath.c_str());
+        const Imf::InputFile file(filepath.c_str());
         const Imf::Header& header = file.header();
 
-        Imath::Box2i dw = header.dataWindow();
+        const Imath::Box2i& dw = header.dataWindow();
         u32 width = dw.max.x - dw.min.x + 1;
         u32 height = dw.max.y - dw.min.y + 1;
 

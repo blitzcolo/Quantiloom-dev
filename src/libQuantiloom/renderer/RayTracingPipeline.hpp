@@ -63,28 +63,28 @@ public:
     // ========================================================================
 
     // Bind output image (binding 0)
-    void BindOutputImage(const GpuImage& image);
+    void BindOutputImage(const GpuImage& image) const;
 
     // Bind TLAS (binding 1)
-    void BindAccelerationStructure(VkAccelerationStructureKHR tlas);
+    void BindAccelerationStructure(VkAccelerationStructureKHR tlas) const;
 
     // Bind LUT buffer (binding 2)
-    void BindLUTBuffer(const GpuBuffer& buffer);
+    void BindLUTBuffer(const GpuBuffer& buffer) const;
 
     // Bind geometry buffers (binding 3: vertex, binding 4: index, binding 8: UVs [optional])
-    void BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer, const GpuBuffer* uvBuffer = nullptr);
+    void BindGeometryBuffers(const GpuBuffer& vertexBuffer, const GpuBuffer& indexBuffer, const GpuBuffer* uvBuffer = nullptr) const;
 
     // Bind material buffer (binding 5)
-    void BindMaterialBuffer(const GpuBuffer& buffer);
+    void BindMaterialBuffer(const GpuBuffer& buffer) const;
 
     // Bind tangent buffer (binding 9) - Optional
-    void BindTangentBuffer(const GpuBuffer& buffer);
+    void BindTangentBuffer(const GpuBuffer& buffer) const;
 
     // Bind texture arrays (binding 6: textures, binding 7: samplers)
     // Uses bindless descriptor indexing (VK_EXT_descriptor_indexing)
     // If imageViews is empty, binds a single dummy white texture
     void BindTextures(const std::vector<VkImageView>& imageViews,
-                      const std::vector<VkSampler>& samplers);
+                      const std::vector<VkSampler>& samplers) const;
 
     // ========================================================================
     // IBL (Image-Based Lighting) Bindings
@@ -96,13 +96,13 @@ public:
     // ========================================================================
 
     // Bind prefiltered environment cubemap (binding 10)
-    void BindPrefilteredEnvMap(VkImageView imageView);
+    void BindPrefilteredEnvMap(VkImageView imageView) const;
 
     // Bind BRDF integration LUT for IBL (binding 11: texture, binding 12: sampler)
-    void BindBRDFLut(VkImageView imageView, VkSampler sampler);
+    void BindBRDFLut(VkImageView imageView, VkSampler sampler) const;
 
     // Update all bindings (call after all Bind* calls)
-    void UpdateDescriptorSets();
+    static void UpdateDescriptorSets();
 
     // ========================================================================
     // Rendering
@@ -115,7 +115,7 @@ public:
     void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed);
 
     // Record trace rays command into provided command buffer
-    void TraceRays(VkCommandBuffer cmd, u32 width, u32 height);
+    void TraceRays(VkCommandBuffer cmd, u32 width, u32 height) const;
 
     // ========================================================================
     // Accessors
@@ -140,13 +140,13 @@ private:
     // ========================================================================
 
     // Load SPIR-V shader from file
-    std::vector<u32> LoadSPIRV(const std::string& path);
+    static std::vector<u32> LoadSPIRV(const std::string& path);
 
     // Create shader module from SPIR-V
-    VkShaderModule CreateShaderModule(const std::vector<u32>& spirv);
+    [[nodiscard]] VkShaderModule CreateShaderModule(const std::vector<u32>& spirv) const;
 
     // Get SBT aligned size
-    u32 AlignedSize(u32 size, u32 alignment) const;
+    static u32 AlignedSize(u32 size, u32 alignment);
 
     // ========================================================================
     // Vulkan handles

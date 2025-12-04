@@ -9,8 +9,8 @@ namespace quantiloom {
 // Construction / Destruction
 // ============================================================================
 
-GpuBuffer::GpuBuffer(VmaAllocator allocator, VkDeviceSize size,
-                     VkBufferUsageFlags usage, VmaMemoryUsage memUsage)
+GpuBuffer::GpuBuffer(VmaAllocator allocator, const VkDeviceSize size,
+                     const VkBufferUsageFlags usage, const VmaMemoryUsage memUsage)
     : m_allocator(allocator), m_size(size) {
 
     VkBufferCreateInfo bufferInfo{};
@@ -22,7 +22,7 @@ GpuBuffer::GpuBuffer(VmaAllocator allocator, VkDeviceSize size,
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = memUsage;
 
-    VkResult result = vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo,
+    const VkResult result = vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo,
                                       &m_buffer, &m_allocation, nullptr);
 
     if (result != VK_SUCCESS) {
@@ -93,8 +93,7 @@ void* GpuBuffer::Map() {
         return m_mappedData;
     }
 
-    VkResult result = vmaMapMemory(m_allocator, m_allocation, &m_mappedData);
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vmaMapMemory(m_allocator, m_allocation, &m_mappedData); result != VK_SUCCESS) {
         QL_LOG_ERROR("Failed to map buffer memory: error code {}", static_cast<int>(result));
         return nullptr;
     }
@@ -109,15 +108,14 @@ void GpuBuffer::Unmap() {
     }
 }
 
-void GpuBuffer::Upload(const void* data, VkDeviceSize uploadSize, VkDeviceSize offset) {
+void GpuBuffer::Upload(const void* data, const VkDeviceSize uploadSize, const VkDeviceSize offset) {
     if (offset + uploadSize > m_size) {
         QL_LOG_ERROR("Upload size ({} bytes) exceeds buffer size ({} bytes)",
                      offset + uploadSize, m_size);
         return;
     }
 
-    void* mapped = Map();
-    if (mapped != nullptr) {
+    if (void* mapped = Map(); mapped != nullptr) {
         std::memcpy(static_cast<char*>(mapped) + offset, data, uploadSize);
         Unmap();
     }

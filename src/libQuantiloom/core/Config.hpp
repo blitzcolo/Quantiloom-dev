@@ -29,7 +29,7 @@ public:
 
     /// Check if a key exists in the configuration
     /// @param key Dot-separated key path (e.g., "renderer.resolution")
-    bool Has(StringView key) const;
+    [[nodiscard]] bool Has(StringView key) const;
 
     /// Get a value from the configuration (with optional default)
     /// @tparam T Expected value type (i32, f32, String, bool, etc.)
@@ -46,7 +46,7 @@ public:
 
     /// Get a nested table as a Config object
     /// @param key Dot-separated key path
-    Result<Config, String> GetTable(StringView key) const;
+    [[nodiscard]] Result<Config, String> GetTable(StringView key) const;
 
     /// Get an array of values
     /// @tparam T Element type
@@ -55,7 +55,7 @@ public:
     Vector<T> GetArray(StringView key) const;
 
     /// Access the underlying toml::table (for advanced usage)
-    const toml::table& GetRoot() const { return m_Root; }
+    [[nodiscard]] const toml::table& GetRoot() const { return m_Root; }
 
     /// Print the entire config to stdout (for debugging)
     void Print() const;
@@ -66,7 +66,7 @@ private:
     toml::table m_Root;
 
     /// Helper: Navigate to a nested node by dot-separated path
-    const toml::node* Navigate(StringView key) const;
+    [[nodiscard]] const toml::node* Navigate(StringView key) const;
 };
 
 // ============================================================================
@@ -81,35 +81,35 @@ T Config::Get(StringView key, const T& defaultValue) const {
     }
 
     if constexpr (std::is_same_v<T, String>) {
-        if (auto val = node->value<std::string>()) {
+        if (const auto val = node->value<std::string>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, i32>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<i32>(*val);
         }
     } else if constexpr (std::is_same_v<T, i64>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, u32>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<u32>(*val);
         }
     } else if constexpr (std::is_same_v<T, u64>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<u64>(*val);
         }
     } else if constexpr (std::is_same_v<T, f32>) {
-        if (auto val = node->value<double>()) {
+        if (const auto val = node->value<double>()) {
             return static_cast<f32>(*val);
         }
     } else if constexpr (std::is_same_v<T, f64>) {
-        if (auto val = node->value<double>()) {
+        if (const auto val = node->value<double>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, bool>) {
-        if (auto val = node->value<bool>()) {
+        if (const auto val = node->value<bool>()) {
             return *val;
         }
     }
@@ -126,35 +126,35 @@ Result<T, String> Config::GetRequired(StringView key) const {
     }
 
     if constexpr (std::is_same_v<T, String>) {
-        if (auto val = node->value<std::string>()) {
+        if (const auto val = node->value<std::string>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, i32>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<i32>(*val);
         }
     } else if constexpr (std::is_same_v<T, i64>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, u32>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<u32>(*val);
         }
     } else if constexpr (std::is_same_v<T, u64>) {
-        if (auto val = node->value<int64_t>()) {
+        if (const auto val = node->value<int64_t>()) {
             return static_cast<u64>(*val);
         }
     } else if constexpr (std::is_same_v<T, f32>) {
-        if (auto val = node->value<double>()) {
+        if (const auto val = node->value<double>()) {
             return static_cast<f32>(*val);
         }
     } else if constexpr (std::is_same_v<T, f64>) {
-        if (auto val = node->value<double>()) {
+        if (const auto val = node->value<double>()) {
             return *val;
         }
     } else if constexpr (std::is_same_v<T, bool>) {
-        if (auto val = node->value<bool>()) {
+        if (const auto val = node->value<bool>()) {
             return *val;
         }
     }

@@ -17,15 +17,13 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     // ========================================================================
 
     if (config.Has("camera")) {
-        auto cameraTable = config.GetTable("camera");
-        if (cameraTable) {
+        if (auto cameraTable = config.GetTable("camera")) {
             const Config& cam = *cameraTable;
 
             // Position
             glm::vec3 position = scene.camera.GetPosition();
             if (cam.Has("position")) {
-                auto pos = cam.GetArray<f32>("position");
-                if (pos.size() == 3) {
+                if (auto pos = cam.GetArray<f32>("position"); pos.size() == 3) {
                     position = glm::vec3(pos[0], pos[1], pos[2]);
                 }
             }
@@ -33,8 +31,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
             // Look-at
             glm::vec3 lookAt = scene.camera.GetLookAt();
             if (cam.Has("look_at")) {
-                auto lookAtArr = cam.GetArray<f32>("look_at");
-                if (lookAtArr.size() == 3) {
+                if (auto lookAtArr = cam.GetArray<f32>("look_at"); lookAtArr.size() == 3) {
                     lookAt = glm::vec3(lookAtArr[0], lookAtArr[1], lookAtArr[2]);
                 }
             }
@@ -42,8 +39,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
             // Up vector
             glm::vec3 up = scene.camera.GetUp();
             if (cam.Has("up")) {
-                auto upArr = cam.GetArray<f32>("up");
-                if (upArr.size() == 3) {
+                if (auto upArr = cam.GetArray<f32>("up"); upArr.size() == 3) {
                     up = glm::vec3(upArr[0], upArr[1], upArr[2]);
                 }
             }
@@ -64,8 +60,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     // ========================================================================
 
     if (config.Has("renderer.resolution")) {
-        auto res = config.GetArray<i32>("renderer.resolution");
-        if (res.size() == 2) {
+        if (auto res = config.GetArray<i32>("renderer.resolution"); res.size() == 2) {
             scene.width = static_cast<u32>(res[0]);
             scene.height = static_cast<u32>(res[1]);
             // Update camera aspect ratio
@@ -80,16 +75,12 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
 
     // MS-RT mode: band definitions
     if (config.Has("spectral.bands")) {
-        auto bandsTable = config.GetTable("spectral");
-        if (bandsTable) {
+        if (auto bandsTable = config.GetTable("spectral")) {
             // Try to parse bands array (TOML array of tables)
             // Note: toml++ doesn't have direct array-of-tables getter,
             // need to access via root table
-            const auto& root = config.GetRoot();
-            if (root["spectral"]["bands"].is_array()) {
-                const auto& bandsArray = *root["spectral"]["bands"].as_array();
-
-                for (const auto& bandNode : bandsArray) {
+            if (const auto& root = config.GetRoot(); root["spectral"]["bands"].is_array()) {
+                for (const auto& bandsArray = *root["spectral"]["bands"].as_array(); const auto& bandNode : bandsArray) {
                     if (bandNode.is_table()) {
                         const auto& bandTable = *bandNode.as_table();
 
@@ -119,8 +110,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
 
     // HS-OFF mode: wavelength range
     if (config.Has("spectral.range_nm")) {
-        auto range = config.GetArray<f32>("spectral.range_nm");
-        if (range.size() == 2) {
+        if (auto range = config.GetArray<f32>("spectral.range_nm"); range.size() == 2) {
             scene.lambda_min = range[0];
             scene.lambda_max = range[1];
         }
@@ -135,10 +125,9 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     // ========================================================================
 
     if (config.Has("atmosphere.lut")) {
-        String lutPath = config.Get<String>("atmosphere.lut", "");
-        if (!lutPath.empty() && std::filesystem::exists(lutPath)) {
-            auto lut = LUTLoader::LoadHDF5(lutPath);
-            if (lut && lut->IsValid()) {
+        if (auto lutPath = config.Get<String>("atmosphere.lut", "");
+            !lutPath.empty() && std::filesystem::exists(lutPath)) {
+            if (auto lut = LUTLoader::LoadHDF5(lutPath); lut && lut->IsValid()) {
                 scene.atmosphereLUT = std::move(*lut);
                 QL_LOG_INFO("Loaded atmosphere LUT: {} wavelength samples", scene.atmosphereLUT->Size());
             } else {
@@ -159,13 +148,13 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     // ========================================================================
 
     if (!scene.IsValid()) {
-        return Result<Scene, String>::Err("Scene validation failed after loading");
+        return Result<Scene>(Result<Scene>::Err("Scene validation failed after loading"));
     }
 
     QL_LOG_INFO("Scene loaded successfully: {}", scene.name);
     scene.PrintSummary();
 
-    return scene;
+    return Result(scene);
 }
 
 // ============================================================================
@@ -191,13 +180,9 @@ bool Scene::IsValid() const {
     }
 
     // All meshes must be valid
-    for (const auto& mesh : meshes) {
-        if (!mesh.IsValid()) {
-            return false;
-        }
-    }
-
-    return true;
+    return std::ranges::all_of(meshes, [](const auto& mesh) {
+        return mesh.IsValid();
+    });
 }
 
 u32 Scene::GetTotalTriangleCount() const {
@@ -238,9 +223,9 @@ void Scene::PrintSummary() const {
     if (!bands.empty()) {
         QL_LOG_INFO("  Mode: MS-RT");
         QL_LOG_INFO("  Bands: {}", bands.size());
-        for (const auto& band : bands) {
+        for (const auto&[name, center_nm, fwhm_nm] : bands) {
             QL_LOG_INFO("    - {}: {:.1f} nm (FWHM: {:.1f} nm)",
-                        band.name, band.center_nm, band.fwhm_nm);
+                        name, center_nm, fwhm_nm);
         }
     } else {
         QL_LOG_INFO("  Mode: HS-OFF");

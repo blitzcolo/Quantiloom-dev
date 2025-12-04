@@ -2,6 +2,7 @@
 #include "core/Log.hpp"
 #include <algorithm>
 #include <cmath>
+#include <ranges>
 
 namespace quantiloom {
 
@@ -14,8 +15,8 @@ namespace quantiloom {
 
 static f32 InterpolateSpectralCurve(
     const Vector<std::pair<f32, f32>>& curve,
-    f32 lambda_nm,
-    f32 fallback = 0.0f)
+    const f32 lambda_nm,
+    const f32 fallback = 0.0f)
 {
     if (curve.empty()) {
         return fallback;
@@ -34,8 +35,7 @@ static f32 InterpolateSpectralCurve(
     usize right = curve.size() - 1;
 
     while (right - left > 1) {
-        usize mid = (left + right) / 2;
-        if (curve[mid].first < lambda_nm) {
+        if (const usize mid = (left + right) / 2; curve[mid].first < lambda_nm) {
             left = mid;
         } else {
             right = mid;
@@ -43,12 +43,12 @@ static f32 InterpolateSpectralCurve(
     }
 
     // Linear interpolation
-    f32 lambda0 = curve[left].first;
-    f32 lambda1 = curve[right].first;
-    f32 value0 = curve[left].second;
-    f32 value1 = curve[right].second;
+    const f32 lambda0 = curve[left].first;
+    const f32 lambda1 = curve[right].first;
+    const f32 value0 = curve[left].second;
+    const f32 value1 = curve[right].second;
 
-    f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+    const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
     return value0 * (1.0f - t) + value1 * t;
 }
 
@@ -56,16 +56,16 @@ static f32 InterpolateSpectralCurve(
 // IR Property Getters (implementations)
 // ============================================================================
 
-f32 Material::GetIREmissivity(f32 lambda_nm) const {
+f32 Material::GetIREmissivity(const f32 lambda_nm) const {
     return InterpolateSpectralCurve(irEmissivityCurve, lambda_nm, 0.0f);
 }
 
-f32 Material::GetIRReflectance(f32 lambda_nm) const {
+f32 Material::GetIRReflectance(const f32 lambda_nm) const {
     // Fallback to spectralAlbedo if no IR curve available
     return InterpolateSpectralCurve(irReflectanceCurve, lambda_nm, spectralAlbedo);
 }
 
-f32 Material::GetIRTransmittance(f32 lambda_nm) const {
+f32 Material::GetIRTransmittance(const f32 lambda_nm) const {
     return InterpolateSpectralCurve(irTransmittanceCurve, lambda_nm, 0.0f);
 }
 
@@ -82,34 +82,33 @@ bool Material::ValidateIRKirchhoffLaw() const {
     // Collect all wavelengths from all curves
     Vector<f32> allWavelengths;
 
-    for (const auto& [lambda, value] : irEmissivityCurve) {
+    for (const auto &lambda: irEmissivityCurve | std::views::keys) {
         allWavelengths.push_back(lambda);
     }
-    for (const auto& [lambda, value] : irReflectanceCurve) {
+    for (const auto &lambda: irReflectanceCurve | std::views::keys) {
         allWavelengths.push_back(lambda);
     }
-    for (const auto& [lambda, value] : irTransmittanceCurve) {
+    for (const auto &lambda: irTransmittanceCurve | std::views::keys) {
         allWavelengths.push_back(lambda);
     }
 
     // Remove duplicates and sort
-    std::sort(allWavelengths.begin(), allWavelengths.end());
+    std::ranges::sort(allWavelengths);
     allWavelengths.erase(
-        std::unique(allWavelengths.begin(), allWavelengths.end()),
+        std::ranges::unique(allWavelengths).begin(),
         allWavelengths.end()
     );
 
     // Check Kirchhoff's law at each wavelength: ε + ρ + τ ≤ 1
-    const f32 TOLERANCE = 1e-3f;  // Allow small numerical errors
 
     for (f32 lambda : allWavelengths) {
-        f32 epsilon = GetIREmissivity(lambda);
-        f32 rho = GetIRReflectance(lambda);
-        f32 tau = GetIRTransmittance(lambda);
+        const f32 epsilon = GetIREmissivity(lambda);
+        const f32 rho = GetIRReflectance(lambda);
+        const f32 tau = GetIRTransmittance(lambda);
 
         f32 sum = epsilon + rho + tau;
 
-        if (sum > 1.0f + TOLERANCE) {
+        if (constexpr f32 TOLERANCE = 1e-3f; sum > 1.0f + TOLERANCE) {
             QL_LOG_WARN("Material '{}': Kirchhoff's law violated at {:.1f} nm: ε+ρ+τ = {:.3f} > 1.0",
                         name, lambda, sum);
             return false;

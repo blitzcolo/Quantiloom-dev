@@ -35,11 +35,11 @@ Image BRDFLutGenerator::Generate(const Config& config) {
             // Map pixel to [0, 1]
             // x-axis: cos(theta_v) = NdotV (view angle)
             // y-axis: roughness
-            f32 NdotV = (x + 0.5f) / config.resolution;
-            f32 roughness = (y + 0.5f) / config.resolution;
+            const f32 NdotV = (static_cast<float>(x) + 0.5f) / static_cast<float>(config.resolution);
+            const f32 roughness = (static_cast<float>(y) + 0.5f) / static_cast<float>(config.resolution);
 
             // Integrate BRDF
-            glm::vec2 brdf = IntegrateBRDF(NdotV, roughness, config.sampleCount);
+            const glm::vec2 brdf = IntegrateBRDF(NdotV, roughness, config.sampleCount);
 
             // Store result (R=scale, G=bias)
             lut(x, y, 0) = brdf.x;  // Scale
@@ -75,15 +75,15 @@ bool BRDFLutGenerator::GenerateAndSave(const String& filepath) {
 // Internal Implementation
 // ============================================================================
 
-glm::vec2 BRDFLutGenerator::IntegrateBRDF(f32 NdotV, f32 roughness, u32 sampleCount) {
+glm::vec2 BRDFLutGenerator::IntegrateBRDF(const f32 NdotV, const f32 roughness, const u32 sampleCount) {
     // View direction (pointing from surface to camera)
     // Fix normal to +Z, vary view direction based on NdotV
-    glm::vec3 N = glm::vec3(0.0f, 0.0f, 1.0f);
+    constexpr auto N = glm::vec3(0.0f, 0.0f, 1.0f);
 
     // Compute V from NdotV
     // cos(theta) = NdotV, sin(theta) = sqrt(1 - NdotV^2)
-    f32 sinThetaV = std::sqrt(std::max(0.0f, 1.0f - NdotV * NdotV));
-    glm::vec3 V = glm::vec3(sinThetaV, 0.0f, NdotV);
+    const f32 sinThetaV = std::sqrt(std::max(0.0f, 1.0f - NdotV * NdotV));
+    const auto V = glm::vec3(sinThetaV, 0.0f, NdotV);
 
     // Accumulate integrated terms
     f32 A = 0.0f;  // Scale term
@@ -91,7 +91,7 @@ glm::vec2 BRDFLutGenerator::IntegrateBRDF(f32 NdotV, f32 roughness, u32 sampleCo
 
     for (u32 i = 0; i < sampleCount; ++i) {
         // Generate low-discrepancy 2D sample
-        glm::vec2 Xi = Hammersley(i, sampleCount);
+        const glm::vec2 Xi = Hammersley(i, sampleCount);
 
         // Importance sample GGX (generates H in tangent space)
         glm::vec3 H = ImportanceSampleGGX(Xi, N, roughness);
@@ -101,19 +101,18 @@ glm::vec2 BRDFLutGenerator::IntegrateBRDF(f32 NdotV, f32 roughness, u32 sampleCo
         glm::vec3 L = glm::normalize(2.0f * glm::dot(V, H) * H - V);
 
         // Only consider samples where light is in hemisphere
-        f32 NdotL = std::max(L.z, 0.0f);
-        if (NdotL > 0.0f) {
-            f32 NdotH = std::max(H.z, 0.0f);
-            f32 VdotH = std::max(glm::dot(V, H), 0.0f);
+        if (const f32 NdotL = std::max(L.z, 0.0f); NdotL > 0.0f) {
+            const f32 NdotH = std::max(H.z, 0.0f);
+            const f32 VdotH = std::max(glm::dot(V, H), 0.0f);
 
             // Geometry term (Smith GGX with IBL correlation)
-            f32 G = GeometrySmith_GGX_IBL(NdotV, NdotL, roughness);
+            const f32 G = GeometrySmith_GGX_IBL(NdotV, NdotL, roughness);
 
             // Fresnel term (Schlick approximation split into (1-VdotH)^5)
             // F = F0 + (1 - F0) * (1 - VdotH)^5
             // We separate this into: F = F0 * A + B
-            f32 G_Vis = (G * VdotH) / (NdotH * NdotV);
-            f32 Fc = std::pow(1.0f - VdotH, 5.0f);
+            const f32 G_Vis = (G * VdotH) / (NdotH * NdotV);
+            const f32 Fc = std::pow(1.0f - VdotH, 5.0f);
 
             A += (1.0f - Fc) * G_Vis;
             B += Fc * G_Vis;
@@ -124,16 +123,16 @@ glm::vec2 BRDFLutGenerator::IntegrateBRDF(f32 NdotV, f32 roughness, u32 sampleCo
     A /= static_cast<f32>(sampleCount);
     B /= static_cast<f32>(sampleCount);
 
-    return glm::vec2(A, B);
+    return {A, B};
 }
 
-glm::vec3 BRDFLutGenerator::ImportanceSampleGGX(glm::vec2 Xi, glm::vec3 N, f32 roughness) {
-    f32 a = roughness * roughness;
+glm::vec3 BRDFLutGenerator::ImportanceSampleGGX(const glm::vec2 Xi, glm::vec3 N, const f32 roughness) {
+    const f32 a = roughness * roughness;
 
     // Spherical coordinates (GGX distribution)
-    f32 phi = 2.0f * glm::pi<f32>() * Xi.x;
-    f32 cosTheta = std::sqrt((1.0f - Xi.y) / (1.0f + (a * a - 1.0f) * Xi.y));
-    f32 sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
+    const f32 phi = 2.0f * glm::pi<f32>() * Xi.x;
+    const f32 cosTheta = std::sqrt((1.0f - Xi.y) / (1.0f + (a * a - 1.0f) * Xi.y));
+    const f32 sinTheta = std::sqrt(1.0f - cosTheta * cosTheta);
 
     // Tangent space vector
     glm::vec3 H;
@@ -146,24 +145,24 @@ glm::vec3 BRDFLutGenerator::ImportanceSampleGGX(glm::vec2 Xi, glm::vec3 N, f32 r
     return glm::normalize(H);
 }
 
-f32 BRDFLutGenerator::GeometrySmith_GGX_IBL(f32 NdotV, f32 NdotL, f32 roughness) {
+f32 BRDFLutGenerator::GeometrySmith_GGX_IBL(const f32 NdotV, const f32 NdotL, const f32 roughness) {
     // GGX geometry function (Smith) for IBL
     // Uses remapped roughness for better correlation with microfacet model
-    f32 a = roughness;
+    const f32 a = roughness;
     f32 k = (a * a) / 2.0f;  // IBL variant (different from direct lighting)
 
-    auto G1 = [k](f32 NdotX) -> f32 {
+    auto G1 = [k](const f32 NdotX) -> f32 {
         return NdotX / (NdotX * (1.0f - k) + k);
     };
 
     return G1(NdotV) * G1(NdotL);
 }
 
-glm::vec2 BRDFLutGenerator::Hammersley(u32 i, u32 N) {
-    return glm::vec2(
+glm::vec2 BRDFLutGenerator::Hammersley(const u32 i, const u32 N) {
+    return {
         static_cast<f32>(i) / static_cast<f32>(N),
         RadicalInverse_VdC(i)
-    );
+    };
 }
 
 f32 BRDFLutGenerator::RadicalInverse_VdC(u32 bits) {

@@ -47,26 +47,26 @@ public:
     // Accessors
     // ========================================================================
 
-    VkInstance GetInstance() const { return m_instance; }
-    VkPhysicalDevice GetPhysicalDevice() const { return m_physicalDevice; }
-    VkDevice GetDevice() const { return m_device; }
-    VkQueue GetGraphicsQueue() const { return m_graphicsQueue; }
-    u32 GetGraphicsQueueFamily() const { return m_graphicsQueueFamily; }
+    [[nodiscard]] VkInstance GetInstance() const { return m_instance; }
+    [[nodiscard]] VkPhysicalDevice GetPhysicalDevice() const { return m_physicalDevice; }
+    [[nodiscard]] VkDevice GetDevice() const { return m_device; }
+    [[nodiscard]] VkQueue GetGraphicsQueue() const { return m_graphicsQueue; }
+    [[nodiscard]] u32 GetGraphicsQueueFamily() const { return m_graphicsQueueFamily; }
 
-    VmaAllocator GetAllocator() const { return m_allocator; }
+    [[nodiscard]] VmaAllocator GetAllocator() const { return m_allocator; }
 
     // ========================================================================
     // Utility
     // ========================================================================
 
     // Get physical device properties
-    const VkPhysicalDeviceProperties& GetDeviceProperties() const { return m_deviceProperties; }
+    [[nodiscard]] const VkPhysicalDeviceProperties& GetDeviceProperties() const { return m_deviceProperties; }
 
     // Check if Ray Tracing is supported
-    bool IsRayTracingSupported() const { return m_rayTracingSupported; }
+    [[nodiscard]] bool IsRayTracingSupported() const { return m_rayTracingSupported; }
 
     // Get Ray Tracing properties (only valid if IsRayTracingSupported() == true)
-    const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& GetRayTracingProperties() const {
+    [[nodiscard]] const VkPhysicalDeviceRayTracingPipelinePropertiesKHR& GetRayTracingProperties() const {
         return m_rtPipelineProperties;
     }
 
@@ -76,7 +76,8 @@ private:
     // ========================================================================
 
     void CreateInstance();
-    void SetupDebugMessenger();
+
+    static void SetupDebugMessenger();
     void SelectPhysicalDevice();
     void CreateDevice();
     void CreateAllocator();
@@ -86,16 +87,16 @@ private:
     // ========================================================================
 
     // Get required instance extensions
-    std::vector<const char*> GetRequiredInstanceExtensions() const;
+    static std::vector<const char*> GetRequiredInstanceExtensions();
 
     // Get required validation layers
-    std::vector<const char*> GetRequiredValidationLayers() const;
+    static std::vector<const char*> GetRequiredValidationLayers();
 
     // Check if physical device is suitable (has required features)
     bool IsDeviceSuitable(VkPhysicalDevice device) const;
 
     // Find queue family index (graphics + compute + transfer)
-    Optional<u32> FindGraphicsQueueFamily(VkPhysicalDevice device) const;
+    static Optional<u32> FindGraphicsQueueFamily(VkPhysicalDevice device);
 
     // ========================================================================
     // Vulkan Handles (destruction order: reverse of declaration)

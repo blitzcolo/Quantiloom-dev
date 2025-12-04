@@ -51,8 +51,8 @@ struct AtmosphereLUT {
     // ========================================================================
 
     // Check if LUT is valid
-    inline bool IsValid() const {
-        usize n = wavelengths.size();
+    [[nodiscard]] inline bool IsValid() const {
+        const usize n = wavelengths.size();
         if (n == 0) return false;
 
         // All arrays must have same length
@@ -73,12 +73,12 @@ struct AtmosphereLUT {
     }
 
     // Get number of wavelength samples
-    inline usize Size() const { return wavelengths.size(); }
+    [[nodiscard]] inline usize Size() const { return wavelengths.size(); }
 
     // Linear interpolation helper
     // Returns interpolated value at target_nm
     // If target_nm is out of range, clamps to boundary values
-    f32 Interpolate(const std::vector<f32>& values, f32 target_nm) const {
+    [[nodiscard]] f32 Interpolate(const std::vector<f32>& values, const f32 target_nm) const {
         if (wavelengths.empty()) return 0.0f;
 
         // Clamp to boundaries
@@ -94,8 +94,7 @@ struct AtmosphereLUT {
         usize right = wavelengths.size() - 1;
 
         while (right - left > 1) {
-            usize mid = (left + right) / 2;
-            if (wavelengths[mid] < target_nm) {
+            if (const usize mid = (left + right) / 2; wavelengths[mid] < target_nm) {
                 left = mid;
             } else {
                 right = mid;
@@ -103,25 +102,25 @@ struct AtmosphereLUT {
         }
 
         // Linear interpolation
-        f32 lambda0 = wavelengths[left];
-        f32 lambda1 = wavelengths[right];
-        f32 t = (target_nm - lambda0) / (lambda1 - lambda0);
+        const f32 lambda0 = wavelengths[left];
+        const f32 lambda1 = wavelengths[right];
+        const f32 t = (target_nm - lambda0) / (lambda1 - lambda0);
 
         return values[left] * (1.0f - t) + values[right] * t;
     }
 
     // Get solar irradiance at specific wavelength (nm)
-    inline f32 GetSolarIrradiance(f32 lambda_nm) const {
+    [[nodiscard]] inline f32 GetSolarIrradiance(const f32 lambda_nm) const {
         return Interpolate(solar_irradiance, lambda_nm);
     }
 
     // Get sky radiance at specific wavelength (nm)
-    inline f32 GetSkyRadiance(f32 lambda_nm) const {
+    [[nodiscard]] inline f32 GetSkyRadiance(const f32 lambda_nm) const {
         return Interpolate(sky_radiance, lambda_nm);
     }
 
     // Get transmittance at specific wavelength (nm)
-    inline f32 GetTransmittance(f32 lambda_nm) const {
+    [[nodiscard]] inline f32 GetTransmittance(const f32 lambda_nm) const {
         return Interpolate(transmittance, lambda_nm);
     }
 };

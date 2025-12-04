@@ -29,7 +29,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <cstddef>  // For offsetof
-#include <cstdlib>  // For std::rand (random seed generation)
+#include <random>   // For C++11 random number generation
 
 using namespace quantiloom;
 
@@ -584,16 +584,16 @@ int main(int argc, char* argv[]) {
         f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
         if (spectral_mode == SpectralMode::RGB) {
-            QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr⁻¹·m⁻²",
+            QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
                         sunRadiance.r, sunRadiance.g, sunRadiance.b);
-            QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr⁻¹·m⁻²",
+            QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
                         skyRadiance.r, skyRadiance.g, skyRadiance.b);
         } else {
-            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", sunRadiance_spectral);
-            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr⁻¹·m⁻²·nm⁻¹", skyRadiance_spectral);
+            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr^-1·m^-2·nm^-2", sunRadiance_spectral);
+            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr^-1·m^-2·nm^-2", skyRadiance_spectral);
         }
 
-        LUTData lutData;
+        LUTData lutData{};
         lutData.sunDirection = sunDirection;
 
         // Fill both spectral and RGB fields for flexibility
@@ -632,7 +632,7 @@ int main(int argc, char* argv[]) {
         materialData.reserve(loadedScene.materials.size());
 
         for (const auto& mat : loadedScene.materials) {
-            MaterialDataCPU cpuMat;
+            MaterialDataCPU cpuMat{};
 
             // Base color
             cpuMat.baseColorFactor = mat.baseColorFactor;
@@ -724,27 +724,27 @@ int main(int argc, char* argv[]) {
         // Upload LUT data
         {
             // Convert Image to raw buffer (RG32F format)
-            std::vector<f32> lutData(512 * 512 * 2);
+            std::vector<f32> lutDataMatrix(512 * 512 * 2);
             for (u32 y = 0; y < 512; ++y) {
                 for (u32 x = 0; x < 512; ++x) {
                     u32 idx = (y * 512 + x) * 2;
-                    lutData[idx + 0] = brdfLutImage(x, y, 0);  // R channel (scale)
-                    lutData[idx + 1] = brdfLutImage(x, y, 1);  // G channel (bias)
+                    lutDataMatrix[idx + 0] = brdfLutImage(x, y, 0);  // R channel (scale)
+                    lutDataMatrix[idx + 1] = brdfLutImage(x, y, 1);  // G channel (bias)
                 }
             }
 
             // Create staging buffer
-            VkDeviceSize bufferSize = lutData.size() * sizeof(f32);
+            VkDeviceSize bufferSize = lutDataMatrix.size() * sizeof(f32);
             GpuBuffer stagingBuffer(
                 context.GetAllocator(),
                 bufferSize,
                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                 VMA_MEMORY_USAGE_CPU_TO_GPU
             );
-            stagingBuffer.Upload(lutData.data(), bufferSize);
+            stagingBuffer.Upload(lutDataMatrix.data(), bufferSize);
 
             // Copy buffer to image
-            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+            CommandHelper::ExecuteImmediate(context, [&](const VkCommandBuffer cmd) {
                 VkBufferImageCopy region{};
                 region.bufferOffset = 0;
                 region.bufferRowLength = 0;  // Tightly packed
@@ -794,8 +794,7 @@ int main(int argc, char* argv[]) {
         samplerInfo.unnormalizedCoordinates = VK_FALSE;
 
         VkSampler brdfLutSampler = VK_NULL_HANDLE;
-        VkResult samplerResult = vkCreateSampler(context.GetDevice(), &samplerInfo, nullptr, &brdfLutSampler);
-        if (samplerResult != VK_SUCCESS) {
+        if (VkResult samplerResult = vkCreateSampler(context.GetDevice(), &samplerInfo, nullptr, &brdfLutSampler); samplerResult != VK_SUCCESS) {
             throw std::runtime_error("Failed to create BRDF LUT sampler");
         }
 
@@ -807,7 +806,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("Creating prefiltered environment map for IBL...");
 
         // Load environment map (equirectangular EXR)
-        String envMapPath = config.Get<String>("renderer.environment_map", "");
+        auto envMapPath = config.Get<String>("renderer.environment_map", "");
         std::vector<Image> cubemapFaces;
         u32 envMapSize = 256;  // Default cubemap face size
         constexpr u32 envMapMips = 5;  // Mip chain for roughness levels (roughness 0.0 to 1.0)
@@ -1136,6 +1135,12 @@ int main(int argc, char* argv[]) {
             f32 totalGpuMs = 0.0f;
             f64 totalRays = 0.0;
 
+            // Initialize C++11 random number generator
+            // Use random_device for non-deterministic seeding
+            std::random_device rd;
+            std::mt19937 rng(rd());
+            std::uniform_int_distribution<u32> dist(0, std::numeric_limits<u32>::max());
+
             // ================================================================
             // SPP Loop: Accumulative Sampling
             // ================================================================
@@ -1147,8 +1152,8 @@ int main(int argc, char* argv[]) {
 
             for (u32 sampleIndex = 0; sampleIndex < spp; ++sampleIndex) {
                 // Generate unique random seed for this sample
-                // Uses system random to ensure different patterns per sample
-                u32 randomSeed = static_cast<u32>(std::rand()) ^ (frameIndex * 997 + sampleIndex * 1009);
+                // Uses C++11 Mersenne Twister for high-quality randomness
+                u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
 
                 // Update sampling parameters in pipeline
                 pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
@@ -1156,7 +1161,7 @@ int main(int argc, char* argv[]) {
                 QL_LOG_INFO("  [SPP {}/{}] Tracing rays (seed: {})...", sampleIndex + 1, spp, randomSeed);
 
                 // Execute ray tracing for this sample
-                CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+                CommandHelper::ExecuteImmediate(context, [&](const VkCommandBuffer cmd) {
                     // Begin performance timing
                     perfLogger.BeginFrame(cmd);
 
@@ -1261,6 +1266,23 @@ int main(int argc, char* argv[]) {
         }
         QL_LOG_INFO("  Output: {}", outputPath);
         QL_LOG_INFO("========================================");
+
+        // ====================================================================
+        // Resource Cleanup
+        // ====================================================================
+        // CRITICAL: Clean up manually created Vulkan resources before VulkanContext destructor
+        // This prevents validation errors about leaked resources
+        if (brdfLutSampler != VK_NULL_HANDLE) {
+            vkDestroySampler(context.GetDevice(), brdfLutSampler, nullptr);
+        }
+
+        if (envMapView != VK_NULL_HANDLE) {
+            vkDestroyImageView(context.GetDevice(), envMapView, nullptr);
+        }
+
+        if (envMapImage != VK_NULL_HANDLE) {
+            vmaDestroyImage(context.GetAllocator(), envMapImage, envMapAllocation);
+        }
 
     } catch (const std::exception& e) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());

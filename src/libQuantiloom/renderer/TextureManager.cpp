@@ -44,7 +44,7 @@ void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
     // Handle empty texture list: create dummy 1x1 white texture
     if (textures.empty()) {
         QL_LOG_INFO("No textures to upload, creating dummy 1x1 white texture");
-        Texture dummyTex = CreateDummyTexture();
+        const Texture dummyTex = CreateDummyTexture();
 
         m_images.push_back(UploadTexture(dummyTex));
         m_samplers.push_back(CreateSampler(dummyTex.sampler));
@@ -77,7 +77,7 @@ void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
 // Internal Helper Functions
 // ============================================================================
 
-std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) {
+std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) const {
     // Validate texture data
     if (texture.pixels.empty()) {
         QL_LOG_ERROR("Texture '{}' has no pixel data", texture.name);
@@ -264,7 +264,7 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
     return gpuImage;
 }
 
-VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) {
+VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) const {
     VkSamplerCreateInfo samplerCreateInfo{};
     samplerCreateInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
 
@@ -298,9 +298,9 @@ VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) {
     samplerCreateInfo.maxLod = VK_LOD_CLAMP_NONE;  // Use all mip levels
 
     VkSampler sampler;
-    VkResult result = vkCreateSampler(m_context.GetDevice(), &samplerCreateInfo, nullptr, &sampler);
 
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vkCreateSampler(m_context.GetDevice(), &samplerCreateInfo, nullptr, &sampler);
+        result != VK_SUCCESS) {
         QL_LOG_ERROR("Failed to create VkSampler: error code {}", static_cast<int>(result));
         throw std::runtime_error("VkSampler creation failed");
     }

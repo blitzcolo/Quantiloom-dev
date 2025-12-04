@@ -64,11 +64,16 @@ VulkanContext::~VulkanContext() {
     }
 
 #ifdef QUANTILOOM_ENABLE_VALIDATION
+    // IMPORTANT: Save the handle and null it out before destroying to prevent
+    // validation layer from reporting issues during its own destruction
     if (m_debugMessenger != VK_NULL_HANDLE) {
+        VkDebugUtilsMessengerEXT messengerToDestroy = m_debugMessenger;
+        m_debugMessenger = VK_NULL_HANDLE;
+
         auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)
             vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT");
         if (func != nullptr) {
-            func(m_instance, m_debugMessenger, nullptr);
+            func(m_instance, messengerToDestroy, nullptr);
         }
     }
 #endif
@@ -93,8 +98,8 @@ void VulkanContext::CreateInstance() {
     appInfo.engineVersion = VK_MAKE_VERSION(0, 0, 1);
     appInfo.apiVersion = VK_API_VERSION_1_3;  // Vulkan 1.3 for ray tracing
 
-    auto extensions = GetRequiredInstanceExtensions();
-    auto layers = GetRequiredValidationLayers();
+    const auto extensions = GetRequiredInstanceExtensions();
+    const auto layers = GetRequiredValidationLayers();
 
     VkInstanceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -104,8 +109,7 @@ void VulkanContext::CreateInstance() {
     createInfo.enabledLayerCount = static_cast<u32>(layers.size());
     createInfo.ppEnabledLayerNames = layers.data();
 
-    VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance);
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vkCreateInstance(&createInfo, nullptr, &m_instance); result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create Vulkan instance");
     }
 
@@ -331,8 +335,7 @@ void VulkanContext::CreateAllocator() {
     allocatorInfo.pVulkanFunctions = &vulkanFunctions;
     allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;  // Required for ray tracing
 
-    VkResult result = vmaCreateAllocator(&allocatorInfo, &m_allocator);
-    if (result != VK_SUCCESS) {
+    if (const VkResult result = vmaCreateAllocator(&allocatorInfo, &m_allocator); result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create VMA allocator");
     }
 
@@ -343,7 +346,7 @@ void VulkanContext::CreateAllocator() {
 // Helpers
 // ============================================================================
 
-std::vector<const char*> VulkanContext::GetRequiredInstanceExtensions() const {
+std::vector<const char*> VulkanContext::GetRequiredInstanceExtensions() {
     std::vector<const char*> extensions;
 
 #ifdef QUANTILOOM_ENABLE_VALIDATION
@@ -356,7 +359,7 @@ std::vector<const char*> VulkanContext::GetRequiredInstanceExtensions() const {
     return extensions;
 }
 
-std::vector<const char*> VulkanContext::GetRequiredValidationLayers() const {
+std::vector<const char*> VulkanContext::GetRequiredValidationLayers() {
     std::vector<const char*> layers;
 
 #ifdef QUANTILOOM_ENABLE_VALIDATION
@@ -399,8 +402,8 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) const {
         VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
     };
 
-    for (const auto& extension : availableExtensions) {
-        requiredExtensions.erase(extension.extensionName);
+    for (const auto&[extensionName, specVersion] : availableExtensions) {
+        requiredExtensions.erase(extensionName);
     }
 
     if (!requiredExtensions.empty()) {
@@ -436,7 +439,7 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) const {
     return true;
 }
 
-Optional<u32> VulkanContext::FindGraphicsQueueFamily(VkPhysicalDevice device) const {
+Optional<u32> VulkanContext::FindGraphicsQueueFamily(VkPhysicalDevice device) {
     u32 queueFamilyCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
 

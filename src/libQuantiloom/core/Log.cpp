@@ -12,18 +12,18 @@ namespace quantiloom {
 // Static member definition
 std::shared_ptr<spdlog::logger> Log::s_Logger;
 
-void Log::Init(const char* logFilePath, Level level) {
+void Log::Init(const char* logFilePath, const Level level) {
     // Create multi-sink logger (console + file)
     std::vector<spdlog::sink_ptr> sinks;
 
     // Console sink (with color support)
-    auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    const auto consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
     consoleSink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%^%l%$] %v");
     sinks.push_back(consoleSink);
 
     // File sink (if path provided)
     if (logFilePath && logFilePath[0] != '\0') {
-        auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true);
+        const auto fileSink = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFilePath, true);
         fileSink->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%t] %v");
         sinks.push_back(fileSink);
     }
@@ -54,7 +54,7 @@ void Log::Shutdown() {
     }
 }
 
-void Log::SetLevel(Level level) {
+void Log::SetLevel(const Level level) {
     if (!s_Logger) return;
 
     switch (level) {

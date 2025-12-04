@@ -79,8 +79,7 @@ struct Texture {
         }
 
         // Pixel data size must match dimensions
-        size_t expectedSize = static_cast<size_t>(width) * height * channels;
-        if (pixels.size() != expectedSize) {
+        if (const size_t expectedSize = static_cast<size_t>(width) * height * channels; pixels.size() != expectedSize) {
             return false;
         }
 

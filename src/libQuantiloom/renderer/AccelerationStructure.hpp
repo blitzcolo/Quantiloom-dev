@@ -49,17 +49,17 @@ public:
     void Build(VkCommandBuffer cmd);
 
     // Accessors
-    VkAccelerationStructureKHR GetHandle() const { return m_as; }
-    VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
-    bool IsBuilt() const { return m_built; }
+    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
+    [[nodiscard]] VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
+    [[nodiscard]] bool IsBuilt() const { return m_built; }
 
     // Geometry buffer accessors (for shader binding)
-    const GpuBuffer& GetVertexBuffer() const { return *m_vertexBuffer; }
-    const GpuBuffer& GetIndexBuffer() const { return *m_indexBuffer; }
-    const GpuBuffer& GetUVBuffer() const { return *m_uvBuffer; }  // UV coordinates
-    bool HasUVs() const { return m_uvBuffer != nullptr; }  // Check if UVs are available
-    const GpuBuffer& GetTangentBuffer() const { return *m_tangentBuffer; }  // Tangent vectors
-    bool HasTangents() const { return m_tangentBuffer != nullptr; }  // Check if tangents are available
+    [[nodiscard]] const GpuBuffer& GetVertexBuffer() const { return *m_vertexBuffer; }
+    [[nodiscard]] const GpuBuffer& GetIndexBuffer() const { return *m_indexBuffer; }
+    [[nodiscard]] const GpuBuffer& GetUVBuffer() const { return *m_uvBuffer; }  // UV coordinates
+    [[nodiscard]] bool HasUVs() const { return m_uvBuffer != nullptr; }  // Check if UVs are available
+    [[nodiscard]] const GpuBuffer& GetTangentBuffer() const { return *m_tangentBuffer; }  // Tangent vectors
+    [[nodiscard]] bool HasTangents() const { return m_tangentBuffer != nullptr; }  // Check if tangents are available
 
 private:
     // Helper: Upload vertex and index data to GPU buffers
@@ -111,8 +111,8 @@ public:
     void Build(VkCommandBuffer cmd);
 
     // Accessors
-    VkAccelerationStructureKHR GetHandle() const { return m_as; }
-    bool IsBuilt() const { return m_built; }
+    [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
+    [[nodiscard]] bool IsBuilt() const { return m_built; }
 
 private:
     VulkanContext& m_context;

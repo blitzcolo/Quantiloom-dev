@@ -32,8 +32,8 @@ public:
     // Execute commands immediately (synchronous)
     // Creates temporary command buffer, records, submits, and waits for completion
     static void ExecuteImmediate(
-        VulkanContext& context,
-        std::function<void(VkCommandBuffer)> recordFunc
+        const VulkanContext& context,
+        const std::function<void(VkCommandBuffer)> &recordFunc
     );
 
     // ========================================================================
@@ -53,7 +53,7 @@ public:
 
     // Immediate layout transition (creates and submits command buffer)
     static void TransitionImageLayoutImmediate(
-        VulkanContext& context,
+        const VulkanContext& context,
         VkImage image,
         VkFormat format,
         VkImageLayout oldLayout,
@@ -71,7 +71,7 @@ public:
     // Only supports VK_FORMAT_R32G32B32A32_SFLOAT for M1
     // Image must be in GENERAL or TRANSFER_SRC_OPTIMAL layout
     static std::vector<f32> ReadbackImage(
-        VulkanContext& context,
+        const VulkanContext& context,
         VkImage image,
         VkFormat format,
         u32 width,

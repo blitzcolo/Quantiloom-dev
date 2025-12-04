@@ -5,6 +5,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <vector>
 #include <string>
+#include <algorithm>
 
 // ============================================================================
 // GeometryPrimitive - Minimal rendering unit (single draw call)
@@ -47,22 +48,22 @@ struct GeometryPrimitive {
     // ========================================================================
 
     // Get number of vertices
-    u32 GetVertexCount() const {
+    [[nodiscard]] u32 GetVertexCount() const {
         return static_cast<u32>(positions.size());
     }
 
     // Get number of triangles
-    u32 GetTriangleCount() const {
+    [[nodiscard]] u32 GetTriangleCount() const {
         return static_cast<u32>(indices.size()) / 3;
     }
 
     // Check if primitive has tangent data
-    bool HasTangents() const {
+    [[nodiscard]] bool HasTangents() const {
         return !tangents.empty();
     }
 
     // Check if primitive is valid
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         // Must have at least 3 vertices forming 1 triangle
         if (positions.size() < 3 || indices.size() < 3) {
             return false;
@@ -143,29 +144,25 @@ struct Mesh {
     // ========================================================================
 
     // Check if mesh is valid
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         // Must have at least one primitive
         if (primitives.empty()) {
             return false;
         }
 
         // All primitives must be valid
-        for (const auto& prim : primitives) {
-            if (!prim.IsValid()) {
-                return false;
-            }
-        }
-
-        return true;
+        return std::ranges::all_of(primitives, [](const auto& prim) {
+            return prim.IsValid();
+        });
     }
 
     // Get total number of primitives
-    u32 GetPrimitiveCount() const {
+    [[nodiscard]] u32 GetPrimitiveCount() const {
         return static_cast<u32>(primitives.size());
     }
 
     // Get total triangle count (across all primitives)
-    u32 GetTotalTriangleCount() const {
+    [[nodiscard]] u32 GetTotalTriangleCount() const {
         u32 total = 0;
         for (const auto& prim : primitives) {
             total += prim.GetTriangleCount();
@@ -174,7 +171,7 @@ struct Mesh {
     }
 
     // Get total vertex count (across all primitives)
-    u32 GetTotalVertexCount() const {
+    [[nodiscard]] u32 GetTotalVertexCount() const {
         u32 total = 0;
         for (const auto& prim : primitives) {
             total += prim.GetVertexCount();
@@ -232,7 +229,7 @@ struct SceneNode {
     // ========================================================================
 
     // Check if node is valid
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         // Transform matrix should not contain NaN or Inf
         for (int i = 0; i < 4; ++i) {
             for (int j = 0; j < 4; ++j) {

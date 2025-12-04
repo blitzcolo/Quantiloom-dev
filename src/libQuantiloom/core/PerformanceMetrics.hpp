@@ -47,7 +47,7 @@ public:
         // Derived metrics
         f64 secondsPerFrame() const { return gpuTime_ms / 1000.0; }
         f64 raysPerSecond() const {
-            f64 seconds = secondsPerFrame();
+            const f64 seconds = secondsPerFrame();
             return seconds > 0.0 ? totalRays / seconds : 0.0;
         }
         f64 mraysPerSecond() const { return raysPerSecond() / 1e6; }  // Million rays/sec

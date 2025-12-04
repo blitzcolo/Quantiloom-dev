@@ -68,18 +68,18 @@ public:
     // ========================================================================
 
     // Get number of textures
-    u32 GetTextureCount() const { return static_cast<u32>(m_images.size()); }
+    [[nodiscard]] u32 GetTextureCount() const { return static_cast<u32>(m_images.size()); }
 
     // Get array of VkImageView handles (for descriptor set binding)
     // Index matches original texture index from scene
-    const std::vector<VkImageView>& GetImageViews() const { return m_imageViews; }
+    [[nodiscard]] const std::vector<VkImageView>& GetImageViews() const { return m_imageViews; }
 
     // Get array of VkSampler handles (for descriptor set binding)
     // Index matches original texture index from scene
-    const std::vector<VkSampler>& GetSamplers() const { return m_samplers; }
+    [[nodiscard]] const std::vector<VkSampler>& GetSamplers() const { return m_samplers; }
 
     // Check if textures have been uploaded
-    bool IsEmpty() const { return m_images.empty(); }
+    [[nodiscard]] bool IsEmpty() const { return m_images.empty(); }
 
 private:
     // ========================================================================
@@ -88,10 +88,10 @@ private:
 
     // Upload a single texture to GPU
     // Returns GpuImage containing VkImage + VkImageView
-    std::unique_ptr<GpuImage> UploadTexture(const Texture& texture);
+    [[nodiscard]] std::unique_ptr<GpuImage> UploadTexture(const Texture& texture) const;
 
     // Create VkSampler based on TextureSampler settings
-    VkSampler CreateSampler(const TextureSampler& samplerInfo);
+    [[nodiscard]] VkSampler CreateSampler(const TextureSampler& samplerInfo) const;
 
     // Convert TextureSampler::Filter to VkFilter
     static VkFilter ToVkFilter(TextureSampler::Filter filter);
@@ -100,7 +100,7 @@ private:
     static VkSamplerAddressMode ToVkAddressMode(TextureSampler::WrapMode wrapMode);
 
     // Create a 1x1 white dummy texture (fallback for empty texture list)
-    Texture CreateDummyTexture();
+    static Texture CreateDummyTexture();
 
     // ========================================================================
     // Member Variables
