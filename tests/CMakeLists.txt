@@ -182,17 +182,23 @@ set(TEST_CORE_SOURCES
     test_core/test_image.cpp
     test_core/test_spectral_data.cpp
     test_core/test_config.cpp
+    test_core/test_spectral_cube.cpp
 )
 
 # Scene tests
 set(TEST_SCENE_SOURCES
     test_scene/test_material.cpp
     test_scene/test_camera.cpp
+    test_scene/test_mesh.cpp
+    test_scene/test_scene.cpp
 )
 
 # IO tests
 set(TEST_IO_SOURCES
     test_io/test_image_io.cpp
+    test_io/test_spectral_io.cpp
+    test_io/test_lut_loader.cpp
+    test_io/test_gltf_loader.cpp
 )
 
 # Test main (custom main function with logging initialization)
