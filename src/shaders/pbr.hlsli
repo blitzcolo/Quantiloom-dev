@@ -91,6 +91,51 @@ float GeometrySmith(float NdotV, float NdotL, float roughness) {
 }
 
 // ============================================================================
+// Optimized Visibility Term: Vis = G / (4 * NdotV * NdotL)
+// ============================================================================
+// Combines the geometric shadowing term and Cook-Torrance denominator
+// into a single, optimized calculation that avoids division by NdotV/NdotL.
+//
+// PERFORMANCE BENEFITS:
+// - Fewer instructions (eliminates redundant multiplications)
+// - Better numerical stability (cancels out NdotV/NdotL in numerator/denominator)
+// - Reduces "fireflies" artifacts at grazing angles
+//
+// MATHEMATICAL DERIVATION:
+// For Schlick-GGX with k = (roughness+1)²/8:
+//   G = G₁(NdotL) × G₁(NdotV)
+//   G₁(x) = x / (x(1-k) + k)
+//
+// Therefore:
+//   Vis = G / (4·NdotV·NdotL)
+//       = [NdotL/(NdotL(1-k)+k)] × [NdotV/(NdotV(1-k)+k)] / (4·NdotV·NdotL)
+//       = 1 / [4 × (NdotL(1-k)+k) × (NdotV(1-k)+k)]
+//
+// This formulation completely eliminates NdotV and NdotL from the numerator!
+//
+// References:
+// - "Optimizing PBR" (Sébastien Lagarde, 2014)
+// - "Moving Frostbite to PBR" (EA Frostbite, 2014)
+// ============================================================================
+
+float VisibilitySmithGGXCorrelated(float NdotV, float NdotL, float roughness) {
+    // Remap roughness for direct lighting (Epic Games approach)
+    float r = roughness + 1.0;
+    float k = (r * r) / 8.0;
+
+    // Optimized visibility term: 1 / [4 × (NdotL(1-k)+k) × (NdotV(1-k)+k)]
+    // This formulation avoids division by NdotV/NdotL, improving stability
+    float oneMinusK = 1.0 - k;
+    float denomL = NdotL * oneMinusK + k;
+    float denomV = NdotV * oneMinusK + k;
+
+    // Combined denominator with safety clamp
+    float denominator = 4.0 * denomL * denomV;
+
+    return 1.0 / max(denominator, EPSILON);
+}
+
+// ============================================================================
 // Cook-Torrance Microfacet BRDF
 // ============================================================================
 // Full PBR BRDF combining diffuse and specular terms
@@ -128,6 +173,13 @@ float3 CookTorranceBRDF(
     float metallic,
     float roughness
 ) {
+    // OPTIMIZATION: Clamp minimum roughness to prevent numerical instability
+    // Perfectly smooth surfaces (roughness=0) lead to Dirac delta distribution
+    // which causes NaN and fireflies. Minimum value of 0.045 is perceptually smooth.
+    // References: UE4, Unity HDRP, Frostbite all use similar clamping
+    const float MIN_ROUGHNESS = 0.045;
+    roughness = max(roughness, MIN_ROUGHNESS);
+
     // Compute half vector (with safety check for opposite V and L)
     // FIXED: Use SafeHalfVector to prevent NaN when V + L is near-zero
     float3 H = SafeHalfVector(V, L, N);
@@ -144,7 +196,7 @@ float3 CookTorranceBRDF(
     float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
 
     // ========================================================================
-    // Specular Term (Cook-Torrance microfacet BRDF)
+    // Specular Term (Cook-Torrance microfacet BRDF) - OPTIMIZED
     // ========================================================================
 
     // Fresnel term
@@ -154,13 +206,13 @@ float3 CookTorranceBRDF(
     float alpha = roughness * roughness;  // Perceptually linear roughness
     float D = DistributionGGX(NdotH, alpha);
 
-    // Geometric shadowing term (Smith GGX)
-    float G = GeometrySmith(NdotV, NdotL, roughness);
+    // OPTIMIZATION: Use combined visibility term instead of G/(4*NdotV*NdotL)
+    // This eliminates NdotV/NdotL divisions, improving performance and stability
+    float Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
 
-    // Cook-Torrance specular BRDF: (D * F * G) / (4 * NdotV * NdotL)
-    float3 numerator = D * F * G;
-    float denominator = 4.0 * NdotV * NdotL;
-    float3 specular = numerator / max(denominator, EPSILON);
+    // Cook-Torrance specular BRDF: D * F * Vis
+    // Note: Vis already includes the 1/(4*NdotV*NdotL) term
+    float3 specular = D * F * Vis;
 
     // ========================================================================
     // Diffuse Term (Lambertian)
@@ -176,6 +228,9 @@ float3 CookTorranceBRDF(
     // ========================================================================
     // Combined BRDF (diffuse + specular)
     // ========================================================================
+    // NOTE: For future enhancement, consider multi-scattering energy compensation
+    // for rough surfaces to prevent darkening. See Kulla-Conty 2017 or
+    // Turquin 2019 practical approximations.
 
     return diffuse + specular;
 }
@@ -231,7 +286,11 @@ float CookTorranceBRDF_Spectral(
 float3 FresnelSchlickRoughness(float3 F0, float cosTheta, float roughness) {
     cosTheta = saturate(cosTheta);
     float oneMinusCos = 1.0 - cosTheta;
-    float oneMinusCos5 = pow(oneMinusCos, 5.0);
+
+    // OPTIMIZATION: Replace pow(x, 5.0) with multiplication chain
+    // This is significantly faster on GPU (3 multiplications vs expensive pow)
+    float oneMinusCos2 = oneMinusCos * oneMinusCos;
+    float oneMinusCos5 = oneMinusCos2 * oneMinusCos2 * oneMinusCos;
 
     // Roughness correction: interpolate between F0 and 1 based on roughness
     // At grazing angles, rough surfaces still show full Fresnel reflection
@@ -299,5 +358,69 @@ float3 EvaluateIBLSpecular(
 
     return iblSpecular;
 }
+
+// ============================================================================
+// Multi-Scattering Energy Compensation (Future Enhancement)
+// ============================================================================
+// The standard Cook-Torrance BRDF models SINGLE-SCATTERING only: light bounces
+// once off the microfacet surface. In reality, rough surfaces exhibit
+// MULTI-SCATTERING: light bounces multiple times between microfacets before
+// exiting.
+//
+// PROBLEM: Energy Loss (Darkening)
+// At high roughness, single-scattering loses energy because light that bounces
+// into valleys between microfacets is not accounted for. This causes rough
+// materials (especially metals) to appear darker than they should physically.
+//
+// Example: A rough aluminum ball looks darker than it should because the BRDF
+// doesn't account for light bouncing multiple times in the micro-grooves.
+//
+// SOLUTION: Energy Compensation
+// Several methods exist to approximate multi-scattering:
+//
+// 1. **Kulla-Conty 2017** (Most Accurate, Expensive)
+//    - Pre-computes energy loss in a 2D LUT: E(μ, α) where μ=NdotV, α=roughness
+//    - Adds compensation term: (1 - E) × F_avg × albedo
+//    - Requires additional texture lookup and storage
+//    - Reference: "Revisiting Physically Based Shading at Imageworks" (Kulla & Conty, 2017)
+//
+// 2. **Turquin 2019** (Practical Approximation)
+//    - Analytical approximation without LUT
+//    - Adds term: k × (1 - F) × roughness² where k ≈ 0.5-1.0
+//    - Simpler but less accurate than Kulla-Conty
+//    - Reference: "Practical multiple scattering compensation for microfacet models" (Turquin, 2019)
+//
+// 3. **Fdez-Agüera 2021** (LUT-free Analytical)
+//    - High-quality analytical fit to multi-scattering
+//    - No texture lookups, polynomial approximation
+//    - Reference: "A Multiple-Scattering Microfacet Model for Real-Time IBL" (Fdez-Agüera, 2021)
+//
+// WHEN TO IMPLEMENT:
+// - If rough metallic materials look too dark (especially at grazing angles)
+// - If physical accuracy is critical (product visualization, material design)
+// - If rendering budget allows for extra texture lookup or computation
+//
+// IMPLEMENTATION NOTES:
+// - Multi-scattering affects BOTH direct lighting and IBL
+// - For metals: effect is most visible (colored multi-scattering)
+// - For dielectrics: effect is subtle but measurable
+// - Can be implemented as post-process or integrated into BRDF
+//
+// PSEUDOCODE (Kulla-Conty):
+// ```
+// float E_o = energyLUT.Sample(NdotV, roughness).r;  // Outgoing energy loss
+// float E_avg = energyLUT.Sample(0.5, roughness).g;  // Average energy loss
+// float F_avg = F0;  // Simplified, or use average Fresnel
+//
+// float3 energyCompensation = (1.0 - E_o) * F_avg * albedo / (1.0 - F_avg * (1.0 - E_avg));
+// float3 finalBRDF = standardBRDF + energyCompensation;
+// ```
+//
+// REFERENCES:
+// - Kulla & Conty, "Revisiting Physically Based Shading at Imageworks", SIGGRAPH 2017
+// - Turquin, "Practical multiple scattering compensation for microfacet models", 2019
+// - Fdez-Agüera, "A Multiple-Scattering Microfacet Model for Real-Time IBL", JCGT 2021
+// - Heitz et al., "Multiple-scattering microfacet BSDFs with the Smith model", SIGGRAPH 2016
+// ============================================================================
 
 #endif // QUANTILOOM_PBR_HLSLI

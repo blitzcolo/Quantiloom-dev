@@ -668,14 +668,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Use IR material properties (evaluated from curves at current wavelength)
         // If no IR data available, fallback to spectralAlbedo approximation
         float emissivity = material.irEmissivity;
-        float reflectance = material.irReflectance;
         float transmittance = material.irTransmittance;
 
-        // Kirchhoff's law validation: ε + ρ + τ ≤ 1
-        // Note: GPU already receives pre-evaluated values from CPU-side curves
+        // OPTIMIZATION: Compute reflectance from energy conservation
+        // ρ = 1 - ε - τ (see GetIRReflectance() in common.hlsli)
+        // This eliminates redundant storage and enforces Kirchhoff's law
+        float reflectance = GetIRReflectance(material);
+
+        // Energy conservation validation (should always be true now)
+        // ε + ρ + τ = 1 by construction (reflectance is derived)
+        // This check is kept for debugging but should never trigger normalization
         float energySum = emissivity + reflectance + transmittance;
-        if (energySum > 1.0) {
-            // Normalize to conserve energy if curves violate Kirchhoff's law
+        if (energySum > 1.001) {  // Allow small numerical tolerance
+            // Fallback normalization (should rarely/never happen)
             float normFactor = 1.0 / energySum;
             emissivity *= normFactor;
             reflectance *= normFactor;

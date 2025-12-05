@@ -118,7 +118,7 @@ void main() {
     ray.TMax = 10000.0; // Far plane
 
     // ========================================================================
-    // Initialize Ray Differentials
+    // Initialize Ray Differentials (OPTIMIZED)
     // ========================================================================
     // Compute ray direction differentials for adjacent pixels
     // This enables proper texture LOD computation for antialiasing
@@ -127,7 +127,15 @@ void main() {
     //   dD/dx = difference in ray direction between (x, y) and (x+1, y)
     //   dD/dy = difference in ray direction between (x, y) and (x, y+1)
     //
-    // Ray origin is the same for all rays (pinhole camera), so dO/dx = dO/dy = 0
+    // OPTIMIZATION NOTE:
+    // Ray origin differentials (dO/dx, dO/dy) have been removed from Payload
+    // to reduce payload size from 60 bytes to 36 bytes (40% reduction).
+    // For pinhole cameras, dO/dx = dO/dy = 0 always (origin is constant),
+    // so this optimization is lossless for primary rays.
+    //
+    // For secondary rays (reflections/refractions), origin differentials would
+    // improve texture filtering quality, but the performance cost (50% larger
+    // payload) outweighs the visual benefit for most IR rendering applications.
     // ========================================================================
 
     // Compute ray direction for adjacent pixels (x+1, y) and (x, y+1)
@@ -166,11 +174,9 @@ void main() {
     Payload payload;
     payload.radiance = float3(0.0, 0.0, 0.0);
 
-    // Set ray differentials
+    // Set ray direction differentials (origin differentials removed for performance)
     payload.dDdx = dDdx;
     payload.dDdy = dDdy;
-    payload.dOdx = float3(0.0, 0.0, 0.0);  // Pinhole camera: origin is constant
-    payload.dOdy = float3(0.0, 0.0, 0.0);
 
     // Trace ray (hit group index 0, miss index 0)
     TraceRay(

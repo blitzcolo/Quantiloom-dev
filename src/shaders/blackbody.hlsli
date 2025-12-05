@@ -19,6 +19,20 @@
 static const float PLANCK_H = 6.62607015e-34;  // Planck constant (J·s)
 static const float SPEED_OF_LIGHT_C = 299792458.0;   // Speed of light (m/s)
 static const float BOLTZMANN_K = 1.380649e-23;       // Boltzmann constant (J/K)
+static const float STEFAN_BOLTZMANN = 5.670374419e-8;  // Stefan-Boltzmann constant (W·m⁻²·K⁻⁴)
+
+// ============================================================================
+// Pre-computed Constants for Planck's Law (Performance Optimization)
+// ============================================================================
+// These constants combine physical constants with unit conversion factors
+// to minimize runtime computation in IRPlanckRadiance()
+//
+// C1_NM = 2hc² × 10⁹ (combines 2hc² with nm conversion for λ⁵)
+// C2 = hc/k (exponent factor)
+// ============================================================================
+
+static const float C1_NM = 1.191042972e16;  // 2 × h × c² × 1e9 (W·nm⁴·sr⁻¹·m⁻²)
+static const float C2 = 1.43877736e-2;      // h × c / k (m·K)
 
 // ============================================================================
 // Planck's Law: Spectral Radiance of Blackbody
@@ -56,33 +70,30 @@ float IRPlanckRadiance(float temperature_K, float wavelength_nm) {
         return 0.0;
     }
 
-    // Convert wavelength from nm to meters
+    // Optimized: Replace pow(lambda_nm, 5) with explicit multiplication
+    // This is significantly faster on GPU hardware
+    float lambda_nm_2 = wavelength_nm * wavelength_nm;
+    float lambda_nm_4 = lambda_nm_2 * lambda_nm_2;
+    float lambda_nm_5 = lambda_nm_4 * wavelength_nm;
+
+    // Optimized: Use pre-computed constant C1_NM which already includes
+    // the 2hc² term and the nm to m conversion factor
+    float numerator = C1_NM / lambda_nm_5;
+
+    // Convert wavelength to meters for exponent calculation
     float lambda_m = wavelength_nm * 1e-9;
+    float exponent = C2 / (lambda_m * temperature_K);
 
-    // Precompute constants
-    float c1 = 2.0 * PLANCK_H * SPEED_OF_LIGHT_C * SPEED_OF_LIGHT_C;  // 2hc²
-    float c2 = PLANCK_H * SPEED_OF_LIGHT_C / BOLTZMANN_K;             // hc/k
+    // Optimized: Remove branching - rely on IEEE 754 float behavior
+    // If exponent is large, exp(exponent) may overflow to INF
+    // INF / INF = NaN, but (exp(x) - 1.0) handles this gracefully
+    // For very large exponent: exp(x) - 1 ≈ exp(x) automatically
+    // The max() clamp prevents division by zero
+    float denominator = exp(exponent) - 1.0;
 
-    // Planck's law
-    float numerator = c1 / pow(lambda_m, 5.0);
-    float exponent = c2 / (lambda_m * temperature_K);
-
-    // Avoid overflow: exp(x) overflows for x > ~88
-    // For very short wavelengths or low temperatures, exp(exponent) >> 1,
-    // so we can approximate: exp(x) - 1 ≈ exp(x)
-    float denominator;
-    if (exponent > 50.0) {
-        // exp(50) ≈ 5e21, denominator ≈ exp(exponent)
-        denominator = exp(exponent);
-    } else {
-        denominator = exp(exponent) - 1.0;
-    }
-
-    // L_λ in W·sr⁻¹·m⁻²·m⁻¹
-    float L_lambda_per_m = numerator / max(denominator, 1e-30);
-
-    // Convert from /m to /nm
-    float L_lambda_per_nm = L_lambda_per_m * 1e-9;
+    // L_λ in W·sr⁻¹·m⁻²·nm⁻¹
+    // The 1e-30 prevents division by zero and handles edge cases
+    float L_lambda_per_nm = numerator / max(denominator, 1e-30);
 
     return L_lambda_per_nm;
 }
@@ -110,6 +121,82 @@ float IRWienPeakWavelength(float temperature_K) {
     const float WIEN_CONSTANT = 2.897771955e-3;  // m·K
     float lambda_peak_m = WIEN_CONSTANT / max(temperature_K, 1.0);
     return lambda_peak_m * 1e9;  // Convert to nm
+}
+
+// ============================================================================
+// Stefan-Boltzmann Law: Total Emissive Power
+// ============================================================================
+// Computes the total radiant exitance (power per unit area) emitted by a
+// blackbody across all wavelengths.
+//
+// Formula:
+//   M = σ × T⁴
+//
+// Where:
+//   σ = 5.670374419 × 10⁻⁸ W·m⁻²·K⁻⁴ (Stefan-Boltzmann constant)
+//   T = temperature (K)
+//
+// This is the integral of Planck's law over all wavelengths:
+//   M = ∫₀^∞ L_λ(T, λ) dλ = σT⁴
+//
+// Units:
+//   temperature_K: Kelvin [0, ∞)
+//   Returns: Total emissive power in W·m⁻²
+//
+// Use cases:
+//   - Determining overall thermal emission brightness
+//   - Computing total radiative heat transfer
+//   - Scaling spectral radiance for physically-based rendering
+//
+// Examples:
+//   - Human body (310 K): M ≈ 524 W/m²
+//   - Room temp object (300 K): M ≈ 459 W/m²
+//   - Hot engine (600 K): M ≈ 7348 W/m²
+//   - Molten steel (1800 K): M ≈ 597 kW/m²
+// ============================================================================
+
+float IRStefanBoltzmannPower(float temperature_K) {
+    // Guard against invalid input
+    if (temperature_K <= 0.0) {
+        return 0.0;
+    }
+
+    // Optimized: Compute T⁴ using two squaring operations
+    float T_squared = temperature_K * temperature_K;
+    float T_fourth = T_squared * T_squared;
+
+    // Total emissive power: M = σT⁴
+    return STEFAN_BOLTZMANN * T_fourth;
+}
+
+// ============================================================================
+// Helper: Emissivity-Adjusted Total Power (Graybody)
+// ============================================================================
+// Computes total emissive power for a graybody (non-ideal emitter) by
+// applying an emissivity factor ε ∈ [0, 1].
+//
+// Formula:
+//   M = ε × σ × T⁴
+//
+// Where:
+//   ε = emissivity [0, 1] (dimensionless)
+//       ε = 1.0: perfect blackbody
+//       ε = 0.0: perfect reflector (no emission)
+//
+// Typical emissivities:
+//   - Polished aluminum: 0.04
+//   - Oxidized aluminum: 0.20
+//   - Human skin: 0.98
+//   - Water: 0.96
+//   - Asphalt: 0.93
+//   - Concrete: 0.92
+//   - Paint (most colors): 0.90-0.95
+//
+// Returns: Total emissive power in W·m⁻²
+// ============================================================================
+
+float IRGraybodyPower(float temperature_K, float emissivity) {
+    return emissivity * IRStefanBoltzmannPower(temperature_K);
 }
 
 #endif // QUANTILOOM_BLACKBODY_HLSLI
