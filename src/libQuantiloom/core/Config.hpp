@@ -74,7 +74,7 @@ private:
 // ============================================================================
 
 template<typename T>
-T Config::Get(StringView key, const T& defaultValue) const {
+T Config::Get(const StringView key, const T& defaultValue) const {
     const toml::node* node = Navigate(key);
     if (!node) {
         return defaultValue;
@@ -118,7 +118,7 @@ T Config::Get(StringView key, const T& defaultValue) const {
 }
 
 template<typename T>
-Result<T, String> Config::GetRequired(StringView key) const {
+Result<T, String> Config::GetRequired(const StringView key) const {
     using ResultType = Result<T, String>;
     const toml::node* node = Navigate(key);
     if (!node) {
@@ -163,7 +163,7 @@ Result<T, String> Config::GetRequired(StringView key) const {
 }
 
 template<typename T>
-Vector<T> Config::GetArray(StringView key) const {
+Vector<T> Config::GetArray(const StringView key) const {
     const toml::node* node = Navigate(key);
     Vector<T> result;
 
