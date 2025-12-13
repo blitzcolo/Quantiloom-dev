@@ -727,31 +727,86 @@ int main(int argc, char* argv[]) {
         }
 
         // ====================================================================
-        // Create Complex Refractive Index Buffer (for physical Fresnel)
+        // Load Complex Refractive Index Data (for physical Fresnel)
         // ====================================================================
-        // TODO: Load n,k data from RefractiveIndex.INFO YAML files via config
-        // Config format (future):
+        // Config format:
         //   [refractive_index]
-        //   "Gold" = "path/to/Au_Johnson.yml"
-        //   "Silver" = "path/to/Ag_Johnson.yml"
+        //   "Gold_Material" = "data/refractiveindex/Au_Johnson.yml"
+        //   "Silver_Material" = "data/refractiveindex/Ag_Johnson.yml"
+        //
+        // The material name (left side) must match the glTF material name
+        // The path (right side) points to RefractiveIndex.INFO YAML file
         // ====================================================================
-        QL_LOG_INFO("Creating complex refractive index buffer...");
+        QL_LOG_INFO("Loading complex refractive index data...");
 
         std::vector<ComplexRefractiveIndexGPU> criData;
-        std::unique_ptr<GpuBuffer> criBuffer;
+        std::unordered_map<std::string, i32> materialNameToCRIIndex;
 
-        // For now, create dummy buffer for valid binding
-        // Real n,k data loading will be added in future iteration
-        ComplexRefractiveIndexGPU dummyCRI{};
-        criBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(),
-            sizeof(ComplexRefractiveIndexGPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-        criBuffer->Upload(&dummyCRI, sizeof(ComplexRefractiveIndexGPU));
-        QL_LOG_INFO("  Created dummy complex refractive index buffer (no data loaded)");
-        QL_LOG_INFO("  NOTE: Use config [refractive_index] section to load measured n,k data");
+        // Check if refractive_index section exists in config
+        if (config.HasSection("refractive_index")) {
+            auto criEntries = config.GetSection("refractive_index");
+
+            for (const auto& [materialName, yamlPath] : criEntries) {
+                QL_LOG_INFO("  Loading n,k data for '{}' from '{}'", materialName, yamlPath);
+
+                // Load YAML file (RefractiveIndex.INFO format)
+                auto result = SpectralIO::LoadRefractiveIndexYAML(yamlPath);
+
+                if (!result) {
+                    QL_LOG_WARN("    Failed to load: {}", result.error());
+                    continue;
+                }
+
+                // Convert to GPU format (uniform resampling)
+                ComplexRefractiveIndex cri = result.value();
+                ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
+
+                // Store index mapping
+                i32 criIndex = static_cast<i32>(criData.size());
+                materialNameToCRIIndex[materialName] = criIndex;
+                criData.push_back(gpuCRI);
+
+                // Log wavelength range and sample F0 at 550nm for reference
+                auto [lambda_min, lambda_max] = cri.GetWavelengthRange();
+                f32 F0_550 = cri.FresnelR0(550.0f);
+
+                QL_LOG_INFO("    Loaded: {} samples, λ=[{:.1f}, {:.1f}] nm, F0@550nm={:.3f} → CRI index {}",
+                            gpuCRI.numSamples,
+                            lambda_min, lambda_max,
+                            F0_550,
+                            criIndex);
+            }
+        }
+
+        QL_LOG_INFO("  Total complex refractive index entries loaded: {}", criData.size());
+
+        // Create GPU buffer for complex refractive index
+        std::unique_ptr<GpuBuffer> criBuffer;
+        if (!criData.empty()) {
+            criBuffer = std::make_unique<GpuBuffer>(
+                context.GetAllocator(),
+                criData.size() * sizeof(ComplexRefractiveIndexGPU),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            criBuffer->Upload(criData.data(), criData.size() * sizeof(ComplexRefractiveIndexGPU));
+            QL_LOG_INFO("  Uploaded {} bytes to GPU ({} entries × {} bytes)",
+                        criData.size() * sizeof(ComplexRefractiveIndexGPU),
+                        criData.size(),
+                        sizeof(ComplexRefractiveIndexGPU));
+        } else {
+            // Create a dummy buffer with one empty entry for valid binding
+            ComplexRefractiveIndexGPU dummyCRI{};
+            criBuffer = std::make_unique<GpuBuffer>(
+                context.GetAllocator(),
+                sizeof(ComplexRefractiveIndexGPU),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            criBuffer->Upload(&dummyCRI, sizeof(ComplexRefractiveIndexGPU));
+            QL_LOG_INFO("  Created dummy CRI buffer (no data loaded)");
+            QL_LOG_INFO("  NOTE: Add [refractive_index] section to config for physical metal Fresnel");
+        }
 
         // ====================================================================
         // Create Material Buffer (PBR)
@@ -805,9 +860,15 @@ int main(int argc, char* argv[]) {
             cpuMat.irTransmittance = mat.GetIRTransmittance(wavelength_nm);
             cpuMat.irTemperature_K = mat.irTemperature_K;
 
-            // Complex refractive index for physical Fresnel (default: -1 = use PBR approximation)
-            // TODO: Load from config [refractive_index] section mapping material name to n,k data
-            cpuMat.complexRefractiveIndexIndex = -1;
+            // Complex refractive index for physical Fresnel
+            // Look up by material name, default to -1 (no data = use PBR approximation)
+            auto criIt = materialNameToCRIIndex.find(mat.name);
+            if (criIt != materialNameToCRIIndex.end()) {
+                cpuMat.complexRefractiveIndexIndex = criIt->second;
+                QL_LOG_INFO("  Material '{}': using physical Fresnel (CRI index {})", mat.name, criIt->second);
+            } else {
+                cpuMat.complexRefractiveIndexIndex = -1;  // Use standard PBR F0 approximation
+            }
 
             materialData.push_back(cpuMat);
 

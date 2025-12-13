@@ -77,7 +77,7 @@ private:
 
     void CreateInstance();
 
-    static void SetupDebugMessenger();
+    void SetupDebugMessenger();
     void SelectPhysicalDevice();
     void CreateDevice();
     void CreateAllocator();
