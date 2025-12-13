@@ -38,6 +38,8 @@ using namespace quantiloom;
 // ============================================================================
 // Dual mode support: RGB and spectral
 // ============================================================================
+// CRITICAL: This structure MUST match GPU-side LUTData in common.hlsli!
+// ============================================================================
 
 struct LUTData {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
@@ -48,7 +50,10 @@ struct LUTData {
 
     glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode, offset 32
     f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
-};  // Total: 48 bytes
+
+    f32 worldUnitsToMeters;         // Conversion factor: world_units × this = meters, offset 48
+    glm::vec3 _padding;             // Padding for 16-byte alignment, offset 52
+};  // Total: 64 bytes
 
 // ============================================================================
 // Material Data Structure (matches shader MaterialData structure)
@@ -385,6 +390,21 @@ int main(int argc, char* argv[]) {
         f32 transmittance = config.Get<f32>("lighting.transmittance", 0.9f);
         transmittance = std::clamp(transmittance, 0.0f, 1.0f);
 
+        // World unit configuration
+        // Conversion factor from scene units to meters for physically-correct Beer-Lambert
+        // Default: 1.0 (scene units are meters)
+        // Example values:
+        //   - 1.0 for meters (default)
+        //   - 0.01 for centimeters
+        //   - 0.001 for millimeters
+        //   - 0.0254 for inches
+        //   - 0.3048 for feet
+        f32 worldUnitsToMeters = config.Get<f32>("scene.world_units_to_meters", 1.0f);
+        if (worldUnitsToMeters <= 0.0f) {
+            QL_LOG_WARN("scene.world_units_to_meters must be positive, using default 1.0");
+            worldUnitsToMeters = 1.0f;
+        }
+
         QL_LOG_INFO("  Sun direction: [{:.2f}, {:.2f}, {:.2f}]",
                     sunDirection.x, sunDirection.y, sunDirection.z);
         QL_LOG_INFO("  Sun radiance: [{:.2f}, {:.2f}, {:.2f}]",
@@ -392,6 +412,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Sky radiance: [{:.2f}, {:.2f}, {:.2f}]",
                     skyRadiance.x, skyRadiance.y, skyRadiance.z);
         QL_LOG_INFO("  Atmospheric transmittance: {:.3f}", transmittance);
+        QL_LOG_INFO("  World units to meters: {:.6f}", worldUnitsToMeters);
 
         // Material settings
         auto albedoArray = config.GetArray<f32>("material.albedo");
@@ -602,6 +623,8 @@ int main(int argc, char* argv[]) {
         lutData.sunRadiance_rgb = sunRadiance;
         lutData.skyRadiance_rgb = skyRadiance;
         lutData.transmittance = transmittance;
+        lutData.worldUnitsToMeters = worldUnitsToMeters;
+        lutData._padding = glm::vec3(0.0f);
 
         GpuBuffer lutBuffer(
             context.GetAllocator(),

@@ -424,8 +424,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Full volume rendering (M4) will use delta-tracking with 3D extinction fields.
     // ========================================================================
 
-    // Compute path length from camera to hit point
-    float pathLength_m = RayTCurrent();  // Distance along ray in meters (world units)
+    // Compute path length from camera to hit point (convert to meters)
+    // CRITICAL: Scene units may not be meters - use worldUnitsToMeters conversion
+    float pathLength_m = RayTCurrent() * lut.worldUnitsToMeters;
 
     // Convert LUT transmittance (vertical optical depth) to extinction coefficient
     // Assumption: LUT transmittance is for vertical path through atmosphere
@@ -573,22 +574,88 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
         // ====================================================================
-        // RGB Mode: Physically-correct RGB rendering
+        // RGB Mode: Physically-correct RGB rendering with spectral support
         // ====================================================================
-        // For RGB mode, we directly output the PBR-computed RGB radiance.
-        // The radiance is already in linear RGB space (from PBR calculations).
+        // Two paths depending on material data:
         //
-        // NOTE: Full spectral RGB pipeline (with RGB→Spectrum→XYZ→RGB) is
-        // TBD as a future enhancement. Current implementation outputs linear RGB.
+        // PATH A (Quantitative): If material has measured spectral curve
+        //   - Sample reflectance at R/G/B representative wavelengths
+        //   - Weight by CIE XYZ color matching functions
+        //   - Convert XYZ → Linear RGB (sRGB D65)
+        //
+        // PATH B (Fallback): Standard PBR RGB pipeline
+        //   - Use glTF baseColor texture directly
+        //   - Apply Cook-Torrance BRDF with RGB albedo
+        //
+        // NOTE: For full spectral accuracy (HS-OFF), use SPECTRAL_MODE_SINGLE
+        // and render multiple wavelengths separately.
         // ====================================================================
 
-        // DEBUG: Directly output baseColor texture to verify texture sampling
-        // Uncomment to bypass all lighting and see raw texture color
-        // output_radiance = baseColor.rgb;
+        if (material.spectralReflectanceCurveIndex >= 0) {
+            // ================================================================
+            // PATH A: Quantitative RGB from measured spectral curve
+            // ================================================================
+            // Sample at 3 representative wavelengths and integrate via CIE CMF
+            // This provides better accuracy than RGB→Spectrum→RGB round-trip
+            //
+            // Representative wavelengths (sRGB primaries approximation):
+            //   - Red:   650 nm (CIE X peak contribution)
+            //   - Green: 550 nm (CIE Y peak, luminance)
+            //   - Blue:  450 nm (CIE Z peak contribution)
+            // ================================================================
 
-        output_radiance = radiance;
+            const float LAMBDA_R = 650.0;
+            const float LAMBDA_G = 550.0;
+            const float LAMBDA_B = 450.0;
 
-        // FIXED: Validation - clamp and sanitize to prevent NaN/Inf
+            // Sample spectral reflectance at R/G/B wavelengths
+            float rho_R = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_R);
+            float rho_G = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_G);
+            float rho_B = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_B);
+
+            // Evaluate CIE XYZ color matching functions at each wavelength
+            float3 xyz_R = float3(CIE_X(LAMBDA_R), CIE_Y(LAMBDA_R), CIE_Z(LAMBDA_R));
+            float3 xyz_G = float3(CIE_X(LAMBDA_G), CIE_Y(LAMBDA_G), CIE_Z(LAMBDA_G));
+            float3 xyz_B = float3(CIE_X(LAMBDA_B), CIE_Y(LAMBDA_B), CIE_Z(LAMBDA_B));
+
+            // Compute spectral radiance at each wavelength using scalar BRDF
+            // Assume sun radiance is roughly equal at R/G/B (simplification)
+            float brdf_R = CookTorranceBRDF_Spectral(normal, V, L, rho_R, metallic, roughness);
+            float brdf_G = CookTorranceBRDF_Spectral(normal, V, L, rho_G, metallic, roughness);
+            float brdf_B = CookTorranceBRDF_Spectral(normal, V, L, rho_B, metallic, roughness);
+
+            // Direct sun contribution at each wavelength
+            float sun_scalar = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
+            float L_R = brdf_R * sun_scalar * NdotL;
+            float L_G = brdf_G * sun_scalar * NdotL;
+            float L_B = brdf_B * sun_scalar * NdotL;
+
+            // Add sky ambient (simplified: assume uniform sky contribution)
+            float sky_scalar = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+            float kD_avg = (1.0 - metallic);  // Simplified diffuse coefficient
+            L_R += kD_avg * rho_R / PI * sky_scalar;
+            L_G += kD_avg * rho_G / PI * sky_scalar;
+            L_B += kD_avg * rho_B / PI * sky_scalar;
+
+            // Integrate via CIE XYZ (3-sample Monte Carlo with uniform PDF)
+            // PDF = 1/3 for 3 samples, so weight = L * CMF / (1/3) = 3 * L * CMF
+            // Then normalize by wavelength range factor (simplified)
+            float3 XYZ = (L_R * xyz_R + L_G * xyz_G + L_B * xyz_B) * (400.0 / 3.0);
+
+            // XYZ → Linear RGB (sRGB D65)
+            output_radiance = ConvertXYZToLinearRGB(XYZ);
+
+            // Add emissive (assumed to be linear RGB, not spectral)
+            output_radiance += emissive;
+
+        } else {
+            // ================================================================
+            // PATH B: Standard PBR RGB (fallback for non-spectral materials)
+            // ================================================================
+            output_radiance = radiance;
+        }
+
+        // Validation: clamp and sanitize to prevent NaN/Inf
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
             output_radiance = float3(0.0, 0.0, 0.0);  // Fallback to black
         }
@@ -596,27 +663,42 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
         // ====================================================================
-        // Single Wavelength Mode: True Spectral Rendering (Visible Light)
+        // Single Wavelength Mode: True Spectral Rendering (HS-OFF Quantitative)
         // ====================================================================
         // For single wavelength, we:
-        // 1. Convert RGB albedo → spectral reflectance at camera.wavelength_nm
-        // 2. Compute scalar PBR BRDF with spectral reflectance
-        // 3. Use scalar sun radiance (sunRadiance_spectral)
+        // 1. Query physical spectral reflectance curve if available
+        // 2. Fallback to RGB upsampling if no measured curve
+        // 3. Compute scalar PBR BRDF with spectral reflectance
+        // 4. Use scalar sun radiance (sunRadiance_spectral)
         //
-        // IMPORTANT: This is ONLY valid for visible light (380-780 nm).
-        // For IR wavelengths, use MWIR/LWIR modes instead.
+        // SPECTRAL DATA PRIORITY:
+        // 1. Measured spectral curve (spectralReflectanceCurveIndex >= 0) → Quantitative
+        // 2. RGB texture upsampling (Gaussian basis) → Approximate only
         // ====================================================================
 
         float lambda = camera.wavelength_nm;
 
-        // 1. Convert RGB albedo to spectral reflectance at wavelength λ
-        //    Uses Gaussian-based RGB→Spectrum upsampling (SpectralConversion.hlsli)
-        //    NOTE: baseColor.rgb is already in linear space (glTF textures are sRGB-decoded)
-        float spectralAlbedo = GetSpectralReflectanceFromRGBTexture(
-            baseColor.rgb,
-            lambda,
-            false  // Already in linear space (not sRGB)
-        );
+        // 1. Query spectral reflectance: prefer measured curve, fallback to RGB upsampling
+        float spectralAlbedo;
+
+        if (material.spectralReflectanceCurveIndex >= 0) {
+            // QUANTITATIVE PATH: Use physically-measured spectral reflectance curve
+            // This enables true HS-OFF mode with physical accuracy
+            spectralAlbedo = EvaluateSpectralCurve(
+                spectralCurves,
+                material.spectralReflectanceCurveIndex,
+                lambda
+            );
+        } else {
+            // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
+            // WARNING: This path does NOT guarantee physical accuracy
+            // For quantitative rendering, materials MUST have measured spectral curves
+            spectralAlbedo = GetSpectralReflectanceFromRGBTexture(
+                baseColor.rgb,
+                lambda,
+                false  // Already in linear space (not sRGB)
+            );
+        }
 
         // 2. Compute scalar PBR BRDF with spectral albedo
         //    Uses the same Cook-Torrance model, but with scalar reflectance

@@ -154,6 +154,11 @@ float SampleSpectralCurve(SpectralCurveGPU curve, float query_wavelength_nm) {
 // DUAL MODE SUPPORT:
 // - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb (float3)
 // - Spectral mode: Use sunRadiance_spectral and skyRadiance_spectral (float)
+//
+// WORLD UNITS:
+// - worldUnitsToMeters: Conversion factor from scene units to meters
+// - Required for correct Beer-Lambert attenuation calculation
+// - Example: if scene uses centimeters, worldUnitsToMeters = 0.01
 // ============================================================================
 
 struct LUTData {
@@ -165,6 +170,9 @@ struct LUTData {
 
     float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
     float  transmittance;        // Atmospheric transmittance τ(λ) [0, 1] (vertical path)
+
+    float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
+    float3 _padding;             // Padding for 16-byte alignment
 };
 
 // ============================================================================

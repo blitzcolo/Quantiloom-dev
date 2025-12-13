@@ -13,7 +13,7 @@ output = "avocado.exr" # Output file path (OpenEXR format)
 # ============================================================================
 # Spectral Rendering Mode
 # ============================================================================
-# ⚠️  WARNING: "single", "mwir_fused", and "lwir_fused" modes are PREVIEW ONLY
+# WARNING: "single", "mwir_fused", and "lwir_fused" modes are PREVIEW ONLY
 # ============================================================================
 # These modes use RGB-averaged spectral albedo, NOT physically measured
 # spectral reflectance. They are intended for VISUALIZATION ONLY.
@@ -42,6 +42,7 @@ mode = "rgb"                   # RGB mode for full color rendering
 # ============================================================================
 # Metal-Roughness spheres grid (tests metallic 0.0-1.0, roughness 0.0-1.0)
 gltf = "assets/models/glTF-Sample-Assets/Models/Avocado/glTF/Avocado.gltf"
+world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 
 [camera]
 # Camera setup for viewing the glTF model
