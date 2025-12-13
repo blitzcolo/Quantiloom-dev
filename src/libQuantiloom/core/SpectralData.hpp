@@ -224,4 +224,165 @@ struct SpectralCurveGPU {
 // CRITICAL: Must match GPU-side SpectralCurveGPU in common.hlsli!
 static_assert(sizeof(SpectralCurveGPU) == 272, "SpectralCurveGPU size mismatch! Expected 272 bytes (must match GPU)");
 
+// ============================================================================
+// ComplexRefractiveIndex - CPU-side complex refractive index (n, k)
+// ============================================================================
+// Stores wavelength-dependent complex refractive index for Fresnel calculations.
+// Data source: RefractiveIndex.INFO database (n, k tabulated data)
+//
+// PHYSICS:
+// - N = n + ik where n = refractive index, k = extinction coefficient
+// - n determines phase velocity: v = c/n
+// - k determines absorption: intensity decays as exp(-4πkd/λ)
+//
+// USAGE:
+// - Metal surfaces: high k values (gold, silver, copper, aluminum)
+// - Dielectrics: k ≈ 0 in transparent regions (glass, water)
+// - Semiconductors: varies with wavelength (silicon, germanium)
+// ============================================================================
+
+struct ComplexRefractiveIndex {
+    Vector<f32> wavelengths_nm;  // Wavelength samples (nm)
+    Vector<f32> n;               // Real part (refractive index)
+    Vector<f32> k;               // Imaginary part (extinction coefficient)
+
+    // Default constructor: empty data
+    ComplexRefractiveIndex() = default;
+
+    // Evaluate n and k at specific wavelength using linear interpolation
+    [[nodiscard]] std::pair<f32, f32> Evaluate(f32 lambda_nm) const {
+        if (wavelengths_nm.empty()) return {1.0f, 0.0f};  // Default: air
+
+        // Out of range - return edge values
+        if (lambda_nm <= wavelengths_nm.front()) {
+            return {n.front(), k.front()};
+        }
+        if (lambda_nm >= wavelengths_nm.back()) {
+            return {n.back(), k.back()};
+        }
+
+        // Linear search and interpolation
+        for (size_t i = 0; i < wavelengths_nm.size() - 1; ++i) {
+            const f32 lambda0 = wavelengths_nm[i];
+            const f32 lambda1 = wavelengths_nm[i + 1];
+
+            if (lambda_nm >= lambda0 && lambda_nm <= lambda1) {
+                const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+                const f32 n_val = n[i] * (1.0f - t) + n[i + 1] * t;
+                const f32 k_val = k[i] * (1.0f - t) + k[i + 1] * t;
+                return {n_val, k_val};
+            }
+        }
+
+        return {1.0f, 0.0f};  // Should never reach here
+    }
+
+    // Get wavelength range
+    [[nodiscard]] std::pair<f32, f32> GetWavelengthRange() const {
+        if (wavelengths_nm.empty()) return {0.0f, 0.0f};
+        return {wavelengths_nm.front(), wavelengths_nm.back()};
+    }
+
+    // Check if valid
+    [[nodiscard]] bool IsValid() const {
+        if (wavelengths_nm.empty()) return false;
+        if (wavelengths_nm.size() != n.size() || wavelengths_nm.size() != k.size()) return false;
+        return true;
+    }
+
+    // Calculate Fresnel reflectance at normal incidence: R = |(n-1+ik)/(n+1+ik)|²
+    // This is the specular reflectance F0 for PBR rendering
+    [[nodiscard]] f32 FresnelR0(f32 lambda_nm) const {
+        auto [n_val, k_val] = Evaluate(lambda_nm);
+        // R = [(n-1)² + k²] / [(n+1)² + k²]
+        const f32 numerator = (n_val - 1.0f) * (n_val - 1.0f) + k_val * k_val;
+        const f32 denominator = (n_val + 1.0f) * (n_val + 1.0f) + k_val * k_val;
+        return numerator / denominator;
+    }
+};
+
+// ============================================================================
+// ComplexRefractiveIndexGPU - GPU-side fixed-size complex refractive index
+// ============================================================================
+// Uniform sampling for O(1) GPU query, stores both n and k curves.
+//
+// SIZE: 64×4 (n) + 64×4 (k) + 4 + 4 + 4 + 4 = 528 bytes per curve
+// ============================================================================
+
+struct ComplexRefractiveIndexGPU {
+    f32 n[MAX_SPECTRAL_SAMPLES]{};       // Refractive index at uniform grid
+    f32 k[MAX_SPECTRAL_SAMPLES]{};       // Extinction coefficient at uniform grid
+    f32 startWavelength_nm = 0.0f;       // First wavelength (nm)
+    f32 stepSize_nm = 0.0f;              // Step size (nm)
+    u32 numSamples = 0;                  // Valid sample count
+    u32 _padding = 0;                    // 16-byte alignment
+
+    // Default constructor
+    ComplexRefractiveIndexGPU() = default;
+
+    // Get wavelength at index
+    [[nodiscard]] f32 GetWavelength(u32 index) const {
+        return startWavelength_nm + static_cast<f32>(index) * stepSize_nm;
+    }
+
+    // Evaluate n,k at wavelength (O(1) with interpolation)
+    [[nodiscard]] std::pair<f32, f32> Evaluate(f32 lambda_nm) const {
+        if (numSamples == 0 || stepSize_nm <= 0.0f) return {1.0f, 0.0f};
+
+        const f32 index_f = (lambda_nm - startWavelength_nm) / stepSize_nm;
+
+        if (index_f < 0.0f) return {n[0], k[0]};
+        if (index_f >= static_cast<f32>(numSamples - 1)) {
+            return {n[numSamples - 1], k[numSamples - 1]};
+        }
+
+        const u32 i0 = static_cast<u32>(index_f);
+        const u32 i1 = i0 + 1;
+        const f32 t = index_f - static_cast<f32>(i0);
+
+        return {
+            n[i0] * (1.0f - t) + n[i1] * t,
+            k[i0] * (1.0f - t) + k[i1] * t
+        };
+    }
+
+    // Calculate Fresnel R0 at wavelength
+    [[nodiscard]] f32 FresnelR0(f32 lambda_nm) const {
+        auto [n_val, k_val] = Evaluate(lambda_nm);
+        const f32 numerator = (n_val - 1.0f) * (n_val - 1.0f) + k_val * k_val;
+        const f32 denominator = (n_val + 1.0f) * (n_val + 1.0f) + k_val * k_val;
+        return numerator / denominator;
+    }
+
+    // Convert from CPU ComplexRefractiveIndex
+    static ComplexRefractiveIndexGPU FromCPU(const ComplexRefractiveIndex& cri,
+                                              u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
+        ComplexRefractiveIndexGPU gpu;
+
+        if (cri.wavelengths_nm.empty()) return gpu;
+
+        targetSamples = std::min(targetSamples, MAX_SPECTRAL_SAMPLES);
+        if (targetSamples < 2) targetSamples = 2;
+
+        const f32 lambda_min = cri.wavelengths_nm.front();
+        const f32 lambda_max = cri.wavelengths_nm.back();
+
+        gpu.startWavelength_nm = lambda_min;
+        gpu.stepSize_nm = (lambda_max - lambda_min) / static_cast<f32>(targetSamples - 1);
+        gpu.numSamples = targetSamples;
+
+        for (u32 i = 0; i < targetSamples; ++i) {
+            const f32 lambda = lambda_min + static_cast<f32>(i) * gpu.stepSize_nm;
+            auto [n_val, k_val] = cri.Evaluate(lambda);
+            gpu.n[i] = n_val;
+            gpu.k[i] = k_val;
+        }
+
+        return gpu;
+    }
+};
+
+// Verify GPU struct size: 64×4 + 64×4 + 4 + 4 + 4 + 4 = 528 bytes
+static_assert(sizeof(ComplexRefractiveIndexGPU) == 528, "ComplexRefractiveIndexGPU size mismatch!");
+
 } // namespace quantiloom

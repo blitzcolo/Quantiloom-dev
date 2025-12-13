@@ -47,6 +47,26 @@
 [[vk::binding(13, 0)]] StructuredBuffer<SpectralCurveGPU> spectralCurves;
 
 // ============================================================================
+// NEW (M2+): Complex Refractive Index Buffer
+// ============================================================================
+// Buffer of complex refractive index (n, k) for physical Fresnel calculation
+// Indexed by MaterialData::complexRefractiveIndexIndex
+// Data source: RefractiveIndex.INFO database (measured metal optical constants)
+//
+// PHYSICS:
+// - Metal surfaces: Use measured n,k for accurate wavelength-dependent Fresnel
+// - Dielectrics: k ≈ 0 (transparent), n determines refraction
+// - Semiconductors: Wavelength-dependent n,k (silicon, germanium)
+//
+// When complexRefractiveIndexIndex >= 0, use physical Fresnel equation:
+//   F = FresnelConductor(cosθ, n(λ), k(λ))
+// Otherwise, use standard PBR approximation:
+//   F = F0 + (1-F0) * (1-cosθ)^5
+// ============================================================================
+
+[[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+
+// ============================================================================
 // IBL (Image-Based Lighting) Resources
 // ============================================================================
 // Added for physically-based specular reflections on metallic surfaces
@@ -229,6 +249,67 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 
     // Use SafeNormalize with geometric normal as fallback
     return SafeNormalize(normal, worldNormal);
+}
+
+// ============================================================================
+// Physical Fresnel F0 Computation
+// ============================================================================
+// Computes F0 (normal incidence reflectance) using physical n,k data when
+// available, falling back to standard PBR approximation otherwise.
+//
+// PHYSICAL PATH (complexRefractiveIndexIndex >= 0):
+//   - Query measured complex refractive index at current wavelength
+//   - Use exact Fresnel equation: F0 = [(n-1)² + k²] / [(n+1)² + k²]
+//   - Provides wavelength-dependent specular reflection (gold, copper, etc.)
+//
+// PBR PATH (complexRefractiveIndexIndex < 0):
+//   - Use standard approximation: F0 = lerp(0.04, albedo, metallic)
+//   - 0.04 = typical dielectric F0 (glass, plastic)
+//   - Albedo used for metals (color tinting at normal incidence)
+//
+// PARAMETERS:
+//   material: MaterialData with complexRefractiveIndexIndex
+//   albedo: Base color (used for PBR metallic tinting)
+//   metallic: Metalness factor [0, 1]
+//   wavelength_nm: Current wavelength for spectral lookup
+//
+// RETURNS:
+//   float3 F0 - normal incidence reflectance (replicated to RGB for non-spectral)
+// ============================================================================
+
+float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic, float wavelength_nm) {
+    if (material.complexRefractiveIndexIndex >= 0) {
+        // PHYSICAL PATH: Use measured n,k data from RefractiveIndex.INFO
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[material.complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float n = nk.x;
+        float k = nk.y;
+
+        // Fresnel at normal incidence: F0 = [(n-1)² + k²] / [(n+1)² + k²]
+        float F0_physical = FresnelF0(n, k);
+
+        // For spectral mode, return scalar F0 replicated to RGB
+        // For RGB mode, this is an approximation (should sample at R/G/B wavelengths)
+        return float3(F0_physical, F0_physical, F0_physical);
+    }
+
+    // PBR PATH: Standard approximation
+    // Dielectrics: F0 ≈ 0.04 (glass, plastic, water)
+    // Metals: F0 = albedo (color tinting from base color)
+    return lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+}
+
+// Compute full Fresnel reflectance at arbitrary angle using physical n,k data
+// Used for specular highlight computation (not just F0)
+float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavelength_nm) {
+    if (material.complexRefractiveIndexIndex >= 0) {
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[material.complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        return FresnelConductor(cosTheta, nk.x, nk.y);
+    }
+
+    // Fallback: Use Schlick approximation with typical dielectric F0
+    return FresnelSchlick(cosTheta, 0.04);
 }
 
 // ============================================================================
@@ -480,7 +561,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     // Compute F0 (reflectance at normal incidence) for Fresnel calculations
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    // Uses physical n,k data when available for wavelength-accurate metal reflections
+    float3 F0 = ComputePhysicalF0(material, albedo, metallic, camera.wavelength_nm);
 
     // ------------------------------------------------------------------------
     // Sky Radiance Hemispherical Integration (Diffuse Ambient)
@@ -556,7 +638,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    Where:
         //    - envBRDF.x (scale): multiplies F0 (Fresnel at normal incidence)
         //    - envBRDF.y (bias): constant offset for grazing angles
-        float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+        //    NOTE: F0 is computed outside this block using physical n,k data when available
         iblSpecular = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
 
         // 6. Energy conservation: for metals, reduce diffuse contribution

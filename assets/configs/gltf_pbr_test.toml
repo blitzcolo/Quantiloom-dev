@@ -81,3 +81,28 @@ albedo = [0.8, 0.8, 0.8]
 # If true, rendering will abort if RGB-upsampled materials are detected
 fail_on_srgb_upsample = false     # Set to true for strict quantitative mode
 log_material_sources = true       # Log spectral source for each material
+
+# ============================================================================
+# Spectral Curves for Quantitative Rendering (HS-OFF Mode)
+# ============================================================================
+# Map glTF material names to measured spectral reflectance CSV files.
+# Format: "MaterialName" = "path/to/reflectance.csv"
+#
+# CSV format (wavelength_nm, reflectance):
+#   380.0, 0.05
+#   390.0, 0.06
+#   ...
+#   780.0, 0.12
+#
+# Example:
+# [spectral_curves]
+# "Material.001" = "assets/spectra/aluminum_reflectance.csv"
+# "Glass_Material" = "assets/spectra/glass_reflectance.csv"
+#
+# NOTE: If a material is not listed here, it will use RGB→Spectrum upsampling
+# (approximate, not physically accurate). For quantitative rendering (HS-OFF),
+# ALL materials should have measured spectral curves.
+# ============================================================================
+# [spectral_curves]
+# Uncomment and add your material mappings here
+

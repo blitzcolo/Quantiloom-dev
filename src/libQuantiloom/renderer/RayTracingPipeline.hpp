@@ -101,6 +101,29 @@ public:
     // Bind BRDF integration LUT for IBL (binding 11: texture, binding 12: sampler)
     void BindBRDFLut(VkImageView imageView, VkSampler sampler) const;
 
+    // ========================================================================
+    // Spectral Curves Buffer (Binding 13)
+    // ========================================================================
+    // Bind measured spectral reflectance curves for quantitative HS-OFF mode
+    // Each curve is a SpectralCurveGPU struct (272 bytes) with uniform sampling
+    // ========================================================================
+
+    // Bind spectral curves buffer (binding 13)
+    // Pass nullptr or empty buffer to disable spectral curve lookup (uses RGB fallback)
+    void BindSpectralCurvesBuffer(const GpuBuffer* buffer) const;
+
+    // ========================================================================
+    // Complex Refractive Index Buffer (Binding 14)
+    // ========================================================================
+    // Bind measured complex refractive index (n, k) for physical Fresnel
+    // Each entry is a ComplexRefractiveIndexGPU struct (528 bytes)
+    // Used for accurate specular reflection on metals (gold, silver, etc.)
+    // ========================================================================
+
+    // Bind complex refractive index buffer (binding 14)
+    // Pass nullptr to disable physical Fresnel (uses PBR F0 approximation)
+    void BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const;
+
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
 

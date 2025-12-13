@@ -8,6 +8,7 @@ QL_DISABLE_WARNINGS_PUSH
 QL_DISABLE_WARNINGS_POP
 
 #include <filesystem>
+#include <unordered_map>
 
 // ============================================================================
 // Configuration Loader (TOML)
@@ -47,6 +48,15 @@ public:
     /// Get a nested table as a Config object
     /// @param key Dot-separated key path
     [[nodiscard]] Result<Config, String> GetTable(StringView key) const;
+
+    /// Check if a section (table) exists
+    /// @param key Section name (e.g., "spectral_curves")
+    [[nodiscard]] bool HasSection(StringView key) const;
+
+    /// Get all key-value pairs from a section as a map
+    /// @param key Section name
+    /// @return Map of string keys to string values
+    [[nodiscard]] std::unordered_map<String, String> GetSection(StringView key) const;
 
     /// Get an array of values
     /// @tparam T Element type

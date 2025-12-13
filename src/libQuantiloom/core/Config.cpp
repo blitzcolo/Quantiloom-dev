@@ -49,6 +49,29 @@ Result<Config, String> Config::GetTable(const StringView key) const {
     return Result(Config(std::move(clonedTable)));
 }
 
+bool Config::HasSection(const StringView key) const {
+    const toml::node* node = Navigate(key);
+    return node != nullptr && node->is_table();
+}
+
+std::unordered_map<String, String> Config::GetSection(const StringView key) const {
+    std::unordered_map<String, String> result;
+
+    const toml::node* node = Navigate(key);
+    if (!node || !node->is_table()) {
+        return result;
+    }
+
+    const toml::table* table = node->as_table();
+    for (const auto& [k, v] : *table) {
+        if (v.is_string()) {
+            result[String(k)] = *v.value<std::string>();
+        }
+    }
+
+    return result;
+}
+
 void Config::Print() const {
     std::ostringstream oss;
     oss << m_Root;

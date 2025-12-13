@@ -8,8 +8,10 @@
 #include "core/Log.hpp"
 #include "core/Config.hpp"
 #include "core/Image.hpp"
+#include "core/SpectralData.hpp"
 #include "io/ImageIO.hpp"
 #include "io/GltfLoader.hpp"
+#include "io/SpectralIO.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/AccelerationStructure.hpp"
@@ -70,35 +72,39 @@ struct MaterialDataCPU {
 
     i32 normalTextureIndex;              // offset 32, size 4
     f32 normalScale;                     // offset 36, size 4
+    glm::vec2 _padding0;                 // offset 40, size 8 (align emissiveFactor to 16-byte)
 
-    glm::vec3 emissiveFactor;            // offset 40, size 12
-    i32 emissiveTextureIndex;            // offset 52, size 4
+    glm::vec3 emissiveFactor;            // offset 48, size 12
+    i32 emissiveTextureIndex;            // offset 60, size 4
 
-    u32 alphaMode;                       // offset 56, size 4
-    f32 alphaCutoff;                     // offset 60, size 4
+    u32 alphaMode;                       // offset 64, size 4
+    f32 alphaCutoff;                     // offset 68, size 4
 
-    f32 spectralAlbedo;                  // offset 64, size 4 (LEGACY M1)
-    i32 spectralReflectanceCurveIndex;   // offset 68, size 4 (NEW M2+)
+    f32 spectralAlbedo;                  // offset 72, size 4 (LEGACY M1)
+    i32 spectralReflectanceCurveIndex;   // offset 76, size 4 (Spectral curves index)
 
-    f32 irEmissivity;                    // offset 72, size 4
-    f32 irReflectance;                   // offset 76, size 4
-    f32 irTransmittance;                 // offset 80, size 4
-    f32 irTemperature_K;                 // offset 84, size 4
-};  // Total: 88 bytes (must match GPU MaterialData in common.hlsli)
+    f32 irEmissivity;                    // offset 80, size 4
+    f32 irTransmittance;                 // offset 84, size 4
+    f32 irTemperature_K;                 // offset 88, size 4
+
+    i32 complexRefractiveIndexIndex;     // offset 92, size 4 (n,k curve index for Fresnel)
+};  // Total: 96 bytes (must match GPU MaterialData in common.hlsli)
 
 // Verify struct layout matches shader expectations
 // If this fails, the CPU/GPU struct layouts are mismatched, which WILL cause GPU crashes
-static_assert(sizeof(MaterialDataCPU) == 88, "MaterialDataCPU size mismatch! Expected 88 bytes to match GPU MaterialData struct");
+static_assert(sizeof(MaterialDataCPU) == 96, "MaterialDataCPU size mismatch! Expected 96 bytes to match GPU MaterialData struct");
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 40, "emissiveFactor offset mismatch");
-static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 52, "emissiveTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 64, "spectralAlbedo offset mismatch");
-static_assert(offsetof(MaterialDataCPU, spectralReflectanceCurveIndex) == 68, "spectralReflectanceCurveIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irEmissivity) == 72, "irEmissivity offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irReflectance) == 76, "irReflectance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTransmittance) == 80, "irTransmittance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 84, "irTemperature_K offset mismatch");
+static_assert(offsetof(MaterialDataCPU, _padding0) == 40, "_padding0 offset mismatch");
+static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 48, "emissiveFactor offset mismatch");
+static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 60, "emissiveTextureIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, alphaMode) == 64, "alphaMode offset mismatch");
+static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 72, "spectralAlbedo offset mismatch");
+static_assert(offsetof(MaterialDataCPU, spectralReflectanceCurveIndex) == 76, "spectralReflectanceCurveIndex offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irEmissivity) == 80, "irEmissivity offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTransmittance) == 84, "irTransmittance offset mismatch");
+static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 88, "irTemperature_K offset mismatch");
+static_assert(offsetof(MaterialDataCPU, complexRefractiveIndexIndex) == 92, "complexRefractiveIndexIndex offset mismatch");
 
 // ============================================================================
 // Environment Map Helpers
@@ -646,6 +652,108 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  {} textures uploaded", textureManager.GetTextureCount());
 
         // ====================================================================
+        // Load Spectral Curves from CSV (for quantitative HS-OFF mode)
+        // ====================================================================
+        // Config format:
+        //   [spectral_curves]
+        //   "Material_Name" = "path/to/reflectance.csv"
+        //   "Another_Material" = "path/to/another.csv"
+        // ====================================================================
+        QL_LOG_INFO("Loading spectral curves...");
+
+        std::vector<SpectralCurveGPU> spectralCurvesData;
+        std::unordered_map<std::string, i32> materialNameToSpectralIndex;
+
+        // Check if spectral_curves section exists in config
+        if (config.HasSection("spectral_curves")) {
+            auto curveEntries = config.GetSection("spectral_curves");
+
+            for (const auto& [materialName, csvPath] : curveEntries) {
+                QL_LOG_INFO("  Loading spectral curve for '{}' from '{}'", materialName, csvPath);
+
+                // Load CSV file
+                auto result = SpectralIO::LoadSpectralCurveCSV(csvPath);
+
+                if (!result) {
+                    QL_LOG_WARN("    Failed to load: {}", result.error());
+                    continue;
+                }
+
+                // Convert to SpectralCurve
+                SpectralCurve curve;
+                curve.samples = result.value();
+
+                // Convert to GPU format (uniform resampling)
+                SpectralCurveGPU gpuCurve = SpectralCurveGPU::FromCPU(curve);
+
+                // Store index mapping
+                i32 curveIndex = static_cast<i32>(spectralCurvesData.size());
+                materialNameToSpectralIndex[materialName] = curveIndex;
+                spectralCurvesData.push_back(gpuCurve);
+
+                QL_LOG_INFO("    Loaded: {} samples, λ=[{:.1f}, {:.1f}] nm → curve index {}",
+                            gpuCurve.numSamples,
+                            gpuCurve.startWavelength_nm,
+                            gpuCurve.GetWavelength(gpuCurve.numSamples - 1),
+                            curveIndex);
+            }
+        }
+
+        QL_LOG_INFO("  Total spectral curves loaded: {}", spectralCurvesData.size());
+
+        // Create GPU buffer for spectral curves (even if empty - need valid binding)
+        std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
+        if (!spectralCurvesData.empty()) {
+            spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+                context.GetAllocator(),
+                spectralCurvesData.size() * sizeof(SpectralCurveGPU),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            spectralCurvesBuffer->Upload(spectralCurvesData.data(),
+                                          spectralCurvesData.size() * sizeof(SpectralCurveGPU));
+            QL_LOG_INFO("  Uploaded {} bytes to GPU", spectralCurvesData.size() * sizeof(SpectralCurveGPU));
+        } else {
+            // Create a dummy buffer with one empty curve for valid binding
+            SpectralCurveGPU dummyCurve{};
+            spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+                context.GetAllocator(),
+                sizeof(SpectralCurveGPU),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            spectralCurvesBuffer->Upload(&dummyCurve, sizeof(SpectralCurveGPU));
+            QL_LOG_INFO("  Created dummy spectral curves buffer (no curves loaded)");
+        }
+
+        // ====================================================================
+        // Create Complex Refractive Index Buffer (for physical Fresnel)
+        // ====================================================================
+        // TODO: Load n,k data from RefractiveIndex.INFO YAML files via config
+        // Config format (future):
+        //   [refractive_index]
+        //   "Gold" = "path/to/Au_Johnson.yml"
+        //   "Silver" = "path/to/Ag_Johnson.yml"
+        // ====================================================================
+        QL_LOG_INFO("Creating complex refractive index buffer...");
+
+        std::vector<ComplexRefractiveIndexGPU> criData;
+        std::unique_ptr<GpuBuffer> criBuffer;
+
+        // For now, create dummy buffer for valid binding
+        // Real n,k data loading will be added in future iteration
+        ComplexRefractiveIndexGPU dummyCRI{};
+        criBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(),
+            sizeof(ComplexRefractiveIndexGPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        criBuffer->Upload(&dummyCRI, sizeof(ComplexRefractiveIndexGPU));
+        QL_LOG_INFO("  Created dummy complex refractive index buffer (no data loaded)");
+        QL_LOG_INFO("  NOTE: Use config [refractive_index] section to load measured n,k data");
+
+        // ====================================================================
         // Create Material Buffer (PBR)
         // ====================================================================
         QL_LOG_INFO("Creating PBR material buffer...");
@@ -681,11 +789,25 @@ int main(int argc, char* argv[]) {
             // Spectral (M1 compatibility)
             cpuMat.spectralAlbedo = mat.spectralAlbedo;
 
+            // Spectral reflectance curve index (M2+ quantitative mode)
+            // Look up by material name, default to -1 (no curve = use RGB fallback)
+            auto spectralIt = materialNameToSpectralIndex.find(mat.name);
+            if (spectralIt != materialNameToSpectralIndex.end()) {
+                cpuMat.spectralReflectanceCurveIndex = spectralIt->second;
+                QL_LOG_INFO("  Material '{}': using spectral curve index {}", mat.name, spectralIt->second);
+            } else {
+                cpuMat.spectralReflectanceCurveIndex = -1;  // No curve, use RGB fallback
+            }
+
             // Infrared material properties (evaluate curves at current wavelength)
+            // NOTE: irReflectance is computed on GPU from energy conservation (ρ = 1 - ε - τ)
             cpuMat.irEmissivity = mat.GetIREmissivity(wavelength_nm);
-            cpuMat.irReflectance = mat.GetIRReflectance(wavelength_nm);
             cpuMat.irTransmittance = mat.GetIRTransmittance(wavelength_nm);
             cpuMat.irTemperature_K = mat.irTemperature_K;
+
+            // Complex refractive index for physical Fresnel (default: -1 = use PBR approximation)
+            // TODO: Load from config [refractive_index] section mapping material name to n,k data
+            cpuMat.complexRefractiveIndexIndex = -1;
 
             materialData.push_back(cpuMat);
 
@@ -1117,6 +1239,12 @@ int main(int argc, char* argv[]) {
         // Binding 12: IBL sampler (shared by both textures)
         pipeline.BindPrefilteredEnvMap(envMapView);                      // Binding 10
         pipeline.BindBRDFLut(brdfLutTexture.GetView(), brdfLutSampler);  // Binding 11, 12
+
+        // Bind spectral curves buffer (binding 13)
+        pipeline.BindSpectralCurvesBuffer(spectralCurvesBuffer.get());
+
+        // Bind complex refractive index buffer (binding 14)
+        pipeline.BindComplexRefractiveIndexBuffer(criBuffer.get());
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();

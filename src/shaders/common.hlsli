@@ -146,6 +146,165 @@ float SampleSpectralCurve(SpectralCurveGPU curve, float query_wavelength_nm) {
 }
 
 // ============================================================================
+// Complex Refractive Index Data Structure (GPU)
+// ============================================================================
+// Fixed-size complex refractive index N = n + ik for Fresnel calculations
+// Data source: RefractiveIndex.INFO database
+//
+// PHYSICS:
+// - n: Refractive index (determines phase velocity and Snell's refraction)
+// - k: Extinction coefficient (determines absorption)
+// - For metals: k >> 0 (high absorption)
+// - For dielectrics: k ≈ 0 (transparent in certain bands)
+//
+// SIZE: 64*4 (n) + 64*4 (k) + 4 + 4 + 4 + 4 = 528 bytes per curve
+// Must match CPU-side ComplexRefractiveIndexGPU structure
+// ============================================================================
+
+struct ComplexRefractiveIndexGPU {
+    float n[MAX_SPECTRAL_SAMPLES];       // Refractive index at uniform grid
+    float k[MAX_SPECTRAL_SAMPLES];       // Extinction coefficient at uniform grid
+    float startWavelength_nm;            // Starting wavelength (nm)
+    float stepSize_nm;                   // Wavelength step size (nm)
+    uint  numSamples;                    // Number of valid samples
+    uint  _padding;                      // 16-byte alignment
+};
+
+// ============================================================================
+// Helper: Query Complex Refractive Index at Arbitrary Wavelength
+// ============================================================================
+// Returns: float2(n, k) - refractive index and extinction coefficient
+// ============================================================================
+
+float2 SampleComplexRefractiveIndex(ComplexRefractiveIndexGPU cri, float query_wavelength_nm) {
+    // Handle empty data
+    if (cri.numSamples == 0) {
+        return float2(1.0, 0.0);  // Default: air
+    }
+
+    // Compute fractional index
+    float index_f = (query_wavelength_nm - cri.startWavelength_nm) / cri.stepSize_nm;
+
+    // Clamp to valid range
+    if (index_f < 0.0) {
+        return float2(cri.n[0], cri.k[0]);
+    }
+
+    if (index_f >= float(cri.numSamples - 1)) {
+        return float2(cri.n[cri.numSamples - 1], cri.k[cri.numSamples - 1]);
+    }
+
+    // Linear interpolation
+    uint  i0 = uint(floor(index_f));
+    uint  i1 = i0 + 1;
+    float t = frac(index_f);
+
+    return float2(
+        lerp(cri.n[i0], cri.n[i1], t),
+        lerp(cri.k[i0], cri.k[i1], t)
+    );
+}
+
+// ============================================================================
+// Fresnel Equations for Complex Refractive Index (Conductor)
+// ============================================================================
+// Computes Fresnel reflectance for materials with complex refractive index
+// (metals, semiconductors) at arbitrary incidence angle.
+//
+// PHYSICS:
+// For complex N = n + ik, the Fresnel equations become:
+//   Rs = |((n1*cos_i - n2*cos_t)/(n1*cos_i + n2*cos_t))|^2
+//   Rp = |((n1*cos_t - n2*cos_i)/(n1*cos_t + n2*cos_i))|^2
+//   R = (Rs + Rp) / 2 (unpolarized light)
+//
+// For conductors (metals), we use the simplified formulation from:
+// "An Inexpensive BRDF Model for Physically-based Rendering" - Schlick 1994
+// Combined with conductor Fresnel from PBRT-v4.
+//
+// Input:
+//   cosTheta: cos(incident angle), dot(N, V) or dot(N, L)
+//   n: real part of refractive index (at query wavelength)
+//   k: imaginary part (extinction coefficient)
+//
+// Returns:
+//   Fresnel reflectance [0, 1]
+// ============================================================================
+
+float FresnelConductor(float cosTheta, float n, float k) {
+    // Clamp cosTheta to avoid numerical issues
+    cosTheta = saturate(abs(cosTheta));
+
+    float cos2 = cosTheta * cosTheta;
+    float sin2 = 1.0 - cos2;
+
+    float n2 = n * n;
+    float k2 = k * k;
+
+    float t0 = n2 - k2 - sin2;
+    float a2b2 = sqrt(t0 * t0 + 4.0 * n2 * k2);
+    float t1 = a2b2 + cos2;
+    float a = sqrt(0.5 * (a2b2 + t0));
+    float t2 = 2.0 * a * cosTheta;
+    float Rs = (t1 - t2) / (t1 + t2);
+
+    float t3 = cos2 * a2b2 + sin2 * sin2;
+    float t4 = t2 * sin2;
+    float Rp = Rs * (t3 - t4) / (t3 + t4);
+
+    return 0.5 * (Rs + Rp);
+}
+
+// ============================================================================
+// Fresnel Reflectance at Normal Incidence (F0)
+// ============================================================================
+// Simplified Fresnel for perpendicular incidence (θ = 0)
+// Used for PBR F0 computation
+//
+// Formula: F0 = [(n-1)² + k²] / [(n+1)² + k²]
+//
+// Input:
+//   n: refractive index
+//   k: extinction coefficient
+//
+// Returns:
+//   F0 (normal incidence reflectance) [0, 1]
+// ============================================================================
+
+float FresnelF0(float n, float k) {
+    float numerator = (n - 1.0) * (n - 1.0) + k * k;
+    float denominator = (n + 1.0) * (n + 1.0) + k * k;
+    return numerator / denominator;
+}
+
+// ============================================================================
+// Schlick Fresnel Approximation with Spectral F0
+// ============================================================================
+// Standard Schlick approximation using computed F0 from n,k
+//
+// Formula: F = F0 + (1 - F0) * (1 - cosTheta)^5
+//
+// Input:
+//   cosTheta: cos(incident angle)
+//   F0: normal incidence reflectance (from FresnelF0)
+//
+// Returns:
+//   Fresnel reflectance [0, 1]
+// ============================================================================
+
+float FresnelSchlick(float cosTheta, float F0) {
+    float oneMinusCos = 1.0 - saturate(cosTheta);
+    float oneMinusCos5 = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos;
+    return F0 + (1.0 - F0) * oneMinusCos5;
+}
+
+// RGB version for standard PBR
+float3 FresnelSchlickRGB(float cosTheta, float3 F0) {
+    float oneMinusCos = 1.0 - saturate(cosTheta);
+    float oneMinusCos5 = oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos * oneMinusCos;
+    return F0 + (1.0 - F0) * oneMinusCos5;
+}
+
+// ============================================================================
 // LUT Data Structure
 // ============================================================================
 // Atmospheric lookup table for spectral and RGB rendering
@@ -260,7 +419,11 @@ struct MaterialData {
     float  irEmissivity;             // IR emissivity ε(λ) [0, 1]            // Offset: 80-84
     float  irTransmittance;          // IR transmittance τ(λ) [0, 1]        // Offset: 84-88
     float  irTemperature_K;          // IR surface temperature (K) for blackbody emission (0 = no emission) // Offset: 88-92
-    float  _padding1;                // Padding to maintain alignment        // Offset: 92-96
+
+    // Complex refractive index for specular Fresnel (physical metals)
+    // When >= 0, uses measured n,k data from RefractiveIndex.INFO for accurate Fresnel
+    // When < 0, uses metallicFactor-based F0 approximation (standard PBR)
+    int    complexRefractiveIndexIndex; // Index into complexRefractiveIndex buffer (-1 = use PBR approximation) // Offset: 92-96
 
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity

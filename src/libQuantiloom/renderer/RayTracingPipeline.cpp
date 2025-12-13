@@ -144,7 +144,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
     constexpr u32 MAX_TEXTURES = 1024;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(13);  // Added UV, tangent buffers, IBL textures (prefiltered env, BRDF LUT, sampler)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(15);  // Added complex refractive index buffer (binding 14)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -248,9 +248,37 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[12].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[12].pImmutableSamplers = nullptr;
 
+    // ========================================================================
+    // Spectral Curves Buffer (Binding 13)
+    // ========================================================================
+    // Contains measured spectral reflectance curves for quantitative rendering
+    // Each curve is a SpectralCurveGPU struct with uniform wavelength sampling
+    // ========================================================================
+
+    // Binding 13: Spectral curves buffer (StructuredBuffer<SpectralCurveGPU>)
+    bindings[13].binding = 13;
+    bindings[13].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[13].descriptorCount = 1;
+    bindings[13].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[13].pImmutableSamplers = nullptr;
+
+    // ========================================================================
+    // Complex Refractive Index Buffer (Binding 14)
+    // ========================================================================
+    // Contains measured complex refractive index (n, k) for physical Fresnel
+    // Each entry is a ComplexRefractiveIndexGPU struct (528 bytes)
+    // ========================================================================
+
+    // Binding 14: Complex refractive index buffer (StructuredBuffer<ComplexRefractiveIndexGPU>)
+    bindings[14].binding = 14;
+    bindings[14].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[14].descriptorCount = 1;
+    bindings[14].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[14].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(13, 0);  // Updated for all bindings including IBL
+    std::vector<VkDescriptorBindingFlags> bindingFlags(15, 0);  // Updated for CRI buffer
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -277,7 +305,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 6;  // LUT + vertex + index + material + UV + tangent buffers
+    poolSizes[2].descriptorCount = 8;  // LUT + vertex + index + material + UV + tangent + spectral curves + CRI
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = MAX_TEXTURES + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -345,8 +373,6 @@ void RayTracingPipeline::CreatePipelineLayout() {
 // ============================================================================
 
 void RayTracingPipeline::LoadShaders() {
-    VkDevice device = m_context.GetDevice();
-
     // Load all shaders
     const auto raygenSpirv = LoadSPIRV(m_raygenPath);
     const auto chitSpirv = LoadSPIRV(m_closestHitPath);
@@ -887,6 +913,74 @@ void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) c
     writes[1].pImageInfo = &samplerInfo;
 
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+}
+
+// ============================================================================
+// Spectral Curves Buffer Binding
+// ============================================================================
+
+void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    if (buffer == nullptr) {
+        QL_LOG_INFO("Spectral curves buffer is null - spectral curve lookup will use RGB fallback");
+        // Note: Shader must handle spectralReflectanceCurveIndex < 0 for fallback
+        return;
+    }
+
+    QL_LOG_INFO("Binding spectral curves buffer to descriptor set (binding 13)");
+    QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
+    QL_LOG_INFO("  Expected curves: ~{}", buffer->GetSize() / 272);  // 272 bytes per SpectralCurveGPU
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer->GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 13;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+// ============================================================================
+// Complex Refractive Index Buffer Binding
+// ============================================================================
+
+void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    if (buffer == nullptr) {
+        QL_LOG_INFO("Complex refractive index buffer is null - will use PBR F0 approximation");
+        // Note: Shader must handle complexRefractiveIndexIndex < 0 for fallback
+        return;
+    }
+
+    QL_LOG_INFO("Binding complex refractive index buffer to descriptor set (binding 14)");
+    QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
+    QL_LOG_INFO("  Expected entries: ~{}", buffer->GetSize() / 528);  // 528 bytes per ComplexRefractiveIndexGPU
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer->GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 14;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::UpdateDescriptorSets() {
