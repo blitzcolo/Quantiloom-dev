@@ -20,7 +20,7 @@
 
 // IMPORTANT: These values MUST match SpectralMode enum in C++ code!
 #define SPECTRAL_MODE_SINGLE       0  // Single wavelength (grayscale output)
-#define SPECTRAL_MODE_RGB          1  // RGB rendering with spectral conversions
+#define SPECTRAL_MODE_RGB_FUSED    1  // RGB rendering with 32-wavelength spectral integration
 #define SPECTRAL_MODE_MULTISPECTRAL 2  // Multiple wavelengths (hyperspectral cube) - TBD
 #define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
 #define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)

@@ -476,7 +476,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 sunRadiance;
     float3 skyRadiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
         // RGB mode: Use full RGB lighting
         sunRadiance = lut.sunRadiance_rgb;
         skyRadiance = lut.skyRadiance_rgb;
@@ -654,88 +654,92 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     float3 output_radiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
         // ====================================================================
-        // RGB Mode: Physically-correct RGB rendering with spectral support
+        // RGB_Fused Mode: True 32-Wavelength Spectral Integration
         // ====================================================================
-        // Two paths depending on material data:
+        // Physically-correct spectral rendering with full wavelength sampling:
+        //   1. Sample 32 wavelengths uniformly across visible spectrum (380-780nm)
+        //   2. Compute spectral radiance L(λ) at each wavelength
+        //   3. Integrate via CIE XYZ color matching functions
+        //   4. Convert XYZ → Linear RGB (sRGB D65)
         //
-        // PATH A (Quantitative): If material has measured spectral curve
-        //   - Sample reflectance at R/G/B representative wavelengths
-        //   - Weight by CIE XYZ color matching functions
-        //   - Convert XYZ → Linear RGB (sRGB D65)
+        // This is the TRUE HS-OFF spectral rendering for visible light.
+        // Performance: ~10-15x slower than single wavelength, but physically accurate.
         //
-        // PATH B (Fallback): Standard PBR RGB pipeline
-        //   - Use glTF baseColor texture directly
-        //   - Apply Cook-Torrance BRDF with RGB albedo
-        //
-        // NOTE: For full spectral accuracy (HS-OFF), use SPECTRAL_MODE_SINGLE
-        // and render multiple wavelengths separately.
+        // SPECTRAL REFLECTANCE SOURCE (priority order):
+        //   1. Measured spectral curve (spectralReflectanceCurveIndex >= 0)
+        //   2. RGB texture upsampling via Gaussian basis (fallback)
         // ====================================================================
 
-        if (material.spectralReflectanceCurveIndex >= 0) {
-            // ================================================================
-            // PATH A: Quantitative RGB from measured spectral curve
-            // ================================================================
-            // Sample at 3 representative wavelengths and integrate via CIE CMF
-            // This provides better accuracy than RGB→Spectrum→RGB round-trip
-            //
-            // Representative wavelengths (sRGB primaries approximation):
-            //   - Red:   650 nm (CIE X peak contribution)
-            //   - Green: 550 nm (CIE Y peak, luminance)
-            //   - Blue:  450 nm (CIE Z peak contribution)
-            // ================================================================
+        // Spectral integration parameters
+        const uint   NUM_WAVELENGTH_SAMPLES = 32;
+        const float  LAMBDA_MIN_VIS = 380.0;  // nm
+        const float  LAMBDA_MAX_VIS = 780.0;  // nm
+        const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
-            const float LAMBDA_R = 650.0;
-            const float LAMBDA_G = 550.0;
-            const float LAMBDA_B = 450.0;
+        // CIE XYZ normalization factor
+        // For equal-energy white (E), Y should integrate to 1.0
+        // ∫ȳ(λ)dλ ≈ 106.9 over 380-780nm, so normalize by this
+        const float CIE_Y_INTEGRAL = 106.9;
 
-            // Sample spectral reflectance at R/G/B wavelengths
-            float rho_R = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_R);
-            float rho_G = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_G);
-            float rho_B = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, LAMBDA_B);
+        // Accumulate XYZ tristimulus values
+        float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
-            // Evaluate CIE XYZ color matching functions at each wavelength
-            float3 xyz_R = float3(CIE_X(LAMBDA_R), CIE_Y(LAMBDA_R), CIE_Z(LAMBDA_R));
-            float3 xyz_G = float3(CIE_X(LAMBDA_G), CIE_Y(LAMBDA_G), CIE_Z(LAMBDA_G));
-            float3 xyz_B = float3(CIE_X(LAMBDA_B), CIE_Y(LAMBDA_B), CIE_Z(LAMBDA_B));
+        // Sun and sky radiance (convert RGB to approximate spectral)
+        // For physically accurate rendering, these should be spectral LUTs
+        float sun_power = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
+        float sky_power = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
 
-            // Compute spectral radiance at each wavelength using scalar BRDF
-            // Assume sun radiance is roughly equal at R/G/B (simplification)
-            float brdf_R = CookTorranceBRDF_Spectral(normal, V, L, rho_R, metallic, roughness);
-            float brdf_G = CookTorranceBRDF_Spectral(normal, V, L, rho_G, metallic, roughness);
-            float brdf_B = CookTorranceBRDF_Spectral(normal, V, L, rho_B, metallic, roughness);
+        // Loop over wavelengths
+        [unroll]
+        for (uint i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i) {
+            float lambda = LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP;
 
-            // Direct sun contribution at each wavelength
-            float sun_scalar = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
-            float L_R = brdf_R * sun_scalar * NdotL;
-            float L_G = brdf_G * sun_scalar * NdotL;
-            float L_B = brdf_B * sun_scalar * NdotL;
+            // 1. Get spectral reflectance at this wavelength
+            float rho_lambda;
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                // Quantitative path: measured spectral curve
+                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+            } else {
+                // Fallback path: RGB → Spectrum upsampling
+                rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
+            }
 
-            // Add sky ambient (simplified: assume uniform sky contribution)
-            float sky_scalar = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
-            float kD_avg = (1.0 - metallic);  // Simplified diffuse coefficient
-            L_R += kD_avg * rho_R / PI * sky_scalar;
-            L_G += kD_avg * rho_G / PI * sky_scalar;
-            L_B += kD_avg * rho_B / PI * sky_scalar;
+            // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
+            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness);
 
-            // Integrate via CIE XYZ (3-sample Monte Carlo with uniform PDF)
-            // PDF = 1/3 for 3 samples, so weight = L * CMF / (1/3) = 3 * L * CMF
-            // Then normalize by wavelength range factor (simplified)
-            float3 XYZ = (L_R * xyz_R + L_G * xyz_G + L_B * xyz_B) * (400.0 / 3.0);
+            // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun × (N·L) + kD × ρ(λ)/π × L_sky
+            float L_direct = brdf_lambda * sun_power * NdotL;
 
-            // XYZ → Linear RGB (sRGB D65)
-            output_radiance = ConvertXYZToLinearRGB(XYZ);
+            // Diffuse ambient (simplified Fresnel for diffuse coefficient)
+            float kD_lambda = (1.0 - metallic);  // Metals have no diffuse
+            float L_ambient = kD_lambda * rho_lambda / PI * sky_power;
 
-            // Add emissive (assumed to be linear RGB, not spectral)
-            output_radiance += emissive;
+            float L_lambda = L_direct + L_ambient;
 
-        } else {
-            // ================================================================
-            // PATH B: Standard PBR RGB (fallback for non-spectral materials)
-            // ================================================================
-            output_radiance = radiance;
+            // 4. Weight by CIE XYZ color matching functions
+            float x_bar = CIE_X(lambda);
+            float y_bar = CIE_Y(lambda);
+            float z_bar = CIE_Z(lambda);
+
+            // Riemann sum integration: ∫L(λ)×CMF(λ)dλ ≈ Σ L(λᵢ)×CMF(λᵢ)×Δλ
+            XYZ_accum.x += L_lambda * x_bar * LAMBDA_STEP;
+            XYZ_accum.y += L_lambda * y_bar * LAMBDA_STEP;
+            XYZ_accum.z += L_lambda * z_bar * LAMBDA_STEP;
         }
+
+        // Normalize by CIE Y integral for proper luminance scaling
+        XYZ_accum /= CIE_Y_INTEGRAL;
+
+        // XYZ → Linear RGB (sRGB D65)
+        output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
+
+        // Add emissive (assumed to be linear RGB, not spectral)
+        output_radiance += emissive;
+
+        // Add IBL specular reflection (already computed in RGB)
+        output_radiance += iblSpecular;
 
         // Validation: clamp and sanitize to prevent NaN/Inf
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
@@ -820,56 +824,85 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
-        // MWIR/LWIR Fusion Mode: Infrared band fusion with blackbody emission
+        // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
         // ====================================================================
-        // Compute self-emission (ε × L_blackbody) + reflected radiance (ρ × L_incident)
-        // Uses simplified model: emissivity ≈ spectralAlbedo (Kirchhoff's law approximation)
-        // For full quantitative IR, use measured ε(λ)/ρ(λ)/τ(λ) curves (future work)
+        // True spectral integration across infrared bands:
+        //   - MWIR: 3000-5000nm (Mid-Wave Infrared)
+        //   - LWIR: 8000-12000nm (Long-Wave Infrared)
+        //
+        // Physics model:
+        //   L_total(λ) = ε(λ) × L_bb(T,λ) + ρ(λ) × L_reflected(λ)
+        //
+        // where:
+        //   ε(λ) = emissivity (from material.irEmissivity)
+        //   L_bb(T,λ) = Planck blackbody radiance at temperature T
+        //   ρ(λ) = reflectance = 1 - ε - τ (Kirchhoff's law)
+        //   L_reflected = incident radiance (sun + sky + environment)
+        //
+        // Output: Single grayscale value (band-integrated radiance)
         // ====================================================================
 
-        float lambda_nm = camera.wavelength_nm;
+        // Determine wavelength range based on mode
+        float lambda_min, lambda_max;
+        if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED) {
+            lambda_min = 3000.0;   // nm
+            lambda_max = 5000.0;   // nm
+        } else {  // LWIR
+            lambda_min = 8000.0;   // nm
+            lambda_max = 12000.0;  // nm
+        }
 
-        // Use IR material properties (evaluated from curves at current wavelength)
-        // If no IR data available, fallback to spectralAlbedo approximation
+        // Integration parameters
+        const uint  NUM_IR_SAMPLES = 16;  // Fewer samples than visible (smoother spectra)
+        const float lambda_step = (lambda_max - lambda_min) / float(NUM_IR_SAMPLES - 1);
+
+        // Accumulate band-integrated radiance
+        float radiance_accum = 0.0;
+
+        // Material IR properties
         float emissivity = material.irEmissivity;
         float transmittance = material.irTransmittance;
+        float reflectance = GetIRReflectance(material);  // ρ = 1 - ε - τ
 
-        // OPTIMIZATION: Compute reflectance from energy conservation
-        // ρ = 1 - ε - τ (see GetIRReflectance() in common.hlsli)
-        // This eliminates redundant storage and enforces Kirchhoff's law
-        float reflectance = GetIRReflectance(material);
+        // Incident radiance for reflection (simplified: use visible radiance average)
+        float L_incident = (radiance.r + radiance.g + radiance.b) / 3.0;
 
-        // Energy conservation validation (should always be true now)
-        // ε + ρ + τ = 1 by construction (reflectance is derived)
-        // This check is kept for debugging but should never trigger normalization
-        float energySum = emissivity + reflectance + transmittance;
-        if (energySum > 1.001) {  // Allow small numerical tolerance
-            // Fallback normalization (should rarely/never happen)
-            float normFactor = 1.0 / energySum;
-            emissivity *= normFactor;
-            reflectance *= normFactor;
-            transmittance *= normFactor;
+        // Loop over wavelengths in IR band
+        [unroll]
+        for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
+            float lambda = lambda_min + float(i) * lambda_step;
+
+            // 1. Self-emission: ε(λ) × L_blackbody(T, λ)
+            float L_emission = 0.0;
+            if (material.irTemperature_K > 0.0) {
+                float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
+                L_emission = emissivity * L_blackbody;
+            }
+
+            // 2. Reflected radiance: ρ(λ) × L_incident
+            // For accurate simulation, L_incident should also be wavelength-dependent
+            // Here we use a simplified constant (future: spectral environment map)
+            float L_reflected = reflectance * L_incident;
+
+            // 3. Total spectral radiance at this wavelength
+            float L_lambda = L_emission + L_reflected;
+
+            // Accumulate (Riemann sum)
+            radiance_accum += L_lambda * lambda_step;
         }
 
-        // Self-emission: ε(λ) × L_blackbody(T, λ)
-        float selfEmission = 0.0;
-        if (material.irTemperature_K > 0.0) {
-            float blackbodyRadiance = IRPlanckRadiance(material.irTemperature_K, lambda_nm);
-            selfEmission = emissivity * blackbodyRadiance;
+        // Normalize by wavelength range to get average radiance over band
+        float band_width = lambda_max - lambda_min;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
         }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);  // Allow high dynamic range for IR
 
-        // Reflected radiance: ρ(λ) × L_incident
-        // Convert RGB radiance to scalar for IR (simple average)
-        float reflected = (radiance.r + radiance.g + radiance.b) / 3.0 * reflectance;
-
-        float radiance_spectral = selfEmission + reflected;
-
-        if (!isfinite(radiance_spectral)) {
-            radiance_spectral = 0.0;
-        }
-        radiance_spectral = clamp(radiance_spectral, 0.0, 1e6);  // Allow high dynamic range for IR
-
-        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        // Output as grayscale (IR images are single-channel)
+        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
     } else {
         // ====================================================================

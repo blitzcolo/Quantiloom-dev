@@ -31,7 +31,7 @@ void main(inout Payload payload) {
     LUTData lut = skyLUT[0];
 
     // Choose sky radiance based on spectral mode
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
         // RGB mode: Use full RGB sky radiance
         payload.radiance = lut.skyRadiance_rgb;
     } else {
