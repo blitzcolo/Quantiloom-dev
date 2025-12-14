@@ -76,14 +76,19 @@ TEST(TypesTest, ParseSpectralModeSingle) {
     EXPECT_EQ(res2.value(), SpectralMode::Single);
 }
 
-TEST(TypesTest, ParseSpectralModeRGB) {
-    auto res1 = ParseSpectralMode("rgb");
+TEST(TypesTest, ParseSpectralModeRGBFused) {
+    auto res1 = ParseSpectralMode("rgb_fused");
     EXPECT_TRUE(res1.has_value());
-    EXPECT_EQ(res1.value(), SpectralMode::RGB);
+    EXPECT_EQ(res1.value(), SpectralMode::RGB_Fused);
 
-    auto res2 = ParseSpectralMode("RGB");
+    // Legacy name for backward compatibility
+    auto res2 = ParseSpectralMode("rgb");
     EXPECT_TRUE(res2.has_value());
-    EXPECT_EQ(res2.value(), SpectralMode::RGB);
+    EXPECT_EQ(res2.value(), SpectralMode::RGB_Fused);
+
+    auto res3 = ParseSpectralMode("RGB");
+    EXPECT_TRUE(res3.has_value());
+    EXPECT_EQ(res3.value(), SpectralMode::RGB_Fused);
 }
 
 TEST(TypesTest, ParseSpectralModeMultispectral) {

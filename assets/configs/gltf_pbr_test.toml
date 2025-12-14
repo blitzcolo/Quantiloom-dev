@@ -23,14 +23,14 @@ environment_map = "assets/maps/blue_photo_studio_4k.exr"  # EXR environment map
 # For quantitative results, use mode = "hs_off" with measured spectral data.
 # ============================================================================
 # Available modes:
-#   - "rgb"          : RGB rendering with full color (preview quality)
+#   - "rgb_fused"          : RGB rendering with full color (preview quality)
 #   - "single"       : Single wavelength grayscale (PREVIEW ONLY, not quantitative)
 #   - "mwir_fused"   : Mid-wave IR fusion 3-5μm (PREVIEW ONLY, not quantitative)
 #   - "lwir_fused"   : Long-wave IR fusion 8-12μm (PREVIEW ONLY, not quantitative)
 #   - "hs_off"       : Hyperspectral offline (QUANTITATIVE - requires measured spectra)
 # ============================================================================
-mode = "single"                   # RGB mode for full color rendering
-wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
+mode = "mwir_fused"                   # RGB mode for full color rendering
+#wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
 [scene]
 # ============================================================================
@@ -99,10 +99,47 @@ log_material_sources = true       # Log spectral source for each material
 # "Material.001" = "assets/spectra/aluminum_reflectance.csv"
 # "Glass_Material" = "assets/spectra/glass_reflectance.csv"
 #
+# NOTE: The material name must match the glTF material name exactly.
+#
 # NOTE: If a material is not listed here, it will use RGB→Spectrum upsampling
 # (approximate, not physically accurate). For quantitative rendering (HS-OFF),
 # ALL materials should have measured spectral curves.
 # ============================================================================
 # [spectral_curves]
+# Uncomment and add your material mappings here
+
+# ============================================================================
+# Complex Refractive Index for Physical Fresnel (Metal Materials)
+# ============================================================================
+# Map glTF material names to RefractiveIndex.INFO YAML files for accurate
+# wavelength-dependent Fresnel reflectance on metal surfaces.
+#
+# Data source: https://refractiveindex.info/
+# Download YAML files from the database and place in assets/refractiveindex/
+#
+# Format: "MaterialName" = "path/to/material.yml"
+#
+# YAML file format (RefractiveIndex.INFO tabulated nk):
+#   DATA:
+#     - type: tabulated nk
+#       data: |
+#           0.5000 0.9400 1.9600    # wavelength(µm) n k
+#           0.5500 0.8800 2.2000
+#           ...
+#
+# Example:
+# [refractive_index]
+# "Gold_Material" = "assets/refractiveindex/Au_Johnson.yml"
+# "Silver_Material" = "assets/refractiveindex/Ag_Johnson.yml"
+# "Copper_Material" = "assets/refractiveindex/Cu_Johnson.yml"
+# "Aluminum_Material" = "assets/refractiveindex/Al_Rakic.yml"
+#
+# NOTE: The material name must match the glTF material name exactly.
+#
+# NOTE: If a material is not listed here, it will use standard PBR F0
+# approximation: F0 = 0.04 + metallic * (baseColor - 0.04)
+# For accurate metal rendering, provide measured n,k data.
+# ============================================================================
+# [refractive_index]
 # Uncomment and add your material mappings here
 

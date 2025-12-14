@@ -30,6 +30,12 @@ public:
     // Returns true on success, false on failure
     static bool WriteEXR(const std::string& filepath, const Image& image);
 
+    // Write image to PNG file (8-bit sRGB output)
+    // Converts HDR float data to LDR with optional gamma correction
+    // Input channels: 1 (grayscale), 3 (RGB), or 4 (RGBA)
+    // Returns true on success, false on failure
+    static bool WritePNG(const std::string& filepath, const Image& image);
+
     // ========================================================================
     // EXR Reading
     // ========================================================================

@@ -1015,10 +1015,11 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
     );
 
     // Push constants (camera + sampling parameters)
+    // IMPORTANT: stageFlags must match the pipeline layout push constant range
     vkCmdPushConstants(
         cmd,
         m_pipelineLayout,
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR,
         0,
         sizeof(PushConstantsRayGen),
         &m_pushConstants

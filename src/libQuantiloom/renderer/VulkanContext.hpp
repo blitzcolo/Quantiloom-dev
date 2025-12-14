@@ -118,9 +118,11 @@ private:
 
     VmaAllocator m_allocator = VK_NULL_HANDLE;  // Last created, first destroyed
 
-#ifdef QUANTILOOM_ENABLE_VALIDATION
+    // Debug messenger - CRITICAL: Do NOT wrap in #ifdef to avoid ODR violation!
+    // Different translation units may have different QUANTILOOM_ENABLE_VALIDATION
+    // definitions, causing class layout mismatch and memory corruption.
+    // Instead, keep the member always present and guard only the usage code.
     VkDebugUtilsMessengerEXT m_debugMessenger = VK_NULL_HANDLE;
-#endif
 };
 
 } // namespace quantiloom

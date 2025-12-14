@@ -51,11 +51,11 @@ using Wavelength = f32;
 // ============================================================================
 
 enum class SpectralMode : u32 {
-    Single       = 0,  // Single wavelength (grayscale output)
-    RGB          = 1,  // RGB rendering with spectral conversions
+    Single       = 0,  // Single wavelength (grayscale output, EXR only)
+    RGB_Fused    = 1,  // RGB fusion with CIE XYZ -> sRGB (outputs EXR + PNG)
     Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
-    MWIR_Fused   = 3,  // Mid-wave IR fusion (3000-5000nm)
-    LWIR_Fused   = 4   // Long-wave IR fusion (8000-12000nm)
+    MWIR_Fused   = 3,  // Mid-wave IR fusion 3000-5000nm (outputs EXR + PNG)
+    LWIR_Fused   = 4   // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
 };
 
 // ============================================================================
@@ -148,8 +148,9 @@ auto Err(E&& error) {
 inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str) {
     if (mode_str == "single" || mode_str == "single_wavelength") {
         return Result(SpectralMode::Single);
-    } else if (mode_str == "rgb" || mode_str == "RGB") {
-        return Result(SpectralMode::RGB);
+    } else if (mode_str == "rgb_fused" || mode_str == "rgb" || mode_str == "RGB") {
+        // Accept both new name (rgb_fused) and legacy name (rgb) for compatibility
+        return Result(SpectralMode::RGB_Fused);
     } else if (mode_str == "multispectral") {
         return Result(SpectralMode::Multispectral);
     } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {

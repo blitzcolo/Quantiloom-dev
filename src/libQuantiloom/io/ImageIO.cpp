@@ -1,5 +1,9 @@
 #include "ImageIO.hpp"
 
+// stb_image_write for PNG output (header-only library)
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include <stb_image_write.h>
+
 #include <OpenEXR/ImfRgbaFile.h>
 #include <OpenEXR/ImfArray.h>
 #include <OpenEXR/ImfChannelList.h>
@@ -141,6 +145,67 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
 
     } catch (const std::exception& e) {
         QL_LOG_ERROR("ImageIO::WriteEXR: Failed to write {}: {}", filepath, e.what());
+        return false;
+    }
+}
+
+// ============================================================================
+// Public API: WritePNG
+// ============================================================================
+
+bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
+    if (!image.IsValid()) {
+        QL_LOG_ERROR("ImageIO::WritePNG: Invalid image");
+        return false;
+    }
+
+    // PNG supports 1 (grayscale), 3 (RGB), or 4 (RGBA) channels
+    if (image.channels != 1 && image.channels != 3 && image.channels != 4) {
+        QL_LOG_ERROR("ImageIO::WritePNG: Unsupported channel count {} (need 1, 3, or 4)",
+                     image.channels);
+        return false;
+    }
+
+    try {
+        // Convert float [0,1] to uint8 [0,255] with clamping
+        std::vector<uint8_t> pixels(image.width * image.height * image.channels);
+
+        for (u32 y = 0; y < image.height; ++y) {
+            for (u32 x = 0; x < image.width; ++x) {
+                for (u32 c = 0; c < image.channels; ++c) {
+                    float value = image(x, y, c);
+
+                    // Clamp to [0, 1] range (HDR values may exceed 1.0)
+                    value = std::clamp(value, 0.0f, 1.0f);
+
+                    // Convert to 8-bit (image data is already in sRGB if from CIE XYZ conversion)
+                    pixels[(y * image.width + x) * image.channels + c] =
+                        static_cast<uint8_t>(value * 255.0f + 0.5f);
+                }
+            }
+        }
+
+        // Write PNG (stride = width * channels)
+        int result = stbi_write_png(
+            filepath.c_str(),
+            static_cast<int>(image.width),
+            static_cast<int>(image.height),
+            static_cast<int>(image.channels),
+            pixels.data(),
+            static_cast<int>(image.width * image.channels)
+        );
+
+        if (result == 0) {
+            QL_LOG_ERROR("ImageIO::WritePNG: stbi_write_png failed for {}", filepath);
+            return false;
+        }
+
+        QL_LOG_INFO("ImageIO::WritePNG: Wrote {}x{} image with {} channels to {}",
+                    image.width, image.height, image.channels, filepath);
+        return true;
+
+    } catch (const std::exception& e) {
+        QL_LOG_ERROR("ImageIO::WritePNG: Failed to write {}: {}", filepath, e.what());
         return false;
     }
 }

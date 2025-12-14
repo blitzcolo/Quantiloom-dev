@@ -610,7 +610,7 @@ int main(int argc, char* argv[]) {
         f32 sunRadiance_spectral = (sunRadiance.r + sunRadiance.g + sunRadiance.b) / 3.0f;
         f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
-        if (spectral_mode == SpectralMode::RGB) {
+        if (spectral_mode == SpectralMode::RGB_Fused) {
             QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
                         sunRadiance.r, sunRadiance.g, sunRadiance.b);
             QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
@@ -1439,7 +1439,7 @@ int main(int argc, char* argv[]) {
             img.metadata["quality_level"] = "PREVIEW_ONLY";
             img.metadata["warning"] = "RGB-averaged spectral albedo, not quantitative";
             img.metadata["note"] = "For quantitative results use mode=hs_off with measured spectra";
-        } else if (spectral_mode == SpectralMode::RGB) {
+        } else if (spectral_mode == SpectralMode::RGB_Fused) {
             img.metadata["quality_level"] = "PREVIEW";
             img.metadata["note"] = "RGB rendering, preview quality";
         }
@@ -1462,6 +1462,36 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  [OK] Saved spectral image to {}", outputPath);
         } else {
             QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outputPath);
+        }
+
+        // For fused modes (RGB, MWIR, LWIR), also save PNG preview
+        // These modes output both EXR (HDR/physical) and PNG (LDR preview)
+        bool isFusedMode = (spectral_mode == SpectralMode::RGB_Fused ||
+                           spectral_mode == SpectralMode::MWIR_Fused ||
+                           spectral_mode == SpectralMode::LWIR_Fused);
+
+        if (isFusedMode) {
+            // Generate PNG path from EXR path (replace extension)
+            std::filesystem::path exrPath(outputPath);
+            std::filesystem::path pngPath = exrPath.parent_path() / (exrPath.stem().string() + ".png");
+
+            // Create RGB image for PNG (drop alpha channel)
+            Image pngImg(width, height, 3);
+            pngImg.channelNames = {"R", "G", "B"};
+
+            for (u32 y = 0; y < height; ++y) {
+                for (u32 x = 0; x < width; ++x) {
+                    pngImg(x, y, 0) = img(x, y, 0);  // R
+                    pngImg(x, y, 1) = img(x, y, 1);  // G
+                    pngImg(x, y, 2) = img(x, y, 2);  // B
+                }
+            }
+
+            if (ImageIO::WritePNG(pngPath.string(), pngImg)) {
+                QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
+            } else {
+                QL_LOG_WARN("  [WARN] Failed to save PNG preview to {}", pngPath.string());
+            }
         }
 
         // ====================================================================

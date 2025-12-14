@@ -63,20 +63,16 @@ VulkanContext::~VulkanContext() {
         vkDestroyDevice(m_device, nullptr);
     }
 
-#ifdef QUANTILOOM_ENABLE_VALIDATION
-    // IMPORTANT: Save the handle and null it out before destroying to prevent
-    // validation layer from reporting issues during its own destruction
+    // Destroy debug messenger if it was created (always check, regardless of build config)
+    // This avoids ODR issues where different TUs have different QUANTILOOM_ENABLE_VALIDATION
     if (m_debugMessenger != VK_NULL_HANDLE) {
-        VkDebugUtilsMessengerEXT messengerToDestroy = m_debugMessenger;
-        m_debugMessenger = VK_NULL_HANDLE;
-
         auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)
             vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT");
         if (func != nullptr) {
-            func(m_instance, messengerToDestroy, nullptr);
+            func(m_instance, m_debugMessenger, nullptr);
         }
+        m_debugMessenger = VK_NULL_HANDLE;
     }
-#endif
 
     if (m_instance != VK_NULL_HANDLE) {
         vkDestroyInstance(m_instance, nullptr);

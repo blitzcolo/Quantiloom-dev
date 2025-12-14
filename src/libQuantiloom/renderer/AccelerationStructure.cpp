@@ -4,6 +4,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <stdexcept>
 #include <cstring>
+#include <memory>
 
 namespace quantiloom {
 
@@ -90,26 +91,62 @@ void BLAS::UploadGeometryBuffers() {
     }
 
     // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
+    // CRITICAL: Staging buffers MUST be created OUTSIDE the lambda to ensure they
+    // remain valid until the command buffer is submitted and GPU operations complete.
+    // If created inside the lambda, they would be destroyed before vkEndCommandBuffer,
+    // causing validation errors (VkBuffer destroyed while command buffer still recording).
+
+    // Create staging buffers OUTSIDE the lambda (CPU-accessible)
+    GpuBuffer vertexStaging(
+        allocator,
+        vertexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    GpuBuffer indexStaging(
+        allocator,
+        indexBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    // Upload data to staging buffers
+    vertexStaging.Upload(m_primitive.positions.data(), vertexBufferSize);
+    indexStaging.Upload(m_primitive.indices.data(), indexBufferSize);
+
+    // Create UV staging buffer if needed
+    std::unique_ptr<GpuBuffer> uvStaging;
+    if (hasUVs) {
+        const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
+        uvStaging = std::make_unique<GpuBuffer>(
+            allocator,
+            uvBufferSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_ONLY
+        );
+        uvStaging->Upload(m_primitive.uvs.data(), uvBufferSize);
+    }
+
+    // Create tangent staging buffer
+    GpuBuffer tangentStaging(
+        allocator,
+        tangentBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    if (hasTangents) {
+        tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
+        QL_LOG_DEBUG("  BLAS: Prepared {} real tangents for upload", tangentCount);
+    } else {
+        const std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+        tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
+        QL_LOG_DEBUG("  BLAS: Prepared {} fallback tangents for upload", tangentCount);
+    }
+
+    // Execute copy commands (staging buffers remain valid throughout)
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        // Create staging buffers (CPU-accessible)
-        GpuBuffer vertexStaging(
-            allocator,
-            vertexBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY
-        );
-
-        GpuBuffer indexStaging(
-            allocator,
-            indexBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY
-        );
-
-        // Upload data to staging buffers
-        vertexStaging.Upload(m_primitive.positions.data(), vertexBufferSize);
-        indexStaging.Upload(m_primitive.indices.data(), indexBufferSize);
-
         // Copy staging → device-local
         VkBufferCopy vertexCopyRegion{};
         vertexCopyRegion.size = vertexBufferSize;
@@ -120,42 +157,16 @@ void BLAS::UploadGeometryBuffers() {
         vkCmdCopyBuffer(cmd, indexStaging.GetHandle(), m_indexBuffer->GetHandle(), 1, &indexCopyRegion);
 
         // Upload UV data if present
-        if (hasUVs) {
+        if (hasUVs && uvStaging) {
             const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
-            GpuBuffer uvStaging(
-                allocator,
-                uvBufferSize,
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VMA_MEMORY_USAGE_CPU_ONLY
-            );
-            uvStaging.Upload(m_primitive.uvs.data(), uvBufferSize);
-
             VkBufferCopy uvCopyRegion{};
             uvCopyRegion.size = uvBufferSize;
-            vkCmdCopyBuffer(cmd, uvStaging.GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
+            vkCmdCopyBuffer(cmd, uvStaging->GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
 
             QL_LOG_INFO("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
         }
 
-        // Upload tangent data (use fallback if not present)
-        GpuBuffer tangentStaging(
-            allocator,
-            tangentBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY
-        );
-
-        if (hasTangents) {
-            // Upload real tangent data
-            tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
-            QL_LOG_DEBUG("  BLAS: Uploaded {} real tangents to GPU", tangentCount);
-        } else {
-            // Upload fallback tangent data (X-axis tangent with positive handedness)
-            const std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
-            tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
-            QL_LOG_DEBUG("  BLAS: Uploaded {} fallback tangents to GPU", tangentCount);
-        }
-
+        // Upload tangent data
         VkBufferCopy tangentCopyRegion{};
         tangentCopyRegion.size = tangentBufferSize;
         vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
@@ -176,6 +187,7 @@ void BLAS::UploadGeometryBuffers() {
             0, nullptr
         );
     });
+    // Staging buffers are destroyed here, AFTER ExecuteImmediate completes (GPU done)
 
     QL_LOG_INFO("  Uploaded geometry via staging buffers: {} vertices, {} indices",
                 m_primitive.positions.size(), m_primitive.indices.size());
