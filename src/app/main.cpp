@@ -957,18 +957,35 @@ int main(int argc, char* argv[]) {
         materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
 
         // ====================================================================
-        // Generate BRDF Integration LUT for IBL
+        // Load or Generate BRDF Integration LUT for IBL (with Disk Caching)
         // ====================================================================
-        // TODO (Optimization): Add disk caching to avoid 6-second regeneration on each run
-        // Potential cache format: Binary (.dat) or HDF5 (.h5) with metadata
-        // Cache key: resolution + sampleCount + BRDF model (GGX)
-        // See docs/DATA_PREPARATION.md for caching strategy
-        QL_LOG_INFO("Generating BRDF integration LUT for IBL (this may take 5-10 seconds)...");
+        // The BRDF LUT is scene-independent and can be cached to disk.
+        // First run: Generate (5-10 seconds) and save to cache
+        // Subsequent runs: Load from cache (instant)
+        // ====================================================================
 
         BRDFLutGenerator::Config brdfConfig;
         brdfConfig.resolution = 512;
         brdfConfig.sampleCount = 1024;
-        Image brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
+
+        const String brdfCachePath = "assets/luts/brdf_lut_512_ggx.bin";
+        Image brdfLutImage;
+
+        // Try to load from cache first
+        auto cachedLut = BRDFLutGenerator::LoadFromBinary(brdfCachePath, &brdfConfig);
+        if (cachedLut.has_value()) {
+            QL_LOG_INFO("BRDF LUT loaded from cache (skipped 5-10 second generation)");
+            brdfLutImage = std::move(cachedLut.value());
+        } else {
+            // Cache miss: Generate and save
+            QL_LOG_INFO("Generating BRDF integration LUT for IBL (this may take 5-10 seconds)...");
+            brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
+
+            // Save to cache for next run
+            if (BRDFLutGenerator::SaveToBinary(brdfCachePath, brdfLutImage, brdfConfig)) {
+                QL_LOG_INFO("  BRDF LUT cached to {} for future runs", brdfCachePath);
+            }
+        }
 
         // Upload BRDF LUT to GPU
         QL_LOG_INFO("  Uploading BRDF LUT to GPU...");

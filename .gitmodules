@@ -8,3 +8,6 @@
 [submodule "reference-only/vk_gltf_renderer"]
 	path = reference-only/vk_gltf_renderer
 	url = https://github.com/nvpro-samples/vk_gltf_renderer.git
+[submodule "assets/refractiveindex"]
+	path = assets/refractiveindex
+	url = https://github.com/polyanskiy/refractiveindex.info-database.git

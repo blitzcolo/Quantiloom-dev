@@ -201,6 +201,11 @@ set(TEST_IO_SOURCES
     test_io/test_gltf_loader.cpp
 )
 
+# Renderer tests (non-Vulkan components only)
+set(TEST_RENDERER_SOURCES
+    test_renderer/test_brdf_lut.cpp
+)
+
 # Test main (custom main function with logging initialization)
 set(TEST_MAIN_SOURCE
     test_main.cpp
@@ -212,6 +217,7 @@ set(ALL_TEST_SOURCES
     ${TEST_CORE_SOURCES}
     ${TEST_SCENE_SOURCES}
     ${TEST_IO_SOURCES}
+    ${TEST_RENDERER_SOURCES}
 )
 
 # ============================================================================
@@ -300,6 +306,13 @@ add_custom_target(test_io
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Run only renderer tests (non-Vulkan)
+add_custom_target(test_renderer
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*
+    DEPENDS libquantiloom_tests
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # ============================================================================
 # Optional: Code Coverage (Linux/GCC only)
 # ============================================================================
@@ -335,6 +348,7 @@ message(STATUS "  Test executable: libquantiloom_tests")
 message(STATUS "  Core tests:      ${TEST_CORE_SOURCES}")
 message(STATUS "  Scene tests:     ${TEST_SCENE_SOURCES}")
 message(STATUS "  IO tests:        ${TEST_IO_SOURCES}")
+message(STATUS "  Renderer tests:  ${TEST_RENDERER_SOURCES}")
 message(STATUS "  Total tests:     ${ALL_TEST_SOURCES}")
 message(STATUS "==================================================")
 message(STATUS "Build and run:")

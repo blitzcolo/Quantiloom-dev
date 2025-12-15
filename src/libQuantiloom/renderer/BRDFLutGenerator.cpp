@@ -5,8 +5,21 @@
 #include <glm/gtc/constants.hpp>
 #include <cmath>
 #include <algorithm>
+#include <fstream>
+#include <filesystem>
 
 namespace quantiloom {
+
+// ============================================================================
+// Binary Cache Header Structure
+// ============================================================================
+
+struct BRDFLutCacheHeader {
+    u32 magic;          // CACHE_MAGIC for validation
+    u32 version;        // CACHE_VERSION for compatibility
+    u32 resolution;     // LUT texture size (NxN)
+    u32 sampleCount;    // Monte Carlo samples used to generate
+};
 
 // ============================================================================
 // Public API
@@ -72,6 +85,154 @@ bool BRDFLutGenerator::GenerateAndSave(const String& filepath) {
 }
 
 // ============================================================================
+// Binary Cache I/O Implementation
+// ============================================================================
+
+bool BRDFLutGenerator::SaveToBinary(const String& filepath, const Image& lut, const Config& config) {
+    // Validate image
+    if (lut.width != config.resolution || lut.height != config.resolution || lut.channels != 2) {
+        QL_LOG_ERROR("SaveToBinary: Image dimensions don't match config ({}x{}x{} vs {}x{}x2)",
+                     lut.width, lut.height, lut.channels, config.resolution, config.resolution);
+        return false;
+    }
+
+    // Create parent directories if they don't exist
+    std::filesystem::path filePath(filepath);
+    if (filePath.has_parent_path()) {
+        std::filesystem::create_directories(filePath.parent_path());
+    }
+
+    // Open file for binary writing
+    std::ofstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        QL_LOG_ERROR("SaveToBinary: Failed to open file for writing: {}", filepath);
+        return false;
+    }
+
+    // Write header
+    BRDFLutCacheHeader header{};
+    header.magic = CACHE_MAGIC;
+    header.version = CACHE_VERSION;
+    header.resolution = config.resolution;
+    header.sampleCount = config.sampleCount;
+
+    file.write(reinterpret_cast<const char*>(&header), sizeof(header));
+
+    // Write raw float data
+    const size_t dataSize = lut.data.size() * sizeof(f32);
+    file.write(reinterpret_cast<const char*>(lut.data.data()), static_cast<std::streamsize>(dataSize));
+
+    if (!file.good()) {
+        QL_LOG_ERROR("SaveToBinary: Write error occurred");
+        return false;
+    }
+
+    file.close();
+    QL_LOG_INFO("SaveToBinary: Saved BRDF LUT cache to {} ({} bytes)", filepath, sizeof(header) + dataSize);
+    return true;
+}
+
+std::optional<Image> BRDFLutGenerator::LoadFromBinary(const String& filepath, const Config* expectedConfig) {
+    // Check if file exists
+    if (!std::filesystem::exists(filepath)) {
+        QL_LOG_INFO("LoadFromBinary: Cache file not found: {}", filepath);
+        return std::nullopt;
+    }
+
+    // Open file for binary reading
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        QL_LOG_WARN("LoadFromBinary: Failed to open cache file: {}", filepath);
+        return std::nullopt;
+    }
+
+    // Read header
+    BRDFLutCacheHeader header{};
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+
+    if (!file.good()) {
+        QL_LOG_WARN("LoadFromBinary: Failed to read header from {}", filepath);
+        return std::nullopt;
+    }
+
+    // Validate magic number
+    if (header.magic != CACHE_MAGIC) {
+        QL_LOG_WARN("LoadFromBinary: Invalid magic number in {} (expected 0x{:08X}, got 0x{:08X})",
+                    filepath, CACHE_MAGIC, header.magic);
+        return std::nullopt;
+    }
+
+    // Validate version
+    if (header.version != CACHE_VERSION) {
+        QL_LOG_WARN("LoadFromBinary: Version mismatch in {} (expected {}, got {})",
+                    filepath, CACHE_VERSION, header.version);
+        return std::nullopt;
+    }
+
+    // Validate against expected config if provided
+    if (expectedConfig != nullptr) {
+        if (header.resolution != expectedConfig->resolution) {
+            QL_LOG_WARN("LoadFromBinary: Resolution mismatch (cached: {}, expected: {})",
+                        header.resolution, expectedConfig->resolution);
+            return std::nullopt;
+        }
+        if (header.sampleCount != expectedConfig->sampleCount) {
+            QL_LOG_WARN("LoadFromBinary: Sample count mismatch (cached: {}, expected: {})",
+                        header.sampleCount, expectedConfig->sampleCount);
+            return std::nullopt;
+        }
+    }
+
+    // Create image
+    Image lut(header.resolution, header.resolution, 2);
+    lut.channelNames = {"scale", "bias"};
+    lut.metadata["generator"] = "Quantiloom_BRDFLutGenerator";
+    lut.metadata["resolution"] = std::to_string(header.resolution);
+    lut.metadata["samples"] = std::to_string(header.sampleCount);
+    lut.metadata["source"] = "cache";
+
+    // Read raw float data
+    const size_t dataSize = lut.data.size() * sizeof(f32);
+    file.read(reinterpret_cast<char*>(lut.data.data()), static_cast<std::streamsize>(dataSize));
+
+    if (!file.good()) {
+        QL_LOG_WARN("LoadFromBinary: Failed to read data from {}", filepath);
+        return std::nullopt;
+    }
+
+    file.close();
+    QL_LOG_INFO("LoadFromBinary: Loaded BRDF LUT from cache {} ({}x{}, {} samples)",
+                filepath, header.resolution, header.resolution, header.sampleCount);
+    return lut;
+}
+
+bool BRDFLutGenerator::IsCacheValid(const String& filepath, const Config& expectedConfig) {
+    // Check if file exists
+    if (!std::filesystem::exists(filepath)) {
+        return false;
+    }
+
+    // Open file for binary reading
+    std::ifstream file(filepath, std::ios::binary);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    // Read header only
+    BRDFLutCacheHeader header{};
+    file.read(reinterpret_cast<char*>(&header), sizeof(header));
+    file.close();
+
+    // Validate
+    if (header.magic != CACHE_MAGIC) return false;
+    if (header.version != CACHE_VERSION) return false;
+    if (header.resolution != expectedConfig.resolution) return false;
+    if (header.sampleCount != expectedConfig.sampleCount) return false;
+
+    return true;
+}
+
+// ============================================================================
 // Internal Implementation
 // ============================================================================
 
@@ -127,6 +288,7 @@ glm::vec2 BRDFLutGenerator::IntegrateBRDF(const f32 NdotV, const f32 roughness, 
 }
 
 glm::vec3 BRDFLutGenerator::ImportanceSampleGGX(const glm::vec2 Xi, glm::vec3 N, const f32 roughness) {
+    (void)N;  // Unused: N is fixed to (0, 0, 1), tangent frame is identity
     const f32 a = roughness * roughness;
 
     // Spherical coordinates (GGX distribution)

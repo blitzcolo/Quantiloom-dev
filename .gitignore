@@ -80,3 +80,5 @@ conan/
 src/shaders/*.exr
 src/shaders/*.spv
 .agent/
+assets/usgs/
+reference-only/

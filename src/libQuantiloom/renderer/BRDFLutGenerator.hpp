@@ -4,6 +4,7 @@
 #include "core/Image.hpp"
 #include <glm/glm.hpp>
 #include <vector>
+#include <optional>
 
 // ============================================================================
 // BRDF LUT Generator - For Image-Based Lighting (IBL)
@@ -19,6 +20,10 @@
 // Usage:
 //   float2 brdf = brdfLUT.Sample(NdotV, roughness);
 //   float3 ibl = prefilteredColor * (F0 * brdf.x + brdf.y);
+//
+// Caching:
+//   The LUT is scene-independent and can be cached to disk as a binary file.
+//   Use LoadFromBinary() to skip expensive Monte Carlo integration.
 //
 // References:
 // - Epic Games, "Real Shading in Unreal Engine 4" (2013)
@@ -52,6 +57,27 @@ public:
     static bool GenerateAndSave(const String& filepath, const Config& config);
     static bool GenerateAndSave(const String& filepath);  // Uses default Config
 
+    // ========================================================================
+    // Binary Cache I/O (Fast Load/Save)
+    // ========================================================================
+    // Binary format for fast caching without EXR overhead.
+    // File structure:
+    //   - Header (16 bytes): magic(4) + version(4) + resolution(4) + sampleCount(4)
+    //   - Data: raw float32 array (resolution × resolution × 2 channels)
+    // ========================================================================
+
+    // Save generated LUT to binary cache file
+    // Returns true on success, false on failure
+    static bool SaveToBinary(const String& filepath, const Image& lut, const Config& config);
+
+    // Load LUT from binary cache file
+    // Returns Image if file exists and is valid, std::nullopt otherwise
+    // expectedConfig: If provided, validates that cached file matches expected parameters
+    static std::optional<Image> LoadFromBinary(const String& filepath, const Config* expectedConfig = nullptr);
+
+    // Check if binary cache file exists and is valid
+    static bool IsCacheValid(const String& filepath, const Config& expectedConfig);
+
 private:
     // ========================================================================
     // Internal Computation
@@ -72,6 +98,12 @@ private:
 
     // Radical inverse (for Hammersley)
     static f32 RadicalInverse_VdC(u32 bits);
+
+    // ========================================================================
+    // Binary Format Constants
+    // ========================================================================
+    static constexpr u32 CACHE_MAGIC = 0x4C444642;   // "BFDL" (BRDF LUT)
+    static constexpr u32 CACHE_VERSION = 1;
 };
 
 } // namespace quantiloom
