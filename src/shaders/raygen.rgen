@@ -16,7 +16,7 @@
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
-[[vk::binding(2, 0)]] StructuredBuffer<LUTData> skyLUT;
+[[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;  // Fallback lighting (unused here)
 
 // ============================================================================
 // Push Constants (Extended for Accumulation Sampling)

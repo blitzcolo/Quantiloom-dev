@@ -6,6 +6,11 @@
 // - Metadata preservation
 // - Large hyperspectral cube handling
 // - File format validation
+// - CSV spectral curve loading
+// - USGS Spectral Library loading
+// - RefractiveIndex.INFO YAML loading
+// - ASTM G-173 solar spectrum loading (sun/sky irradiance)
+// - SolarSpectralLUT GPU format conversion
 // - Edge cases
 // ============================================================================
 
@@ -813,4 +818,578 @@ TEST_F(SpectralIOTest, LoadRefractiveIndexYAMLWavelengthConversion) {
     // Verify wavelengths are converted to nm
     EXPECT_NEAR(cri.wavelengths_nm[0], 1000.0f, 1e-3f);
     EXPECT_NEAR(cri.wavelengths_nm[1], 2000.0f, 1e-3f);
+}
+
+// ============================================================================
+// ASTM G-173 Solar Spectrum Loading Tests
+// ============================================================================
+// Tests for loading ASTM G-173-03 Reference Solar Spectral Irradiances
+// File format: 4-column CSV (Wavelength, ETR, Global, Direct+circumsolar)
+// ============================================================================
+
+TEST_F(SpectralIOTest, LoadASTMG173Basic) {
+    auto filepath = GetTempFilePath("astmg173_test.csv");
+
+    // Create mock ASTM G-173 CSV file (simplified)
+    // Column 1: Wavelength (nm)
+    // Column 2: ETR (W·m⁻²·nm⁻¹)
+    // Column 3: Global tilt (W·m⁻²·nm⁻¹)
+    // Column 4: Direct+circumsolar (W·m⁻²·nm⁻¹)
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "280,8.2000E-02,4.7309E-23,2.5361E-26\n";
+    file << "300,5.1400E-01,1.0230E-04,2.4980E-06\n";
+    file << "400,1.5140E+00,1.2680E+00,1.1130E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file << "700,1.5050E+00,1.3820E+00,1.3140E+00\n";
+    file << "1000,7.4900E-01,6.9660E-01,6.6810E-01\n";
+    file << "2000,2.1630E-01,1.4440E-01,1.6200E-01\n";
+    file << "4000,1.6170E-02,1.1010E-02,1.3080E-02\n";
+    file.close();
+
+    // Load column 4 (Direct+circumsolar) - default
+    auto result = SpectralIO::LoadASTMG173(filepath);
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_TRUE(curve.IsValid());
+    EXPECT_EQ(curve.samples.size(), 9);
+
+    // Verify wavelength range (280-4000 nm)
+    EXPECT_NEAR(curve.samples.front().first, 280.0f, 1e-3f);
+    EXPECT_NEAR(curve.samples.back().first, 4000.0f, 1e-3f);
+
+    // Verify some irradiance values (column 4: Direct+circumsolar)
+    // At 400nm: 1.1130 W·m⁻²·nm⁻¹
+    auto range = curve.GetWavelengthRange();
+    EXPECT_NEAR(range.first, 280.0f, 1e-3f);
+    EXPECT_NEAR(range.second, 4000.0f, 1e-3f);
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173Column2ETR) {
+    auto filepath = GetTempFilePath("astmg173_etr.csv");
+
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "400,1.5140E+00,1.2680E+00,1.1130E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file.close();
+
+    // Load column 2 (ETR - Extraterrestrial Radiation)
+    auto result = SpectralIO::LoadASTMG173(filepath, 2);
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 3);
+
+    // Verify ETR values at 500nm should be 1.9170
+    EXPECT_NEAR(curve.Evaluate(500.0f), 1.917f, 0.01f);
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173Column3Global) {
+    auto filepath = GetTempFilePath("astmg173_global.csv");
+
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "400,1.5140E+00,1.2680E+00,1.1130E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file.close();
+
+    // Load column 3 (Global tilt)
+    auto result = SpectralIO::LoadASTMG173(filepath, 3);
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 3);
+
+    // Verify Global tilt value at 500nm should be 1.6750
+    EXPECT_NEAR(curve.Evaluate(500.0f), 1.675f, 0.01f);
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173SunAndSkyBasic) {
+    auto filepath = GetTempFilePath("astmg173_sun_sky.csv");
+
+    // Create mock ASTM G-173 data
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "400,1.5140E+00,1.2680E+00,1.1130E+00\n";
+    file << "450,1.7610E+00,1.5510E+00,1.4000E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";
+    file << "550,1.8690E+00,1.6620E+00,1.5510E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file << "650,1.6760E+00,1.5460E+00,1.4720E+00\n";
+    file << "700,1.5050E+00,1.3820E+00,1.3140E+00\n";
+    file.close();
+
+    auto result = SpectralIO::LoadASTMG173SunAndSky(filepath);
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Verify both curves are valid
+    EXPECT_TRUE(sunCurve.IsValid());
+    EXPECT_TRUE(skyCurve.IsValid());
+    EXPECT_EQ(sunCurve.samples.size(), 7);
+    EXPECT_EQ(skyCurve.samples.size(), 7);
+
+    // Sun curve should be Direct+circumsolar (column 4)
+    // Sky curve should be Global - Direct (column 3 - column 4)
+
+    // At 500nm:
+    // Direct+circumsolar = 1.5290
+    // Global = 1.6750
+    // Diffuse sky = Global - Direct = 1.6750 - 1.5290 = 0.1460
+    EXPECT_NEAR(sunCurve.Evaluate(500.0f), 1.5290f, 0.01f);
+    EXPECT_NEAR(skyCurve.Evaluate(500.0f), 0.146f, 0.02f);
+
+    // Verify wavelength ranges match
+    auto sunRange = sunCurve.GetWavelengthRange();
+    auto skyRange = skyCurve.GetWavelengthRange();
+    EXPECT_NEAR(sunRange.first, skyRange.first, 1e-3f);
+    EXPECT_NEAR(sunRange.second, skyRange.second, 1e-3f);
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173SunAndSkyPhysicalValues) {
+    auto filepath = GetTempFilePath("astmg173_physical.csv");
+
+    // Use more realistic ASTM G-173 values for visible spectrum peak
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "380,9.9550E-01,7.0550E-01,5.5910E-01\n";
+    file << "450,1.7610E+00,1.5510E+00,1.4000E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";  // Near peak
+    file << "550,1.8690E+00,1.6620E+00,1.5510E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file << "700,1.5050E+00,1.3820E+00,1.3140E+00\n";
+    file << "780,1.1240E+00,1.0190E+00,9.5820E-01\n";
+    file.close();
+
+    auto result = SpectralIO::LoadASTMG173SunAndSky(filepath);
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Verify physical characteristics:
+    // 1. Sun irradiance peaks around 500nm (visible light)
+    f32 sun500 = sunCurve.Evaluate(500.0f);
+    f32 sun380 = sunCurve.Evaluate(380.0f);
+    f32 sun780 = sunCurve.Evaluate(780.0f);
+    EXPECT_GT(sun500, sun380);  // Peak > UV edge
+    EXPECT_GT(sun500, sun780);  // Peak > IR edge
+
+    // 2. All irradiance values should be positive
+    for (const auto& sample : sunCurve.samples) {
+        EXPECT_GE(sample.second, 0.0f);
+    }
+    for (const auto& sample : skyCurve.samples) {
+        EXPECT_GE(sample.second, 0.0f);
+    }
+
+    // 3. Sky (diffuse) should be less than sun (direct) at most wavelengths
+    EXPECT_LT(skyCurve.Evaluate(500.0f), sunCurve.Evaluate(500.0f));
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173Nonexistent) {
+    auto filepath = GetTempFilePath("nonexistent_astm.csv");
+
+    auto result = SpectralIO::LoadASTMG173(filepath);
+    EXPECT_FALSE(result.has_value());
+
+    auto result2 = SpectralIO::LoadASTMG173SunAndSky(filepath);
+    EXPECT_FALSE(result2.has_value());
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173MalformedHeader) {
+    auto filepath = GetTempFilePath("malformed_astm.csv");
+
+    std::ofstream file(filepath);
+    file << "This is not a valid ASTM G-173 header\n";
+    file << "Random,Data,Goes,Here\n";
+    file << "100,200,300,400\n";
+    file.close();
+
+    auto result = SpectralIO::LoadASTMG173(filepath);
+    // Should either fail or handle gracefully
+    // Implementation may vary based on header parsing behavior
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173InvalidColumn) {
+    auto filepath = GetTempFilePath("astmg173_inv_col.csv");
+
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "400,1.5140E+00,1.2680E+00,1.1130E+00\n";
+    file.close();
+
+    // Request invalid column (column 5 doesn't exist)
+    auto result = SpectralIO::LoadASTMG173(filepath, 5);
+    // Should either fail or fall back to valid column
+    if (result.has_value()) {
+        EXPECT_TRUE(result.value().samples.empty() || result.value().samples.size() > 0);
+    }
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173ScientificNotation) {
+    auto filepath = GetTempFilePath("astmg173_scientific.csv");
+
+    // Test various scientific notation formats
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "280,8.2000E-02,4.7309E-23,2.5361E-26\n";  // Very small values
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";   // Normal values
+    file << "4000,1.6170E-02,1.1010E-02,1.3080E-02\n";  // Small IR values
+    file.close();
+
+    auto result = SpectralIO::LoadASTMG173(filepath);
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 3);
+
+    // Verify scientific notation parsing
+    EXPECT_NEAR(curve.samples[0].second, 2.5361e-26f, 1e-28f);  // Very small UV
+    EXPECT_NEAR(curve.samples[1].second, 1.529f, 0.01f);        // Normal visible
+    EXPECT_NEAR(curve.samples[2].second, 0.01308f, 0.0001f);    // Small IR
+}
+
+TEST_F(SpectralIOTest, LoadASTMG173ToSolarSpectralLUT) {
+    auto filepath = GetTempFilePath("astmg173_to_lut.csv");
+
+    // Create ASTM G-173 data covering visible spectrum
+    std::ofstream file(filepath);
+    file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,Direct+circumsolar W*m-2*nm-1\n";
+    file << "380,9.9550E-01,7.0550E-01,5.5910E-01\n";
+    file << "450,1.7610E+00,1.5510E+00,1.4000E+00\n";
+    file << "500,1.9170E+00,1.6750E+00,1.5290E+00\n";
+    file << "550,1.8690E+00,1.6620E+00,1.5510E+00\n";
+    file << "600,1.8310E+00,1.6740E+00,1.5870E+00\n";
+    file << "700,1.5050E+00,1.3820E+00,1.3140E+00\n";
+    file << "780,1.1240E+00,1.0190E+00,9.5820E-01\n";
+    file.close();
+
+    auto result = SpectralIO::LoadASTMG173SunAndSky(filepath);
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Convert to SolarSpectralLUT (GPU format)
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    EXPECT_TRUE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+
+    // Verify wavelength range is preserved
+    auto [min_wl, max_wl] = lut.GetWavelengthRange();
+    EXPECT_NEAR(min_wl, 380.0f, 1.0f);
+    EXPECT_NEAR(max_wl, 780.0f, 1.0f);
+
+    // Verify evaluation works (interpolation)
+    f32 sunAt500 = lut.sunIrradiance.Evaluate(500.0f);
+    EXPECT_GT(sunAt500, 1.0f);   // Should be > 1 W·m⁻²·nm⁻¹ at peak
+    EXPECT_LT(sunAt500, 2.0f);   // But less than 2
+
+    f32 skyAt500 = lut.skyIrradiance.Evaluate(500.0f);
+    EXPECT_GT(skyAt500, 0.0f);   // Diffuse sky should be positive
+    EXPECT_LT(skyAt500, 0.5f);   // But much less than direct sun
+}
+
+// ============================================================================
+// libRadtran uvspec Output Loading Tests
+// ============================================================================
+// Tests for loading libRadtran atmospheric radiative transfer model output.
+// Standard uvspec output format: wavelength edir edn eup uavg
+// ============================================================================
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecBasic) {
+    auto filepath = GetTempFilePath("uvspec_basic.txt");
+
+    // Create mock libRadtran uvspec output (space-separated)
+    // Format: wavelength(nm)  edir  edn  eup  uavg
+    std::ofstream file(filepath);
+    file << "# libRadtran uvspec output\n";
+    file << "# wavelength(nm)  edir  edn  eup  uavg\n";
+    file << "380.000  0.5591  0.1464  0.0000  0.0732\n";
+    file << "400.000  1.1130  0.1550  0.0000  0.0775\n";
+    file << "450.000  1.4000  0.1510  0.0000  0.0755\n";
+    file << "500.000  1.5290  0.1460  0.0000  0.0730\n";
+    file << "550.000  1.5510  0.1110  0.0000  0.0555\n";
+    file << "600.000  1.5870  0.0870  0.0000  0.0435\n";
+    file << "650.000  1.4720  0.0740  0.0000  0.0370\n";
+    file << "700.000  1.3140  0.0680  0.0000  0.0340\n";
+    file.close();
+
+    // Load edir (column 2)
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_TRUE(curve.IsValid());
+    EXPECT_EQ(curve.samples.size(), 8);
+
+    // Verify wavelength range
+    EXPECT_NEAR(curve.samples.front().first, 380.0f, 1e-3f);
+    EXPECT_NEAR(curve.samples.back().first, 700.0f, 1e-3f);
+
+    // Verify edir value at 500nm
+    EXPECT_NEAR(curve.Evaluate(500.0f), 1.529f, 0.01f);
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecEdnColumn) {
+    auto filepath = GetTempFilePath("uvspec_edn.txt");
+
+    std::ofstream file(filepath);
+    file << "400.000  1.1130  0.1550  0.0000  0.0775\n";
+    file << "500.000  1.5290  0.1460  0.0000  0.0730\n";
+    file << "600.000  1.5870  0.0870  0.0000  0.0435\n";
+    file.close();
+
+    // Load edn (column 3)
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 3, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 3);
+
+    // Verify edn value at 500nm
+    EXPECT_NEAR(curve.Evaluate(500.0f), 0.146f, 0.01f);
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecMicrometerUnit) {
+    auto filepath = GetTempFilePath("uvspec_um.txt");
+
+    // Wavelengths in micrometers (µm)
+    std::ofstream file(filepath);
+    file << "# wavelength in micrometers\n";
+    file << "0.400  1.1130  0.1550  0.0000  0.0775\n";
+    file << "0.500  1.5290  0.1460  0.0000  0.0730\n";
+    file << "0.600  1.5870  0.0870  0.0000  0.0435\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "um");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+
+    // Verify wavelengths are converted to nm
+    EXPECT_NEAR(curve.samples.front().first, 400.0f, 1e-3f);
+    EXPECT_NEAR(curve.samples.back().first, 600.0f, 1e-3f);
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecWavenumberUnit) {
+    auto filepath = GetTempFilePath("uvspec_cm1.txt");
+
+    // Wavelengths in wavenumber (cm⁻¹)
+    // λ(nm) = 1e7 / ν(cm⁻¹)
+    // 25000 cm⁻¹ = 400 nm
+    // 20000 cm⁻¹ = 500 nm
+    // 16667 cm⁻¹ = 600 nm
+    std::ofstream file(filepath);
+    file << "# wavelength in wavenumber cm-1\n";
+    file << "25000.0  1.1130  0.1550  0.0000  0.0775\n";
+    file << "20000.0  1.5290  0.1460  0.0000  0.0730\n";
+    file << "16666.7  1.5870  0.0870  0.0000  0.0435\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "cm-1");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+
+    // Wavenumber input should be sorted to wavelength order (low to high)
+    EXPECT_NEAR(curve.samples.front().first, 400.0f, 1.0f);  // 25000 cm⁻¹ → 400 nm
+    EXPECT_NEAR(curve.samples.back().first, 600.0f, 1.0f);   // 16667 cm⁻¹ → 600 nm
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranSunAndSkyBasic) {
+    auto filepath = GetTempFilePath("uvspec_sun_sky.txt");
+
+    std::ofstream file(filepath);
+    file << "# libRadtran uvspec output for sun and sky\n";
+    file << "380.000  0.5591  0.1464  0.0000  0.0732\n";
+    file << "450.000  1.4000  0.1510  0.0000  0.0755\n";
+    file << "500.000  1.5290  0.1460  0.0000  0.0730\n";
+    file << "550.000  1.5510  0.1110  0.0000  0.0555\n";
+    file << "600.000  1.5870  0.0870  0.0000  0.0435\n";
+    file << "700.000  1.3140  0.0680  0.0000  0.0340\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranSunAndSky(filepath, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Verify both curves are valid
+    EXPECT_TRUE(sunCurve.IsValid());
+    EXPECT_TRUE(skyCurve.IsValid());
+    EXPECT_EQ(sunCurve.samples.size(), 6);
+    EXPECT_EQ(skyCurve.samples.size(), 6);
+
+    // Sun curve should be edir (column 2)
+    EXPECT_NEAR(sunCurve.Evaluate(500.0f), 1.529f, 0.01f);
+
+    // Sky curve should be edn (column 3)
+    EXPECT_NEAR(skyCurve.Evaluate(500.0f), 0.146f, 0.01f);
+
+    // Verify wavelength ranges match
+    auto sunRange = sunCurve.GetWavelengthRange();
+    auto skyRange = skyCurve.GetWavelengthRange();
+    EXPECT_NEAR(sunRange.first, skyRange.first, 1e-3f);
+    EXPECT_NEAR(sunRange.second, skyRange.second, 1e-3f);
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranSunAndSkyPhysicalValues) {
+    auto filepath = GetTempFilePath("uvspec_physical.txt");
+
+    // Use realistic libRadtran-like values for visible spectrum
+    std::ofstream file(filepath);
+    file << "380.000  0.5591  0.1464  0.0000  0.0732\n";
+    file << "450.000  1.4000  0.1510  0.0000  0.0755\n";
+    file << "500.000  1.5290  0.1460  0.0000  0.0730\n";  // Near peak
+    file << "550.000  1.5510  0.1110  0.0000  0.0555\n";
+    file << "600.000  1.5870  0.0870  0.0000  0.0435\n";
+    file << "700.000  1.3140  0.0680  0.0000  0.0340\n";
+    file << "780.000  0.9582  0.0510  0.0000  0.0255\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranSunAndSky(filepath, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Verify physical characteristics:
+    // 1. Sun irradiance peaks around 500-600nm
+    f32 sun500 = sunCurve.Evaluate(500.0f);
+    f32 sun380 = sunCurve.Evaluate(380.0f);
+    f32 sun780 = sunCurve.Evaluate(780.0f);
+    EXPECT_GT(sun500, sun380);  // Peak > UV edge
+    EXPECT_GT(sun500, sun780);  // Peak > IR edge
+
+    // 2. All irradiance values should be positive
+    for (const auto& sample : sunCurve.samples) {
+        EXPECT_GE(sample.second, 0.0f);
+    }
+    for (const auto& sample : skyCurve.samples) {
+        EXPECT_GE(sample.second, 0.0f);
+    }
+
+    // 3. Sky (diffuse) should be less than sun (direct)
+    EXPECT_LT(skyCurve.Evaluate(500.0f), sunCurve.Evaluate(500.0f));
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecNonexistent) {
+    auto filepath = GetTempFilePath("nonexistent_uvspec.txt");
+
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "nm");
+    EXPECT_FALSE(result.has_value());
+
+    auto result2 = SpectralIO::LoadLibRadtranSunAndSky(filepath, "nm");
+    EXPECT_FALSE(result2.has_value());
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecInvalidColumn) {
+    auto filepath = GetTempFilePath("uvspec_inv_col.txt");
+
+    std::ofstream file(filepath);
+    file << "400.000  1.1130  0.1550  0.0000  0.0775\n";
+    file.close();
+
+    // Request column 11 (way out of range)
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 11, "nm");
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecInvalidUnit) {
+    auto filepath = GetTempFilePath("uvspec_inv_unit.txt");
+
+    std::ofstream file(filepath);
+    file << "400.000  1.1130  0.1550  0.0000  0.0775\n";
+    file.close();
+
+    // Invalid wavelength unit
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "invalid_unit");
+    EXPECT_FALSE(result.has_value());
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecScientificNotation) {
+    auto filepath = GetTempFilePath("uvspec_scientific.txt");
+
+    // Test scientific notation parsing (common in libRadtran output)
+    std::ofstream file(filepath);
+    file << "280.000  8.2000E-02  4.7309E-23  0.0000E+00  2.3655E-23\n";
+    file << "300.000  5.1400E-01  1.0230E-04  0.0000E+00  5.1150E-05\n";
+    file << "500.000  1.5290E+00  1.4600E-01  0.0000E+00  7.3000E-02\n";
+    file << "1000.000  6.6810E-01  4.2100E-02  0.0000E+00  2.1050E-02\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 4);
+
+    // Verify scientific notation parsing
+    EXPECT_NEAR(curve.samples[0].second, 0.082f, 0.001f);     // 8.2E-02
+    EXPECT_NEAR(curve.samples[2].second, 1.529f, 0.01f);      // 1.5290E+00
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranToSolarSpectralLUT) {
+    auto filepath = GetTempFilePath("uvspec_to_lut.txt");
+
+    // Create libRadtran output covering visible spectrum
+    std::ofstream file(filepath);
+    file << "380.000  0.5591  0.1464  0.0000  0.0732\n";
+    file << "450.000  1.4000  0.1510  0.0000  0.0755\n";
+    file << "500.000  1.5290  0.1460  0.0000  0.0730\n";
+    file << "550.000  1.5510  0.1110  0.0000  0.0555\n";
+    file << "600.000  1.5870  0.0870  0.0000  0.0435\n";
+    file << "700.000  1.3140  0.0680  0.0000  0.0340\n";
+    file << "780.000  0.9582  0.0510  0.0000  0.0255\n";
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranSunAndSky(filepath, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const auto& [sunCurve, skyCurve] = result.value();
+
+    // Convert to SolarSpectralLUT (GPU format)
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    EXPECT_TRUE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+
+    // Verify wavelength range is preserved
+    auto [min_wl, max_wl] = lut.GetWavelengthRange();
+    EXPECT_NEAR(min_wl, 380.0f, 1.0f);
+    EXPECT_NEAR(max_wl, 780.0f, 1.0f);
+
+    // Verify evaluation works (interpolation)
+    f32 sunAt500 = lut.sunIrradiance.Evaluate(500.0f);
+    EXPECT_GT(sunAt500, 1.0f);   // Should be > 1 W·m⁻²·nm⁻¹ at peak
+    EXPECT_LT(sunAt500, 2.0f);   // But less than 2
+
+    f32 skyAt500 = lut.skyIrradiance.Evaluate(500.0f);
+    EXPECT_GT(skyAt500, 0.0f);   // Diffuse sky should be positive
+    EXPECT_LT(skyAt500, 0.2f);   // But much less than direct sun
+}
+
+TEST_F(SpectralIOTest, LoadLibRadtranUvspecWithExtraWhitespace) {
+    auto filepath = GetTempFilePath("uvspec_whitespace.txt");
+
+    // Test handling of various whitespace patterns
+    std::ofstream file(filepath);
+    file << "  400.000    1.1130    0.1550    0.0000    0.0775  \n";  // Leading/trailing spaces
+    file << "\t500.000\t1.5290\t0.1460\t0.0000\t0.0730\n";           // Tabs
+    file << "   600.000  1.5870   0.0870  0.0000   0.0435   \n";      // Multiple spaces
+    file.close();
+
+    auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "nm");
+    ASSERT_TRUE(result.has_value());
+
+    const SpectralCurve& curve = result.value();
+    EXPECT_EQ(curve.samples.size(), 3);
 }

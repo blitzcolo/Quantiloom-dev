@@ -70,45 +70,4 @@ install(TARGETS Quantiloom
     RUNTIME DESTINATION bin
 )
 
-# ============================================================================
-# Quantiloom M1 Test (Standalone Ray Tracing Test)
-# ============================================================================
-
-add_executable(QuantiloomM1Test
-    main_m1_test.cpp
-    ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
-)
-
-target_include_directories(QuantiloomM1Test
-    PRIVATE
-        ${CMAKE_CURRENT_BINARY_DIR}
-)
-
-target_link_libraries(QuantiloomM1Test
-    PRIVATE
-        libQuantiloom
-)
-
-target_compile_definitions(QuantiloomM1Test
-    PRIVATE
-        QL_USE_STATIC
-)
-
-set_target_properties(QuantiloomM1Test PROPERTIES
-    CXX_STANDARD 20
-    CXX_STANDARD_REQUIRED ON
-)
-
-# Copy compiled shaders to the M1 test executable directory
-add_custom_command(
-    TARGET QuantiloomM1Test POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
-        "$<TARGET_FILE_DIR:QuantiloomM1Test>"
-    COMMENT "Copying shaders to M1 test executable directory"
-    DEPENDS CompileShaders
-)
-
 message(STATUS "Quantiloom executables configured successfully")

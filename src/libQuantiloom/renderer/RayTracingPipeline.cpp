@@ -144,7 +144,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
     constexpr u32 MAX_TEXTURES = 1024;
 
-    std::vector<VkDescriptorSetLayoutBinding> bindings(15);  // Added complex refractive index buffer (binding 14)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(16);  // Added SolarSpectralLUT (binding 15)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -276,9 +276,25 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[14].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[14].pImmutableSamplers = nullptr;
 
+    // ========================================================================
+    // Solar Spectral LUT Buffer (Binding 15)
+    // ========================================================================
+    // Contains ASTM G-173 solar irradiance curves for spectral rendering
+    // Structure: SolarSpectralLUT (544 bytes = 2 × SpectralCurveGPU)
+    // - sunIrradiance: Direct+circumsolar irradiance (W·m⁻²·nm⁻¹)
+    // - skyIrradiance: Diffuse sky irradiance (W·m⁻²·nm⁻¹)
+    // ========================================================================
+
+    // Binding 15: Solar spectral LUT buffer (SolarSpectralLUT)
+    bindings[15].binding = 15;
+    bindings[15].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[15].descriptorCount = 1;
+    bindings[15].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
+    bindings[15].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(15, 0);  // Updated for CRI buffer
+    std::vector<VkDescriptorBindingFlags> bindingFlags(16, 0);  // Updated for SolarSpectralLUT
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -305,7 +321,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 8;  // LUT + vertex + index + material + UV + tangent + spectral curves + CRI
+    poolSizes[2].descriptorCount = 9;  // LUT + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = MAX_TEXTURES + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -975,6 +991,39 @@ void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffe
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 14;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+// ============================================================================
+// Solar Spectral LUT Buffer Binding
+// ============================================================================
+
+void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    if (buffer == nullptr) {
+        QL_LOG_INFO("Solar spectral LUT buffer is null - will use LightingParams RGB fallback");
+        // Note: Shader must check if SolarSpectralLUT is valid before use
+        return;
+    }
+
+    QL_LOG_INFO("Binding solar spectral LUT buffer to descriptor set (binding 15)");
+    QL_LOG_INFO("  Buffer size: {} bytes (expected: 544)", buffer->GetSize());
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer->GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 15;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;

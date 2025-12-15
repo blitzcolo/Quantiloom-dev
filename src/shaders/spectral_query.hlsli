@@ -134,14 +134,14 @@ float QueryMaterialSpectralAlbedo(StructuredBuffer<SpectralCurveGPU> spectralCur
 // ============================================================================
 
 // TODO: Implement MODTRAN LUT query for wavelength-dependent transmittance
-// Current: Returns scalar transmittance from LUTData (wavelength-independent)
+// Current: Returns scalar transmittance from LightingParams (wavelength-independent)
 // Future: Query LUT(λ, altitude, zenith_angle) → τ(λ)
 //
 // PLACEHOLDER IMPLEMENTATION:
-float QueryAtmosphericTransmittance(StructuredBuffer<LUTData> skyLUT,
+float QueryAtmosphericTransmittance(StructuredBuffer<LightingParams> lightingParams,
                                     float lambda_nm,
                                     float distance_m) {
-    LUTData lut = skyLUT[0];
+    LightingParams lut = lightingParams[0];
 
     // PLACEHOLDER: Use scalar transmittance (wavelength-independent)
     // This is a simplification - real implementation should query MODTRAN LUT

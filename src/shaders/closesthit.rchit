@@ -27,7 +27,7 @@
 // Bindings
 // ============================================================================
 
-[[vk::binding(2, 0)]] StructuredBuffer<LUTData> skyLUT;
+[[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
 [[vk::binding(3, 0)]] StructuredBuffer<float3> vertexBuffer;    // Vertex positions
 [[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
 [[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
@@ -65,6 +65,26 @@
 // ============================================================================
 
 [[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+
+// ============================================================================
+// NEW (M2+): Solar Spectral LUT Buffer
+// ============================================================================
+// Contains ASTM G-173 solar irradiance curves for spectral rendering
+// Enables physically-accurate wavelength-dependent sun/sky illumination
+//
+// DATA:
+// - sunIrradiance: Direct+circumsolar spectral irradiance (W·m⁻²·nm⁻¹)
+// - skyIrradiance: Diffuse sky spectral irradiance (W·m⁻²·nm⁻¹)
+//
+// USAGE:
+// - Query sun irradiance: SampleSunIrradiance(solarLUT, wavelength_nm)
+// - Query sky irradiance: SampleSkyIrradiance(solarLUT, wavelength_nm)
+// - Convert to radiance: L = E / SUN_SOLID_ANGLE_SR
+//
+// When solarSpectralLUT[0].sunIrradiance.numSamples == 0, fall back to LightingParams RGB values
+// ============================================================================
+
+[[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
 
 // ============================================================================
 // IBL (Image-Based Lighting) Resources
@@ -468,7 +488,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Fetch sun/sky lighting data from LUT
     // ========================================================================
 
-    LUTData lut = skyLUT[0];
+    LightingParams lut = lightingParams[0];
     // FIXED: Use SafeNormalize in case LUT data is invalid
     float3 sunDir = SafeNormalize(lut.sunDirection, float3(0.0, 1.0, 0.0));
 
@@ -686,15 +706,46 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Accumulate XYZ tristimulus values
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
-        // Sun and sky radiance (convert RGB to approximate spectral)
-        // For physically accurate rendering, these should be spectral LUTs
-        float sun_power = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
-        float sky_power = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+        // ====================================================================
+        // Solar Spectral LUT: Use true spectral irradiance when available
+        // ====================================================================
+        // Priority:
+        // 1. SolarSpectralLUT with measured ASTM G-173 spectra (preferred)
+        // 2. LightingParams RGB values approximated as flat spectrum (fallback)
+        // ====================================================================
+        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+
+        // Fallback: approximate RGB as flat spectrum (for legacy compatibility)
+        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
+        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
 
         // Loop over wavelengths
         [unroll]
         for (uint i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i) {
             float lambda = LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP;
+
+            // ================================================================
+            // Query Sun/Sky Spectral Radiance at Wavelength λ
+            // ================================================================
+            float sun_radiance_lambda;
+            float sky_radiance_lambda;
+
+            if (hasSpectralSolarLUT) {
+                // PHYSICAL PATH: Query ASTM G-173 spectral irradiance curves
+                // Convert irradiance (W·m⁻²·nm⁻¹) to radiance (W·sr⁻¹·m⁻²·nm⁻¹)
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+
+                // Sun disk: L = E / Ω_sun (radiance from irradiance)
+                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                // Sky: diffuse hemispherical, already in radiance-like units (W·m⁻²·nm⁻¹·sr⁻¹ approximated)
+                // For sky dome, we assume uniform sky approximation: L_sky ≈ E_sky / π
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                // FALLBACK: Use flat spectrum approximation from RGB values
+                sun_radiance_lambda = sun_power_rgb;
+                sky_radiance_lambda = sky_power_rgb;
+            }
 
             // 1. Get spectral reflectance at this wavelength
             float rho_lambda;
@@ -709,12 +760,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness);
 
-            // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun × (N·L) + kD × ρ(λ)/π × L_sky
-            float L_direct = brdf_lambda * sun_power * NdotL;
+            // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) + kD × ρ(λ)/π × L_sky(λ)
+            float L_direct = brdf_lambda * sun_radiance_lambda * NdotL;
 
             // Diffuse ambient (simplified Fresnel for diffuse coefficient)
             float kD_lambda = (1.0 - metallic);  // Metals have no diffuse
-            float L_ambient = kD_lambda * rho_lambda / PI * sky_power;
+            float L_ambient = kD_lambda * rho_lambda / PI * sky_radiance_lambda;
 
             float L_lambda = L_direct + L_ambient;
 
@@ -755,14 +806,34 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 1. Query physical spectral reflectance curve if available
         // 2. Fallback to RGB upsampling if no measured curve
         // 3. Compute scalar PBR BRDF with spectral reflectance
-        // 4. Use scalar sun radiance (sunRadiance_spectral)
+        // 4. Query sun/sky radiance from SolarSpectralLUT or LightingParams fallback
         //
         // SPECTRAL DATA PRIORITY:
-        // 1. Measured spectral curve (spectralReflectanceCurveIndex >= 0) → Quantitative
-        // 2. RGB texture upsampling (Gaussian basis) → Approximate only
+        // 1. SolarSpectralLUT (ASTM G-173) → True spectral illumination
+        // 2. LightingParams.sunRadiance_spectral → Scalar fallback
         // ====================================================================
 
         float lambda = camera.wavelength_nm;
+
+        // ================================================================
+        // Query Sun/Sky Spectral Radiance at Wavelength λ
+        // ================================================================
+        float sunRadiance_lambda;
+        float skyRadiance_lambda;
+
+        if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
+            // PHYSICAL PATH: Query ASTM G-173 spectral irradiance curves
+            float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+            float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+
+            // Convert irradiance to radiance
+            sunRadiance_lambda = SunIrradianceToRadiance(sun_irr);
+            skyRadiance_lambda = sky_irr / PI;  // Diffuse sky: L ≈ E / π
+        } else {
+            // FALLBACK: Use LightingParams scalar values
+            sunRadiance_lambda = lut.sunRadiance_spectral;
+            skyRadiance_lambda = lut.skyRadiance_spectral;
+        }
 
         // 1. Query spectral reflectance: prefer measured curve, fallback to RGB upsampling
         float spectralAlbedo;
@@ -798,17 +869,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         );
 
         // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L)
-        //    Use scalar sun radiance at wavelength λ
-        float sunIntensity_scalar = lut.sunRadiance_spectral;
-        float directSun_scalar = brdf_scalar * sunIntensity_scalar * NdotL;
+        //    Use spectral sun radiance at wavelength λ
+        float directSun_scalar = brdf_scalar * sunRadiance_lambda * NdotL;
 
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)
         float3 F0_scalar = lerp(float3(0.04, 0.04, 0.04), float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
         float3 F_scalar = FresnelSchlick(F0_scalar, max(dot(normal, V), 0.0));
         float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
-        float skyIntensity_scalar = lut.skyRadiance_spectral;
-        float skyAmbient_scalar = kD_scalar * spectralAlbedo / PI * skyIntensity_scalar;
+        float skyAmbient_scalar = kD_scalar * spectralAlbedo / PI * skyRadiance_lambda;
 
         // 5. Total spectral radiance (scalar)
         float radiance_spectral = directSun_scalar + skyAmbient_scalar + emissive.r;  // Assume emissive is grayscale in spectral mode

@@ -206,6 +206,67 @@ float2 SampleComplexRefractiveIndex(ComplexRefractiveIndexGPU cri, float query_w
 }
 
 // ============================================================================
+// Solar Spectral LUT Data Structure (GPU)
+// ============================================================================
+// Full spectral irradiance curves for sun and sky illumination.
+// Enables physically-accurate spectral rendering with ASTM G-173 or libRadtran data.
+//
+// DATA SOURCES:
+// - ASTM G-173-03 Reference Air Mass 1.5 Spectra (terrestrial solar)
+//   - Direct sun: Column 4 (Direct+circumsolar) - W·m⁻²·nm⁻¹
+//   - Diffuse sky: Global - Direct - W·m⁻²·nm⁻¹
+// - libRadtran: Custom atmospheric conditions
+//
+// USAGE:
+// - Query sun irradiance: SampleSpectralCurve(solarLUT.sunIrradiance, wavelength_nm)
+// - Query sky irradiance: SampleSpectralCurve(solarLUT.skyIrradiance, wavelength_nm)
+// - Convert irradiance E to radiance L: L = E / Ω_sun (for sun disk)
+//   where Ω_sun ≈ 6.8e-5 sr (angular diameter ~0.53°)
+//
+// SIZE: 272 + 272 = 544 bytes (must match CPU-side SolarSpectralLUT)
+// ============================================================================
+
+struct SolarSpectralLUT {
+    SpectralCurveGPU sunIrradiance;   // Direct sun spectral irradiance (W·m⁻²·nm⁻¹)
+    SpectralCurveGPU skyIrradiance;   // Diffuse sky spectral irradiance (W·m⁻²·nm⁻¹)
+};
+
+// ============================================================================
+// Helper: Sample Solar Irradiance at Wavelength
+// ============================================================================
+// Convenience wrappers for querying sun/sky spectral irradiance
+// ============================================================================
+
+float SampleSunIrradiance(SolarSpectralLUT lut, float wavelength_nm) {
+    return SampleSpectralCurve(lut.sunIrradiance, wavelength_nm);
+}
+
+float SampleSkyIrradiance(SolarSpectralLUT lut, float wavelength_nm) {
+    return SampleSpectralCurve(lut.skyIrradiance, wavelength_nm);
+}
+
+// ============================================================================
+// Helper: Convert Sun Irradiance to Radiance
+// ============================================================================
+// Converts spectral irradiance E (W·m⁻²·nm⁻¹) to radiance L (W·sr⁻¹·m⁻²·nm⁻¹)
+// using the sun's solid angle.
+//
+// Physics:
+//   E = ∫ L · cos(θ) · dΩ ≈ L · Ω_sun  (for small angle θ ≈ 0)
+//   L = E / Ω_sun
+//
+// Sun parameters:
+//   - Angular diameter: ~0.533° = 9.3 mrad
+//   - Solid angle: Ω = π · (θ/2)² ≈ 6.8e-5 sr
+// ============================================================================
+
+static const float SUN_SOLID_ANGLE_SR = 6.8e-5;  // Sun solid angle (steradians)
+
+float SunIrradianceToRadiance(float irradiance) {
+    return irradiance / SUN_SOLID_ANGLE_SR;
+}
+
+// ============================================================================
 // Fresnel Equations for Complex Refractive Index (Conductor)
 // ============================================================================
 // Computes Fresnel reflectance for materials with complex refractive index
@@ -305,14 +366,20 @@ float3 FresnelSchlickRGB(float cosTheta, float3 F0) {
 }
 
 // ============================================================================
-// LUT Data Structure
+// Lighting Parameters Structure
 // ============================================================================
-// Atmospheric lookup table for spectral and RGB rendering
-// Must match CPU-side LUT data layout
+// Runtime lighting parameters for shading (NOT a precomputed LUT).
+// This provides fallback RGB/scalar values when SolarSpectralLUT is unavailable.
+//
+// Must match CPU-side LightingParams data layout in main.cpp.
 //
 // DUAL MODE SUPPORT:
 // - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb (float3)
 // - Spectral mode: Use sunRadiance_spectral and skyRadiance_spectral (float)
+//
+// NOTE: The actual precomputed spectral LUT is SolarSpectralLUT (binding 15),
+// which contains full spectral irradiance curves from MODTRAN/libRadtran.
+// This struct provides simple scalar/RGB fallback values.
 //
 // WORLD UNITS:
 // - worldUnitsToMeters: Conversion factor from scene units to meters
@@ -320,14 +387,14 @@ float3 FresnelSchlickRGB(float cosTheta, float3 F0) {
 // - Example: if scene uses centimeters, worldUnitsToMeters = 0.01
 // ============================================================================
 
-struct LUTData {
+struct LightingParams {
     float3 sunDirection;         // Normalized sun direction vector (FROM surface TO sun)
-    float  sunRadiance_spectral; // Sun spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
+    float  sunRadiance_spectral; // Sun spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹) - fallback
 
-    float3 sunRadiance_rgb;      // Sun RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
-    float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹)
+    float3 sunRadiance_rgb;      // Sun RGB radiance (W·sr⁻¹·m⁻²) for RGB mode - fallback
+    float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹) - fallback
 
-    float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode
+    float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode - fallback
     float  transmittance;        // Atmospheric transmittance τ(λ) [0, 1] (vertical path)
 
     float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters

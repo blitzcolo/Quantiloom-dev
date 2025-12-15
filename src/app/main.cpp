@@ -36,21 +36,26 @@
 using namespace quantiloom;
 
 // ============================================================================
-// LUT Data Structure (matches shader LUTData structure)
+// LightingParams Data Structure (matches shader LightingParams structure)
 // ============================================================================
-// Dual mode support: RGB and spectral
-// ============================================================================
-// CRITICAL: This structure MUST match GPU-side LUTData in common.hlsli!
+// Runtime lighting parameters for shading (NOT a precomputed LUT).
+// This provides fallback RGB values when spectral LUT is not available.
+//
+// NOTE: The actual precomputed spectral LUT is SolarSpectralLUT (binding 15),
+// which contains full spectral irradiance curves from MODTRAN/libRadtran.
+// This struct provides simple scalar/RGB fallback values.
+//
+// CRITICAL: This structure MUST match GPU-side LightingParams in common.hlsli!
 // ============================================================================
 
-struct LUTData {
+struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
-    f32 sunRadiance_spectral;       // Spectral radiance at current λ, offset 12
+    f32 sunRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 12
 
-    glm::vec3 sunRadiance_rgb;      // RGB radiance for RGB mode, offset 16
-    f32 skyRadiance_spectral;       // Spectral radiance at current λ, offset 28
+    glm::vec3 sunRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 16
+    f32 skyRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 28
 
-    glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode, offset 32
+    glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 32
     f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
 
     f32 worldUnitsToMeters;         // Conversion factor: world_units × this = meters, offset 48
@@ -620,26 +625,26 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr^-1·m^-2·nm^-2", skyRadiance_spectral);
         }
 
-        LUTData lutData{};
-        lutData.sunDirection = sunDirection;
+        LightingParams lightingParams{};
+        lightingParams.sunDirection = sunDirection;
 
-        // Fill both spectral and RGB fields for flexibility
-        lutData.sunRadiance_spectral = sunRadiance_spectral;
-        lutData.skyRadiance_spectral = skyRadiance_spectral;
-        lutData.sunRadiance_rgb = sunRadiance;
-        lutData.skyRadiance_rgb = skyRadiance;
-        lutData.transmittance = transmittance;
-        lutData.worldUnitsToMeters = worldUnitsToMeters;
-        lutData._padding = glm::vec3(0.0f);
+        // Fill both spectral and RGB fields for fallback (used when SolarSpectralLUT unavailable)
+        lightingParams.sunRadiance_spectral = sunRadiance_spectral;
+        lightingParams.skyRadiance_spectral = skyRadiance_spectral;
+        lightingParams.sunRadiance_rgb = sunRadiance;
+        lightingParams.skyRadiance_rgb = skyRadiance;
+        lightingParams.transmittance = transmittance;
+        lightingParams.worldUnitsToMeters = worldUnitsToMeters;
+        lightingParams._padding = glm::vec3(0.0f);
 
-        GpuBuffer lutBuffer(
+        GpuBuffer lightingParamsBuffer(
             context.GetAllocator(),
-            sizeof(LUTData),
+            sizeof(LightingParams),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
 
-        lutBuffer.Upload(&lutData, sizeof(LUTData));
+        lightingParamsBuffer.Upload(&lightingParams, sizeof(LightingParams));
 
         // ====================================================================
         // Upload Textures to GPU
@@ -807,6 +812,65 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  Created dummy CRI buffer (no data loaded)");
             QL_LOG_INFO("  NOTE: Add [refractive_index] section to config for physical metal Fresnel");
         }
+
+        // ====================================================================
+        // Create Solar Spectral LUT Buffer (MODTRAN / libRadtran)
+        // ====================================================================
+        // Contains sun and sky irradiance curves for spectral rendering.
+        // When valid data is available, shader uses wavelength-dependent illumination.
+        // Otherwise, falls back to LightingParams RGB values.
+        //
+        // Config format:
+        //   [lighting]
+        //   solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"
+        //
+        // File format (uvspec-compatible):
+        //   # comment
+        //   wavelength(nm)  edir(W/m2/nm)  edn(W/m2/sr/nm)  trans
+        //   380.0  1.234e+00  5.678e-02  0.9876
+        //   ...
+        // ====================================================================
+        QL_LOG_INFO("Loading solar spectral LUT...");
+
+        std::unique_ptr<GpuBuffer> solarSpectralLUTBuffer;
+        SolarSpectralLUT solarLUT{};  // Zero-initialized (numSamples=0 = fallback mode)
+
+        if (config.Has("lighting.solar_lut")) {
+            String solarLutPath = config.Get<String>("lighting.solar_lut");
+            QL_LOG_INFO("  Loading solar LUT from: {}", solarLutPath);
+
+            // Load using existing libRadtran/uvspec loader (format is compatible)
+            auto result = SpectralIO::LoadLibRadtranSunAndSky(solarLutPath, "nm");
+
+            if (result.has_value()) {
+                auto& [sunCurve, skyCurve] = result.value();
+
+                // Convert to GPU format (uniform resampling to 64 samples)
+                solarLUT = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+                if (solarLUT.IsValid()) {
+                    auto [minWl, maxWl] = solarLUT.GetWavelengthRange();
+                    QL_LOG_INFO("  ✓ Solar LUT loaded: {} samples, λ=[{:.1f}, {:.1f}] nm",
+                                solarLUT.sunIrradiance.numSamples, minWl, maxWl);
+                } else {
+                    QL_LOG_WARN("  ⚠ Solar LUT conversion failed, using RGB fallback");
+                }
+            } else {
+                QL_LOG_WARN("  ⚠ Failed to load solar LUT: {}", result.error());
+                QL_LOG_WARN("  ⚠ Using LightingParams RGB fallback");
+            }
+        } else {
+            QL_LOG_INFO("  No solar_lut specified in config, using LightingParams RGB fallback");
+            QL_LOG_INFO("  NOTE: Add [lighting] solar_lut = \"path/to/file.txt\" for spectral illumination");
+        }
+
+        solarSpectralLUTBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(),
+            sizeof(SolarSpectralLUT),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        solarSpectralLUTBuffer->Upload(&solarLUT, sizeof(SolarSpectralLUT));
 
         // ====================================================================
         // Create Material Buffer (PBR)
@@ -1276,7 +1340,7 @@ int main(int argc, char* argv[]) {
         // Bind resources in correct order (bindings 0-7)
         pipeline.BindOutputImage(outputImage);                          // Binding 0
         pipeline.BindAccelerationStructure(tlas.GetHandle());           // Binding 1
-        pipeline.BindLUTBuffer(lutBuffer);                              // Binding 2
+        pipeline.BindLUTBuffer(lightingParamsBuffer);                   // Binding 2 (LightingParams)
 
         // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
         if (!blasList.empty()) {
@@ -1306,6 +1370,9 @@ int main(int argc, char* argv[]) {
 
         // Bind complex refractive index buffer (binding 14)
         pipeline.BindComplexRefractiveIndexBuffer(criBuffer.get());
+
+        // Bind solar spectral LUT buffer (binding 15)
+        pipeline.BindSolarSpectralLUT(solarSpectralLUTBuffer.get());
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();

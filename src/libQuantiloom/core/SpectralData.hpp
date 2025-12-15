@@ -385,4 +385,63 @@ struct ComplexRefractiveIndexGPU {
 // Verify GPU struct size: 64×4 + 64×4 + 4 + 4 + 4 + 4 = 528 bytes
 static_assert(sizeof(ComplexRefractiveIndexGPU) == 528, "ComplexRefractiveIndexGPU size mismatch!");
 
+// ============================================================================
+// SolarSpectralLUT - GPU-side solar illumination spectral curves
+// ============================================================================
+// Stores full spectral irradiance curves for sun and sky illumination.
+// Enables physically-accurate spectral rendering with ASTM G-173 or libRadtran data.
+//
+// DATA SOURCES:
+// - ASTM G-173-03 Reference Air Mass 1.5 Spectra (terrestrial solar irradiance)
+//   - Direct sun: Column 4 (Direct+circumsolar) - W·m⁻²·nm⁻¹
+//   - Diffuse sky: Global - Direct - W·m⁻²·nm⁻¹
+// - libRadtran: High-accuracy atmospheric radiative transfer (for custom atmospheres)
+//
+// WAVELENGTH RANGE:
+// - ASTM G-173: 280-4000nm (covers UV through near-IR)
+// - Typical visible rendering: 380-780nm
+// - Thermal IR rendering: 3000-14000nm (requires separate data)
+//
+// USAGE:
+// - Upload once at scene initialization (static solar conditions)
+// - Query in shader: SampleSpectralCurve(sunIrradiance, wavelength_nm)
+// - Convert irradiance to radiance using sun solid angle: L = E / Ω_sun
+//   where Ω_sun ≈ 6.8e-5 sr (angular diameter ~0.53°)
+//
+// SIZE: 272 + 272 = 544 bytes
+// ============================================================================
+
+struct SolarSpectralLUT {
+    SpectralCurveGPU sunIrradiance;   // Direct sun spectral irradiance (W·m⁻²·nm⁻¹)
+    SpectralCurveGPU skyIrradiance;   // Diffuse sky spectral irradiance (W·m⁻²·nm⁻¹)
+
+    // Default constructor: empty curves
+    SolarSpectralLUT() = default;
+
+    // Construct from CPU-side SpectralCurves (resamples to uniform grid)
+    static SolarSpectralLUT FromCPU(const SpectralCurve& sunCurve,
+                                     const SpectralCurve& skyCurve,
+                                     u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
+        SolarSpectralLUT lut;
+        lut.sunIrradiance = SpectralCurveGPU::FromCPU(sunCurve, targetSamples);
+        lut.skyIrradiance = SpectralCurveGPU::FromCPU(skyCurve, targetSamples);
+        return lut;
+    }
+
+    // Check if valid (both curves have data)
+    [[nodiscard]] bool IsValid() const {
+        return sunIrradiance.numSamples > 0 && skyIrradiance.numSamples > 0;
+    }
+
+    // Get wavelength range (intersection of sun and sky ranges)
+    [[nodiscard]] std::pair<f32, f32> GetWavelengthRange() const {
+        auto [sunMin, sunMax] = sunIrradiance.GetWavelengthRange();
+        auto [skyMin, skyMax] = skyIrradiance.GetWavelengthRange();
+        return {std::max(sunMin, skyMin), std::min(sunMax, skyMax)};
+    }
+};
+
+// Verify SolarSpectralLUT size: 272 + 272 = 544 bytes
+static_assert(sizeof(SolarSpectralLUT) == 544, "SolarSpectralLUT size mismatch! Expected 544 bytes");
+
 } // namespace quantiloom

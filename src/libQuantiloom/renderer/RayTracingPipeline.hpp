@@ -124,6 +124,19 @@ public:
     // Pass nullptr to disable physical Fresnel (uses PBR F0 approximation)
     void BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const;
 
+    // ========================================================================
+    // Solar Spectral LUT Buffer (Binding 15)
+    // ========================================================================
+    // Bind ASTM G-173 solar irradiance curves for spectral rendering
+    // Structure: SolarSpectralLUT (544 bytes = 2 × SpectralCurveGPU)
+    // - sunIrradiance: Direct+circumsolar irradiance (W·m⁻²·nm⁻¹)
+    // - skyIrradiance: Diffuse sky irradiance (W·m⁻²·nm⁻¹)
+    // ========================================================================
+
+    // Bind solar spectral LUT buffer (binding 15)
+    // Pass nullptr to use LightingParams RGB fallback
+    void BindSolarSpectralLUT(const GpuBuffer* buffer) const;
+
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
 

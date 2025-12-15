@@ -3,6 +3,7 @@
 #include <H5Cpp.h>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <limits>
 #include <algorithm>
 
@@ -710,6 +711,494 @@ SpectralIO::LoadRefractiveIndexYAML(const std::filesystem::path& yamlFile) {
                 cri.wavelengths_nm.front(), cri.wavelengths_nm.back());
 
     return Result(std::move(cri));
+}
+
+// ============================================================================
+// ASTM G-173 Solar Spectrum Loading
+// ============================================================================
+
+Result<SpectralCurve, String>
+SpectralIO::LoadASTMG173(const std::filesystem::path& csvPath, u32 column) {
+    // Validate column (2=ETR, 3=Global, 4=Direct+circumsolar)
+    if (column < 2 || column > 4) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "ASTM G-173: Invalid column " + std::to_string(column) +
+            " (valid: 2=ETR, 3=Global, 4=Direct+circumsolar)"
+        });
+    }
+
+    // Check file exists
+    if (!std::filesystem::exists(csvPath)) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "ASTM G-173 file not found: " + csvPath.string()
+        });
+    }
+
+    // Open CSV file
+    std::ifstream file(csvPath);
+    if (!file.is_open()) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "Failed to open ASTM G-173 file: " + csvPath.string()
+        });
+    }
+
+    SpectralCurve curve;
+    std::string line;
+    u32 lineNumber = 0;
+    f32 lastWavelength = -std::numeric_limits<f32>::infinity();
+
+    while (std::getline(file, line)) {
+        ++lineNumber;
+
+        // Trim BOM and leading whitespace
+        size_t start = 0;
+        // Skip UTF-8 BOM if present (EF BB BF)
+        if (line.size() >= 3 &&
+            static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF) {
+            start = 3;
+        }
+        start = line.find_first_not_of(" \t\r\n", start);
+        if (start == std::string::npos) continue;
+
+        // Skip header line (contains "Wvlgth" or non-numeric first char)
+        const char firstChar = line[start];
+        if (!std::isdigit(firstChar) && firstChar != '-' && firstChar != '.') {
+            continue;  // Header or comment line
+        }
+
+        // Parse 4 columns: wavelength, ETR, Global, Direct+circumsolar
+        f32 wavelength = 0.0f;
+        f32 col2 = 0.0f, col3 = 0.0f, col4 = 0.0f;
+
+        // ASTM G-173 uses comma separator, scientific notation allowed
+        int parsed = std::sscanf(line.c_str() + start,
+                                  "%f,%f,%f,%f",
+                                  &wavelength, &col2, &col3, &col4);
+
+        if (parsed != 4) {
+            // Try with spaces after commas
+            parsed = std::sscanf(line.c_str() + start,
+                                  "%f, %f, %f, %f",
+                                  &wavelength, &col2, &col3, &col4);
+        }
+
+        if (parsed != 4) {
+            QL_LOG_WARN("ASTM G-173: Parse error at line {} (got {} values): '{}'",
+                        lineNumber, parsed, line.substr(start, 60));
+            continue;
+        }
+
+        // Validate monotonicity
+        if (wavelength <= lastWavelength) {
+            QL_LOG_WARN("ASTM G-173: Non-monotonic wavelength at line {}: {} <= {}",
+                        lineNumber, wavelength, lastWavelength);
+            continue;
+        }
+
+        // Select target column
+        f32 value = 0.0f;
+        switch (column) {
+            case 2: value = col2; break;  // ETR
+            case 3: value = col3; break;  // Global tilt
+            case 4: value = col4; break;  // Direct+circumsolar
+        }
+
+        // Validate irradiance value (can be very small but not negative)
+        if (value < 0.0f) {
+            value = 0.0f;  // Clamp negative to zero
+        }
+
+        curve.samples.emplace_back(wavelength, value);
+        lastWavelength = wavelength;
+    }
+
+    // Validate minimum samples
+    if (curve.samples.size() < 2) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "ASTM G-173: Not enough valid data points (found " +
+            std::to_string(curve.samples.size()) + ")"
+        });
+    }
+
+    const char* columnName = (column == 2) ? "ETR" :
+                             (column == 3) ? "Global" : "Direct+circumsolar";
+
+    QL_LOG_INFO("SpectralIO::LoadASTMG173: Loaded {} points [{}] from {} (λ: {:.1f}-{:.1f} nm)",
+                curve.samples.size(), columnName,
+                csvPath.filename().string(),
+                curve.samples.front().first, curve.samples.back().first);
+
+    return Result(std::move(curve));
+}
+
+Result<std::pair<SpectralCurve, SpectralCurve>, String>
+SpectralIO::LoadASTMG173SunAndSky(const std::filesystem::path& csvPath) {
+    // Check file exists
+    if (!std::filesystem::exists(csvPath)) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "ASTM G-173 file not found: " + csvPath.string()
+            });
+    }
+
+    // Open CSV file
+    std::ifstream file(csvPath);
+    if (!file.is_open()) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "Failed to open ASTM G-173 file: " + csvPath.string()
+            });
+    }
+
+    SpectralCurve sunCurve;   // Direct+circumsolar
+    SpectralCurve skyCurve;   // Diffuse = Global - Direct
+
+    std::string line;
+    u32 lineNumber = 0;
+    f32 lastWavelength = -std::numeric_limits<f32>::infinity();
+
+    while (std::getline(file, line)) {
+        ++lineNumber;
+
+        // Trim BOM and whitespace
+        size_t start = 0;
+        if (line.size() >= 3 &&
+            static_cast<unsigned char>(line[0]) == 0xEF &&
+            static_cast<unsigned char>(line[1]) == 0xBB &&
+            static_cast<unsigned char>(line[2]) == 0xBF) {
+            start = 3;
+        }
+        start = line.find_first_not_of(" \t\r\n", start);
+        if (start == std::string::npos) continue;
+
+        // Skip header
+        const char firstChar = line[start];
+        if (!std::isdigit(firstChar) && firstChar != '-' && firstChar != '.') {
+            continue;
+        }
+
+        // Parse columns
+        f32 wavelength = 0.0f;
+        f32 col2 = 0.0f, col3 = 0.0f, col4 = 0.0f;
+
+        int parsed = std::sscanf(line.c_str() + start,
+                                  "%f,%f,%f,%f",
+                                  &wavelength, &col2, &col3, &col4);
+
+        if (parsed != 4) {
+            parsed = std::sscanf(line.c_str() + start,
+                                  "%f, %f, %f, %f",
+                                  &wavelength, &col2, &col3, &col4);
+        }
+
+        if (parsed != 4 || wavelength <= lastWavelength) {
+            continue;
+        }
+
+        // Direct sun = column 4
+        const f32 directSun = std::max(0.0f, col4);
+
+        // Diffuse sky = Global - Direct (can be zero or small at some wavelengths)
+        const f32 diffuseSky = std::max(0.0f, col3 - col4);
+
+        sunCurve.samples.emplace_back(wavelength, directSun);
+        skyCurve.samples.emplace_back(wavelength, diffuseSky);
+
+        lastWavelength = wavelength;
+    }
+
+    if (sunCurve.samples.size() < 2) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "ASTM G-173: Not enough valid data points"
+            });
+    }
+
+    QL_LOG_INFO("SpectralIO::LoadASTMG173SunAndSky: Loaded {} points for sun/sky (λ: {:.1f}-{:.1f} nm)",
+                sunCurve.samples.size(),
+                sunCurve.samples.front().first, sunCurve.samples.back().first);
+
+    return Result(std::make_pair(std::move(sunCurve), std::move(skyCurve)));
+}
+
+// ============================================================================
+// libRadtran uvspec Output Loading
+// ============================================================================
+//
+// libRadtran uvspec produces space-separated output with configurable columns.
+// Standard output format (output_quantity irradiance):
+//   wavelength  edir  edn  eup  uavg
+//
+// Column indices (1-based, column 1 = wavelength):
+//   2 = edir: Direct solar irradiance
+//   3 = edn:  Downward diffuse irradiance
+//   4 = eup:  Upward diffuse irradiance
+//   5 = uavg: Mean irradiance
+//
+// Wavelength units vary based on libRadtran configuration:
+//   - nm (default): nanometers
+//   - um: micrometers (multiply by 1000 to get nm)
+//   - cm-1: wavenumber (convert: λ_nm = 1e7 / wavenumber)
+// ============================================================================
+
+// Helper: Convert wavelength to nm based on unit
+static f32 ConvertWavelengthToNm(f32 value, const String& unit) {
+    if (unit == "nm") {
+        return value;
+    } else if (unit == "um") {
+        return value * 1000.0f;  // µm to nm
+    } else if (unit == "cm-1") {
+        // Wavenumber to wavelength: λ(nm) = 1e7 / ν(cm⁻¹)
+        if (value <= 0.0f) return 0.0f;
+        return 1e7f / value;
+    }
+    // Default: assume nm
+    return value;
+}
+
+// Helper: Parse a line of libRadtran uvspec output
+// Returns: (wavelength, column_values[]) or empty if parse fails
+static std::optional<std::pair<f32, std::vector<f32>>>
+ParseLibRadtranLine(const std::string& line) {
+    // Trim leading whitespace
+    const size_t start = line.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return std::nullopt;
+
+    // Skip comments
+    if (line[start] == '#') return std::nullopt;
+
+    // Tokenize by whitespace
+    std::vector<f32> values;
+    std::istringstream iss(line.substr(start));
+    f32 val;
+    while (iss >> val) {
+        values.push_back(val);
+    }
+
+    // Need at least wavelength + one data column
+    if (values.size() < 2) return std::nullopt;
+
+    const f32 wavelength = values[0];
+    values.erase(values.begin());  // Remove wavelength from data columns
+
+    return std::make_pair(wavelength, std::move(values));
+}
+
+Result<SpectralCurve, String>
+SpectralIO::LoadLibRadtranUvspec(const std::filesystem::path& uvspecFile,
+                                  u32 column,
+                                  const String& wavelengthUnit) {
+    // Validate column index (2-5 for standard output)
+    if (column < 2 || column > 10) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "libRadtran: Invalid column " + std::to_string(column) +
+            " (valid: 2=edir, 3=edn, 4=eup, 5=uavg, or higher for custom output)"
+        });
+    }
+
+    // Validate wavelength unit
+    if (wavelengthUnit != "nm" && wavelengthUnit != "um" && wavelengthUnit != "cm-1") {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "libRadtran: Unsupported wavelength unit '" + wavelengthUnit +
+            "' (supported: nm, um, cm-1)"
+        });
+    }
+
+    // Check file exists
+    if (!std::filesystem::exists(uvspecFile)) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "libRadtran file not found: " + uvspecFile.string()
+        });
+    }
+
+    // Open file
+    std::ifstream file(uvspecFile);
+    if (!file.is_open()) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "Failed to open libRadtran file: " + uvspecFile.string()
+        });
+    }
+
+    SpectralCurve curve;
+    std::string line;
+    u32 lineNumber = 0;
+    f32 lastWavelength_nm = -std::numeric_limits<f32>::infinity();
+    bool isWavenumber = (wavelengthUnit == "cm-1");
+
+    while (std::getline(file, line)) {
+        ++lineNumber;
+
+        auto parsed = ParseLibRadtranLine(line);
+        if (!parsed) continue;
+
+        auto& [wavelength_raw, columns] = *parsed;
+
+        // Check if requested column exists
+        const u32 dataIndex = column - 2;  // column 2 -> index 0
+        if (dataIndex >= columns.size()) {
+            QL_LOG_WARN("libRadtran: Line {} has only {} data columns, need column {}",
+                        lineNumber, columns.size() + 1, column);
+            continue;
+        }
+
+        // Convert wavelength to nm
+        const f32 wavelength_nm = ConvertWavelengthToNm(wavelength_raw, wavelengthUnit);
+
+        if (wavelength_nm <= 0.0f) {
+            QL_LOG_WARN("libRadtran: Invalid wavelength at line {}: {}", lineNumber, wavelength_raw);
+            continue;
+        }
+
+        // Get requested column value
+        const f32 value = std::max(0.0f, columns[dataIndex]);  // Clamp negative to zero
+
+        // For wavenumber input, data comes in reverse order (high λ to low λ)
+        // We'll sort later if needed
+        curve.samples.emplace_back(wavelength_nm, value);
+
+        // Track for monotonicity check (after potential reversal)
+        if (!isWavenumber) {
+            if (wavelength_nm <= lastWavelength_nm) {
+                QL_LOG_WARN("libRadtran: Non-monotonic wavelength at line {}: {} <= {}",
+                            lineNumber, wavelength_nm, lastWavelength_nm);
+            }
+            lastWavelength_nm = wavelength_nm;
+        }
+    }
+
+    // Validate minimum samples
+    if (curve.samples.size() < 2) {
+        return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+            "libRadtran: Not enough valid data points (found " +
+            std::to_string(curve.samples.size()) + ")"
+        });
+    }
+
+    // Sort by wavelength (needed for wavenumber input which is reverse-ordered)
+    std::sort(curve.samples.begin(), curve.samples.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Validate monotonicity after sort
+    for (size_t i = 1; i < curve.samples.size(); ++i) {
+        if (curve.samples[i].first <= curve.samples[i - 1].first) {
+            return Result<SpectralCurve>(Result<SpectralCurve>::Err{
+                "libRadtran: Duplicate wavelength at " + std::to_string(curve.samples[i].first) + " nm"
+            });
+        }
+    }
+
+    const char* columnName = (column == 2) ? "edir (direct)" :
+                             (column == 3) ? "edn (diffuse down)" :
+                             (column == 4) ? "eup (diffuse up)" :
+                             (column == 5) ? "uavg (mean)" : "custom";
+
+    QL_LOG_INFO("SpectralIO::LoadLibRadtranUvspec: Loaded {} points [{}] from {} (λ: {:.1f}-{:.1f} nm)",
+                curve.samples.size(), columnName,
+                uvspecFile.filename().string(),
+                curve.samples.front().first, curve.samples.back().first);
+
+    return Result(std::move(curve));
+}
+
+Result<std::pair<SpectralCurve, SpectralCurve>, String>
+SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
+                                     const String& wavelengthUnit) {
+    // Validate wavelength unit
+    if (wavelengthUnit != "nm" && wavelengthUnit != "um" && wavelengthUnit != "cm-1") {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "libRadtran: Unsupported wavelength unit '" + wavelengthUnit +
+                "' (supported: nm, um, cm-1)"
+            });
+    }
+
+    // Check file exists
+    if (!std::filesystem::exists(uvspecFile)) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "libRadtran file not found: " + uvspecFile.string()
+            });
+    }
+
+    // Open file
+    std::ifstream file(uvspecFile);
+    if (!file.is_open()) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "Failed to open libRadtran file: " + uvspecFile.string()
+            });
+    }
+
+    SpectralCurve sunCurve;   // edir (column 2)
+    SpectralCurve skyCurve;   // edn (column 3)
+
+    std::string line;
+    u32 lineNumber = 0;
+    bool isWavenumber = (wavelengthUnit == "cm-1");
+
+    while (std::getline(file, line)) {
+        ++lineNumber;
+
+        auto parsed = ParseLibRadtranLine(line);
+        if (!parsed) continue;
+
+        auto& [wavelength_raw, columns] = *parsed;
+
+        // Need at least edir (col 2) and edn (col 3), i.e., 2 data columns
+        if (columns.size() < 2) {
+            QL_LOG_WARN("libRadtran: Line {} has only {} data columns, need at least 2 (edir, edn)",
+                        lineNumber, columns.size());
+            continue;
+        }
+
+        // Convert wavelength to nm
+        const f32 wavelength_nm = ConvertWavelengthToNm(wavelength_raw, wavelengthUnit);
+
+        if (wavelength_nm <= 0.0f) continue;
+
+        // edir = column index 0 (column 2 in 1-based)
+        // edn = column index 1 (column 3 in 1-based)
+        const f32 directSun = std::max(0.0f, columns[0]);
+        const f32 diffuseSky = std::max(0.0f, columns[1]);
+
+        sunCurve.samples.emplace_back(wavelength_nm, directSun);
+        skyCurve.samples.emplace_back(wavelength_nm, diffuseSky);
+    }
+
+    // Validate minimum samples
+    if (sunCurve.samples.size() < 2) {
+        return Result<std::pair<SpectralCurve, SpectralCurve>>(
+            Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                "libRadtran: Not enough valid data points (found " +
+                std::to_string(sunCurve.samples.size()) + ")"
+            });
+    }
+
+    // Sort by wavelength (needed for wavenumber input)
+    std::sort(sunCurve.samples.begin(), sunCurve.samples.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::sort(skyCurve.samples.begin(), skyCurve.samples.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+
+    // Validate monotonicity
+    for (size_t i = 1; i < sunCurve.samples.size(); ++i) {
+        if (sunCurve.samples[i].first <= sunCurve.samples[i - 1].first) {
+            return Result<std::pair<SpectralCurve, SpectralCurve>>(
+                Result<std::pair<SpectralCurve, SpectralCurve>>::Err{
+                    "libRadtran: Duplicate wavelength at " +
+                    std::to_string(sunCurve.samples[i].first) + " nm"
+                });
+        }
+    }
+
+    QL_LOG_INFO("SpectralIO::LoadLibRadtranSunAndSky: Loaded {} points for sun/sky from {} (λ: {:.1f}-{:.1f} nm)",
+                sunCurve.samples.size(),
+                uvspecFile.filename().string(),
+                sunCurve.samples.front().first, sunCurve.samples.back().first);
+
+    return Result(std::make_pair(std::move(sunCurve), std::move(skyCurve)));
 }
 
 } // namespace quantiloom

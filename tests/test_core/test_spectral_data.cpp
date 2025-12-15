@@ -7,6 +7,10 @@
 // - Edge case handling (out of range, empty curves)
 // - SpectralCurveGPU conversion and memory layout
 // - Downsampling algorithms
+// - ComplexRefractiveIndex (n,k) evaluation and Fresnel R0
+// - ComplexRefractiveIndexGPU conversion
+// - SolarSpectralLUT (sun/sky irradiance) construction and evaluation
+// - Physical material tests (gold, silver, copper optical constants)
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -706,4 +710,160 @@ TEST(SpectralDataTest, CopperOpticalConstants) {
 
     // Copper should have lower F0 at short wavelengths (absorbs blue/green)
     EXPECT_LT(copper.FresnelR0(500.0f), copper.FresnelR0(700.0f));
+}
+
+// ============================================================================
+// SolarSpectralLUT Tests
+// ============================================================================
+
+TEST(SpectralDataTest, SolarSpectralLUTDefaultConstruction) {
+    SolarSpectralLUT lut;
+
+    // Both curves should be empty
+    EXPECT_EQ(lut.sunIrradiance.numSamples, 0);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, 0);
+    EXPECT_FALSE(lut.IsValid());
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTSizeVerification) {
+    // Verify struct size: 272 + 272 = 544 bytes
+    // CRITICAL: Must match GPU-side SolarSpectralLUT in common.hlsli
+    EXPECT_EQ(sizeof(SolarSpectralLUT), 544);
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTFromCPUBasic) {
+    // Create simple sun and sky curves
+    Vector<f32> wavelengths = {400.0f, 500.0f, 600.0f, 700.0f};
+    Vector<f32> sunValues = {0.5f, 1.2f, 1.0f, 0.8f};   // Sun irradiance
+    Vector<f32> skyValues = {0.2f, 0.3f, 0.25f, 0.15f}; // Sky irradiance
+
+    SpectralCurve sunCurve(wavelengths, sunValues);
+    SpectralCurve skyCurve(wavelengths, skyValues);
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    EXPECT_TRUE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+
+    // Verify wavelength range
+    EXPECT_NEAR(lut.sunIrradiance.startWavelength_nm, 400.0f, 1e-5f);
+    EXPECT_NEAR(lut.skyIrradiance.startWavelength_nm, 400.0f, 1e-5f);
+
+    // Verify endpoint values (resampled to uniform grid)
+    EXPECT_NEAR(lut.sunIrradiance.values[0], 0.5f, 1e-5f);
+    EXPECT_NEAR(lut.skyIrradiance.values[0], 0.2f, 1e-5f);
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTFromCPUEmpty) {
+    SpectralCurve emptyCurve;
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(emptyCurve, emptyCurve);
+
+    EXPECT_FALSE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, 0);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, 0);
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTGetWavelengthRange) {
+    Vector<f32> sunWavelengths = {380.0f, 550.0f, 780.0f};
+    Vector<f32> sunValues = {0.5f, 1.0f, 0.7f};
+
+    Vector<f32> skyWavelengths = {400.0f, 550.0f, 700.0f};  // Narrower range
+    Vector<f32> skyValues = {0.2f, 0.3f, 0.2f};
+
+    SpectralCurve sunCurve(sunWavelengths, sunValues);
+    SpectralCurve skyCurve(skyWavelengths, skyValues);
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    // GetWavelengthRange should return intersection
+    auto [min_wl, max_wl] = lut.GetWavelengthRange();
+
+    // Sun: 380-780, Sky: 400-700 → Intersection: 400-700
+    EXPECT_NEAR(min_wl, 400.0f, 1e-3f);
+    EXPECT_NEAR(max_wl, 700.0f, 1e-3f);
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTEvaluate) {
+    // Create curves with known values for testing
+    Vector<f32> wavelengths = {400.0f, 600.0f};
+    Vector<f32> sunValues = {0.5f, 1.5f};   // Linear ramp
+    Vector<f32> skyValues = {0.1f, 0.3f};
+
+    SpectralCurve sunCurve(wavelengths, sunValues);
+    SpectralCurve skyCurve(wavelengths, skyValues);
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    // Test endpoint evaluation
+    EXPECT_NEAR(lut.sunIrradiance.Evaluate(400.0f), 0.5f, 1e-5f);
+    EXPECT_NEAR(lut.sunIrradiance.Evaluate(600.0f), 1.5f, 1e-5f);
+
+    // Test interpolation at midpoint
+    EXPECT_NEAR(lut.sunIrradiance.Evaluate(500.0f), 1.0f, 0.05f);
+    EXPECT_NEAR(lut.skyIrradiance.Evaluate(500.0f), 0.2f, 0.02f);
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTPhysicalASTMG173Range) {
+    // Test with typical ASTM G-173 wavelength range (280-4000nm)
+    // Simulating realistic solar spectral irradiance curve
+
+    const u32 numPoints = 50;
+    Vector<f32> wavelengths(numPoints);
+    Vector<f32> sunValues(numPoints);
+    Vector<f32> skyValues(numPoints);
+
+    for (u32 i = 0; i < numPoints; ++i) {
+        f32 t = static_cast<f32>(i) / static_cast<f32>(numPoints - 1);
+        wavelengths[i] = 280.0f + t * (4000.0f - 280.0f);
+
+        // Approximate solar spectrum shape (peaks around 500nm)
+        f32 lambda = wavelengths[i];
+        sunValues[i] = 1.5f * std::exp(-std::pow((lambda - 500.0f) / 200.0f, 2.0f));
+        skyValues[i] = 0.3f * sunValues[i];  // Sky is ~20% of direct sun
+    }
+
+    SpectralCurve sunCurve(wavelengths, sunValues);
+    SpectralCurve skyCurve(wavelengths, skyValues);
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    EXPECT_TRUE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, MAX_SPECTRAL_SAMPLES);
+
+    // Verify wavelength range covers input
+    auto [min_wl, max_wl] = lut.GetWavelengthRange();
+    EXPECT_NEAR(min_wl, 280.0f, 1.0f);
+    EXPECT_NEAR(max_wl, 4000.0f, 1.0f);
+
+    // Peak should be around 500nm (visible light)
+    f32 sunAt500 = lut.sunIrradiance.Evaluate(500.0f);
+    f32 sunAt280 = lut.sunIrradiance.Evaluate(280.0f);
+    f32 sunAt4000 = lut.sunIrradiance.Evaluate(4000.0f);
+
+    EXPECT_GT(sunAt500, sunAt280);   // Peak > UV edge
+    EXPECT_GT(sunAt500, sunAt4000);  // Peak > IR edge
+}
+
+TEST(SpectralDataTest, SolarSpectralLUTCustomTargetSamples) {
+    // Test with custom number of target samples
+    Vector<f32> wavelengths = {400.0f, 500.0f, 600.0f, 700.0f};
+    Vector<f32> sunValues = {0.5f, 1.2f, 1.0f, 0.8f};
+    Vector<f32> skyValues = {0.2f, 0.3f, 0.25f, 0.15f};
+
+    SpectralCurve sunCurve(wavelengths, sunValues);
+    SpectralCurve skyCurve(wavelengths, skyValues);
+
+    // Use fewer samples
+    const u32 targetSamples = 32;
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve, targetSamples);
+
+    EXPECT_TRUE(lut.IsValid());
+    EXPECT_EQ(lut.sunIrradiance.numSamples, targetSamples);
+    EXPECT_EQ(lut.skyIrradiance.numSamples, targetSamples);
+
+    // Verify uniform step size
+    f32 expectedStep = (700.0f - 400.0f) / static_cast<f32>(targetSamples - 1);
+    EXPECT_NEAR(lut.sunIrradiance.stepSize_nm, expectedStep, 1e-5f);
 }
