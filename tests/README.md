@@ -39,7 +39,7 @@ tests/
 #### Core Module (`test_core/`)
 - **`test_types.cpp`** (70+ tests)
   - `Result<T, E>` 类型的成功/错误处理
-  - 光谱模式解析 (Single, RGB, Multispectral, MWIR, LWIR)
+  - 光谱模式解析 (Single, RGB, Multispectral, MWIR, LWIR, SWIR)
   - 错误码转换和物理常量验证
   - C++20 concepts测试 (Arithmetic, Numeric)
 

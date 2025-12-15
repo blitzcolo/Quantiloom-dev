@@ -4,29 +4,22 @@
 
 ## 📦 必需数据 (Required Data)
 
-### 1. **BRDF Integration LUT** ⚠️ 每次生成（可优化）
+### 1. **BRDF Integration LUT** ✅ 自动缓存
 **用途**: IBL镜面反射的split-sum approximation
-**格式**: 内存中的Image结构 (RG32F, 512×512)
-**生成时间**: 约6秒（每次运行都会重新生成）
-**优化方案**: TODO - 添加磁盘缓存
+**格式**: 二进制缓存或内存中的Image结构 (RG32F, 512×512)
+**生成时间**: 首次约6秒，后续从缓存加载<100ms
 
 **当前状态**:
-- ⚠️ 每次运行都会重新生成（耗时6秒）
+- ✅ 支持二进制磁盘缓存（自动加载/保存）
 - ✅ 生成使用蒙特卡洛积分（1024采样/像素）
-- 🔧 **待优化**: 添加HDF5或二进制缓存（见 `main.cpp:586` TODO注释）
+- ✅ 缓存文件包含magic number和version校验
+- ✅ 缓存路径可配置
 
-**手动预生成方案** (高级用户):
-如果需要预生成BRDF LUT以节省启动时间，可以：
-1. 运行一次渲染器生成LUT
-2. 修改`BRDFLutGenerator`添加保存功能
-3. 保存为HDF5格式（与大气LUT一致）
-4. 在`main.cpp`中添加加载逻辑
-
-**为什么暂时没有缓存？**
-- `Image`类当前没有EXR/HDF5 IO功能
-- 保持代码简洁，优先实现核心渲染功能
-- 6秒对于开发阶段可以接受
-- 后续可以轻松添加（参考 `SpectralIO::LoadHDF5`）
+**缓存机制**:
+- `BRDFLutGenerator::SaveToBinary()`: 保存LUT到二进制文件
+- `BRDFLutGenerator::LoadFromBinary()`: 从缓存加载LUT
+- 缓存头包含: magic(0x42524446), version, resolution, sampleCount
+- 自动校验参数匹配，不匹配则重新生成
 
 ---
 
@@ -276,13 +269,12 @@ model_path = "models/thermal_scene.gltf"  # 带IR extension的场景
 
 ---
 
-## ⚡ 性能优化
+## ⚡ 性能说明
 
-### BRDF LUT缓存 (待实现)
-- **当前**: 每次运行生成6秒
-- **计划**: 添加HDF5缓存（<100ms加载）
-- **潜在加速**: ~60倍
-- **实现难度**: 低（参考 `SpectralIO::LoadHDF5`）
+### BRDF LUT缓存
+- **机制**: 自动二进制缓存，首次生成后加载时间<100ms
+- **缓存位置**: 可通过config配置（默认 `cache/brdf_lut.bin`）
+- **加速效果**: 首次6秒 → 后续<100ms（~60倍加速）
 
 ### 建议的数据目录结构
 ```
