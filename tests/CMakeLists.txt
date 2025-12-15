@@ -204,6 +204,7 @@ set(TEST_IO_SOURCES
 # Renderer tests (non-Vulkan components only)
 set(TEST_RENDERER_SOURCES
     test_renderer/test_brdf_lut.cpp
+    test_renderer/test_lighting_params.cpp
 )
 
 # Test main (custom main function with logging initialization)
@@ -308,7 +309,7 @@ add_custom_target(test_io
 
 # Run only renderer tests (non-Vulkan)
 add_custom_target(test_renderer
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

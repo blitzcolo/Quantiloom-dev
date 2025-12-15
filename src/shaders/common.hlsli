@@ -24,6 +24,7 @@
 #define SPECTRAL_MODE_MULTISPECTRAL 2  // Multiple wavelengths (hyperspectral cube) - TBD
 #define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
 #define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)
+#define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion (1000-2500nm)
 
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
@@ -398,7 +399,8 @@ struct LightingParams {
     float  transmittance;        // Atmospheric transmittance τ(λ) [0, 1] (vertical path)
 
     float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
-    float3 _padding;             // Padding for 16-byte alignment
+    float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation
+    float2 _padding;             // Padding for 16-byte alignment
 };
 
 // ============================================================================

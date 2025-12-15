@@ -14,22 +14,23 @@ environment_map = "assets/maps/blue_photo_studio_4k.exr"  # EXR environment map
 # ============================================================================
 # Spectral Rendering Mode
 # ============================================================================
-# WARNING: "single", "mwir_fused", and "lwir_fused" modes are PREVIEW ONLY
+# WARNING: "single", "mwir_fused", "lwir_fused", and "swir_fused" modes
+#          are PREVIEW ONLY when no measured spectral curves are provided.
 # ============================================================================
 # These modes use RGB-averaged spectral albedo, NOT physically measured
 # spectral reflectance. They are intended for VISUALIZATION ONLY.
 # DO NOT use for quantitative analysis or scientific measurements.
 #
-# For quantitative results, use mode = "hs_off" with measured spectral data.
+# For quantitative results, provide measured spectral curves via [spectral_curves].
 # ============================================================================
 # Available modes:
-#   - "rgb_fused"          : RGB rendering with full color (preview quality)
+#   - "rgb_fused"    : RGB rendering with full color (preview quality)
 #   - "single"       : Single wavelength grayscale (PREVIEW ONLY, not quantitative)
+#   - "swir_fused"   : Short-wave IR fusion 1-2.5μm (PREVIEW ONLY, not quantitative)
 #   - "mwir_fused"   : Mid-wave IR fusion 3-5μm (PREVIEW ONLY, not quantitative)
 #   - "lwir_fused"   : Long-wave IR fusion 8-12μm (PREVIEW ONLY, not quantitative)
-#   - "hs_off"       : Hyperspectral offline (QUANTITATIVE - requires measured spectra)
 # ============================================================================
-mode = "mwir_fused"                   # RGB mode for full color rendering
+mode = "rgb_fused"                   # RGB mode for full color rendering
 #wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
 [scene]
@@ -68,6 +69,8 @@ fov_y = 45.0                   # Vertical field of view (degrees)
 sun_direction = [0.5, 0.8, 0.3]   # FROM surface TO sun (normalized automatically)
 sun_radiance = [5.0, 5.0, 5.0]    # Sun radiance (RGB, averaged to spectral scalar)
 sky_radiance = [0.5, 0.7, 1.0]    # Sky radiance (RGB, averaged to spectral scalar)
+#solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"   # Solar LUT for MODTRAN, if not povided, will use sun_radiance and sky_radiance as fallback
+atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default sky. 280K: Warm sky. 290K: Tropical humid sky.
 
 [material]
 # Fallback material for procedural geometry (not used for glTF models)

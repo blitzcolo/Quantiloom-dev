@@ -891,6 +891,96 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 
+    } else if (camera.spectral_mode == SPECTRAL_MODE_SWIR_FUSED) {
+        // ====================================================================
+        // SWIR Fused Mode: Short-Wave IR Band Integration (1000-2500nm)
+        // ====================================================================
+        // In SWIR band, solar radiation is still significant (unlike MWIR/LWIR).
+        // Physics model combines:
+        //   1. Reflected solar irradiance (dominant for passive imaging)
+        //   2. Minor thermal emission (only for very hot objects T > 500K)
+        //
+        // L_total(λ) = ρ(λ) × [L_sun(λ) + L_sky(λ)] + ε(λ) × L_bb(T,λ)
+        //
+        // For typical outdoor scenes at ambient temperature (~300K), thermal
+        // emission in SWIR is negligible (Planck peak at ~10μm, not 1-2.5μm).
+        // ====================================================================
+
+        const float SWIR_LAMBDA_MIN = 1000.0;   // nm
+        const float SWIR_LAMBDA_MAX = 2500.0;   // nm
+        const uint  NUM_SWIR_SAMPLES = 16;
+        const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
+
+        float radiance_accum = 0.0;
+
+        // Check if we have spectral solar LUT for accurate SWIR illumination
+        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+
+        // Fallback: flat spectrum from RGB average
+        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
+        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+
+        // Material IR properties (for thermal contribution, usually negligible in SWIR)
+        float emissivity = material.irEmissivity;
+        float reflectance = GetIRReflectance(material);
+
+        [unroll]
+        for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
+            float lambda = SWIR_LAMBDA_MIN + float(i) * lambda_step;
+
+            // 1. Query solar/sky irradiance at this SWIR wavelength
+            float sun_radiance_lambda;
+            float sky_radiance_lambda;
+
+            if (hasSpectralSolarLUT) {
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                // Fallback: use RGB average (approximation)
+                sun_radiance_lambda = sun_power_rgb;
+                sky_radiance_lambda = sky_power_rgb;
+            }
+
+            // 2. Get spectral reflectance at this wavelength
+            float rho_lambda;
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+            } else {
+                // Fallback: use IR reflectance from energy conservation
+                rho_lambda = reflectance;
+            }
+
+            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL + L_sky(λ))
+            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL + sky_radiance_lambda);
+
+            // 4. Thermal emission (minor in SWIR for T < 500K)
+            float L_emission = 0.0;
+            if (material.irTemperature_K > 400.0) {
+                // Only compute if object is hot enough for SWIR emission
+                float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
+                L_emission = emissivity * L_blackbody;
+            }
+
+            // 5. Total spectral radiance
+            float L_lambda = L_reflected + L_emission;
+
+            radiance_accum += L_lambda * lambda_step;
+        }
+
+        // Normalize by band width
+        float band_width = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
+        }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+
+        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+
     } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
@@ -930,28 +1020,30 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Material IR properties
         float emissivity = material.irEmissivity;
-        float transmittance = material.irTransmittance;
         float reflectance = GetIRReflectance(material);  // ρ = 1 - ε - τ
 
-        // Incident radiance for reflection (simplified: use visible radiance average)
-        float L_incident = (radiance.r + radiance.g + radiance.b) / 3.0;
+        // Atmospheric downwelling radiation temperature
+        // In MWIR/LWIR bands, solar contribution is negligible (~0.1% of thermal)
+        // Incident radiance dominated by atmospheric thermal emission (sky temperature)
+        float T_atmosphere = lut.atmosphereTemperature_K;
 
         // Loop over wavelengths in IR band
         [unroll]
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
-            // 1. Self-emission: ε(λ) × L_blackbody(T, λ)
+            // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)
             float L_emission = 0.0;
             if (material.irTemperature_K > 0.0) {
                 float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
                 L_emission = emissivity * L_blackbody;
             }
 
-            // 2. Reflected radiance: ρ(λ) × L_incident
-            // For accurate simulation, L_incident should also be wavelength-dependent
-            // Here we use a simplified constant (future: spectral environment map)
-            float L_reflected = reflectance * L_incident;
+            // 2. Reflected atmospheric downwelling radiation: ρ(λ) × L_atmosphere(T_atm, λ)
+            // This is the thermal radiation from the atmosphere above the surface
+            // NOT the visible RGB radiance (which is negligible in IR bands)
+            float L_downwelling = IRPlanckRadiance(T_atmosphere, lambda);
+            float L_reflected = reflectance * L_downwelling;
 
             // 3. Total spectral radiance at this wavelength
             float L_lambda = L_emission + L_reflected;

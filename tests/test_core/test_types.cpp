@@ -117,10 +117,67 @@ TEST(TypesTest, ParseSpectralModeLWIR) {
     EXPECT_EQ(res2.value(), SpectralMode::LWIR_Fused);
 }
 
+TEST(TypesTest, ParseSpectralModeSWIR) {
+    auto res1 = ParseSpectralMode("swir_fused");
+    EXPECT_TRUE(res1.has_value());
+    EXPECT_EQ(res1.value(), SpectralMode::SWIR_Fused);
+
+    auto res2 = ParseSpectralMode("SWIR");
+    EXPECT_TRUE(res2.has_value());
+    EXPECT_EQ(res2.value(), SpectralMode::SWIR_Fused);
+}
+
 TEST(TypesTest, ParseSpectralModeInvalid) {
     auto res = ParseSpectralMode("invalid_mode");
     EXPECT_FALSE(res.has_value());
     EXPECT_FALSE(res.error().empty());
+}
+
+// ============================================================================
+// SpectralMode Enum Value Tests
+// ============================================================================
+// These tests verify that SpectralMode enum values match GPU shader defines
+// in common.hlsli. If these fail, CPU/GPU rendering mode selection will break.
+// ============================================================================
+
+TEST(TypesTest, SpectralModeEnumValues) {
+    // CRITICAL: These values MUST match #define SPECTRAL_MODE_* in common.hlsli
+    // Shader defines:
+    //   #define SPECTRAL_MODE_SINGLE       0
+    //   #define SPECTRAL_MODE_RGB_FUSED    1
+    //   #define SPECTRAL_MODE_MULTISPECTRAL 2
+    //   #define SPECTRAL_MODE_MWIR_FUSED   3
+    //   #define SPECTRAL_MODE_LWIR_FUSED   4
+    //   #define SPECTRAL_MODE_SWIR_FUSED   5
+
+    EXPECT_EQ(static_cast<u32>(SpectralMode::Single), 0u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::RGB_Fused), 1u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::Multispectral), 2u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::MWIR_Fused), 3u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::LWIR_Fused), 4u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::SWIR_Fused), 5u);
+}
+
+TEST(TypesTest, SpectralModeEnumSize) {
+    // SpectralMode is backed by u32 for GPU compatibility
+    EXPECT_EQ(sizeof(SpectralMode), sizeof(u32));
+}
+
+TEST(TypesTest, SpectralModeAllModesAccepted) {
+    // Verify all modes have at least one valid string representation
+    const char* modeStrings[] = {
+        "single",        // Single
+        "rgb_fused",     // RGB_Fused
+        "multispectral", // Multispectral
+        "mwir_fused",    // MWIR_Fused
+        "lwir_fused",    // LWIR_Fused
+        "swir_fused"     // SWIR_Fused
+    };
+
+    for (const char* modeStr : modeStrings) {
+        auto res = ParseSpectralMode(modeStr);
+        EXPECT_TRUE(res.has_value()) << "Failed to parse: " << modeStr;
+    }
 }
 
 // ============================================================================

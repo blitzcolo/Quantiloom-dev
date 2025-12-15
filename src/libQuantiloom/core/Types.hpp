@@ -55,7 +55,8 @@ enum class SpectralMode : u32 {
     RGB_Fused    = 1,  // RGB fusion with CIE XYZ -> sRGB (outputs EXR + PNG)
     Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
     MWIR_Fused   = 3,  // Mid-wave IR fusion 3000-5000nm (outputs EXR + PNG)
-    LWIR_Fused   = 4   // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
+    LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
+    SWIR_Fused   = 5   // Short-wave IR fusion 1000-2500nm (outputs EXR + PNG)
 };
 
 // ============================================================================
@@ -157,6 +158,8 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
         return Result(SpectralMode::MWIR_Fused);
     } else if (mode_str == "lwir_fused" || mode_str == "LWIR") {
         return Result(SpectralMode::LWIR_Fused);
+    } else if (mode_str == "swir_fused" || mode_str == "SWIR") {
+        return Result(SpectralMode::SWIR_Fused);
     } else {
         return Result<SpectralMode>(Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str)));
     }

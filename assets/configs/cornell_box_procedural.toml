@@ -17,7 +17,14 @@ output = "cornell_box_output.exr"
 # Single wavelength mode uses RGB-averaged spectral albedo, NOT physically
 # measured spectral reflectance. This is intended for visualization ONLY.
 #
-# For quantitative results, use mode = "hs_off" with measured spectral material data.
+# For quantitative results, provide measured spectral curves via [spectral_curves].
+# ============================================================================
+# Available modes:
+#   - "rgb"          : RGB rendering with full color (preview quality)
+#   - "single"       : Single wavelength grayscale (PREVIEW ONLY, not quantitative)
+#   - "swir_fused"   : Short-wave IR fusion 1-2.5μm (PREVIEW ONLY, not quantitative)
+#   - "mwir_fused"   : Mid-wave IR fusion 3-5μm (PREVIEW ONLY, not quantitative)
+#   - "lwir_fused"   : Long-wave IR fusion 8-12μm (PREVIEW ONLY, not quantitative)
 # ============================================================================
 mode = "single_wavelength"
 wavelength_nm = 550.0

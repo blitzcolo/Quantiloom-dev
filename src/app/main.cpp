@@ -21,6 +21,7 @@
 #include "renderer/CommandHelper.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
 #include "renderer/PerformanceLogger.hpp"
+#include "renderer/LightingParams.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
@@ -34,33 +35,6 @@
 #include <random>   // For C++11 random number generation
 
 using namespace quantiloom;
-
-// ============================================================================
-// LightingParams Data Structure (matches shader LightingParams structure)
-// ============================================================================
-// Runtime lighting parameters for shading (NOT a precomputed LUT).
-// This provides fallback RGB values when spectral LUT is not available.
-//
-// NOTE: The actual precomputed spectral LUT is SolarSpectralLUT (binding 15),
-// which contains full spectral irradiance curves from MODTRAN/libRadtran.
-// This struct provides simple scalar/RGB fallback values.
-//
-// CRITICAL: This structure MUST match GPU-side LightingParams in common.hlsli!
-// ============================================================================
-
-struct LightingParams {
-    glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
-    f32 sunRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 12
-
-    glm::vec3 sunRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 16
-    f32 skyRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 28
-
-    glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 32
-    f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
-
-    f32 worldUnitsToMeters;         // Conversion factor: world_units × this = meters, offset 48
-    glm::vec3 _padding;             // Padding for 16-byte alignment, offset 52
-};  // Total: 64 bytes
 
 // ============================================================================
 // Material Data Structure (matches shader MaterialData structure)
@@ -349,18 +323,19 @@ int main(int argc, char* argv[]) {
         auto spectralModeResult = ParseSpectralMode(spectralModeStr);
         if (!spectralModeResult.has_value()) {
             QL_LOG_ERROR("Invalid spectral mode: {}", spectralModeStr);
-            QL_LOG_ERROR("Supported modes: single, rgb, mwir_fused, lwir_fused");
+            QL_LOG_ERROR("Supported modes: single, rgb, mwir_fused, lwir_fused, swir_fused");
             return 1;
         }
         SpectralMode spectral_mode = *spectralModeResult;
 
         QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
 
-        // Only read wavelength_nm for modes that require it (single, MWIR, LWIR)
+        // Only read wavelength_nm for modes that require it (single, MWIR, LWIR, SWIR)
         f32 wavelength_nm = 550.0f;  // Default value (unused in RGB mode)
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
-            spectral_mode == SpectralMode::LWIR_Fused) {
+            spectral_mode == SpectralMode::LWIR_Fused ||
+            spectral_mode == SpectralMode::SWIR_Fused) {
             wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
             QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
         }
@@ -401,6 +376,15 @@ int main(int argc, char* argv[]) {
         f32 transmittance = config.Get<f32>("lighting.transmittance", 0.9f);
         transmittance = std::clamp(transmittance, 0.0f, 1.0f);
 
+        // Effective atmosphere temperature for IR downwelling radiation
+        // Used in MWIR/LWIR modes to compute atmospheric thermal emission
+        // Default: 260K (clear sky), typical range: 240K (cold/dry) to 290K (hot/humid)
+        f32 atmosphereTemperature_K = config.Get<f32>("lighting.atmosphere_temperature_k", 260.0f);
+        if (atmosphereTemperature_K < 150.0f || atmosphereTemperature_K > 350.0f) {
+            QL_LOG_WARN("lighting.atmosphere_temperature_k={:.1f}K is outside typical range [150, 350], check config",
+                        atmosphereTemperature_K);
+        }
+
         // World unit configuration
         // Conversion factor from scene units to meters for physically-correct Beer-Lambert
         // Default: 1.0 (scene units are meters)
@@ -423,6 +407,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Sky radiance: [{:.2f}, {:.2f}, {:.2f}]",
                     skyRadiance.x, skyRadiance.y, skyRadiance.z);
         QL_LOG_INFO("  Atmospheric transmittance: {:.3f}", transmittance);
+        QL_LOG_INFO("  Atmosphere temperature (IR): {:.1f} K", atmosphereTemperature_K);
         QL_LOG_INFO("  World units to meters: {:.6f}", worldUnitsToMeters);
 
         // Material settings
@@ -475,7 +460,8 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         bool requireQuantitative = (spectral_mode == SpectralMode::Multispectral ||
                                      spectral_mode == SpectralMode::MWIR_Fused ||
-                                     spectral_mode == SpectralMode::LWIR_Fused);
+                                     spectral_mode == SpectralMode::LWIR_Fused ||
+                                     spectral_mode == SpectralMode::SWIR_Fused);
 
         bool failOnSRGB = config.Get<bool>("quality.fail_on_srgb_upsample", false);
         bool logSources = config.Get<bool>("quality.log_material_sources", false);
@@ -635,7 +621,8 @@ int main(int argc, char* argv[]) {
         lightingParams.skyRadiance_rgb = skyRadiance;
         lightingParams.transmittance = transmittance;
         lightingParams.worldUnitsToMeters = worldUnitsToMeters;
-        lightingParams._padding = glm::vec3(0.0f);
+        lightingParams.atmosphereTemperature_K = atmosphereTemperature_K;
+        lightingParams._padding = glm::vec2(0.0f);
 
         GpuBuffer lightingParamsBuffer(
             context.GetAllocator(),
@@ -1414,11 +1401,12 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
-            spectral_mode == SpectralMode::LWIR_Fused) {
+            spectral_mode == SpectralMode::LWIR_Fused ||
+            spectral_mode == SpectralMode::SWIR_Fused) {
             QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm with {} samples per pixel...", wavelength_nm, spp);
             QL_LOG_WARN("  ⚠️  PREVIEW MODE: Using RGB-averaged spectral albedo.");
             QL_LOG_WARN("  ⚠️  NOT suitable for quantitative analysis.");
-            QL_LOG_WARN("  ⚠️  For quantitative results, use mode=\"hs_off\" with measured spectral data.");
+            QL_LOG_WARN("  ⚠️  For quantitative results, provide measured spectral curves.");
         } else {
             QL_LOG_INFO("Rendering frame in RGB mode with {} samples per pixel...", spp);
         }
@@ -1454,7 +1442,7 @@ int main(int argc, char* argv[]) {
                 // Update sampling parameters in pipeline
                 pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
 
-                QL_LOG_INFO("  [SPP {}/{}] Tracing rays (seed: {})...", sampleIndex + 1, spp, randomSeed);
+                //QL_LOG_INFO("  [SPP {}/{}] Tracing rays (seed: {})...", sampleIndex + 1, spp, randomSeed);
 
                 // Execute ray tracing for this sample
                 CommandHelper::ExecuteImmediate(context, [&](const VkCommandBuffer cmd) {
@@ -1472,10 +1460,10 @@ int main(int argc, char* argv[]) {
                 totalGpuMs += perfLogger.GetLastFrameGpuMs();
                 totalRays += perfLogger.GetLastFrameRaysPerSec();
 
-                QL_LOG_INFO("  [SPP {}/{}] Completed - GPU: {:.2f} ms, Progress: {:.1f}%",
+                /*QL_LOG_INFO("  [SPP {}/{}] Completed - GPU: {:.2f} ms, Progress: {:.1f}%",
                             sampleIndex + 1, spp,
                             perfLogger.GetLastFrameGpuMs(),
-                            100.0f * (sampleIndex + 1) / spp);
+                            100.0f * (sampleIndex + 1) / spp);*/
             }
 
             // Log aggregated performance metrics
@@ -1518,11 +1506,12 @@ int main(int argc, char* argv[]) {
         img.metadata["mode"] = spectralModeStr;
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
-            spectral_mode == SpectralMode::LWIR_Fused) {
+            spectral_mode == SpectralMode::LWIR_Fused ||
+            spectral_mode == SpectralMode::SWIR_Fused) {
             img.metadata["wavelength_nm"] = std::to_string(wavelength_nm);
             img.metadata["quality_level"] = "PREVIEW_ONLY";
             img.metadata["warning"] = "RGB-averaged spectral albedo, not quantitative";
-            img.metadata["note"] = "For quantitative results use mode=hs_off with measured spectra";
+            img.metadata["note"] = "For quantitative results provide measured spectral curves";
         } else if (spectral_mode == SpectralMode::RGB_Fused) {
             img.metadata["quality_level"] = "PREVIEW";
             img.metadata["note"] = "RGB rendering, preview quality";
@@ -1552,7 +1541,8 @@ int main(int argc, char* argv[]) {
         // These modes output both EXR (HDR/physical) and PNG (LDR preview)
         bool isFusedMode = (spectral_mode == SpectralMode::RGB_Fused ||
                            spectral_mode == SpectralMode::MWIR_Fused ||
-                           spectral_mode == SpectralMode::LWIR_Fused);
+                           spectral_mode == SpectralMode::LWIR_Fused ||
+                           spectral_mode == SpectralMode::SWIR_Fused);
 
         if (isFusedMode) {
             // Generate PNG path from EXR path (replace extension)
@@ -1587,7 +1577,8 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
-            spectral_mode == SpectralMode::LWIR_Fused) {
+            spectral_mode == SpectralMode::LWIR_Fused ||
+            spectral_mode == SpectralMode::SWIR_Fused) {
             QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
         }
         QL_LOG_INFO("  Output: {}", outputPath);
