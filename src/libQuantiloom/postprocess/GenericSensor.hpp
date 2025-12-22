@@ -32,6 +32,12 @@ private:
     // Step 5: Convert noisy electrons back to radiance (for preview)
     auto ElectronsToRadiance(const Image& electrons, const SensorParams& p) -> Image;
 
+    // FPN: Generate fixed pattern noise maps (PRNU + DSNU)
+    auto GenerateFPNMaps(u32 width, u32 height, const SensorParams& p) -> void;
+
+    // FPN: Apply fixed pattern noise to electron signal
+    auto ApplyFPN(Image& electrons, const SensorParams& p) -> void;
+
     // Helpers
     auto MakeGaussianKernel(f32 sigma) -> Vector<f32>;
     auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image;
@@ -39,6 +45,11 @@ private:
 
     // RNG for noise
     std::mt19937 m_Rng;
+
+    // FPN maps (generated once, reused for all frames)
+    Image m_PRNUMap;  // Photo Response Non-Uniformity (multiplicative gain map)
+    Image m_DSNUMap;  // Dark Signal Non-Uniformity (additive dark current map)
+    bool m_FPNMapsGenerated = false;
 };
 
 } // namespace quantiloom

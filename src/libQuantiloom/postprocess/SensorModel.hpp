@@ -36,6 +36,14 @@ struct SensorParams {
     bool enableDarkCurrent = true;      // Dark current noise
     bool enableFPN = false;             // Fixed pattern noise (PRNU/DSNU)
 
+    // FPN parameters (Fixed Pattern Noise)
+    f32 prnuSigma = 0.01f;              // PRNU standard deviation (typical: 0.005-0.02, i.e., 0.5-2%)
+    f32 dsnuSigma_e = 5.0f;             // DSNU standard deviation (electrons, typical: 5-20)
+
+    // NUC parameters (Non-Uniformity Correction)
+    bool enableNUC = false;             // Apply NUC correction (leaves residual noise)
+    f32 nucEfficiency = 0.98f;          // NUC efficiency (typical: 0.95-0.99, i.e., 95-99%)
+
     // Temperature (for IR sensors)
     f32 detectorTemperature_K = 77.0f;  // Detector temperature (K)
 

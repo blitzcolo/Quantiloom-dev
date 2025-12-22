@@ -38,6 +38,12 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
     Log::Debug("Sensor chain: Input {}x{} ({} channels)",
                hdr.width, hdr.height, hdr.channels);
 
+    // Generate FPN maps if needed (lazy initialization)
+    if (params.enableFPN && !m_FPNMapsGenerated) {
+        GenerateFPNMaps(hdr.width, hdr.height, params);
+        m_FPNMapsGenerated = true;
+    }
+
     // Step 1: Apply PSF blur (diffraction-limited optics)
     // Calculate Airy disk radius (simplified: sigma ~ λ·f# / pixel_pitch)
     const f32 wavelength_m = params.wavelength_nm * 1e-9f;
@@ -220,34 +226,6 @@ auto GenericSensor::RadianceToElectrons(const Image& radiance,
 }
 
 // ============================================================================
-// Step 3: Add Noise
-// ============================================================================
-
-auto GenericSensor::AddNoise(Image& electrons, const SensorParams& p) -> void {
-    std::normal_distribution<f32> gaussianDist(0.0f, 1.0f);
-
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        f32 signal = electrons.data[i];
-
-        // Poisson noise (shot noise): σ = sqrt(N)
-        if (p.enablePoissonNoise && signal > 0.0f) {
-            const f32 shotNoise_rms = std::sqrt(signal);
-            signal += gaussianDist(m_Rng) * shotNoise_rms;
-        }
-
-        // Read noise (Gaussian)
-        if (p.enableReadNoise) {
-            signal += gaussianDist(m_Rng) * p.readNoise_e_rms;
-        }
-
-        // Clamp to [0, well_capacity]
-        signal = std::clamp(signal, 0.0f, p.wellCapacity_e);
-
-        electrons.data[i] = signal;
-    }
-}
-
-// ============================================================================
 // Step 4: ADC Quantization
 // ============================================================================
 
@@ -317,6 +295,134 @@ auto GenericSensor::ElectronsToRadiance(const Image& electrons,
     }
 
     return radiance;
+}
+
+// ============================================================================
+// FPN: Generate Fixed Pattern Noise Maps (PRNU + DSNU)
+// ============================================================================
+
+auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
+                                     const SensorParams& p) -> void {
+    Log::Info("Generating FPN maps: {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
+              width, height, p.prnuSigma * 100.0f, p.dsnuSigma_e);
+
+    // Initialize maps
+    m_PRNUMap.Resize(width, height, 1);  // Single channel (grayscale)
+    m_DSNUMap.Resize(width, height, 1);
+
+    // Generate PRNU map (if sigma > 0)
+    if (p.prnuSigma > 1e-6f) {
+        std::normal_distribution<f32> prnuDist(0.0f, p.prnuSigma);  // PRNU: mean=0, sigma=0.5-2%
+        for (u32 i = 0; i < m_PRNUMap.TotalElements(); ++i) {
+            m_PRNUMap.data[i] = prnuDist(m_Rng);
+        }
+    } else {
+        // Zero PRNU: all pixels have uniform gain
+        std::fill(m_PRNUMap.data.begin(), m_PRNUMap.data.end(), 0.0f);
+    }
+
+    // Generate DSNU map (if sigma > 0)
+    if (p.dsnuSigma_e > 1e-6f) {
+        std::normal_distribution<f32> dsnuDist(0.0f, p.dsnuSigma_e); // DSNU: mean=0, sigma=5-20 e-
+        for (u32 i = 0; i < m_DSNUMap.TotalElements(); ++i) {
+            m_DSNUMap.data[i] = dsnuDist(m_Rng);
+        }
+    } else {
+        // Zero DSNU: all pixels have uniform dark current
+        std::fill(m_DSNUMap.data.begin(), m_DSNUMap.data.end(), 0.0f);
+    }
+
+    Log::Debug("FPN maps generated: PRNU range [{:.4f}, {:.4f}], DSNU range [{:.2f}, {:.2f}] e-",
+               *std::min_element(m_PRNUMap.data.begin(), m_PRNUMap.data.end()),
+               *std::max_element(m_PRNUMap.data.begin(), m_PRNUMap.data.end()),
+               *std::min_element(m_DSNUMap.data.begin(), m_DSNUMap.data.end()),
+               *std::max_element(m_DSNUMap.data.begin(), m_DSNUMap.data.end()));
+}
+
+// ============================================================================
+// FPN: Apply Fixed Pattern Noise (PRNU + DSNU) with Optional NUC
+// ============================================================================
+
+auto GenericSensor::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
+    if (!p.enableFPN || !m_FPNMapsGenerated) {
+        return;  // FPN disabled or maps not generated
+    }
+
+    // Verify map dimensions match image dimensions
+    if (m_PRNUMap.width != electrons.width || m_PRNUMap.height != electrons.height) {
+        Log::Warn("FPN map size mismatch: {}x{} vs {}x{}, skipping FPN",
+                  m_PRNUMap.width, m_PRNUMap.height, electrons.width, electrons.height);
+        return;
+    }
+
+    // Apply FPN with optional NUC correction
+    for (u32 y = 0; y < electrons.height; ++y) {
+        for (u32 x = 0; x < electrons.width; ++x) {
+            const u32 idx = y * electrons.width + x;
+
+            // Get FPN values for this pixel
+            f32 prnu = m_PRNUMap.data[idx];  // Multiplicative gain error
+            f32 dsnu = m_DSNUMap.data[idx];  // Additive dark signal error
+
+            // Apply NUC correction (if enabled)
+            // NUC reduces FPN but leaves a residual due to imperfect calibration
+            if (p.enableNUC) {
+                prnu *= (1.0f - p.nucEfficiency);  // Residual PRNU after NUC
+                dsnu *= (1.0f - p.nucEfficiency);  // Residual DSNU after NUC
+            }
+
+            // Apply FPN to all channels
+            for (u32 c = 0; c < electrons.channels; ++c) {
+                f32& signal = electrons(x, y, c);
+
+                // PRNU: multiplicative gain non-uniformity
+                // signal' = signal × (1 + prnu)
+                signal *= (1.0f + prnu);
+
+                // DSNU: additive dark signal non-uniformity
+                // signal'' = signal' + dsnu
+                signal += dsnu;
+            }
+        }
+    }
+
+    const char* nucStatus = p.enableNUC ? " (with NUC residual)" : " (without NUC)";
+    Log::Debug("FPN applied{}", nucStatus);
+}
+
+// ============================================================================
+// Step 3: Add Noise (Updated to include FPN)
+// ============================================================================
+
+auto GenericSensor::AddNoise(Image& electrons, const SensorParams& p) -> void {
+    std::normal_distribution<f32> gaussianDist(0.0f, 1.0f);
+
+    // Apply temporal noise sources (Poisson, Read Noise)
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        f32 signal = electrons.data[i];
+
+        // Poisson noise (shot noise): σ = sqrt(N)
+        if (p.enablePoissonNoise && signal > 0.0f) {
+            const f32 shotNoise_rms = std::sqrt(signal);
+            signal += gaussianDist(m_Rng) * shotNoise_rms;
+        }
+
+        // Read noise (Gaussian)
+        if (p.enableReadNoise) {
+            signal += gaussianDist(m_Rng) * p.readNoise_e_rms;
+        }
+
+        electrons.data[i] = signal;
+    }
+
+    // Apply Fixed Pattern Noise (PRNU + DSNU) after temporal noise
+    // FPN is applied last because it affects the signal AFTER photon/electron conversion
+    ApplyFPN(electrons, p);
+
+    // Final clamp to [0, well_capacity]
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        electrons.data[i] = std::clamp(electrons.data[i], 0.0f, p.wellCapacity_e);
+    }
 }
 
 } // namespace quantiloom

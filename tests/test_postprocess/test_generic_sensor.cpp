@@ -362,3 +362,348 @@ TEST_F(GenericSensorTest, FullChainPreservesImageStructure) {
 
     EXPECT_LT(topLeft, bottomRight);
 }
+
+// ============================================================================
+// FPN (Fixed Pattern Noise) Tests
+// ============================================================================
+
+TEST_F(GenericSensorTest, FPNDisabledByDefault) {
+    Image hdr(100, 100, 1);
+    for (auto& val : hdr.data) {
+        val = 1.0f;
+    }
+
+    // FPN disabled by default
+    EXPECT_FALSE(params.enableFPN);
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    // Should succeed without FPN
+    EXPECT_EQ(result.value().rawDN.width, 100);
+}
+
+TEST_F(GenericSensorTest, FPNMapsGeneratedOnce) {
+    Image hdr(100, 100, 1);
+    for (auto& val : hdr.data) {
+        val = 1.0f;
+    }
+
+    // Enable FPN
+    params.enableFPN = true;
+    params.prnuSigma = 0.01f;  // 1% PRNU
+    params.dsnuSigma_e = 5.0f;
+    params.enablePoissonNoise = false;  // Disable temporal noise for deterministic test
+    params.enableReadNoise = false;
+
+    // First apply
+    auto result1 = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result1.has_value());
+    const Image& dn1 = result1.value().rawDN;
+
+    // Second apply (should reuse FPN maps)
+    auto result2 = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result2.has_value());
+    const Image& dn2 = result2.value().rawDN;
+
+    // FPN is fixed, so DN values should be IDENTICAL across frames
+    // (temporal noise disabled, FPN map reused)
+    for (u32 i = 0; i < dn1.data.size(); ++i) {
+        EXPECT_FLOAT_EQ(dn1.data[i], dn2.data[i]);
+    }
+}
+
+TEST_F(GenericSensorTest, FPNIncreasesVariance) {
+    Image hdr(200, 200, 1);
+    for (auto& val : hdr.data) {
+        val = 1.0f;  // Uniform input
+    }
+
+    // Disable temporal noise
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.fNumber = 1.4f;  // Minimal PSF blur
+
+    // Test without FPN
+    params.enableFPN = false;
+    auto resultNoFPN = sensor.Apply(hdr, params);
+    ASSERT_TRUE(resultNoFPN.has_value());
+
+    const Image& dnNoFPN = resultNoFPN.value().rawDN;
+    const u32 margin = 20;
+    f32 meanNoFPN = 0.0f;
+    u32 count = 0;
+
+    for (u32 y = margin; y < dnNoFPN.height - margin; ++y) {
+        for (u32 x = margin; x < dnNoFPN.width - margin; ++x) {
+            meanNoFPN += dnNoFPN(x, y, 0);
+            ++count;
+        }
+    }
+    meanNoFPN /= count;
+
+    f32 varianceNoFPN = 0.0f;
+    for (u32 y = margin; y < dnNoFPN.height - margin; ++y) {
+        for (u32 x = margin; x < dnNoFPN.width - margin; ++x) {
+            f32 diff = dnNoFPN(x, y, 0) - meanNoFPN;
+            varianceNoFPN += diff * diff;
+        }
+    }
+    varianceNoFPN /= count;
+
+    // Test with FPN enabled
+    params.enableFPN = true;
+    params.prnuSigma = 0.02f;  // 2% PRNU (noticeable effect)
+    params.dsnuSigma_e = 10.0f;
+
+    // Need new sensor instance to regenerate FPN maps
+    GenericSensor sensorWithFPN;
+    auto resultWithFPN = sensorWithFPN.Apply(hdr, params);
+    ASSERT_TRUE(resultWithFPN.has_value());
+
+    const Image& dnWithFPN = resultWithFPN.value().rawDN;
+    f32 meanWithFPN = 0.0f;
+    count = 0;
+
+    for (u32 y = margin; y < dnWithFPN.height - margin; ++y) {
+        for (u32 x = margin; x < dnWithFPN.width - margin; ++x) {
+            meanWithFPN += dnWithFPN(x, y, 0);
+            ++count;
+        }
+    }
+    meanWithFPN /= count;
+
+    f32 varianceWithFPN = 0.0f;
+    for (u32 y = margin; y < dnWithFPN.height - margin; ++y) {
+        for (u32 x = margin; x < dnWithFPN.width - margin; ++x) {
+            f32 diff = dnWithFPN(x, y, 0) - meanWithFPN;
+            varianceWithFPN += diff * diff;
+        }
+    }
+    varianceWithFPN /= count;
+
+    // FPN should significantly increase variance
+    EXPECT_GT(varianceWithFPN, varianceNoFPN * 2.0f);
+}
+
+TEST_F(GenericSensorTest, PRNUAffectsSignalMultiplicatively) {
+    Image hdr(100, 100, 1);
+
+    // Test at two different signal levels
+    const f32 lowSignal = 0.1f;
+    const f32 highSignal = 1.0f;
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.05f;  // 5% PRNU (strong effect)
+    params.dsnuSigma_e = 0.0f;  // Disable DSNU to isolate PRNU
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    // Low signal test
+    for (auto& val : hdr.data) {
+        val = lowSignal;
+    }
+    GenericSensor sensor1;
+    auto result1 = sensor1.Apply(hdr, params);
+    ASSERT_TRUE(result1.has_value());
+    const Image& dnLow = result1.value().rawDN;
+
+    // High signal test (reuse same sensor to get identical FPN maps)
+    for (auto& val : hdr.data) {
+        val = highSignal;
+    }
+    auto result2 = sensor1.Apply(hdr, params);
+    ASSERT_TRUE(result2.has_value());
+    const Image& dnHigh = result2.value().rawDN;
+
+    // PRNU is multiplicative: DN_high / DN_low should be approximately constant
+    // across all pixels (equal to highSignal / lowSignal = 10)
+    const f32 expectedRatio = highSignal / lowSignal;
+
+    // Sample center pixel
+    f32 ratio = dnHigh(50, 50, 0) / dnLow(50, 50, 0);
+    EXPECT_NEAR(ratio, expectedRatio, expectedRatio * 0.2f);  // Within 20%
+}
+
+TEST_F(GenericSensorTest, DSNUIsAdditiveAndSignalIndependent) {
+    Image hdr(100, 100, 1);
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.0f;  // Disable PRNU to isolate DSNU
+    params.dsnuSigma_e = 20.0f;  // Strong DSNU
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    // Test at zero signal (only DSNU present)
+    for (auto& val : hdr.data) {
+        val = 0.0f;
+    }
+    GenericSensor sensorDSNU;
+    auto result1 = sensorDSNU.Apply(hdr, params);
+    ASSERT_TRUE(result1.has_value());
+    const Image& dnZero = result1.value().rawDN;
+
+    // Test at non-zero signal (DSNU + signal)
+    for (auto& val : hdr.data) {
+        val = 0.5f;
+    }
+    auto result2 = sensorDSNU.Apply(hdr, params);
+    ASSERT_TRUE(result2.has_value());
+    const Image& dnSignal = result2.value().rawDN;
+
+    // DSNU is additive: DN_signal - DN_zero should be roughly uniform
+    // (difference is pure signal, DSNU cancels out)
+    f32 diff1 = dnSignal(30, 30, 0) - dnZero(30, 30, 0);
+    f32 diff2 = dnSignal(70, 70, 0) - dnZero(70, 70, 0);
+
+    // Both differences should be similar (within 30%, allowing for quantization)
+    EXPECT_NEAR(diff1, diff2, std::max(diff1, diff2) * 0.3f);
+}
+
+// ============================================================================
+// NUC (Non-Uniformity Correction) Tests
+// ============================================================================
+
+TEST_F(GenericSensorTest, NUCReducesFPNButLeavesResidual) {
+    Image hdr(200, 200, 1);
+    for (auto& val : hdr.data) {
+        val = 1.0f;
+    }
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.02f;  // 2% PRNU
+    params.dsnuSigma_e = 10.0f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.fNumber = 1.4f;
+
+    // Test without NUC (full FPN)
+    params.enableNUC = false;
+    GenericSensor sensorNoNUC;
+    auto resultNoNUC = sensorNoNUC.Apply(hdr, params);
+    ASSERT_TRUE(resultNoNUC.has_value());
+
+    const Image& dnNoNUC = resultNoNUC.value().rawDN;
+    const u32 margin = 20;
+    f32 meanNoNUC = 0.0f;
+    u32 count = 0;
+
+    for (u32 y = margin; y < dnNoNUC.height - margin; ++y) {
+        for (u32 x = margin; x < dnNoNUC.width - margin; ++x) {
+            meanNoNUC += dnNoNUC(x, y, 0);
+            ++count;
+        }
+    }
+    meanNoNUC /= count;
+
+    f32 varianceNoNUC = 0.0f;
+    for (u32 y = margin; y < dnNoNUC.height - margin; ++y) {
+        for (u32 x = margin; x < dnNoNUC.width - margin; ++x) {
+            f32 diff = dnNoNUC(x, y, 0) - meanNoNUC;
+            varianceNoNUC += diff * diff;
+        }
+    }
+    varianceNoNUC /= count;
+
+    // Test with NUC (98% efficiency, 2% residual)
+    params.enableNUC = true;
+    params.nucEfficiency = 0.98f;
+    GenericSensor sensorWithNUC;
+    auto resultWithNUC = sensorWithNUC.Apply(hdr, params);
+    ASSERT_TRUE(resultWithNUC.has_value());
+
+    const Image& dnWithNUC = resultWithNUC.value().rawDN;
+    f32 meanWithNUC = 0.0f;
+    count = 0;
+
+    for (u32 y = margin; y < dnWithNUC.height - margin; ++y) {
+        for (u32 x = margin; x < dnWithNUC.width - margin; ++x) {
+            meanWithNUC += dnWithNUC(x, y, 0);
+            ++count;
+        }
+    }
+    meanWithNUC /= count;
+
+    f32 varianceWithNUC = 0.0f;
+    for (u32 y = margin; y < dnWithNUC.height - margin; ++y) {
+        for (u32 x = margin; x < dnWithNUC.width - margin; ++x) {
+            f32 diff = dnWithNUC(x, y, 0) - meanWithNUC;
+            varianceWithNUC += diff * diff;
+        }
+    }
+    varianceWithNUC /= count;
+
+    // NUC should significantly reduce variance
+    EXPECT_LT(varianceWithNUC, varianceNoNUC * 0.5f);
+
+    // But should NOT eliminate it completely (residual remains)
+    EXPECT_GT(varianceWithNUC, 0.0f);
+}
+
+TEST_F(GenericSensorTest, NUCEfficiencyControlsResidual) {
+    Image hdr(150, 150, 1);
+    for (auto& val : hdr.data) {
+        val = 1.0f;
+    }
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.03f;  // 3% PRNU (strong effect)
+    params.dsnuSigma_e = 15.0f;  // Strong DSNU
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    // First: measure variance with 90% NUC efficiency
+    params.enableNUC = true;
+    params.nucEfficiency = 0.90f;
+    GenericSensor sensor90;
+    auto result90 = sensor90.Apply(hdr, params);
+    ASSERT_TRUE(result90.has_value());
+
+    const Image& dn90 = result90.value().rawDN;
+    f32 mean90 = 0.0f;
+    for (const auto& val : dn90.data) {
+        mean90 += val;
+    }
+    mean90 /= dn90.data.size();
+
+    f32 variance90 = 0.0f;
+    for (const auto& val : dn90.data) {
+        f32 diff = val - mean90;
+        variance90 += diff * diff;
+    }
+    variance90 /= dn90.data.size();
+
+    // Second: measure variance with 50% NUC efficiency (much worse, 50% residual)
+    params.nucEfficiency = 0.50f;
+    GenericSensor sensor50;
+    auto result50 = sensor50.Apply(hdr, params);
+    ASSERT_TRUE(result50.has_value());
+
+    const Image& dn50 = result50.value().rawDN;
+    f32 mean50 = 0.0f;
+    for (const auto& val : dn50.data) {
+        mean50 += val;
+    }
+    mean50 /= dn50.data.size();
+
+    f32 variance50 = 0.0f;
+    for (const auto& val : dn50.data) {
+        f32 diff = val - mean50;
+        variance50 += diff * diff;
+    }
+    variance50 /= dn50.data.size();
+
+    // With 50% NUC efficiency, residual FPN is much larger (50% vs 10%)
+    // So variance50 should be significantly larger than variance90
+    // Allow for statistical variation: expect at least 30% difference
+    EXPECT_GT(variance50, variance90 * 1.3f);
+
+    // Sanity check: both variances should be positive (FPN is present)
+    EXPECT_GT(variance90, 0.0f);
+    EXPECT_GT(variance50, 0.0f);
+}
