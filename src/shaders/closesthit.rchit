@@ -35,6 +35,7 @@
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
 [[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
 [[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
+[[vk::binding(16, 0)]] StructuredBuffer<float3> normalBuffer;   // Normal vectors (required for smooth shading)
 
 // ============================================================================
 // NEW (M2+): Spectral Curve Buffer
@@ -361,14 +362,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 v1 = vertexBuffer[idx1];
     float3 v2 = vertexBuffer[idx2];
 
-    // Compute edge vectors
-    float3 edge1 = v1 - v0;
-    float3 edge2 = v2 - v0;
+    // Read per-vertex normals and interpolate using barycentric coordinates
+    // This gives smooth shading (Gouraud/Phong) instead of flat shading
+    float3 n0 = normalBuffer[idx0];
+    float3 n1 = normalBuffer[idx1];
+    float3 n2 = normalBuffer[idx2];
 
-    // Compute geometric normal (object space)
-    // FIXED: Use SafeNormalize to handle degenerate triangles (collinear vertices)
-    float3 crossProduct = cross(edge1, edge2);
-    float3 objectNormal = SafeNormalize(crossProduct, float3(0.0, 1.0, 0.0));
+    // Barycentric interpolation: n = n0 * w0 + n1 * w1 + n2 * w2
+    // where w0 = (1 - bary.x - bary.y), w1 = bary.x, w2 = bary.y
+    float3 objectNormal = n0 * (1.0 - attribs.bary.x - attribs.bary.y)
+                        + n1 * attribs.bary.x
+                        + n2 * attribs.bary.y;
+    objectNormal = SafeNormalize(objectNormal, float3(0.0, 1.0, 0.0));
 
     // Transform normal to world space
     // FIXED: Use SafeNormalize to prevent NaN propagation

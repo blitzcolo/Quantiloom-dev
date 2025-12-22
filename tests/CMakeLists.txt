@@ -205,6 +205,7 @@ set(TEST_IO_SOURCES
 set(TEST_RENDERER_SOURCES
     test_renderer/test_brdf_lut.cpp
     test_renderer/test_lighting_params.cpp
+    test_renderer/test_acceleration_structure.cpp
 )
 
 # Postprocess tests (sensor simulation, multiband fusion)
@@ -316,7 +317,7 @@ add_custom_target(test_io
 
 # Run only renderer tests (non-Vulkan)
 add_custom_target(test_renderer
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

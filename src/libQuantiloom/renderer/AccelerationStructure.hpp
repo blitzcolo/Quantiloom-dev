@@ -60,6 +60,8 @@ public:
     [[nodiscard]] bool HasUVs() const { return m_uvBuffer != nullptr; }  // Check if UVs are available
     [[nodiscard]] const GpuBuffer& GetTangentBuffer() const { return *m_tangentBuffer; }  // Tangent vectors
     [[nodiscard]] bool HasTangents() const { return m_tangentBuffer != nullptr; }  // Check if tangents are available
+    [[nodiscard]] const GpuBuffer& GetNormalBuffer() const { return *m_normalBuffer; }  // Normal vectors
+    [[nodiscard]] bool HasNormals() const { return m_normalBuffer != nullptr; }  // Check if normals are available
 
 private:
     // Helper: Upload vertex and index data to GPU buffers
@@ -76,6 +78,7 @@ private:
     std::unique_ptr<GpuBuffer> m_indexBuffer;    // Index data (device-local)
     std::unique_ptr<GpuBuffer> m_uvBuffer;       // UV coordinates (device-local, optional)
     std::unique_ptr<GpuBuffer> m_tangentBuffer;  // Tangent vectors (device-local, optional)
+    std::unique_ptr<GpuBuffer> m_normalBuffer;   // Normal vectors (device-local, required for smooth shading)
     std::unique_ptr<GpuBuffer> m_scratchBuffer;  // Scratch space for build
 
     // Device address

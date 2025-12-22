@@ -90,6 +90,24 @@ void BLAS::UploadGeometryBuffers() {
         QL_LOG_DEBUG("  BLAS: Created fallback tangent buffer: {} vertices ({} bytes)", tangentCount, tangentBufferSize);
     }
 
+    // Create normal buffer (always create, use fallback if not present)
+    // CRITICAL: Always bind normal buffer for smooth shading interpolation
+    const bool hasNormals = !m_primitive.normals.empty();
+    const size_t normalCount = hasNormals ? m_primitive.normals.size() : m_primitive.positions.size();
+    const VkDeviceSize normalBufferSize = normalCount * sizeof(glm::vec3);
+    m_normalBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        normalBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+    if (hasNormals) {
+        QL_LOG_DEBUG("  BLAS: Created normal buffer: {} normals ({} bytes)", normalCount, normalBufferSize);
+    } else {
+        QL_LOG_WARN("  BLAS: No normals provided, creating fallback flat normal buffer: {} vertices ({} bytes)", normalCount, normalBufferSize);
+    }
+
     // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
     // CRITICAL: Staging buffers MUST be created OUTSIDE the lambda to ensure they
     // remain valid until the command buffer is submitted and GPU operations complete.
@@ -145,6 +163,42 @@ void BLAS::UploadGeometryBuffers() {
         QL_LOG_DEBUG("  BLAS: Prepared {} fallback tangents for upload", tangentCount);
     }
 
+    // Create normal staging buffer
+    GpuBuffer normalStaging(
+        allocator,
+        normalBufferSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    if (hasNormals) {
+        normalStaging.Upload(m_primitive.normals.data(), normalBufferSize);
+        QL_LOG_DEBUG("  BLAS: Prepared {} real normals for upload", normalCount);
+    } else {
+        // Generate flat normals (geometric normals, one per triangle vertex)
+        std::vector<glm::vec3> fallbackNormals(normalCount, glm::vec3(0.0f));
+        for (size_t i = 0; i < m_primitive.indices.size(); i += 3) {
+            const u32 i0 = m_primitive.indices[i + 0];
+            const u32 i1 = m_primitive.indices[i + 1];
+            const u32 i2 = m_primitive.indices[i + 2];
+
+            const glm::vec3 v0 = m_primitive.positions[i0];
+            const glm::vec3 v1 = m_primitive.positions[i1];
+            const glm::vec3 v2 = m_primitive.positions[i2];
+
+            const glm::vec3 edge1 = v1 - v0;
+            const glm::vec3 edge2 = v2 - v0;
+            const glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
+
+            // All 3 vertices of this triangle share the same normal (flat shading)
+            fallbackNormals[i0] = normal;
+            fallbackNormals[i1] = normal;
+            fallbackNormals[i2] = normal;
+        }
+        normalStaging.Upload(fallbackNormals.data(), normalBufferSize);
+        QL_LOG_DEBUG("  BLAS: Prepared {} generated flat normals for upload", normalCount);
+    }
+
     // Execute copy commands (staging buffers remain valid throughout)
     CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
         // Copy staging → device-local
@@ -170,6 +224,11 @@ void BLAS::UploadGeometryBuffers() {
         VkBufferCopy tangentCopyRegion{};
         tangentCopyRegion.size = tangentBufferSize;
         vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
+
+        // Upload normal data
+        VkBufferCopy normalCopyRegion{};
+        normalCopyRegion.size = normalBufferSize;
+        vkCmdCopyBuffer(cmd, normalStaging.GetHandle(), m_normalBuffer->GetHandle(), 1, &normalCopyRegion);
 
         // Insert barrier - transfer writes must complete before AS build reads
         VkMemoryBarrier barrier{};
@@ -211,6 +270,8 @@ BLAS::BLAS(BLAS&& other) noexcept
     , m_vertexBuffer(std::move(other.m_vertexBuffer))
     , m_indexBuffer(std::move(other.m_indexBuffer))
     , m_uvBuffer(std::move(other.m_uvBuffer))
+    , m_tangentBuffer(std::move(other.m_tangentBuffer))
+    , m_normalBuffer(std::move(other.m_normalBuffer))
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
     , m_deviceAddress(other.m_deviceAddress)
     , m_built(other.m_built)
@@ -239,6 +300,8 @@ BLAS& BLAS::operator=(BLAS&& other) noexcept {
         m_vertexBuffer = std::move(other.m_vertexBuffer);
         m_indexBuffer = std::move(other.m_indexBuffer);
         m_uvBuffer = std::move(other.m_uvBuffer);
+        m_tangentBuffer = std::move(other.m_tangentBuffer);
+        m_normalBuffer = std::move(other.m_normalBuffer);
         m_scratchBuffer = std::move(other.m_scratchBuffer);
         m_deviceAddress = other.m_deviceAddress;
         m_built = other.m_built;

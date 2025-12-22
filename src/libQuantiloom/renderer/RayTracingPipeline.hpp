@@ -80,6 +80,9 @@ public:
     // Bind tangent buffer (binding 9) - Optional
     void BindTangentBuffer(const GpuBuffer& buffer) const;
 
+    // Bind normal buffer (binding 16) - Required for smooth shading
+    void BindNormalBuffer(const GpuBuffer& buffer) const;
+
     // Bind texture arrays (binding 6: textures, binding 7: samplers)
     // Uses bindless descriptor indexing (VK_EXT_descriptor_indexing)
     // If imageViews is empty, binds a single dummy white texture

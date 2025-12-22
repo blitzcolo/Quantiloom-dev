@@ -1355,6 +1355,9 @@ int main(int argc, char* argv[]) {
 
             // Bind tangent buffer (always present, uses fallback data if model has no tangents)
             pipeline.BindTangentBuffer(blasList[0].GetTangentBuffer());  // Binding 9
+
+            // Bind normal buffer (always present, required for smooth shading)
+            pipeline.BindNormalBuffer(blasList[0].GetNormalBuffer());    // Binding 16
         }
 
         pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
