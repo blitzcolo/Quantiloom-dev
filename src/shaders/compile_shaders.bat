@@ -58,10 +58,11 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/miss.spv created
 
+
 echo.
 echo =========================================
 echo   All shaders compiled successfully!
 echo =========================================
 echo.
-echo You can now run the M1 test application.
+echo You can now run the M1 application.
 

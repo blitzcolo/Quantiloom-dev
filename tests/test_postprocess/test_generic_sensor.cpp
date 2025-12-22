@@ -707,3 +707,234 @@ TEST_F(GenericSensorTest, NUCEfficiencyControlsResidual) {
     EXPECT_GT(variance90, 0.0f);
     EXPECT_GT(variance50, 0.0f);
 }
+
+// ============================================================================
+// FPN Anisotropic Stripe Pattern Tests
+// ============================================================================
+
+TEST_F(GenericSensorTest, PRNUCreatesVerticalStripes) {
+    // PRNU should create vertical stripes (column FPN from readout electronics)
+    // Pixels in the same column should have similar PRNU values
+    Image hdr(200, 200, 1);
+    for (auto& val : hdr.data) {
+        val = 0.01f;  // Low radiance to avoid saturation
+    }
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.08f;  // 8% PRNU (strong effect)
+    params.dsnuSigma_e = 0.0f;  // Disable DSNU to isolate PRNU
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.fNumber = 1.4f;  // Minimal PSF blur
+    params.gain = 1.0f;  // Lower gain to preserve signal range
+
+    GenericSensor sensorPRNU;
+    auto result = sensorPRNU.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Verify we're not saturated (check that not all values are at max DN)
+    const f32 maxDN = static_cast<f32>((1u << params.bitDepth) - 1);
+    f32 dnSum = 0.0f;
+    for (const auto& val : dn.data) {
+        dnSum += val;
+    }
+    f32 avgDN = dnSum / dn.data.size();
+    ASSERT_LT(avgDN, maxDN * 0.9f) << "Signal is saturated, reduce input radiance";
+
+    // Calculate column-wise variance vs row-wise variance
+    // For vertical stripes: between-column variance >> within-column variance
+
+    // Column means
+    std::vector<f32> colMeans(dn.width, 0.0f);
+    for (u32 x = 0; x < dn.width; ++x) {
+        for (u32 y = 0; y < dn.height; ++y) {
+            colMeans[x] += dn(x, y, 0);
+        }
+        colMeans[x] /= dn.height;
+    }
+
+    f32 overallMean = 0.0f;
+    for (const auto& m : colMeans) {
+        overallMean += m;
+    }
+    overallMean /= colMeans.size();
+
+    f32 betweenColumnVariance = 0.0f;
+    for (const auto& m : colMeans) {
+        f32 diff = m - overallMean;
+        betweenColumnVariance += diff * diff;
+    }
+    betweenColumnVariance /= colMeans.size();
+
+    // Within-column variance: how much do pixels within a column vary?
+    f32 withinColumnVariance = 0.0f;
+    u32 count = 0;
+    for (u32 x = 50; x < 150; ++x) {  // Sample middle columns
+        f32 colMean = colMeans[x];
+        for (u32 y = 50; y < 150; ++y) {  // Sample middle rows
+            f32 diff = dn(x, y, 0) - colMean;
+            withinColumnVariance += diff * diff;
+            ++count;
+        }
+    }
+    withinColumnVariance /= count;
+
+    // For vertical stripes: between-column variance should be larger
+    // than within-column variance (columns are uniform internally but differ from each other)
+    EXPECT_GT(betweenColumnVariance, withinColumnVariance);
+}
+
+TEST_F(GenericSensorTest, DSNUCreatesHorizontalStripes) {
+    // DSNU should create horizontal stripes (row FPN from row addressing)
+    // Pixels in the same row should have similar DSNU values
+    Image hdr(200, 200, 1);
+    for (auto& val : hdr.data) {
+        val = 0.01f;  // Low radiance to avoid saturation
+    }
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.0f;  // Disable PRNU to isolate DSNU
+    params.dsnuSigma_e = 50.0f;  // Strong DSNU (in electrons)
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.fNumber = 1.4f;  // Minimal PSF blur
+    params.gain = 1.0f;  // Lower gain to preserve signal range
+
+    GenericSensor sensorDSNU;
+    auto result = sensorDSNU.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Verify we have non-zero signal
+    f32 dnSum = 0.0f;
+    for (const auto& val : dn.data) {
+        dnSum += val;
+    }
+    f32 avgDN = dnSum / dn.data.size();
+    ASSERT_GT(avgDN, 10.0f) << "Signal is too weak";
+
+    // Calculate row-wise variance vs column-wise variance
+    // For horizontal stripes: between-row variance >> within-row variance
+
+    // Row means
+    std::vector<f32> rowMeans(dn.height, 0.0f);
+    for (u32 y = 0; y < dn.height; ++y) {
+        for (u32 x = 0; x < dn.width; ++x) {
+            rowMeans[y] += dn(x, y, 0);
+        }
+        rowMeans[y] /= dn.width;
+    }
+
+    f32 overallMean = 0.0f;
+    for (const auto& m : rowMeans) {
+        overallMean += m;
+    }
+    overallMean /= rowMeans.size();
+
+    f32 betweenRowVariance = 0.0f;
+    for (const auto& m : rowMeans) {
+        f32 diff = m - overallMean;
+        betweenRowVariance += diff * diff;
+    }
+    betweenRowVariance /= rowMeans.size();
+
+    // Within-row variance: how much do pixels within a row vary?
+    f32 withinRowVariance = 0.0f;
+    u32 count = 0;
+    for (u32 y = 50; y < 150; ++y) {  // Sample middle rows
+        f32 rowMean = rowMeans[y];
+        for (u32 x = 50; x < 150; ++x) {  // Sample middle columns
+            f32 diff = dn(x, y, 0) - rowMean;
+            withinRowVariance += diff * diff;
+            ++count;
+        }
+    }
+    withinRowVariance /= count;
+
+    // For horizontal stripes: between-row variance should be larger
+    // than within-row variance (rows are uniform internally but differ from each other)
+    EXPECT_GT(betweenRowVariance, withinRowVariance);
+}
+
+TEST_F(GenericSensorTest, CombinedFPNCreatesGridPattern) {
+    // When both PRNU (vertical) and DSNU (horizontal) are enabled,
+    // the combined effect should create a grid-like pattern
+    Image hdr(200, 200, 1);
+    for (auto& val : hdr.data) {
+        val = 0.01f;  // Low radiance to avoid saturation
+    }
+
+    params.enableFPN = true;
+    params.prnuSigma = 0.06f;  // 6% PRNU
+    params.dsnuSigma_e = 40.0f;  // DSNU
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.fNumber = 1.4f;
+    params.gain = 1.0f;  // Lower gain to preserve signal range
+
+    GenericSensor sensorGrid;
+    auto result = sensorGrid.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Verify we have reasonable signal
+    f32 dnSum = 0.0f;
+    for (const auto& val : dn.data) {
+        dnSum += val;
+    }
+    f32 avgDN = dnSum / dn.data.size();
+    ASSERT_GT(avgDN, 10.0f) << "Signal is too weak";
+
+    // Calculate both column and row variance contributions
+    // For a grid pattern, both should be significant
+
+    // Column means
+    std::vector<f32> colMeans(dn.width, 0.0f);
+    for (u32 x = 0; x < dn.width; ++x) {
+        for (u32 y = 0; y < dn.height; ++y) {
+            colMeans[x] += dn(x, y, 0);
+        }
+        colMeans[x] /= dn.height;
+    }
+
+    f32 overallMean = 0.0f;
+    for (const auto& m : colMeans) {
+        overallMean += m;
+    }
+    overallMean /= colMeans.size();
+
+    f32 columnVariance = 0.0f;
+    for (const auto& m : colMeans) {
+        f32 diff = m - overallMean;
+        columnVariance += diff * diff;
+    }
+    columnVariance /= colMeans.size();
+
+    // Row means
+    std::vector<f32> rowMeans(dn.height, 0.0f);
+    for (u32 y = 0; y < dn.height; ++y) {
+        for (u32 x = 0; x < dn.width; ++x) {
+            rowMeans[y] += dn(x, y, 0);
+        }
+        rowMeans[y] /= dn.width;
+    }
+
+    f32 rowVariance = 0.0f;
+    for (const auto& m : rowMeans) {
+        f32 diff = m - overallMean;
+        rowVariance += diff * diff;
+    }
+    rowVariance /= rowMeans.size();
+
+    // Both column and row variance should be significant (grid pattern)
+    // They don't need to be equal, but both should be non-trivial
+    EXPECT_GT(columnVariance, 1.0f);  // PRNU contribution
+    EXPECT_GT(rowVariance, 1.0f);     // DSNU contribution
+}

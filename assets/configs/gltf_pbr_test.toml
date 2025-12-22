@@ -154,19 +154,19 @@ log_material_sources = true       # Log spectral source for each material
 # If enabled, simulates realistic sensor characteristics (PSF blur, noise, ADC).
 # ============================================================================
 [sensor]
-enabled = false                 # Set to true to enable sensor simulation
+enabled = true                 # Set to true to enable sensor simulation
 
 # Optics parameters (aggressive settings for demo)
 focal_length_mm = 50.0          # Focal length (mm)
 f_number = 11.0                 # Aperture (f-stop) - SMALL APERTURE = MORE DIFFRACTION BLUR
 pixel_pitch_um = 5.0            # Pixel pitch (micrometers)
 
-# Detector parameters (low-end sensor for dramatic effect)
-quantum_efficiency = 0.5        # QE at peak wavelength [0.0-1.0] - LOW QE = WEAK SIGNAL
-well_capacity_e = 30000.0       # Full well capacity (electrons) - SMALLER WELL
-read_noise_e_rms = 50.0         # Read noise (electrons RMS) - HIGH NOISE (5x normal)
-dark_current_e_s = 500.0        # Dark current (electrons/second) - HIGH DARK CURRENT (10x)
-integration_time_s = 0.002      # Integration time (seconds) - SHORT EXPOSURE = UNDEREXPOSED
+# Detector parameters (adjusted for better FPN visibility)
+quantum_efficiency = 0.8        # QE at peak wavelength [0.0-1.0] - INCREASED for stronger signal
+well_capacity_e = 50000.0       # Full well capacity (electrons)
+read_noise_e_rms = 10.0         # Read noise (electrons RMS) - REDUCED for cleaner FPN pattern
+dark_current_e_s = 50.0         # Dark current (electrons/second) - REDUCED
+integration_time_s = 0.01       # Integration time (seconds) - INCREASED for stronger signal
 
 # ADC parameters
 bit_depth = 12                  # ADC bit depth (12/14/16) - LOWER BIT DEPTH = VISIBLE QUANTIZATION
@@ -176,7 +176,14 @@ gain = 5.0                      # Gain (electrons/DN) - HIGHER GAIN to avoid sat
 enable_poisson_noise = true     # Shot noise (photon counting)
 enable_read_noise = true        # Readout noise
 enable_dark_current = true      # Dark current noise
-enable_fpn = false              # Fixed pattern noise (PRNU/DSNU)
+enable_fpn = true                # Fixed pattern noise (PRNU/DSNU)
+
+# FPN parameters (Fixed Pattern Noise) - Only used if enable_fpn = true
+[sensor.fpn]
+prnu_sigma = 0.03               # PRNU standard deviation (8% - STRONG but not saturating, realistic: 0.5-2%)
+dsnu_sigma_e = 25.0             # DSNU standard deviation (30 e- - VISIBLE but not overwhelming, realistic: 5-20)
+enable_nuc = false              # Apply NUC correction (leaves residual noise)
+nuc_efficiency = 0.95           # NUC efficiency (95-99%, only used if enable_nuc = true)
 
 # Temperature (for IR sensors)
 detector_temperature_k = 77.0   # Detector temperature (K) for IR
@@ -225,3 +232,58 @@ weight_mwir = 0.3
 exr = "fused_vis_swir_mwir.exr"   # HDR output
 png = "fused_vis_swir_mwir.png"   # LDR preview
 
+# ============================================================================
+# Atmospheric Scattering (Delta-Tracking Volumetric Rendering)
+# ============================================================================
+# Physical model for volumetric atmospheric scattering using Delta-Tracking.
+# Supports wavelength-dependent Rayleigh + Mie scattering for realistic sky.
+#
+# PRESETS:
+#   - "clear_day"      : Standard clear atmosphere (visibility ~23km)
+#   - "hazy"           : Reduced visibility (~4.5km), more aerosol
+#   - "polluted_urban" : Heavy pollution (~2km visibility)
+#   - "mountain_top"   : Extremely clear (~90km visibility), thin atmosphere
+#   - "mars"           : Martian dust atmosphere (CO2-dominated)
+#   - "disabled"       : No atmospheric scattering (use for space scenes)
+#
+# CUSTOM PARAMETERS:
+# You can override preset values by specifying them explicitly below.
+# All parameters are optional; unspecified values use the preset defaults.
+# ============================================================================
+[atmospheric]
+preset = "clear_day"            # Use preset as base configuration
+
+# Rayleigh scattering (molecular) - Optional overrides
+rayleigh_enabled = true         # Enable Rayleigh scattering (O2, N2 molecules)
+# rayleigh_beta_550nm = 5.8e-6  # Scattering coefficient at 550nm (m^-1)
+# rayleigh_scale_height = 8500.0 # Scale height H_r (meters)
+
+# Mie scattering (aerosol) - Optional overrides
+mie_enabled = true              # Enable Mie scattering (dust, water droplets)
+# mie_beta_550nm = 2.0e-6       # Scattering coefficient at 550nm (m^-1)
+# mie_scale_height = 1200.0     # Scale height H_m (meters)
+# mie_g = 0.76                  # Asymmetry parameter (0=isotropic, >0=forward)
+# mie_alpha = 0.84              # Angstrom exponent (wavelength dependence)
+
+# Planet geometry - Optional overrides
+# planet_radius = 6.371e6       # Planet radius (meters, Earth: 6.371e6)
+# atmosphere_height = 60000.0   # Atmosphere top (meters, typical: 60km)
+
+# Delta-Tracking parameters - Optional overrides
+# max_distance = 100000.0       # Maximum ray march distance (meters)
+# max_steps = 64                # Maximum Delta-Tracking steps (32-128)
+# extinction_threshold = 0.01   # Early termination threshold (transmittance < 1%)
+
+# ============================================================================
+# EXAMPLE: Disable atmospheric scattering for space scenes
+# ============================================================================
+# [atmospheric]
+# preset = "disabled"
+
+# ============================================================================
+# EXAMPLE: Custom hazy urban scene
+# ============================================================================
+# [atmospheric]
+# preset = "clear_day"
+# mie_beta_550nm = 15.0e-6      # Override: heavy pollution
+# mie_scale_height = 800.0      # Override: lower aerosol layer

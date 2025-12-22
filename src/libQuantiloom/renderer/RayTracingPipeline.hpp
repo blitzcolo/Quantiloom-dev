@@ -140,6 +140,18 @@ public:
     // Pass nullptr to use LightingParams RGB fallback
     void BindSolarSpectralLUT(const GpuBuffer* buffer) const;
 
+    // ========================================================================
+    // Atmospheric Parameters (Binding 17)
+    // ========================================================================
+    // Bind atmospheric parameters buffer for Delta-Tracking volumetric rendering
+    // Provides Rayleigh + Mie scattering coefficients for wavelength-dependent extinction
+    // Pass nullptr to disable atmospheric scattering (use LUT fallback)
+    // ========================================================================
+
+    // Bind atmospheric parameters buffer (binding 17)
+    // Pass nullptr to disable Delta-Tracking
+    void BindAtmosphericParams(const GpuBuffer* buffer) const;
+
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
 

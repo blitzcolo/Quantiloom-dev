@@ -37,6 +37,12 @@ public:
         p.enableDarkCurrent = config.Get<bool>("sensor.enable_dark_current", true);
         p.enableFPN = config.Get<bool>("sensor.enable_fpn", false);
 
+        // FPN parameters (from sensor.fpn subtable, only used if enableFPN = true)
+        p.prnuSigma = config.Get<f32>("sensor.fpn.prnu_sigma", 0.01f);
+        p.dsnuSigma_e = config.Get<f32>("sensor.fpn.dsnu_sigma_e", 5.0f);
+        p.enableNUC = config.Get<bool>("sensor.fpn.enable_nuc", false);
+        p.nucEfficiency = config.Get<f32>("sensor.fpn.nuc_efficiency", 0.98f);
+
         // Temperature
         p.detectorTemperature_K = config.Get<f32>("sensor.detector_temperature_k", 77.0f);
 

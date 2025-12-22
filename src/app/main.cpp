@@ -22,6 +22,7 @@
 #include "renderer/BRDFLutGenerator.hpp"
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
+#include "renderer/AtmosphericConfig.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
@@ -824,6 +825,8 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<GpuBuffer> solarSpectralLUTBuffer;
         SolarSpectralLUT solarLUT{};  // Zero-initialized (numSamples=0 = fallback mode)
 
+        std::unique_ptr<GpuBuffer> atmosphericParamsBuffer;
+
         if (config.Has("lighting.solar_lut")) {
             String solarLutPath = config.Get<String>("lighting.solar_lut");
             QL_LOG_INFO("  Loading solar LUT from: {}", solarLutPath);
@@ -860,6 +863,32 @@ int main(int argc, char* argv[]) {
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
         solarSpectralLUTBuffer->Upload(&solarLUT, sizeof(SolarSpectralLUT));
+
+        // ====================================================================
+        // Create Atmospheric Parameters Buffer (Binding 17)
+        // ====================================================================
+        QL_LOG_INFO("Creating atmospheric parameters buffer...");
+
+        // Load atmospheric config from scene TOML or use default
+        AtmosphericConfig atmosphericConfig = AtmosphericConfig::ClearDay();
+        // TODO: Load from scene.toml if [atmospheric] section exists
+
+        // Convert to GPU structure
+        AtmosphericParamsGPU atmosphericGPU = atmosphericConfig.ToGPU();
+
+        // Create buffer
+        atmosphericParamsBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(),
+            sizeof(AtmosphericParamsGPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        atmosphericParamsBuffer->Upload(&atmosphericGPU, sizeof(AtmosphericParamsGPU));
+
+        QL_LOG_INFO("  Atmospheric rendering: {} (Rayleigh={}, Mie={})",
+                    atmosphericConfig.IsEnabled() ? "ENABLED" : "DISABLED",
+                    atmosphericConfig.rayleigh_enabled,
+                    atmosphericConfig.mie_enabled);
 
         // ====================================================================
         // Create Material Buffer (PBR)
@@ -1382,6 +1411,9 @@ int main(int argc, char* argv[]) {
 
         // Bind solar spectral LUT buffer (binding 15)
         pipeline.BindSolarSpectralLUT(solarSpectralLUTBuffer.get());
+
+        // Bind atmospheric parameters buffer (binding 17)
+        pipeline.BindAtmosphericParams(atmosphericParamsBuffer.get());
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();

@@ -311,24 +311,125 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
     m_DSNUMap.Resize(width, height, 1);
 
     // Generate PRNU map (if sigma > 0)
+    // PRNU simulates column-wise gain non-uniformity from readout electronics
+    // Using anisotropic filtering: smooth along Y (columns), preserve X independence
+    // This creates VERTICAL STRIPES (column FPN)
     if (p.prnuSigma > 1e-6f) {
-        std::normal_distribution<f32> prnuDist(0.0f, p.prnuSigma);  // PRNU: mean=0, sigma=0.5-2%
-        for (u32 i = 0; i < m_PRNUMap.TotalElements(); ++i) {
-            m_PRNUMap.data[i] = prnuDist(m_Rng);
+        std::normal_distribution<f32> prnuDist(0.0f, p.prnuSigma);
+
+        // Step 1: Generate per-column random values (1D noise expanded to 2D)
+        // Each column shares the same base value with slight per-pixel variation
+        Vector<f32> columnNoise(width);
+        for (u32 x = 0; x < width; ++x) {
+            columnNoise[x] = prnuDist(m_Rng);
+        }
+
+        // Step 2: Apply 1D smoothing to column noise for wider stripes
+        f32 smoothingSigma = 8.0f;  // Stripe width in pixels
+        auto kernel = MakeGaussianKernel(smoothingSigma);
+        const i32 radius = static_cast<i32>(kernel.size()) / 2;
+
+        Vector<f32> smoothedColumnNoise(width);
+        for (u32 x = 0; x < width; ++x) {
+            f32 sum = 0.0f;
+            for (i32 k = -radius; k <= radius; ++k) {
+                const i32 xk = std::clamp(static_cast<i32>(x) + k, 0, static_cast<i32>(width) - 1);
+                sum += columnNoise[xk] * kernel[k + radius];
+            }
+            smoothedColumnNoise[x] = sum;
+        }
+
+        // Step 3: Expand to 2D map (same value for entire column + small per-pixel variation)
+        std::normal_distribution<f32> pixelNoise(0.0f, p.prnuSigma * 0.1f);  // 10% pixel-level noise
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                m_PRNUMap(x, y, 0) = smoothedColumnNoise[x] + pixelNoise(m_Rng);
+            }
+        }
+
+        // Step 4: Renormalize to target sigma
+        f32 currentMean = 0.0f;
+        for (const auto& val : m_PRNUMap.data) {
+            currentMean += val;
+        }
+        currentMean /= m_PRNUMap.TotalElements();
+
+        f32 currentVariance = 0.0f;
+        for (const auto& val : m_PRNUMap.data) {
+            f32 diff = val - currentMean;
+            currentVariance += diff * diff;
+        }
+        currentVariance /= m_PRNUMap.TotalElements();
+        f32 currentSigma = std::sqrt(currentVariance);
+
+        if (currentSigma > 1e-6f) {
+            f32 scale = p.prnuSigma / currentSigma;
+            for (auto& val : m_PRNUMap.data) {
+                val = (val - currentMean) * scale;
+            }
         }
     } else {
-        // Zero PRNU: all pixels have uniform gain
         std::fill(m_PRNUMap.data.begin(), m_PRNUMap.data.end(), 0.0f);
     }
 
     // Generate DSNU map (if sigma > 0)
+    // DSNU simulates row-wise dark current non-uniformity from row addressing
+    // Using anisotropic filtering: smooth along X (rows), preserve Y independence
+    // This creates HORIZONTAL STRIPES (row FPN)
     if (p.dsnuSigma_e > 1e-6f) {
-        std::normal_distribution<f32> dsnuDist(0.0f, p.dsnuSigma_e); // DSNU: mean=0, sigma=5-20 e-
-        for (u32 i = 0; i < m_DSNUMap.TotalElements(); ++i) {
-            m_DSNUMap.data[i] = dsnuDist(m_Rng);
+        std::normal_distribution<f32> dsnuDist(0.0f, p.dsnuSigma_e);
+
+        // Step 1: Generate per-row random values
+        Vector<f32> rowNoise(height);
+        for (u32 y = 0; y < height; ++y) {
+            rowNoise[y] = dsnuDist(m_Rng);
+        }
+
+        // Step 2: Apply 1D smoothing to row noise for wider stripes
+        f32 smoothingSigma = 5.0f;  // Stripe width in pixels (narrower than PRNU)
+        auto kernel = MakeGaussianKernel(smoothingSigma);
+        const i32 radius = static_cast<i32>(kernel.size()) / 2;
+
+        Vector<f32> smoothedRowNoise(height);
+        for (u32 y = 0; y < height; ++y) {
+            f32 sum = 0.0f;
+            for (i32 k = -radius; k <= radius; ++k) {
+                const i32 yk = std::clamp(static_cast<i32>(y) + k, 0, static_cast<i32>(height) - 1);
+                sum += rowNoise[yk] * kernel[k + radius];
+            }
+            smoothedRowNoise[y] = sum;
+        }
+
+        // Step 3: Expand to 2D map (same value for entire row + small per-pixel variation)
+        std::normal_distribution<f32> pixelNoise(0.0f, p.dsnuSigma_e * 0.1f);  // 10% pixel-level noise
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                m_DSNUMap(x, y, 0) = smoothedRowNoise[y] + pixelNoise(m_Rng);
+            }
+        }
+
+        // Step 4: Renormalize to target sigma
+        f32 currentMean = 0.0f;
+        for (const auto& val : m_DSNUMap.data) {
+            currentMean += val;
+        }
+        currentMean /= m_DSNUMap.TotalElements();
+
+        f32 currentVariance = 0.0f;
+        for (const auto& val : m_DSNUMap.data) {
+            f32 diff = val - currentMean;
+            currentVariance += diff * diff;
+        }
+        currentVariance /= m_DSNUMap.TotalElements();
+        f32 currentSigma = std::sqrt(currentVariance);
+
+        if (currentSigma > 1e-6f) {
+            f32 scale = p.dsnuSigma_e / currentSigma;
+            for (auto& val : m_DSNUMap.data) {
+                val = (val - currentMean) * scale;
+            }
         }
     } else {
-        // Zero DSNU: all pixels have uniform dark current
         std::fill(m_DSNUMap.data.begin(), m_DSNUMap.data.end(), 0.0f);
     }
 
@@ -386,8 +487,24 @@ auto GenericSensor::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
         }
     }
 
+    // Log statistics for verification
+    f32 totalVariance = 0.0f;
+    f32 mean = 0.0f;
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        mean += electrons.data[i];
+    }
+    mean /= electrons.TotalElements();
+
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        f32 diff = electrons.data[i] - mean;
+        totalVariance += diff * diff;
+    }
+    totalVariance /= electrons.TotalElements();
+    f32 stdDev = std::sqrt(totalVariance);
+
     const char* nucStatus = p.enableNUC ? " (with NUC residual)" : " (without NUC)";
-    Log::Debug("FPN applied{}", nucStatus);
+    Log::Info("FPN applied{}: mean={:.1f} e-, stddev={:.1f} e- ({:.2f}%)",
+              nucStatus, mean, stdDev, (stdDev / mean) * 100.0f);
 }
 
 // ============================================================================

@@ -11,9 +11,10 @@
 // - RGB mode: Physically-based spectral upsampling + XYZ integration
 // - Single mode: Full spectral fidelity with measured reflectance curves
 //
-// ATMOSPHERIC MODEL (LUT-fast):
+//ATMOSPHERIC MODEL (Enhanced with Delta-Tracking support):
 // - Beer-Lambert path attenuation: T(λ, d) = exp(-σ_t(λ) × d)
-// - MODTRAN LUT provides σ_t(λ) extinction coefficient
+// - MODTRAN LUT provides σ_t(λ) extinction coefficient (fallback)
+// - AtmosphericParams provides physical Rayleigh + Mie coefficients (enhanced)
 // - Hemispherical sky radiance integration for diffuse ambient
 // ============================================================================
 
@@ -22,6 +23,7 @@
 #include "SpectralConversion.hlsli"
 #include "blackbody.hlsli"
 #include "spectral_query.hlsli"
+#include "atmospheric.hlsli"
 
 // ============================================================================
 // Bindings
@@ -86,6 +88,16 @@
 // ============================================================================
 
 [[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
+
+// ============================================================================
+// Atmospheric Parameters Buffer (Binding 17)
+// ============================================================================
+// Physical parameters for enhanced atmospheric transmittance calculation
+// Provides Rayleigh + Mie coefficients for wavelength-dependent extinction
+// When beta_rayleigh_550nm.x > 0, use physical model; otherwise use LUT fallback
+// ============================================================================
+
+[[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
 
 // ============================================================================
 // IBL (Image-Based Lighting) Resources
@@ -512,40 +524,47 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // ========================================================================
-    // LUT-fast Atmospheric Transmission Model (Beer-Lambert Law)
+    // Enhanced Atmospheric Transmission Model
     // ========================================================================
-    // Computes atmospheric transmittance along view path using Beer-Lambert law:
+    // Computes atmospheric transmittance along view path
     //   T(λ, d) = exp(-σ_t(λ) × d)
     //
-    // where:
-    //   σ_t(λ) = wavelength-dependent extinction coefficient (1/m)
-    //   d = path length (m) from camera to surface
+    // TWO MODES:
+    // 1. Physical mode (AtmosphericParams available):
+    //    - Uses Rayleigh + Mie scattering coefficients
+    //    - Wavelength-dependent extinction: σ_t(λ) = β_r(λ) + β_m(λ)
+    //    - Assumes constant density (simplified for closesthit performance)
     //
-    // MODTRAN LUT INTEGRATION:
-    // - LUT provides τ_vertical(λ) = vertical optical depth (dimensionless)
-    // - Convert to extinction coefficient: σ_t(λ) = τ_vertical(λ) / H_atm
-    // - H_atm ≈ 8000m (atmospheric scale height)
-    //
-    // NOTE: This is a SIMPLIFIED model (LUT-fast mode).
-    // Full volume rendering (M4) will use delta-tracking with 3D extinction fields.
+    // 2. LUT-fast mode (fallback):
+    //    - Uses MODTRAN LUT transmittance
+    //    - Converts vertical optical depth to extinction coefficient
     // ========================================================================
 
     // Compute path length from camera to hit point (convert to meters)
-    // CRITICAL: Scene units may not be meters - use worldUnitsToMeters conversion
     float pathLength_m = RayTCurrent() * lut.worldUnitsToMeters;
 
-    // Convert LUT transmittance (vertical optical depth) to extinction coefficient
-    // Assumption: LUT transmittance is for vertical path through atmosphere
-    // τ_vertical ≈ 0.1-0.5 (typical clear sky), so σ_t ≈ 1e-5 to 6e-5 m^-1
-    const float atmosphericScaleHeight_m = 8000.0;  // Rayleigh scale height (m)
+    float atmosphericTransmittance;
+    AtmosphericParams atmo = atmosphericParams[0];
 
-    float opticalDepth_vertical = -log(max(lut.transmittance, 1e-6));  // τ = -ln(T)
-    float extinctionCoeff = opticalDepth_vertical / atmosphericScaleHeight_m;  // σ_t = τ / H
+    // Check if physical atmospheric model is enabled
+    if (atmo.beta_rayleigh_550nm.x > 1e-9) {
+        // PHYSICAL MODE: Use Rayleigh + Mie coefficients
+        float3 beta_r = RayleighScatteringCoeff(camera.wavelength_nm, atmo.beta_rayleigh_550nm);
+        float3 beta_m = MieScatteringCoeff(camera.wavelength_nm, atmo.beta_mie_550nm, atmo.mie_alpha);
 
-    // Apply Beer-Lambert attenuation along view path
-    // For short paths (< 10km), this is a reasonable approximation
-    // For longer paths, need to account for path integral through varying density
-    float atmosphericTransmittance = exp(-extinctionCoeff * pathLength_m);
+        // Total extinction (assuming sea-level density for simplicity)
+        float3 sigma_t = beta_r + beta_m;
+        float extinction = (sigma_t.r + sigma_t.g + sigma_t.b) / 3.0;  // Average over RGB
+
+        // Transmittance along path
+        atmosphericTransmittance = exp(-extinction * pathLength_m);
+    } else {
+        // LUT-FAST MODE (fallback): Use MODTRAN LUT
+        const float atmosphericScaleHeight_m = 8000.0;
+        float opticalDepth_vertical = -log(max(lut.transmittance, 1e-6));
+        float extinctionCoeff = opticalDepth_vertical / atmosphericScaleHeight_m;
+        atmosphericTransmittance = exp(-extinctionCoeff * pathLength_m);
+    }
 
     // Clamp to [0, 1] to prevent numerical issues
     atmosphericTransmittance = clamp(atmosphericTransmittance, 0.0, 1.0);
