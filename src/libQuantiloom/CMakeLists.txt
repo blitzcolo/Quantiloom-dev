@@ -65,6 +65,14 @@ add_library(libQuantiloom STATIC
     scene/Scene.cpp
     scene/Scene.hpp
 
+    # Postprocess module
+    postprocess/SensorModel.hpp
+    postprocess/GenericSensor.cpp
+    postprocess/GenericSensor.hpp
+    postprocess/MultibandFusion.cpp
+    postprocess/MultibandFusion.hpp
+    postprocess/PostprocessConfig.hpp
+
     # Generated files
     ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
 )

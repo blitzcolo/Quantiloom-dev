@@ -259,6 +259,9 @@ add_subdirectory(src/libQuantiloom)
 # Main application
 add_subdirectory(src/app)
 
+# Tools (fusion, etc.)
+add_subdirectory(src/tools)
+
 # Examples (optional)
 if(QUANTILOOM_BUILD_EXAMPLES)
     # add_subdirectory(examples)  # TODO: M2+

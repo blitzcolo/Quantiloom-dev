@@ -207,6 +207,12 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_lighting_params.cpp
 )
 
+# Postprocess tests (sensor simulation, multiband fusion)
+set(TEST_POSTPROCESS_SOURCES
+    test_postprocess/test_generic_sensor.cpp
+    test_postprocess/test_multiband_fusion.cpp
+)
+
 # Test main (custom main function with logging initialization)
 set(TEST_MAIN_SOURCE
     test_main.cpp
@@ -219,6 +225,7 @@ set(ALL_TEST_SOURCES
     ${TEST_SCENE_SOURCES}
     ${TEST_IO_SOURCES}
     ${TEST_RENDERER_SOURCES}
+    ${TEST_POSTPROCESS_SOURCES}
 )
 
 # ============================================================================
@@ -314,6 +321,13 @@ add_custom_target(test_renderer
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Run only postprocess tests (sensor simulation, fusion)
+add_custom_target(test_postprocess
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=GenericSensorTest.*:MultibandFusionTest.*
+    DEPENDS libquantiloom_tests
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # ============================================================================
 # Optional: Code Coverage (Linux/GCC only)
 # ============================================================================
@@ -345,14 +359,22 @@ install(TARGETS libquantiloom_tests
 message(STATUS "==================================================")
 message(STATUS "libQuantiloom Unit Tests Configuration")
 message(STATUS "==================================================")
-message(STATUS "  Test executable: libquantiloom_tests")
-message(STATUS "  Core tests:      ${TEST_CORE_SOURCES}")
-message(STATUS "  Scene tests:     ${TEST_SCENE_SOURCES}")
-message(STATUS "  IO tests:        ${TEST_IO_SOURCES}")
-message(STATUS "  Renderer tests:  ${TEST_RENDERER_SOURCES}")
-message(STATUS "  Total tests:     ${ALL_TEST_SOURCES}")
+message(STATUS "  Test executable:   libquantiloom_tests")
+message(STATUS "  Core tests:        ${TEST_CORE_SOURCES}")
+message(STATUS "  Scene tests:       ${TEST_SCENE_SOURCES}")
+message(STATUS "  IO tests:          ${TEST_IO_SOURCES}")
+message(STATUS "  Renderer tests:    ${TEST_RENDERER_SOURCES}")
+message(STATUS "  Postprocess tests: ${TEST_POSTPROCESS_SOURCES}")
+message(STATUS "  Total tests:       ${ALL_TEST_SOURCES}")
 message(STATUS "==================================================")
 message(STATUS "Build and run:")
 message(STATUS "  cmake --build . --target libquantiloom_tests")
 message(STATUS "  ctest --output-on-failure")
+message(STATUS "==================================================")
+message(STATUS "Targeted test runs:")
+message(STATUS "  cmake --build . --target test_core")
+message(STATUS "  cmake --build . --target test_scene")
+message(STATUS "  cmake --build . --target test_io")
+message(STATUS "  cmake --build . --target test_renderer")
+message(STATUS "  cmake --build . --target test_postprocess")
 message(STATUS "==================================================")

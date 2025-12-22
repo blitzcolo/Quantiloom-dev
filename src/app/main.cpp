@@ -26,6 +26,8 @@
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
 #include "SceneBuilder.hpp"
+#include "postprocess/GenericSensor.hpp"
+#include "postprocess/PostprocessConfig.hpp"
 
 #include <glm/glm.hpp>
 #include <iostream>
@@ -1528,6 +1530,66 @@ int main(int argc, char* argv[]) {
                 img(x, y, 2) = pixels[pixelIndex + 2];  // B
                 img(x, y, 3) = pixels[pixelIndex + 3];  // A
             }
+        }
+
+        // ====================================================================
+        // Sensor Simulation (Optional Postprocessing)
+        // ====================================================================
+        if (PostprocessConfig::IsSensorEnabled(config)) {
+            QL_LOG_INFO("Applying sensor simulation...");
+
+            // Parse sensor parameters from config
+            SensorParams sensorParams = PostprocessConfig::ParseSensorParams(config);
+
+            // Create sensor model
+            GenericSensor sensor;
+
+            // Extract RGB/grayscale channels (drop alpha for sensor simulation)
+            Image hdrInput(width, height, 3);
+            for (u32 y = 0; y < height; ++y) {
+                for (u32 x = 0; x < width; ++x) {
+                    hdrInput(x, y, 0) = img(x, y, 0);  // R
+                    hdrInput(x, y, 1) = img(x, y, 1);  // G
+                    hdrInput(x, y, 2) = img(x, y, 2);  // B
+                }
+            }
+
+            // Apply sensor chain
+            auto sensorResult = sensor.Apply(hdrInput, sensorParams);
+            if (!sensorResult.has_value()) {
+                QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", sensorResult.error());
+            } else {
+                QL_LOG_INFO("  [OK] Sensor simulation complete");
+
+                const SensorOutput& sensorOutput = sensorResult.value();
+
+                // Replace image with enhanced preview (noisy radiance, for PNG/visualization)
+                const Image& enhancedPreview = sensorOutput.enhancedPreview;
+                for (u32 y = 0; y < height; ++y) {
+                    for (u32 x = 0; x < width; ++x) {
+                        img(x, y, 0) = enhancedPreview(x, y, 0);  // R
+                        img(x, y, 1) = enhancedPreview(x, y, 1);  // G
+                        img(x, y, 2) = enhancedPreview(x, y, 2);  // B
+                        // Alpha unchanged
+                    }
+                }
+
+                // Update metadata
+                img.metadata["postprocess"] = "sensor_simulation_preview";
+
+                // Save raw DN image to separate file
+                std::filesystem::path exrPath(outputPath);
+                std::string rawDnPath = (exrPath.parent_path() / (exrPath.stem().string() + "_rawdn.exr")).string();
+
+                QL_LOG_INFO("Saving raw DN image to {}...", rawDnPath);
+                if (ImageIO::WriteEXR(rawDnPath, sensorOutput.rawDN)) {
+                    QL_LOG_INFO("  [OK] Saved raw DN image");
+                } else {
+                    QL_LOG_WARN("  [WARN] Failed to save raw DN image");
+                }
+            }
+        } else {
+            QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
         }
 
         // Save as EXR

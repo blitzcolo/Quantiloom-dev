@@ -146,3 +146,82 @@ log_material_sources = true       # Log spectral source for each material
 # [refractive_index]
 # Uncomment and add your material mappings here
 
+# ============================================================================
+# Sensor Simulation (Post-processing)
+# ============================================================================
+# Control whether to apply sensor effects to the rendered HDR output.
+# If disabled, outputs the raw HDR radiance from the renderer (perfect output).
+# If enabled, simulates realistic sensor characteristics (PSF blur, noise, ADC).
+# ============================================================================
+[sensor]
+enabled = false                 # Set to true to enable sensor simulation
+
+# Optics parameters (aggressive settings for demo)
+focal_length_mm = 50.0          # Focal length (mm)
+f_number = 11.0                 # Aperture (f-stop) - SMALL APERTURE = MORE DIFFRACTION BLUR
+pixel_pitch_um = 5.0            # Pixel pitch (micrometers)
+
+# Detector parameters (low-end sensor for dramatic effect)
+quantum_efficiency = 0.5        # QE at peak wavelength [0.0-1.0] - LOW QE = WEAK SIGNAL
+well_capacity_e = 30000.0       # Full well capacity (electrons) - SMALLER WELL
+read_noise_e_rms = 50.0         # Read noise (electrons RMS) - HIGH NOISE (5x normal)
+dark_current_e_s = 500.0        # Dark current (electrons/second) - HIGH DARK CURRENT (10x)
+integration_time_s = 0.002      # Integration time (seconds) - SHORT EXPOSURE = UNDEREXPOSED
+
+# ADC parameters
+bit_depth = 12                  # ADC bit depth (12/14/16) - LOWER BIT DEPTH = VISIBLE QUANTIZATION
+gain = 5.0                      # Gain (electrons/DN) - HIGHER GAIN to avoid saturation
+
+# Noise flags (all enabled for maximum realism)
+enable_poisson_noise = true     # Shot noise (photon counting)
+enable_read_noise = true        # Readout noise
+enable_dark_current = true      # Dark current noise
+enable_fpn = false              # Fixed pattern noise (PRNU/DSNU)
+
+# Temperature (for IR sensors)
+detector_temperature_k = 77.0   # Detector temperature (K) for IR
+
+# ============================================================================
+# Multiband Fusion (Post-processing)
+# ============================================================================
+# Fuse VIS/SWIR/MWIR bands into a single enhanced grayscale/pseudocolor image.
+# Requires rendering the same scene in multiple spectral modes.
+# Output is for qualitative analysis (target detection), not quantitative.
+# ============================================================================
+[fusion]
+# Fusion algorithm selection
+# Options: "laplacian_pyramid", "weighted_average", "max_response", "pseudo_color"
+method = "weighted_average"
+
+# Auto-normalization (applies to all methods)
+auto_normalize = true           # Normalize each band to [0, 1] before fusion
+
+# Manual normalization ranges (used if auto_normalize = false)
+vis_min = 0.0
+vis_max = 1.0
+swir_min = 0.0
+swir_max = 1e-3
+mwir_min = 0.0
+mwir_max = 1e-2
+
+# Laplacian Pyramid parameters (only used when method = "laplacian_pyramid")
+[fusion.laplacian_pyramid]
+levels = 5                      # Pyramid depth (4-6 recommended)
+
+# Weighted Average parameters (only used when method = "weighted_average")
+[fusion.weighted_average]
+weight_vis = 0.4
+weight_swir = 0.3
+weight_mwir = 0.3
+
+# Max Response - no additional parameters
+[fusion.max_response]
+
+# Pseudo Color - no additional parameters
+[fusion.pseudo_color]
+
+# Output paths (applies to all methods)
+[fusion.output]
+exr = "fused_vis_swir_mwir.exr"   # HDR output
+png = "fused_vis_swir_mwir.png"   # LDR preview
+

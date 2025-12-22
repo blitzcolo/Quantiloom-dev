@@ -1,0 +1,322 @@
+#include "GenericSensor.hpp"
+#include "../core/Log.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+
+namespace quantiloom {
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+// Planck constant (J·s)
+constexpr f64 kPlanckConstant = 6.62607015e-34;
+
+// Speed of light (m/s)
+constexpr f64 kSpeedOfLight = 299792458.0;
+
+// ============================================================================
+// Constructor
+// ============================================================================
+
+GenericSensor::GenericSensor()
+    : m_Rng(std::random_device{}()) {}
+
+// ============================================================================
+// Main Interface
+// ============================================================================
+
+auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
+    -> Result<SensorOutput, String> {
+
+    if (!hdr.IsValid()) {
+        return typename Result<SensorOutput, String>::Err("Invalid input image");
+    }
+
+    Log::Debug("Sensor chain: Input {}x{} ({} channels)",
+               hdr.width, hdr.height, hdr.channels);
+
+    // Step 1: Apply PSF blur (diffraction-limited optics)
+    // Calculate Airy disk radius (simplified: sigma ~ λ·f# / pixel_pitch)
+    const f32 wavelength_m = params.wavelength_nm * 1e-9f;
+    const f32 airyRadius_um = 1.22f * wavelength_m * 1e6f * params.fNumber;
+    const f32 sigma_pixels = airyRadius_um / params.pixelPitch_um;
+
+    Log::Debug("PSF: σ = {:.2f} pixels (Airy radius = {:.2f} μm)",
+               sigma_pixels, airyRadius_um);
+
+    Image blurred = ApplyPSF(hdr, sigma_pixels);
+
+    // Step 2: Radiance → Photo-electrons
+    Image electrons = RadianceToElectrons(blurred, params);
+
+    // Step 3: Add noise
+    AddNoise(electrons, params);
+
+    // Step 4a: Quantize to DN (raw sensor output)
+    Image rawDN = QuantizeToDN(electrons, params);
+
+    // Step 4b: Convert noisy electrons back to radiance (enhanced preview)
+    Image enhancedPreview = ElectronsToRadiance(electrons, params);
+
+    // Add metadata
+    rawDN.metadata["sensor_model"] = "GenericSensor";
+    rawDN.metadata["integration_time_s"] = std::to_string(params.integrationTime_s);
+    rawDN.metadata["gain"] = std::to_string(params.gain);
+    rawDN.metadata["bit_depth"] = std::to_string(params.bitDepth);
+
+    enhancedPreview.metadata["sensor_model"] = "GenericSensor";
+    enhancedPreview.metadata["enhanced_preview"] = "true";
+
+    Log::Info("Sensor chain complete: DN range [0, {}]", (1u << params.bitDepth) - 1);
+
+    SensorOutput output;
+    output.rawDN = std::move(rawDN);
+    output.enhancedPreview = std::move(enhancedPreview);
+
+    return std::move(output);  // Implicit conversion to Result
+}
+
+// ============================================================================
+// Step 1: Optical PSF (Gaussian Approximation)
+// ============================================================================
+
+auto GenericSensor::ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image {
+    if (sigma_pixels < 0.1f) {
+        // No blur needed
+        return img;
+    }
+
+    // Separable Gaussian convolution: O(N·K) instead of O(N·K²)
+    const auto kernel = MakeGaussianKernel(sigma_pixels);
+    Image temp = ConvolveX(img, kernel);
+    return ConvolveY(temp, kernel);
+}
+
+auto GenericSensor::MakeGaussianKernel(const f32 sigma) -> Vector<f32> {
+    // Kernel radius: 3σ (covers 99.7% of Gaussian)
+    const i32 radius = static_cast<i32>(std::ceil(3.0f * sigma));
+    const i32 size = 2 * radius + 1;
+
+    Vector<f32> kernel(size);
+    f32 sum = 0.0f;
+
+    for (i32 i = 0; i < size; ++i) {
+        const f32 x = static_cast<f32>(i - radius);
+        kernel[i] = std::exp(-0.5f * (x * x) / (sigma * sigma));
+        sum += kernel[i];
+    }
+
+    // Normalize
+    for (auto& k : kernel) {
+        k /= sum;
+    }
+
+    return kernel;
+}
+
+auto GenericSensor::ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image {
+    Image result(img.width, img.height, img.channels);
+    const i32 radius = static_cast<i32>(kernel.size()) / 2;
+
+    for (u32 y = 0; y < img.height; ++y) {
+        for (u32 x = 0; x < img.width; ++x) {
+            for (u32 c = 0; c < img.channels; ++c) {
+                f32 sum = 0.0f;
+                for (i32 k = -radius; k <= radius; ++k) {
+                    const i32 xk = std::clamp(static_cast<i32>(x) + k, 0,
+                                              static_cast<i32>(img.width) - 1);
+                    sum += img(xk, y, c) * kernel[k + radius];
+                }
+                result(x, y, c) = sum;
+            }
+        }
+    }
+
+    return result;
+}
+
+auto GenericSensor::ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image {
+    Image result(img.width, img.height, img.channels);
+    const i32 radius = static_cast<i32>(kernel.size()) / 2;
+
+    for (u32 y = 0; y < img.height; ++y) {
+        for (u32 x = 0; x < img.width; ++x) {
+            for (u32 c = 0; c < img.channels; ++c) {
+                f32 sum = 0.0f;
+                for (i32 k = -radius; k <= radius; ++k) {
+                    const i32 yk = std::clamp(static_cast<i32>(y) + k, 0,
+                                              static_cast<i32>(img.height) - 1);
+                    sum += img(x, yk, c) * kernel[k + radius];
+                }
+                result(x, y, c) = sum;
+            }
+        }
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Step 2: Radiance → Photo-electrons
+// ============================================================================
+
+auto GenericSensor::RadianceToElectrons(const Image& radiance,
+                                         const SensorParams& p) -> Image {
+    Image electrons(radiance.width, radiance.height, radiance.channels);
+
+    // Pixel area (m²)
+    const f64 pixelArea_m2 = (p.pixelPitch_um * 1e-6) * (p.pixelPitch_um * 1e-6);
+
+    // Photon energy: E = h·c / λ
+    const f64 wavelength_m = p.wavelength_nm * 1e-9;
+    const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
+
+    // Solid angle subtended by lens aperture: Ω = π / (4 × f#²)
+    const f64 solidAngle_sr = std::numbers::pi / (4.0 * p.fNumber * p.fNumber);
+
+    Log::Debug("Optics: f# = {:.1f}, Ω = {:.6e} sr, pixel area = {:.3e} m²",
+               p.fNumber, solidAngle_sr, pixelArea_m2);
+
+    // Statistics for debugging
+    f64 minElectrons = 1e10, maxElectrons = 0.0, sumElectrons = 0.0;
+
+    for (u32 i = 0; i < radiance.TotalElements(); ++i) {
+        // Input: radiance L (W/m²/sr)
+        // Irradiance: E = L · Ω (W/m²)
+        const f64 irradiance_W_m2 = radiance.data[i] * solidAngle_sr;
+
+        // Energy collected: E_total = E · A · t (Joules)
+        const f64 energy_J = irradiance_W_m2 * pixelArea_m2 * p.integrationTime_s;
+
+        // Number of photons: N_photons = E_total / E_photon
+        const f64 numPhotons = energy_J / photonEnergy_J;
+
+        // Number of photo-electrons: N_e = N_photons · QE
+        f64 numElectrons = numPhotons * p.quantumEfficiency;
+
+        // Add dark current
+        if (p.enableDarkCurrent) {
+            numElectrons += p.darkCurrent_e_s * p.integrationTime_s;
+        }
+
+        // Clamp to well capacity
+        numElectrons = std::min(numElectrons, static_cast<f64>(p.wellCapacity_e));
+
+        electrons.data[i] = static_cast<f32>(numElectrons);
+
+        // Update statistics
+        minElectrons = std::min(minElectrons, numElectrons);
+        maxElectrons = std::max(maxElectrons, numElectrons);
+        sumElectrons += numElectrons;
+    }
+
+    const f64 avgElectrons = sumElectrons / radiance.TotalElements();
+    Log::Debug("Electrons: min={:.1f}, max={:.1f}, avg={:.1f} e-", minElectrons, maxElectrons, avgElectrons);
+
+    return electrons;
+}
+
+// ============================================================================
+// Step 3: Add Noise
+// ============================================================================
+
+auto GenericSensor::AddNoise(Image& electrons, const SensorParams& p) -> void {
+    std::normal_distribution<f32> gaussianDist(0.0f, 1.0f);
+
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        f32 signal = electrons.data[i];
+
+        // Poisson noise (shot noise): σ = sqrt(N)
+        if (p.enablePoissonNoise && signal > 0.0f) {
+            const f32 shotNoise_rms = std::sqrt(signal);
+            signal += gaussianDist(m_Rng) * shotNoise_rms;
+        }
+
+        // Read noise (Gaussian)
+        if (p.enableReadNoise) {
+            signal += gaussianDist(m_Rng) * p.readNoise_e_rms;
+        }
+
+        // Clamp to [0, well_capacity]
+        signal = std::clamp(signal, 0.0f, p.wellCapacity_e);
+
+        electrons.data[i] = signal;
+    }
+}
+
+// ============================================================================
+// Step 4: ADC Quantization
+// ============================================================================
+
+auto GenericSensor::QuantizeToDN(const Image& electrons,
+                                  const SensorParams& p) -> Image {
+    Image dn(electrons.width, electrons.height, electrons.channels);
+
+    const f32 maxDN = static_cast<f32>((1u << p.bitDepth) - 1);
+
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        // Convert electrons to DN: DN = electrons / gain
+        f32 dnValue = electrons.data[i] / p.gain;
+
+        // Quantize to ADC range
+        dnValue = std::clamp(dnValue, 0.0f, maxDN);
+
+        // Floor to integer DN (ADC quantization)
+        dnValue = std::floor(dnValue);
+
+        dn.data[i] = dnValue;
+    }
+
+    return dn;
+}
+
+// ============================================================================
+// Step 5: Photo-electrons → Radiance (Reverse Conversion for Preview)
+// ============================================================================
+
+auto GenericSensor::ElectronsToRadiance(const Image& electrons,
+                                         const SensorParams& p) -> Image {
+    Image radiance(electrons.width, electrons.height, electrons.channels);
+
+    // Pixel area (m²)
+    const f64 pixelArea_m2 = (p.pixelPitch_um * 1e-6) * (p.pixelPitch_um * 1e-6);
+
+    // Photon energy: E = h·c / λ
+    const f64 wavelength_m = p.wavelength_nm * 1e-9;
+    const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
+
+    // Solid angle subtended by lens aperture: Ω = π / (4 × f#²)
+    const f64 solidAngle_sr = std::numbers::pi / (4.0 * p.fNumber * p.fNumber);
+
+    // Reverse conversion: electrons → radiance
+    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
+        f64 numElectrons = electrons.data[i];
+
+        // Remove dark current contribution
+        if (p.enableDarkCurrent) {
+            numElectrons -= p.darkCurrent_e_s * p.integrationTime_s;
+            numElectrons = std::max(numElectrons, 0.0);
+        }
+
+        // Electrons → Photons: N_photons = N_e / QE
+        const f64 numPhotons = numElectrons / p.quantumEfficiency;
+
+        // Photons → Energy: E_total = N_photons × E_photon
+        const f64 energy_J = numPhotons * photonEnergy_J;
+
+        // Energy → Irradiance: E = E_total / (A × t)
+        const f64 irradiance_W_m2 = energy_J / (pixelArea_m2 * p.integrationTime_s);
+
+        // Irradiance → Radiance: L = E / Ω
+        const f64 radiance_W_m2_sr = irradiance_W_m2 / solidAngle_sr;
+
+        radiance.data[i] = static_cast<f32>(radiance_W_m2_sr);
+    }
+
+    return radiance;
+}
+
+} // namespace quantiloom
