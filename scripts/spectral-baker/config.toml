@@ -1,0 +1,72 @@
+# SpectralBaker Configuration
+# Converts USGS spectral library to NMF basis functions for Quantiloom
+
+# =============================================================================
+# Input Paths
+# =============================================================================
+[input]
+# USGS library root directory (relative to this config file)
+usgs_root = "../../assets/usgs/ASCIIdata_splib07a"
+
+# Wavelength file for ASD instrument (VIS + SWIR: 0.35-2.5 µm)
+wavelength_file = "splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
+
+# File pattern for material data (glob pattern)
+material_filter = "**/*_AREF.txt"
+
+# =============================================================================
+# Processing Parameters
+# =============================================================================
+[processing]
+
+# Spectral band definitions
+# Each band can have its own n_components (basis function count)
+
+[processing.bands.VIS]
+range_um = [0.350, 0.780]   # Visible light (350-780 nm, 430nm range)
+interval_nm = 2.0           # 2 nm sampling -> 216 samples
+n_components = 16           # 16 basis functions
+
+[processing.bands.NIR]
+range_um = [0.780, 1.100]   # Near IR (780-1100 nm, 320nm range)
+interval_nm = 2.0           # 2 nm sampling -> 161 samples
+n_components = 16           # 16 basis functions
+
+[processing.bands.SWIR]
+range_um = [1.100, 2.500]   # Short-wave IR (1100-2500 nm, 1400nm range)
+interval_nm = 2.0           # 2 nm sampling -> 701 samples
+n_components = 32           # 32 basis functions (wider band needs more)
+
+# Default NMF parameters (can be overridden per-band)
+[processing.nmf]
+init = "nndsvda"            # Deterministic initialization
+solver = "cd"               # Coordinate descent (fast)
+max_iter = 2000             # Increased for better convergence
+tol = 1.0e-4                # Convergence threshold
+random_state = 42           # For reproducibility
+
+# =============================================================================
+# Output Paths
+# =============================================================================
+[output]
+# Global basis functions (binary, for C++ loader)
+basis_file = "../../assets/spectral/quantiloom_basis_v1.bin"
+
+# Material weights database (JSON, for glTF integration)
+material_json = "../../assets/spectral/quantiloom_materials.json"
+
+# Validation plots directory
+plots_dir = "./output/plots"
+
+# =============================================================================
+# Validation Settings
+# =============================================================================
+[validation]
+# Number of worst-performing materials to plot
+plot_worst_n_materials = 10
+
+# Number of best-performing materials to plot
+plot_best_n_materials = 5
+
+# Export error histogram
+export_error_histogram = true
