@@ -197,6 +197,7 @@ set(TEST_SCENE_SOURCES
 set(TEST_IO_SOURCES
     test_io/test_image_io.cpp
     test_io/test_spectral_io.cpp
+    test_io/test_spectral_basis_loader.cpp
     test_io/test_lut_loader.cpp
     test_io/test_gltf_loader.cpp
 )

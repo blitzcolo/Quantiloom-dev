@@ -27,6 +27,8 @@ add_library(libQuantiloom STATIC
     io/ImageIO.hpp
     io/SpectralIO.cpp
     io/SpectralIO.hpp
+    io/SpectralBasisLoader.cpp
+    io/SpectralBasisLoader.hpp
     io/LUTLoader.cpp
     io/LUTLoader.hpp
     io/GltfLoader.cpp

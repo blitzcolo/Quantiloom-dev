@@ -89,15 +89,6 @@ tests/
   - 文件存在性检查和尺寸读取
   - 边界情况 (单像素, 大图像, 200通道)
 
-### 🚧 待实现 (Planned)
-
-#### Renderer Module (`test_renderer/`)
-- Vulkan初始化测试 (需要GPU环境或mock)
-- GPU缓冲区创建和上传
-- 加速结构构建 (BLAS/TLAS)
-- 纹理管理和绑定
-- 光线追踪管线创建
-
 #### HS-Core Module (`test_hs_core/`)
 - 混合PDF MIS采样验证
 - Delta-tracking算法正确性
@@ -108,6 +99,15 @@ tests/
 - 传感器响应卷积
 - 噪声链 (泊松, 读噪, 暗电流)
 - DN生成和量化
+
+### 🚧 待实现 (Planned)
+
+#### Renderer Module (`test_renderer/`)
+- Vulkan初始化测试 (需要GPU环境或mock)
+- GPU缓冲区创建和上传
+- 加速结构构建 (BLAS/TLAS)
+- 纹理管理和绑定
+- 光线追踪管线创建
 
 ## 构建和运行 (Build and Run)
 

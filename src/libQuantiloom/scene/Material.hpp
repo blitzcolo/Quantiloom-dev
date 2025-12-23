@@ -115,6 +115,14 @@ struct Material {
     f32 irTemperature_K = 0.0f;
 
     // ========================================================================
+    // Quantiloom Spectral Material Reference (from glTF extras)
+    // ========================================================================
+    // When set, this material uses pre-computed spectral data from SpectralBaker.
+    // The name references an entry in the quantiloom_materials.json database.
+    // Example glTF extras: { "quantiloom_material": "Gold_HS111.3B" }
+    String quantiloomMaterialRef;  // Empty = no reference
+
+    // ========================================================================
     // Metadata
     // ========================================================================
     String name;  // Material name (for debugging)

@@ -12,6 +12,7 @@
 #include "io/ImageIO.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/SpectralIO.hpp"
+#include "io/SpectralBasisLoader.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/AccelerationStructure.hpp"
@@ -694,7 +695,94 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        QL_LOG_INFO("  Total spectral curves loaded: {}", spectralCurvesData.size());
+        QL_LOG_INFO("  Total spectral curves from CSV: {}", spectralCurvesData.size());
+
+        // ====================================================================
+        // Load SpectralBaker NMF Basis Data (for quantitative spectral rendering)
+        // ====================================================================
+        // Config format:
+        //   [spectral]
+        //   basis_file = "assets/spectral/quantiloom_basis_v1.bin"
+        //   materials_json = "assets/spectral/quantiloom_materials.json"
+        //   band = "VIS"  # Which band to use for rendering (VIS, NIR, SWIR)
+        //
+        // Materials reference the database via glTF extras:
+        //   "extras": { "quantiloom_material": "Gold_HS111.3B" }
+        // ====================================================================
+
+        SpectralBasisLoader basisLoader;
+        String activeBand = "VIS";  // Default to visible band
+
+        if (config.Has("spectral.basis_file") && config.Has("spectral.materials_json")) {
+            String basisFilePath = config.Get<String>("spectral.basis_file");
+            String materialsJsonPath = config.Get<String>("spectral.materials_json");
+            activeBand = config.Get<String>("spectral.band", "VIS");
+
+            QL_LOG_INFO("Loading SpectralBaker NMF basis data...");
+            QL_LOG_INFO("  Basis file: {}", basisFilePath);
+            QL_LOG_INFO("  Materials JSON: {}", materialsJsonPath);
+            QL_LOG_INFO("  Active band: {}", activeBand);
+
+            if (basisLoader.Load(basisFilePath, materialsJsonPath)) {
+                QL_LOG_INFO("  SpectralBaker data loaded: {} materials, {} bands",
+                            basisLoader.GetMaterialCount(), basisLoader.GetNumBands());
+
+                // Process materials with Quantiloom spectral references
+                for (const auto& mat : loadedScene.materials) {
+                    if (mat.quantiloomMaterialRef.empty()) continue;
+
+                    QL_LOG_INFO("  Processing Quantiloom material reference: '{}' -> '{}'",
+                                mat.name, mat.quantiloomMaterialRef);
+
+                    // Try exact match first, then partial match
+                    const MaterialSpectralData* spectralData = basisLoader.FindMaterial(mat.quantiloomMaterialRef);
+                    if (!spectralData) {
+                        spectralData = basisLoader.FindMaterialPartial(mat.quantiloomMaterialRef);
+                        if (spectralData) {
+                            QL_LOG_INFO("    Matched via partial search: '{}'", spectralData->name);
+                        }
+                    }
+
+                    if (!spectralData) {
+                        QL_LOG_WARN("    Material '{}' not found in SpectralBaker database", mat.quantiloomMaterialRef);
+                        continue;
+                    }
+
+                    // Reconstruct spectral curve for the active band
+                    SpectralCurveGPU gpuCurve = basisLoader.ReconstructCurveGPU(spectralData->name, activeBand);
+                    if (gpuCurve.numSamples == 0) {
+                        QL_LOG_WARN("    Failed to reconstruct curve for band '{}'", activeBand);
+                        continue;
+                    }
+
+                    // Store index mapping (use glTF material name, not the spectral ref)
+                    i32 curveIndex = static_cast<i32>(spectralCurvesData.size());
+                    materialNameToSpectralIndex[mat.name] = curveIndex;
+                    spectralCurvesData.push_back(gpuCurve);
+
+                    // Find band data for quality metrics
+                    const MaterialSpectralData::BandData* bandData = nullptr;
+                    auto bandIt = spectralData->bands.find(activeBand);
+                    if (bandIt != spectralData->bands.end()) {
+                        bandData = &bandIt->second;
+                    }
+
+                    QL_LOG_INFO("    Reconstructed: {} samples, λ=[{:.1f}, {:.1f}] nm, RMSE={:.4f} → index {}",
+                                gpuCurve.numSamples,
+                                gpuCurve.startWavelength_nm,
+                                gpuCurve.GetWavelength(gpuCurve.numSamples - 1),
+                                bandData ? bandData->rmse : 0.0f,
+                                curveIndex);
+                }
+            } else {
+                QL_LOG_WARN("  Failed to load SpectralBaker data, using fallback");
+            }
+        } else {
+            QL_LOG_INFO("  No SpectralBaker basis configured");
+            QL_LOG_INFO("  NOTE: Add [spectral] basis_file and materials_json for NMF spectral data");
+        }
+
+        QL_LOG_INFO("  Total spectral curves (CSV + SpectralBaker): {}", spectralCurvesData.size());
 
         // Create GPU buffer for spectral curves (even if empty - need valid binding)
         std::unique_ptr<GpuBuffer> spectralCurvesBuffer;

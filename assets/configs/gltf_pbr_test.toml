@@ -33,6 +33,11 @@ environment_map = "assets/maps/qwantani_noon_puresky_4k.exr"  # EXR environment 
 mode = "rgb_fused"                   # RGB mode for full color rendering
 #wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
+# 
+basis_file = "assets/spectral/quantiloom_basis_v2.qlbin"
+materials_json = "assets/spectral/quantiloom_materials.json"
+band = "VIS"  # 或 "NIR", "SWIR"
+
 [scene]
 # ============================================================================
 # glTF Model Path
