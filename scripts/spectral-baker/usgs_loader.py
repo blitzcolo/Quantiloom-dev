@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-USGS Spectral Library Data Loader
+USGS Spectral Library Data Loader (SpectralBaker v3.0)
 
 Parses the USGS splib07a ASCII format for spectral reflectance data.
 Handles both wavelength files and material AREF (absolute reflectance) files.

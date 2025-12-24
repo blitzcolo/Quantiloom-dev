@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-SpectralBaker - Main Entry Point
+SpectralBaker v3.0 - Multi-Source Spectral Data Converter
 
-Converts USGS spectral library data into NMF basis functions and material weights
-for physically-based spectral rendering.
+Converts spectral reflectance data from multiple sources (USGS, RefractiveIndex.info)
+into NMF basis functions and material weights for physically-based spectral rendering.
+
+Supports 5 spectral bands: VIS, NIR, SWIR, MWIR, LWIR (0.35-15 µm)
 
 Usage:
     # Scan available materials
@@ -19,6 +21,7 @@ Usage:
     python bake_spectral.py --config config.toml
 
 Author: Quantiloom Team
+Version: 3.0
 """
 
 import argparse
@@ -42,6 +45,10 @@ from usgs_loader import (
     discover_materials,
     get_material_by_name,
     MaterialData
+)
+from refractiveindex_loader import (
+    load_all_refractiveindex_materials,
+    discover_refractiveindex_materials
 )
 from spectral_processor import (
     BandConfig,
@@ -110,41 +117,136 @@ def parse_nmf_config(config: dict) -> NMFConfig:
     )
 
 
+def load_materials_from_config(config: dict, args, config_dir: Optional[Path] = None) -> List[MaterialData]:
+    """
+    Load materials based on configured data source.
+
+    Args:
+        config: Parsed config dict
+        args: Command-line arguments (for max_materials, etc.)
+        config_dir: Directory containing config file (for relative path resolution)
+
+    Returns:
+        List of MaterialData objects
+    """
+    logger = logging.getLogger(__name__)
+
+    input_cfg = config.get('input', {})
+    source_type = input_cfg.get('source_type', 'usgs')
+
+    if source_type == 'usgs':
+        # USGS data source
+        usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
+        wl_file = input_cfg.get('wavelength_file', 'splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt')
+
+        # Resolve paths relative to config file
+        if config_dir:
+            usgs_root = str(config_dir / usgs_root)
+
+        logger.info(f"Loading materials from USGS: {usgs_root}")
+        materials = load_all_materials(usgs_root, wl_file, max_materials=args.max_materials)
+
+    elif source_type == 'refractiveindex':
+        # RefractiveIndex.info data source
+        refidx_root = input_cfg.get('refractiveindex_root', '../../assets/refractiveindex/database')
+        refidx_pattern = input_cfg.get('refractiveindex_pattern', 'data/main/**/nk/*.yml')
+
+        # Resolve paths relative to config file
+        if config_dir:
+            refidx_root = str(config_dir / refidx_root)
+
+        logger.info(f"Loading materials from RefractiveIndex.info: {refidx_root}")
+        materials = load_all_refractiveindex_materials(refidx_root, refidx_pattern, max_materials=args.max_materials)
+
+    else:
+        raise ValueError(f"Unknown source_type: {source_type}. Must be 'usgs' or 'refractiveindex'")
+
+    logger.info(f"Loaded {len(materials)} materials from {source_type}")
+
+    return materials
+
+
 def cmd_scan(args, config: dict):
     """Scan available materials and report statistics."""
     logger = logging.getLogger(__name__)
 
     input_cfg = config.get('input', {})
-    usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
+    source_type = input_cfg.get('source_type', 'usgs')
 
     # Resolve path relative to config file
-    if args.config:
-        config_dir = Path(args.config).parent
-        usgs_root = str(config_dir / usgs_root)
-
-    logger.info(f"Scanning USGS library: {usgs_root}")
-
-    # Discover all material files
-    all_files = discover_materials(usgs_root, pattern="**/*_AREF.txt")
-    asd_files = discover_materials(usgs_root, pattern="**/*_AREF.txt", instrument_filter="ASD")
-
-    # Count by chapter
-    chapter_counts = {}
-    for f in asd_files:
-        path = Path(f)
-        for part in path.parts:
-            if part.startswith("Chapter"):
-                chapter_counts[part] = chapter_counts.get(part, 0) + 1
-                break
+    config_dir = Path(args.config).parent if args.config else None
 
     print("\n" + "=" * 60)
-    print("USGS Spectral Library Scan Results")
+    print(f"Material Library Scan Results ({source_type.upper()})")
     print("=" * 60)
-    print(f"\nTotal AREF files: {len(all_files)}")
-    print(f"ASD files (VIS+SWIR): {len(asd_files)}")
-    print(f"\nBy Chapter:")
-    for chapter in sorted(chapter_counts.keys()):
-        print(f"  {chapter}: {chapter_counts[chapter]}")
+
+    if source_type == 'usgs':
+        usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
+
+        if config_dir:
+            usgs_root = str(config_dir / usgs_root)
+
+        logger.info(f"Scanning USGS library: {usgs_root}")
+
+        # Discover all material files
+        all_files = discover_materials(usgs_root, pattern="**/*_AREF.txt")
+        asd_files = discover_materials(usgs_root, pattern="**/*_AREF.txt", instrument_filter="ASD")
+
+        # Count by chapter
+        chapter_counts = {}
+        for f in asd_files:
+            path = Path(f)
+            for part in path.parts:
+                if part.startswith("Chapter"):
+                    chapter_counts[part] = chapter_counts.get(part, 0) + 1
+                    break
+
+        print(f"\nTotal AREF files: {len(all_files)}")
+        print(f"ASD files (VIS+SWIR): {len(asd_files)}")
+        print(f"\nBy Chapter:")
+        for chapter in sorted(chapter_counts.keys()):
+            print(f"  {chapter}: {chapter_counts[chapter]}")
+
+    elif source_type == 'refractiveindex':
+        refidx_root = input_cfg.get('refractiveindex_root', '../../assets/refractiveindex/database')
+        refidx_pattern = input_cfg.get('refractiveindex_pattern', 'data/main/**/nk/*.yml')
+
+        if config_dir:
+            refidx_root = str(config_dir / refidx_root)
+
+        logger.info(f"Scanning RefractiveIndex.info library: {refidx_root}")
+
+        # Parse pattern to get search path
+        search_path = Path(refidx_root) / refidx_pattern.split('/')[0]
+        remaining_pattern = '/'.join(refidx_pattern.split('/')[1:])
+
+        all_files = discover_refractiveindex_materials(
+            str(search_path),
+            pattern=remaining_pattern,
+            category_filter='main'
+        )
+
+        # Count by material
+        material_counts = {}
+        for f in all_files:
+            path = Path(f)
+            # Extract material from path (data/main/MaterialSymbol/nk/Author.yml)
+            for i, part in enumerate(path.parts):
+                if part == 'main' and i + 1 < len(path.parts):
+                    material = path.parts[i + 1]
+                    material_counts[material] = material_counts.get(material, 0) + 1
+                    break
+
+        print(f"\nTotal nk data files: {len(all_files)}")
+        print(f"Unique materials: {len(material_counts)}")
+        print(f"\nTop 10 materials by data count:")
+        for material, count in sorted(material_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
+            print(f"  {material}: {count} datasets")
+
+    else:
+        logger.error(f"Unknown source_type: {source_type}")
+        return 1
+
     print("=" * 60 + "\n")
 
 
@@ -152,19 +254,13 @@ def cmd_single_material(args, config: dict):
     """Process a single material for testing/debugging."""
     logger = logging.getLogger(__name__)
 
-    input_cfg = config.get('input', {})
-    usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
-    wl_file = input_cfg.get('wavelength_file', 'splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt')
-
     # Resolve paths
-    if args.config:
-        config_dir = Path(args.config).parent
-        usgs_root = str(config_dir / usgs_root)
+    config_dir = Path(args.config).parent if args.config else None
 
-    logger.info(f"Loading materials from: {usgs_root}")
+    logger.info("Loading materials...")
 
     # Load all materials (needed for NMF to have sufficient data)
-    materials = load_all_materials(usgs_root, wl_file, max_materials=args.max_materials)
+    materials = load_materials_from_config(config, args, config_dir)
 
     # Find target material
     target = get_material_by_name(materials, args.material)
@@ -224,20 +320,15 @@ def cmd_experiment(args, config: dict):
     """Run basis count experiment."""
     logger = logging.getLogger(__name__)
 
-    input_cfg = config.get('input', {})
-    usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
-    wl_file = input_cfg.get('wavelength_file', 'splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt')
-
-    if args.config:
-        config_dir = Path(args.config).parent
-        usgs_root = str(config_dir / usgs_root)
+    # Resolve paths
+    config_dir = Path(args.config).parent if args.config else None
 
     # Parse component counts
     n_components_list = [int(x) for x in args.experiment_basis.split(',')]
     logger.info(f"Running experiment with basis counts: {n_components_list}")
 
     # Load materials
-    materials = load_all_materials(usgs_root, wl_file, max_materials=args.max_materials)
+    materials = load_materials_from_config(config, args, config_dir)
 
     # Get band configs
     bands = parse_band_config(config.get('processing', {}))
@@ -282,14 +373,10 @@ def cmd_full_bake(args, config: dict):
     proc_cfg = config.get('processing', {})
     valid_cfg = config.get('validation', {})
 
-    usgs_root = input_cfg.get('usgs_root', '../../assets/usgs/ASCIIdata_splib07a')
-    wl_file = input_cfg.get('wavelength_file', 'splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt')
-
     # Resolve paths relative to config file
-    if args.config:
-        config_dir = Path(args.config).parent
-        usgs_root = str(config_dir / usgs_root)
+    config_dir = Path(args.config).parent if args.config else None
 
+    if config_dir:
         # Resolve output paths
         basis_file = str(config_dir / output_cfg.get('basis_file', './output/quantiloom_basis_v1.bin'))
         material_json = str(config_dir / output_cfg.get('material_json', './output/quantiloom_materials.json'))
@@ -309,7 +396,7 @@ def cmd_full_bake(args, config: dict):
     logger.info("STEP 1: Loading Materials")
     logger.info("=" * 60)
 
-    materials = load_all_materials(usgs_root, wl_file, max_materials=args.max_materials)
+    materials = load_materials_from_config(config, args, config_dir)
 
     if len(materials) == 0:
         logger.error("No materials loaded!")
@@ -385,7 +472,7 @@ def cmd_full_bake(args, config: dict):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='SpectralBaker - USGS Spectral Data to NMF Basis Converter',
+        description='SpectralBaker v3.0 - Multi-Source Spectral Data to NMF Basis Converter',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

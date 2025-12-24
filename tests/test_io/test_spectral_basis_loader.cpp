@@ -40,16 +40,16 @@ protected:
         return tempDir / filename;
     }
 
-    // Helper: Create a valid binary basis file (format v2)
+    // Helper: Create a valid binary basis file (format v3)
     void CreateTestBasisFile(const std::filesystem::path& path,
-                             u32 numBands = 3,
+                             u32 numBands = 5,
                              u32 numBasis = 4,
                              u32 numSamples = 10) {
         std::ofstream file(path, std::ios::binary);
 
         // Header (64 bytes)
         const char magic[4] = {'Q', 'B', 'A', 'S'};
-        u32 version = 2;
+        u32 version = 3;
         file.write(magic, 4);
         file.write(reinterpret_cast<const char*>(&version), sizeof(u32));
         file.write(reinterpret_cast<const char*>(&numBands), sizeof(u32));
@@ -62,13 +62,15 @@ protected:
         struct {
             const char* name;
             f32 startUm, endUm;
-        } bands[3] = {
+        } bands[5] = {
             {"VIS",  0.350f, 0.780f},
             {"NIR",  0.780f, 1.100f},
-            {"SWIR", 1.100f, 2.500f}
+            {"SWIR", 1.100f, 2.500f},
+            {"MWIR", 2.500f, 6.500f},
+            {"LWIR", 6.500f, 15.000f}
         };
 
-        for (u32 b = 0; b < numBands && b < 3; ++b) {
+        for (u32 b = 0; b < numBands && b < 5; ++b) {
             // Band header (16 bytes)
             f32 startUm = bands[b].startUm;
             f32 endUm = bands[b].endUm;
@@ -115,8 +117,8 @@ protected:
             file << "      },\n";
             file << "      \"bands\": {\n";
 
-            const char* bandNames[] = {"VIS", "NIR", "SWIR"};
-            for (int b = 0; b < 3; ++b) {
+            const char* bandNames[] = {"VIS", "NIR", "SWIR", "MWIR", "LWIR"};
+            for (int b = 0; b < 5; ++b) {
                 file << "        \"" << bandNames[b] << "\": {\n";
                 file << "          \"basis_weights\": [";
 
@@ -131,7 +133,7 @@ protected:
                 file << "          \"rmse\": 0.005,\n";
                 file << "          \"explained_variance\": 0.98\n";
                 file << "        }";
-                if (b < 2) file << ",";
+                if (b < 4) file << ",";
                 file << "\n";
             }
 
@@ -155,20 +157,20 @@ protected:
 
 TEST_F(SpectralBasisLoaderTest, LoadBasisFileBasic) {
     auto basisPath = GetTempFilePath("test_basis.bin");
-    CreateTestBasisFile(basisPath, 3, 4, 10);
+    CreateTestBasisFile(basisPath, 5, 4, 10);
 
     SpectralBasisLoader loader;
     bool success = loader.LoadBasis(basisPath);
 
     ASSERT_TRUE(success);
     EXPECT_TRUE(loader.HasBasis());
-    EXPECT_EQ(loader.GetNumBands(), 3);
-    EXPECT_EQ(loader.GetBasisVersion(), 2);
+    EXPECT_EQ(loader.GetNumBands(), 5);
+    EXPECT_EQ(loader.GetBasisVersion(), 3);
 }
 
 TEST_F(SpectralBasisLoaderTest, LoadBasisFileGetBasis) {
     auto basisPath = GetTempFilePath("test_basis_get.bin");
-    CreateTestBasisFile(basisPath, 3, 8, 20);
+    CreateTestBasisFile(basisPath, 5, 8, 20);
 
     SpectralBasisLoader loader;
     loader.LoadBasis(basisPath);
@@ -192,6 +194,20 @@ TEST_F(SpectralBasisLoaderTest, LoadBasisFileGetBasis) {
     const BasisFunctions* swirBasis = loader.GetBasis("SWIR");
     ASSERT_NE(swirBasis, nullptr);
     EXPECT_EQ(swirBasis->name, "SWIR");
+
+    // Get MWIR basis
+    const BasisFunctions* mwirBasis = loader.GetBasis("MWIR");
+    ASSERT_NE(mwirBasis, nullptr);
+    EXPECT_EQ(mwirBasis->name, "MWIR");
+    EXPECT_NEAR(mwirBasis->wavelengthStart_um, 2.500f, 1e-5f);
+    EXPECT_NEAR(mwirBasis->wavelengthEnd_um, 6.500f, 1e-5f);
+
+    // Get LWIR basis
+    const BasisFunctions* lwirBasis = loader.GetBasis("LWIR");
+    ASSERT_NE(lwirBasis, nullptr);
+    EXPECT_EQ(lwirBasis->name, "LWIR");
+    EXPECT_NEAR(lwirBasis->wavelengthStart_um, 6.500f, 1e-5f);
+    EXPECT_NEAR(lwirBasis->wavelengthEnd_um, 15.000f, 1e-5f);
 
     // Get nonexistent band
     const BasisFunctions* invalid = loader.GetBasis("INVALID");
@@ -248,8 +264,8 @@ TEST_F(SpectralBasisLoaderTest, LoadBasisFileTruncated) {
     // Create truncated file (only header, no band data)
     std::ofstream file(basisPath, std::ios::binary);
     const char magic[4] = {'Q', 'B', 'A', 'S'};
-    u32 version = 2;
-    u32 numBands = 3;
+    u32 version = 3;
+    u32 numBands = 5;
     file.write(magic, 4);
     file.write(reinterpret_cast<const char*>(&version), sizeof(u32));
     file.write(reinterpret_cast<const char*>(&numBands), sizeof(u32));
@@ -307,6 +323,8 @@ TEST_F(SpectralBasisLoaderTest, LoadMaterialsJsonFindMaterial) {
     EXPECT_TRUE(gold->HasBand("VIS"));
     EXPECT_TRUE(gold->HasBand("NIR"));
     EXPECT_TRUE(gold->HasBand("SWIR"));
+    EXPECT_TRUE(gold->HasBand("MWIR"));
+    EXPECT_TRUE(gold->HasBand("LWIR"));
 
     // Not found
     const MaterialSpectralData* notFound = loader.FindMaterial("Nonexistent");
@@ -387,7 +405,7 @@ TEST_F(SpectralBasisLoaderTest, LoadBothFiles) {
     auto basisPath = GetTempFilePath("combined_basis.bin");
     auto jsonPath = GetTempFilePath("combined_materials.json");
 
-    CreateTestBasisFile(basisPath, 3, 4, 10);
+    CreateTestBasisFile(basisPath, 5, 4, 10);
     CreateTestMaterialsJson(jsonPath, {"Material_X", "Material_Y"}, 4);
 
     SpectralBasisLoader loader;
@@ -396,7 +414,7 @@ TEST_F(SpectralBasisLoaderTest, LoadBothFiles) {
     ASSERT_TRUE(success);
     EXPECT_TRUE(loader.HasBasis());
     EXPECT_TRUE(loader.HasMaterials());
-    EXPECT_EQ(loader.GetNumBands(), 3);
+    EXPECT_EQ(loader.GetNumBands(), 5);
     EXPECT_EQ(loader.GetMaterialCount(), 2);
 }
 
@@ -491,7 +509,7 @@ TEST_F(SpectralBasisLoaderTest, ReconstructFullSpectrum) {
     auto basisPath = GetTempFilePath("full_spectrum_basis.bin");
     auto jsonPath = GetTempFilePath("full_spectrum_materials.json");
 
-    CreateTestBasisFile(basisPath, 3, 4, 20);
+    CreateTestBasisFile(basisPath, 5, 4, 20);
     CreateTestMaterialsJson(jsonPath, {"FullSpectrumMaterial"}, 4);
 
     SpectralBasisLoader loader;
@@ -500,7 +518,7 @@ TEST_F(SpectralBasisLoaderTest, ReconstructFullSpectrum) {
     SpectralCurve fullCurve = loader.ReconstructFullSpectrum("FullSpectrumMaterial");
 
     EXPECT_FALSE(fullCurve.samples.empty());
-    // Should span VIS + NIR + SWIR range
+    // Should span VIS + NIR + SWIR + MWIR + LWIR range (5 bands)
     EXPECT_GT(fullCurve.samples.size(), 20);  // More than single band
 
     // Verify wavelength ordering (should be monotonically increasing)
@@ -575,7 +593,9 @@ TEST_F(SpectralBasisLoaderTest, MaterialSpectralDataHasBand) {
     EXPECT_TRUE(mat->HasBand("VIS"));
     EXPECT_TRUE(mat->HasBand("NIR"));
     EXPECT_TRUE(mat->HasBand("SWIR"));
-    EXPECT_FALSE(mat->HasBand("LWIR"));  // Not in our test data
+    EXPECT_TRUE(mat->HasBand("MWIR"));
+    EXPECT_TRUE(mat->HasBand("LWIR"));
+    EXPECT_FALSE(mat->HasBand("INVALID"));  // Invalid band name
 }
 
 TEST_F(SpectralBasisLoaderTest, MaterialSpectralDataWeights) {
@@ -607,11 +627,13 @@ TEST_F(SpectralBasisLoaderTest, NMFBandTypeToString) {
     EXPECT_STREQ(NMFBandTypeToString(NMFBandType::VIS), "VIS");
     EXPECT_STREQ(NMFBandTypeToString(NMFBandType::NIR), "NIR");
     EXPECT_STREQ(NMFBandTypeToString(NMFBandType::SWIR), "SWIR");
+    EXPECT_STREQ(NMFBandTypeToString(NMFBandType::MWIR), "MWIR");
+    EXPECT_STREQ(NMFBandTypeToString(NMFBandType::LWIR), "LWIR");
 }
 
 TEST_F(SpectralBasisLoaderTest, GetBasisByEnum) {
     auto basisPath = GetTempFilePath("enum_test.bin");
-    CreateTestBasisFile(basisPath, 3, 4, 10);
+    CreateTestBasisFile(basisPath, 5, 4, 10);
 
     SpectralBasisLoader loader;
     loader.LoadBasis(basisPath);
@@ -628,6 +650,14 @@ TEST_F(SpectralBasisLoaderTest, GetBasisByEnum) {
     const BasisFunctions* swirBasis = loader.GetBasis(NMFBandType::SWIR);
     ASSERT_NE(swirBasis, nullptr);
     EXPECT_EQ(swirBasis->name, "SWIR");
+
+    const BasisFunctions* mwirBasis = loader.GetBasis(NMFBandType::MWIR);
+    ASSERT_NE(mwirBasis, nullptr);
+    EXPECT_EQ(mwirBasis->name, "MWIR");
+
+    const BasisFunctions* lwirBasis = loader.GetBasis(NMFBandType::LWIR);
+    ASSERT_NE(lwirBasis, nullptr);
+    EXPECT_EQ(lwirBasis->name, "LWIR");
 }
 
 // ============================================================================
@@ -653,8 +683,8 @@ TEST_F(SpectralBasisLoaderTest, LoadRealFilesIfAvailable) {
     // Should have significant number of materials (SpectralBaker produces ~1374)
     EXPECT_GT(loader.GetMaterialCount(), 100);
 
-    // Should have 3 bands
-    EXPECT_EQ(loader.GetNumBands(), 3);
+    // Should have 5 bands
+    EXPECT_EQ(loader.GetNumBands(), 5);
 
     // Try to reconstruct a known material
     auto names = loader.GetMaterialNames();
@@ -673,8 +703,8 @@ TEST_F(SpectralBasisLoaderTest, LoadLargeMaterialsDatabase) {
     auto basisPath = GetTempFilePath("large_basis.bin");
     auto jsonPath = GetTempFilePath("large_materials.json");
 
-    // Create basis with larger dimensions
-    CreateTestBasisFile(basisPath, 3, 32, 200);
+    // Create basis with larger dimensions (5 bands for v3)
+    CreateTestBasisFile(basisPath, 5, 32, 200);
 
     // Create JSON with many materials
     std::vector<std::string> materialNames;

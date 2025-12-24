@@ -15,7 +15,7 @@ namespace quantiloom {
 // Binary Constants
 // ============================================================================
 static constexpr char MAGIC[4] = {'Q', 'B', 'A', 'S'};
-static constexpr u32 SUPPORTED_VERSION = 2;
+static constexpr u32 SUPPORTED_VERSION = 3;
 static constexpr size_t HEADER_SIZE = 64;
 static constexpr size_t BAND_HEADER_SIZE = 16;
 
@@ -85,7 +85,7 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
     // Parse each band
     m_basisFunctions.clear();
 
-    static const char* bandNames[] = {"VIS", "NIR", "SWIR"};
+    static const char* bandNames[] = {"VIS", "NIR", "SWIR", "MWIR", "LWIR"};
 
     for (u32 bandIdx = 0; bandIdx < numBands; ++bandIdx) {
         if (offset + BAND_HEADER_SIZE > fileSize) {
@@ -94,7 +94,7 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
         }
 
         BasisFunctions basis;
-        basis.name = (bandIdx < 3) ? bandNames[bandIdx] : ("Band" + std::to_string(bandIdx));
+        basis.name = (bandIdx < 5) ? bandNames[bandIdx] : ("Band" + std::to_string(bandIdx));
 
         // Band header (16 bytes)
         basis.wavelengthStart_um = ReadLE<f32>(data, offset);
@@ -502,8 +502,10 @@ SpectralCurve SpectralBasisLoader::ReconstructFullSpectrum(const String& materia
     SpectralCurve visCurve = ReconstructCurve(materialName, "VIS");
     SpectralCurve nirCurve = ReconstructCurve(materialName, "NIR");
     SpectralCurve swirCurve = ReconstructCurve(materialName, "SWIR");
+    SpectralCurve mwirCurve = ReconstructCurve(materialName, "MWIR");
+    SpectralCurve lwirCurve = ReconstructCurve(materialName, "LWIR");
 
-    // Combine in order: VIS -> NIR -> SWIR
+    // Combine in order: VIS -> NIR -> SWIR -> MWIR -> LWIR
     // Note: There may be overlap between bands, so we take the value from the
     // band that is "primary" for that wavelength range
 
@@ -523,7 +525,21 @@ SpectralCurve SpectralBasisLoader::ReconstructFullSpectrum(const String& materia
 
     // SWIR: 1100-2500nm
     for (const auto& [wl, val] : swirCurve.samples) {
-        if (wl >= 1100.0f) {
+        if (wl >= 1100.0f && wl < 2500.0f) {
+            fullCurve.samples.emplace_back(wl, val);
+        }
+    }
+
+    // MWIR: 2500-6500nm
+    for (const auto& [wl, val] : mwirCurve.samples) {
+        if (wl >= 2500.0f && wl < 6500.0f) {
+            fullCurve.samples.emplace_back(wl, val);
+        }
+    }
+
+    // LWIR: 6500-15000nm
+    for (const auto& [wl, val] : lwirCurve.samples) {
+        if (wl >= 6500.0f) {
             fullCurve.samples.emplace_back(wl, val);
         }
     }

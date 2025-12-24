@@ -1,18 +1,13 @@
-# SpectralBaker v3.0 Configuration
-# Converts spectral library data to NMF basis functions for Quantiloom
-# Supports: USGS (reflectance) and RefractiveIndex.info (n,k) data sources
+# SpectralBaker v3.0 Configuration - RefractiveIndex.info Source
+# Converts RefractiveIndex.info (n,k) data to NMF basis functions
+# Supports 5 bands: VIS, NIR, SWIR, MWIR, LWIR (0.35-15 µm)
 
 # =============================================================================
 # Input Paths
 # =============================================================================
 [input]
 # Data source type: "usgs" or "refractiveindex"
-source_type = "usgs"
-
-# USGS library configuration
-usgs_root = "../../assets/usgs/ASCIIdata_splib07a"
-wavelength_file = "splib07a_Wavelengths_ASD_0.35-2.5_microns_2151_ch.txt"
-material_filter = "**/*_AREF.txt"
+source_type = "refractiveindex"
 
 # RefractiveIndex.info database configuration
 refractiveindex_root = "../../assets/refractiveindex/database"
@@ -27,28 +22,28 @@ refractiveindex_pattern = "data/main/**/nk/*.yml"  # Glob pattern for nk data fi
 # Each band can have its own n_components (basis function count)
 
 [processing.bands.VIS]
-range_um = [0.350, 0.780]   # Visible light (350-780 nm, 430nm range)
+range_um = [0.350, 0.780]   # Visible light (350-780 nm)
 interval_nm = 2.0           # 2 nm sampling -> 216 samples
 n_components = 16           # 16 basis functions
 
 [processing.bands.NIR]
-range_um = [0.780, 1.100]   # Near IR (780-1100 nm, 320nm range)
+range_um = [0.780, 1.100]   # Near IR (780-1100 nm)
 interval_nm = 2.0           # 2 nm sampling -> 161 samples
 n_components = 16           # 16 basis functions
 
 [processing.bands.SWIR]
-range_um = [1.100, 2.500]   # Short-wave IR (1100-2500 nm, 1400nm range)
+range_um = [1.100, 2.500]   # Short-wave IR (1100-2500 nm)
 interval_nm = 2.0           # 2 nm sampling -> 701 samples
-n_components = 32           # 32 basis functions (wider band needs more)
+n_components = 32           # 32 basis functions
 
 [processing.bands.MWIR]
-range_um = [2.500, 6.500]   # Mid-wave IR (2500-6500 nm, 4000nm range)
-interval_nm = 5.0           # 5 nm sampling -> 801 samples (wider interval for long wavelengths)
+range_um = [2.500, 6.500]   # Mid-wave IR (2500-6500 nm)
+interval_nm = 5.0           # 5 nm sampling -> 801 samples
 n_components = 32           # 32 basis functions
 
 [processing.bands.LWIR]
-range_um = [6.500, 15.000]  # Long-wave IR (6500-15000 nm, 8500nm range)
-interval_nm = 10.0          # 10 nm sampling -> 851 samples (even wider for far-IR)
+range_um = [6.500, 15.000]  # Long-wave IR (6500-15000 nm)
+interval_nm = 10.0          # 10 nm sampling -> 851 samples
 n_components = 32           # 32 basis functions
 
 # Default NMF parameters (can be overridden per-band)
@@ -64,13 +59,13 @@ random_state = 42           # For reproducibility
 # =============================================================================
 [output]
 # Global basis functions (binary, for C++ loader)
-basis_file = "../../assets/spectral/quantiloom_basis_v1.bin"
+basis_file = "../../assets/spectral/quantiloom_basis_refidx_v1.bin"
 
 # Material weights database (JSON, for glTF integration)
-material_json = "../../assets/spectral/quantiloom_materials.json"
+material_json = "../../assets/spectral/quantiloom_materials_refidx.json"
 
 # Validation plots directory
-plots_dir = "./output/plots"
+plots_dir = "./output/plots_refidx"
 
 # =============================================================================
 # Validation Settings

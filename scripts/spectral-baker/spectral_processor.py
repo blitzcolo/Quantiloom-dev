@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Spectral Processor
+Spectral Processor (SpectralBaker v3.0)
 
 Resampling, band splitting, and NMF basis extraction for spectral data.
+Supports 5 bands: VIS, NIR, SWIR, MWIR, LWIR (0.35-15 µm)
 
 Author: Quantiloom Team
 """
@@ -43,11 +44,13 @@ class BandConfig:
         return wl_nm / 1000.0  # Convert to micrometers
 
 
-# Default band configurations (VIS + NIR + SWIR)
+# Default band configurations (VIS + NIR + SWIR + MWIR + LWIR)
 DEFAULT_BANDS = {
     'VIS': BandConfig('VIS', (0.350, 0.780), 2.0, 16),
     'NIR': BandConfig('NIR', (0.780, 1.100), 2.0, 16),
     'SWIR': BandConfig('SWIR', (1.100, 2.500), 2.0, 32),
+    'MWIR': BandConfig('MWIR', (2.500, 6.500), 5.0, 32),  # Mid-wave IR: wider sampling
+    'LWIR': BandConfig('LWIR', (6.500, 15.000), 10.0, 32), # Long-wave IR: even wider sampling
 }
 
 
@@ -218,12 +221,28 @@ def compute_nmf_basis(reflectance_matrix: np.ndarray,
     if config is None:
         config = NMFConfig()
 
-    logger.info(f"Running NMF with {config.n_components} components...")
+    n_samples, n_features = reflectance_matrix.shape
+
+    # Check if we need to adjust n_components or init method
+    n_components = config.n_components
+    init_method = config.init
+
+    if n_components > min(n_samples, n_features):
+        logger.warning(f"n_components ({n_components}) > min(n_samples, n_features) ({min(n_samples, n_features)})")
+        logger.warning(f"Reducing n_components to {min(n_samples, n_features)}")
+        n_components = min(n_samples, n_features)
+
+    # 'nndsvda' requires n_components <= min(n_samples, n_features)
+    if init_method == 'nndsvda' and n_components > min(n_samples, n_features):
+        logger.warning(f"init='nndsvda' not compatible with n_components={n_components}, using 'random' instead")
+        init_method = 'random'
+
+    logger.info(f"Running NMF with {n_components} components...")
 
     # Initialize NMF
     nmf = NMF(
-        n_components=config.n_components,
-        init=config.init,
+        n_components=n_components,
+        init=init_method,
         solver=config.solver,
         max_iter=config.max_iter,
         tol=config.tol,
@@ -270,11 +289,30 @@ def compute_per_material_metrics(original: np.ndarray,
     rmse = np.sqrt(np.mean(diff ** 2, axis=1))
 
     # Per-material explained variance
+    # For materials with near-constant spectra (e.g., metals in IR with R≈1),
+    # material_var ≈ 0, making explained variance undefined/negative.
+    # In these cases, we judge quality by RMSE instead.
+
     material_var = np.var(original, axis=1)
     residual_var = np.var(diff, axis=1)
-    explained = np.where(material_var > 1e-10,
-                        1.0 - residual_var / material_var,
-                        1.0)
+
+    # Threshold for "flat spectrum": if variance < 1e-6, spectrum is essentially constant
+    FLAT_THRESHOLD = 1e-6
+
+    explained = np.zeros_like(material_var)
+
+    for i in range(len(material_var)):
+        if material_var[i] < FLAT_THRESHOLD:
+            # Flat spectrum: judge by RMSE only
+            # If reconstruction is good (RMSE < 0.001), report 1.0
+            # Otherwise report 0.0 (to indicate reconstruction failed)
+            explained[i] = 1.0 if rmse[i] < 0.001 else 0.0
+        else:
+            # Normal case: compute explained variance
+            ev = 1.0 - residual_var[i] / material_var[i]
+            # Clamp to reasonable range [-1, 1]
+            # Negative values mean reconstruction is worse than a constant model
+            explained[i] = np.clip(ev, -1.0, 1.0)
 
     return rmse, explained
 
