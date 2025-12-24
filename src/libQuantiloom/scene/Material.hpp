@@ -117,10 +117,28 @@ struct Material {
     // ========================================================================
     // Quantiloom Spectral Material Reference (from glTF extras)
     // ========================================================================
-    // When set, this material uses pre-computed spectral data from SpectralBaker.
-    // The name references an entry in the quantiloom_materials.json database.
-    // Example glTF extras: { "quantiloom_material": "Gold_HS111.3B" }
-    String quantiloomMaterialRef;  // Empty = no reference
+    // When set, this material uses pre-computed spectral data from external databases.
+    // The type specifies the data source, and the name references an entry in that database.
+    //
+    // Example glTF extras:
+    //   "extras": {
+    //     "quantiloom_material": {
+    //       "type": "quantiloom_usgs",
+    //       "name": "Aluminum brushed 293K"
+    //     }
+    //   }
+    //
+    // Supported types:
+    //   - "quantiloom_usgs": SpectralBaker NMF basis from USGS library
+    //   - (future) "refractiveindex_info": RefractiveIndex.INFO database
+    //   - (future) "custom_csv": Custom CSV spectral curve
+    String quantiloomMaterialType;  // e.g., "quantiloom_usgs"
+    String quantiloomMaterialRef;   // Material name in the database
+
+    // Check if material has a Quantiloom spectral reference
+    [[nodiscard]] bool HasQuantiloomRef() const {
+        return !quantiloomMaterialType.empty() && !quantiloomMaterialRef.empty();
+    }
 
     // ========================================================================
     // Metadata

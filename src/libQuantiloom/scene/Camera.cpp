@@ -104,7 +104,7 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
     QL_LOG_INFO("Camera loaded from config:");
     QL_LOG_INFO("  Position: ({:.2f}, {:.2f}, {:.2f})", position.x, position.y, position.z);
     QL_LOG_INFO("  LookAt:   ({:.2f}, {:.2f}, {:.2f})", lookAt.x, lookAt.y, lookAt.z);
-    QL_LOG_INFO("  FOV:      {:.1f}°", fovY);
+    QL_LOG_INFO("  FOV:      {:.1f} deg", fovY);
 
     return Result(camera);  // Direct construction of Result
 }

@@ -48,7 +48,7 @@ band = "VIS"  # 或 "NIR", "SWIR"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
 # ============================================================================
-gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF-Embedded/DamagedHelmet.gltf"
+gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF/DamagedHelmet.gltf"
 world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 
 # ============================================================================

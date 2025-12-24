@@ -316,6 +316,73 @@ TEST(MaterialTest, NameCustom) {
 }
 
 // ============================================================================
+// Quantiloom Material Reference Tests (glTF extras integration)
+// ============================================================================
+
+TEST(MaterialTest, QuantiloomMaterialRefDefault) {
+    Material mat;
+
+    // Default: both fields empty, HasQuantiloomRef() returns false
+    EXPECT_TRUE(mat.quantiloomMaterialType.empty());
+    EXPECT_TRUE(mat.quantiloomMaterialRef.empty());
+    EXPECT_FALSE(mat.HasQuantiloomRef());
+}
+
+TEST(MaterialTest, HasQuantiloomRefBothFields) {
+    Material mat;
+    mat.quantiloomMaterialType = "quantiloom_usgs";
+    mat.quantiloomMaterialRef = "Aluminum brushed 293K";
+
+    // Both fields set: HasQuantiloomRef() returns true
+    EXPECT_TRUE(mat.HasQuantiloomRef());
+    EXPECT_EQ(mat.quantiloomMaterialType, "quantiloom_usgs");
+    EXPECT_EQ(mat.quantiloomMaterialRef, "Aluminum brushed 293K");
+}
+
+TEST(MaterialTest, HasQuantiloomRefTypeOnly) {
+    Material mat;
+    mat.quantiloomMaterialType = "quantiloom_usgs";
+    // quantiloomMaterialRef is empty
+
+    // Only type set: HasQuantiloomRef() returns false
+    EXPECT_FALSE(mat.HasQuantiloomRef());
+}
+
+TEST(MaterialTest, HasQuantiloomRefNameOnly) {
+    Material mat;
+    // quantiloomMaterialType is empty
+    mat.quantiloomMaterialRef = "Aluminum brushed 293K";
+
+    // Only name set: HasQuantiloomRef() returns false
+    EXPECT_FALSE(mat.HasQuantiloomRef());
+}
+
+TEST(MaterialTest, QuantiloomMaterialTypes) {
+    Material mat;
+
+    // Test various type values
+    mat.quantiloomMaterialType = "quantiloom_usgs";
+    mat.quantiloomMaterialRef = "Test Material";
+    EXPECT_TRUE(mat.HasQuantiloomRef());
+
+    mat.quantiloomMaterialType = "refractiveindex_info";
+    EXPECT_TRUE(mat.HasQuantiloomRef());
+
+    mat.quantiloomMaterialType = "custom_csv";
+    EXPECT_TRUE(mat.HasQuantiloomRef());
+}
+
+TEST(MaterialTest, QuantiloomMaterialWithSpectralSource) {
+    Material mat;
+    mat.quantiloomMaterialType = "quantiloom_usgs";
+    mat.quantiloomMaterialRef = "Gold_HS111.3B";
+    mat.spectralSource = Material::SpectralSource::Measured;
+
+    EXPECT_TRUE(mat.HasQuantiloomRef());
+    EXPECT_EQ(mat.spectralSource, Material::SpectralSource::Measured);
+}
+
+// ============================================================================
 // Realistic Material Tests
 // ============================================================================
 

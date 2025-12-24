@@ -67,9 +67,9 @@ void BLAS::UploadGeometryBuffers() {
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
             VMA_MEMORY_USAGE_GPU_ONLY
         );
-        QL_LOG_INFO("  [DEBUG] Created UV buffer: {} UVs ({} bytes)", m_primitive.uvs.size(), uvBufferSize);
+        QL_LOG_DEBUG("  [DEBUG] Created UV buffer: {} UVs ({} bytes)", m_primitive.uvs.size(), uvBufferSize);
     } else {
-        QL_LOG_INFO("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
+        QL_LOG_DEBUG("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
     }
 
     // Create tangent buffer (always create, use fallback if not present)
@@ -217,7 +217,7 @@ void BLAS::UploadGeometryBuffers() {
             uvCopyRegion.size = uvBufferSize;
             vkCmdCopyBuffer(cmd, uvStaging->GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
 
-            QL_LOG_INFO("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
+            QL_LOG_DEBUG("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
         }
 
         // Upload tangent data

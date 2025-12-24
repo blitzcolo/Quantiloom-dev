@@ -606,13 +606,13 @@ int main(int argc, char* argv[]) {
         f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
         if (spectral_mode == SpectralMode::RGB_Fused) {
-            QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
+            QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
                         sunRadiance.r, sunRadiance.g, sunRadiance.b);
-            QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W·sr^-1·m^-2",
+            QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
                         skyRadiance.r, skyRadiance.g, skyRadiance.b);
         } else {
-            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W·sr^-1·m^-2·nm^-2", sunRadiance_spectral);
-            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W·sr^-1·m^-2·nm^-2", skyRadiance_spectral);
+            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", sunRadiance_spectral);
+            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", skyRadiance_spectral);
         }
 
         LightingParams lightingParams{};
@@ -729,10 +729,17 @@ int main(int argc, char* argv[]) {
 
                 // Process materials with Quantiloom spectral references
                 for (const auto& mat : loadedScene.materials) {
-                    if (mat.quantiloomMaterialRef.empty()) continue;
+                    if (!mat.HasQuantiloomRef()) continue;
 
-                    QL_LOG_INFO("  Processing Quantiloom material reference: '{}' -> '{}'",
-                                mat.name, mat.quantiloomMaterialRef);
+                    // Currently only support quantiloom_usgs type
+                    if (mat.quantiloomMaterialType != "quantiloom_usgs") {
+                        QL_LOG_WARN("  Unsupported spectral material type: '{}' (only 'quantiloom_usgs' supported)",
+                                    mat.quantiloomMaterialType);
+                        continue;
+                    }
+
+                    QL_LOG_INFO("  Processing Quantiloom material: '{}' -> type='{}', name='{}'",
+                                mat.name, mat.quantiloomMaterialType, mat.quantiloomMaterialRef);
 
                     // Try exact match first, then partial match
                     const MaterialSpectralData* spectralData = basisLoader.FindMaterial(mat.quantiloomMaterialRef);
@@ -1042,13 +1049,13 @@ int main(int argc, char* argv[]) {
 
             materialData.push_back(cpuMat);
 
-            QL_LOG_INFO("  Material '{}': base=[{:.2f},{:.2f},{:.2f},{:.2f}] metal={:.2f} rough={:.2f}",
+            QL_LOG_DEBUG("  Material '{}': base=[{:.2f},{:.2f},{:.2f},{:.2f}] metal={:.2f} rough={:.2f}",
                         mat.name,
                         mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b, mat.baseColorFactor.a,
                         mat.metallicFactor, mat.roughnessFactor);
-            QL_LOG_INFO("    [DEBUG] emissive=[{:.3f},{:.3f},{:.3f}]",
+            QL_LOG_DEBUG("    [DEBUG] emissive=[{:.3f},{:.3f},{:.3f}]",
                         mat.emissiveFactor.r, mat.emissiveFactor.g, mat.emissiveFactor.b);
-            QL_LOG_INFO("    [DEBUG] Texture indices: baseColor={} metallicRough={} normal={} emissive={}",
+            QL_LOG_DEBUG("    [DEBUG] Texture indices: baseColor={} metallicRough={} normal={} emissive={}",
                         mat.baseColorTextureIndex, mat.metallicRoughnessTextureIndex,
                         mat.normalTextureIndex, mat.emissiveTextureIndex);
         }
@@ -1614,7 +1621,7 @@ int main(int argc, char* argv[]) {
         // Readback and Save
         // ====================================================================
         QL_LOG_INFO("Reading back and saving image...");
-        QL_LOG_INFO("  [DEBUG] Starting image readback...");
+        QL_LOG_DEBUG("  [DEBUG] Starting image readback...");
 
         std::vector<f32> pixels = CommandHelper::ReadbackImage(
             context,

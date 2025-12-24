@@ -789,9 +789,9 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, cons
         uvWrite.descriptorCount = 1;
         uvWrite.pBufferInfo = &uvInfo;
         writes.push_back(uvWrite);
-        QL_LOG_INFO("  [DEBUG] Bound UV buffer to binding 8");
+        QL_LOG_DEBUG("  [DEBUG] Bound UV buffer to binding 8");
     } else {
-        QL_LOG_INFO("  [DEBUG] No UV buffer provided, skipping binding 8");
+        QL_LOG_DEBUG("  [DEBUG] No UV buffer provided, skipping binding 8");
     }
 
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
