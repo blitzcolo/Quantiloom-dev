@@ -55,3 +55,21 @@
 
   1. USGS 数据质量问题：约 20 个材质有负反射率（已自动 clamp 到 [0, 1]）
   2. NMF 收敛：部分情况下达到最大迭代次数，可在 config.toml 中增加 max_iter
+
+  # glTF 2.0 使用
+
+  ## glTF 材质引用(usgs):
+  ```json
+  {
+    "materials": [{
+      "name": "Something_Something_Plastic_Surface",
+      "pbrMetallicRoughness": { ... },
+      "extras": {
+        "quantiloom_material": {
+            "name": "Plastic_PETE GDS383 Clrbluis",
+            "type": "quantiloom_usgs"
+        }
+      }
+    }]
+  }
+  ```

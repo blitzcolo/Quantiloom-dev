@@ -35,58 +35,75 @@ Quantiloom operates in two distinct modes from a single, configurable codebase:
 Quantiloom/
 │
 ├── assets/
-│   ├── scenes/             # 3D Scene objects (OBJ, GLTF)
+│   ├── models/             # 3D models (GLTF)
 │   ├── materials/          # Materials and temperatures data (HDF5, CSV)
 │   ├── luts/               # MODTRAN LUTs (HDF5, SKYLUT6)
 │   └── configs/            # TOML configuration files
 │
-├── build/                  # (In .gitignore) CMake generated build files (for Windows)
+├── build/                  # (In .gitignore) CMake build files (Windows)
 │
-├── docs/                   # Documentation (including API documentation)
+├── docs/                   # Documentation
+│   └── DATA_PREPARATION.md # Data preparation guide
 │
-├── examples/               # Small projects demonstrating API usage
-│   ├── 01_load_scene/      # Demonstrates how to load a scene
-│   ├── 02_run_ms_rt/       # Demonstrates how to run MS-RT preview
-│   └── 03_run_hs_off/      # Demonstrates how to run HS-OFF per-band point rendering
+├── examples/               # (Placeholder) API usage examples
 │
-├── out/                    # (In .gitignore) CMake build output (for Linux)
+├── out/                    # (In .gitignore) CMake build output (Linux)
 │
 ├── scripts/                # Automation and validation scripts
 │   ├── validation/         # Validation benchmark suite (Python)
 │   │   ├── run_benchmark.py
-│   │   ├── compare_pbrt.py   # Compare with PBRT-v4/Mitsuba3
+│   │   ├── compare_pbrt.py # Compare with PBRT-v4/Mitsuba3
 │   │   └── plot_results.py
-│   └── utils/              # Asset conversion, LUT generation, etc. tool scripts
+│   └── utils/              # Asset conversion, LUT generation tools
 │
 ├── src/                    # Core source code
 │   │
-│   ├── libQuantiloom/      # (Built as a library) HS-core API core
-│   │   ├── core/           # Basic tools (Log, Config, Math)
+│   ├── libQuantiloom/      # (Built as static library) HS-core API
+│   │   ├── core/           # Basic tools (Log, Config, Math, Types)
 │   │   ├── scene/          # Scene and asset management
-│   │   ├── renderer/       # Vulkan abstraction layer (PSO, Buffer, TLAS/BLAS)
+│   │   ├── renderer/       # Vulkan abstraction (PSO, Buffer, TLAS/BLAS)
 │   │   ├── hs_core/        # HS-core algorithms (MIS, Delta-Tracking)
+│   │   ├── io/             # I/O utilities (ImageIO, SpectralIO)
 │   │   └── postprocess/    # Sensor and noise chain
 │   │
-│   └── app/                # (Built as an executable) Main application
-│       ├── RendererMS.cpp  # MS-RT mode implementation
-│       ├── RendererHS.cpp  # HS-OFF mode implementation
+│   ├── shaders/            # HLSL ray tracing shaders (compiled to SPIR-V)
+│   │   ├── raygen.rgen     # Ray generation shader
+│   │   ├── closesthit.rchit# Closest hit (PBR + spectral)
+│   │   ├── miss.rmiss      # Miss shader (sky/atmosphere)
+│   │   └── *.hlsli         # Shader headers (PBR, blackbody, spectral)
+│   │
+│   └── app/                # (Built as executable) Main application
 │       └── main.cpp        # Main program entry
 │
-├── tests/                  # C++ unit tests (GTest/Catch2)
-│   ├── test_core/          # Test functions in core/
-│   └── test_scene/         # Test functions in scene/
+├── tests/                  # C++ unit tests (GTest)
+│   ├── test_core/          # Tests for core/
+│   ├── test_scene/         # Tests for scene/
+│   ├── test_renderer/      # Tests for renderer/
+│   ├── test_hs_core/       # Tests for hs_core/
+│   ├── test_io/            # Tests for io/
+│   └── test_postprocess/   # Tests for postprocess/
 │
-├── vendor/                 # Third-party dependency libraries
-│   ├── assimp/
-│   ├── tinygltf/
-│   ├── hdf5/
-│   ├── openexr/
-│   ├── tomlplusplus/
-│   └── ...                 # PBRT-v4/Mitsuba3 (as a V&V reference)
+├── tools/                  # Development tools
+│   ├── setup_dxc.sh        # DXC shader compiler setup (Linux)
+│   └── setup_dxc.ps1       # DXC shader compiler setup (Windows)
+│
+├── .cpm_cache/             # (In .gitignore) CPM dependency cache
 │
 ├── .gitignore
 ├── .gitattributes
 ├── CMakeLists.txt          # Top-level CMake (configures all subdirectories)
+├── build_linux.sh          # Linux build script
+├── build_windows.ps1       # Windows build script
 ├── LICENSE
 └── README.md
 ```
+
+### Dependencies (via CPM)
+
+Dependencies are managed by [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) and cached in `.cpm_cache/`:
+- **spdlog**: Logging
+- **tomlplusplus**: TOML config parsing
+- **tinygltf**: glTF model loading
+- **hdf5**: HDF5 spectral data I/O
+- **openexr**: EXR image I/O
+- **VulkanMemoryAllocator**: Vulkan memory management
