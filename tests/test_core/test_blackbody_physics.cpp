@@ -340,3 +340,113 @@ TEST(BlackbodyPhysicsTest, MieScattering_WeakerWavelengthDependence) {
     EXPECT_NEAR(ratio_mie, 1.36, 0.05);  // Relaxed tolerance
     EXPECT_LT(ratio_mie, 2.0);  // Must be weaker than λ⁻² scaling
 }
+
+// ============================================================================
+// NIR Band Physics Tests (780-1400nm)
+// ============================================================================
+// NIR is "reflected infrared" - thermal emission is negligible for T < 600K
+// These tests verify the physical basis for NIR_Fused mode implementation
+// ============================================================================
+
+TEST(BlackbodyPhysicsTest, NIR_RoomTemperature300K_NegligibleEmission) {
+    // At 300K, thermal emission in NIR (780-1400nm) is essentially zero
+    // Wien peak at 300K is ~9660nm, far from NIR band
+    double radiance_nir_low = IRPlanckRadiance(300.0, 780.0);   // NIR start
+    double radiance_nir_mid = IRPlanckRadiance(300.0, 1000.0);  // NIR mid
+    double radiance_nir_high = IRPlanckRadiance(300.0, 1400.0); // NIR end
+    double radiance_peak = IRPlanckRadiance(300.0, 9660.0);     // Wien peak
+
+    // NIR emission should be many orders of magnitude smaller than peak
+    // Relaxed thresholds based on actual Planck law calculations
+    EXPECT_LT(radiance_nir_low, radiance_peak * 1e-18);   // ~8e-22 vs ~1e-20
+    EXPECT_LT(radiance_nir_mid, radiance_peak * 1e-13);   // ~2e-16 vs ~1e-15
+    EXPECT_LT(radiance_nir_high, radiance_peak * 1e-8);   // ~3e-11 vs ~1e-10
+}
+
+TEST(BlackbodyPhysicsTest, NIR_ThresholdTemperature600K) {
+    // At 600K, Wien peak is ~4830nm (MWIR)
+    // NIR emission starts to become measurable but still weak
+    double radiance_nir = IRPlanckRadiance(600.0, 1000.0);  // 1μm
+    double radiance_mwir = IRPlanckRadiance(600.0, 4000.0); // 4μm (near peak)
+
+    // NIR should be much weaker than MWIR at 600K
+    EXPECT_LT(radiance_nir, radiance_mwir * 0.01);  // < 1% of MWIR
+}
+
+TEST(BlackbodyPhysicsTest, NIR_HighTemperature1800K_SignificantEmission) {
+    // At 1800K (molten steel), Wien peak is ~1610nm (SWIR/NIR boundary)
+    // NIR emission becomes significant
+    double radiance_nir = IRPlanckRadiance(1800.0, 1000.0);   // 1μm (NIR)
+    double radiance_peak = IRPlanckRadiance(1800.0, 1610.0);  // Wien peak
+
+    // At high temperature, NIR emission is substantial (> 10% of peak)
+    EXPECT_GT(radiance_nir, radiance_peak * 0.1);
+}
+
+TEST(BlackbodyPhysicsTest, NIR_WavelengthRange_Verification) {
+    // Verify NIR band spans 780-1400nm (ISO 20473 IR-A classification)
+    constexpr double NIR_MIN = 780.0;   // nm
+    constexpr double NIR_MAX = 1400.0;  // nm
+    constexpr double VIS_MAX = 780.0;   // nm (visible light ends)
+
+    // NIR should start where visible ends
+    EXPECT_EQ(NIR_MIN, VIS_MAX);
+
+    // NIR band width
+    double nir_bandwidth = NIR_MAX - NIR_MIN;
+    EXPECT_NEAR(nir_bandwidth, 620.0, 1.0);  // 620nm bandwidth
+}
+
+TEST(BlackbodyPhysicsTest, NIR_SunTemperature5800K_StrongEmission) {
+    // Sun at 5800K peaks at ~500nm (visible)
+    // NIR receives substantial solar radiation
+    double radiance_visible = IRPlanckRadiance(5800.0, 550.0);  // Green peak
+    double radiance_nir = IRPlanckRadiance(5800.0, 1000.0);     // 1μm NIR
+
+    // NIR should be significant fraction of visible (solar spectrum is broad)
+    // At 5800K, ratio should be roughly 0.3-0.5 (Wien side of peak)
+    double ratio = radiance_nir / radiance_visible;
+    EXPECT_GT(ratio, 0.2);
+    EXPECT_LT(ratio, 0.6);
+}
+
+TEST(BlackbodyPhysicsTest, NIR_ReflectedVsThermal_Comparison) {
+    // For outdoor scenes, compare solar NIR irradiance vs thermal emission
+    // Sun: 5800K, object: 300K
+
+    // Solar NIR radiance at object (scaled by solid angle, approximated)
+    double sun_nir = IRPlanckRadiance(5800.0, 1000.0);
+
+    // Thermal NIR emission from 300K object
+    double thermal_nir = IRPlanckRadiance(300.0, 1000.0);
+
+    // Solar should dominate by many orders of magnitude
+    // This is why NIR_Fused mode uses reflected solar model, not thermal emission
+    // Actual ratio is ~6e19, so use 1e19 as threshold
+    EXPECT_GT(sun_nir / thermal_nir, 1e19);
+}
+
+TEST(BlackbodyPhysicsTest, NIR_BandIntegration_vs_SWIR) {
+    // Compare average radiance across NIR vs SWIR bands at 300K
+    // Both should be negligible at room temperature
+
+    auto integrateRadiance = [](double T, double lambda_min, double lambda_max, int samples) {
+        double sum = 0.0;
+        double step = (lambda_max - lambda_min) / (samples - 1);
+        for (int i = 0; i < samples; ++i) {
+            double lambda = lambda_min + i * step;
+            sum += IRPlanckRadiance(T, lambda);
+        }
+        return sum * step;
+    };
+
+    double nir_integral = integrateRadiance(300.0, 780.0, 1400.0, 16);
+    double swir_integral = integrateRadiance(300.0, 1000.0, 2500.0, 16);
+    double lwir_integral = integrateRadiance(300.0, 8000.0, 12000.0, 16);
+
+    // LWIR should dominate at room temperature (Wien peak near 10μm)
+    // NIR and SWIR have negligible thermal emission at 300K
+    // Actual ratios: LWIR/NIR ~ 1e12, LWIR/SWIR ~ 3e4
+    EXPECT_GT(lwir_integral, nir_integral * 1e8);
+    EXPECT_GT(lwir_integral, swir_integral * 1e3);
+}

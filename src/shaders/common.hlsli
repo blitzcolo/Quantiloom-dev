@@ -25,6 +25,7 @@
 #define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
 #define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)
 #define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion (1000-2500nm)
+#define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion (780-1400nm) - reflected solar
 
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE

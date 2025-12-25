@@ -127,6 +127,16 @@ TEST(TypesTest, ParseSpectralModeSWIR) {
     EXPECT_EQ(res2.value(), SpectralMode::SWIR_Fused);
 }
 
+TEST(TypesTest, ParseSpectralModeNIR) {
+    auto res1 = ParseSpectralMode("nir_fused");
+    EXPECT_TRUE(res1.has_value());
+    EXPECT_EQ(res1.value(), SpectralMode::NIR_Fused);
+
+    auto res2 = ParseSpectralMode("NIR");
+    EXPECT_TRUE(res2.has_value());
+    EXPECT_EQ(res2.value(), SpectralMode::NIR_Fused);
+}
+
 TEST(TypesTest, ParseSpectralModeInvalid) {
     auto res = ParseSpectralMode("invalid_mode");
     EXPECT_FALSE(res.has_value());
@@ -149,6 +159,7 @@ TEST(TypesTest, SpectralModeEnumValues) {
     //   #define SPECTRAL_MODE_MWIR_FUSED   3
     //   #define SPECTRAL_MODE_LWIR_FUSED   4
     //   #define SPECTRAL_MODE_SWIR_FUSED   5
+    //   #define SPECTRAL_MODE_NIR_FUSED    6
 
     EXPECT_EQ(static_cast<u32>(SpectralMode::Single), 0u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::RGB_Fused), 1u);
@@ -156,6 +167,7 @@ TEST(TypesTest, SpectralModeEnumValues) {
     EXPECT_EQ(static_cast<u32>(SpectralMode::MWIR_Fused), 3u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::LWIR_Fused), 4u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::SWIR_Fused), 5u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::NIR_Fused), 6u);
 }
 
 TEST(TypesTest, SpectralModeEnumSize) {
@@ -171,7 +183,8 @@ TEST(TypesTest, SpectralModeAllModesAccepted) {
         "multispectral", // Multispectral
         "mwir_fused",    // MWIR_Fused
         "lwir_fused",    // LWIR_Fused
-        "swir_fused"     // SWIR_Fused
+        "swir_fused",    // SWIR_Fused
+        "nir_fused"      // NIR_Fused
     };
 
     for (const char* modeStr : modeStrings) {
@@ -229,6 +242,10 @@ TEST(TypesTest, SpectralRangeConstants) {
     EXPECT_EQ(WAVELENGTH_MIN_VISIBLE, 380.0f);
     EXPECT_EQ(WAVELENGTH_MAX_VISIBLE, 780.0f);
 
+    // NIR band (Near-Infrared) - reflected solar
+    EXPECT_EQ(WAVELENGTH_MIN_NIR, 780.0f);
+    EXPECT_EQ(WAVELENGTH_MAX_NIR, 1400.0f);
+
     // SWIR band (Short-Wave Infrared)
     EXPECT_EQ(WAVELENGTH_MIN_SWIR, 1000.0f);
     EXPECT_EQ(WAVELENGTH_MAX_SWIR, 2500.0f);
@@ -242,7 +259,8 @@ TEST(TypesTest, SpectralRangeConstants) {
     EXPECT_EQ(WAVELENGTH_MAX_LWIR, 12000.0f);
 
     // Bands should be in increasing order
-    EXPECT_LT(WAVELENGTH_MAX_VISIBLE, WAVELENGTH_MIN_SWIR);
+    EXPECT_EQ(WAVELENGTH_MAX_VISIBLE, WAVELENGTH_MIN_NIR);  // NIR starts where visible ends
+    EXPECT_LT(WAVELENGTH_MAX_NIR, WAVELENGTH_MAX_SWIR);     // NIR overlaps with SWIR
     EXPECT_LT(WAVELENGTH_MAX_SWIR, WAVELENGTH_MIN_MWIR);
     EXPECT_LT(WAVELENGTH_MAX_MWIR, WAVELENGTH_MIN_LWIR);
 }

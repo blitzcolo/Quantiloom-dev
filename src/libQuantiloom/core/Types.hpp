@@ -56,7 +56,8 @@ enum class SpectralMode : u32 {
     Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
     MWIR_Fused   = 3,  // Mid-wave IR fusion 3000-5000nm (outputs EXR + PNG)
     LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
-    SWIR_Fused   = 5   // Short-wave IR fusion 1000-2500nm (outputs EXR + PNG)
+    SWIR_Fused   = 5,  // Short-wave IR fusion 1000-2500nm (outputs EXR + PNG)
+    NIR_Fused    = 6   // Near IR fusion 780-1400nm (outputs EXR + PNG) - reflected solar
 };
 
 // ============================================================================
@@ -160,6 +161,8 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
         return Result(SpectralMode::LWIR_Fused);
     } else if (mode_str == "swir_fused" || mode_str == "SWIR") {
         return Result(SpectralMode::SWIR_Fused);
+    } else if (mode_str == "nir_fused" || mode_str == "NIR") {
+        return Result(SpectralMode::NIR_Fused);
     } else {
         return Result<SpectralMode>(Result<SpectralMode, String>::Err("Invalid spectral mode: " + String(mode_str)));
     }
@@ -257,7 +260,10 @@ namespace constants {
     inline constexpr Wavelength WAVELENGTH_MAX_VISIBLE = 780.0f;  // Standard CIE visible range ends at 780nm
 
     // Infrared bands (following ISO 20473 classification)
-    // NIR: Near-Infrared (780-1400nm) - not currently used
+    // NIR: Near-Infrared (780-1400nm) - primarily reflected solar radiation
+    inline constexpr Wavelength WAVELENGTH_MIN_NIR = 780.0f;
+    inline constexpr Wavelength WAVELENGTH_MAX_NIR = 1400.0f;
+
     // SWIR: Short-Wave Infrared (1000-2500nm)
     inline constexpr Wavelength WAVELENGTH_MIN_SWIR = 1000.0f;
     inline constexpr Wavelength WAVELENGTH_MAX_SWIR = 2500.0f;

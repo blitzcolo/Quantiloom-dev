@@ -1026,3 +1026,141 @@ TEST(CIE_CMF_Test, NonNegativeInVisibleCore) {
         // Note: Some wavelengths around 500-570nm have complex behavior
     }
 }
+
+// ============================================================================
+// NIR Band Spectral Data Tests (780-1400nm)
+// ============================================================================
+// Tests for NIR wavelength range handling in spectral data structures
+// NIR is "reflected infrared" - used in vegetation analysis, night vision, etc.
+// ============================================================================
+
+TEST(SpectralDataTest, NIR_SpectralCurveCreation) {
+    // Create a spectral curve spanning NIR band (780-1400nm)
+    Vector<f32> wavelengths = {780.0f, 900.0f, 1000.0f, 1200.0f, 1400.0f};
+    Vector<f32> values = {0.3f, 0.5f, 0.45f, 0.4f, 0.35f};
+
+    SpectralCurve nir_curve(wavelengths, values);
+
+    EXPECT_TRUE(nir_curve.IsValid());
+    EXPECT_EQ(nir_curve.samples.size(), 5);
+
+    // Verify wavelength range
+    auto [min_wl, max_wl] = nir_curve.GetWavelengthRange();
+    EXPECT_NEAR(min_wl, 780.0f, 1e-5f);
+    EXPECT_NEAR(max_wl, 1400.0f, 1e-5f);
+}
+
+TEST(SpectralDataTest, NIR_SpectralCurveGPUConversion) {
+    // Test CPU->GPU conversion for NIR spectral data
+    Vector<f32> wavelengths = {780.0f, 900.0f, 1000.0f, 1200.0f, 1400.0f};
+    Vector<f32> values = {0.30f, 0.50f, 0.45f, 0.40f, 0.35f};
+
+    SpectralCurve cpu_curve(wavelengths, values);
+    SpectralCurveGPU gpu_curve = SpectralCurveGPU::FromCPU(cpu_curve);
+
+    // SpectralCurveGPU uses numSamples > 0 to indicate validity
+    EXPECT_GT(gpu_curve.numSamples, 0u);
+
+    // Verify uniform sampling covers NIR range
+    EXPECT_LE(gpu_curve.startWavelength_nm, 780.0f);
+    EXPECT_GE(gpu_curve.GetWavelength(gpu_curve.numSamples - 1), 1400.0f);
+
+    // Verify interpolation at known points
+    EXPECT_NEAR(gpu_curve.Evaluate(780.0f), 0.30f, 0.02f);
+    EXPECT_NEAR(gpu_curve.Evaluate(1000.0f), 0.45f, 0.02f);
+}
+
+TEST(SpectralDataTest, NIR_VegetationReflectance) {
+    // Vegetation has characteristic "red edge" at ~700-750nm
+    // and high reflectance in NIR (used for NDVI calculation)
+    Vector<f32> wavelengths = {650.0f, 700.0f, 750.0f, 850.0f, 1000.0f};
+    Vector<f32> values = {0.05f, 0.10f, 0.40f, 0.50f, 0.45f};  // Red edge pattern
+
+    SpectralCurve veg_curve(wavelengths, values);
+    EXPECT_TRUE(veg_curve.IsValid());
+
+    // NIR reflectance should be much higher than red
+    f32 red_reflectance = veg_curve.Evaluate(650.0f);
+    f32 nir_reflectance = veg_curve.Evaluate(850.0f);
+
+    EXPECT_GT(nir_reflectance, red_reflectance * 5.0f);  // NIR >> Red
+}
+
+TEST(SpectralDataTest, NIR_WaterAbsorptionBands) {
+    // Water has absorption bands at ~970nm and ~1200nm
+    // These are used for moisture detection in NIR imaging
+    Vector<f32> wavelengths = {850.0f, 950.0f, 970.0f, 1000.0f, 1150.0f, 1200.0f, 1300.0f};
+    Vector<f32> values = {0.50f, 0.45f, 0.20f, 0.40f, 0.45f, 0.15f, 0.40f};
+
+    SpectralCurve water_curve(wavelengths, values);
+
+    // Absorption dips at water bands
+    EXPECT_LT(water_curve.Evaluate(970.0f), water_curve.Evaluate(850.0f));
+    EXPECT_LT(water_curve.Evaluate(1200.0f), water_curve.Evaluate(1150.0f));
+}
+
+TEST(SpectralDataTest, NIR_SolarLUTCoverage) {
+    // Test that SolarSpectralLUT can cover VIS + NIR range
+    Vector<f32> wavelengths;
+    Vector<f32> sunValues;
+    Vector<f32> skyValues;
+
+    // Create broad spectrum covering visible + NIR (400-1400nm)
+    for (f32 wl = 400.0f; wl <= 1400.0f; wl += 50.0f) {
+        wavelengths.push_back(wl);
+        // Solar spectrum approximation: decreasing with wavelength
+        sunValues.push_back(1.5f * std::exp(-(wl - 500.0f) * (wl - 500.0f) / 200000.0f));
+        skyValues.push_back(0.3f * std::exp(-(wl - 450.0f) * (wl - 450.0f) / 100000.0f));
+    }
+
+    SpectralCurve sunCurve(wavelengths, sunValues);
+    SpectralCurve skyCurve(wavelengths, skyValues);
+
+    SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+
+    EXPECT_TRUE(lut.IsValid());
+
+    // Verify coverage extends into NIR
+    auto [min_wl, max_wl] = lut.GetWavelengthRange();
+    EXPECT_LE(min_wl, 400.0f);
+    EXPECT_GE(max_wl, 1400.0f);
+
+    // NIR should have significant solar irradiance (less than visible, but still present)
+    f32 sun_visible = sunCurve.Evaluate(550.0f);
+    f32 sun_nir = sunCurve.Evaluate(1000.0f);
+
+    EXPECT_GT(sun_nir, sun_visible * 0.1f);  // NIR > 10% of visible peak
+}
+
+TEST(SpectralDataTest, NIR_ComplexRefractiveIndexRange) {
+    // Test complex refractive index data extending into NIR
+    // Many optical materials have data in NIR range
+    ComplexRefractiveIndex nir_material;
+    nir_material.wavelengths_nm = {700.0f, 800.0f, 900.0f, 1000.0f, 1200.0f, 1400.0f};
+    nir_material.n = {1.50f, 1.48f, 1.46f, 1.45f, 1.44f, 1.43f};  // Glass-like
+    nir_material.k = {0.0f, 0.0f, 0.0f, 0.0f, 0.001f, 0.002f};    // Slight absorption at long λ
+
+    EXPECT_TRUE(nir_material.IsValid());
+
+    // Fresnel R0 for dielectric should be moderate
+    f32 F0 = nir_material.FresnelR0(1000.0f);
+    EXPECT_GT(F0, 0.03f);  // > 3% reflection
+    EXPECT_LT(F0, 0.10f);  // < 10% reflection (dielectric)
+}
+
+TEST(SpectralDataTest, NIR_BandBoundaries) {
+    // Verify NIR band boundaries align with visible spectrum
+    constexpr f32 VISIBLE_MAX = 780.0f;
+    constexpr f32 NIR_MIN = 780.0f;
+    constexpr f32 NIR_MAX = 1400.0f;
+    constexpr f32 SWIR_MIN = 1000.0f;
+
+    // NIR starts where visible ends
+    EXPECT_EQ(VISIBLE_MAX, NIR_MIN);
+
+    // NIR overlaps with SWIR (1000-1400nm is in both)
+    EXPECT_LT(SWIR_MIN, NIR_MAX);
+
+    // NIR bandwidth
+    EXPECT_NEAR(NIR_MAX - NIR_MIN, 620.0f, 1.0f);
+}

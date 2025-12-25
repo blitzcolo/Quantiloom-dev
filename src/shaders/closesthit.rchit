@@ -1011,6 +1011,93 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
+    } else if (camera.spectral_mode == SPECTRAL_MODE_NIR_FUSED) {
+        // ====================================================================
+        // NIR Fused Mode: Near-Infrared Band Integration (780-1400nm)
+        // ====================================================================
+        // NIR is "reflected infrared" - behaves almost identically to visible light.
+        // Solar radiation is the dominant source; thermal emission is negligible
+        // for objects below ~600K (327°C).
+        //
+        // Physics model:
+        //   L_total(λ) = ρ(λ) × [L_sun(λ) × cos(θ) + L_sky(λ)]
+        //
+        // Key properties of NIR (780-1400nm):
+        //   - ~46-55% of solar energy is in NIR/SWIR bands
+        //   - Can be focused with standard glass optics (unlike thermal IR)
+        //   - Commonly used in: vegetation analysis (chlorophyll reflection),
+        //     night vision (active illumination), material identification
+        //   - Water absorbs strongly at 970nm and 1200nm (moisture detection)
+        //
+        // Reference: ISO 20473 classifies NIR as IR-A (780nm - 1.4μm)
+        // ====================================================================
+
+        const float NIR_LAMBDA_MIN = 780.0;    // nm (start of IR-A band)
+        const float NIR_LAMBDA_MAX = 1400.0;   // nm (end of IR-A band)
+        const uint  NUM_NIR_SAMPLES = 16;
+        const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
+
+        float radiance_accum = 0.0;
+
+        // Check if we have spectral solar LUT for accurate NIR illumination
+        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+
+        // Fallback: flat spectrum from RGB average
+        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
+        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+
+        [unroll]
+        for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {
+            float lambda = NIR_LAMBDA_MIN + float(i) * lambda_step;
+
+            // 1. Query solar/sky irradiance at this NIR wavelength
+            float sun_radiance_lambda;
+            float sky_radiance_lambda;
+
+            if (hasSpectralSolarLUT) {
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                // Fallback: use RGB average (approximation)
+                sun_radiance_lambda = sun_power_rgb;
+                sky_radiance_lambda = sky_power_rgb;
+            }
+
+            // 2. Get spectral reflectance at this wavelength
+            float rho_lambda;
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                // Quantitative path: use measured spectral curve
+                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+            } else {
+                // Fallback: RGB upsampling (NIR is close enough to visible for this to be reasonable)
+                // This uses Gaussian basis functions centered at R/G/B wavelengths
+                rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
+            }
+
+            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL + L_sky(λ))
+            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL + sky_radiance_lambda);
+
+            // Note: Thermal emission is negligible in NIR for T < 600K
+            // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
+            // Skip thermal calculation for performance
+
+            radiance_accum += L_reflected * lambda_step;
+        }
+
+        // Normalize by band width
+        float band_width = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
+        }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+
+        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+
     } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
