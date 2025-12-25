@@ -16,7 +16,8 @@ This directory contains HLSL ray tracing shaders for Quantiloom.
 |------|-------------|
 | `common.hlsli` | Shared types, spectral modes, payload structures |
 | `pbr.hlsli` | Cook-Torrance PBR functions (GGX, Fresnel) |
-| `blackbody.hlsli` | Planck blackbody radiation for thermal IR |
+| `blackbody.hlsli` | Planck blackbody radiation for thermal IR (C1_NM = 1.191×10²⁰) |
+| `atmospheric.hlsli` | Rayleigh+Mie scattering, Delta-Tracking volumetric rendering |
 | `SpectralConversion.hlsli` | CIE XYZ color matching, spectral upsampling |
 | `spectral_query.hlsli` | Spectral curve sampling utilities |
 
@@ -115,8 +116,32 @@ Defined in `common.hlsli`:
 
 - **Cook-Torrance PBR**: Full GGX specular with height-correlated Smith geometry
 - **Spectral rendering**: Physically-based spectral upsampling and XYZ integration
-- **IR thermal emission**: Planck blackbody radiation for MWIR/LWIR/SWIR modes
+- **IR thermal emission**: Planck blackbody radiation for MWIR/LWIR/SWIR modes ⭐ **Corrected (2025-12-25)**
+  - Fixed Planck constant C1_NM (was 10000× too small)
+  - Validated against 300K blackbody @ 9.6μm (~0.01 W·sr⁻¹·m⁻²·nm⁻¹)
 - **Measured material data**: Spectral reflectance curves and complex refractive indices
 - **IBL**: Environment map lighting with prefiltered specular
-- **Atmospheric model**: Beer-Lambert attenuation with MODTRAN-compatible LUTs
+- **Atmospheric model**: Beer-Lambert attenuation + physical Rayleigh/Mie scattering ⭐ **Enhanced (2025-12-25)**
+  - Scalar/RGB versions for type-correct wavelength dependence
+  - Delta-Tracking volumetric rendering for heterogeneous media
 - **Ray differentials**: Texture LOD computation for proper filtering
+
+## Recent Fixes (2025-12-25)
+
+### Critical Physics Corrections
+1. **Planck Constant Error**: `C1_NM = 1.191042972e16` → `1.191042972e20` (blackbody.hlsli:51)
+   - **Impact**: All MWIR/LWIR thermal calculations now physically correct
+   - **Validation**: 24 unit tests added (test_blackbody_physics.cpp)
+
+2. **Atmospheric Scattering Type Confusion**: Split functions into `_Scalar` and `_RGB` versions
+   - **Impact**: Eliminated incorrect float3 averaging in single-wavelength rendering
+   - **Files**: atmospheric.hlsli (lines 42-86), closesthit.rchit (line 553)
+
+### Verification
+Run physics validation tests:
+```bash
+cd build
+cmake --build . --target libquantiloom_tests
+ctest --output-on-failure --gtest_filter=BlackbodyPhysicsTest.*
+```
+All 24 tests should pass ✅

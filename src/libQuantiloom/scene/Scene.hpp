@@ -103,6 +103,10 @@ public:
     // Get total vertex count
     u32 GetTotalVertexCount() const;
 
+    // Get scene bounding box diagonal length (meters)
+    // Used for automatic atmospheric scattering enable/disable
+    f32 GetBoundingBoxSize() const;
+
     // Print scene summary (for debugging)
     void PrintSummary() const;
 };

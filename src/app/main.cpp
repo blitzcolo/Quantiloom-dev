@@ -964,9 +964,83 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Creating atmospheric parameters buffer...");
 
-        // Load atmospheric config from scene TOML or use default
-        AtmosphericConfig atmosphericConfig = AtmosphericConfig::ClearDay();
-        // TODO: Load from scene.toml if [atmospheric] section exists
+        // ====================================================================
+        // AUTOMATIC ATMOSPHERIC SCATTERING ENABLE/DISABLE
+        // ====================================================================
+        // For small scenes (<100m), atmospheric scattering causes artifacts:
+        // - Horizontal rays traverse thousands of km of atmosphere (Earth-scale)
+        // - Result: nearly all light scattered → black horizontal bands
+        // - Solution: Auto-disable for small indoor/object scenes
+        //
+        // Threshold: 100m diagonal bounding box
+        // - Larger: Outdoor scene → enable atmosphere
+        // - Smaller: Indoor/object → disable atmosphere
+        // ====================================================================
+
+        f32 sceneBBoxSize = loadedScene.GetBoundingBoxSize() * worldUnitsToMeters;
+        bool autoEnableAtmosphere = (sceneBBoxSize > 100.0f);
+
+        QL_LOG_INFO("  Scene bounding box diagonal: {:.2f} m", sceneBBoxSize);
+        QL_LOG_INFO("  Atmospheric scattering: {} (scene size {})",
+                    autoEnableAtmosphere ? "AUTO-ENABLED" : "AUTO-DISABLED",
+                    autoEnableAtmosphere ? ">100m" : "<100m");
+
+        // Load atmospheric config from scene TOML or use auto-detection
+        AtmosphericConfig atmosphericConfig;
+        bool userDisabledAtmosphere = false;
+
+        // Check if user explicitly configured atmospheric settings in TOML
+        if (config.Has("atmospheric.preset")) {
+            String preset = config.Get<String>("atmospheric.preset");
+            QL_LOG_INFO("  User-specified atmospheric preset: {}", preset);
+
+            if (preset == "disabled") {
+                atmosphericConfig = AtmosphericConfig::Disabled();
+                userDisabledAtmosphere = true;  // Mark as explicitly disabled
+                QL_LOG_INFO("  Atmospheric rendering DISABLED by user (preset=disabled)");
+            } else if (preset == "clear_day") {
+                atmosphericConfig = AtmosphericConfig::ClearDay();
+            } else if (preset == "hazy") {
+                atmosphericConfig = AtmosphericConfig::Hazy();
+            } else if (preset == "polluted_urban") {
+                atmosphericConfig = AtmosphericConfig::PollutedUrban();
+            } else if (preset == "mountain_top") {
+                atmosphericConfig = AtmosphericConfig::MountainTop();
+            } else if (preset == "mars") {
+                atmosphericConfig = AtmosphericConfig::Mars();
+            } else {
+                QL_LOG_WARN("  Unknown preset '{}', using clear_day", preset);
+                atmosphericConfig = AtmosphericConfig::ClearDay();
+            }
+        } else {
+            // Auto-detection based on scene size
+            if (autoEnableAtmosphere) {
+                atmosphericConfig = AtmosphericConfig::ClearDay();
+                QL_LOG_INFO("  Using preset: clear_day (auto-enabled, scene > 100m)");
+            } else {
+                atmosphericConfig = AtmosphericConfig::Disabled();
+                QL_LOG_INFO("  Using preset: disabled (auto-disabled, scene < 100m)");
+            }
+        }
+
+        // Apply optional parameter overrides from TOML (if specified)
+        // IMPORTANT: Do NOT apply overrides if user explicitly disabled atmosphere
+        if (!userDisabledAtmosphere) {
+            if (config.Has("atmospheric.rayleigh_enabled")) {
+                atmosphericConfig.rayleigh_enabled = config.Get<bool>("atmospheric.rayleigh_enabled");
+            }
+            if (config.Has("atmospheric.mie_enabled")) {
+                atmosphericConfig.mie_enabled = config.Get<bool>("atmospheric.mie_enabled");
+            }
+            if (config.Has("atmospheric.rayleigh_beta_550nm")) {
+                atmosphericConfig.rayleigh_beta_550nm = config.Get<f32>("atmospheric.rayleigh_beta_550nm");
+            }
+            if (config.Has("atmospheric.mie_beta_550nm")) {
+                atmosphericConfig.mie_beta_550nm = config.Get<f32>("atmospheric.mie_beta_550nm");
+            }
+        } else if (config.Has("atmospheric.rayleigh_enabled") || config.Has("atmospheric.mie_enabled")) {
+            QL_LOG_WARN("  Atmospheric preset='disabled' but override parameters found - ignoring overrides");
+        }
 
         // Convert to GPU structure
         AtmosphericParamsGPU atmosphericGPU = atmosphericConfig.ToGPU();

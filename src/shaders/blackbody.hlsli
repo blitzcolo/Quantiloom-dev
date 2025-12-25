@@ -27,11 +27,28 @@ static const float STEFAN_BOLTZMANN = 5.670374419e-8;  // Stefan-Boltzmann const
 // These constants combine physical constants with unit conversion factors
 // to minimize runtime computation in IRPlanckRadiance()
 //
-// C1_NM = 2hc² × 10⁹ (combines 2hc² with nm conversion for λ⁵)
+// C1_NM = 2hc² × 10³⁶ (converts λ from nm to m, and dλ from m to nm)
 // C2 = hc/k (exponent factor)
+//
+// DERIVATION:
+// Standard Planck formula (λ in meters):
+//   L_λ(m⁻¹) = (2hc²/λ⁵) / (exp(hc/λkT) - 1)  [W·sr⁻¹·m⁻²·m⁻¹]
+//
+// Convert wavelength to nanometers:
+//   λ_m = λ_nm × 10⁻⁹
+//   λ_m⁵ = λ_nm⁵ × 10⁻⁴⁵
+//
+// Convert spectral radiance from per-meter to per-nanometer:
+//   L_λ(nm⁻¹) = L_λ(m⁻¹) × dλ_m/dλ_nm = L_λ(m⁻¹) × 10⁻⁹
+//
+// Combine:
+//   L_λ(nm⁻¹) = (2hc²/[λ_nm⁵ × 10⁻⁴⁵]) / (...) × 10⁻⁹
+//             = (2hc² × 10³⁶/λ_nm⁵) / (...)
+//
+// Therefore: C1_NM = 2hc² × 10³⁶ = 1.191042972 × 10²⁰
 // ============================================================================
 
-static const float C1_NM = 1.191042972e16;  // 2 × h × c² × 1e9 (W·nm⁴·sr⁻¹·m⁻²)
+static const float C1_NM = 1.191042972e20;  // 2 × h × c² × 1e36 (W·nm⁴·sr⁻¹·m⁻²)
 static const float C2 = 1.43877736e-2;      // h × c / k (m·K)
 
 // ============================================================================

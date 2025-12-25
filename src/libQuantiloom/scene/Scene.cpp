@@ -2,6 +2,7 @@
 #include "core/Log.hpp"
 #include "io/LUTLoader.hpp"
 #include <filesystem>
+#include <limits>
 
 namespace quantiloom {
 
@@ -241,6 +242,32 @@ void Scene::PrintSummary() const {
     }
 
     QL_LOG_INFO("========================================");
+}
+
+f32 Scene::GetBoundingBoxSize() const {
+    // Compute axis-aligned bounding box (AABB) for entire scene
+    // Returns diagonal length in scene units (convert to meters via worldUnitsToMeters)
+
+    if (meshes.empty()) {
+        return 0.0f;
+    }
+
+    glm::vec3 bbox_min(std::numeric_limits<f32>::max());
+    glm::vec3 bbox_max(std::numeric_limits<f32>::lowest());
+
+    // Iterate over all meshes and all primitives
+    for (const auto& mesh : meshes) {
+        for (const auto& primitive : mesh.primitives) {
+            for (const auto& pos : primitive.positions) {
+                bbox_min = glm::min(bbox_min, pos);
+                bbox_max = glm::max(bbox_max, pos);
+            }
+        }
+    }
+
+    // Compute diagonal length (longest extent)
+    glm::vec3 diagonal = bbox_max - bbox_min;
+    return glm::length(diagonal);
 }
 
 } // namespace quantiloom

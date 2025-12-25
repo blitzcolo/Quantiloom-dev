@@ -549,12 +549,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Check if physical atmospheric model is enabled
     if (atmo.beta_rayleigh_550nm.x > 1e-9) {
         // PHYSICAL MODE: Use Rayleigh + Mie coefficients
-        float3 beta_r = RayleighScatteringCoeff(camera.wavelength_nm, atmo.beta_rayleigh_550nm);
-        float3 beta_m = MieScatteringCoeff(camera.wavelength_nm, atmo.beta_mie_550nm, atmo.mie_alpha);
+        // Use SCALAR versions for single-wavelength computation
+        float beta_r = RayleighScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_rayleigh_550nm.x);
+        float beta_m = MieScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_mie_550nm.x, atmo.mie_alpha);
 
-        // Total extinction (assuming sea-level density for simplicity)
-        float3 sigma_t = beta_r + beta_m;
-        float extinction = (sigma_t.r + sigma_t.g + sigma_t.b) / 3.0;  // Average over RGB
+        // Total extinction (scalar for single wavelength)
+        float extinction = beta_r + beta_m;
 
         // Transmittance along path
         atmosphericTransmittance = exp(-extinction * pathLength_m);

@@ -30,28 +30,59 @@ static const float REFERENCE_WAVELENGTH_NM = 550.0;
 // ============================================================================
 // Wavelength-Dependent Scattering Coefficients
 // ============================================================================
+// Physical scattering follows power laws:
+//   - Rayleigh (molecular): β(λ) ∝ λ⁻⁴ (strong wavelength dependence)
+//   - Mie (aerosol): β(λ) ∝ λ⁻ᵅ where α ≈ 0.84 (weaker dependence)
+//
+// TWO VERSIONS PROVIDED:
+//   1. Scalar version: For single-wavelength spectral rendering
+//   2. RGB version: For RGB mode with three separate wavelength calculations
+// ============================================================================
 
-/// Compute Rayleigh scattering coefficient at arbitrary wavelength
-/// β_r(λ) = β_r(550nm) × (550/λ)^4
+/// Compute Rayleigh scattering coefficient at single wavelength (SCALAR)
+/// β_r(λ) = β_r(550nm) × (550/λ)⁴
 /// @param wavelength_nm Query wavelength (nanometers)
-/// @param beta_r_550nm Reference Rayleigh coefficient at 550nm (m^-1)
-/// @return Rayleigh scattering coefficient at wavelength (m^-1)
-float3 RayleighScatteringCoeff(float wavelength_nm, float3 beta_r_550nm) {
+/// @param beta_r_550nm Reference Rayleigh coefficient at 550nm (m⁻¹)
+/// @return Rayleigh scattering coefficient at wavelength (m⁻¹)
+float RayleighScatteringCoeff_Scalar(float wavelength_nm, float beta_r_550nm) {
     float ratio = REFERENCE_WAVELENGTH_NM / wavelength_nm;
     float power4 = ratio * ratio * ratio * ratio;
     return beta_r_550nm * power4;
 }
 
-/// Compute Mie scattering coefficient at arbitrary wavelength
-/// β_m(λ) = β_m(550nm) × (550/λ)^α
+/// Compute Rayleigh scattering coefficient at three RGB wavelengths
+/// Evaluates β_r(λ) separately for R, G, B wavelengths
+/// @param wavelengths_rgb Three wavelengths for R, G, B channels (nanometers)
+/// @param beta_r_550nm Reference Rayleigh coefficient at 550nm (m⁻¹)
+/// @return Rayleigh scattering coefficients for RGB (m⁻¹)
+float3 RayleighScatteringCoeff_RGB(float3 wavelengths_rgb, float beta_r_550nm) {
+    float3 ratio = float3(REFERENCE_WAVELENGTH_NM, REFERENCE_WAVELENGTH_NM, REFERENCE_WAVELENGTH_NM) / wavelengths_rgb;
+    float3 power4 = ratio * ratio * ratio * ratio;
+    return float3(beta_r_550nm, beta_r_550nm, beta_r_550nm) * power4;
+}
+
+/// Compute Mie scattering coefficient at single wavelength (SCALAR)
+/// β_m(λ) = β_m(550nm) × (550/λ)ᵅ
 /// @param wavelength_nm Query wavelength (nanometers)
-/// @param beta_m_550nm Reference Mie coefficient at 550nm (m^-1)
+/// @param beta_m_550nm Reference Mie coefficient at 550nm (m⁻¹)
 /// @param alpha Angstrom exponent (typically ~0.84)
-/// @return Mie scattering coefficient at wavelength (m^-1)
-float3 MieScatteringCoeff(float wavelength_nm, float3 beta_m_550nm, float alpha) {
+/// @return Mie scattering coefficient at wavelength (m⁻¹)
+float MieScatteringCoeff_Scalar(float wavelength_nm, float beta_m_550nm, float alpha) {
     float ratio = REFERENCE_WAVELENGTH_NM / wavelength_nm;
     float power_alpha = pow(ratio, alpha);
     return beta_m_550nm * power_alpha;
+}
+
+/// Compute Mie scattering coefficient at three RGB wavelengths
+/// Evaluates β_m(λ) separately for R, G, B wavelengths
+/// @param wavelengths_rgb Three wavelengths for R, G, B channels (nanometers)
+/// @param beta_m_550nm Reference Mie coefficient at 550nm (m⁻¹)
+/// @param alpha Angstrom exponent (typically ~0.84)
+/// @return Mie scattering coefficients for RGB (m⁻¹)
+float3 MieScatteringCoeff_RGB(float3 wavelengths_rgb, float beta_m_550nm, float alpha) {
+    float3 ratio = float3(REFERENCE_WAVELENGTH_NM, REFERENCE_WAVELENGTH_NM, REFERENCE_WAVELENGTH_NM) / wavelengths_rgb;
+    float3 power_alpha = pow(ratio, float3(alpha, alpha, alpha));
+    return float3(beta_m_550nm, beta_m_550nm, beta_m_550nm) * power_alpha;
 }
 
 // ============================================================================
@@ -191,17 +222,18 @@ bool DeltaTracking(
     float3 pos_entry = ray_origin + ray_dir * t_min;
     float altitude_entry = GetAltitude(pos_entry, planet_center, atmosphere.planet_radius);
 
-    float3 beta_r = RayleighScatteringCoeff(wavelength_nm, atmosphere.beta_rayleigh_550nm);
-    float3 beta_m = MieScatteringCoeff(wavelength_nm, atmosphere.beta_mie_550nm, atmosphere.mie_alpha);
+    // Use SCALAR versions for single-wavelength volumetric rendering
+    float beta_r = RayleighScatteringCoeff_Scalar(wavelength_nm, atmosphere.beta_rayleigh_550nm.x);
+    float beta_m = MieScatteringCoeff_Scalar(wavelength_nm, atmosphere.beta_mie_550nm.x, atmosphere.mie_alpha);
 
     float rho_r_entry = AtmosphericDensity(altitude_entry, atmosphere.rayleigh_scale_height);
     float rho_m_entry = AtmosphericDensity(altitude_entry, atmosphere.mie_scale_height);
 
     // Total extinction = scattering (assuming negligible absorption)
-    float3 sigma_t_entry = (beta_r * rho_r_entry) + (beta_m * rho_m_entry);
+    float sigma_t_entry = (beta_r * rho_r_entry) + (beta_m * rho_m_entry);
 
-    // Use maximum component as majorant (conservative bound)
-    float sigma_maj = max(max(sigma_t_entry.r, sigma_t_entry.g), sigma_t_entry.b);
+    // Use as majorant (conservative bound)
+    float sigma_maj = sigma_t_entry;
 
     // Safety check: if majorant is near zero, atmosphere is negligible
     if (sigma_maj < 1e-9) {
@@ -232,8 +264,8 @@ bool DeltaTracking(
         float rho_r = AtmosphericDensity(altitude_sample, atmosphere.rayleigh_scale_height);
         float rho_m = AtmosphericDensity(altitude_sample, atmosphere.mie_scale_height);
 
-        float3 sigma_t_sample = (beta_r * rho_r) + (beta_m * rho_m);
-        float sigma_t = max(max(sigma_t_sample.r, sigma_t_sample.g), sigma_t_sample.b);
+        float sigma_t_sample = (beta_r * rho_r) + (beta_m * rho_m);
+        float sigma_t = sigma_t_sample;
 
         // Collision probability
         float p_collision = sigma_t / sigma_maj;
@@ -279,14 +311,15 @@ float3 SingleScattering(
     float altitude = GetAltitude(pos, planet_center, atmosphere.planet_radius);
 
     // Compute scattering coefficients at this altitude
-    float3 beta_r = RayleighScatteringCoeff(wavelength_nm, atmosphere.beta_rayleigh_550nm);
-    float3 beta_m = MieScatteringCoeff(wavelength_nm, atmosphere.beta_mie_550nm, atmosphere.mie_alpha);
+    // Use SCALAR versions for single-wavelength computation
+    float beta_r = RayleighScatteringCoeff_Scalar(wavelength_nm, atmosphere.beta_rayleigh_550nm.x);
+    float beta_m = MieScatteringCoeff_Scalar(wavelength_nm, atmosphere.beta_mie_550nm.x, atmosphere.mie_alpha);
 
     float rho_r = AtmosphericDensity(altitude, atmosphere.rayleigh_scale_height);
     float rho_m = AtmosphericDensity(altitude, atmosphere.mie_scale_height);
 
-    float3 sigma_s_r = beta_r * rho_r;
-    float3 sigma_s_m = beta_m * rho_m;
+    float sigma_s_r = beta_r * rho_r;
+    float sigma_s_m = beta_m * rho_m;
 
     // Phase functions
     float cosTheta = dot(-view_dir, sun_dir);  // Scattering angle
@@ -308,17 +341,17 @@ float3 SingleScattering(
         float avg_altitude = altitude + 0.5 * atmosphere.atmosphere_height;
         float rho_avg_r = AtmosphericDensity(avg_altitude, atmosphere.rayleigh_scale_height);
         float rho_avg_m = AtmosphericDensity(avg_altitude, atmosphere.mie_scale_height);
-        float3 sigma_t_avg = (beta_r * rho_avg_r) + (beta_m * rho_avg_m);
-        float sigma_avg = (sigma_t_avg.r + sigma_t_avg.g + sigma_t_avg.b) / 3.0;
+        float sigma_t_avg = (beta_r * rho_avg_r) + (beta_m * rho_avg_m);
+        float sigma_avg = sigma_t_avg;
         transmittance_sun = exp(-sigma_avg * max(t_sun_far - max(t_sun_near, 0.0), 0.0));
     }
 
     // Single scattering integral (simplified: point source sun)
     // L_s = β_s × p(θ) × L_sun × T(point → sun)
-    float3 L_scattered_r = sigma_s_r * phase_r * sun_radiance * transmittance_sun;
-    float3 L_scattered_m = sigma_s_m * phase_m * sun_radiance * transmittance_sun;
+    float L_scattered_r = sigma_s_r * phase_r * sun_radiance * transmittance_sun;
+    float L_scattered_m = sigma_s_m * phase_m * sun_radiance * transmittance_sun;
 
-    return L_scattered_r + L_scattered_m;
+    return float3(L_scattered_r + L_scattered_m, L_scattered_r + L_scattered_m, L_scattered_r + L_scattered_m);
 }
 
 #endif // QUANTILOOM_ATMOSPHERIC_HLSLI

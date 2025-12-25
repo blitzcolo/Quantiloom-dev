@@ -68,74 +68,68 @@ void main(inout Payload payload) {
     // Atmospheric Scattering (Delta-Tracking)
     // ========================================================================
     if (atmosphereEnabled) {
-        // OPTIMIZATION: For small-scale scenes, ignore Earth curvature
-        // Only apply atmospheric scattering to upward-looking rays
-        // Downward rays use fallback (ground color or black)
-        // For large-scale scenes (>10km), need full spherical geometry
-        if (ray_dir.y > 0.01) {  // Ray pointing upward (with small tolerance)
-            // Planet center: assume camera at surface, planet center below
-            // TODO: Make this configurable via uniform buffer
-            float3 planet_center = float3(0.0, -atmo.planet_radius, 0.0);
+        // Planet center: assume camera at surface, planet center below
+        // TODO: Make this configurable via uniform buffer
+        float3 planet_center = float3(0.0, -atmo.planet_radius, 0.0);
 
-            // Compute ray-atmosphere intersection
-            float t_atmo_near, t_atmo_far;
-            bool hits_atmosphere = RaySphereIntersection(
-                ray_origin, ray_dir, planet_center,
-                atmo.planet_radius + atmo.atmosphere_height,
-                t_atmo_near, t_atmo_far);
+        // Compute ray-atmosphere intersection
+        float t_atmo_near, t_atmo_far;
+        bool hits_atmosphere = RaySphereIntersection(
+            ray_origin, ray_dir, planet_center,
+            atmo.planet_radius + atmo.atmosphere_height,
+            t_atmo_near, t_atmo_far);
 
-            if (hits_atmosphere && t_atmo_far > 0.0) {
-                // Ray enters atmosphere
-                float t_min = max(t_atmo_near, 0.0);
-                float t_max = t_atmo_far;
+        if (hits_atmosphere && t_atmo_far > 0.0) {
+            // Ray enters atmosphere
+            float t_min = max(t_atmo_near, 0.0);
+            float t_max = t_atmo_far;
 
-                // Initialize random state using ray coordinates
-                // Use a simple hash of ray origin + direction for seed
-                uint seed = uint(dot(ray_origin, float3(127.1, 311.7, 74.7))) +
-                            uint(dot(ray_dir, float3(269.5, 183.3, 246.1)) * 1000.0);
-                uint random_state = seed ^ 0xDEADBEEFu;
+            // Initialize random state using ray coordinates
+            // Use a simple hash of ray origin + direction for seed
+            uint seed = uint(dot(ray_origin, float3(127.1, 311.7, 74.7))) +
+                        uint(dot(ray_dir, float3(269.5, 183.3, 246.1)) * 1000.0);
+            uint random_state = seed ^ 0xDEADBEEFu;
 
-                // Perform Delta-Tracking
-                float t_scatter;
-                float transmittance;
-                bool scattered = DeltaTracking(
-                    ray_origin, ray_dir,
-                    t_min, t_max,
-                    camera.wavelength_nm,
-                    atmo,
-                    planet_center,
-                    random_state,
-                    t_scatter,
-                    transmittance);
+            // Perform Delta-Tracking
+            float t_scatter;
+            float transmittance;
+            bool scattered = DeltaTracking(
+                ray_origin, ray_dir,
+                t_min, t_max,
+                camera.wavelength_nm,
+                atmo,
+                planet_center,
+                random_state,
+                t_scatter,
+                transmittance);
 
-                if (scattered) {
-                    // Scattering event occurred
-                    float3 scatter_pos = ray_origin + ray_dir * t_scatter;
-                    float3 sun_dir = normalize(lut.sunDirection);
+            if (scattered) {
+                // Scattering event occurred
+                float3 scatter_pos = ray_origin + ray_dir * t_scatter;
+                float3 sun_dir = normalize(lut.sunDirection);
 
-                    // Get sun radiance at current wavelength
-                    float sun_radiance;
-                    if (hasSpectralSolarLUT) {
-                        float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
-                        sun_radiance = SunIrradianceToRadiance(sun_irr);
-                    } else {
-                        sun_radiance = lut.sunRadiance_spectral;
-                    }
-
-                    // Compute single scattering
-                    float3 scattered_radiance = SingleScattering(
-                        scatter_pos, ray_dir, sun_dir,
-                        camera.wavelength_nm,
-                        atmo, planet_center,
-                        sun_radiance);
-
-                    payload.radiance = scattered_radiance;
-                    return;
+                // Get sun radiance at current wavelength
+                float sun_radiance;
+                if (hasSpectralSolarLUT) {
+                    float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
+                    sun_radiance = SunIrradianceToRadiance(sun_irr);
+                } else {
+                    sun_radiance = lut.sunRadiance_spectral;
                 }
 
-                // No scattering: ray escaped atmosphere, return attenuated sky radiance
-                // (multiply by transmittance to account for extinction along path)
+                // Compute single scattering
+                float3 scattered_radiance = SingleScattering(
+                    scatter_pos, ray_dir, sun_dir,
+                    camera.wavelength_nm,
+                    atmo, planet_center,
+                    sun_radiance);
+
+                payload.radiance = scattered_radiance;
+                return;
             }
+
+            // No scattering: ray escaped atmosphere without collision
+            // Fall through to simple sky radiance (attenuated by transmittance if needed)
         }
     }
 

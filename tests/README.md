@@ -7,10 +7,11 @@ This directory contains comprehensive unit tests for the Quantiloom spectral pat
 ```
 tests/
 ├── test_core/           # 核心模块测试 (Core module tests)
-│   ├── test_types.cpp           # Result类型, 光谱模式解析, 错误码
-│   ├── test_image.cpp           # 图像容器, 像素访问, 内存布局
-│   ├── test_spectral_data.cpp   # 光谱曲线, 插值, GPU转换
-│   └── test_config.cpp          # TOML配置加载和解析
+│   ├── test_types.cpp            # Result类型, 光谱模式解析, 错误码
+│   ├── test_image.cpp            # 图像容器, 像素访问, 内存布局
+│   ├── test_spectral_data.cpp    # 光谱曲线, 插值, GPU转换
+│   ├── test_blackbody_physics.cpp # 黑体辐射物理验证, Planck/Stefan-Boltzmann/Wien定律
+│   └── test_config.cpp           # TOML配置加载和解析
 │
 ├── test_scene/          # 场景模块测试 (Scene module tests)
 │   ├── test_material.cpp        # 材质验证, PBR参数, 红外属性
@@ -56,6 +57,16 @@ tests/
   - 单调性验证和波长范围检查
   - `SpectralCurveGPU` 转换和降采样
   - 物理真实性测试 (可见光反射率, 红外发射率)
+
+- **`test_blackbody_physics.cpp`** (24 tests)
+  - Planck常数验证 (C1_NM = 1.191×10²⁰, C2 = 0.0144)
+  - 300K黑体辐射度验证 (~0.01 W·sr⁻¹·m⁻²·nm⁻¹ @ 9.6μm)
+  - Stefan-Boltzmann定律 (M = σT⁴)
+  - Wien位移定律 (λ_peak = b/T)
+  - 温度缩放验证 (310K人体 → 5800K太阳)
+  - 波长依赖性 (Wien/Rayleigh-Jeans极限)
+  - Rayleigh散射λ⁻⁴验证 (蓝光/红光比 = 4.35)
+  - Mie散射λ⁻⁰·⁸⁴验证 (蓝光/红光比 = 1.36)
 
 - **`test_config.cpp`** (35+ tests)
   - TOML文件加载和解析
@@ -388,9 +399,9 @@ TEST(SpectralDataTest, InterpolationBenchmark) {
 ---
 
 **测试覆盖率统计** (当前):
-- **核心模块 (Core)**: ~175 tests (types, image, spectral_data, config)
+- **核心模块 (Core)**: ~199 tests (types, image, spectral_data, blackbody_physics, config)
 - **场景模块 (Scene)**: ~70 tests (material, camera)
 - **I/O模块 (I/O)**: ~25 tests (image_io)
-- **总计**: ~270 单元测试
+- **总计**: ~294 单元测试
 
 **目标**: 根据SRS M1.5要求, 建立自动化、可复现的交叉验证基准套件。
