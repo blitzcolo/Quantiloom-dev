@@ -1,3 +1,36 @@
+/**
+ * @file GpuImage.hpp
+ * @brief RAII wrapper for VkImage with VMA memory allocation and automatic view creation
+ *
+ * Provides GpuImage class for managing Vulkan image resources:
+ * - Automatic VkImage creation with VMA memory allocation
+ * - Automatic VkImageView creation for shader access
+ * - RAII lifecycle (automatic destruction on scope exit)
+ * - Mipmap support (for environment maps, texture filtering)
+ *
+ * Image types supported:
+ * - 2D images (textures, render targets)
+ * - Storage images (compute shader output)
+ * - Sampled images (texture sampling in shaders)
+ * - Transfer src/dst (for GPU-CPU data transfer)
+ *
+ * Common formats:
+ * - VK_FORMAT_R32G32B32A32_SFLOAT: HDR render targets (128 bpp)
+ * - VK_FORMAT_R8G8B8A8_UNORM: LDR textures (32 bpp)
+ * - VK_FORMAT_R8G8B8A8_SRGB: sRGB textures with gamma (32 bpp)
+ * - VK_FORMAT_R32G32_SFLOAT: BRDF LUT (64 bpp)
+ *
+ * Data transfer:
+ * Unlike GpuBuffer, images cannot be directly mapped to CPU memory.
+ * Use staging buffers with vkCmdCopyBufferToImage/vkCmdCopyImageToBuffer.
+ *
+ * @note Movable but non-copyable (strict ownership semantics)
+ * @note Image layout transitions managed externally via pipeline barriers
+ * @note View is created automatically (can't be changed after construction)
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -8,25 +41,67 @@
 // ============================================================================
 // GpuImage - RAII wrapper for VkImage with VMA allocation
 // ============================================================================
-// Responsibilities:
-// - Create VkImage with VMA memory allocation
-// - Create VkImageView for shader access
-// - Automatically destroy on destruction (RAII)
-// - Movable but non-copyable (strict ownership)
-//
-// Usage:
-//   GpuImage renderTarget(allocator, device, width, height,
-//       VK_FORMAT_R32G32B32A32_SFLOAT,
-//       VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
-//
-// Note:
-// - Unlike GpuBuffer, images cannot be directly mapped
-// - Data transfer requires staging buffers and vkCmdCopyBufferToImage
-// - Layout transitions are managed externally via pipeline barriers
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @class GpuImage
+ * @brief RAII-managed VkImage with automatic VMA allocation, view creation, and cleanup
+ *
+ * Provides safe management of Vulkan 2D image resources.
+ * Images and image views are destroyed automatically when GpuImage goes out of scope.
+ *
+ * Memory management:
+ * - Uses VMA for efficient allocation (selects appropriate heap automatically)
+ * - VkImage and VkImageView created in constructor
+ * - Both destroyed in destructor (no manual vkDestroyImage required)
+ *
+ * Image layouts:
+ * Images are created in VK_IMAGE_LAYOUT_UNDEFINED and must be transitioned
+ * to appropriate layouts before use:
+ * - VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: For texture sampling
+ * - VK_IMAGE_LAYOUT_GENERAL: For storage image read/write
+ * - VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL: For GPU-to-CPU copy
+ * - VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL: For CPU-to-GPU copy
+ *
+ * Usage example:
+ * @code
+ * // Create HDR render target
+ * GpuImage renderTarget(
+ *     allocator,
+ *     device,
+ *     1920, 1080,  // width, height
+ *     VK_FORMAT_R32G32B32A32_SFLOAT,
+ *     VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+ *     VMA_MEMORY_USAGE_GPU_ONLY
+ * );
+ *
+ * // Transition to GENERAL layout for compute shader write
+ * CommandHelper::TransitionImageLayoutImmediate(
+ *     context, renderTarget.GetImage(), renderTarget.GetFormat(),
+ *     VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL
+ * );
+ *
+ * // Create texture with mipmaps
+ * GpuImage envMap(
+ *     allocator, device,
+ *     512, 512,  // width, height
+ *     VK_FORMAT_R8G8B8A8_SRGB,
+ *     VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+ *     VMA_MEMORY_USAGE_GPU_ONLY,
+ *     5  // mip levels
+ * );
+ * @endcode
+ *
+ * @note Non-copyable (prevents double-free of VkImage)
+ * @note Movable (allows std::vector<GpuImage> and return values)
+ * @note Cannot be mapped directly (use staging buffers for data transfer)
+ * @note Image layout transitions require pipeline barriers (see CommandHelper)
+ *
+ * @see GpuBuffer for buffer resource management
+ * @see CommandHelper::TransitionImageLayout for layout transitions
+ * @see TextureManager for texture upload from CPU Image data
+ */
 class QL_API GpuImage {
 public:
     // ========================================================================

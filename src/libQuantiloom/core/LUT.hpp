@@ -1,3 +1,33 @@
+/**
+ * @file LUT.hpp
+ * @brief MODTRAN atmospheric lookup table for LUT-fast rendering mode
+ *
+ * Provides AtmosphereLUT struct for pre-computed atmospheric data:
+ * - Solar irradiance at top-of-atmosphere (W·m⁻²·nm⁻¹)
+ * - Sky radiance at zenith (W·m⁻²·sr⁻¹·nm⁻¹)
+ * - Direct solar transmittance τ(λ) = exp(-optical_depth)
+ *
+ * Used in LUT-fast mode to avoid full volumetric atmospheric path tracing.
+ * Data sourced from MODTRAN, libRadtran, or other atmospheric radiative transfer codes.
+ *
+ * Wavelength range:
+ * - Typical: 300-2500nm (UV-Vis-NIR-SWIR)
+ * - Sampling: 5-10nm intervals
+ *
+ * Query interface:
+ * - Linear interpolation for arbitrary wavelengths
+ * - GetWavelengthRange() for supported spectral domain
+ *
+ * @note Transmittance is direct solar only (no diffuse/path radiance)
+ * @note Sky radiance assumes zenith view (no angular dependence)
+ * @note For multi-angle data, use AtmosphereTransmittanceLUT instead
+ *
+ * @see AtmosphereTransmittanceLUT for 3D (λ,h,θ) lookup tables
+ * @see LUTLoader for HDF5 file I/O
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Types.hpp"
@@ -10,21 +40,28 @@ namespace quantiloom {
 // ============================================================================
 // AtmosphereLUT - MODTRAN lookup table for LUT-fast mode
 // ============================================================================
-// This structure holds pre-computed atmospheric data from MODTRAN.
-// Used in MS-RT's LUT-fast mode to avoid full volumetric path tracing.
-//
-// Units:
-// - wavelengths: nm
-// - solar_irradiance: W/m^2/nm (at top-of-atmosphere)
-// - sky_radiance: W/m^2/sr/nm (zenith, for simplicity)
-// - transmittance: dimensionless [0, 1]
-//
-// Future extensions (M4):
-// - Multi-angle sky radiance
-// - Path radiance for different view geometries
-// - Absorption/scattering coefficients for volume rendering
-// ============================================================================
-
+/**
+ * @struct AtmosphereLUT
+ * @brief 1D atmospheric lookup table with wavelength-dependent solar/sky data
+ *
+ * Stores pre-computed atmospheric illumination for a specific viewing geometry:
+ * - Solar irradiance: Direct + circumsolar radiation at top-of-atmosphere
+ * - Sky radiance: Diffuse skylight (zenith view)
+ * - Transmittance: Atmospheric attenuation factor (Beer-Lambert law)
+ *
+ * Data generation:
+ * - MODTRAN: tape5 input → tape7 output (extract relevant channels)
+ * - libRadtran: uvspec input → wavelength/irradiance/radiance columns
+ *
+ * Metadata examples:
+ * - "solar_zenith_deg": "30" (sun angle)
+ * - "visibility_km": "23" (atmospheric clarity)
+ * - "model": "US_Standard" (atmospheric profile)
+ *
+ * @note All arrays must have same length (wavelengths.size())
+ * @note Wavelengths must be monotonically increasing
+ * @note Query methods perform linear interpolation
+ */
 struct AtmosphereLUT {
     // Wavelength axis (nm), must be monotonically increasing
     std::vector<f32> wavelengths;

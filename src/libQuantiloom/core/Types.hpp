@@ -1,3 +1,21 @@
+/**
+ * @file Types.hpp
+ * @brief Fundamental type definitions and C++20 utilities for Quantiloom spectral renderer
+ *
+ * This header provides the core type system for Quantiloom, including:
+ * - Fixed-width integer and floating-point type aliases (i8/u8, i32/u32, f32/f64)
+ * - Spectral rendering mode enumeration (Single, RGB_Fused, MWIR_Fused, LWIR_Fused, etc.)
+ * - Result<T,E> error handling type (variant-based, std::expected alternative)
+ * - Error code definitions for all subsystems
+ * - Container type aliases (Vector, Array, Span, Optional, etc.)
+ * - C++20 concepts for generic programming (Arithmetic, Numeric, SpectralData)
+ * - Physical constants (PI, speed of light, Planck constant, IR band ranges)
+ *
+ * All Quantiloom code uses these types for consistency and portability across Windows/Linux.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include <cstdint>
@@ -13,7 +31,7 @@
 
 // ============================================================================
 // Fundamental Type Aliases & C++20 Utilities
-// Quantiloom M0 - Modern C++20 type definitions
+// Quantiloom - Modern C++20 type definitions
 // ============================================================================
 
 namespace quantiloom {
@@ -46,10 +64,21 @@ using Wavelength = f32;
 // ============================================================================
 // Spectral Rendering Modes
 // ============================================================================
-// Defines different spectral rendering pipelines supported by Quantiloom
-// IMPORTANT: Must match shader defines in common.hlsli!
-// ============================================================================
-
+/**
+ * @enum SpectralMode
+ * @brief Defines different spectral rendering pipelines supported by Quantiloom
+ *
+ * Controls how the renderer interprets wavelengths and produces output:
+ * - Single: Monochromatic rendering at one wavelength (EXR grayscale output)
+ * - RGB_Fused: Standard visible-light RGB rendering with CIE XYZ color matching
+ * - IR bands: Thermal/near-IR fusion modes with wavelength-specific processing
+ *
+ * @note CRITICAL: Must match shader defines in common.hlsli exactly!
+ * @note RGB_Fused outputs both EXR (HDR) and PNG (tone-mapped preview)
+ * @note IR modes (MWIR/LWIR/SWIR/NIR) output thermal/reflectance imagery
+ *
+ * @see SpectralData.hpp for wavelength-dependent material properties
+ */
 enum class SpectralMode : u32 {
     Single       = 0,  // Single wavelength (grayscale output, EXR only)
     RGB_Fused    = 1,  // RGB fusion with CIE XYZ -> sRGB (outputs EXR + PNG)
@@ -94,8 +123,37 @@ using Optional = std::optional<T>;
 // Error Handling (C++20-compatible Result type)
 // ============================================================================
 
-/// Simple Result type using std::variant (C++20 compatible)
-/// Usage: Result<T, E> func() { return T{...}; } or { return Err<E>{msg}; }
+/**
+ * @class Result
+ * @brief C++20-compatible error handling type (variant-based, std::expected alternative)
+ *
+ * Represents either a successful value (T) or an error (E). Provides explicit error handling
+ * without exceptions, forcing call sites to check for errors explicitly.
+ *
+ * @tparam T Success value type
+ * @tparam E Error type (defaults to String)
+ *
+ * Usage example:
+ * @code
+ * Result<Image, String> LoadImage(const String& path) {
+ *     if (!FileExists(path))
+ *         return Result<Image, String>::Err("File not found");
+ *     return Image{...};  // Implicit construction from T
+ * }
+ *
+ * auto result = LoadImage("texture.png");
+ * if (result.has_value()) {
+ *     Image& img = result.value();
+ *     // Process image...
+ * } else {
+ *     QL_LOG_ERROR("Failed to load: {}", result.error());
+ * }
+ * @endcode
+ *
+ * @note Prefer this over exceptions for expected failure modes (file I/O, parsing, etc.)
+ * @note For unexpected failures (programming errors), use QL_ASSERT or throw exceptions
+ * @see ErrorCode for common error categories
+ */
 template<typename T, typename E = String>
 class Result {
 public:
@@ -168,7 +226,21 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
     }
 }
 
-/// Error codes for Quantiloom operations
+/**
+ * @enum ErrorCode
+ * @brief Standardized error codes for all Quantiloom subsystems
+ *
+ * Categorized by subsystem for quick diagnosis:
+ * - 1-99: File I/O errors
+ * - 100-199: Configuration/parsing errors
+ * - 200-299: Vulkan/GPU errors
+ * - 300-399: Scene/geometry errors
+ * - 400-499: Spectral data errors
+ * - 9999: Unknown/uncategorized errors
+ *
+ * @note Use ErrorCodeToString() to convert to human-readable messages
+ * @see Result<T, ErrorCode> for typed error returns
+ */
 enum class ErrorCode : u32 {
     Success = 0,
 

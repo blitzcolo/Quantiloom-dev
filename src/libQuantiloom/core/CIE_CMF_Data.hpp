@@ -1,3 +1,41 @@
+/**
+ * @file CIE_CMF_Data.hpp
+ * @brief CIE 1931 2-degree standard observer color matching functions
+ *
+ * Provides official CIE tristimulus values for RGB color conversion:
+ * - Wavelength range: 380-780nm (visible spectrum)
+ * - Sampling: 1nm intervals (401 samples)
+ * - Data source: CIE 015:2018 Colorimetry, 4th Edition
+ *
+ * Color matching functions (CMF):
+ * - x_bar(λ): Red sensitivity (peaks ~600nm)
+ * - y_bar(λ): Green sensitivity (peaks ~555nm, matches photopic luminosity)
+ * - z_bar(λ): Blue sensitivity (peaks ~445nm)
+ *
+ * Normalization:
+ * - y_bar normalized to peak at exactly 1.0 at 555nm
+ * - Integral of y_bar over visible spectrum = 683 lm/W (photometric)
+ *
+ * Shader usage:
+ * Upload to GPU StructuredBuffer<float3> and sample via:
+ * @code
+ * float3 xyz = GetCIE_XYZ(wavelength_nm);
+ * float3 rgb = XYZ_to_sRGB(xyz);  // Apply color conversion matrix
+ * @endcode
+ *
+ * Data source file:
+ * - assets/luts/CIE_xyz_1931_2deg.csv
+ *
+ * @note This is the 2-degree standard observer (central 2° field-of-view)
+ * @note For 10-degree observer, use CIE 1964 data (not included)
+ * @note Data stored as compile-time constexpr array (zero runtime overhead)
+ *
+ * @see GetCIE_XYZ() for integer wavelength query
+ * @see GetCIE_XYZ_Interpolated() for fractional wavelength query
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -8,24 +46,45 @@ namespace quantiloom {
 // ============================================================================
 // CIE 1931 2-Degree Standard Observer Color Matching Functions
 // ============================================================================
-// Official CIE data at 1nm intervals from 380nm to 780nm (401 samples)
-// Source: CIE 015:2018 Colorimetry, 4th Edition
-// Data file: assets/luts/CIE_xyz_1931_2deg.csv
-//
-// Each entry contains (x_bar, y_bar, z_bar) tristimulus values
-// Normalized such that y_bar peaks at exactly 1.0 at 555nm
-//
-// GPU Usage:
-//   Upload to StructuredBuffer<float3> and use SampleCIE_XYZ_LUT() in shader
-// ============================================================================
 
+/**
+ * @brief Number of CIE CMF samples (380-780nm inclusive)
+ */
 static constexpr u32 CIE_CMF_LUT_SIZE = 401;
+
+/**
+ * @brief Minimum wavelength in CIE CMF table (nm)
+ */
 static constexpr f32 CIE_CMF_LAMBDA_MIN = 380.0f;
+
+/**
+ * @brief Maximum wavelength in CIE CMF table (nm)
+ */
 static constexpr f32 CIE_CMF_LAMBDA_MAX = 780.0f;
+
+/**
+ * @brief Wavelength step size in CIE CMF table (nm)
+ */
 static constexpr f32 CIE_CMF_LAMBDA_STEP = 1.0f;
 
-// CIE 1931 2-degree observer data (x_bar, y_bar, z_bar)
-// Indexed as: CIE_1931_2DEG[wavelength_nm - 380]
+/**
+ * @brief CIE 1931 2-degree observer tristimulus values (x_bar, y_bar, z_bar)
+ *
+ * Official CIE data at 1nm intervals from 380nm to 780nm.
+ * Array indexed as: CIE_1931_2DEG[wavelength_nm - 380][channel]
+ *
+ * Example:
+ * @code
+ * // Get tristimulus at 555nm (peak luminosity)
+ * u32 index = 555 - 380;  // = 175
+ * f32 x = CIE_1931_2DEG[index][0];  // x_bar
+ * f32 y = CIE_1931_2DEG[index][1];  // y_bar (peaks at 1.0)
+ * f32 z = CIE_1931_2DEG[index][2];  // z_bar
+ * @endcode
+ *
+ * @note y_bar peaks at 1.0 at 555nm (photopic luminosity maximum)
+ * @note Values outside 380-780nm range are undefined (use bounds checking)
+ */
 static constexpr std::array<std::array<f32, 3>, CIE_CMF_LUT_SIZE> CIE_1931_2DEG = {{
     // 380-389 nm
     {{0.001368f, 0.000039f, 0.006450f}},    // 380

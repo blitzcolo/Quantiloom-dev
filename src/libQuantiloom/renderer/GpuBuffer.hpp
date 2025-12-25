@@ -1,3 +1,33 @@
+/**
+ * @file GpuBuffer.hpp
+ * @brief RAII wrapper for VkBuffer with VMA memory allocation
+ *
+ * Provides GpuBuffer class for managing Vulkan buffer resources:
+ * - Automatic VkBuffer creation with VMA memory allocation
+ * - RAII lifecycle (automatic destruction on scope exit)
+ * - Map/Unmap interface for CPU-visible buffers
+ * - Upload helper for data transfer
+ * - Device address query for ray tracing shader access
+ *
+ * Memory types supported:
+ * - VMA_MEMORY_USAGE_GPU_ONLY: Device-local (fastest GPU access, no CPU access)
+ * - VMA_MEMORY_USAGE_CPU_TO_GPU: Host-visible staging (CPU write, GPU read)
+ * - VMA_MEMORY_USAGE_GPU_TO_CPU: Host-visible readback (GPU write, CPU read)
+ *
+ * Common use cases:
+ * - Vertex/index buffers (GPU_ONLY, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)
+ * - Uniform buffers (CPU_TO_GPU, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)
+ * - Storage buffers (CPU_TO_GPU, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT)
+ * - Staging buffers (CPU_TO_GPU, VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+ * - Readback buffers (GPU_TO_CPU, VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+ *
+ * @note Movable but non-copyable (strict ownership semantics)
+ * @note Map/Upload only work on HOST_VISIBLE buffers
+ * @note GetDeviceAddress requires VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -8,25 +38,60 @@
 // ============================================================================
 // GpuBuffer - RAII wrapper for VkBuffer with VMA allocation
 // ============================================================================
-// Responsibilities:
-// - Create VkBuffer with VMA memory allocation
-// - Automatically destroy on destruction (RAII)
-// - Provide Map/Unmap interface for CPU-accessible buffers
-// - Movable but non-copyable (strict ownership)
-//
-// Usage:
-//   GpuBuffer vertexBuffer(allocator, size,
-//       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-//       VMA_MEMORY_USAGE_GPU_ONLY);
-//
-// Memory types:
-// - VMA_MEMORY_USAGE_GPU_ONLY: Device-local (fastest for GPU)
-// - VMA_MEMORY_USAGE_CPU_TO_GPU: Staging buffer (host-visible)
-// - VMA_MEMORY_USAGE_GPU_TO_CPU: Readback buffer
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @class GpuBuffer
+ * @brief RAII-managed VkBuffer with automatic VMA memory allocation and cleanup
+ *
+ * Provides safe, automatic management of Vulkan buffer resources.
+ * Buffers are destroyed automatically when GpuBuffer goes out of scope.
+ *
+ * Memory management:
+ * - Uses VMA (Vulkan Memory Allocator) for efficient allocation
+ * - Automatically selects appropriate memory heap based on usage flags
+ * - No manual vkFreeMemory required (RAII handles cleanup)
+ *
+ * Usage patterns:
+ * @code
+ * // Vertex buffer (GPU-only, no CPU access)
+ * GpuBuffer vertexBuffer(
+ *     allocator,
+ *     sizeof(vertices),
+ *     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+ *     VMA_MEMORY_USAGE_GPU_ONLY
+ * );
+ *
+ * // Staging buffer for upload (CPU-to-GPU)
+ * GpuBuffer staging(
+ *     allocator,
+ *     dataSize,
+ *     VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+ *     VMA_MEMORY_USAGE_CPU_TO_GPU
+ * );
+ * staging.Upload(data, dataSize);  // Automatic Map/Unmap
+ *
+ * // Uniform buffer (CPU writes every frame)
+ * GpuBuffer uniformBuffer(
+ *     allocator,
+ *     sizeof(UniformData),
+ *     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+ *     VMA_MEMORY_USAGE_CPU_TO_GPU
+ * );
+ * void* mapped = uniformBuffer.Map();
+ * memcpy(mapped, &uniformData, sizeof(UniformData));
+ * uniformBuffer.Unmap();
+ * @endcode
+ *
+ * @note Non-copyable (prevents accidental double-free)
+ * @note Movable (allows std::vector<GpuBuffer> and return values)
+ * @note Map/Upload only work on VMA_MEMORY_USAGE_CPU_TO_GPU or GPU_TO_CPU buffers
+ * @note Device address requires VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT usage flag
+ *
+ * @see GpuImage for image resource management
+ * @see VulkanContext for VmaAllocator access
+ */
 class QL_API GpuBuffer {
 public:
     // ========================================================================

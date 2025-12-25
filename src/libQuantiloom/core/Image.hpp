@@ -1,3 +1,27 @@
+/**
+ * @file Image.hpp
+ * @brief Generic multi-channel image container for spectral/multi-band rendering
+ *
+ * Provides Image struct for storing:
+ * - RGB/RGBA images (standard rendering output)
+ * - Single-channel grayscale images (monochromatic spectral output)
+ * - Multi-band spectral cubes (hyperspectral rendering, N channels)
+ * - HDR floating-point data (physical radiance units)
+ *
+ * Memory layout: Row-major, channel-last (matches OpenEXR scanline order):
+ *   data[y * width * channels + x * channels + c]
+ *
+ * This layout enables:
+ * - Efficient scanline iteration for I/O
+ * - Cache-friendly pixel access
+ * - Direct interop with OpenEXR, stb_image, etc.
+ *
+ * All pixel data is stored as f32, even if source is f16/u8 (converted during load).
+ * Supports optional channel naming and key-value metadata for multi-spectral output.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Types.hpp"
@@ -10,16 +34,41 @@ namespace quantiloom {
 // ============================================================================
 // Image - Generic multi-channel image container
 // ============================================================================
-// Used for:
-// - MS-RT multi-band output (N channels, each named)
-// - Single-band intermediate buffers
-// - RGB/sRGB preview outputs
-//
-// Memory layout: Row-major, channel-last
-//   data[y * width * channels + x * channels + c]
-// This matches OpenEXR's scanline order and allows efficient iteration.
-// ============================================================================
-
+/**
+ * @struct Image
+ * @brief Generic multi-channel floating-point image container
+ *
+ * Stores arbitrary-channel images (RGB, RGBA, grayscale, multi-spectral) with:
+ * - f32 pixel data (HDR-capable, physical radiance units)
+ * - Channel naming (for multi-spectral output identification)
+ * - Metadata key-value store (rendering params, spectral config, etc.)
+ *
+ * Usage examples:
+ * @code
+ * // Create RGB image
+ * Image rgb(1920, 1080, 3);
+ * rgb(0, 0, 0) = 1.0f;  // Red pixel at (0,0)
+ *
+ * // Create multi-spectral cube
+ * Image spectral(512, 512, 16);  // 16 bands
+ * spectral.channelNames[0] = "VIS_550nm";
+ * spectral.channelNames[1] = "NIR_850nm";
+ * spectral.metadata["spp"] = "128";
+ *
+ * // Efficient scanline iteration
+ * for (u32 y = 0; y < img.height; ++y) {
+ *     f32* scanline = img.PixelPtr(0, y);
+ *     for (u32 x = 0; x < img.width; ++x) {
+ *         f32 r = scanline[x * img.channels + 0];
+ *         // Process pixel...
+ *     }
+ * }
+ * @endcode
+ *
+ * @note Memory layout: data[y][x][c] (row-major, channel-last)
+ * @note Always uses f32 storage (converts u8/f16 to f32 during load)
+ * @see ImageIO for EXR/PNG read/write operations
+ */
 struct Image {
     // Dimensions
     u32 width = 0;

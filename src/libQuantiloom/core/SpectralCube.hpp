@@ -1,3 +1,53 @@
+/**
+ * @file SpectralCube.hpp
+ * @brief Hyperspectral data cube container for multi-wavelength rendering output
+ *
+ * Provides SpectralCube struct for storing 3D hyperspectral image data:
+ * - Spatial dimensions: width × height (pixels)
+ * - Spectral dimension: nbands (wavelength channels)
+ * - Wavelength metadata: range and spacing
+ *
+ * Memory layout: C-order (band-major, BSQ format)
+ * @code
+ * data[band * height * width + y * width + x]
+ * @endcode
+ *
+ * This layout choice provides:
+ * 1. Per-band contiguity: Each wavelength band is contiguous in memory
+ * 2. HDF5 compatibility: Matches HDF5 C-order datasets
+ * 3. MODTRAN comparison: Atmospheric models use band-major output
+ * 4. Efficient band extraction: Single memcpy per band
+ *
+ * Alternative layouts (BIP/BIL) can be handled via HDF5 chunking and transpose.
+ *
+ * Usage example:
+ * @code
+ * // Create hyperspectral cube: 512x512 spatial, 64 bands, 400-800nm
+ * SpectralCube cube(512, 512, 64, 400.0f, 800.0f);
+ *
+ * // Set pixel value
+ * cube(x, y, band) = radiance;
+ *
+ * // Query wavelength for band
+ * f32 wavelength = cube.wavelengths[band];
+ *
+ * // Find band closest to target wavelength
+ * u32 band850 = cube.FindBand(850.0f);
+ *
+ * // Save to HDF5
+ * SpectralIO::WriteHDF5("output.h5", cube);
+ * @endcode
+ *
+ * @note Memory layout: data[b][y][x] (C-order, band-major)
+ * @note Always uses f32 storage (physical radiance units)
+ * @note Wavelength array auto-generated from lambda_min/max/nbands
+ *
+ * @see SpectralIO::WriteHDF5 for saving hyperspectral data
+ * @see SpectralIO::ReadHDF5 for loading hyperspectral data
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Types.hpp"
@@ -8,19 +58,34 @@
 namespace quantiloom {
 
 // ============================================================================
-// SpectralCube - Hyperspectral data cube (HS-OFF output)
+// SpectralCube - Hyperspectral data cube (multi-wavelength output)
 // ============================================================================
-// Memory layout: C-order (band-major)
-//   data[b * height * width + y * width + x]
-//
-// This layout is chosen for:
-// 1. Per-band rendering: each band is contiguous in memory
-// 2. HDF5 compatibility: HDF5 datasets use C-order by default
-// 3. MODTRAN comparison: most atmospheric models output band-major data
-//
-// Alternative layouts (e.g., BIP/BSQ/BIL) can be handled via HDF5 chunking.
-// ============================================================================
-
+/**
+ * @struct SpectralCube
+ * @brief 3D hyperspectral data cube with band-major memory layout (BSQ format)
+ *
+ * Stores multi-wavelength rendering output as a 3D array: [band][y][x].
+ * Each band represents a different wavelength channel.
+ *
+ * Coordinate system:
+ * - X: Horizontal axis (0 to width-1)
+ * - Y: Vertical axis (0 to height-1)
+ * - Band: Spectral axis (0 to nbands-1, maps to wavelength via wavelengths[])
+ *
+ * Memory layout (C-order / Band Sequential):
+ * @code
+ * // Band 0: data[0 ... width*height-1]
+ * // Band 1: data[width*height ... 2*width*height-1]
+ * // ...
+ * // Band N: data[N*width*height ... (N+1)*width*height-1]
+ * @endcode
+ *
+ * @note Data stored as f32 (physical radiance: W·sr⁻¹·m⁻²·nm⁻¹)
+ * @note Wavelengths auto-generated: λ[b] = lambda_min + b × delta_lambda
+ * @note Metadata stored as key-value strings (preserved in HDF5 attributes)
+ *
+ * @see SpectralIO for HDF5 I/O operations
+ */
 struct SpectralCube {
     // Spatial dimensions
     u32 width = 0;

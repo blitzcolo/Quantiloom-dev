@@ -1,3 +1,21 @@
+/**
+ * @file Platform.hpp
+ * @brief Cross-platform abstraction layer and compiler detection macros
+ *
+ * Provides platform/compiler-specific macros for:
+ * - Platform identification (QL_WINDOWS, QL_LINUX, QL_MACOS)
+ * - Compiler detection (QL_COMPILER_MSVC, QL_COMPILER_GCC, QL_COMPILER_CLANG)
+ * - Build configuration (QL_DEBUG, QL_RELEASE)
+ * - DLL export/import (QL_API)
+ * - Debug utilities (QL_DEBUGBREAK, QL_ASSERT)
+ * - Warning suppression (QL_DISABLE_WARNINGS_PUSH/POP)
+ *
+ * Platform macros are defined by CMake at configure time based on target system.
+ * This header ensures Quantiloom compiles correctly on Windows/Linux with MSVC/GCC/Clang.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 // ============================================================================

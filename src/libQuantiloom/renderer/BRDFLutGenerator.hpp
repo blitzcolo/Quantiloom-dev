@@ -1,3 +1,41 @@
+/**
+ * @file BRDFLutGenerator.hpp
+ * @brief BRDF integration LUT generator for physically-based image-based lighting (IBL)
+ *
+ * Provides BRDFLutGenerator class for generating 2D BRDF integration lookup tables:
+ * - Split-sum approximation of IBL specular integral (Epic Games 2013)
+ * - Monte Carlo importance sampling of GGX microfacet BRDF
+ * - Disk caching to avoid expensive regeneration (5-10 seconds)
+ *
+ * LUT format:
+ * - Size: 512×512 (NdotV × roughness grid)
+ * - Channels: RG (2 channels, f32 or f16)
+ *   - R channel: Scale term for F·G integral
+ *   - G channel: Bias term for F·G integral
+ *
+ * Shader usage:
+ * @code
+ * float2 brdf = brdfLUT.Sample(NdotV, roughness);
+ * float3 iblSpecular = prefilteredEnvColor * (F0 * brdf.x + brdf.y);
+ * @endcode
+ *
+ * Caching system:
+ * - LUT is scene-independent (only depends on BRDF model)
+ * - SaveToBinary() creates .bin cache file (instant loading on subsequent runs)
+ * - LoadFromBinary() verifies resolution/sampleCount match before loading
+ *
+ * References:
+ * - Epic Games, "Real Shading in Unreal Engine 4" (SIGGRAPH 2013)
+ * - Brian Karis, "Specular BRDF Reference" (2014)
+ * - https://blog.selfshadow.com/publications/s2013-shading-course/
+ *
+ * @note Generation takes 5-10 seconds (Monte Carlo integration)
+ * @note Use disk caching for production (LoadFromBinary)
+ * @note GGX microfacet distribution only (no Beckmann/Phong)
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -8,26 +46,6 @@
 
 // ============================================================================
 // BRDF LUT Generator - For Image-Based Lighting (IBL)
-// ============================================================================
-// Generates a 2D lookup table for split-sum approximation of IBL specular
-//
-// LUT Format:
-// - Size: 512x512 (NdotV × roughness)
-// - Channels: RG16F or RG32F
-//   - R: Scale term (for F·G integral)
-//   - G: Bias term (for F·G integral)
-//
-// Usage:
-//   float2 brdf = brdfLUT.Sample(NdotV, roughness);
-//   float3 ibl = prefilteredColor * (F0 * brdf.x + brdf.y);
-//
-// Caching:
-//   The LUT is scene-independent and can be cached to disk as a binary file.
-//   Use LoadFromBinary() to skip expensive Monte Carlo integration.
-//
-// References:
-// - Epic Games, "Real Shading in Unreal Engine 4" (2013)
-// - Karis, "Specular BRDF Reference" (2014)
 // ============================================================================
 
 namespace quantiloom {

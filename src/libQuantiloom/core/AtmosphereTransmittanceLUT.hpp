@@ -1,3 +1,39 @@
+/**
+ * @file AtmosphereTransmittanceLUT.hpp
+ * @brief 3D atmospheric transmittance lookup table for spectral rendering
+ *
+ * Provides AtmosphereTransmittanceLUT struct for wavelength-dependent atmospheric effects:
+ * - Transmittance: τ(λ,h,θ) ∈ [0,1], fraction of light transmitted through atmosphere
+ * - Path radiance: L_path(λ,h,θ), atmospheric self-emission (W·sr⁻¹·m⁻²·nm⁻¹)
+ *
+ * Dimensions:
+ * 1. Wavelength (λ): 300-14000nm typical (UV-Vis-SWIR-MWIR-LWIR)
+ * 2. Altitude (h): 0-30000m typical (observer height above sea level)
+ * 3. Zenith angle (θ): 0-85° typical (angle from vertical)
+ *
+ * Interpolation:
+ * - Trilinear interpolation across all three dimensions
+ * - Uniform axes (λ, h): O(1) index computation
+ * - Non-uniform axis (θ): O(N) linear search (typically only 5-10 values)
+ *
+ * Data sources:
+ * - MODTRAN: Industry-standard atmospheric radiative transfer code
+ * - libRadtran: Open-source UV/Vis/IR atmospheric model
+ * - Custom LUT generation scripts (see scripts/atmosphere-qlut-gen/)
+ *
+ * File format (.qlut):
+ * - TOML header (1024 bytes): Metadata (wavelength range, altitude, angles, etc.)
+ * - Binary data (float32 arrays): Transmittance and path radiance in C-order
+ *
+ * @note Use AtmosphereTransmittanceLUTLoader to load .qlut files
+ * @note Transmittance includes both absorption and scattering (Beer-Lambert law)
+ * @note Path radiance includes atmospheric scattering into line-of-sight
+ *
+ * @see AtmosphereTransmittanceLUTLoader for .qlut file I/O
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Types.hpp"
@@ -8,46 +44,32 @@
 #include <algorithm>
 
 namespace quantiloom {
-
-// ============================================================================
-// AtmosphereTransmittanceLUT - 3D Transmittance Lookup Table
-// ============================================================================
-// Multi-dimensional atmospheric transmittance LUT for spectral rendering.
-// Supports wavelength-dependent atmospheric effects across altitude and
-// view geometry.
-//
-// DIMENSIONS:
-//   1. Wavelength (λ): 300-14000 nm typical, covers UV-Vis-SWIR-MWIR-LWIR
-//   2. Altitude (h): 0-30000 m typical, observer height above sea level
-//   3. Zenith Angle (θ): 0-85° typical, angle from vertical
-//
-// DATA PRODUCTS:
-//   - transmittance: τ(λ,h,θ) ∈ [0,1], atmospheric path transmittance
-//   - path_radiance: L_path(λ,h,θ), atmospheric self-emission (W·sr⁻¹·m⁻²·nm⁻¹)
-//
-// FILE FORMAT (.qlut):
-//   - TOML header (1024 bytes, padded with null)
-//   - Binary data (float32 arrays, C-order)
-//
-// GENERATION:
-//   Use MODTRAN, libRadtran, or similar atmospheric radiative transfer codes.
-//   See scripts/atmosphere-qlut-gen/README.md for details.
-//
-// USAGE:
-//   auto lut = AtmosphereTransmittanceLUTLoader::Load("midlat_summer.qlut");
-//   float tau = lut->QueryTransmittance(4000.0f, 1000.0f, 30.0f);
-// ============================================================================
-
-// Forward declaration
 struct AtmosphereTransmittanceLUT;
 
 // ============================================================================
 // Uniform Grid Axis
 // ============================================================================
-// Describes a uniformly-spaced axis (wavelength, altitude)
-// Enables O(1) index computation: idx = (value - start) / step
-// ============================================================================
-
+/**
+ * @struct UniformAxis
+ * @brief Uniformly-spaced 1D axis for O(1) index computation
+ *
+ * Represents a regularly-sampled dimension (wavelength, altitude).
+ * Index computation: idx = (value - start) / step
+ *
+ * Example:
+ * @code
+ * UniformAxis wavelengthAxis;
+ * wavelengthAxis.start = 400.0f;  // nm
+ * wavelengthAxis.stop = 800.0f;
+ * wavelengthAxis.count = 81;
+ * wavelengthAxis.step = (800.0f - 400.0f) / 80.0f;  // 5nm spacing
+ *
+ * f32 idx = wavelengthAxis.GetFractionalIndex(550.0f);  // Returns 30.0
+ * @endcode
+ *
+ * @note GetFractionalIndex() returns fractional indices for linear interpolation
+ * @note Values outside [start, stop] are clamped to boundaries
+ */
 struct UniformAxis {
     f32 start = 0.0f;    // First value (inclusive)
     f32 stop  = 0.0f;    // Last value (inclusive)

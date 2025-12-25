@@ -1,16 +1,49 @@
+/**
+ * @file PerformanceMetrics.hpp
+ * @brief GPU/CPU performance timing and throughput measurement system
+ *
+ * Provides PerformanceMetrics class for measuring rendering performance:
+ * - GPU execution time via Vulkan timestamp queries
+ * - CPU frame time via std::chrono high-resolution clock
+ * - Derived metrics: seconds/frame, rays/second, throughput
+ * - CSV export for performance analysis
+ *
+ * Complies with SRS §3.2 requirement: "seconds-per-frame" metric.
+ *
+ * Metrics collected:
+ * - GPU time (ms): vkCmdWriteTimestamp around ray tracing dispatch
+ * - CPU time (ms): std::chrono wall-clock time
+ * - Total rays: width × height × spp
+ * - Rays/second: totalRays / (gpuTime_ms / 1000.0)
+ * - Mrays/second: rays/second / 1e6
+ *
+ * Usage example:
+ * @code
+ * PerformanceMetrics metrics(context);
+ *
+ * // Frame rendering loop
+ * metrics.BeginFrame(cmd);
+ * pipeline.TraceRays(cmd, width, height);
+ * metrics.EndFrame(cmd);
+ *
+ * // Query results
+ * auto stats = metrics.GetLastFrameStats();
+ * QL_LOG_INFO("GPU: {:.2f} ms, Throughput: {:.1f} Mrays/s",
+ *             stats.gpuTime_ms, stats.mraysPerSecond());
+ *
+ * // Export to CSV
+ * metrics.ExportCSV("performance.csv");
+ * @endcode
+ *
+ * @note BeginFrame/EndFrame must be called in same command buffer
+ * @note Timestamp query requires VK_QUERY_TYPE_TIMESTAMP support
+ * @note Results available after GPU execution completes (vkQueueWaitIdle)
+ *
+ * @author wtflmao
+ */
+
 // ============================================================================
 // Quantiloom - Performance Metrics System
-// ============================================================================
-// Provides GPU/CPU timing and throughput measurements
-// Complies with SRS §3.2 requirement: "seconds-per-frame" metric
-//
-// Usage:
-//   PerformanceMetrics metrics(context);
-//   metrics.BeginFrame(commandBuffer);
-//   // ... render commands ...
-//   metrics.EndFrame(commandBuffer);
-//   auto stats = metrics.GetLastFrameStats();
-//   QL_LOG_INFO("Seconds/Frame: {:.3f}", stats.secondsPerFrame());
 // ============================================================================
 
 #pragma once

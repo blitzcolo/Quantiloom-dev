@@ -1,3 +1,56 @@
+/**
+ * @file AtmosphericConfig.hpp
+ * @brief Atmospheric scattering configuration for volumetric rendering
+ *
+ * Provides atmospheric rendering configuration:
+ * - AtmosphericParamsGPU: GPU-side parameters (64 bytes, matches shader)
+ * - AtmosphericConfig: CPU-side configuration with preset factories
+ *
+ * Atmospheric scattering model:
+ * - Rayleigh scattering: Molecular scattering (wavelength^-4 dependence)
+ * - Mie scattering: Aerosol scattering (wavelength^-alpha dependence)
+ * - Delta-tracking: Unbiased volumetric path tracing
+ *
+ * Presets:
+ * - ClearDay: Standard atmosphere (visibility 23km, sea level)
+ * - Hazy: Reduced visibility (10km, high aerosol loading)
+ * - PollutedUrban: Heavy pollution (5km visibility)
+ * - MountainTop: High altitude (3000m, thin atmosphere)
+ * - Mars: Martian atmosphere (CO2, dust storms)
+ * - Disabled: No atmospheric scattering (for indoor/small scenes)
+ *
+ * Physical parameters:
+ * - beta_rayleigh_550nm: Rayleigh scattering coefficient at 550nm (m⁻¹)
+ * - beta_mie_550nm: Mie scattering coefficient at 550nm (m⁻¹)
+ * - scale_height: Exponential falloff with altitude H = H0 * exp(-h/H_scale)
+ * - mie_g: Asymmetry parameter (forward scattering bias, -1 to 1)
+ * - mie_alpha: Angstrom exponent (wavelength dependence, typically 0-2)
+ *
+ * Usage example:
+ * @code
+ * // Use preset
+ * AtmosphericConfig config = AtmosphericConfig::ClearDay();
+ * AtmosphericParamsGPU gpuParams = config.ToGPU();
+ *
+ * // Upload to GPU
+ * GpuBuffer atmosBuffer(allocator, sizeof(AtmosphericParamsGPU),
+ *                       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+ *                       VMA_MEMORY_USAGE_CPU_TO_GPU);
+ * atmosBuffer.Upload(&gpuParams, sizeof(AtmosphericParamsGPU));
+ *
+ * // Or load from TOML
+ * auto result = AtmosphericConfig::FromTOML("atmosphere.toml");
+ * @endcode
+ *
+ * @note GPU struct size: 64 bytes (verified by static_assert)
+ * @note For indoor/small scenes, use Disabled() preset (avoids artifacts)
+ * @note Automatic enable/disable based on scene bounding box (see main.cpp)
+ *
+ * @see LightingParams for basic sun/sky illumination parameters
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -8,10 +61,19 @@ namespace quantiloom {
 // ============================================================================
 // AtmosphericParams - GPU Structure
 // ============================================================================
-// Must match shader structure in common.hlsli
-// Size: 64 bytes (2×vec3 + 10×f32/u32, all 16-byte aligned)
-// ============================================================================
-
+/**
+ * @struct AtmosphericParamsGPU
+ * @brief GPU-side atmospheric scattering parameters (64 bytes, matches common.hlsli)
+ *
+ * Contains all parameters for wavelength-dependent volumetric atmospheric rendering:
+ * - Rayleigh scattering (molecular): beta, scale height
+ * - Mie scattering (aerosol): beta, scale height, phase function
+ * - Planet geometry: radius, atmosphere height
+ * - Delta-tracking: max distance, max steps, extinction threshold
+ *
+ * @note MUST match shader struct in common.hlsli (verified by static_assert)
+ * @note Size: 64 bytes (4×16-byte aligned blocks)
+ */
 struct AtmosphericParamsGPU {
     // Rayleigh scattering (molecular) - 16 bytes
     glm::vec3 beta_rayleigh_550nm;      // Scattering coefficient at 550nm (m^-1)

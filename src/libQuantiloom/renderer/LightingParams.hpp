@@ -1,3 +1,36 @@
+/**
+ * @file LightingParams.hpp
+ * @brief Runtime lighting parameters for GPU shaders (sun/sky radiance, atmosphere config)
+ *
+ * Provides LightingParams struct for runtime lighting configuration:
+ * - Sun direction and radiance (direct illumination)
+ * - Sky radiance (ambient/diffuse illumination)
+ * - Atmospheric transmittance and temperature
+ * - World unit scaling for physically-correct Beer-Lambert attenuation
+ *
+ * Dual-mode support:
+ * - RGB mode: Uses sunRadiance_rgb and skyRadiance_rgb
+ * - Spectral mode: Uses sunRadiance_spectral and skyRadiance_spectral
+ * - When SolarSpectralLUT available, these values serve as fallback
+ *
+ * Physical units:
+ * - Radiance: W·sr⁻¹·m⁻² (RGB mode) or W·sr⁻¹·m⁻²·nm⁻¹ (spectral mode)
+ * - Temperature: Kelvin (K)
+ * - worldUnitsToMeters: Conversion factor for scene unit scaling
+ *
+ * CRITICAL: This struct MUST match GPU LightingParams in common.hlsli exactly!
+ * Memory layout validated by static_assert at compile time.
+ *
+ * @note Size: 64 bytes (16-byte aligned for GPU)
+ * @note Uploaded to GPU via storage buffer (binding 2)
+ * @note Any layout change requires shader update
+ *
+ * @see SolarSpectralLUT for wavelength-dependent illumination curves
+ * @see AtmosphericConfig for atmospheric scattering parameters
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -7,28 +40,29 @@
 // ============================================================================
 // LightingParams Data Structure
 // ============================================================================
-// Runtime lighting parameters for GPU shading. Provides sun/sky radiance values
-// and atmospheric parameters for both RGB and spectral rendering modes.
-//
-// CRITICAL: This structure MUST match GPU-side LightingParams in common.hlsli!
-// Any change here requires corresponding update in the shader.
-//
-// MEMORY LAYOUT (64 bytes total, 16-byte aligned):
-// - Offset  0: sunDirection (12 bytes) + sunRadiance_spectral (4 bytes)
-// - Offset 16: sunRadiance_rgb (12 bytes) + skyRadiance_spectral (4 bytes)
-// - Offset 32: skyRadiance_rgb (12 bytes) + transmittance (4 bytes)
-// - Offset 48: worldUnitsToMeters (4 bytes) + atmosphereTemperature_K (4 bytes) + padding (8 bytes)
-//
-// USAGE:
-// - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb
-// - Spectral mode: Use sunRadiance_spectral and skyRadiance_spectral
-// - MWIR/LWIR mode: Use atmosphereTemperature_K for downwelling thermal radiation
-//
-// NOTE: When SolarSpectralLUT is available, the spectral/rgb values serve as fallback.
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @struct LightingParams
+ * @brief Runtime lighting parameters for GPU shaders (64 bytes, 16-byte aligned)
+ *
+ * Provides sun/sky illumination and atmospheric parameters for all rendering modes.
+ * Uploaded to GPU storage buffer and accessed in closest hit shaders.
+ *
+ * Memory layout (validated by static_assert):
+ * @code
+ * Offset  0: sunDirection (vec3, 12 bytes) + sunRadiance_spectral (f32, 4 bytes)
+ * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
+ * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
+ * Offset 48: worldUnitsToMeters (f32, 4 bytes) + atmosphereTemperature_K (f32, 4 bytes) + _padding (vec2, 8 bytes)
+ * Total: 64 bytes
+ * @endcode
+ *
+ * @note MUST match shader struct in common.hlsli (verified at compile time)
+ * @note Use RGB values for RGB_Fused mode, spectral values for Single/MWIR/LWIR modes
+ * @note atmosphereTemperature_K used for IR downwelling thermal radiation
+ */
 struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
     f32 sunRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 12

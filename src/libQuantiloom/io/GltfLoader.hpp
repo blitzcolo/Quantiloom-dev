@@ -1,3 +1,38 @@
+/**
+ * @file GltfLoader.hpp
+ * @brief glTF 2.0 model loader for 3D scenes with PBR materials
+ *
+ * Provides GltfLoader class for loading glTF 2.0 files:
+ * - Parses .gltf (JSON + external resources) and .glb (binary) formats
+ * - Converts glTF meshes to Quantiloom GeometryPrimitive format
+ * - Converts glTF PBR materials to Quantiloom Material format
+ * - Loads embedded/external textures (PNG/JPEG) to Quantiloom Texture format
+ * - Flattens scene graph to world-space SceneNode transforms
+ *
+ * Supported glTF 2.0 features:
+ * - Meshes with multiple primitives (triangle lists)
+ * - PBR metallic-roughness materials
+ * - Textures: base color, metallic-roughness, normal maps, emissive
+ * - Embedded textures (base64 DataURI in .gltf files)
+ * - External textures (PNG/JPEG files via URI references)
+ * - Binary embedded textures (.glb binary chunks)
+ * - Scene graph hierarchies (flattened to world-space transforms)
+ * - Transform nodes (translation, rotation, scale, matrix)
+ *
+ * NOT supported:
+ * - Animations/skinning/morph targets
+ * - Cameras/lights (use Quantiloom config instead)
+ * - Extensions (KHR_materials_*, KHR_lights_punctual, etc.)
+ *
+ * Uses tinygltf library for glTF parsing.
+ *
+ * @note Returns Result<Scene, String> for explicit error handling
+ * @note Scene graph flattened to world space (no hierarchy preserved)
+ * @note All mesh primitives become separate GeometryPrimitive instances
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -11,41 +46,61 @@
 // ============================================================================
 // GltfLoader - Loads glTF 2.0 models (.gltf, .glb)
 // ============================================================================
-// Responsibilities:
-// - Parse glTF 2.0 files using tinygltf library
-// - Convert glTF meshes to Quantiloom Mesh/GeometryPrimitive format
-// - Convert glTF PBR materials to Quantiloom Material format
-// - Load textures (embedded/external PNG/JPEG) to Quantiloom Texture format
-// - Build Scene hierarchy with nodes and transforms
-//
-// Supported Features:
-// - Meshes with multiple primitives
-// - PBR metallic-roughness materials
-// - Textures (all glTF 2.0 formats):
-//   * Embedded textures (base64 DataURI in .gltf)
-//   * External textures (PNG/JPEG files via URI)
-//   * Binary embedded textures (.glb format)
-// - Scene graph transforms (flattened to world space)
-// - Normal maps, emissive maps
-// - File formats: .gltf (JSON + external resources), .glb (binary)
-//
-// Not Supported (M2):
-// - Animations
-// - Skinning/morphing
-// - Cameras (use config file instead)
-// - Lights (use config file instead)
-// - Extensions (KHR_materials_*, etc.)
-//
-// Usage:
-//   auto result = GltfLoader::LoadFromFile("model.gltf");
-//   if (!result.has_value()) {
-//       QL_LOG_ERROR("Failed to load glTF: {}", result.error());
-//   }
-//   Scene scene = result.value();
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @class GltfLoader
+ * @brief Static utility class for loading glTF 2.0 3D models into Quantiloom scenes
+ *
+ * Converts glTF 2.0 files (JSON or binary) into Quantiloom Scene format.
+ * Handles all glTF data extraction, format conversion, and resource loading.
+ *
+ * Loading workflow:
+ * 1. Parse glTF file using tinygltf library
+ * 2. Extract and convert meshes → Quantiloom Mesh/GeometryPrimitive
+ * 3. Extract and convert materials → Quantiloom Material (PBR)
+ * 4. Load textures → Quantiloom Texture (decode PNG/JPEG)
+ * 5. Flatten scene graph → SceneNode list with world transforms
+ * 6. Return complete Scene object
+ *
+ * Usage example:
+ * @code
+ * // Load glTF model
+ * auto result = GltfLoader::LoadFromFile("models/DamagedHelmet.gltf");
+ * if (!result.has_value()) {
+ *     QL_LOG_ERROR("Failed to load glTF: {}", result.error());
+ *     return;
+ * }
+ *
+ * Scene scene = std::move(result.value());
+ * QL_LOG_INFO("Loaded: {} meshes, {} materials, {} textures",
+ *             scene.meshes.size(),
+ *             scene.materials.size(),
+ *             scene.textures.size());
+ *
+ * // Scene ready for rendering
+ * // Build BLAS for each mesh primitive...
+ * @endcode
+ *
+ * Error handling:
+ * @code
+ * auto result = GltfLoader::LoadFromFile("model.gltf");
+ * if (!result.has_value()) {
+ *     // Error message in result.error()
+ *     QL_LOG_ERROR("Load failed: {}", result.error());
+ * }
+ * @endcode
+ *
+ * @note Supports both .gltf (JSON + external files) and .glb (binary single-file)
+ * @note Scene graph flattened: parent transforms accumulated into world space
+ * @note Each glTF primitive becomes separate GeometryPrimitive (enables per-primitive materials)
+ * @note Texture data decoded to f32 in CPU memory (not uploaded to GPU yet)
+ *
+ * @see Scene for output scene structure
+ * @see Material for PBR material mapping
+ * @see Texture for texture data format
+ */
 class QL_API GltfLoader {
 public:
     // ========================================================================

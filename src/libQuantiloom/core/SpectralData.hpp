@@ -1,3 +1,26 @@
+/**
+ * @file SpectralData.hpp
+ * @brief Wavelength-dependent material property data structures for physically-based spectral rendering
+ *
+ * Provides CPU/GPU data structures for:
+ * - SpectralCurve: Variable-length spectral reflectance/emissivity curves (CPU-side)
+ * - SpectralCurveGPU: Fixed-size uniform-sampled curves for GPU (64 samples max)
+ * - ComplexRefractiveIndex: n,k curves for physical Fresnel calculations (metals, dielectrics)
+ * - ComplexRefractiveIndexGPU: Fixed-size n,k data for GPU
+ * - SolarSpectralLUT: Sun and sky irradiance curves (ASTM G-173, libRadtran data)
+ *
+ * Design philosophy:
+ * - CPU: Flexible std::vector-based, arbitrary-length curves
+ * - GPU: Fixed-size arrays for fast upload and O(1) query
+ * - Uniform sampling: Wavelengths computed as λ[i] = start + i * step (no storage overhead)
+ * - Resampling: CPU irregular data → GPU uniform grid (linear interpolation)
+ *
+ * GPU structs MUST match shader definitions in common.hlsli exactly (verified by static_assert).
+ * All GPU structs use std430 layout for efficient SSBO binding.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -7,29 +30,43 @@
 // ============================================================================
 // Spectral Curve Data Structures
 // ============================================================================
-// Represents wavelength-dependent material properties for physically-based
-// spectral path tracing. Supports both sparse (measured) and dense (computed)
-// spectral representations.
-//
-// DESIGN PHILOSOPHY:
-// - CPU side: Flexible representation (std::vector for variable-length curves)
-// - GPU side: Fixed-size representation (arrays for fast upload/query)
-//
-// USAGE:
-// - Store measured spectral reflectance/emissivity curves
-// - Replace scalar spectralAlbedo with full spectral fidelity
-// - Enable quantitative HS-OFF mode with physical validation
-// ============================================================================
+/**
+ * @defgroup SpectralData Spectral Data Structures
+ * @brief Wavelength-dependent material properties for physically-based spectral path tracing
+ *
+ * Supports both sparse (measured) and dense (computed) spectral representations.
+ * Enables quantitative hyperspectral rendering with full wavelength fidelity.
+ */
 
 namespace quantiloom {
 
 // ============================================================================
 // SpectralCurve - CPU-side variable-length spectral curve
 // ============================================================================
-// Stores wavelength-value pairs for arbitrary spectral data
-// Supports linear interpolation for continuous wavelength queries
-// ============================================================================
-
+/**
+ * @struct SpectralCurve
+ * @brief CPU-side variable-length spectral reflectance/emissivity curve
+ *
+ * Stores wavelength-value pairs for arbitrary spectral data (reflectance, emissivity, transmittance).
+ * Supports linear interpolation for continuous wavelength queries.
+ *
+ * Typical uses:
+ * - Measured spectral reflectance from spectrometers (e.g., ASD FieldSpec, USB4000)
+ * - Emissivity curves from material databases (e.g., ASTER, ECOSTRESS)
+ * - Complex refractive index data (n,k) from RefractiveIndex.INFO
+ *
+ * Data source examples:
+ * - USGS spectral library: 400-2500nm, 5nm spacing
+ * - RefractiveIndex.INFO: Arbitrary wavelength sampling
+ * - Custom CSV files: User-defined sampling
+ *
+ * @note Wavelengths must be monotonically increasing
+ * @note Evaluate() performs linear interpolation (O(N) search)
+ * @note For GPU use, convert to SpectralCurveGPU for O(1) query
+ *
+ * @see SpectralCurveGPU for fixed-size GPU representation
+ * @see SpectralIO::LoadSpectralCurveCSV() for loading from CSV files
+ */
 struct SpectralCurve {
     Vector<std::pair<f32, f32>> samples;  // (wavelength_nm, value)
 
@@ -96,26 +133,41 @@ struct SpectralCurve {
 // ============================================================================
 // SpectralCurveGPU - GPU-side fixed-size spectral curve (UNIFORM SAMPLING)
 // ============================================================================
-// Fixed-size representation for efficient GPU upload and O(1) query.
-//
-// CRITICAL: This struct MUST match the GPU definition in common.hlsli!
-//
-// UNIFORM SAMPLING DESIGN:
-// - Wavelengths are NOT stored explicitly (saves 256 bytes per curve)
-// - Wavelength computed as: λ[i] = startWavelength_nm + i × stepSize_nm
-// - Enables O(1) lookup instead of O(log N) binary search
-// - CPU must resample irregular measured data to uniform grid before upload
-//
-// EXAMPLE CONFIGURATIONS:
-// - Visible spectrum: start=380nm, step=6.35nm, samples=64 → covers 380-786nm
-// - UV-Vis-NIR: start=360nm, step=10nm, samples=64 → covers 360-990nm
-// - Full IR range: start=3000nm, step=140nm, samples=64 → covers 3000-11960nm
-//
-// SIZE: 64×4 + 4 + 4 + 4 + 4 = 272 bytes per curve (was 528 bytes)
-// ============================================================================
+/**
+ * @struct SpectralCurveGPU
+ * @brief GPU-side fixed-size spectral curve with uniform wavelength sampling
+ *
+ * Fixed-size (64 samples max) representation for efficient GPU upload and O(1) query.
+ * Uses uniform wavelength grid: λ[i] = startWavelength_nm + i × stepSize_nm
+ *
+ * CRITICAL DESIGN DECISIONS:
+ * - Wavelengths NOT stored explicitly (saves 256 bytes per curve)
+ * - O(1) lookup instead of O(log N) binary search
+ * - CPU must resample irregular measured data before upload (see FromCPU())
+ * - GPU shader computes wavelength on-the-fly (no memory reads)
+ *
+ * Example configurations:
+ * @code
+ * // Visible spectrum: 380-786nm (64 samples)
+ * gpu.startWavelength_nm = 380.0f;
+ * gpu.stepSize_nm = 6.35f;
+ * gpu.numSamples = 64;
+ *
+ * // Full IR range: 3000-11960nm (64 samples)
+ * gpu.startWavelength_nm = 3000.0f;
+ * gpu.stepSize_nm = 140.0f;
+ * gpu.numSamples = 64;
+ * @endcode
+ *
+ * @note SIZE: 64×4 + 4 + 4 + 4 + 4 = 272 bytes per curve
+ * @note MUST match GPU SpectralCurveGPU in common.hlsli (verified by static_assert)
+ * @note Use FromCPU() to convert variable-length SpectralCurve to uniform grid
+ *
+ * @see SpectralCurve for CPU-side representation
+ * @see common.hlsli SampleSpectralCurve() for GPU-side evaluation
+ */
 
-static constexpr u32 MAX_SPECTRAL_SAMPLES = 64;
-
+ static constexpr u32 MAX_SPECTRAL_SAMPLES = 64;
 struct SpectralCurveGPU {
     f32 values[MAX_SPECTRAL_SAMPLES]{};  // Spectral values at uniform wavelength grid
     f32 startWavelength_nm = 0.0f;       // First wavelength in grid (nm)
