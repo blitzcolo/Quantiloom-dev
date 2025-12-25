@@ -20,6 +20,7 @@ add_library(libQuantiloom STATIC
     core/Image.hpp
     core/SpectralCube.hpp
     core/LUT.hpp
+    core/AtmosphereTransmittanceLUT.hpp
     libQuantiloom.rc
 
     # IO module
@@ -31,6 +32,8 @@ add_library(libQuantiloom STATIC
     io/SpectralBasisLoader.hpp
     io/LUTLoader.cpp
     io/LUTLoader.hpp
+    io/AtmosphereTransmittanceLUTLoader.cpp
+    io/AtmosphereTransmittanceLUTLoader.hpp
     io/GltfLoader.cpp
     io/GltfLoader.hpp
 
