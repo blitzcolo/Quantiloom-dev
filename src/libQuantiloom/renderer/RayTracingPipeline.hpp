@@ -1,3 +1,63 @@
+/**
+ * @file RayTracingPipeline.hpp
+ * @brief Vulkan ray tracing pipeline management and shader binding
+ *
+ * Provides RayTracingPipeline class for managing:
+ * - Ray tracing shader loading and compilation (SPIR-V)
+ * - VkRayTracingPipelineKHR creation with shader groups
+ * - Shader Binding Table (SBT) construction with proper alignment
+ * - Descriptor set management for resource binding
+ * - TraceRays() execution interface
+ *
+ * Shader Groups:
+ * - Ray Generation: Primary ray generation from camera
+ * - Closest Hit: Surface shading and material evaluation
+ * - Miss: Sky/environment sampling
+ *
+ * Resource Bindings (Fixed Descriptor Layout):
+ * - Binding 0: Output image (storage image)
+ * - Binding 1: TLAS (acceleration structure)
+ * - Binding 2: Lighting parameters (uniform buffer)
+ * - Binding 3-4: Geometry buffers (vertex, index)
+ * - Binding 5: Material buffer (storage buffer)
+ * - Binding 6-7: Texture arrays (bindless, sampled images + samplers)
+ * - Binding 8: UV buffer (optional)
+ * - Binding 9: Tangent buffer (optional)
+ * - Binding 10-12: IBL resources (prefiltered envmap, BRDF LUT, sampler)
+ * - Binding 13: Spectral reflectance curves (storage buffer)
+ * - Binding 14: Complex refractive index (n,k) data (storage buffer)
+ * - Binding 15: Solar spectral LUT (storage buffer)
+ * - Binding 16: Normal buffer (required)
+ * - Binding 17: Atmospheric parameters (storage buffer)
+ *
+ * Usage example:
+ * @code
+ * VulkanContext context;
+ * RayTracingPipeline pipeline(context, "raygen.spv", "closesthit.spv", "miss.spv");
+ *
+ * // Bind resources
+ * pipeline.BindOutputImage(outputImage);
+ * pipeline.BindAccelerationStructure(tlas.GetHandle());
+ * pipeline.BindGeometryBuffers(vertexBuffer, indexBuffer, &uvBuffer);
+ * pipeline.BindMaterialBuffer(materialBuffer);
+ * pipeline.BindTextures(imageViews, samplers);
+ *
+ * // Set camera and render
+ * pipeline.SetCameraData(cameraData);
+ * pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
+ *
+ * CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+ *     pipeline.TraceRays(cmd, width, height);
+ * });
+ * @endcode
+ *
+ * @note Pipeline must outlive all bound resources
+ * @note All shaders must be compiled to SPIR-V before loading
+ * @note Descriptor binding indices MUST match shader layout qualifiers
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -12,21 +72,52 @@
 // ============================================================================
 // RayTracingPipeline - Manages Vulkan Ray Tracing pipeline and SBT
 // ============================================================================
-// Responsibilities:
-// - Load and compile ray tracing shaders (SPIR-V)
-// - Create VkRayTracingPipelineKHR with shader groups
-// - Build Shader Binding Table (SBT) with correct alignment
-// - Manage descriptor set layouts and descriptor sets
-// - Provide TraceRays() interface for rendering
-//
-// Lifetime:
-// - Must be created AFTER VulkanContext
-// - Must be destroyed BEFORE VulkanContext
-// - Non-copyable, non-movable (owns Vulkan resources)
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @class RayTracingPipeline
+ * @brief Manages Vulkan ray tracing pipeline, shader binding table, and resource bindings
+ *
+ * Central class for ray tracing rendering in Quantiloom. Handles all aspects of
+ * Vulkan ray tracing pipeline creation, resource binding, and ray dispatch.
+ *
+ * Key responsibilities:
+ * - Shader module loading from SPIR-V files
+ * - Pipeline creation with ray generation, closest hit, and miss shaders
+ * - Shader Binding Table (SBT) construction with correct memory alignment
+ * - Descriptor set layout creation and management
+ * - Resource binding interface (buffers, images, acceleration structures)
+ * - Push constants for camera and sampling parameters
+ * - vkCmdTraceRaysKHR dispatch
+ *
+ * Resource Binding Architecture:
+ * All resources are bound through descriptor sets using fixed binding indices.
+ * The binding layout is defined in shaders and MUST match exactly:
+ * @code
+ * // Shader layout (common.hlsli)
+ * [[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
+ * [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
+ * [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
+ * // ... etc
+ * @endcode
+ *
+ * Shader Binding Table Layout:
+ * @code
+ * | Raygen | Closest Hit | Miss |
+ * | ------ | ----------- | ---- |
+ * | 1 shader | 1 shader  | 1 shader |
+ * @endcode
+ *
+ * @note Non-copyable, non-movable (owns Vulkan resources)
+ * @note Must be created AFTER VulkanContext
+ * @note Must be destroyed BEFORE VulkanContext
+ *
+ * @see VulkanContext for Vulkan initialization
+ * @see GpuBuffer for buffer resource management
+ * @see GpuImage for image resource management
+ * @see CommandHelper for command buffer utilities
+ */
 class QL_API RayTracingPipeline {
 public:
     // ========================================================================

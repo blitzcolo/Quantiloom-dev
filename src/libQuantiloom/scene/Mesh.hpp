@@ -1,3 +1,38 @@
+/**
+ * @file Mesh.hpp
+ * @brief Geometry primitives and mesh containers for ray tracing scenes
+ *
+ * Provides core geometry data structures:
+ * - GeometryPrimitive: Single renderable unit (vertex/index data + material)
+ * - Mesh: Container for multiple primitives (logical mesh object)
+ * - SceneNode: Mesh instance with world-space transform
+ *
+ * Geometry hierarchy:
+ * @code
+ * SceneNode (instance)
+ *   └── meshIndex → Mesh (logical object)
+ *       └── primitives[] → GeometryPrimitive[] (draw calls)
+ *           └── materialId → Material
+ * @endcode
+ *
+ * Ray tracing mapping:
+ * - Each GeometryPrimitive → one BLAS (Bottom-Level Acceleration Structure)
+ * - Each SceneNode → one TLAS instance (references BLAS with transform)
+ * - Material ID embedded in TLAS instance for shader access
+ *
+ * Vertex attributes:
+ * - Positions (vec3): Required, object-space coordinates
+ * - Normals (vec3): Optional, smooth shading normals
+ * - UVs (vec2): Optional, texture coordinates [0,1]
+ * - Tangents (vec4): Optional, normal mapping (xyz=tangent, w=handedness ±1)
+ *
+ * @note All vertex data stored CPU-side (uploaded to GPU during BLAS build)
+ * @note Indices use u32 type (supports up to 4B vertices per primitive)
+ * @note Memory layout: Structure-of-Arrays (separate vectors per attribute)
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -10,26 +45,48 @@
 // ============================================================================
 // GeometryPrimitive - Minimal rendering unit (single draw call)
 // ============================================================================
-// Represents a contiguous block of geometry with:
-// - Vertex attributes (positions, normals, UVs)
-// - Triangle indices
-// - Single material binding
-//
-// In glTF terminology:
-// - This maps to a single glTF "primitive" (subset of a mesh)
-// - Each primitive has its own material and vertex attributes
-//
-// In Vulkan Ray Tracing:
-// - Each primitive becomes one BLAS (Bottom-Level Acceleration Structure)
-// - BLAS is instanced in TLAS with transform and material ID
-//
-// Memory layout:
-// - All data stored in CPU memory (std::vector)
-// - Upload to GPU happens in AccelerationStructure::BuildBLAS()
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @struct GeometryPrimitive
+ * @brief Single contiguous geometry block with vertex attributes and one material
+ *
+ * Represents the smallest renderable unit in Quantiloom (equivalent to one draw call).
+ * Each primitive contains:
+ * - Vertex attribute arrays (positions, normals, UVs, tangents)
+ * - Triangle index buffer
+ * - Material reference
+ *
+ * In glTF terminology:
+ * - Maps to a single glTF "primitive" (subset of a mesh with one material)
+ *
+ * In Vulkan Ray Tracing:
+ * - Each primitive becomes one BLAS (Bottom-Level Acceleration Structure)
+ * - BLAS instanced in TLAS with transform and material ID
+ *
+ * Usage example:
+ * @code
+ * GeometryPrimitive cube;
+ * cube.positions = { 8 vertices };
+ * cube.indices = { 36 indices (12 triangles) };
+ * cube.normals = { 8 normals };
+ * cube.uvs = { 8 UVs };
+ * cube.materialId = 0;  // References scene.materials[0]
+ *
+ * // Build BLAS from primitive
+ * BLAS blas(context, cube);
+ * blas.Build(cmd);
+ * @endcode
+ *
+ * @note Positions are required, all other attributes optional
+ * @note If normals empty, flat shading used (face normals computed from triangles)
+ * @note If UVs empty, texture sampling falls back to vertex colors
+ * @note If tangents empty, normal mapping disabled
+ *
+ * @see Mesh for container of multiple primitives
+ * @see BLAS for GPU acceleration structure
+ */
 struct GeometryPrimitive {
     // Vertex attributes
     std::vector<glm::vec3> positions;  // Vertex positions (object space)

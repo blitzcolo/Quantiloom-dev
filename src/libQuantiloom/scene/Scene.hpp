@@ -1,3 +1,27 @@
+/**
+ * @file Scene.hpp
+ * @brief Top-level scene container for geometry, materials, camera, and spectral configuration
+ *
+ * Provides Scene class as the central container for all rendering data:
+ * - Geometry: Meshes (geometry primitives) and SceneNodes (instances with transforms)
+ * - Materials: PBR material definitions with spectral/IR properties
+ * - Textures: CPU-side texture images (uploaded to GPU by TextureManager)
+ * - Camera: Viewpoint configuration
+ * - Spectral config: Wavelength bands, ranges, atmosphere LUTs
+ *
+ * Scene lifetime:
+ * - Created at application startup (Scene::FromConfig or manually)
+ * - Must outlive Renderer (renderer holds references, not ownership)
+ * - Destroyed at shutdown after renderer cleanup
+ *
+ * Loading sources:
+ * - TOML configuration files (Scene::FromConfig)
+ * - glTF 2.0 models (GltfLoader::LoadFromFile)
+ * - Procedural generation (SceneBuilder test scenes)
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Camera.hpp"
@@ -11,18 +35,26 @@
 #include <string>
 
 // ============================================================================
-// SpectralBand - Band-pass configuration for MS-RT mode
-// ============================================================================
-// Defines a single spectral band with:
-// - center_nm: Center wavelength (nanometers)
-// - fwhm_nm: Full-width at half-maximum (bandwidth)
-// - name: Human-readable identifier
-//
-// Used in MS-RT mode to define output channels
+// SpectralBand - Band-pass configuration for multi-spectral rendering
 // ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @struct SpectralBand
+ * @brief Defines a single spectral band with center wavelength and bandwidth
+ *
+ * Used in multi-spectral rendering mode to define output channels.
+ * Each band represents a filter response function (typically Gaussian).
+ *
+ * Example:
+ * @code
+ * SpectralBand visGreen = {"VIS_Green", 550.0f, 40.0f};  // 530-570nm (FWHM=40nm)
+ * SpectralBand nirBand = {"NIR_850", 850.0f, 30.0f};     // 835-865nm
+ * @endcode
+ *
+ * @see Scene::bands for multi-spectral channel configuration
+ */
 struct SpectralBand {
     String name;
     f32 center_nm = 550.0f;
@@ -36,21 +68,59 @@ struct SpectralBand {
 // ============================================================================
 // Scene - Top-level scene container
 // ============================================================================
-// Responsibilities:
-// - Hold all scene data (geometry, materials, camera, spectral config)
-// - Load from TOML configuration (Scene::FromConfig)
-// - Provide lifetime management (owns all data)
-//
-// Usage:
-//   auto config = Config::Load("scene.toml");
-//   auto scene = Scene::FromConfig(*config);
-//   renderer.SetScene(scene);  // Renderer references Scene
-//
-// Lifetime:
-// - Scene must outlive Renderer (Renderer holds reference, not ownership)
-// - Typically created at application startup, destroyed at shutdown
-// ============================================================================
-
+/**
+ * @class Scene
+ * @brief Top-level container for all scene data (geometry, materials, camera, spectral config)
+ *
+ * Central data structure holding all rendering resources:
+ * - Geometry: meshes (GeometryPrimitive collections) + nodes (instances with transforms)
+ * - Materials: PBR definitions with spectral/IR properties
+ * - Textures: CPU image data (RGB/RGBA, uploaded to GPU separately)
+ * - Camera: Viewpoint configuration (position, FOV, look-at)
+ * - Spectral: Wavelength bands, ranges, atmosphere LUTs
+ *
+ * Scene graph structure:
+ * @code
+ * Scene
+ * ├── meshes[] (geometry definitions)
+ * │   └── primitives[] (vertex/index data + material ID)
+ * ├── nodes[] (mesh instances with transforms)
+ * │   ├── meshIndex (reference to meshes[])
+ * │   └── transform (4x4 matrix, world space)
+ * ├── materials[] (PBR + spectral properties)
+ * └── textures[] (CPU images, referenced by materials)
+ * @endcode
+ *
+ * Usage example:
+ * @code
+ * // Load from config
+ * auto config = Config::Load("scene.toml");
+ * auto sceneResult = Scene::FromConfig(*config);
+ * if (!sceneResult.has_value()) {
+ *     QL_LOG_ERROR("Failed to load scene: {}", sceneResult.error());
+ *     return;
+ * }
+ * Scene scene = std::move(sceneResult.value());
+ *
+ * // Or load glTF
+ * auto gltfResult = GltfLoader::LoadFromFile("model.gltf");
+ * Scene scene = std::move(gltfResult.value());
+ *
+ * // Access scene data
+ * QL_LOG_INFO("Scene: {} meshes, {} materials, {} triangles",
+ *             scene.meshes.size(), scene.materials.size(),
+ *             scene.GetTotalTriangleCount());
+ * @endcode
+ *
+ * @note Scene must outlive Renderer (renderer holds references)
+ * @note Meshes are indexed by nodes (one mesh can have multiple instances)
+ * @note Materials are indexed by primitives (triangle groups)
+ * @note Textures are indexed by materials (bindless descriptor array on GPU)
+ *
+ * @see GltfLoader for loading glTF 2.0 models
+ * @see SceneBuilder for procedural test scenes
+ * @see main.cpp for complete integration example
+ */
 class QL_API Scene {
 public:
     // ========================================================================

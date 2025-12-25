@@ -1,3 +1,33 @@
+/**
+ * @file Texture.hpp
+ * @brief CPU-side texture metadata and pixel data for GPU upload
+ *
+ * Provides texture data structures:
+ * - TextureSampler: Sampler parameters (filter modes, wrap modes)
+ * - Texture: CPU-side 2D texture image with metadata
+ *
+ * Texture workflow:
+ * 1. Created during scene loading (GltfLoader extracts from glTF, or procedural)
+ * 2. Stored in Scene::textures vector (CPU memory)
+ * 3. Referenced by Material via texture index (-1 = no texture)
+ * 4. Uploaded to GPU by TextureManager (converts to VkImage + VkSampler)
+ *
+ * Pixel format:
+ * - CPU: u8 RGBA8 (4 bytes per pixel, row-major)
+ * - GPU: Converted to RGBA8_UNORM or RGBA8_SRGB based on isSRGB flag
+ *
+ * Color space:
+ * - Base color textures: sRGB (isSRGB = true, requires gamma correction)
+ * - Metallic/roughness/normal: Linear (isSRGB = false, no gamma)
+ * - Emissive textures: sRGB (glTF 2.0 spec)
+ *
+ * @note Texture data remains in CPU memory until GPU upload
+ * @note TextureManager handles GPU resource creation
+ * @note Material texture indices must reference valid Scene::textures entries
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -6,24 +36,28 @@
 // ============================================================================
 // Texture - GPU texture resource metadata
 // ============================================================================
-// Represents a 2D texture image with metadata needed for:
-// - Vulkan resource creation (VkImage, VkImageView, VkSampler)
-// - glTF material binding
-// - Spectral mode fallback
-//
-// Lifecycle:
-// - Created during scene loading (GltfLoader or procedural)
-// - Uploaded to GPU by TextureManager
-// - Referenced by Material via textureIndex
-//
-// Ownership:
-// - CPU-side pixel data owned by Scene::textures
-// - GPU-side resources owned by TextureManager
-// ============================================================================
 
 namespace quantiloom {
 
-// Texture sampler parameters (maps to glTF sampler spec)
+/**
+ * @struct TextureSampler
+ * @brief Texture sampler parameters (maps to glTF 2.0 sampler specification)
+ *
+ * Defines how textures are filtered and wrapped during shader sampling.
+ * Parameters directly map to VkSamplerCreateInfo fields.
+ *
+ * Filter modes:
+ * - Nearest: No filtering (blocky pixels, sharp edges)
+ * - Linear: Bilinear filtering (smooth pixels, blurred edges)
+ *
+ * Wrap modes:
+ * - Repeat: Tiling (UV wraps at 1.0 → 0.0)
+ * - ClampToEdge: Edge pixels stretched beyond [0,1]
+ * - MirroredRepeat: Mirrored tiling (UV mirrors at boundaries)
+ *
+ * @see Texture for texture image data
+ * @see TextureManager for GPU upload and VkSampler creation
+ */
 struct TextureSampler {
     enum class Filter {
         Nearest = 0,

@@ -1,3 +1,39 @@
+/**
+ * @file Material.hpp
+ * @brief PBR material properties (glTF 2.0 metallic-roughness workflow) with spectral/IR extensions
+ *
+ * Provides Material struct implementing:
+ * - Full glTF 2.0 PBR metallic-roughness model
+ * - Base color (RGB + texture)
+ * - Metallic-Roughness workflow (metal vs. dielectric)
+ * - Normal mapping for surface detail
+ * - Emissive properties (HDR self-emission)
+ * - Alpha blending modes (opaque, mask, blend)
+ *
+ * Spectral rendering extensions:
+ * - spectralAlbedo: Scalar reflectance for single-wavelength (legacy)
+ * - spectralReflectanceCurveIndex: Index into full spectral curves (quantitative)
+ * - SpectralSource tracking: Measured vs. RGB-upsampled (quality gate)
+ *
+ * Infrared (MWIR/LWIR) extensions:
+ * - irEmissivityCurve: Blackbody emission fraction ε(λ)
+ * - irReflectanceCurve: Reflected radiance fraction ρ(λ)
+ * - irTransmittanceCurve: Transmitted radiance fraction τ(λ)
+ * - irTemperature_K: Surface temperature for Planck's law
+ * - Kirchhoff's law validation: ε + ρ + τ = 1
+ *
+ * Quantiloom spectral material system:
+ * - quantiloomMaterialType: Database type (e.g., "quantiloom_usgs")
+ * - quantiloomMaterialRef: Material name in database
+ * - Enables SpectralBaker NMF basis reconstruction
+ *
+ * @note All texture indices reference Scene::textures array (-1 = no texture)
+ * @note Uploaded to GPU via MaterialData buffer (see main.cpp MaterialDataCPU)
+ * @note Shader access via bindless descriptor arrays
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -7,27 +43,46 @@
 // ============================================================================
 // Material - PBR material properties (glTF 2.0 metallic-roughness model)
 // ============================================================================
-// Implements full glTF 2.0 material specification:
-// - Base color (RGBA factor + optional texture)
-// - Metallic-Roughness workflow
-// - Normal mapping
-// - Emissive properties
-// - Alpha blending modes
-//
-// For spectral rendering (M1 compatibility):
-// - spectralAlbedo: Scalar reflectance computed from baseColorFactor
-//
-// Texture binding:
-// - Texture indices refer to Scene::textures array
-// - Index -1 means no texture (use factor value directly)
-//
-// Shader mapping:
-// - All parameters uploaded to GPU via MaterialData buffer
-// - Textures accessed via bindless descriptor array
-// ============================================================================
-
+    
 namespace quantiloom {
 
+/**
+ * @struct Material
+ * @brief Physically-based material with glTF 2.0 PBR and spectral/IR extensions
+ *
+ * Combines standard glTF 2.0 PBR with Quantiloom spectral rendering features:
+ * - glTF 2.0: base color, metallic, roughness, normal maps, emissive
+ * - Spectral: Full wavelength-dependent reflectance curves (400-2500nm)
+ * - Infrared: Emissivity, reflectance, transmittance curves (3-12μm)
+ * - Quality tracking: Measured vs. RGB-upsampled spectral data
+ *
+ * Usage example:
+ * @code
+ * // Create Lambertian material
+ * Material mat = Material::CreateLambertian(glm::vec3(0.8f, 0.2f, 0.1f), "RedDiffuse");
+ *
+ * // glTF-loaded material with textures
+ * Material gltfMat;
+ * gltfMat.baseColorTextureIndex = 0;  // Index into Scene::textures
+ * gltfMat.metallicFactor = 0.0f;
+ * gltfMat.roughnessFactor = 0.8f;
+ *
+ * // Spectral material (quantitative)
+ * gltfMat.spectralReflectanceCurveIndex = 5;  // Index into spectral curves buffer
+ * gltfMat.spectralSource = Material::SpectralSource::Measured;
+ *
+ * // IR thermal material
+ * gltfMat.irEmissivityCurve = {{3000.0f, 0.9f}, {5000.0f, 0.85f}, ...};
+ * gltfMat.irTemperature_K = 300.0f;  // Room temperature
+ * @endcode
+ *
+ * @note For quantitative spectral rendering, use Measured spectral sources only
+ * @note RGB-upsampled materials are NOT suitable for scientific analysis
+ * @note Infrared materials must satisfy Kirchhoff's law: ε + ρ + τ ≤ 1
+ *
+ * @see SpectralCurve for spectral reflectance curves
+ * @see main.cpp MaterialDataCPU for GPU upload structure
+ */
 struct Material {
     // ========================================================================
     // PBR Base Color

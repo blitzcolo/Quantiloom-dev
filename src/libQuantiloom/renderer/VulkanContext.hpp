@@ -1,3 +1,32 @@
+/**
+ * @file VulkanContext.hpp
+ * @brief Centralized Vulkan lifecycle management and device initialization
+ *
+ * Provides VulkanContext class for managing all Vulkan resources:
+ * - VkInstance creation with validation layers (debug builds)
+ * - Physical device selection (GPU with ray tracing support)
+ * - Logical device creation with required extensions/features
+ * - VmaAllocator for efficient memory management
+ * - Queue management (graphics/compute/transfer)
+ *
+ * VulkanContext acts as the root of the Vulkan resource hierarchy:
+ * - MUST outlive ALL Vulkan resources (buffers, images, acceleration structures, pipelines)
+ * - Singleton-like usage (non-copyable, non-movable)
+ * - Created once at application startup, destroyed at shutdown
+ *
+ * Ray tracing requirements:
+ * - VK_KHR_ray_tracing_pipeline extension
+ * - VK_KHR_acceleration_structure extension
+ * - VK_KHR_deferred_host_operations (for async AS builds)
+ * - Ray query features (ray queries in compute/graphics shaders)
+ *
+ * @note This class is Windows/Linux cross-platform compatible
+ * @note Requires Vulkan 1.3 or higher with ray tracing extensions
+ * @note Uses VMA (Vulkan Memory Allocator) for automatic memory management
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -14,20 +43,56 @@
 // ============================================================================
 // VulkanContext - Centralized Vulkan lifecycle management
 // ============================================================================
-// Responsibilities:
-// - Create and destroy VkInstance (with validation layers if enabled)
-// - Select and create VkDevice (with required extensions/features)
-// - Create and destroy VmaAllocator (for memory management)
-// - Provide access to core Vulkan handles
-//
-// Lifetime:
-// - Must outlive ALL resources (buffers, images, acceleration structures)
-// - Typically created at application startup, destroyed at shutdown
-// - Singleton-like usage (non-copyable, non-movable)
-// ============================================================================
 
 namespace quantiloom {
 
+/**
+ * @class VulkanContext
+ * @brief Manages Vulkan instance, device, and memory allocator lifecycle
+ *
+ * Central initialization and cleanup for all Vulkan resources.
+ * Provides access to core Vulkan handles for creating buffers, images, pipelines, etc.
+ *
+ * Initialization sequence:
+ * 1. CreateInstance() - VkInstance with validation layers (debug)
+ * 2. SetupDebugMessenger() - Validation error reporting
+ * 3. SelectPhysicalDevice() - Choose GPU with ray tracing support
+ * 4. CreateDevice() - VkDevice with required extensions/features
+ * 5. CreateAllocator() - VmaAllocator for memory management
+ *
+ * Resource destruction order (reverse of creation):
+ * 1. VmaAllocator destroyed (frees all allocations)
+ * 2. VkDevice destroyed (releases GPU resources)
+ * 3. VkDebugUtilsMessenger destroyed (stops validation)
+ * 4. VkInstance destroyed (releases Vulkan driver)
+ *
+ * Usage example:
+ * @code
+ * // Create context (initializes Vulkan)
+ * VulkanContext context;
+ *
+ * if (!context.IsRayTracingSupported()) {
+ *     QL_LOG_ERROR("Ray tracing not supported!");
+ *     return;
+ * }
+ *
+ * // Create resources using context
+ * GpuBuffer vertexBuffer(context.GetAllocator(), size, usage, memUsage);
+ * GpuImage outputImage(context.GetAllocator(), context.GetDevice(), width, height, format, usage, memUsage);
+ *
+ * // Resources MUST be destroyed before context goes out of scope
+ * // (automatic via RAII destructors)
+ * @endcode
+ *
+ * @note Non-copyable, non-movable (singleton-like pattern)
+ * @note Must outlive ALL Vulkan resources created with it
+ * @note Validation layers enabled in debug builds only
+ * @note Aborts if ray tracing not supported (hard requirement)
+ *
+ * @see GpuBuffer for vertex/index/uniform buffer management
+ * @see GpuImage for texture and render target management
+ * @see AccelerationStructure for BLAS/TLAS ray tracing structures
+ */
 class QL_API VulkanContext {
 public:
     // ========================================================================

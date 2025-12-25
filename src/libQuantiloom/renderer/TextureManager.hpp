@@ -1,3 +1,34 @@
+/**
+ * @file TextureManager.hpp
+ * @brief GPU texture upload and bindless descriptor array management
+ *
+ * Provides TextureManager class for batch texture upload to GPU:
+ * - Uploads multiple CPU Texture objects to GPU VkImage resources
+ * - Creates VkSampler for each texture based on filter/wrap settings
+ * - Manages lifetime of all texture images and samplers (RAII)
+ * - Provides VkImageView and VkSampler arrays for bindless descriptor sets
+ *
+ * Texture format conversion:
+ * - All textures uploaded as RGBA8_UNORM (32 bpp)
+ * - Source formats (1-4 channels) expanded to RGBA automatically
+ * - Image layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL (after upload)
+ *
+ * Bindless descriptor indexing:
+ * - Each texture gets a unique index (matches Material texture indices)
+ * - Shader access via: texture2DArray[textureIndex]
+ * - Requires VK_EXT_descriptor_indexing extension
+ *
+ * Fallback behavior:
+ * - If no textures provided, creates 1x1 white dummy texture
+ * - Prevents null descriptor access in shaders
+ *
+ * @note All textures uploaded during UploadTextures() call (batch operation)
+ * @note Samplers destroyed manually in destructor (GpuImage handles images via RAII)
+ * @note Texture indices are immutable after upload
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "core/Types.hpp"
@@ -12,29 +43,54 @@
 // ============================================================================
 // TextureManager - Manages GPU texture upload and binding
 // ============================================================================
-// Responsibilities:
-// - Upload CPU Texture objects to GPU VkImage resources
-// - Create VkSampler for each texture based on TextureSampler settings
-// - Manage lifetime of all texture resources (RAII)
-// - Provide arrays of VkImageView and VkSampler for bindless descriptor sets
-//
-// Architecture:
-// - One GpuImage per texture (VkImage + VkImageView)
-// - One VkSampler per texture (filter + wrap mode)
-// - All textures uploaded to RGBA8_UNORM format
-// - Image layout: VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-//
-// Usage:
-//   TextureManager texMgr(context);
-//   texMgr.UploadTextures(scene.textures);
-//
-//   // Bind to descriptor set
-//   const auto& views = texMgr.GetImageViews();
-//   const auto& samplers = texMgr.GetSamplers();
-// ============================================================================
 
 namespace quantiloom {
-
+    
+/**
+ * @class TextureManager
+ * @brief Manages batch upload of textures to GPU with bindless descriptor arrays
+ *
+ * Central texture management system for Quantiloom renderer.
+ * Handles conversion from CPU Texture data to GPU VkImage resources.
+ *
+ * Upload workflow:
+ * 1. Constructor creates TextureManager (no textures uploaded yet)
+ * 2. UploadTextures() converts all CPU textures to GPU images
+ * 3. For each texture:
+ *    - Create VkImage (RGBA8_UNORM format)
+ *    - Upload pixel data via staging buffer
+ *    - Transition layout to SHADER_READ_ONLY_OPTIMAL
+ *    - Create VkSampler with specified filter/wrap modes
+ * 4. GetImageViews()/GetSamplers() return arrays for descriptor binding
+ *
+ * Usage example:
+ * @code
+ * // Create manager
+ * TextureManager texMgr(context);
+ *
+ * // Upload all scene textures
+ * texMgr.UploadTextures(scene.textures);
+ *
+ * // Bind to pipeline descriptor set
+ * const auto& views = texMgr.GetImageViews();
+ * const auto& samplers = texMgr.GetSamplers();
+ * pipeline.BindTextures(views, samplers);  // Binding 6-7
+ *
+ * // Shader access (HLSL):
+ * // [[vk::binding(6, 0)]] Texture2D textures[];
+ * // [[vk::binding(7, 0)]] SamplerState samplers[];
+ * // float4 color = textures[matData.baseColorTextureIndex].Sample(
+ * //     samplers[matData.baseColorTextureIndex], uv);
+ * @endcode
+ *
+ * @note Empty texture list triggers creation of 1x1 white dummy texture
+ * @note All textures converted to RGBA8_UNORM regardless of source format
+ * @note Texture indices must match Material texture index references
+ *
+ * @see Texture for CPU-side texture data structure
+ * @see GpuImage for GPU image resource management
+ * @see Material for texture index references
+ */
 class QL_API TextureManager {
 public:
     // ========================================================================
