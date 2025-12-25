@@ -938,3 +938,258 @@ TEST_F(GenericSensorTest, CombinedFPNCreatesGridPattern) {
     EXPECT_GT(columnVariance, 1.0f);  // PRNU contribution
     EXPECT_GT(rowVariance, 1.0f);     // DSNU contribution
 }
+
+// ============================================================================
+// P5 Fix: Vignetting Tests (Cos^4 Natural Vignetting)
+// ============================================================================
+// Tests for the cos^4 vignetting implementation added in P5 fix.
+// Natural vignetting follows: E(θ) = E(0) × cos⁴(θ)
+// where θ is the angle from the optical axis.
+// ============================================================================
+
+TEST_F(GenericSensorTest, VignettingDisabledProducesUniformOutput) {
+    // Create uniform radiance image
+    // Use moderate radiance to avoid ADC saturation (14-bit max = 16383)
+    Image hdr(128, 128, 1);
+    for (auto& val : hdr.data) {
+        val = 0.5f;  // Moderate radiance to stay below saturation
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = false;  // Disabled
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Center and corner should have equal DN values (no vignetting)
+    u32 centerIdx = 64 * 128 + 64;  // Center pixel
+    u32 cornerIdx = 0;               // Top-left corner
+
+    f32 centerDN = dn.data[centerIdx];
+    f32 cornerDN = dn.data[cornerIdx];
+
+    // Allow small tolerance for numerical precision
+    EXPECT_NEAR(centerDN, cornerDN, centerDN * 0.01f)
+        << "With vignetting disabled, center and corner should be equal";
+}
+
+TEST_F(GenericSensorTest, VignettingEnabledDarkensEdges) {
+    // Create uniform radiance image
+    // Use low radiance to avoid ADC saturation (14-bit max = 16383)
+    Image hdr(128, 128, 1);
+    for (auto& val : hdr.data) {
+        val = 0.1f;  // Low radiance to stay well below saturation
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = true;   // Enabled
+    params.fov_deg = 60.0f;            // Wide FOV for noticeable vignetting
+    params.isTelecentric = false;
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Get center and corner values
+    u32 centerIdx = 64 * 128 + 64;
+    u32 cornerIdx = 0;
+
+    f32 centerDN = dn.data[centerIdx];
+    f32 cornerDN = dn.data[cornerIdx];
+
+    // Corner should be darker than center (vignetting effect)
+    EXPECT_GT(centerDN, cornerDN)
+        << "With vignetting enabled, center should be brighter than corner";
+
+    // Vignetting ratio should be between 40% and 90%
+    // For 60° FOV, corner angle is about 30°, cos^4(30°) ≈ 0.56
+    f32 vignetteRatio = cornerDN / centerDN;
+    EXPECT_GT(vignetteRatio, 0.3f) << "Vignette ratio too low (corner too dark)";
+    EXPECT_LT(vignetteRatio, 0.95f) << "Vignette ratio too high (no visible vignetting)";
+}
+
+TEST_F(GenericSensorTest, TelecentricLensNoVignetting) {
+    // Telecentric lenses have no natural vignetting
+    // Use moderate radiance to avoid ADC saturation
+    Image hdr(128, 128, 1);
+    for (auto& val : hdr.data) {
+        val = 0.5f;
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = true;   // Would be enabled...
+    params.fov_deg = 60.0f;
+    params.isTelecentric = true;       // ...but telecentric overrides
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    u32 centerIdx = 64 * 128 + 64;
+    u32 cornerIdx = 0;
+
+    f32 centerDN = dn.data[centerIdx];
+    f32 cornerDN = dn.data[cornerIdx];
+
+    // Telecentric lens should have no vignetting
+    EXPECT_NEAR(centerDN, cornerDN, centerDN * 0.01f)
+        << "Telecentric lens should have no vignetting";
+}
+
+TEST_F(GenericSensorTest, VignettingFollowsCos4Law) {
+    // Verify that vignetting accurately follows the cos^4 law
+    // Use moderate radiance to avoid ADC saturation while maintaining precision
+    Image hdr(256, 256, 1);
+    for (auto& val : hdr.data) {
+        val = 0.5f;  // Moderate radiance - avoids saturation at 14-bit ADC
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = true;
+    params.fov_deg = 45.0f;
+    params.isTelecentric = false;
+    params.pixelPitch_um = 5.0f;
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Get center value
+    const u32 cx = 128, cy = 128;
+    f32 centerDN = dn(cx, cy, 0);
+    ASSERT_GT(centerDN, 0.0f) << "Center DN should be positive";
+
+    // Calculate focal length from FOV (matching the sensor implementation)
+    const f32 PI = 3.14159265358979323846f;
+    f32 fov_half_rad = params.fov_deg * 0.5f * (PI / 180.0f);
+    f32 sensor_half_width = static_cast<f32>(cx) * params.pixelPitch_um * 1e-6f;
+    f32 focal_length_m = sensor_half_width / std::tan(fov_half_rad);
+
+    // Test at various radial distances
+    std::vector<std::pair<u32, u32>> testPoints = {
+        {160, 128},  // 32 pixels right of center
+        {192, 128},  // 64 pixels right of center
+        {224, 128},  // 96 pixels right of center
+        {160, 160},  // Diagonal
+        {192, 192},  // Diagonal
+    };
+
+    for (const auto& [testX, testY] : testPoints) {
+        f32 testDN = dn(testX, testY, 0);
+
+        // Calculate expected vignetting based on cos^4 law
+        f32 dx = (static_cast<f32>(testX) - static_cast<f32>(cx)) * params.pixelPitch_um * 1e-6f;
+        f32 dy = (static_cast<f32>(testY) - static_cast<f32>(cy)) * params.pixelPitch_um * 1e-6f;
+        f32 r = std::sqrt(dx * dx + dy * dy);
+        f32 theta = std::atan2(r, focal_length_m);
+        f32 cos_theta = std::cos(theta);
+        f32 expected_vignette = cos_theta * cos_theta * cos_theta * cos_theta;
+
+        f32 actual_ratio = testDN / centerDN;
+
+        // Allow 5% tolerance for numerical precision
+        EXPECT_NEAR(actual_ratio, expected_vignette, 0.05f)
+            << "Vignetting at pixel (" << testX << ", " << testY << ") "
+            << "should follow cos^4 law. Expected: " << expected_vignette
+            << ", Actual: " << actual_ratio;
+    }
+}
+
+TEST_F(GenericSensorTest, VignettingScalesWithFOV) {
+    // Wider FOV should produce more vignetting at corners
+    // Use moderate radiance to avoid ADC saturation
+    Image hdr(128, 128, 1);
+    for (auto& val : hdr.data) {
+        val = 0.5f;
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = true;
+    params.isTelecentric = false;
+
+    // Test with narrow FOV
+    params.fov_deg = 20.0f;
+    auto resultNarrow = sensor.Apply(hdr, params);
+    ASSERT_TRUE(resultNarrow.has_value());
+
+    // Test with wide FOV
+    params.fov_deg = 90.0f;
+    GenericSensor sensorWide;
+    auto resultWide = sensorWide.Apply(hdr, params);
+    ASSERT_TRUE(resultWide.has_value());
+
+    const Image& dnNarrow = resultNarrow.value().rawDN;
+    const Image& dnWide = resultWide.value().rawDN;
+
+    // Calculate vignetting ratio at corner for both FOVs
+    u32 centerIdx = 64 * 128 + 64;
+    u32 cornerIdx = 0;
+
+    f32 ratioNarrow = dnNarrow.data[cornerIdx] / dnNarrow.data[centerIdx];
+    f32 ratioWide = dnWide.data[cornerIdx] / dnWide.data[centerIdx];
+
+    // Wide FOV should have more vignetting (lower ratio at corner)
+    EXPECT_LT(ratioWide, ratioNarrow)
+        << "Wider FOV should produce more vignetting at corners";
+}
+
+TEST_F(GenericSensorTest, VignettingSymmetric) {
+    // Vignetting should be radially symmetric
+    // Use moderate radiance to avoid ADC saturation
+    Image hdr(128, 128, 1);
+    for (auto& val : hdr.data) {
+        val = 0.5f;
+    }
+
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    params.enableFPN = false;
+    params.enableVignetting = true;
+    params.fov_deg = 45.0f;
+    params.isTelecentric = false;
+
+    auto result = sensor.Apply(hdr, params);
+    ASSERT_TRUE(result.has_value());
+
+    const Image& dn = result.value().rawDN;
+
+    // Check that points at same distance from center have same DN
+    // Compare four corners of a square around center
+    u32 cx = 64, cy = 64;
+    u32 offset = 30;  // 30 pixels from center
+
+    f32 dnRight = dn(cx + offset, cy, 0);
+    f32 dnLeft = dn(cx - offset, cy, 0);
+    f32 dnUp = dn(cx, cy - offset, 0);
+    f32 dnDown = dn(cx, cy + offset, 0);
+
+    // All four should be approximately equal (radial symmetry)
+    f32 avg = (dnRight + dnLeft + dnUp + dnDown) / 4.0f;
+    f32 tolerance = avg * 0.02f;  // 2% tolerance
+
+    EXPECT_NEAR(dnRight, avg, tolerance);
+    EXPECT_NEAR(dnLeft, avg, tolerance);
+    EXPECT_NEAR(dnUp, avg, tolerance);
+    EXPECT_NEAR(dnDown, avg, tolerance);
+}

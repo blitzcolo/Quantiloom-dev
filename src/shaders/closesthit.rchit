@@ -945,8 +945,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
 
         // Material IR properties (for thermal contribution, usually negligible in SWIR)
-        float emissivity = material.irEmissivity;
-        float reflectance = GetIRReflectance(material);
+        // Use effective emissivity that derives from metallic factor when not set (P1 fix)
+        float emissivity = GetEffectiveIREmissivity(material);
+        float reflectance = GetEffectiveIRReflectance(material);
 
         [unroll]
         for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
@@ -1013,26 +1014,39 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //   - MWIR: 3000-5000nm (Mid-Wave Infrared)
         //   - LWIR: 8000-12000nm (Long-Wave Infrared)
         //
-        // Physics model:
-        //   L_total(λ) = ε(λ) × L_bb(T,λ) + ρ(λ) × L_reflected(λ)
+        // Physics model (updated with solar reflection for MWIR - P2 fix):
+        //   L_total(λ) = ε(λ) × L_bb(T,λ) + ρ(λ) × [L_atm↓(λ) + L_sun(λ)×cos(θ)]
         //
         // where:
-        //   ε(λ) = emissivity (from material.irEmissivity)
+        //   ε(λ) = emissivity (derived from metallicFactor if not set - P1 fix)
         //   L_bb(T,λ) = Planck blackbody radiance at temperature T
         //   ρ(λ) = reflectance = 1 - ε - τ (Kirchhoff's law)
-        //   L_reflected = incident radiance (sun + sky + environment)
+        //   L_atm↓ = atmospheric downwelling radiance (sky thermal)
+        //   L_sun = solar irradiance (significant in MWIR 3-5μm, negligible in LWIR)
+        //
+        // MWIR Solar Contribution (P2 fix):
+        //   At 4μm, solar irradiance ≈ 5 W·m⁻²·μm⁻¹ (AM1.5)
+        //   For T=300K surface: thermal emission ≈ 0.24 W·sr⁻¹·m⁻²·μm⁻¹
+        //   Solar reflection can contribute 5-20% of total radiance for sunlit surfaces!
         //
         // Output: Single grayscale value (band-integrated radiance)
         // ====================================================================
 
-        // Determine wavelength range based on mode
+        // Determine wavelength range and whether to include solar term
         float lambda_min, lambda_max;
+        bool includeSolarReflection = false;  // Only for MWIR during daytime
+
         if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED) {
             lambda_min = 3000.0;   // nm
             lambda_max = 5000.0;   // nm
+            // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
+            // Only include if surface is facing sun and sun is above horizon
+            includeSolarReflection = (NdotL > 0.0);
         } else {  // LWIR
             lambda_min = 8000.0;   // nm
             lambda_max = 12000.0;  // nm
+            // LWIR: solar contribution < 0.1%, skip for performance
+            includeSolarReflection = false;
         }
 
         // Integration parameters
@@ -1042,14 +1056,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Accumulate band-integrated radiance
         float radiance_accum = 0.0;
 
-        // Material IR properties
-        float emissivity = material.irEmissivity;
-        float reflectance = GetIRReflectance(material);  // ρ = 1 - ε - τ
+        // Material IR properties (P1 fix: use effective emissivity from metallic factor)
+        float emissivity = GetEffectiveIREmissivity(material);
+        float reflectance = GetEffectiveIRReflectance(material);
 
         // Atmospheric downwelling radiation temperature
-        // In MWIR/LWIR bands, solar contribution is negligible (~0.1% of thermal)
-        // Incident radiance dominated by atmospheric thermal emission (sky temperature)
         float T_atmosphere = lut.atmosphereTemperature_K;
+
+        // Check if we have spectral solar LUT for accurate MWIR illumination
+        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+
+        // Sun solid angle for converting surface radiance to irradiance
+        // Ω_sun ≈ 6.8e-5 sr (subtends ~0.53° angular diameter)
+        const float SUN_SOLID_ANGLE_SR = 6.8e-5;
 
         // Loop over wavelengths in IR band
         [unroll]
@@ -1064,13 +1083,44 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // 2. Reflected atmospheric downwelling radiation: ρ(λ) × L_atmosphere(T_atm, λ)
-            // This is the thermal radiation from the atmosphere above the surface
-            // NOT the visible RGB radiance (which is negligible in IR bands)
             float L_downwelling = IRPlanckRadiance(T_atmosphere, lambda);
-            float L_reflected = reflectance * L_downwelling;
+            float L_reflected_atm = reflectance * L_downwelling;
 
-            // 3. Total spectral radiance at this wavelength
-            float L_lambda = L_emission + L_reflected;
+            // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
+            float L_reflected_sun = 0.0;
+            if (includeSolarReflection && NdotL > 0.0) {
+                // Get solar spectral irradiance at this MWIR wavelength
+                float sun_irr_lambda = 0.0;
+
+                if (hasSpectralSolarLUT) {
+                    // Query ASTM G-173 or similar (if data extends to MWIR)
+                    sun_irr_lambda = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+                } else {
+                    // Fallback: Planck approximation for sun at 5778K
+                    // L_sun(λ) = B(T_sun, λ) × Ω_sun × (R_sun / D_earth-sun)²
+                    // The irradiance at Earth is already factored into typical solar data
+                    // Here we use Planck at 5778K scaled to match AM0 solar constant
+                    float L_sun_surface = IRPlanckRadiance(5778.0, lambda);
+                    // Scale by sun solid angle to get approximate irradiance
+                    // This is a rough approximation; use spectral LUT for accuracy
+                    sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR * 1e4;  // W/m²/μm approximate
+                }
+
+                // Convert irradiance to radiance and apply Lambertian BRDF
+                // L_reflected = ρ/π × E_sun × cos(θ) for diffuse surfaces
+                // For simplicity, using ρ × (E/π) × NdotL
+                float sun_radiance_lambda = sun_irr_lambda / PI;
+                L_reflected_sun = reflectance * sun_radiance_lambda * NdotL;
+
+                // Apply atmospheric transmittance on sun-surface path (if available)
+                // TODO: Query AtmosphereTransmittanceLUT for accurate path transmittance
+                // For now, assume typical MWIR transmittance of ~0.8 for clear sky
+                const float MWIR_ATM_TRANSMITTANCE_APPROX = 0.8;
+                L_reflected_sun *= MWIR_ATM_TRANSMITTANCE_APPROX;
+            }
+
+            // 4. Total spectral radiance at this wavelength
+            float L_lambda = L_emission + L_reflected_atm + L_reflected_sun;
 
             // Accumulate (Riemann sum)
             radiance_accum += L_lambda * lambda_step;

@@ -236,7 +236,10 @@ bool DeltaTracking(
     float sigma_maj = sigma_t_entry;
 
     // Safety check: if majorant is near zero, atmosphere is negligible
-    if (sigma_maj < 1e-9) {
+    // Threshold: 1e-7 m⁻¹ means mean free path > 10,000 km
+    // At this density, scattering probability < 0.01% per km
+    // This prevents numerical overflow when computing free-flight distance
+    if (sigma_maj < 1e-7) {
         t_scatter = -1.0;
         transmittance = 1.0;
         return false;
@@ -247,9 +250,17 @@ bool DeltaTracking(
     transmittance = 1.0;
 
     for (uint step = 0; step < atmosphere.max_steps; ++step) {
-        // Sample free-flight distance
+        // Sample free-flight distance: t_free = -ln(ξ) / σ_maj
+        // Note: log(xi) is negative for xi ∈ (0,1), so -log(xi) is positive
         float xi = RandomFloat01(random_state);
-        float t_sample = t - log(max(xi, 1e-6)) / sigma_maj;
+        float free_flight = -log(max(xi, 1e-6)) / sigma_maj;
+
+        // Clamp free-flight distance to prevent numerical overflow
+        // Max reasonable distance is 2x the path length through atmosphere
+        float max_free_flight = (t_max - t_min) * 2.0;
+        free_flight = min(free_flight, max_free_flight);
+
+        float t_sample = t + free_flight;
 
         // Check if ray exited medium
         if (t_sample > t_max) {

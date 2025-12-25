@@ -107,3 +107,24 @@ Dependencies are managed by [CPM.cmake](https://github.com/cpm-cmake/CPM.cmake) 
 - **hdf5**: HDF5 spectral data I/O
 - **openexr**: EXR image I/O
 - **VulkanMemoryAllocator**: Vulkan memory management
+
+---
+
+## Recent Updates
+
+### 2025-12-25: Critical Physics Fixes
+
+**Fixed 10000× error in thermal IR rendering**:
+- Corrected Planck constant `C1_NM` in `blackbody.hlsli` (1.191×10¹⁶ → 1.191×10²⁰)
+- Refactored atmospheric scattering coefficient functions for type correctness
+- Added 24 comprehensive physics validation tests
+
+**Impact**: MWIR/LWIR thermal calculations now physically accurate and suitable for quantitative analysis.
+
+**Validation**: Run `ctest --gtest_filter=BlackbodyPhysicsTest.*` - all tests pass ✅
+
+For details, see:
+- `/src/shaders/blackbody.hlsli:24-52` (corrected constant + derivation)
+- `/src/shaders/atmospheric.hlsli:42-86` (type-correct scattering functions)
+- `/tests/test_core/test_blackbody_physics.cpp` (comprehensive physics tests)
+

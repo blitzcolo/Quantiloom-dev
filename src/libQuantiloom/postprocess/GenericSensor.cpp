@@ -168,6 +168,11 @@ auto GenericSensor::ConvolveY(const Image& img, const Vector<f32>& kernel) -> Im
 // ============================================================================
 // Step 2: Radiance → Photo-electrons
 // ============================================================================
+// Implements:
+// - Solid angle calculation for lens aperture
+// - Optional cos^4 natural vignetting (P5 fix)
+// - Photon counting with quantum efficiency
+// ============================================================================
 
 auto GenericSensor::RadianceToElectrons(const Image& radiance,
                                          const SensorParams& p) -> Image {
@@ -186,41 +191,104 @@ auto GenericSensor::RadianceToElectrons(const Image& radiance,
     Log::Debug("Optics: f# = {:.1f}, Ω = {:.6e} sr, pixel area = {:.3e} m²",
                p.fNumber, solidAngle_sr, pixelArea_m2);
 
+    // ========================================================================
+    // Vignetting setup (P5 fix: cos^4 natural vignetting)
+    // ========================================================================
+    // Compute image center and focal length for vignetting calculation
+    const f32 cx = static_cast<f32>(radiance.width) / 2.0f;
+    const f32 cy = static_cast<f32>(radiance.height) / 2.0f;
+
+    // Focal length from FOV:
+    // tan(FOV/2) = (sensor_width/2) / focal_length
+    // focal_length = (width * pitch) / (2 * tan(FOV/2))
+    f32 focal_length_m = 0.0f;
+    if (p.enableVignetting && !p.isTelecentric && p.fov_deg > 0.0f) {
+        const f32 fov_half_rad = p.fov_deg * 0.5f * (std::numbers::pi_v<f32> / 180.0f);
+        const f32 sensor_half_width = cx * p.pixelPitch_um * 1e-6f;
+        focal_length_m = sensor_half_width / std::tan(fov_half_rad);
+        Log::Debug("Vignetting enabled: FOV={:.1f}°, focal_length={:.1f}mm",
+                   p.fov_deg, focal_length_m * 1000.0f);
+    }
+
     // Statistics for debugging
     f64 minElectrons = 1e10, maxElectrons = 0.0, sumElectrons = 0.0;
+    f32 minVignette = 1.0f, maxVignette = 1.0f;
 
-    for (u32 i = 0; i < radiance.TotalElements(); ++i) {
-        // Input: radiance L (W/m²/sr)
-        // Irradiance: E = L · Ω (W/m²)
-        const f64 irradiance_W_m2 = radiance.data[i] * solidAngle_sr;
+    for (u32 y = 0; y < radiance.height; ++y) {
+        for (u32 x = 0; x < radiance.width; ++x) {
+            // ================================================================
+            // Compute vignetting factor for this pixel
+            // ================================================================
+            f32 vignette = 1.0f;
+            if (p.enableVignetting && !p.isTelecentric && focal_length_m > 0.0f) {
+                // Distance from optical axis (in meters)
+                const f32 dx = (static_cast<f32>(x) - cx) * p.pixelPitch_um * 1e-6f;
+                const f32 dy = (static_cast<f32>(y) - cy) * p.pixelPitch_um * 1e-6f;
+                const f32 r = std::sqrt(dx * dx + dy * dy);
 
-        // Energy collected: E_total = E · A · t (Joules)
-        const f64 energy_J = irradiance_W_m2 * pixelArea_m2 * p.integrationTime_s;
+                // Angle from optical axis: θ = atan(r / f)
+                const f32 theta = std::atan2(r, focal_length_m);
 
-        // Number of photons: N_photons = E_total / E_photon
-        const f64 numPhotons = energy_J / photonEnergy_J;
+                // Cos^4 vignetting law:
+                // E(θ) = E(0) × cos⁴(θ)
+                // Components:
+                //   - cos θ: oblique incidence on sensor (Lambert)
+                //   - cos θ: reduced solid angle of exit pupil
+                //   - cos² θ: increased image distance (inverse-square)
+                const f32 cos_theta = std::cos(theta);
+                vignette = cos_theta * cos_theta * cos_theta * cos_theta;
 
-        // Number of photo-electrons: N_e = N_photons · QE
-        f64 numElectrons = numPhotons * p.quantumEfficiency;
+                // Update statistics
+                minVignette = std::min(minVignette, vignette);
+                maxVignette = std::max(maxVignette, vignette);
+            }
 
-        // Add dark current
-        if (p.enableDarkCurrent) {
-            numElectrons += p.darkCurrent_e_s * p.integrationTime_s;
+            // Effective solid angle with vignetting applied
+            const f64 effective_solidAngle_sr = solidAngle_sr * static_cast<f64>(vignette);
+
+            // Process all channels for this pixel
+            for (u32 c = 0; c < radiance.channels; ++c) {
+                const u32 idx = (y * radiance.width + x) * radiance.channels + c;
+
+                // Input: radiance L (W/m²/sr)
+                // Irradiance: E = L · Ω (W/m²)
+                const f64 irradiance_W_m2 = radiance.data[idx] * effective_solidAngle_sr;
+
+                // Energy collected: E_total = E · A · t (Joules)
+                const f64 energy_J = irradiance_W_m2 * pixelArea_m2 * p.integrationTime_s;
+
+                // Number of photons: N_photons = E_total / E_photon
+                const f64 numPhotons = energy_J / photonEnergy_J;
+
+                // Number of photo-electrons: N_e = N_photons · QE
+                f64 numElectrons = numPhotons * p.quantumEfficiency;
+
+                // Add dark current
+                if (p.enableDarkCurrent) {
+                    numElectrons += p.darkCurrent_e_s * p.integrationTime_s;
+                }
+
+                // Clamp to well capacity
+                numElectrons = std::min(numElectrons, static_cast<f64>(p.wellCapacity_e));
+
+                electrons.data[idx] = static_cast<f32>(numElectrons);
+
+                // Update statistics
+                minElectrons = std::min(minElectrons, numElectrons);
+                maxElectrons = std::max(maxElectrons, numElectrons);
+                sumElectrons += numElectrons;
+            }
         }
-
-        // Clamp to well capacity
-        numElectrons = std::min(numElectrons, static_cast<f64>(p.wellCapacity_e));
-
-        electrons.data[i] = static_cast<f32>(numElectrons);
-
-        // Update statistics
-        minElectrons = std::min(minElectrons, numElectrons);
-        maxElectrons = std::max(maxElectrons, numElectrons);
-        sumElectrons += numElectrons;
     }
 
     const f64 avgElectrons = sumElectrons / radiance.TotalElements();
-    Log::Debug("Electrons: min={:.1f}, max={:.1f}, avg={:.1f} e-", minElectrons, maxElectrons, avgElectrons);
+    Log::Debug("Electrons: min={:.1f}, max={:.1f}, avg={:.1f} e-",
+               minElectrons, maxElectrons, avgElectrons);
+
+    if (p.enableVignetting && !p.isTelecentric) {
+        Log::Debug("Vignetting: center={:.2f}, edge={:.2f} ({:.1f}% falloff)",
+                   maxVignette, minVignette, (1.0f - minVignette) * 100.0f);
+    }
 
     return electrons;
 }

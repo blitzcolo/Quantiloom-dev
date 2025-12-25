@@ -49,6 +49,11 @@ struct SensorParams {
 
     // Wavelength (for QE calculation, optional)
     f32 wavelength_nm = 550.0f;         // Peak wavelength (nm)
+
+    // Vignetting (optical falloff at image edges)
+    bool enableVignetting = false;      // Enable cos^4 natural vignetting
+    f32 fov_deg = 45.0f;                // Horizontal field of view (degrees)
+    bool isTelecentric = false;         // Telecentric lens (no vignetting)
 };
 
 /// Sensor output containing both raw DN and enhanced preview

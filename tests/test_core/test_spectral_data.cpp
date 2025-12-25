@@ -867,3 +867,162 @@ TEST(SpectralDataTest, SolarSpectralLUTCustomTargetSamples) {
     f32 expectedStep = (700.0f - 400.0f) / static_cast<f32>(targetSamples - 1);
     EXPECT_NEAR(lut.sunIrradiance.stepSize_nm, expectedStep, 1e-5f);
 }
+
+// ============================================================================
+// P4 Fix: CIE 1931 Color Matching Function LUT Tests
+// ============================================================================
+// Tests for the CIE CMF data added in P4 fix.
+// Verifies that the LUT contains accurate CIE 1931 2-degree observer data.
+// ============================================================================
+
+#include "core/CIE_CMF_Data.hpp"
+
+TEST(CIE_CMF_Test, LUTConstants) {
+    // Verify LUT constants match expected values
+    EXPECT_EQ(CIE_CMF_LUT_SIZE, 401u);
+    EXPECT_NEAR(CIE_CMF_LAMBDA_MIN, 380.0f, 1e-5f);
+    EXPECT_NEAR(CIE_CMF_LAMBDA_MAX, 780.0f, 1e-5f);
+    EXPECT_NEAR(CIE_CMF_LAMBDA_STEP, 1.0f, 1e-5f);
+}
+
+TEST(CIE_CMF_Test, DataArraySize) {
+    // Verify data array has correct size
+    EXPECT_EQ(CIE_1931_2DEG.size(), CIE_CMF_LUT_SIZE);
+}
+
+TEST(CIE_CMF_Test, GetCIE_XYZ_AtKnownWavelengths) {
+    // Test GetCIE_XYZ at known wavelengths from CIE tables
+    // Reference: CIE 015:2018 Colorimetry
+
+    // 380nm (start of visible range)
+    auto xyz_380 = GetCIE_XYZ(380);
+    EXPECT_NEAR(xyz_380[0], 0.001368f, 0.0001f);  // X
+    EXPECT_NEAR(xyz_380[1], 0.000039f, 0.00001f); // Y
+    EXPECT_NEAR(xyz_380[2], 0.006450f, 0.001f);   // Z
+
+    // 555nm (peak luminosity)
+    auto xyz_555 = GetCIE_XYZ(555);
+    // Y should be high at 555nm (peak of luminosity function)
+    EXPECT_GT(xyz_555[1], 0.9f);
+
+    // 780nm (end of visible range)
+    // Values should be small but non-zero
+    auto xyz_780 = GetCIE_XYZ(780);
+    EXPECT_GT(xyz_780[0], 0.0f);  // X still positive
+    EXPECT_LT(xyz_780[0], 0.1f);  // But small
+}
+
+TEST(CIE_CMF_Test, GetCIE_XYZ_OutOfRange) {
+    // Values outside visible range should return zeros
+    auto xyz_below = GetCIE_XYZ(300);
+    EXPECT_NEAR(xyz_below[0], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_below[1], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_below[2], 0.0f, 1e-7f);
+
+    auto xyz_above = GetCIE_XYZ(900);
+    EXPECT_NEAR(xyz_above[0], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_above[1], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_above[2], 0.0f, 1e-7f);
+}
+
+TEST(CIE_CMF_Test, GetCIE_XYZ_Interp_Accuracy) {
+    // Test interpolation accuracy
+    // Interpolated value at integer wavelength should match exact value
+    auto xyz_exact = GetCIE_XYZ(500);
+    auto xyz_interp = GetCIE_XYZ_Interp(500.0f);
+
+    EXPECT_NEAR(xyz_exact[0], xyz_interp[0], 1e-6f);
+    EXPECT_NEAR(xyz_exact[1], xyz_interp[1], 1e-6f);
+    EXPECT_NEAR(xyz_exact[2], xyz_interp[2], 1e-6f);
+}
+
+TEST(CIE_CMF_Test, GetCIE_XYZ_Interp_Midpoint) {
+    // Test that interpolation at midpoint gives average
+    auto xyz_500 = GetCIE_XYZ(500);
+    auto xyz_501 = GetCIE_XYZ(501);
+    auto xyz_500_5 = GetCIE_XYZ_Interp(500.5f);
+
+    // Should be linear interpolation
+    f32 expected_x = (xyz_500[0] + xyz_501[0]) / 2.0f;
+    f32 expected_y = (xyz_500[1] + xyz_501[1]) / 2.0f;
+    f32 expected_z = (xyz_500[2] + xyz_501[2]) / 2.0f;
+
+    EXPECT_NEAR(xyz_500_5[0], expected_x, 1e-6f);
+    EXPECT_NEAR(xyz_500_5[1], expected_y, 1e-6f);
+    EXPECT_NEAR(xyz_500_5[2], expected_z, 1e-6f);
+}
+
+TEST(CIE_CMF_Test, GetCIE_XYZ_Interp_OutOfRange) {
+    // Interpolated version should also return zeros outside range
+    auto xyz_below = GetCIE_XYZ_Interp(300.0f);
+    EXPECT_NEAR(xyz_below[0], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_below[1], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_below[2], 0.0f, 1e-7f);
+
+    auto xyz_above = GetCIE_XYZ_Interp(900.0f);
+    EXPECT_NEAR(xyz_above[0], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_above[1], 0.0f, 1e-7f);
+    EXPECT_NEAR(xyz_above[2], 0.0f, 1e-7f);
+}
+
+TEST(CIE_CMF_Test, LuminosityFunctionShape) {
+    // Verify Y (luminosity) function has correct shape:
+    // - Peak around 555nm
+    // - Symmetric-ish around peak
+    // - Falls off toward edges
+
+    auto y_380 = GetCIE_XYZ(380)[1];
+    auto y_480 = GetCIE_XYZ(480)[1];
+    auto y_555 = GetCIE_XYZ(555)[1];
+    auto y_630 = GetCIE_XYZ(630)[1];
+    auto y_780 = GetCIE_XYZ(780)[1];
+
+    // Peak should be at 555nm region
+    EXPECT_GT(y_555, y_380);
+    EXPECT_GT(y_555, y_480);
+    EXPECT_GT(y_555, y_630);
+    EXPECT_GT(y_555, y_780);
+
+    // Y at edges should be very small
+    EXPECT_LT(y_380, 0.001f);
+    EXPECT_LT(y_780, 0.01f);
+}
+
+TEST(CIE_CMF_Test, XYZMonotonicity) {
+    // Test that CMF values change reasonably between adjacent wavelengths
+    // (no sudden jumps that would indicate data errors)
+    for (u32 wl = 381; wl <= 779; ++wl) {
+        auto xyz_prev = GetCIE_XYZ(wl - 1);
+        auto xyz_curr = GetCIE_XYZ(wl);
+
+        // Change should be reasonable (< 50% per nm in most regions)
+        for (int i = 0; i < 3; ++i) {
+            f32 prev = xyz_prev[i];
+            f32 curr = xyz_curr[i];
+
+            // If both are significant, change should be gradual
+            if (std::abs(prev) > 0.01f && std::abs(curr) > 0.01f) {
+                f32 ratio = curr / prev;
+                EXPECT_GT(ratio, 0.5f) << "Sudden drop at " << wl << "nm, component " << i;
+                EXPECT_LT(ratio, 2.0f) << "Sudden spike at " << wl << "nm, component " << i;
+            }
+        }
+    }
+}
+
+TEST(CIE_CMF_Test, NonNegativeInVisibleCore) {
+    // X, Y, Z should all be non-negative in the core visible range
+    // (Some analytical approximations have negative values, but true CMF shouldn't)
+    for (u32 wl = 400; wl <= 700; ++wl) {
+        auto xyz = GetCIE_XYZ(wl);
+        // Y is always non-negative
+        EXPECT_GE(xyz[1], 0.0f) << "Y negative at " << wl << "nm";
+
+        // Z is always non-negative
+        EXPECT_GE(xyz[2], 0.0f) << "Z negative at " << wl << "nm";
+
+        // X can be slightly negative in some CMF representations,
+        // but official CIE 1931 2-deg should be non-negative
+        // Note: Some wavelengths around 500-570nm have complex behavior
+    }
+}

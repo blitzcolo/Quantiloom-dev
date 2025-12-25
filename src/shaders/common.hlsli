@@ -526,6 +526,69 @@ float GetIRReflectance(MaterialData mat) {
 }
 
 // ============================================================================
+// Helper: Get Effective IR Emissivity (P1 Fix: Metallic-Emissivity Consistency)
+// ============================================================================
+// Derives IR emissivity from PBR metallic factor when not explicitly set.
+//
+// Physical basis (Kirchhoff's Law):
+//   For opaque materials at thermal equilibrium: ε = α = 1 - ρ
+//   Metals have high reflectance ρ → low emissivity ε
+//   Dielectrics have lower ρ → higher ε
+//
+// The relationship between metallicFactor and emissivity:
+//   - metallicFactor = 0 (dielectric): ε ≈ 0.90-0.98 (typical for plastics, paint)
+//   - metallicFactor = 1 (polished metal): ε ≈ 0.03-0.10 (typical for polished Al, Cu)
+//   - Oxidized metals have intermediate values
+//
+// When irEmissivity < 0 (sentinel value), derive from metallicFactor:
+//   ε_derived = 0.95 - 0.90 × metallic
+//   → metallic=0: ε=0.95 (matte dielectric)
+//   → metallic=1: ε=0.05 (polished metal)
+//
+// Input:
+//   mat: MaterialData with irEmissivity and metallicFactor
+//
+// Returns:
+//   Effective IR emissivity [0, 1]
+//
+// Reference: "Handbook of Optical Constants" (Palik, 1985)
+// ============================================================================
+
+float GetEffectiveIREmissivity(MaterialData mat) {
+    // Sentinel value: irEmissivity < 0 means "derive from PBR properties"
+    if (mat.irEmissivity < 0.0) {
+        // Derive emissivity from metallic factor using physically-based model
+        // Base emissivity for dielectric: 0.95 (rough surface, high absorptance)
+        // Metal emissivity reduction: up to 0.90 (leaving 0.05 for polished metal)
+        // The 0.90 factor accounts for typical metal reflectance ρ ≈ 0.95
+        float emissivity_derived = 0.95 - 0.90 * mat.metallicFactor;
+
+        // Apply roughness correction: rough metals have higher emissivity
+        // due to micro-cavity effects (multiple reflections increase absorptance)
+        // Rough metal: ε increases by up to 2x the polished value
+        float roughness_correction = mat.metallicFactor * mat.roughnessFactor * 0.15;
+        emissivity_derived += roughness_correction;
+
+        return saturate(emissivity_derived);
+    }
+
+    // Use explicitly specified emissivity
+    return mat.irEmissivity;
+}
+
+// ============================================================================
+// Helper: Get Effective IR Reflectance (uses derived emissivity)
+// ============================================================================
+// Same as GetIRReflectance but uses GetEffectiveIREmissivity for metallic consistency.
+// Use this function for IR rendering to ensure Kirchhoff's law compliance.
+// ============================================================================
+
+float GetEffectiveIRReflectance(MaterialData mat) {
+    float emissivity = GetEffectiveIREmissivity(mat);
+    return saturate(1.0 - emissivity - mat.irTransmittance);
+}
+
+// ============================================================================
 // Helper: Validate Energy Conservation for IR Material
 // ============================================================================
 // Checks if IR material properties satisfy energy conservation: ε + ρ + τ ≤ 1
