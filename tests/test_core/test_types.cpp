@@ -225,13 +225,26 @@ TEST(TypesTest, MathConstants) {
 TEST(TypesTest, SpectralRangeConstants) {
     using namespace constants;
 
+    // Visible spectrum (CIE standard)
     EXPECT_EQ(WAVELENGTH_MIN_VISIBLE, 380.0f);
-    EXPECT_EQ(WAVELENGTH_MAX_VISIBLE, 760.0f);
-    EXPECT_EQ(WAVELENGTH_MIN_IR, 760.0f);
-    EXPECT_EQ(WAVELENGTH_MAX_IR, 2500.0f);
+    EXPECT_EQ(WAVELENGTH_MAX_VISIBLE, 780.0f);
 
-    // Visible and IR ranges should connect
-    EXPECT_EQ(WAVELENGTH_MAX_VISIBLE, WAVELENGTH_MIN_IR);
+    // SWIR band (Short-Wave Infrared)
+    EXPECT_EQ(WAVELENGTH_MIN_SWIR, 1000.0f);
+    EXPECT_EQ(WAVELENGTH_MAX_SWIR, 2500.0f);
+
+    // MWIR band (Mid-Wave Infrared)
+    EXPECT_EQ(WAVELENGTH_MIN_MWIR, 3000.0f);
+    EXPECT_EQ(WAVELENGTH_MAX_MWIR, 5000.0f);
+
+    // LWIR band (Long-Wave Infrared)
+    EXPECT_EQ(WAVELENGTH_MIN_LWIR, 8000.0f);
+    EXPECT_EQ(WAVELENGTH_MAX_LWIR, 12000.0f);
+
+    // Bands should be in increasing order
+    EXPECT_LT(WAVELENGTH_MAX_VISIBLE, WAVELENGTH_MIN_SWIR);
+    EXPECT_LT(WAVELENGTH_MAX_SWIR, WAVELENGTH_MIN_MWIR);
+    EXPECT_LT(WAVELENGTH_MAX_MWIR, WAVELENGTH_MIN_LWIR);
 }
 
 TEST(TypesTest, PhysicalConstants) {

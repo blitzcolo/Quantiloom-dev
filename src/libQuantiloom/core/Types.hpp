@@ -252,10 +252,23 @@ namespace constants {
     inline constexpr f64 INV_PI = 1.0 / PI;
 
     // Spectral range (nanometers)
+    // Visible spectrum
     inline constexpr Wavelength WAVELENGTH_MIN_VISIBLE = 380.0f;
-    inline constexpr Wavelength WAVELENGTH_MAX_VISIBLE = 760.0f;
-    inline constexpr Wavelength WAVELENGTH_MIN_IR = 760.0f;
-    inline constexpr Wavelength WAVELENGTH_MAX_IR = 2500.0f;
+    inline constexpr Wavelength WAVELENGTH_MAX_VISIBLE = 780.0f;  // Standard CIE visible range ends at 780nm
+
+    // Infrared bands (following ISO 20473 classification)
+    // NIR: Near-Infrared (780-1400nm) - not currently used
+    // SWIR: Short-Wave Infrared (1000-2500nm)
+    inline constexpr Wavelength WAVELENGTH_MIN_SWIR = 1000.0f;
+    inline constexpr Wavelength WAVELENGTH_MAX_SWIR = 2500.0f;
+
+    // MWIR: Mid-Wave Infrared (3000-5000nm)
+    inline constexpr Wavelength WAVELENGTH_MIN_MWIR = 3000.0f;
+    inline constexpr Wavelength WAVELENGTH_MAX_MWIR = 5000.0f;
+
+    // LWIR: Long-Wave Infrared (8000-12000nm)
+    inline constexpr Wavelength WAVELENGTH_MIN_LWIR = 8000.0f;
+    inline constexpr Wavelength WAVELENGTH_MAX_LWIR = 12000.0f;
 
     // Speed of light (m/s)
     inline constexpr f64 SPEED_OF_LIGHT = 299792458.0;

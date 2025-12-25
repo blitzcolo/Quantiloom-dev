@@ -294,8 +294,38 @@ bool DeltaTracking(
     }
 
     // Max steps exceeded: treat as no collision
+    // Use path-integrated transmittance approximation instead of single-point estimate
+    //
+    // IMPROVED APPROXIMATION:
+    // For exponentially decaying atmosphere, using only the entry point extinction
+    // overestimates absorption. We use trapezoidal integration with entry/exit points
+    // and midpoint for better accuracy:
+    //   τ ≈ (σ_entry + 4×σ_mid + σ_exit) / 6 × path_length (Simpson's rule)
+    //
+    // This reduces error from O(path_length) to O(path_length³) for smooth profiles.
     t_scatter = -1.0;
-    transmittance = exp(-sigma_maj * (t_max - t_min));  // Approximate transmittance
+
+    float3 pos_exit = ray_origin + ray_dir * t_max;
+    float altitude_exit = GetAltitude(pos_exit, planet_center, atmosphere.planet_radius);
+
+    float3 pos_mid = ray_origin + ray_dir * ((t_min + t_max) * 0.5);
+    float altitude_mid = GetAltitude(pos_mid, planet_center, atmosphere.planet_radius);
+
+    // Compute extinction at exit and midpoint
+    float rho_r_exit = AtmosphericDensity(altitude_exit, atmosphere.rayleigh_scale_height);
+    float rho_m_exit = AtmosphericDensity(altitude_exit, atmosphere.mie_scale_height);
+    float sigma_exit = (beta_r * rho_r_exit) + (beta_m * rho_m_exit);
+
+    float rho_r_mid = AtmosphericDensity(altitude_mid, atmosphere.rayleigh_scale_height);
+    float rho_m_mid = AtmosphericDensity(altitude_mid, atmosphere.mie_scale_height);
+    float sigma_mid = (beta_r * rho_r_mid) + (beta_m * rho_m_mid);
+
+    // Simpson's rule: (f(a) + 4f(m) + f(b)) / 6 × (b - a)
+    float sigma_avg = (sigma_t_entry + 4.0 * sigma_mid + sigma_exit) / 6.0;
+    float path_length = t_max - t_min;
+    float optical_depth = sigma_avg * path_length;
+
+    transmittance = exp(-optical_depth);
     return false;
 }
 

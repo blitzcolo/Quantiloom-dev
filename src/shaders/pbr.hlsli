@@ -102,7 +102,7 @@ float GeometrySmith(float NdotV, float NdotL, float roughness) {
 // - Reduces "fireflies" artifacts at grazing angles
 //
 // MATHEMATICAL DERIVATION:
-// For Schlick-GGX with k = (roughness+1)²/8:
+// For Schlick-GGX with k = (roughness+1)²/8 (direct) or k = roughness²/2 (IBL):
 //   G = G₁(NdotL) × G₁(NdotV)
 //   G₁(x) = x / (x(1-k) + k)
 //
@@ -113,13 +113,19 @@ float GeometrySmith(float NdotV, float NdotL, float roughness) {
 //
 // This formulation completely eliminates NdotV and NdotL from the numerator!
 //
+// TWO VERSIONS PROVIDED:
+// - VisibilitySmithGGXCorrelated: For direct lighting, k = (roughness+1)²/8
+// - VisibilitySmithGGXCorrelatedIBL: For IBL, k = roughness²/2
+//
 // References:
 // - "Optimizing PBR" (Sébastien Lagarde, 2014)
 // - "Moving Frostbite to PBR" (EA Frostbite, 2014)
+// - "Real Shading in Unreal Engine 4" (Brian Karis, Epic Games, 2013)
 // ============================================================================
 
 float VisibilitySmithGGXCorrelated(float NdotV, float NdotL, float roughness) {
     // Remap roughness for direct lighting (Epic Games approach)
+    // k = (roughness + 1)² / 8
     float r = roughness + 1.0;
     float k = (r * r) / 8.0;
 
@@ -130,6 +136,35 @@ float VisibilitySmithGGXCorrelated(float NdotV, float NdotL, float roughness) {
     float denomV = NdotV * oneMinusK + k;
 
     // Combined denominator with safety clamp
+    float denominator = 4.0 * denomL * denomV;
+
+    return 1.0 / max(denominator, EPSILON);
+}
+
+// ============================================================================
+// IBL-Specific Visibility Term
+// ============================================================================
+// For Image-Based Lighting, the k remapping differs from direct lighting:
+//   k_ibl = roughness² / 2
+//
+// This is because IBL integrates over the entire hemisphere, not a single
+// light direction. The different k value better approximates the geometry
+// term for environment lighting.
+//
+// Reference: "Real Shading in Unreal Engine 4" (Brian Karis, 2013)
+// ============================================================================
+
+float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness) {
+    // Remap roughness for IBL
+    // k = roughness² / 2
+    float alpha = roughness * roughness;
+    float k = alpha / 2.0;
+
+    // Same optimized formulation as direct lighting
+    float oneMinusK = 1.0 - k;
+    float denomL = NdotL * oneMinusK + k;
+    float denomV = NdotV * oneMinusK + k;
+
     float denominator = 4.0 * denomL * denomV;
 
     return 1.0 / max(denominator, EPSILON);

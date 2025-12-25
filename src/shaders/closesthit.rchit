@@ -791,9 +791,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float kD_lambda = (1.0 - metallic);  // Metals have no diffuse
             float L_ambient = kD_lambda * rho_lambda / PI * sky_radiance_lambda;
 
-            float L_lambda = L_direct + L_ambient;
+            // 4. Emissive contribution (spectrally integrated)
+            // Convert emissive RGB to spectral radiance at this wavelength
+            // This ensures proper color reproduction for self-luminous surfaces
+            float L_emissive = ConvertLinearRGBToSpectrum(emissive, lambda);
 
-            // 4. Weight by CIE XYZ color matching functions
+            float L_lambda = L_direct + L_ambient + L_emissive;
+
+            // 5. Weight by CIE XYZ color matching functions
             float x_bar = CIE_X(lambda);
             float y_bar = CIE_Y(lambda);
             float z_bar = CIE_Z(lambda);
@@ -810,10 +815,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // XYZ → Linear RGB (sRGB D65)
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
 
-        // Add emissive (assumed to be linear RGB, not spectral)
-        output_radiance += emissive;
-
         // Add IBL specular reflection (already computed in RGB)
+        // NOTE: IBL uses prefiltered environment map which is already in RGB space.
+        // For full spectral correctness, IBL would need spectral environment maps,
+        // but this is computationally prohibitive and rarely done in practice.
         output_radiance += iblSpecular;
 
         // Validation: clamp and sanitize to prevent NaN/Inf
