@@ -157,7 +157,7 @@ private:
 
 class QL_API TLAS {
 public:
-    TLAS(VulkanContext& context);
+    explicit TLAS(VulkanContext& context);
     ~TLAS();
 
     // Non-copyable, movable

@@ -134,7 +134,7 @@ struct MaterialSpectralData {
 
     // Check if material has data for a specific band
     [[nodiscard]] bool HasBand(const String& bandName) const {
-        return bands.find(bandName) != bands.end();
+        return bands.contains(bandName);
     }
 };
 

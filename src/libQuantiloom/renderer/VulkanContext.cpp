@@ -66,8 +66,8 @@ VulkanContext::~VulkanContext() {
     // Destroy debug messenger if it was created (always check, regardless of build config)
     // This avoids ODR issues where different TUs have different QUANTILOOM_ENABLE_VALIDATION
     if (m_debugMessenger != VK_NULL_HANDLE) {
-        auto func = (PFN_vkDestroyDebugUtilsMessengerEXT)
-            vkGetInstanceProcAddr(m_instance, "vkDestroyDebugUtilsMessengerEXT");
+        auto func = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(
+            m_instance, "vkDestroyDebugUtilsMessengerEXT"));
         if (func != nullptr) {
             func(m_instance, m_debugMessenger, nullptr);
         }
@@ -129,8 +129,8 @@ void VulkanContext::SetupDebugMessenger() {
         VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     createInfo.pfnUserCallback = DebugCallback;
 
-    auto func = (PFN_vkCreateDebugUtilsMessengerEXT)
-        vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT");
+    auto func = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+        vkGetInstanceProcAddr(m_instance, "vkCreateDebugUtilsMessengerEXT"));
 
     if (func != nullptr) {
         VkResult result = func(m_instance, &createInfo, nullptr, &m_debugMessenger);
@@ -365,7 +365,7 @@ std::vector<const char*> VulkanContext::GetRequiredValidationLayers() {
     return layers;
 }
 
-bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) const {
+bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties deviceProperties;
     vkGetPhysicalDeviceProperties(device, &deviceProperties);
 

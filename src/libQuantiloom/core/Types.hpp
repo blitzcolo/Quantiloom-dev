@@ -169,6 +169,7 @@ public:
     };
 
     Result(Err&& err) : m_data(std::move(err.error)) {}
+    Result(const Err& err) : m_data(err.error) {}
 
     // Check if result holds a value
     [[nodiscard]] bool has_value() const { return std::holds_alternative<T>(m_data); }

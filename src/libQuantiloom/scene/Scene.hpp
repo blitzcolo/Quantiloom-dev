@@ -60,7 +60,7 @@ struct SpectralBand {
     f32 center_nm = 550.0f;
     f32 fwhm_nm = 40.0f;
 
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         return center_nm > 0.0f && fwhm_nm > 0.0f;
     }
 };
@@ -165,17 +165,17 @@ public:
     // ========================================================================
 
     // Check if scene is valid
-    bool IsValid() const;
+    [[nodiscard]] bool IsValid() const;
 
     // Get total triangle count
-    u32 GetTotalTriangleCount() const;
+    [[nodiscard]] u32 GetTotalTriangleCount() const;
 
     // Get total vertex count
-    u32 GetTotalVertexCount() const;
+    [[nodiscard]] u32 GetTotalVertexCount() const;
 
     // Get scene bounding box diagonal length (meters)
     // Used for automatic atmospheric scattering enable/disable
-    f32 GetBoundingBoxSize() const;
+    [[nodiscard]] f32 GetBoundingBoxSize() const;
 
     // Print scene summary (for debugging)
     void PrintSummary() const;

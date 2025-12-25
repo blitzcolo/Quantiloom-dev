@@ -15,7 +15,7 @@ using namespace quantiloom;
 // ============================================================================
 // This environment is set up once before all tests and torn down after all tests.
 
-class QuantiloomTestEnvironment : public ::testing::Environment {
+class QuantiloomTestEnvironment final : public ::testing::Environment {
 public:
     void SetUp() override {
         // Initialize logging system for tests

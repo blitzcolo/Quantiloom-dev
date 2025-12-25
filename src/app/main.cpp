@@ -199,25 +199,25 @@ std::vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize) {
 // Load scene from config file
 // Returns either procedural scene or glTF-loaded scene
 // For glTF scenes, also populates materials and textures
-Result<Scene, String> LoadSceneFromConfig(const Config& config) {
+Result<Scene> LoadSceneFromConfig(const Config& config) {
     Scene scene;
 
     // Check for glTF file
     if (config.Has("scene.gltf")) {
-        String gltfPath = config.Get<String>("scene.gltf");
+        auto gltfPath = config.Get<String>("scene.gltf");
         QL_LOG_INFO("Loading glTF model: {}", gltfPath);
 
         auto result = GltfLoader::LoadFromFile(gltfPath);
         if (!result.has_value()) {
-            return Result<Scene, String>::Err("Failed to load glTF: " + result.error());
+            return Result<Scene>(Result<Scene>::Err("Failed to load glTF: " + result.error()));
         }
 
-        return std::move(result.value());
+        return Result(std::move(result.value()));
     }
 
     // Check for procedural preset
     if (config.Has("scene.preset")) {
-        String preset = config.Get<String>("scene.preset", "cornell_box");
+        auto preset = config.Get<String>("scene.preset", "cornell_box");
         QL_LOG_INFO("Loading built-in scene preset: {}", preset);
 
         Mesh mesh;
@@ -243,7 +243,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
         node.name = "SceneRoot";
         scene.nodes.push_back(node);
 
-        return std::move(scene);
+        return Result(std::move(scene));
     }
 
     // Default: Cornell box
@@ -258,7 +258,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
     node.name = "SceneRoot";
     scene.nodes.push_back(node);
 
-    return std::move(scene);
+    return Result(std::move(scene));
 }
 
 // ============================================================================
@@ -314,14 +314,14 @@ int main(int argc, char* argv[]) {
         u32 width = resArray[0];
         u32 height = resArray[1];
         u32 spp = config.Get<u32>("renderer.spp", 1);
-        String outputPath = config.Get<String>("renderer.output", "spectral_output.exr");
+        auto outputPath = config.Get<String>("renderer.output", "spectral_output.exr");
 
         QL_LOG_INFO("  Resolution: {}x{}", width, height);
         QL_LOG_INFO("  Samples per pixel: {}", spp);
         QL_LOG_INFO("  Output: {}", outputPath);
 
         // Spectral settings
-        String spectralModeStr = config.Get<String>("spectral.mode", "rgb");  // Default to RGB
+        auto spectralModeStr = config.Get<String>("spectral.mode", "rgb");  // Default to RGB
 
         // Parse spectral mode
         auto spectralModeResult = ParseSpectralMode(spectralModeStr);
@@ -558,8 +558,7 @@ int main(int argc, char* argv[]) {
             for (const auto& node : loadedScene.nodes) {
                 const Mesh& mesh = loadedScene.meshes[node.meshIndex];
 
-                for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
-                    const auto& primitive = mesh.primitives[primIdx];
+                for (const auto & primitive : mesh.primitives) {
                     tlas.AddInstance(
                         blasList[blasIndex],
                         primitive.materialId,
@@ -714,8 +713,8 @@ int main(int argc, char* argv[]) {
         String activeBand = "VIS";  // Default to visible band
 
         if (config.Has("spectral.basis_file") && config.Has("spectral.materials_json")) {
-            String basisFilePath = config.Get<String>("spectral.basis_file");
-            String materialsJsonPath = config.Get<String>("spectral.materials_json");
+            auto basisFilePath = config.Get<String>("spectral.basis_file");
+            auto materialsJsonPath = config.Get<String>("spectral.materials_json");
             activeBand = config.Get<String>("spectral.band", "VIS");
 
             QL_LOG_INFO("Loading SpectralBaker NMF basis data...");
@@ -923,7 +922,7 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<GpuBuffer> atmosphericParamsBuffer;
 
         if (config.Has("lighting.solar_lut")) {
-            String solarLutPath = config.Get<String>("lighting.solar_lut");
+            auto solarLutPath = config.Get<String>("lighting.solar_lut");
             QL_LOG_INFO("  Loading solar LUT from: {}", solarLutPath);
 
             // Load using existing libRadtran/uvspec loader (format is compatible)
@@ -991,7 +990,7 @@ int main(int argc, char* argv[]) {
 
         // Check if user explicitly configured atmospheric settings in TOML
         if (config.Has("atmospheric.preset")) {
-            String preset = config.Get<String>("atmospheric.preset");
+            auto preset = config.Get<String>("atmospheric.preset");
             QL_LOG_INFO("  User-specified atmospheric preset: {}", preset);
 
             if (preset == "disabled") {

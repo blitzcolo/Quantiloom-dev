@@ -263,8 +263,8 @@ public:
     // Accessors
     // ========================================================================
 
-    VkPipeline GetPipeline() const { return m_pipeline; }
-    VkPipelineLayout GetPipelineLayout() const { return m_pipelineLayout; }
+    [[nodiscard]] VkPipeline GetPipeline() const { return m_pipeline; }
+    [[nodiscard]] VkPipelineLayout GetPipelineLayout() const { return m_pipelineLayout; }
 
 private:
     // ========================================================================

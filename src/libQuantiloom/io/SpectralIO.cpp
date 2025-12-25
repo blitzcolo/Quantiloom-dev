@@ -1077,8 +1077,7 @@ SpectralIO::LoadLibRadtranUvspec(const std::filesystem::path& uvspecFile,
     }
 
     // Sort by wavelength (needed for wavenumber input which is reverse-ordered)
-    std::sort(curve.samples.begin(), curve.samples.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ranges::sort(curve.samples, [](const auto& a, const auto& b) { return a.first < b.first; });
 
     // Validate monotonicity after sort
     for (size_t i = 1; i < curve.samples.size(); ++i) {
@@ -1177,10 +1176,8 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
     }
 
     // Sort by wavelength (needed for wavenumber input)
-    std::sort(sunCurve.samples.begin(), sunCurve.samples.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
-    std::sort(skyCurve.samples.begin(), skyCurve.samples.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ranges::sort(sunCurve.samples, [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::ranges::sort(skyCurve.samples, [](const auto& a, const auto& b) { return a.first < b.first; });
 
     // Validate monotonicity
     for (size_t i = 1; i < sunCurve.samples.size(); ++i) {

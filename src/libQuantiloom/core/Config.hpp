@@ -128,8 +128,8 @@ T Config::Get(const StringView key, const T& defaultValue) const {
 }
 
 template<typename T>
-Result<T, String> Config::GetRequired(const StringView key) const {
-    using ResultType = Result<T, String>;
+Result<T> Config::GetRequired(const StringView key) const {
+    using ResultType = Result<T>;
     const toml::node* node = Navigate(key);
     if (!node) {
         return typename ResultType::Err("Missing required key: " + String(key));

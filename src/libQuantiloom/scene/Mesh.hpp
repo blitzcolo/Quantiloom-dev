@@ -143,10 +143,10 @@ struct GeometryPrimitive {
         }
 
         // All indices must be in valid range
-        for (u32 idx : indices) {
-            if (idx >= positions.size()) {
-                return false;
-            }
+        if (!std::ranges::all_of(indices, [this](const u32 idx) {
+            return idx < positions.size();
+        })) {
+            return false;
         }
 
         return true;

@@ -158,7 +158,7 @@ private:
     static std::vector<const char*> GetRequiredValidationLayers();
 
     // Check if physical device is suitable (has required features)
-    bool IsDeviceSuitable(VkPhysicalDevice device) const;
+    static bool IsDeviceSuitable(VkPhysicalDevice device);
 
     // Find queue family index (graphics + compute + transfer)
     static Optional<u32> FindGraphicsQueueFamily(VkPhysicalDevice device);

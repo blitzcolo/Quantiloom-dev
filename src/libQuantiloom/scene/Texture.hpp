@@ -101,7 +101,7 @@ struct Texture {
     // ========================================================================
 
     // Check if texture is valid
-    bool IsValid() const {
+    [[nodiscard]] bool IsValid() const {
         // Must have non-zero dimensions
         if (width == 0 || height == 0) {
             return false;
@@ -121,12 +121,12 @@ struct Texture {
     }
 
     // Get size in bytes
-    size_t GetSizeInBytes() const {
+    [[nodiscard]] size_t GetSizeInBytes() const {
         return pixels.size();
     }
 
     // Get pixel data pointer (for GPU upload)
-    const u8* GetData() const {
+    [[nodiscard]] const u8* GetData() const {
         return pixels.data();
     }
 };

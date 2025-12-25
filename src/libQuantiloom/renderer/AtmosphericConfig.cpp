@@ -106,7 +106,7 @@ auto AtmosphericConfig::Disabled() -> AtmosphericConfig {
 // TOML Loading
 // ============================================================================
 
-auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericConfig, String> {
+auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericConfig> {
     try {
         // Parse TOML file
         auto table = toml::parse_file(tomlPath);
@@ -116,7 +116,7 @@ auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericCo
         if (!atmo_table) {
             // No atmospheric config: use default ClearDay
             Log::Info("No [atmospheric] section in {}, using ClearDay preset", tomlPath);
-            return ClearDay();
+            return Result(ClearDay());
         }
 
         AtmosphericConfig config;
@@ -188,14 +188,14 @@ auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericCo
         Log::Info("Loaded atmospheric config from {}: Rayleigh={}, Mie={}",
                   tomlPath, config.rayleigh_enabled, config.mie_enabled);
 
-        return config;
+        return Result(config);
 
     } catch (const toml::parse_error& err) {
-        return Result<AtmosphericConfig, String>::Err(
-            String("Failed to parse TOML: ") + err.what());
+        return Result<AtmosphericConfig>(Result<AtmosphericConfig>::Err(
+            String("Failed to parse TOML: ") + err.what()));
     } catch (const std::exception& err) {
-        return Result<AtmosphericConfig, String>::Err(
-            String("Error loading atmospheric config: ") + err.what());
+        return Result<AtmosphericConfig>(Result<AtmosphericConfig>::Err(
+            String("Error loading atmospheric config: ") + err.what()));
     }
 }
 
@@ -204,7 +204,7 @@ auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericCo
 // ============================================================================
 
 auto AtmosphericConfig::ToGPU() const -> AtmosphericParamsGPU {
-    AtmosphericParamsGPU gpu;
+    AtmosphericParamsGPU gpu{};
 
     // Rayleigh scattering (replicate scalar to RGB for now)
     // For spectral rendering, this will be computed per-wavelength in shader

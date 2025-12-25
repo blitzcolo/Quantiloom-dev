@@ -7,6 +7,7 @@
 
 // JSON parsing (use nlohmann/json if available, otherwise simple manual parsing)
 // For simplicity, we use a simple JSON parser here
+#include <ranges>
 #include <sstream>
 
 namespace quantiloom {
@@ -47,7 +48,7 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
     file.seekg(0, std::ios::beg);
 
     std::vector<u8> data(fileSize);
-    if (!file.read(reinterpret_cast<char*>(data.data()), fileSize)) {
+    if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<long long>(fileSize))) {
         QL_LOG_ERROR("  Failed to read basis file");
         return false;
     }
@@ -397,7 +398,7 @@ bool SpectralBasisLoader::LoadMaterials(const std::filesystem::path& jsonFilePat
 std::vector<String> SpectralBasisLoader::GetMaterialNames() const {
     std::vector<String> names;
     names.reserve(m_materials.size());
-    for (const auto& [name, _] : m_materials) {
+    for (const auto &name: m_materials | std::views::keys) {
         names.push_back(name);
     }
     return names;
@@ -411,13 +412,13 @@ const MaterialSpectralData* SpectralBasisLoader::FindMaterial(const String& name
 const MaterialSpectralData* SpectralBasisLoader::FindMaterialPartial(const String& pattern) const {
     // Convert pattern to lowercase for case-insensitive search
     String lowerPattern = pattern;
-    std::transform(lowerPattern.begin(), lowerPattern.end(), lowerPattern.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
+    std::ranges::transform(lowerPattern, lowerPattern.begin(),
+                           [](const unsigned char c) { return std::tolower(c); });
 
     for (const auto& [name, material] : m_materials) {
         String lowerName = name;
-        std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(),
-                       [](unsigned char c) { return std::tolower(c); });
+        std::ranges::transform(lowerName, lowerName.begin(),
+                               [](const unsigned char c) { return std::tolower(c); });
 
         if (lowerName.find(lowerPattern) != String::npos) {
             return &material;

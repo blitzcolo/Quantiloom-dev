@@ -12,20 +12,20 @@ namespace quantiloom {
 
 auto MultibandFusion::Fuse(const Image& vis, const Image& swir,
                             const Image& mwir, const FusionParams& params)
-    -> Result<Image, String> {
+    -> Result<Image> {
 
     // Validate inputs
     if (!vis.IsValid() || !swir.IsValid() || !mwir.IsValid()) {
-        return typename Result<Image, String>::Err("Invalid input images");
+        return Result<Image>(Result<Image>::Err("Invalid input images"));
     }
 
     if (vis.width != swir.width || vis.width != mwir.width ||
         vis.height != swir.height || vis.height != mwir.height) {
-        return typename Result<Image, String>::Err("Image dimensions must match");
+        return Result<Image>(Result<Image>::Err("Image dimensions must match"));
     }
 
     if (vis.channels != swir.channels || vis.channels != mwir.channels) {
-        return typename Result<Image, String>::Err("Image channel counts must match");
+        return Result<Image>(Result<Image>::Err("Image channel counts must match"));
     }
 
     Log::Info("Multiband fusion: {}x{} VIS/SWIR/MWIR → {} mode",
@@ -66,7 +66,7 @@ auto MultibandFusion::Fuse(const Image& vis, const Image& swir,
             fused = PseudoColor(visNorm, swirNorm, mwirNorm);
             break;
         default:
-            return typename Result<Image, String>::Err("Unknown fusion method");
+            return Result<Image>(Result<Image>::Err("Unknown fusion method"));
     }
 
     // Add metadata
@@ -77,7 +77,7 @@ auto MultibandFusion::Fuse(const Image& vis, const Image& swir,
 
     Log::Info("Fusion complete: {} channels", fused.channels);
 
-    return std::move(fused);  // Implicit conversion to Result
+    return Result(std::move(fused));  // Implicit conversion to Result
 }
 
 // ============================================================================
@@ -97,8 +97,8 @@ auto MultibandFusion::NormalizeBand(Image& band, const f32 minVal, const f32 max
 auto MultibandFusion::AutoNormalizeBand(Image& band) -> std::pair<f32, f32> {
     if (band.data.empty()) return {0.0f, 1.0f};
 
-    const f32 minVal = *std::min_element(band.data.begin(), band.data.end());
-    const f32 maxVal = *std::max_element(band.data.begin(), band.data.end());
+    const f32 minVal = *std::ranges::min_element(band.data);
+    const f32 maxVal = *std::ranges::max_element(band.data);
 
     NormalizeBand(band, minVal, maxVal);
 
@@ -236,7 +236,7 @@ auto MultibandFusion::BuildLaplacianPyramid(const Image& img, const u32 levels) 
 
 auto MultibandFusion::CollapseLaplacianPyramid(const Vector<Image>& pyramid) -> Image {
     if (pyramid.empty()) {
-        return Image();
+        return {};
     }
 
     // Start from top (smallest) level
@@ -296,16 +296,16 @@ auto MultibandFusion::Upsample(const Image& img, const u32 targetWidth,
 
     for (u32 y = 0; y < targetHeight; ++y) {
         for (u32 x = 0; x < targetWidth; ++x) {
-            const f32 srcX = x * xRatio;
-            const f32 srcY = y * yRatio;
+            const f32 srcX = static_cast<f32>(x) * xRatio;
+            const f32 srcY = static_cast<f32>(y) * yRatio;
 
             const u32 x0 = static_cast<u32>(srcX);
             const u32 y0 = static_cast<u32>(srcY);
             const u32 x1 = std::min(x0 + 1, img.width - 1);
             const u32 y1 = std::min(y0 + 1, img.height - 1);
 
-            const f32 fx = srcX - x0;
-            const f32 fy = srcY - y0;
+            const f32 fx = srcX - static_cast<f32>(x0);
+            const f32 fy = srcY - static_cast<f32>(y0);
 
             for (u32 c = 0; c < img.channels; ++c) {
                 const f32 v00 = img(x0, y0, c);

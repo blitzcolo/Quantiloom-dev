@@ -29,10 +29,10 @@ GenericSensor::GenericSensor()
 // ============================================================================
 
 auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
-    -> Result<SensorOutput, String> {
+    -> Result<SensorOutput> {
 
     if (!hdr.IsValid()) {
-        return typename Result<SensorOutput, String>::Err("Invalid input image");
+        return Result<SensorOutput>(Result<SensorOutput>::Err("Invalid input image"));
     }
 
     Log::Debug("Sensor chain: Input {}x{} ({} channels)",
@@ -82,7 +82,7 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
     output.rawDN = std::move(rawDN);
     output.enhancedPreview = std::move(enhancedPreview);
 
-    return std::move(output);  // Implicit conversion to Result
+    return Result<SensorOutput, String>(std::move(output));  // Implicit conversion to Result
 }
 
 // ============================================================================
@@ -420,14 +420,14 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
         for (const auto& val : m_PRNUMap.data) {
             currentMean += val;
         }
-        currentMean /= m_PRNUMap.TotalElements();
+        currentMean /= static_cast<f32>(m_PRNUMap.TotalElements());
 
         f32 currentVariance = 0.0f;
         for (const auto& val : m_PRNUMap.data) {
             f32 diff = val - currentMean;
             currentVariance += diff * diff;
         }
-        currentVariance /= m_PRNUMap.TotalElements();
+        currentVariance /= static_cast<f32>(m_PRNUMap.TotalElements());
         f32 currentSigma = std::sqrt(currentVariance);
 
         if (currentSigma > 1e-6f) {
@@ -437,7 +437,7 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
             }
         }
     } else {
-        std::fill(m_PRNUMap.data.begin(), m_PRNUMap.data.end(), 0.0f);
+        std::ranges::fill(m_PRNUMap.data, 0.0f);
     }
 
     // Generate DSNU map (if sigma > 0)
@@ -481,14 +481,14 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
         for (const auto& val : m_DSNUMap.data) {
             currentMean += val;
         }
-        currentMean /= m_DSNUMap.TotalElements();
+        currentMean /= static_cast<f32>(m_DSNUMap.TotalElements());
 
         f32 currentVariance = 0.0f;
         for (const auto& val : m_DSNUMap.data) {
             f32 diff = val - currentMean;
             currentVariance += diff * diff;
         }
-        currentVariance /= m_DSNUMap.TotalElements();
+        currentVariance /= static_cast<f32>(m_DSNUMap.TotalElements());
         f32 currentSigma = std::sqrt(currentVariance);
 
         if (currentSigma > 1e-6f) {
@@ -498,14 +498,14 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
             }
         }
     } else {
-        std::fill(m_DSNUMap.data.begin(), m_DSNUMap.data.end(), 0.0f);
+        std::ranges::fill(m_DSNUMap.data, 0.0f);
     }
 
     Log::Debug("FPN maps generated: PRNU range [{:.4f}, {:.4f}], DSNU range [{:.2f}, {:.2f}] e-",
-               *std::min_element(m_PRNUMap.data.begin(), m_PRNUMap.data.end()),
-               *std::max_element(m_PRNUMap.data.begin(), m_PRNUMap.data.end()),
-               *std::min_element(m_DSNUMap.data.begin(), m_DSNUMap.data.end()),
-               *std::max_element(m_DSNUMap.data.begin(), m_DSNUMap.data.end()));
+               *std::ranges::min_element(m_PRNUMap.data),
+               *std::ranges::max_element(m_PRNUMap.data),
+               *std::ranges::min_element(m_DSNUMap.data),
+               *std::ranges::max_element(m_DSNUMap.data));
 }
 
 // ============================================================================
@@ -561,13 +561,13 @@ auto GenericSensor::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
     for (u32 i = 0; i < electrons.TotalElements(); ++i) {
         mean += electrons.data[i];
     }
-    mean /= electrons.TotalElements();
+    mean /= static_cast<f32>(electrons.TotalElements());
 
     for (u32 i = 0; i < electrons.TotalElements(); ++i) {
         f32 diff = electrons.data[i] - mean;
         totalVariance += diff * diff;
     }
-    totalVariance /= electrons.TotalElements();
+    totalVariance /= static_cast<f32>(electrons.TotalElements());
     f32 stdDev = std::sqrt(totalVariance);
 
     const char* nucStatus = p.enableNUC ? " (with NUC residual)" : " (without NUC)";

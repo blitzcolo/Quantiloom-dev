@@ -124,7 +124,7 @@ public:
     static auto FromTOML(const String& tomlPath) -> Result<AtmosphericConfig, String>;
 
     // Convert to GPU structure
-    auto ToGPU() const -> AtmosphericParamsGPU;
+    [[nodiscard]] auto ToGPU() const -> AtmosphericParamsGPU;
 
     // Check if atmospheric rendering is enabled
     [[nodiscard]] auto IsEnabled() const -> bool {
