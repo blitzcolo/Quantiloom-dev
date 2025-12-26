@@ -25,9 +25,6 @@ Result<Config, String> Config::Load(const std::filesystem::path& filePath) {
             << ", column " << err.source().begin.column;
         return Result<Config>(Result<Config>::Err(oss.str()));
     }
-    catch (const std::exception& ex) {
-        return Result<Config>(Result<Config>::Err(String("Failed to load config: ") + ex.what()));
-    }
 }
 
 bool Config::Has(const StringView key) const {

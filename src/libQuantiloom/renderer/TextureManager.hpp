@@ -105,6 +105,14 @@ public:
     // (GpuImage handles VkImage/VkImageView destruction via RAII)
     ~TextureManager();
 
+    // Non-copyable (contains unique_ptr members)
+    TextureManager(const TextureManager&) = delete;
+    TextureManager& operator=(const TextureManager&) = delete;
+
+    // Movable
+    TextureManager(TextureManager&&) noexcept = default;
+    TextureManager& operator=(TextureManager&&) noexcept = default;
+
     // ========================================================================
     // Texture Upload
     // ========================================================================

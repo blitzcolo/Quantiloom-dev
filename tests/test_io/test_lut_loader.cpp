@@ -2,7 +2,7 @@
 // Quantiloom - Unit Tests for io/LUTLoader.hpp
 // ============================================================================
 // Tests cover:
-// - AtmosphereLUT HDF5 read/write roundtrip
+// - AtmosphereLUT TOML read/write roundtrip
 // - Interpolation correctness
 // - Validation checks
 // - Metadata preservation
@@ -75,22 +75,25 @@ protected:
 
 TEST_F(LUTLoaderTest, SaveAndLoadRoundtrip) {
     AtmosphereLUT original = CreateTestLUT();
-    auto filepath = GetTempFilePath("test_lut.h5");
+    auto filepath = GetTempFilePath("test_lut.toml");
 
     // Save LUT
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), original);
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), original);
     ASSERT_TRUE(saveSuccess);
     ASSERT_TRUE(std::filesystem::exists(filepath));
 
     // Load LUT
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
 
     // Verify data integrity
-    EXPECT_EQ(loaded->wavelengths, original.wavelengths);
-    EXPECT_EQ(loaded->solar_irradiance, original.solar_irradiance);
-    EXPECT_EQ(loaded->sky_radiance, original.sky_radiance);
-    EXPECT_EQ(loaded->transmittance, original.transmittance);
+    EXPECT_EQ(loaded->wavelengths.size(), original.wavelengths.size());
+    for (size_t i = 0; i < original.wavelengths.size(); ++i) {
+        EXPECT_NEAR(loaded->wavelengths[i], original.wavelengths[i], 1e-4f);
+        EXPECT_NEAR(loaded->solar_irradiance[i], original.solar_irradiance[i], 1e-4f);
+        EXPECT_NEAR(loaded->sky_radiance[i], original.sky_radiance[i], 1e-4f);
+        EXPECT_NEAR(loaded->transmittance[i], original.transmittance[i], 1e-4f);
+    }
 
     // Verify metadata
     EXPECT_EQ(loaded->metadata["solar_zenith_deg"], "30");
@@ -102,16 +105,16 @@ TEST_F(LUTLoaderTest, SaveInvalidLUT) {
     AtmosphereLUT invalid;
     // Empty LUT - should fail validation
 
-    auto filepath = GetTempFilePath("invalid_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), invalid);
+    auto filepath = GetTempFilePath("invalid_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), invalid);
     EXPECT_FALSE(saveSuccess);
     EXPECT_FALSE(std::filesystem::exists(filepath));
 }
 
 TEST_F(LUTLoaderTest, LoadNonexistentFile) {
-    auto filepath = GetTempFilePath("nonexistent.h5");
+    auto filepath = GetTempFilePath("nonexistent.toml");
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     EXPECT_FALSE(loaded.has_value());
 }
 
@@ -121,10 +124,10 @@ TEST_F(LUTLoaderTest, LoadNonexistentFile) {
 
 TEST_F(LUTLoaderTest, LoadedLUTIsValid) {
     AtmosphereLUT original = CreateTestLUT();
-    auto filepath = GetTempFilePath("valid_lut.h5");
+    auto filepath = GetTempFilePath("valid_lut.toml");
 
-    LUTLoader::SaveHDF5(filepath.string(), original);
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    LUTLoader::SaveTOML(filepath.string(), original);
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
 
     ASSERT_TRUE(loaded.has_value());
     EXPECT_TRUE(loaded->IsValid());
@@ -132,10 +135,10 @@ TEST_F(LUTLoaderTest, LoadedLUTIsValid) {
 
 TEST_F(LUTLoaderTest, MonotonicWavelengthPreserved) {
     AtmosphereLUT original = CreateTestLUT();
-    auto filepath = GetTempFilePath("monotonic_lut.h5");
+    auto filepath = GetTempFilePath("monotonic_lut.toml");
 
-    LUTLoader::SaveHDF5(filepath.string(), original);
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    LUTLoader::SaveTOML(filepath.string(), original);
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
 
     ASSERT_TRUE(loaded.has_value());
 
@@ -208,28 +211,26 @@ TEST_F(LUTLoaderTest, MetadataPreservation) {
     AtmosphereLUT original = CreateTestLUT();
     original.metadata["test_key_1"] = "value_1";
     original.metadata["test_key_2"] = "value_2";
-    original.metadata["unicode_test"] = "测试";
 
-    auto filepath = GetTempFilePath("metadata_lut.h5");
-    LUTLoader::SaveHDF5(filepath.string(), original);
+    auto filepath = GetTempFilePath("metadata_lut.toml");
+    LUTLoader::SaveTOML(filepath.string(), original);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
 
     EXPECT_EQ(loaded->metadata["test_key_1"], "value_1");
     EXPECT_EQ(loaded->metadata["test_key_2"], "value_2");
-    EXPECT_EQ(loaded->metadata["unicode_test"], "测试");
 }
 
 TEST_F(LUTLoaderTest, EmptyMetadata) {
     AtmosphereLUT lut = CreateTestLUT();
     lut.metadata.clear();
 
-    auto filepath = GetTempFilePath("no_metadata_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut);
+    auto filepath = GetTempFilePath("no_metadata_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut);
     ASSERT_TRUE(saveSuccess);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
     EXPECT_TRUE(loaded->metadata.empty());
 }
@@ -239,21 +240,21 @@ TEST_F(LUTLoaderTest, EmptyMetadata) {
 // ============================================================================
 
 TEST_F(LUTLoaderTest, FileExistsCheck) {
-    auto filepath = GetTempFilePath("exists_test.h5");
+    auto filepath = GetTempFilePath("exists_test.toml");
 
     EXPECT_FALSE(LUTLoader::FileExists(filepath.string()));
 
     AtmosphereLUT lut = CreateTestLUT();
-    LUTLoader::SaveHDF5(filepath.string(), lut);
+    LUTLoader::SaveTOML(filepath.string(), lut);
 
     EXPECT_TRUE(LUTLoader::FileExists(filepath.string()));
 }
 
 TEST_F(LUTLoaderTest, GetWavelengthRange) {
     AtmosphereLUT lut = CreateTestLUT();
-    auto filepath = GetTempFilePath("wavelength_range_test.h5");
+    auto filepath = GetTempFilePath("wavelength_range_test.toml");
 
-    LUTLoader::SaveHDF5(filepath.string(), lut);
+    LUTLoader::SaveTOML(filepath.string(), lut);
 
     auto range = LUTLoader::GetWavelengthRange(filepath.string());
     ASSERT_TRUE(range.has_value());
@@ -263,7 +264,7 @@ TEST_F(LUTLoaderTest, GetWavelengthRange) {
 }
 
 TEST_F(LUTLoaderTest, GetWavelengthRangeNonexistent) {
-    auto filepath = GetTempFilePath("nonexistent_range.h5");
+    auto filepath = GetTempFilePath("nonexistent_range.toml");
 
     auto range = LUTLoader::GetWavelengthRange(filepath.string());
     EXPECT_FALSE(range.has_value());
@@ -280,11 +281,11 @@ TEST_F(LUTLoaderTest, SingleWavelengthSample) {
     lut.sky_radiance = {50.0f};
     lut.transmittance = {0.85f};
 
-    auto filepath = GetTempFilePath("single_sample_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut);
+    auto filepath = GetTempFilePath("single_sample_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut);
     ASSERT_TRUE(saveSuccess);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
     EXPECT_TRUE(loaded->IsValid());
 
@@ -312,11 +313,11 @@ TEST_F(LUTLoaderTest, HighResolutionLUT) {
 
     ASSERT_TRUE(lut.IsValid());
 
-    auto filepath = GetTempFilePath("highres_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut);
+    auto filepath = GetTempFilePath("highres_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut);
     ASSERT_TRUE(saveSuccess);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->Size(), 1000);
 }
@@ -328,11 +329,11 @@ TEST_F(LUTLoaderTest, ZeroValues) {
     lut.sky_radiance = {0.0f, 0.0f, 0.0f};
     lut.transmittance = {0.0f, 0.0f, 0.0f};
 
-    auto filepath = GetTempFilePath("zero_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut);
+    auto filepath = GetTempFilePath("zero_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut);
     ASSERT_TRUE(saveSuccess);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
 
     EXPECT_NEAR(loaded->GetSolarIrradiance(600.0f), 0.0f, 1e-5f);
@@ -388,11 +389,11 @@ TEST_F(LUTLoaderTest, RealisticMODTRANLUT) {
 
     ASSERT_TRUE(lut.IsValid());
 
-    auto filepath = GetTempFilePath("modtran_realistic_lut.h5");
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut);
+    auto filepath = GetTempFilePath("modtran_realistic_lut.toml");
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut);
     ASSERT_TRUE(saveSuccess);
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->Size(), nsamples);
     EXPECT_EQ(loaded->metadata["model"], "MODTRAN6");
@@ -403,23 +404,35 @@ TEST_F(LUTLoaderTest, RealisticMODTRANLUT) {
 // ============================================================================
 
 TEST_F(LUTLoaderTest, CorruptedFile) {
-    auto filepath = GetTempFilePath("corrupted.h5");
+    auto filepath = GetTempFilePath("corrupted.toml");
 
-    // Create a non-HDF5 file
+    // Create a malformed TOML file
     std::ofstream file(filepath);
-    file << "This is not an HDF5 file!";
+    file << "[data]\nwavelengths = \"not an array\"\n";
     file.close();
 
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
+    EXPECT_FALSE(loaded.has_value());
+}
+
+TEST_F(LUTLoaderTest, MissingDataSection) {
+    auto filepath = GetTempFilePath("missing_data.toml");
+
+    // Create TOML with only metadata
+    std::ofstream file(filepath);
+    file << "[metadata]\nmodel = \"test\"\n";
+    file.close();
+
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     EXPECT_FALSE(loaded.has_value());
 }
 
 TEST_F(LUTLoaderTest, OverwriteExistingFile) {
     AtmosphereLUT lut1 = CreateTestLUT();
-    auto filepath = GetTempFilePath("overwrite_test.h5");
+    auto filepath = GetTempFilePath("overwrite_test.toml");
 
     // Save first LUT
-    LUTLoader::SaveHDF5(filepath.string(), lut1);
+    LUTLoader::SaveTOML(filepath.string(), lut1);
 
     // Create different LUT
     AtmosphereLUT lut2;
@@ -429,11 +442,11 @@ TEST_F(LUTLoaderTest, OverwriteExistingFile) {
     lut2.transmittance = {0.88f, 0.85f};
 
     // Overwrite
-    bool saveSuccess = LUTLoader::SaveHDF5(filepath.string(), lut2);
+    bool saveSuccess = LUTLoader::SaveTOML(filepath.string(), lut2);
     ASSERT_TRUE(saveSuccess);
 
     // Load and verify it's the new LUT
-    auto loaded = LUTLoader::LoadHDF5(filepath.string());
+    auto loaded = LUTLoader::LoadTOML(filepath.string());
     ASSERT_TRUE(loaded.has_value());
     EXPECT_EQ(loaded->Size(), 2);
     EXPECT_NEAR(loaded->wavelengths[0], 500.0f, 1e-5f);

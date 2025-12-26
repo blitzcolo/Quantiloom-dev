@@ -109,7 +109,7 @@ auto AtmosphericConfig::Disabled() -> AtmosphericConfig {
 auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericConfig> {
     try {
         // Parse TOML file
-        auto table = toml::parse_file(tomlPath);
+        toml::table table = toml::parse_file(tomlPath);
 
         // Check if [atmospheric] section exists
         auto atmo_table = table["atmospheric"];
@@ -192,10 +192,7 @@ auto AtmosphericConfig::FromTOML(const String& tomlPath) -> Result<AtmosphericCo
 
     } catch (const toml::parse_error& err) {
         return Result<AtmosphericConfig>(Result<AtmosphericConfig>::Err(
-            String("Failed to parse TOML: ") + err.what()));
-    } catch (const std::exception& err) {
-        return Result<AtmosphericConfig>(Result<AtmosphericConfig>::Err(
-            String("Error loading atmospheric config: ") + err.what()));
+            String("Failed to parse TOML: ") + std::string(err.description())));
     }
 }
 

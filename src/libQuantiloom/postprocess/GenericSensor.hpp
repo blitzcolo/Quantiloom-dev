@@ -45,13 +45,14 @@
 #pragma once
 
 #include "SensorModel.hpp"
+#include "core/Platform.hpp"
 #include <random>
 
 namespace quantiloom {
 
 /// Generic sensor implementation - covers VIS/SWIR/MWIR/LWIR
 /// Full chain: Optics (PSF) → Detector (QE, noise) → ADC (quantization)
-class GenericSensor final : public SensorModel {
+class QL_API GenericSensor final : public SensorModel {
 public:
     GenericSensor();
     ~GenericSensor() override = default;

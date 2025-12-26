@@ -8,38 +8,29 @@
 namespace quantiloom {
 
 // ============================================================================
-// LUTLoader - MODTRAN LUT loading from HDF5
+// LUTLoader - Atmosphere LUT I/O using TOML format
 // ============================================================================
-// Expected HDF5 structure:
-//   /wavelengths         - 1D dataset [n], float32, nm
-//   /solar_irradiance    - 1D dataset [n], float32, W/m^2/nm
-//   /sky_radiance        - 1D dataset [n], float32, W/m^2/sr/nm
-//   /transmittance       - 1D dataset [n], float32, dimensionless
-//   /metadata            - Group with string attributes
+// TOML structure:
+//   [metadata]
+//   solar_zenith_deg = "30"
+//   visibility_km = "23"
 //
-// This structure is compatible with our dummy LUT generator and
-// future MODTRAN export scripts.
+//   [data]
+//   wavelengths = [380.0, 390.0, ...]
+//   solar_irradiance = [1.0, 1.1, ...]
+//   sky_radiance = [0.1, 0.15, ...]
+//   transmittance = [0.95, 0.94, ...]
+//
+// File extension: .lut.toml (recommended) or .toml
 // ============================================================================
 
 class QL_API LUTLoader {
 public:
-    // ========================================================================
-    // LUT Loading
-    // ========================================================================
+    // Load LUT from TOML file
+    static std::optional<AtmosphereLUT> LoadTOML(const std::string& filepath);
 
-    // Load LUT from HDF5 file
-    static std::optional<AtmosphereLUT> LoadHDF5(const std::string& filepath);
-
-    // ========================================================================
-    // LUT Saving (for test/debug purposes)
-    // ========================================================================
-
-    // Save LUT to HDF5 file
-    static bool SaveHDF5(const std::string& filepath, const AtmosphereLUT& lut);
-
-    // ========================================================================
-    // Utilities
-    // ========================================================================
+    // Save LUT to TOML file
+    static bool SaveTOML(const std::string& filepath, const AtmosphereLUT& lut);
 
     // Check if file exists
     static bool FileExists(const std::string& filepath);

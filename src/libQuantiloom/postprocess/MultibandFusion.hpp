@@ -55,6 +55,7 @@
 
 #include "../core/Image.hpp"
 #include "../core/Types.hpp"
+#include "../core/Platform.hpp"
 
 namespace quantiloom {
 
@@ -93,7 +94,7 @@ struct FusionParams {
 };
 
 /// Multiband fusion - combine VIS/SWIR/MWIR into enhanced output
-class MultibandFusion {
+class QL_API MultibandFusion {
 public:
     /// Fuse three bands into a single image
     /// @param vis VIS band image (visible)

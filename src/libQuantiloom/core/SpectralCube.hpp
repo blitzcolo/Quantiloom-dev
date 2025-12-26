@@ -14,11 +14,8 @@
  *
  * This layout choice provides:
  * 1. Per-band contiguity: Each wavelength band is contiguous in memory
- * 2. HDF5 compatibility: Matches HDF5 C-order datasets
- * 3. MODTRAN comparison: Atmospheric models use band-major output
- * 4. Efficient band extraction: Single memcpy per band
- *
- * Alternative layouts (BIP/BIL) can be handled via HDF5 chunking and transpose.
+ * 2. MODTRAN comparison: Atmospheric models use band-major output
+ * 3. Efficient band extraction: Single memcpy per band
  *
  * Usage example:
  * @code
@@ -33,17 +30,11 @@
  *
  * // Find band closest to target wavelength
  * u32 band850 = cube.FindBand(850.0f);
- *
- * // Save to HDF5
- * SpectralIO::WriteHDF5("output.h5", cube);
  * @endcode
  *
  * @note Memory layout: data[b][y][x] (C-order, band-major)
  * @note Always uses f32 storage (physical radiance units)
  * @note Wavelength array auto-generated from lambda_min/max/nbands
- *
- * @see SpectralIO::WriteHDF5 for saving hyperspectral data
- * @see SpectralIO::ReadHDF5 for loading hyperspectral data
  *
  * @author wtflmao
  */
@@ -54,6 +45,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <algorithm>
 
 namespace quantiloom {
 
@@ -82,9 +74,7 @@ namespace quantiloom {
  *
  * @note Data stored as f32 (physical radiance: W·sr⁻¹·m⁻²·nm⁻¹)
  * @note Wavelengths auto-generated: λ[b] = lambda_min + b × delta_lambda
- * @note Metadata stored as key-value strings (preserved in HDF5 attributes)
- *
- * @see SpectralIO for HDF5 I/O operations
+ * @note Metadata stored as key-value strings
  */
 struct SpectralCube {
     // Spatial dimensions
@@ -175,7 +165,7 @@ struct SpectralCube {
     }
 
     // Clear cube data
-    void Clear() { std::fill(data.begin(), data.end(), 0.0f); }
+    void Clear() { std::ranges::fill(data, 0.0f); }
 
     // Get wavelength for band index
     [[nodiscard]] inline f32 GetWavelength(const u32 b) const {

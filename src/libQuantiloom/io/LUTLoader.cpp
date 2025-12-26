@@ -1,223 +1,159 @@
 #include "LUTLoader.hpp"
 
-#include <H5Cpp.h>
+#include <toml++/toml.hpp>
 #include <filesystem>
+#include <fstream>
 
 namespace quantiloom {
 
 // ============================================================================
-// Helper: Read 1D float array from HDF5 dataset
+// Helper: Read array of f32 from TOML array node
 // ============================================================================
 
-static bool Read1DArray(
-    const H5::H5File& file,
-    const std::string& datasetName,
-    std::vector<f32>& outArray)
-{
-    try {
-        const H5::DataSet dataset = file.openDataSet(datasetName);
-        const H5::DataSpace dataspace = dataset.getSpace();
+static bool ReadF32Array(const toml::array* arr, std::vector<f32>& out) {
+    if (!arr) return false;
 
-        if (int rank = dataspace.getSimpleExtentNdims(); rank != 1) {
-            QL_LOG_ERROR("LUTLoader: Expected 1D dataset for {}, got rank {}", datasetName, rank);
+    out.clear();
+    out.reserve(arr->size());
+
+    for (const auto& elem : *arr) {
+        if (auto val = elem.value<double>()) {
+            out.push_back(static_cast<f32>(*val));
+        } else {
             return false;
         }
-
-        hsize_t dims[1];
-        dataspace.getSimpleExtentDims(dims);
-
-        outArray.resize(dims[0]);
-        dataset.read(outArray.data(), H5::PredType::NATIVE_FLOAT);
-
-        return true;
-
-    } catch (const H5::Exception& e) {
-        QL_LOG_ERROR("LUTLoader: Failed to read {}: {}", datasetName, e.getDetailMsg());
-        return false;
     }
+
+    return !out.empty();
 }
 
 // ============================================================================
-// Helper: Write 1D float array to HDF5 dataset
+// Public API: LoadTOML
 // ============================================================================
 
-static bool Write1DArray(
-    const H5::H5File& file,
-    const std::string& datasetName,
-    const std::vector<f32>& data)
-{
-    try {
-        hsize_t dims[1] = {data.size()};
-        const H5::DataSpace dataspace(1, dims);
-
-        const H5::DataSet dataset = file.createDataSet(
-            datasetName, H5::PredType::NATIVE_FLOAT, dataspace);
-
-        dataset.write(data.data(), H5::PredType::NATIVE_FLOAT);
-        return true;
-
-    } catch (const H5::Exception& e) {
-        QL_LOG_ERROR("LUTLoader: Failed to write {}: {}", datasetName, e.getDetailMsg());
-        return false;
+std::optional<AtmosphereLUT> LUTLoader::LoadTOML(const std::string& filepath) {
+    if (!FileExists(filepath)) {
+        QL_LOG_ERROR("LUTLoader::LoadTOML: File not found: {}", filepath);
+        return std::nullopt;
     }
-}
 
-// ============================================================================
-// Helper: Read metadata from /metadata group
-// ============================================================================
-
-static void ReadMetadata(const H5::H5File& file, AtmosphereLUT& lut) {
     try {
-        const H5::Group metaGroup = file.openGroup("/metadata");
+        toml::table tbl = toml::parse_file(filepath);
+        AtmosphereLUT lut;
 
-        for (hsize_t i = 0; i < metaGroup.getNumAttrs(); ++i) {
-            H5::Attribute attr = metaGroup.openAttribute(i);
-            std::string name = attr.getName();
+        // Read [data] section
+        auto* data = tbl["data"].as_table();
+        if (!data) {
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Missing [data] section in {}", filepath);
+            return std::nullopt;
+        }
 
-            // Query the actual datatype instead of assuming
+        // Read arrays
+        if (!ReadF32Array((*data)["wavelengths"].as_array(), lut.wavelengths)) {
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Missing or invalid 'wavelengths' array");
+            return std::nullopt;
+        }
 
-            if (H5::DataType dtype = attr.getDataType(); dtype.getClass() == H5T_STRING) {
-                H5::StrType strType = attr.getStrType();
-                std::string value;
+        if (!ReadF32Array((*data)["solar_irradiance"].as_array(), lut.solar_irradiance)) {
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Missing or invalid 'solar_irradiance' array");
+            return std::nullopt;
+        }
 
-                if (strType.isVariableStr()) {
-                    // Variable-length string: use char* buffer
-                    char* c_str = nullptr;
-                    attr.read(strType, &c_str);
-                    if (c_str != nullptr) {
-                        value = std::string(c_str);
-                        // CRITICAL: free memory allocated by HDF5 for variable-length strings
-                        H5free_memory(c_str);
-                    }
-                } else {
-                    // Fixed-length string: allocate buffer of exact size
-                    size_t str_len = strType.getSize();
-                    std::vector<char> buffer(str_len + 1, '\0');
-                    attr.read(strType, buffer.data());
-                    value = std::string(buffer.data());
+        if (!ReadF32Array((*data)["sky_radiance"].as_array(), lut.sky_radiance)) {
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Missing or invalid 'sky_radiance' array");
+            return std::nullopt;
+        }
+
+        if (!ReadF32Array((*data)["transmittance"].as_array(), lut.transmittance)) {
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Missing or invalid 'transmittance' array");
+            return std::nullopt;
+        }
+
+        // Read [metadata] section (optional)
+        if (auto* meta = tbl["metadata"].as_table()) {
+            for (const auto& [key, val] : *meta) {
+                if (auto str = val.value<std::string>()) {
+                    lut.metadata[std::string(key.str())] = *str;
                 }
-
-                lut.metadata[name] = value;
             }
         }
 
-    } catch (const H5::Exception& e) {
-        QL_LOG_WARN("LUTLoader: Failed to read metadata: {}", e.getDetailMsg());
-    }
-}
-
-// ============================================================================
-// Helper: Write metadata to /metadata group
-// ============================================================================
-
-static void WriteMetadata(const H5::H5File& file, const AtmosphereLUT& lut) {
-    try {
-        const H5::Group metaGroup = file.createGroup("/metadata");
-        const H5::StrType strType(H5::PredType::C_S1, H5T_VARIABLE);
-        const H5::DataSpace scalar(H5S_SCALAR);
-
-        for (const auto& [key, value] : lut.metadata) {
-            H5::Attribute attr = metaGroup.createAttribute(key, strType, scalar);
-            attr.write(strType, value);
-        }
-
-    } catch (const H5::Exception& e) {
-        QL_LOG_WARN("LUTLoader: Failed to write metadata: {}", e.getDetailMsg());
-    }
-}
-
-// ============================================================================
-// Public API: LoadHDF5
-// ============================================================================
-
-std::optional<AtmosphereLUT> LUTLoader::LoadHDF5(const std::string& filepath) {
-    if (!FileExists(filepath)) {
-        QL_LOG_ERROR("LUTLoader::LoadHDF5: File not found: {}", filepath);
-        return std::nullopt;
-    }
-
-    try {
-        const H5::H5File file(filepath, H5F_ACC_RDONLY);
-
-        AtmosphereLUT lut;
-
-        // Read datasets
-        if (!Read1DArray(file, "/wavelengths", lut.wavelengths)) {
-            return std::nullopt;
-        }
-
-        if (!Read1DArray(file, "/solar_irradiance", lut.solar_irradiance)) {
-            return std::nullopt;
-        }
-
-        if (!Read1DArray(file, "/sky_radiance", lut.sky_radiance)) {
-            return std::nullopt;
-        }
-
-        if (!Read1DArray(file, "/transmittance", lut.transmittance)) {
-            return std::nullopt;
-        }
-
-        // Read metadata
-        ReadMetadata(file, lut);
-
         // Validate
         if (!lut.IsValid()) {
-            QL_LOG_ERROR("LUTLoader::LoadHDF5: Loaded LUT failed validation");
+            QL_LOG_ERROR("LUTLoader::LoadTOML: Loaded LUT failed validation");
             return std::nullopt;
         }
 
-        QL_LOG_INFO("LUTLoader::LoadHDF5: Loaded LUT with {} wavelength samples from {}",
+        QL_LOG_INFO("LUTLoader::LoadTOML: Loaded LUT with {} wavelength samples from {}",
                     lut.Size(), filepath);
         return lut;
 
-    } catch (const H5::Exception& e) {
-        QL_LOG_ERROR("LUTLoader::LoadHDF5: Failed to load {}: {}",
-                     filepath, e.getDetailMsg());
+    } catch (const toml::parse_error& err) {
+        QL_LOG_ERROR("LUTLoader::LoadTOML: Parse error in {}: {}", filepath, err.description());
         return std::nullopt;
     }
 }
 
 // ============================================================================
-// Public API: SaveHDF5
+// Public API: SaveTOML
 // ============================================================================
 
-bool LUTLoader::SaveHDF5(const std::string& filepath, const AtmosphereLUT& lut) {
+bool LUTLoader::SaveTOML(const std::string& filepath, const AtmosphereLUT& lut) {
     if (!lut.IsValid()) {
-        QL_LOG_ERROR("LUTLoader::SaveHDF5: Invalid LUT");
+        QL_LOG_ERROR("LUTLoader::SaveTOML: Invalid LUT");
         return false;
     }
 
     try {
-        const H5::H5File file(filepath, H5F_ACC_TRUNC);
+        toml::table tbl;
 
-        // Write datasets
-        if (!Write1DArray(file, "/wavelengths", lut.wavelengths)) {
+        // Build [metadata] section
+        toml::table meta;
+        for (const auto& [key, value] : lut.metadata) {
+            meta.insert(key, value);
+        }
+        tbl.insert("metadata", std::move(meta));
+
+        // Build [data] section
+        toml::table data;
+
+        // Convert vectors to TOML arrays
+        toml::array wavelengths_arr;
+        for (f32 v : lut.wavelengths) wavelengths_arr.push_back(static_cast<double>(v));
+
+        toml::array solar_arr;
+        for (f32 v : lut.solar_irradiance) solar_arr.push_back(static_cast<double>(v));
+
+        toml::array sky_arr;
+        for (f32 v : lut.sky_radiance) sky_arr.push_back(static_cast<double>(v));
+
+        toml::array trans_arr;
+        for (f32 v : lut.transmittance) trans_arr.push_back(static_cast<double>(v));
+
+        data.insert("wavelengths", std::move(wavelengths_arr));
+        data.insert("solar_irradiance", std::move(solar_arr));
+        data.insert("sky_radiance", std::move(sky_arr));
+        data.insert("transmittance", std::move(trans_arr));
+
+        tbl.insert("data", std::move(data));
+
+        // Write to file
+        std::ofstream file(filepath);
+        if (!file.is_open()) {
+            QL_LOG_ERROR("LUTLoader::SaveTOML: Cannot open file for writing: {}", filepath);
             return false;
         }
 
-        if (!Write1DArray(file, "/solar_irradiance", lut.solar_irradiance)) {
-            return false;
-        }
+        file << "# Quantiloom Atmosphere LUT\n";
+        file << "# Generated by LUTLoader\n\n";
+        file << tbl;
 
-        if (!Write1DArray(file, "/sky_radiance", lut.sky_radiance)) {
-            return false;
-        }
-
-        if (!Write1DArray(file, "/transmittance", lut.transmittance)) {
-            return false;
-        }
-
-        // Write metadata
-        WriteMetadata(file, lut);
-
-        QL_LOG_INFO("LUTLoader::SaveHDF5: Saved LUT with {} wavelength samples to {}",
+        QL_LOG_INFO("LUTLoader::SaveTOML: Saved LUT with {} wavelength samples to {}",
                     lut.Size(), filepath);
         return true;
 
-    } catch (const H5::Exception& e) {
-        QL_LOG_ERROR("LUTLoader::SaveHDF5: Failed to save {}: {}",
-                     filepath, e.getDetailMsg());
+    } catch (const std::exception& e) {
+        QL_LOG_ERROR("LUTLoader::SaveTOML: Error writing {}: {}", filepath, e.what());
         return false;
     }
 }
@@ -235,32 +171,31 @@ bool LUTLoader::FileExists(const std::string& filepath) {
 // Public API: GetWavelengthRange
 // ============================================================================
 
-std::optional<std::pair<f32, f32>> LUTLoader::GetWavelengthRange(
-    const std::string& filepath)
-{
+std::optional<std::pair<f32, f32>> LUTLoader::GetWavelengthRange(const std::string& filepath) {
     if (!FileExists(filepath)) {
         return std::nullopt;
     }
 
     try {
-        const H5::H5File file(filepath, H5F_ACC_RDONLY);
-        const H5::DataSet dataset = file.openDataSet("/wavelengths");
-        const H5::DataSpace dataspace = dataset.getSpace();
+        toml::table tbl = toml::parse_file(filepath);
 
-        hsize_t dims[1];
-        dataspace.getSimpleExtentDims(dims);
+        auto* data = tbl["data"].as_table();
+        if (!data) return std::nullopt;
 
-        if (dims[0] < 2) {
-            return std::nullopt;
+        auto* arr = (*data)["wavelengths"].as_array();
+        if (!arr || arr->size() < 2) return std::nullopt;
+
+        auto first = arr->front().value<double>();
+        auto last = arr->back().value<double>();
+
+        if (first && last) {
+            return std::make_pair(static_cast<f32>(*first), static_cast<f32>(*last));
         }
 
-        std::vector<f32> wavelengths(dims[0]);
-        dataset.read(wavelengths.data(), H5::PredType::NATIVE_FLOAT);
+        return std::nullopt;
 
-        return std::make_pair(wavelengths.front(), wavelengths.back());
-
-    } catch (const H5::Exception& e) {
-        QL_LOG_ERROR("LUTLoader::GetWavelengthRange: Failed: {}", e.getDetailMsg());
+    } catch (const toml::parse_error& err) {
+        QL_LOG_ERROR("LUTLoader::GetWavelengthRange: Parse error: {}", err.description());
         return std::nullopt;
     }
 }

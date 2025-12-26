@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Platform.hpp"
 #include "VulkanContext.hpp"
 #include <vulkan/vulkan.h>
 #include <string>
@@ -30,7 +31,9 @@
 
 namespace quantiloom {
 
-class PerformanceLogger {
+// TODO: Consider if this should be public API or internal tool
+// Currently exported for backward compatibility with existing main.cpp
+class QL_API PerformanceLogger {
 public:
     // ========================================================================
     // Configuration

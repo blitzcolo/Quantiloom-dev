@@ -39,6 +39,7 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Platform.hpp"
 #include "core/Image.hpp"
 #include <glm/glm.hpp>
 #include <vector>
@@ -50,7 +51,9 @@
 
 namespace quantiloom {
 
-class BRDFLutGenerator {
+// TODO: Refactor into RayTracingPipeline - BRDF LUT should be managed internally
+// Current DLL export is temporary for backward compatibility
+class QL_API BRDFLutGenerator {
 public:
     // ========================================================================
     // Configuration

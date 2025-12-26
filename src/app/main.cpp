@@ -1326,59 +1326,24 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Manually create cubemap image (GpuImage doesn't support cubemaps yet)
-        VkImage envMapImage = VK_NULL_HANDLE;
-        VkImageView envMapView = VK_NULL_HANDLE;
-        VmaAllocation envMapAllocation = VK_NULL_HANDLE;
-
-        {
-            // Create cubemap image
-            VkImageCreateInfo imageInfo{};
-            imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-            imageInfo.imageType = VK_IMAGE_TYPE_2D;
-            imageInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;  // RGBA32F (HDR)
-            imageInfo.extent = {envMapSize, envMapSize, 1};
-            imageInfo.mipLevels = envMapMips;
-            imageInfo.arrayLayers = 6;  // Cubemap faces: +X, -X, +Y, -Y, +Z, -Z
-            imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
-            imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-            imageInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-            imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;  // Enable cubemap view
-
-            VmaAllocationCreateInfo allocInfo{};
-            allocInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
-
-            VkResult result = vmaCreateImage(context.GetAllocator(), &imageInfo, &allocInfo,
-                                              &envMapImage, &envMapAllocation, nullptr);
-            if (result != VK_SUCCESS) {
-                throw std::runtime_error("Failed to create environment cubemap image");
-            }
-
-            // Create cubemap view
-            VkImageViewCreateInfo viewInfo{};
-            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            viewInfo.image = envMapImage;
-            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_CUBE;  // Cubemap view
-            viewInfo.format = VK_FORMAT_R32G32B32A32_SFLOAT;
-            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            viewInfo.subresourceRange.baseMipLevel = 0;
-            viewInfo.subresourceRange.levelCount = envMapMips;
-            viewInfo.subresourceRange.baseArrayLayer = 0;
-            viewInfo.subresourceRange.layerCount = 6;  // All 6 faces
-
-            result = vkCreateImageView(context.GetDevice(), &viewInfo, nullptr, &envMapView);
-            if (result != VK_SUCCESS) {
-                vmaDestroyImage(context.GetAllocator(), envMapImage, envMapAllocation);
-                throw std::runtime_error("Failed to create environment cubemap view");
-            }
-        }
+        // Create cubemap image using GpuImage wrapper
+        GpuImage envMapImage(
+            context.GetAllocator(),
+            context.GetDevice(),
+            envMapSize, envMapSize,
+            VK_FORMAT_R32G32B32A32_SFLOAT,  // RGBA32F (HDR)
+            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY,
+            envMapMips,
+            6,                                      // 6 faces for cubemap
+            VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,   // Cubemap flag
+            VK_IMAGE_VIEW_TYPE_CUBE                // Cubemap view type
+        );
 
         // Transition image to TRANSFER_DST for upload
         CommandHelper::TransitionImageLayoutImmediate(
             context,
-            envMapImage,
+            envMapImage.GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -1430,7 +1395,7 @@ int main(int argc, char* argv[]) {
                     vkCmdCopyBufferToImage(
                         cmd,
                         stagingBuffer.GetHandle(),
-                        envMapImage,
+                        envMapImage.GetImage(),
                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                         1,
                         &region
@@ -1504,7 +1469,7 @@ int main(int argc, char* argv[]) {
                         vkCmdCopyBufferToImage(
                             cmd,
                             stagingBuffer.GetHandle(),
-                            envMapImage,
+                            envMapImage.GetImage(),
                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                             1,
                             &region
@@ -1517,7 +1482,7 @@ int main(int argc, char* argv[]) {
         // Transition image to SHADER_READ_ONLY for sampling
         CommandHelper::TransitionImageLayoutImmediate(
             context,
-            envMapImage,
+            envMapImage.GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -1568,7 +1533,7 @@ int main(int argc, char* argv[]) {
         // Binding 10: Prefiltered environment cubemap (with mip chain for roughness)
         // Binding 11: BRDF integration LUT (2D texture)
         // Binding 12: IBL sampler (shared by both textures)
-        pipeline.BindPrefilteredEnvMap(envMapView);                      // Binding 10
+        pipeline.BindPrefilteredEnvMap(envMapImage.GetView());               // Binding 10
         pipeline.BindBRDFLut(brdfLutTexture.GetView(), brdfLutSampler);  // Binding 11, 12
 
         // Bind spectral curves buffer (binding 13)
@@ -1858,13 +1823,7 @@ int main(int argc, char* argv[]) {
             vkDestroySampler(context.GetDevice(), brdfLutSampler, nullptr);
         }
 
-        if (envMapView != VK_NULL_HANDLE) {
-            vkDestroyImageView(context.GetDevice(), envMapView, nullptr);
-        }
-
-        if (envMapImage != VK_NULL_HANDLE) {
-            vmaDestroyImage(context.GetAllocator(), envMapImage, envMapAllocation);
-        }
+        // Note: envMapImage (GpuImage) will be automatically destroyed by RAII
 
     } catch (const std::exception& e) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());

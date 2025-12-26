@@ -54,6 +54,7 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Platform.hpp"
 #include <glm/glm.hpp>
 
 namespace quantiloom {
@@ -106,7 +107,9 @@ static_assert(sizeof(AtmosphericParamsGPU) == 64, "AtmosphericParamsGPU size mis
 // Provides preset configurations and TOML loading
 // ============================================================================
 
-class AtmosphericConfig {
+// TODO: Move atmospheric config to Scene API - should be part of scene description
+// Current DLL export is temporary for backward compatibility
+class QL_API AtmosphericConfig {
 public:
     // Constructors
     AtmosphericConfig();

@@ -116,6 +116,18 @@ public:
              VmaMemoryUsage memUsage = VMA_MEMORY_USAGE_GPU_ONLY,
              u32 mipLevels = 1);
 
+    // Create cubemap image (6 array layers, cube-compatible view)
+    // Note: arrayLayers and flags parameters allow flexibility
+    GpuImage(VmaAllocator allocator, VkDevice device,
+             u32 width, u32 height,
+             VkFormat format,
+             VkImageUsageFlags usage,
+             VmaMemoryUsage memUsage,
+             u32 mipLevels,
+             u32 arrayLayers,           // 6 for cubemap
+             VkImageCreateFlags flags,  // VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT for cubemap
+             VkImageViewType viewType); // VK_IMAGE_VIEW_TYPE_CUBE for cubemap
+
     // Destructor: automatically destroys VkImage, VkImageView, and VmaAllocation
     ~GpuImage();
 

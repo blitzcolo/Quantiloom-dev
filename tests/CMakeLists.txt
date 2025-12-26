@@ -167,7 +167,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Enable warnings
 if(MSVC)
-    add_compile_options(/W4)
+    add_compile_options(/W4 /wd4251 /wd4819)
 else()
     add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -278,14 +278,32 @@ else()
 endif()
 
 # ============================================================================
+# Copy DLL to Test Directory (Windows shared library)
+# ============================================================================
+
+if(WIN32 AND NOT QUANTILOOM_STANDALONE_TESTS)
+    # Copy libQuantiloom.dll to test directory for runtime loading
+    add_custom_command(
+        TARGET libquantiloom_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:libQuantiloom>"
+            "$<TARGET_FILE_DIR:libquantiloom_tests>"
+        COMMENT "Copying Quantiloom.dll to test directory"
+    )
+endif()
+
+# ============================================================================
 # Register Tests with CTest
 # ============================================================================
 
-include(GoogleTest)
-gtest_discover_tests(libquantiloom_tests)
+# Note: Using add_test instead of gtest_discover_tests to avoid DLL loading issues
+# gtest_discover_tests runs at build time and may fail to find DLL
+add_test(NAME libQuantiloomAllTests COMMAND libquantiloom_tests)
 
-# Alternative: Add as a single test
-# add_test(NAME libQuantiloomAllTests COMMAND libquantiloom_tests)
+# Set test working directory to exe location (where DLL is copied)
+set_tests_properties(libQuantiloomAllTests PROPERTIES
+    WORKING_DIRECTORY "$<TARGET_FILE_DIR:libquantiloom_tests>"
+)
 
 # ============================================================================
 # Custom Targets for Convenience

@@ -10,45 +10,18 @@
 namespace quantiloom {
 
 // ============================================================================
-// SpectralIO - HDF5 hyperspectral cube reading/writing + Material databases
+// SpectralIO - Spectral data loading for materials and illumination
 // ============================================================================
-// HDF5 structure:
-//   /data              - 3D dataset [nbands, height, width], float32
-//   /wavelengths       - 1D dataset [nbands], float32
-//   /metadata          - Group containing string attributes
-//
-// Material Database Support:
-//   - USGS Spectral Library (DHR reflectance)
-//   - RefractiveIndex.INFO (complex refractive index n,k)
-//   - Custom CSV format
+// Supported formats:
+//   - CSV: Generic wavelength,value pairs
+//   - USGS Spectral Library: DHR reflectance measurements
+//   - RefractiveIndex.INFO: Complex refractive index (n,k) YAML
+//   - ASTM G-173: Standard solar irradiance spectra
+//   - libRadtran uvspec: Atmospheric radiative transfer output
 // ============================================================================
 
 class QL_API SpectralIO {
 public:
-    // ========================================================================
-    // HDF5 Writing
-    // ========================================================================
-
-    // Write spectral cube to HDF5 file
-    static bool WriteHDF5(const std::string& filepath, const SpectralCube& cube);
-
-    // ========================================================================
-    // HDF5 Reading
-    // ========================================================================
-
-    // Read spectral cube from HDF5 file
-    static std::optional<SpectralCube> ReadHDF5(const std::string& filepath);
-
-    // ========================================================================
-    // Utilities
-    // ========================================================================
-
-    // Check if file exists and is valid HDF5
-    static bool FileExists(const std::string& filepath);
-
-    // Get cube dimensions without loading data (fast peek)
-    static std::optional<std::tuple<u32, u32, u32>> GetDimensions(const std::string& filepath);
-
     // ========================================================================
     // Spectral Curve Loading (for material properties)
     // ========================================================================

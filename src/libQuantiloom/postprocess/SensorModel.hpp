@@ -2,6 +2,7 @@
 
 #include "../core/Image.hpp"
 #include "../core/Types.hpp"
+#include "../core/Platform.hpp"
 
 // ============================================================================
 // Sensor Simulation - Abstract Interface
@@ -63,7 +64,7 @@ struct SensorOutput {
 };
 
 /// Abstract sensor model interface
-class SensorModel {
+class QL_API SensorModel {
 public:
     virtual ~SensorModel() = default;
 

@@ -65,9 +65,12 @@ endif()
 # Compiler-Specific Flags
 # ============================================================================
 if(MSVC)
-    # MSVC: Enable UTF-8, modern conformance, and high warning level
+    # MSVC: Enable UTF-8, modern conformance, exception handling, and high warning level
+    # /wd4251: Disable DLL interface warnings for STL/header-only types (safe when using same runtime)
     add_compile_options(
         /W4
+        /EHsc
+        /wd4251
         /permissive-
         /Zc:__cplusplus
         #/source-charset:utf-8
@@ -149,6 +152,7 @@ CPMAddPackage(
         "BUILD_SHARED_LIBS OFF"
         "BUILD_TESTING OFF"
         "OPENEXR_BUILD_TOOLS OFF"
+        "OPENEXR_BUILD_EXAMPLES OFF"
         "OPENEXR_INSTALL_EXAMPLES OFF"
         "OPENEXR_INSTALL_PKG_CONFIG OFF"
 )
@@ -160,28 +164,8 @@ include_directories(SYSTEM "${openexr_SOURCE_DIR}/src/lib")
 include_directories(SYSTEM "${openexr_BINARY_DIR}/src/lib/OpenEXRCore")
 # --- END WORKAROUND ---
 
-# HDF5: Hierarchical Data Format for hyperspectral cubes
-# Try CPM first, fall back to find_package if available
-CPMAddPackage(
-    NAME hdf5
-    GIT_TAG hdf5-1.14.5
-    GITHUB_REPOSITORY HDFGroup/hdf5
-    OPTIONS
-        "BUILD_SHARED_LIBS OFF"
-        "HDF5_USE_STATIC_LIBRARIES ON"
-        "BUILD_TESTING OFF"
-        "HDF5_BUILD_EXAMPLES OFF"
-        "HDF5_BUILD_TOOLS OFF"
-        "HDF5_ENABLE_Z_LIB_SUPPORT ON"
-        "HDF5_BUILD_CPP_LIB ON"
-        "HDF5_BUILD_HL_LIB OFF"
-)
-
-# If CPM failed to fetch HDF5, try system package
-if(NOT hdf5_ADDED)
-    message(STATUS "HDF5 not found via CPM, trying find_package...")
-    find_package(HDF5 REQUIRED COMPONENTS CXX)
-endif()
+# NOTE: HDF5 dependency removed - hyperspectral cube I/O not needed for current use cases
+# If needed in future, re-add with proper static linking configuration
 
 # ============================================================================
 # Vulkan SDK (required for M1+)
@@ -245,6 +229,40 @@ CPMAddPackage(
 )
 
 message(STATUS "Dependencies resolved via CPM.cmake")
+
+# ============================================================================
+# Suppress Warnings for Third-Party Libraries (MSVC)
+# ============================================================================
+if(MSVC)
+    # Helper function to suppress warnings for a target
+    function(suppress_warnings_for_target target_name)
+        if(TARGET ${target_name})
+            target_compile_options(${target_name} PRIVATE /W0)
+        endif()
+    endfunction()
+
+    # OpenEXR libraries
+    suppress_warnings_for_target(OpenEXR)
+    suppress_warnings_for_target(OpenEXRCore)
+    suppress_warnings_for_target(OpenEXRUtil)
+    suppress_warnings_for_target(Iex)
+    suppress_warnings_for_target(IlmThread)
+
+    # Silence C++20 deprecated shared_ptr atomic warnings in IlmThread
+    if(TARGET IlmThread)
+        target_compile_definitions(IlmThread PRIVATE
+            _SILENCE_CXX20_OLD_SHARED_PTR_ATOMIC_SUPPORT_DEPRECATION_WARNING)
+    endif()
+
+    # Imath
+    suppress_warnings_for_target(Imath)
+
+    # OpenJPH (JPEG 2000 HT codec, dependency of OpenEXR)
+    suppress_warnings_for_target(openjph)
+
+    # spdlog
+    suppress_warnings_for_target(spdlog)
+endif()
 
 # ============================================================================
 # Subdirectories

@@ -73,6 +73,8 @@ conan/
 *.tmp
 *.bak
 *.cache
+*.pyc
+*.pyd
 
 
 # other
@@ -82,3 +84,4 @@ src/shaders/*.spv
 .agent/
 assets/usgs/
 reference-only/
+scripts/spectral-baker/output/

@@ -9,7 +9,7 @@ configure_file(
     @ONLY
 )
 
-add_library(libQuantiloom STATIC
+add_library(libQuantiloom SHARED
     # Core module
     core/Log.cpp
     core/Log.hpp
@@ -86,11 +86,13 @@ add_library(libQuantiloom STATIC
 
 target_compile_definitions(libQuantiloom
     PRIVATE
-        QL_BUILD_STATIC
+        QL_BUILD_SHARED
         QUANTILOOM_LIB_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         QUANTILOOM_LIB_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         QUANTILOOM_LIB_VERSION_PATCH=${PROJECT_VERSION_PATCH}
         QUANTILOOM_LIB_VERSION_STRING=${PROJECT_VERSION}
+    INTERFACE
+        QL_USE_SHARED  # Consumers linking against this library will define QL_USE_SHARED
 )
 
 # Enable validation layers in Debug mode
@@ -122,24 +124,18 @@ target_link_libraries(libQuantiloom
         tomlplusplus::tomlplusplus
         OpenEXR::OpenEXR
         Imath::Imath
-        hdf5-static
-        hdf5_cpp-static
         Vulkan::Vulkan
         VMA
         glm::glm
         tinygltf
 )
 
-# Add HDF5 include directories if using find_package
-if(HDF5_FOUND AND NOT hdf5_ADDED)
-    target_include_directories(libQuantiloom PUBLIC ${HDF5_INCLUDE_DIRS})
-endif()
-
 # Compiler-specific flags
 if(MSVC)
-    target_compile_options(libQuantiloom PRIVATE /W4)
+    target_compile_options(libQuantiloom PRIVATE /W4 /EHsc /wd4251 /wd4819)
 else()
-    target_compile_options(libQuantiloom PRIVATE -Wall -Wextra -Wpedantic)
+    # -fvisibility=hidden: Only export symbols explicitly marked with QL_API
+    target_compile_options(libQuantiloom PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
 
 message(STATUS "libQuantiloom configured successfully")

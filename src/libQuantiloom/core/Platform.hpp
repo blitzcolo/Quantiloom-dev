@@ -54,7 +54,7 @@
     #define QL_DEBUG 1
 #endif
 
-// DLL export/import macros (for future shared library support)
+// DLL export/import macros (for shared library support)
 #if defined(QL_WINDOWS)
     #if defined(QL_BUILD_SHARED)
         #define QL_API __declspec(dllexport)
@@ -64,7 +64,13 @@
         #define QL_API
     #endif
 #else
-    #define QL_API __attribute__((visibility("default")))
+    // Linux/macOS: Use visibility attribute when building shared library
+    // Requires -fvisibility=hidden compiler flag to hide non-exported symbols
+    #if defined(QL_BUILD_SHARED)
+        #define QL_API __attribute__((visibility("default")))
+    #else
+        #define QL_API
+    #endif
 #endif
 
 // Debug break macro

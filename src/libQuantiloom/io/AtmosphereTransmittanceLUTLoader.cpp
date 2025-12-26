@@ -201,7 +201,7 @@ auto AtmosphereTransmittanceLUTLoader::PeekInfo(const fs::path& filepath)
 
     // Parse TOML
     try {
-        auto config = toml::parse(header);
+        toml::table config = toml::parse(header);
 
         LUTInfo info;
         info.name = config["metadata"]["name"].value_or("Unknown");
@@ -225,8 +225,9 @@ auto AtmosphereTransmittanceLUTLoader::PeekInfo(const fs::path& filepath)
         info.data_size_bytes = static_cast<usize>(n_wave) * n_alt * n_zen * sizeof(f32);
 
         return info;
+
     } catch (const toml::parse_error& e) {
-        Log::Error("AtmosphereTransmittanceLUTLoader::PeekInfo: TOML parse error: {}", e.what());
+        Log::Error("AtmosphereTransmittanceLUTLoader::PeekInfo: TOML parse error: {}", e.description());
         return std::nullopt;
     }
 }
@@ -239,7 +240,7 @@ auto AtmosphereTransmittanceLUTLoader::ParseHeader(const String& header,
                                                     AtmosphereTransmittanceLUT& lut) -> bool
 {
     try {
-        auto config = toml::parse(header);
+        toml::table config = toml::parse(header);
 
         // Parse metadata
         lut.name = config["metadata"]["name"].value_or("Unknown");
@@ -302,9 +303,6 @@ auto AtmosphereTransmittanceLUTLoader::ParseHeader(const String& header,
     } catch (const toml::parse_error& e) {
         Log::Error("ParseHeader: TOML parse error at line {}: {}",
                    e.source().begin.line, e.description());
-        return false;
-    } catch (const std::exception& e) {
-        Log::Error("ParseHeader: Exception: {}", e.what());
         return false;
     }
 }

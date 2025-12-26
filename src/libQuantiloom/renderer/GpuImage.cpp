@@ -69,6 +69,72 @@ GpuImage::GpuImage(VmaAllocator allocator, VkDevice device,
     }
 }
 
+// Cubemap / array image constructor
+GpuImage::GpuImage(VmaAllocator allocator, VkDevice device,
+                   u32 width, u32 height,
+                   VkFormat format,
+                   VkImageUsageFlags usage,
+                   VmaMemoryUsage memUsage,
+                   u32 mipLevels,
+                   u32 arrayLayers,
+                   VkImageCreateFlags flags,
+                   VkImageViewType viewType)
+    : m_allocator(allocator),
+      m_device(device),
+      m_format(format),
+      m_extent{width, height},
+      m_mipLevels(mipLevels) {
+
+    // Create VkImage (with array layers and flags)
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = format;
+    imageInfo.extent.width = width;
+    imageInfo.extent.height = height;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = mipLevels;
+    imageInfo.arrayLayers = arrayLayers;  // Support cubemaps (6 layers)
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = usage;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageInfo.flags = flags;  // VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT for cubemaps
+
+    VmaAllocationCreateInfo allocInfo{};
+    allocInfo.usage = memUsage;
+
+    VkResult result = vmaCreateImage(m_allocator, &imageInfo, &allocInfo,
+                                     &m_image, &m_allocation, nullptr);
+
+    if (result != VK_SUCCESS) {
+        QL_LOG_ERROR("Failed to create VkImage (cubemap/array) via VMA: error code {}", static_cast<int>(result));
+        throw std::runtime_error("GpuImage creation failed");
+    }
+
+    // Create VkImageView (cubemap or array view)
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = m_image;
+    viewInfo.viewType = viewType;  // VK_IMAGE_VIEW_TYPE_CUBE for cubemaps
+    viewInfo.format = format;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.baseMipLevel = 0;
+    viewInfo.subresourceRange.levelCount = mipLevels;
+    viewInfo.subresourceRange.baseArrayLayer = 0;
+    viewInfo.subresourceRange.layerCount = arrayLayers;  // All layers
+
+    result = vkCreateImageView(m_device, &viewInfo, nullptr, &m_view);
+
+    if (result != VK_SUCCESS) {
+        // Clean up image if view creation fails
+        vmaDestroyImage(m_allocator, m_image, m_allocation);
+        QL_LOG_ERROR("Failed to create VkImageView (cubemap/array): error code {}", static_cast<int>(result));
+        throw std::runtime_error("GpuImage view creation failed");
+    }
+}
+
 GpuImage::~GpuImage() {
     // Destruction order: view before image
     if (m_view != VK_NULL_HANDLE) {

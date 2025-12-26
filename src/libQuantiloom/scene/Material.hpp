@@ -279,4 +279,63 @@ struct Material {
     }
 };
 
+// ============================================================================
+// Inline IR Property Helpers Implementation
+// ============================================================================
+
+namespace detail {
+    // Helper: Linear interpolation for spectral curves
+    inline f32 InterpolateSpectralCurve(
+        const Vector<std::pair<f32, f32>>& curve,
+        f32 lambda_nm,
+        f32 fallback = 0.0f)
+    {
+        if (curve.empty()) {
+            return fallback;
+        }
+
+        // Clamp to boundaries
+        if (lambda_nm <= curve.front().first) {
+            return curve.front().second;
+        }
+        if (lambda_nm >= curve.back().first) {
+            return curve.back().second;
+        }
+
+        // Binary search for surrounding wavelengths
+        usize left = 0;
+        usize right = curve.size() - 1;
+
+        while (right - left > 1) {
+            if (usize mid = (left + right) / 2; curve[mid].first < lambda_nm) {
+                left = mid;
+            } else {
+                right = mid;
+            }
+        }
+
+        // Linear interpolation
+        f32 lambda0 = curve[left].first;
+        f32 lambda1 = curve[right].first;
+        f32 value0 = curve[left].second;
+        f32 value1 = curve[right].second;
+
+        f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+        return value0 * (1.0f - t) + value1 * t;
+    }
+} // namespace detail
+
+inline f32 Material::GetIREmissivity(f32 lambda_nm) const {
+    return detail::InterpolateSpectralCurve(irEmissivityCurve, lambda_nm, 0.0f);
+}
+
+inline f32 Material::GetIRReflectance(f32 lambda_nm) const {
+    // Fallback to spectralAlbedo if no IR curve available
+    return detail::InterpolateSpectralCurve(irReflectanceCurve, lambda_nm, spectralAlbedo);
+}
+
+inline f32 Material::GetIRTransmittance(f32 lambda_nm) const {
+    return detail::InterpolateSpectralCurve(irTransmittanceCurve, lambda_nm, 0.0f);
+}
+
 } // namespace quantiloom

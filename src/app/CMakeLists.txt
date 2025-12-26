@@ -9,6 +9,13 @@ configure_file(
     @ONLY
 )
 
+# Enable warnings
+if(MSVC)
+    add_compile_options(/W4 /wd4251 /wd4819)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
 add_executable(Quantiloom
     main.cpp
     Quantiloom.rc
@@ -25,11 +32,6 @@ target_include_directories(Quantiloom
 target_link_libraries(Quantiloom
     PRIVATE
         libQuantiloom
-)
-
-target_compile_definitions(Quantiloom
-    PRIVATE
-        QL_USE_STATIC
 )
 
 # C++20 standard and RPATH set to executable directory

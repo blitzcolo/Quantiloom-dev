@@ -23,7 +23,7 @@
  * @note For multi-angle data, use AtmosphereTransmittanceLUT instead
  *
  * @see AtmosphereTransmittanceLUT for 3D (λ,h,θ) lookup tables
- * @see LUTLoader for HDF5 file I/O
+ * @see LUTLoader for TOML file I/O
  *
  * @author wtflmao
  */

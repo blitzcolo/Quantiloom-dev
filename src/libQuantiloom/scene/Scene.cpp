@@ -128,7 +128,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     if (config.Has("atmosphere.lut")) {
         if (auto lutPath = config.Get<String>("atmosphere.lut", "");
             !lutPath.empty() && std::filesystem::exists(lutPath)) {
-            if (auto lut = LUTLoader::LoadHDF5(lutPath); lut && lut->IsValid()) {
+            if (auto lut = LUTLoader::LoadTOML(lutPath); lut && lut->IsValid()) {
                 scene.atmosphereLUT = std::move(*lut);
                 QL_LOG_INFO("Loaded atmosphere LUT: {} wavelength samples", scene.atmosphereLUT->Size());
             } else {
@@ -224,9 +224,9 @@ void Scene::PrintSummary() const {
     if (!bands.empty()) {
         QL_LOG_INFO("  Mode: MS-RT");
         QL_LOG_INFO("  Bands: {}", bands.size());
-        for (const auto&[name, center_nm, fwhm_nm] : bands) {
+        for (const auto&[bandName, center_nm, fwhm_nm] : bands) {
             QL_LOG_INFO("    - {}: {:.1f} nm (FWHM: {:.1f} nm)",
-                        name, center_nm, fwhm_nm);
+                        bandName, center_nm, fwhm_nm);
         }
     } else {
         QL_LOG_INFO("  Mode: HS-OFF");
