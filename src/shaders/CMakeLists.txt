@@ -2,9 +2,10 @@
 # Quantiloom Shader Compilation
 # ============================================================================
 # Automatically compiles HLSL shaders to SPIR-V using DXC
+# and GLSL compute shaders using glslc
 # ============================================================================
 
-# Find DXC compiler
+# Find DXC compiler (for HLSL ray tracing shaders)
 set(DXC_SEARCH_PATHS
     "${CMAKE_SOURCE_DIR}/tools/dxc/bin"           # Local DXC from setup script
     "${CMAKE_SOURCE_DIR}/tools/dxc/bin/x64"       # Windows local DXC
@@ -18,19 +19,37 @@ find_program(DXC_EXECUTABLE
     DOC "DirectX Shader Compiler (DXC)"
 )
 
+# Find glslc compiler (for GLSL compute shaders)
+find_program(GLSLC_EXECUTABLE
+    NAMES glslc glslc.exe
+    PATHS
+        "$ENV{VULKAN_SDK}/Bin"
+        "$ENV{VULKAN_SDK}/bin"
+        "/usr/bin"
+    DOC "GLSL Compiler (glslc)"
+)
+
 if(NOT DXC_EXECUTABLE)
     message(WARNING
-        "DXC not found! Shaders will NOT be compiled automatically.\n"
+        "DXC not found! HLSL shaders will NOT be compiled automatically.\n"
         "To install DXC, run:\n"
         "  Linux/macOS: ./tools/setup_dxc.sh\n"
         "  Windows:     powershell -ExecutionPolicy Bypass -File tools/setup_dxc.ps1\n"
         "\n"
         "Alternatively, install Vulkan SDK which includes DXC."
     )
-    return()
+else()
+    message(STATUS "Found DXC: ${DXC_EXECUTABLE}")
 endif()
 
-message(STATUS "Found DXC: ${DXC_EXECUTABLE}")
+if(NOT GLSLC_EXECUTABLE)
+    message(WARNING
+        "glslc not found! GLSL compute shaders will NOT be compiled automatically.\n"
+        "Please install Vulkan SDK which includes glslc."
+    )
+else()
+    message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
+endif()
 
 # Shader source files
 set(SHADER_SOURCES
@@ -81,11 +100,54 @@ add_custom_target(CompileShaders ALL
     COMMENT "Compiling all shaders"
 )
 
+# ============================================================================
+# GLSL Compute Shaders (using glslc)
+# ============================================================================
+
+set(COMPUTE_SHADER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/ibl_brdf_lut.comp
+    ${CMAKE_CURRENT_SOURCE_DIR}/spectral_reconstruct.comp
+)
+
+set(COMPILED_COMPUTE_SHADERS)
+
+if(GLSLC_EXECUTABLE)
+    foreach(COMP_SHADER ${COMPUTE_SHADER_SOURCES})
+        get_filename_component(SHADER_NAME ${COMP_SHADER} NAME_WE)
+        set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+
+        add_custom_command(
+            OUTPUT ${SHADER_OUTPUT}
+            COMMAND ${GLSLC_EXECUTABLE}
+                -fshader-stage=compute
+                -o ${SHADER_OUTPUT}
+                ${COMP_SHADER}
+            DEPENDS ${COMP_SHADER}
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+            COMMENT "Compiling compute shader: ${SHADER_NAME}"
+            VERBATIM
+        )
+
+        list(APPEND COMPILED_COMPUTE_SHADERS ${SHADER_OUTPUT})
+    endforeach()
+
+    add_custom_target(CompileComputeShaders ALL
+        DEPENDS ${COMPILED_COMPUTE_SHADERS}
+        COMMENT "Compiling all compute shaders"
+    )
+
+    message(STATUS "  Compute shaders to compile:")
+    foreach(COMP_SHADER ${COMPUTE_SHADER_SOURCES})
+        get_filename_component(SHADER_FILE ${COMP_SHADER} NAME)
+        message(STATUS "    - ${SHADER_FILE}")
+    endforeach()
+endif()
+
 # Print summary
 message(STATUS "Shader compilation configured:")
 message(STATUS "  Input directory:  ${CMAKE_CURRENT_SOURCE_DIR}")
 message(STATUS "  Output directory: ${SHADER_OUTPUT_DIR}")
-message(STATUS "  Shaders to compile:")
+message(STATUS "  HLSL shaders to compile:")
 foreach(SHADER_SOURCE ${SHADER_SOURCES})
     get_filename_component(SHADER_FILE ${SHADER_SOURCE} NAME)
     message(STATUS "    - ${SHADER_FILE}")

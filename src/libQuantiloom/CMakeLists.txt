@@ -36,6 +36,8 @@ add_library(libQuantiloom SHARED
     io/AtmosphereTransmittanceLUTLoader.hpp
     io/GltfLoader.cpp
     io/GltfLoader.hpp
+    io/SpectralCubeIO.cpp
+    io/SpectralCubeIO.hpp
 
     # Renderer module (Vulkan + VMA wrappers)
     renderer/VmaImpl.cpp
@@ -79,6 +81,21 @@ add_library(libQuantiloom SHARED
     postprocess/MultibandFusion.cpp
     postprocess/MultibandFusion.hpp
     postprocess/PostprocessConfig.hpp
+
+    # Hyperspectral core module
+    hs_core/HyperspectralConfig.hpp
+    hs_core/HyperspectralRenderer.cpp
+    hs_core/HyperspectralRenderer.hpp
+    hs_core/BatchRenderer.cpp
+    hs_core/BatchRenderer.hpp
+    hs_core/SpectralAnalyzer.cpp
+    hs_core/SpectralAnalyzer.hpp
+    hs_core/AdaptiveGridGenerator.cpp
+    hs_core/AdaptiveGridGenerator.hpp
+    hs_core/SpectralReconstructor.cpp
+    hs_core/SpectralReconstructor.hpp
+    hs_core/GpuSpectralReconstructor.cpp
+    hs_core/GpuSpectralReconstructor.hpp
 
     # Generated files
     ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp

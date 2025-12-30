@@ -218,6 +218,17 @@ set(TEST_POSTPROCESS_SOURCES
     test_postprocess/test_multiband_fusion.cpp
 )
 
+# Hyperspectral core tests
+set(TEST_HS_CORE_SOURCES
+    test_hs_core/test_hyperspectral_config.cpp
+    test_hs_core/test_spectral_cube_io.cpp
+    test_hs_core/test_spectral_analyzer.cpp
+    test_hs_core/test_adaptive_grid_generator.cpp
+    test_hs_core/test_spectral_reconstructor.cpp
+    test_hs_core/test_batch_renderer.cpp
+    test_hs_core/test_gpu_spectral_reconstructor.cpp
+)
+
 # Test main (custom main function with logging initialization)
 set(TEST_MAIN_SOURCE
     test_main.cpp
@@ -231,6 +242,7 @@ set(ALL_TEST_SOURCES
     ${TEST_IO_SOURCES}
     ${TEST_RENDERER_SOURCES}
     ${TEST_POSTPROCESS_SOURCES}
+    ${TEST_HS_CORE_SOURCES}
 )
 
 # ============================================================================
@@ -351,6 +363,13 @@ add_custom_target(test_postprocess
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
 
+# Run only hyperspectral core tests
+add_custom_target(test_hs_core
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=HyperspectralConfigTest.*:SpectralCubeIOTest.*:SpectralFeatureTypeTest.*:SpectralFeatureTest.*:SpectralAnalysisParamsTest.*:SpectralAnalysisResultTest.*:SpectralAnalyzerTest.*:AdaptiveGridInfoTest.*:ReconstructionMappingTest.*:AdaptiveGridGeneratorTest.*:InterpolationMethodTest.*:SpectralReconstructorTest.*:BatchRenderStatusTest.*:BatchRenderProgressTest.*:BatchRenderParamsTest.*:ValidateWavelengthListTest.*:SortWavelengthsTest.*:EstimateBatchTimeTest.*:BatchRendererWorkflowTest.*:BatchRendererEdgeCaseTest.*:GpuReconstructorStatusTest.*:GpuReconstructorConfigTest.*:EstimateReconstructionMemoryTest.*:HyperspectralConfigGpuTest.*:CatmullRomReferenceTest.*:LinearInterpReferenceTest.*:WavelengthGridTest.*:SpectralCubeLayoutTest.*:ComputeShaderCompatTest.*:GpuReconstructorEdgeCaseTest.*
+    DEPENDS libquantiloom_tests
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+)
+
 # ============================================================================
 # Optional: Code Coverage (Linux/GCC only)
 # ============================================================================
@@ -388,6 +407,7 @@ message(STATUS "  Scene tests:       ${TEST_SCENE_SOURCES}")
 message(STATUS "  IO tests:          ${TEST_IO_SOURCES}")
 message(STATUS "  Renderer tests:    ${TEST_RENDERER_SOURCES}")
 message(STATUS "  Postprocess tests: ${TEST_POSTPROCESS_SOURCES}")
+message(STATUS "  HS-Core tests:     ${TEST_HS_CORE_SOURCES}")
 message(STATUS "  Total tests:       ${ALL_TEST_SOURCES}")
 message(STATUS "==================================================")
 message(STATUS "Build and run:")
@@ -400,4 +420,5 @@ message(STATUS "  cmake --build . --target test_scene")
 message(STATUS "  cmake --build . --target test_io")
 message(STATUS "  cmake --build . --target test_renderer")
 message(STATUS "  cmake --build . --target test_postprocess")
+message(STATUS "  cmake --build . --target test_hs_core")
 message(STATUS "==================================================")

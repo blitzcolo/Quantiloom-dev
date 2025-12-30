@@ -1,0 +1,365 @@
+// ============================================================================
+// Quantiloom - Spectral Reconstruction Compute Shader
+// ============================================================================
+// GPU-accelerated spectral interpolation for adaptive hyperspectral rendering
+//
+// Reconstructs full spectral cube from adaptively-sampled sparse data using
+// Catmull-Rom cubic spline interpolation. Each pixel's spectrum is processed
+// independently in parallel.
+//
+// Interpolation algorithm: Catmull-Rom spline (tension = 0.5)
+// - Smooth, C1 continuous
+// - Local: requires 4 points (p0, p1, p2, p3)
+// - Interpolates between p1 and p2
+//
+// Memory layout:
+// - Input: SparseCube stored BSQ (band-sequential) in storage buffer
+// - Output: FullCube stored BSQ in storage buffer
+// - Wavelengths: Uniform buffers for source and target grids
+//
+// Reference: "Catmull-Rom Splines" (Catmull & Rom, 1974)
+// ============================================================================
+
+#version 460
+
+// ============================================================================
+// Workgroup Configuration
+// ============================================================================
+// Each thread processes one pixel's entire spectrum reconstruction
+// Using 16x16 tiles for good occupancy on most GPUs
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+// ============================================================================
+// Bindings
+// ============================================================================
+
+// Push constants for reconstruction parameters
+layout(push_constant) uniform PushConstants {
+    uint width;             // Image width
+    uint height;            // Image height
+    uint srcBands;          // Number of source (sparse) bands
+    uint dstBands;          // Number of destination (full) bands
+    uint interpolationMode; // 0=Linear, 1=CatmullRom, 2=Akima
+    uint _pad0;
+    uint _pad1;
+    uint _pad2;
+} params;
+
+// Source sparse cube data (BSQ layout: band0_all_pixels, band1_all_pixels, ...)
+layout(std430, binding = 0) readonly buffer SparseCubeBuffer {
+    float sparseCube[];
+};
+
+// Destination full cube data (BSQ layout)
+layout(std430, binding = 1) writeonly buffer FullCubeBuffer {
+    float fullCube[];
+};
+
+// Source wavelengths (sparse grid)
+layout(std430, binding = 2) readonly buffer SrcWavelengthsBuffer {
+    float srcWavelengths[];
+};
+
+// Target wavelengths (full grid)
+layout(std430, binding = 3) readonly buffer DstWavelengthsBuffer {
+    float dstWavelengths[];
+};
+
+// Reconstruction mapping (pre-computed on CPU)
+// Each entry: [targetBand, sourceBand, sourceNextBand, wasRendered, targetWavelength, interpWeight]
+layout(std430, binding = 4) readonly buffer MappingBuffer {
+    // Packed as: uint4 + float2 per entry
+    // x: targetBand
+    // y: sourceBand (or nearest)
+    // z: sourceNextBand (for linear interp)
+    // w: wasRendered (1 = direct copy, 0 = interpolate)
+    // float[0]: targetWavelength
+    // float[1]: interpWeight (for linear: t between src bands)
+    uint mappingData[];  // Access via helper functions
+};
+
+// ============================================================================
+// Constants
+// ============================================================================
+
+#define INTERP_MODE_LINEAR      0
+#define INTERP_MODE_CATMULL_ROM 1
+#define INTERP_MODE_AKIMA       2
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// Get pixel index in BSQ layout
+uint GetPixelIndex(uint x, uint y, uint band) {
+    uint pixelOffset = y * params.width + x;
+    return band * params.width * params.height + pixelOffset;
+}
+
+// Read source value at (x, y, band)
+float ReadSparse(uint x, uint y, uint band) {
+    return sparseCube[GetPixelIndex(x, y, band)];
+}
+
+// Write destination value at (x, y, band)
+void WriteFull(uint x, uint y, uint band, float value) {
+    fullCube[GetPixelIndex(x, y, band)] = value;
+}
+
+// ============================================================================
+// Linear Interpolation
+// ============================================================================
+
+float LinearInterp(float v0, float v1, float t) {
+    return v0 + t * (v1 - v0);
+}
+
+// ============================================================================
+// Catmull-Rom Cubic Spline Interpolation
+// ============================================================================
+// Interpolates between p1 and p2 using points p0, p1, p2, p3
+// Parameter t in [0, 1]
+
+float CatmullRomInterp(float p0, float p1, float p2, float p3, float t) {
+    float t2 = t * t;
+    float t3 = t2 * t;
+
+    // Catmull-Rom coefficients (tension = 0.5)
+    float a0 = -0.5 * p0 + 1.5 * p1 - 1.5 * p2 + 0.5 * p3;
+    float a1 = p0 - 2.5 * p1 + 2.0 * p2 - 0.5 * p3;
+    float a2 = -0.5 * p0 + 0.5 * p2;
+    float a3 = p1;
+
+    return a0 * t3 + a1 * t2 + a2 * t + a3;
+}
+
+// ============================================================================
+// Find Cubic Interpolation Indices
+// ============================================================================
+// Finds 4 surrounding points (idx0, idx1, idx2, idx3) and interpolation parameter t
+// for Catmull-Rom spline at target wavelength
+
+void GetCubicIndices(float targetWl, out uint idx0, out uint idx1, out uint idx2, out uint idx3, out float t) {
+    uint numSrc = params.srcBands;
+
+    // Find idx1 such that srcWavelengths[idx1] <= targetWl < srcWavelengths[idx1+1]
+    idx1 = 0;
+    for (uint i = 0; i < numSrc - 1; ++i) {
+        if (srcWavelengths[i + 1] < targetWl) {
+            idx1 = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    // Set idx2 (next point)
+    idx2 = (idx1 < numSrc - 1) ? idx1 + 1 : idx1;
+
+    // Set idx0 (one before idx1)
+    idx0 = (idx1 > 0) ? idx1 - 1 : 0;
+
+    // Set idx3 (one after idx2)
+    idx3 = (idx2 < numSrc - 1) ? idx2 + 1 : numSrc - 1;
+
+    // Compute interpolation parameter
+    if (idx2 > idx1) {
+        t = (targetWl - srcWavelengths[idx1]) / (srcWavelengths[idx2] - srcWavelengths[idx1]);
+    } else {
+        t = 0.0;
+    }
+
+    // Clamp t to [0, 1]
+    t = clamp(t, 0.0, 1.0);
+}
+
+// ============================================================================
+// Find Linear Interpolation Indices
+// ============================================================================
+
+void GetLinearIndices(float targetWl, out uint idx0, out uint idx1, out float t) {
+    uint numSrc = params.srcBands;
+
+    // Find interval
+    idx0 = 0;
+    for (uint i = 0; i < numSrc - 1; ++i) {
+        if (srcWavelengths[i + 1] < targetWl) {
+            idx0 = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    idx1 = (idx0 < numSrc - 1) ? idx0 + 1 : idx0;
+
+    // Compute interpolation parameter
+    if (idx1 > idx0) {
+        t = (targetWl - srcWavelengths[idx0]) / (srcWavelengths[idx1] - srcWavelengths[idx0]);
+    } else {
+        t = 0.0;
+    }
+
+    t = clamp(t, 0.0, 1.0);
+}
+
+// ============================================================================
+// Find Exact Match
+// ============================================================================
+// Returns index if targetWl exactly matches a source wavelength, otherwise -1
+
+int FindExactMatch(float targetWl) {
+    float epsilon = 0.01;  // 0.01 nm tolerance
+
+    for (uint i = 0; i < params.srcBands; ++i) {
+        if (abs(srcWavelengths[i] - targetWl) < epsilon) {
+            return int(i);
+        }
+    }
+    return -1;
+}
+
+// ============================================================================
+// Akima Spline Interpolation (Simplified GPU Version)
+// ============================================================================
+// Akima splines are more robust to outliers but require more computation
+// This is a simplified version suitable for GPU execution
+
+float AkimaInterp(uint x, uint y, float targetWl) {
+    uint numSrc = params.srcBands;
+
+    // Find interval
+    uint idx = 0;
+    for (uint i = 0; i < numSrc - 1; ++i) {
+        if (srcWavelengths[i + 1] < targetWl) {
+            idx = i + 1;
+        } else {
+            break;
+        }
+    }
+
+    if (idx >= numSrc - 1) {
+        return ReadSparse(x, y, numSrc - 1);
+    }
+
+    // Compute slopes for 5 points centered around idx
+    float m[5];
+    for (int j = -2; j <= 2; ++j) {
+        int i0 = clamp(int(idx) + j, 0, int(numSrc) - 2);
+        int i1 = i0 + 1;
+        m[j + 2] = (ReadSparse(x, y, i1) - ReadSparse(x, y, i0)) /
+                   (srcWavelengths[i1] - srcWavelengths[i0]);
+    }
+
+    // Akima weights
+    float w1 = abs(m[3] - m[2]);
+    float w2 = abs(m[1] - m[0]);
+
+    float d0, d1;
+    if (w1 + w2 < 1e-10) {
+        d0 = 0.5 * (m[1] + m[2]);
+    } else {
+        d0 = (w1 * m[1] + w2 * m[2]) / (w1 + w2);
+    }
+
+    w1 = abs(m[4] - m[3]);
+    w2 = abs(m[2] - m[1]);
+    if (w1 + w2 < 1e-10) {
+        d1 = 0.5 * (m[2] + m[3]);
+    } else {
+        d1 = (w1 * m[2] + w2 * m[3]) / (w1 + w2);
+    }
+
+    // Hermite interpolation
+    float h = srcWavelengths[idx + 1] - srcWavelengths[idx];
+    float t = (targetWl - srcWavelengths[idx]) / h;
+    float t2 = t * t;
+    float t3 = t2 * t;
+
+    float v0 = ReadSparse(x, y, idx);
+    float v1 = ReadSparse(x, y, idx + 1);
+
+    float h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    float h10 = t3 - 2.0 * t2 + t;
+    float h01 = -2.0 * t3 + 3.0 * t2;
+    float h11 = t3 - t2;
+
+    return h00 * v0 + h10 * h * d0 + h01 * v1 + h11 * h * d1;
+}
+
+// ============================================================================
+// Reconstruct Single Pixel Spectrum
+// ============================================================================
+
+void ReconstructPixel(uint x, uint y) {
+    // Process each target band
+    for (uint dstBand = 0; dstBand < params.dstBands; ++dstBand) {
+        float targetWl = dstWavelengths[dstBand];
+        float value;
+
+        // Check if this wavelength was directly rendered
+        int exactIdx = FindExactMatch(targetWl);
+
+        if (exactIdx >= 0) {
+            // Direct copy - no interpolation needed
+            value = ReadSparse(x, y, exactIdx);
+        } else {
+            // Interpolation needed
+            switch (params.interpolationMode) {
+                case INTERP_MODE_LINEAR: {
+                    uint idx0, idx1;
+                    float t;
+                    GetLinearIndices(targetWl, idx0, idx1, t);
+                    value = LinearInterp(
+                        ReadSparse(x, y, idx0),
+                        ReadSparse(x, y, idx1),
+                        t
+                    );
+                    break;
+                }
+
+                case INTERP_MODE_CATMULL_ROM: {
+                    uint idx0, idx1, idx2, idx3;
+                    float t;
+                    GetCubicIndices(targetWl, idx0, idx1, idx2, idx3, t);
+                    value = CatmullRomInterp(
+                        ReadSparse(x, y, idx0),
+                        ReadSparse(x, y, idx1),
+                        ReadSparse(x, y, idx2),
+                        ReadSparse(x, y, idx3),
+                        t
+                    );
+                    break;
+                }
+
+                case INTERP_MODE_AKIMA: {
+                    value = AkimaInterp(x, y, targetWl);
+                    break;
+                }
+
+                default:
+                    value = 0.0;
+                    break;
+            }
+        }
+
+        // Ensure non-negative radiance
+        value = max(value, 0.0);
+
+        WriteFull(x, y, dstBand, value);
+    }
+}
+
+// ============================================================================
+// Main Compute Shader
+// ============================================================================
+
+void main() {
+    uvec2 coord = gl_GlobalInvocationID.xy;
+
+    // Bounds check
+    if (coord.x >= params.width || coord.y >= params.height) {
+        return;
+    }
+
+    ReconstructPixel(coord.x, coord.y);
+}

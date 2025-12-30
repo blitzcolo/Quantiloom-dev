@@ -30,6 +30,9 @@
 #include "SceneBuilder.hpp"
 #include "postprocess/GenericSensor.hpp"
 #include "postprocess/PostprocessConfig.hpp"
+#include "hs_core/HyperspectralRenderer.hpp"
+#include "hs_core/HyperspectralConfig.hpp"
+#include "io/SpectralCubeIO.hpp"
 
 #include <glm/glm.hpp>
 #include <iostream>
@@ -1569,6 +1572,83 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         // Render Frame with Accumulative Sampling
         // ====================================================================
+
+        // ================================================================
+        // Multispectral (Hyperspectral) Rendering Mode
+        // ================================================================
+        if (spectral_mode == SpectralMode::Multispectral) {
+            QL_LOG_INFO("========================================");
+            QL_LOG_INFO("  MULTISPECTRAL RENDERING MODE");
+            QL_LOG_INFO("========================================");
+
+            // Parse hyperspectral configuration from TOML
+            HyperspectralConfig hsConfig;
+            hsConfig.wavelengthMin_nm = config.Get<f32>("hyperspectral.wavelength_min_nm", 400.0f);
+            hsConfig.wavelengthMax_nm = config.Get<f32>("hyperspectral.wavelength_max_nm", 2500.0f);
+            hsConfig.wavelengthStep_nm = config.Get<f32>("hyperspectral.wavelength_step_nm", 10.0f);
+            hsConfig.spp = spp;
+            hsConfig.useGpuReconstruction = config.Get<bool>("hyperspectral.use_gpu_reconstruction", true);
+
+            // Determine output path (without extension)
+            std::filesystem::path outPath(outputPath);
+            String hsOutputPath = outPath.parent_path().string();
+            if (!hsOutputPath.empty()) hsOutputPath += "/";
+            hsOutputPath += outPath.stem().string();
+            hsConfig.outputPath = hsOutputPath;
+
+            // Output format (default: ENVI_BSQ - standard remote sensing format)
+            String formatStr = config.Get<String>("hyperspectral.output_format", "envi_bsq");
+            if (formatStr == "envi_bsq" || formatStr == "ENVI_BSQ") {
+                hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BSQ;
+            } else if (formatStr == "envi_bil" || formatStr == "ENVI_BIL") {
+                hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BIL;
+            } else if (formatStr == "envi_bip" || formatStr == "ENVI_BIP") {
+                hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BIP;
+            } else if (formatStr == "geotiff" || formatStr == "GeoTIFF") {
+                hsConfig.outputFormat = HyperspectralOutputFormat::GeoTIFF;
+            } else {
+                QL_LOG_WARN("Unknown hyperspectral format '{}', using ENVI_BSQ", formatStr);
+                hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BSQ;
+            }
+
+            QL_LOG_INFO("  Wavelength range: {:.1f} - {:.1f} nm", hsConfig.wavelengthMin_nm, hsConfig.wavelengthMax_nm);
+            QL_LOG_INFO("  Wavelength step: {:.1f} nm", hsConfig.wavelengthStep_nm);
+            QL_LOG_INFO("  Total bands: {}", hsConfig.GetNumBands());
+            QL_LOG_INFO("  SPP per band: {}", hsConfig.spp);
+            QL_LOG_INFO("  Output: {}", hsConfig.outputPath);
+            QL_LOG_INFO("  GPU reconstruction: {}", hsConfig.useGpuReconstruction ? "enabled" : "disabled");
+            QL_LOG_INFO("========================================");
+
+            // Create hyperspectral renderer
+            HyperspectralRenderer hsRenderer(context, pipeline, loadedScene);
+
+            // Progress callback for status updates
+            auto progressCallback = [](const HyperspectralProgress& p, void*) {
+                if (p.currentBand % 10 == 0 || p.currentBand == p.totalBands) {
+                    QL_LOG_INFO("  Band {}/{} ({:.1f} nm) - {:.1f}% - ETA: {:.1f}s",
+                                p.currentBand, p.totalBands, p.currentWavelength_nm,
+                                p.GetPercentage(), p.GetRemainingSeconds());
+                }
+            };
+
+            // Execute hyperspectral rendering
+            auto status = hsRenderer.Render(hsConfig, progressCallback, nullptr);
+
+            if (status == HyperspectralStatus::Success) {
+                QL_LOG_INFO("  Hyperspectral rendering complete!");
+                QL_LOG_INFO("  Total render time: {:.2f} seconds", hsRenderer.GetLastRenderTime());
+                QL_LOG_INFO("  Average time per band: {:.3f} seconds", hsRenderer.GetAverageTimePerBand());
+
+                // Output is already written by HyperspectralRenderer::Render()
+                QL_LOG_INFO("  Output written to: {}.hdr/.dat", hsConfig.outputPath);
+            } else {
+                QL_LOG_ERROR("Hyperspectral rendering failed: {}", HyperspectralStatusToString(status));
+            }
+
+        } else {
+        // ================================================================
+        // Single-frame Rendering (RGB, Single wavelength, IR Fused modes)
+        // ================================================================
         if (spectral_mode == SpectralMode::Single ||
             spectral_mode == SpectralMode::MWIR_Fused ||
             spectral_mode == SpectralMode::LWIR_Fused ||
@@ -1798,6 +1878,8 @@ int main(int argc, char* argv[]) {
             }
         }
 
+        } // End of else block (single-frame rendering)
+
         // ====================================================================
         // Success
         // ====================================================================
@@ -1810,6 +1892,8 @@ int main(int argc, char* argv[]) {
             spectral_mode == SpectralMode::LWIR_Fused ||
             spectral_mode == SpectralMode::SWIR_Fused) {
             QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
+        } else if (spectral_mode == SpectralMode::Multispectral) {
+            QL_LOG_INFO("  Mode: Hyperspectral data cube");
         }
         QL_LOG_INFO("  Output: {}", outputPath);
         QL_LOG_INFO("========================================");

@@ -99,3 +99,11 @@ private:
 #define QL_LOG_WARN(...)     ::quantiloom::Log::Warn(__VA_ARGS__)
 #define QL_LOG_ERROR(...)    ::quantiloom::Log::Error(__VA_ARGS__)
 #define QL_LOG_CRITICAL(...) ::quantiloom::Log::Critical(__VA_ARGS__)
+
+// Short-form aliases (without QL_ prefix)
+#define LOG_TRACE(...)    ::quantiloom::Log::Trace(__VA_ARGS__)
+#define LOG_DEBUG(...)    ::quantiloom::Log::Debug(__VA_ARGS__)
+#define LOG_INFO(...)     ::quantiloom::Log::Info(__VA_ARGS__)
+#define LOG_WARN(...)     ::quantiloom::Log::Warn(__VA_ARGS__)
+#define LOG_ERROR(...)    ::quantiloom::Log::Error(__VA_ARGS__)
+#define LOG_CRITICAL(...) ::quantiloom::Log::Critical(__VA_ARGS__)

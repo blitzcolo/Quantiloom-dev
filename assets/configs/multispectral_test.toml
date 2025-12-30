@@ -1,0 +1,72 @@
+# ============================================================================
+# Quantiloom - Multispectral Hyperspectral Test Configuration
+# =========================================================================
+# This configuration renders a hyperspectral data cube in ENVI format.
+# Output: .hdr (header) + .dat (binary data) files
+# ============================================================================
+
+[renderer]
+resolution = [512, 512]           # Output resolution (smaller for faster testing)
+spp = 4                           # Samples per pixel per wavelength band
+output = "hyperspectral_output"   # Output base path (without extension)
+environment_map = "assets/maps/qwantani_noon_puresky_4k.exr"
+
+[spectral]
+# ============================================================================
+# MULTISPECTRAL MODE - Renders full hyperspectral data cube
+# ============================================================================
+# Renders each wavelength band sequentially, outputs ENVI format
+# suitable for analysis in GDAL, QGIS, ENVI software, or Python/spectral
+# ============================================================================
+mode = "multispectral"
+
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+# ============================================================================
+# Hyperspectral Rendering Parameters
+# ============================================================================
+[hyperspectral]
+# Wavelength range (nanometers)
+wavelength_min_nm = 400.0         # Start wavelength
+wavelength_max_nm = 700.0         # End wavelength
+wavelength_step_nm = 50.0         # Step size (50nm = 7 bands for quick test)
+
+# Output format: "envi_bsq", "envi_bil", "envi_bip", "geotiff"
+# ENVI_BSQ is the standard format for remote sensing software
+output_format = "envi_bsq"
+
+# GPU-accelerated spectral reconstruction (10-40x faster)
+use_gpu_reconstruction = true
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF/DamagedHelmet.gltf"
+world_units_to_meters = 1.0
+
+[camera]
+position = [0.0, 0.0, 3.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[lighting]
+sun_direction = [0.5, 0.8, 0.3]
+sun_radiance = [5.0, 5.0, 5.0]
+sky_radiance = [0.5, 0.7, 1.0]
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+# Disable sensor simulation for hyperspectral output (preserve radiometric accuracy)
+[sensor]
+enabled = false
+
+# Disable atmospheric scattering for cleaner spectral data
+[atmospheric]
+preset = "disabled"
