@@ -85,3 +85,4 @@ src/shaders/*.spv
 assets/usgs/
 reference-only/
 scripts/spectral-baker/output/
+docs/html/
