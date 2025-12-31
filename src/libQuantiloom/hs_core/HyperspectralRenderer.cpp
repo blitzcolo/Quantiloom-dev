@@ -39,8 +39,10 @@
 #include "core/Log.hpp"
 #include "core/Image.hpp"
 #include "io/SpectralCubeIO.hpp"
+#include "io/ImageIO.hpp"
 
 #include <chrono>
+#include <filesystem>
 #include <atomic>
 
 namespace quantiloom {
@@ -364,6 +366,60 @@ HyperspectralStatus HyperspectralRenderer::Render(
         f64 savedTime = uniformTime - m_impl->lastRenderTime;
         LOG_INFO("Adaptive sampling saved {:.1f}s ({:.1f}%% reduction)",
                  savedTime, 100.0 * savedTime / uniformTime);
+    }
+
+    // ========================================================================
+    // Save Intermediate Band Images (Debug Only)
+    // ========================================================================
+
+    if (config.saveIntermediates && !config.outputPath.empty()) {
+        LOG_INFO("Saving intermediate band images for debugging...");
+
+        // Create output directory
+        std::filesystem::path outDir = std::filesystem::path(config.outputPath).parent_path();
+        std::string baseName = std::filesystem::path(config.outputPath).stem().string();
+
+        if (outDir.empty()) {
+            outDir = ".";
+        }
+
+        std::filesystem::path intermediateDir = outDir / (baseName + "_bands");
+        std::filesystem::create_directories(intermediateDir);
+
+        const SpectralCube& cube = m_impl->result;
+        u32 width = cube.width;
+        u32 height = cube.height;
+        u32 numBands = static_cast<u32>(cube.wavelengths.size());
+
+        for (u32 bandIdx = 0; bandIdx < numBands; ++bandIdx) {
+            f32 wavelength = cube.wavelengths[bandIdx];
+
+            // Create grayscale Image from band data
+            Image bandImage;
+            bandImage.Resize(width, height, 1);
+            bandImage.channelNames = {"Y"};  // Luminance channel
+
+            const f32* bandPtr = cube.BandPtr(bandIdx);
+            std::memcpy(bandImage.data.data(), bandPtr, width * height * sizeof(f32));
+
+            // Add metadata
+            bandImage.metadata["wavelength_nm"] = std::to_string(wavelength);
+            bandImage.metadata["band_index"] = std::to_string(bandIdx);
+
+            // Generate filename
+            char filename[256];
+            std::snprintf(filename, sizeof(filename),
+                         "band_%03u_%04.0fnm.exr", bandIdx, wavelength);
+
+            std::filesystem::path filePath = intermediateDir / filename;
+
+            if (!ImageIO::WriteEXR(filePath.string(), bandImage)) {
+                LOG_WARN("Failed to save intermediate band {}: {}", bandIdx, filePath.string());
+            }
+        }
+
+        LOG_INFO("Saved {} intermediate band images to: {}",
+                 numBands, intermediateDir.string());
     }
 
     // ========================================================================

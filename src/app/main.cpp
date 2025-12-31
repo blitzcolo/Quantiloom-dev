@@ -1588,6 +1588,7 @@ int main(int argc, char* argv[]) {
             hsConfig.wavelengthStep_nm = config.Get<f32>("hyperspectral.wavelength_step_nm", 10.0f);
             hsConfig.spp = spp;
             hsConfig.useGpuReconstruction = config.Get<bool>("hyperspectral.use_gpu_reconstruction", true);
+            hsConfig.saveIntermediates = config.Get<bool>("hyperspectral.save_intermediates", false);
 
             // Determine output path (without extension)
             std::filesystem::path outPath(outputPath);
@@ -1617,6 +1618,7 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  SPP per band: {}", hsConfig.spp);
             QL_LOG_INFO("  Output: {}", hsConfig.outputPath);
             QL_LOG_INFO("  GPU reconstruction: {}", hsConfig.useGpuReconstruction ? "enabled" : "disabled");
+            QL_LOG_INFO("  Save intermediates: {}", hsConfig.saveIntermediates ? "enabled" : "disabled");
             QL_LOG_INFO("========================================");
 
             // Create hyperspectral renderer

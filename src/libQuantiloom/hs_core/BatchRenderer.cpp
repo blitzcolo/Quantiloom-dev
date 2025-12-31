@@ -80,6 +80,15 @@ struct BatchRenderer::Impl {
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
             );
 
+            // Transition to GENERAL layout for storage image usage
+            CommandHelper::TransitionImageLayoutImmediate(
+                context,
+                outputImage->GetImage(),
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL
+            );
+
             imageWidth = width;
             imageHeight = height;
 

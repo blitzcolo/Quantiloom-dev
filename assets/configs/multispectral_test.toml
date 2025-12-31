@@ -40,6 +40,10 @@ output_format = "envi_bsq"
 # GPU-accelerated spectral reconstruction (10-40x faster)
 use_gpu_reconstruction = true
 
+# DEBUG: Save each wavelength band as individual EXR file for inspection
+# Output directory: {output_basename}_bands/band_000_0400nm.exr, etc.
+save_intermediates = true
+
 [scene]
 gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF/DamagedHelmet.gltf"
 world_units_to_meters = 1.0
