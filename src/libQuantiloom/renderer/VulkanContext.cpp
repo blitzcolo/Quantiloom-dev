@@ -45,6 +45,79 @@ VulkanContext::VulkanContext() {
     QL_LOG_INFO("Vulkan context initialized successfully");
 }
 
+// ============================================================================
+// Protected Constructor (External Handles - for Adapter Pattern)
+// ============================================================================
+
+VulkanContext::VulkanContext(const ExternalHandles& handles, bool createAllocatorIfNull) {
+    QL_LOG_INFO("Initializing VulkanContext from external handles...");
+
+    // External handles - we do NOT own VkInstance/VkDevice
+    m_ownsVulkanHandles = false;
+
+    // Directly assign external handles (not owned by us)
+    m_instance = handles.instance;
+    m_physicalDevice = handles.physicalDevice;
+    m_device = handles.device;
+    m_graphicsQueue = handles.graphicsQueue;
+    m_graphicsQueueFamily = handles.graphicsQueueFamily;
+    m_debugMessenger = VK_NULL_HANDLE;  // External context manages debug
+
+    // Query device properties
+    vkGetPhysicalDeviceProperties(m_physicalDevice, &m_deviceProperties);
+
+    // Query Ray Tracing properties
+    m_rtPipelineProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_PROPERTIES_KHR;
+    m_asProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_PROPERTIES_KHR;
+    m_asProperties.pNext = &m_rtPipelineProperties;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &m_asProperties;
+
+    vkGetPhysicalDeviceProperties2(m_physicalDevice, &props2);
+
+    // Clear pNext pointers after query
+    m_asProperties.pNext = nullptr;
+    m_rtPipelineProperties.pNext = nullptr;
+
+    m_rayTracingSupported = true;  // Assume external context has RT support
+
+    // Handle allocator
+    if (handles.allocator != VK_NULL_HANDLE) {
+        m_allocator = handles.allocator;
+        m_ownsAllocator = false;
+        QL_LOG_INFO("  Using external VMA allocator");
+    } else if (createAllocatorIfNull) {
+        // Create internal VMA allocator
+        VmaVulkanFunctions vulkanFunctions{};
+        vulkanFunctions.vkGetInstanceProcAddr = &vkGetInstanceProcAddr;
+        vulkanFunctions.vkGetDeviceProcAddr = &vkGetDeviceProcAddr;
+
+        VmaAllocatorCreateInfo allocatorInfo{};
+        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        allocatorInfo.instance = m_instance;
+        allocatorInfo.physicalDevice = m_physicalDevice;
+        allocatorInfo.device = m_device;
+        allocatorInfo.pVulkanFunctions = &vulkanFunctions;
+        allocatorInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+
+        VkResult result = vmaCreateAllocator(&allocatorInfo, &m_allocator);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create VMA allocator for external context");
+        }
+        m_ownsAllocator = true;
+        QL_LOG_INFO("  Created internal VMA allocator for external context");
+    } else {
+        m_allocator = VK_NULL_HANDLE;
+        m_ownsAllocator = false;
+    }
+
+    QL_LOG_INFO("VulkanContext initialized from external handles:");
+    QL_LOG_INFO("  Device: {}", m_deviceProperties.deviceName);
+    QL_LOG_INFO("  Max RT recursion: {}", m_rtPipelineProperties.maxRayRecursionDepth);
+}
+
 VulkanContext::~VulkanContext() {
     QL_LOG_INFO("Destroying Vulkan context...");
 
@@ -54,28 +127,33 @@ VulkanContext::~VulkanContext() {
     }
 
     // Destruction order: reverse of construction
-    // VMA allocator must be destroyed BEFORE device
-    if (m_allocator != VK_NULL_HANDLE) {
+    // VMA allocator must be destroyed BEFORE device (only if we own it)
+    if (m_ownsAllocator && m_allocator != VK_NULL_HANDLE) {
         vmaDestroyAllocator(m_allocator);
+        m_allocator = VK_NULL_HANDLE;
     }
 
-    if (m_device != VK_NULL_HANDLE) {
-        vkDestroyDevice(m_device, nullptr);
-    }
-
-    // Destroy debug messenger if it was created (always check, regardless of build config)
-    // This avoids ODR issues where different TUs have different QUANTILOOM_ENABLE_VALIDATION
-    if (m_debugMessenger != VK_NULL_HANDLE) {
-        auto func = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(
-            m_instance, "vkDestroyDebugUtilsMessengerEXT"));
-        if (func != nullptr) {
-            func(m_instance, m_debugMessenger, nullptr);
+    // Only destroy VkDevice/VkInstance if we own them (not for external handles)
+    if (m_ownsVulkanHandles) {
+        if (m_device != VK_NULL_HANDLE) {
+            vkDestroyDevice(m_device, nullptr);
+            m_device = VK_NULL_HANDLE;
         }
-        m_debugMessenger = VK_NULL_HANDLE;
-    }
 
-    if (m_instance != VK_NULL_HANDLE) {
-        vkDestroyInstance(m_instance, nullptr);
+        // Destroy debug messenger if it was created
+        if (m_debugMessenger != VK_NULL_HANDLE && m_instance != VK_NULL_HANDLE) {
+            auto func = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(vkGetInstanceProcAddr(
+                m_instance, "vkDestroyDebugUtilsMessengerEXT"));
+            if (func != nullptr) {
+                func(m_instance, m_debugMessenger, nullptr);
+            }
+            m_debugMessenger = VK_NULL_HANDLE;
+        }
+
+        if (m_instance != VK_NULL_HANDLE) {
+            vkDestroyInstance(m_instance, nullptr);
+            m_instance = VK_NULL_HANDLE;
+        }
     }
 
     QL_LOG_INFO("Vulkan context destroyed");

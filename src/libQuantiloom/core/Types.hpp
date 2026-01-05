@@ -193,6 +193,56 @@ private:
     std::variant<T, E> m_data;
 };
 
+/**
+ * @class Result<void, E>
+ * @brief Specialization of Result for functions that return nothing on success
+ *
+ * Used for operations that can fail but don't return a value on success.
+ * Uses std::monostate internally to represent the "success" case.
+ *
+ * Usage:
+ * @code
+ * Result<void, String> DoSomething() {
+ *     if (failed) return Result<void, String>::Err("reason");
+ *     return Result<void, String>::Ok();
+ * }
+ *
+ * auto result = DoSomething();
+ * if (!result.has_value()) {
+ *     std::cerr << result.error() << std::endl;
+ * }
+ * @endcode
+ */
+template<typename E>
+class Result<void, E> {
+public:
+    // Construct success (void value)
+    Result() : m_data(std::monostate{}) {}
+
+    // Static factory for success
+    static Result Ok() { return Result(); }
+
+    // Static factory for error
+    static Result Err(E&& e) { return Result(std::move(e)); }
+    static Result Err(const E& e) { return Result(e); }
+
+    // Check if result is success
+    [[nodiscard]] bool has_value() const { return std::holds_alternative<std::monostate>(m_data); }
+    explicit operator bool() const { return has_value(); }
+
+    // Access error (throws if success)
+    [[nodiscard]] const E& error() const & { return std::get<E>(m_data); }
+    E& error() & { return std::get<E>(m_data); }
+    E&& error() && { return std::get<E>(std::move(m_data)); }
+
+private:
+    // Private constructor for error
+    explicit Result(E&& e) : m_data(std::move(e)) {}
+    explicit Result(const E& e) : m_data(e) {}
+
+    std::variant<std::monostate, E> m_data;
+};
+
 // Helper function to create error result
 template<typename E>
 auto Err(E&& error) {

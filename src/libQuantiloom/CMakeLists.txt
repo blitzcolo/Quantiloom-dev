@@ -63,6 +63,11 @@ add_library(libQuantiloom SHARED
     renderer/PerformanceLogger.hpp
     renderer/AtmosphericConfig.cpp
     renderer/AtmosphericConfig.hpp
+    renderer/LightingParams.hpp
+    renderer/VulkanContextAdapter.cpp
+    renderer/VulkanContextAdapter.hpp
+    renderer/ExternalRenderContext.cpp
+    renderer/ExternalRenderContext.hpp
 
     # Scene module
     scene/Camera.cpp
@@ -127,23 +132,36 @@ set_target_properties(libQuantiloom PROPERTIES
     SOVERSION ${PROJECT_VERSION_MAJOR}
 )
 
-# Include directories
+# Include directories (use generator expressions for proper install/export)
 target_include_directories(libQuantiloom
     PUBLIC
-        ${CMAKE_CURRENT_SOURCE_DIR}  # Allows #include "core/Log.hpp"
-        ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "core/LibVersion.hpp"
+        # Build tree: use source and binary dirs
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+        # Install tree: use installed include dir
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/quantiloom>
+)
+
+# GLM headers are needed by consumers (public API uses glm types)
+# Consumers must find_package(glm) to get these directories
+target_include_directories(libQuantiloom
+    PUBLIC
+        $<BUILD_INTERFACE:${glm_SOURCE_DIR}>
 )
 
 # Link dependencies (from CPM.cmake)
+# PUBLIC: Used in public headers (Log.hpp uses spdlog, Config.hpp uses toml++, headers use glm/VMA)
+# PRIVATE: Implementation details not exposed to consumers
 target_link_libraries(libQuantiloom
     PUBLIC
         spdlog::spdlog
         tomlplusplus::tomlplusplus
+        Vulkan::Vulkan
+        glm::glm
+        VMA
+    PRIVATE
         OpenEXR::OpenEXR
         Imath::Imath
-        Vulkan::Vulkan
-        VMA
-        glm::glm
         tinygltf
 )
 
@@ -156,3 +174,69 @@ else()
 endif()
 
 message(STATUS "libQuantiloom configured successfully")
+
+# ============================================================================
+# Install Targets for find_package(Quantiloom) Support
+# ============================================================================
+# NOTE: Installation is currently disabled due to CPM dependency export issues.
+# For Qt6 GUI integration, use add_subdirectory() or FetchContent instead.
+# TODO: Enable installation once we have proper dependency handling.
+# ============================================================================
+
+if(FALSE)  # Disabled: CPM dependencies can't be exported properly
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+# Install library binary
+install(TARGETS libQuantiloom
+    EXPORT QuantiloomTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# Install public headers (preserve directory structure)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/quantiloom
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "*.h"
+    PATTERN "*.cpp" EXCLUDE
+    PATTERN "*.rc" EXCLUDE
+)
+
+# Install generated headers
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/quantiloom/core
+)
+
+# Export targets for find_package
+install(EXPORT QuantiloomTargets
+    FILE QuantiloomTargets.cmake
+    NAMESPACE Quantiloom::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+)
+
+# Generate QuantiloomConfig.cmake
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/QuantiloomConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/QuantiloomConfig.cmake"
+    INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+)
+
+# Generate QuantiloomConfigVersion.cmake
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/QuantiloomConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+# Install config files
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/QuantiloomConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/QuantiloomConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+)
+
+endif()  # if(FALSE) - Disabled install section

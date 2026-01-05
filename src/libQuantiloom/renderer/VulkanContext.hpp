@@ -100,13 +100,53 @@ public:
     // ========================================================================
 
     VulkanContext();
-    ~VulkanContext();
+    virtual ~VulkanContext();
 
     // Non-copyable, non-movable (singleton-like)
     VulkanContext(const VulkanContext&) = delete;
     VulkanContext& operator=(const VulkanContext&) = delete;
     VulkanContext(VulkanContext&&) = delete;
     VulkanContext& operator=(VulkanContext&&) = delete;
+
+    // ========================================================================
+    // External Handles (for VulkanContextAdapter)
+    // ========================================================================
+
+    /**
+     * @struct ExternalHandles
+     * @brief External Vulkan handles for adapter pattern
+     *
+     * Used by VulkanContextAdapter to create a VulkanContext that uses
+     * externally-managed Vulkan resources (e.g., from Qt's QVulkanWindow).
+     */
+    struct ExternalHandles {
+        VkInstance instance = VK_NULL_HANDLE;
+        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+        VkDevice device = VK_NULL_HANDLE;
+        VkQueue graphicsQueue = VK_NULL_HANDLE;
+        u32 graphicsQueueFamily = 0;
+        VmaAllocator allocator = VK_NULL_HANDLE;  // If null, creates internal
+    };
+
+protected:
+    /**
+     * @brief Constructor for adapters - accepts external handles
+     * @param handles External Vulkan handles (must remain valid)
+     * @param ownsAllocator If true and handles.allocator is null, creates internal allocator
+     *
+     * This constructor bypasses normal initialization and directly assigns
+     * external handles. Used by VulkanContextAdapter for Qt6 GUI integration.
+     *
+     * @note Does NOT call CreateInstance/SetupDebugMessenger/SelectPhysicalDevice/CreateDevice
+     * @note External handles MUST remain valid for lifetime of this context
+     */
+    explicit VulkanContext(const ExternalHandles& handles, bool createAllocatorIfNull = true);
+
+    // Track ownership - external handles context does NOT own VkInstance/VkDevice
+    bool m_ownsVulkanHandles = true;  // True for normal constructor, false for external handles
+    bool m_ownsAllocator = true;      // True if we created allocator internally
+
+public:
 
     // ========================================================================
     // Accessors
