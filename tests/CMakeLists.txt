@@ -202,6 +202,7 @@ set(TEST_IO_SOURCES
     test_io/test_lut_loader.cpp
     test_io/test_atmosphere_transmittance_lut_loader.cpp
     test_io/test_gltf_loader.cpp
+    test_io/test_usd_loader.cpp
 )
 
 # Renderer tests (non-Vulkan components only)

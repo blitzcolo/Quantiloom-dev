@@ -220,6 +220,33 @@ if(tinygltf_ADDED)
     message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
 endif()
 
+# TinyUSDZ: OpenUSD loader (static library)
+# Supports USDA (ASCII), USDC (Crate binary), and USDZ (zipped) formats
+CPMAddPackage(
+    NAME tinyusdz
+    GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
+    GIT_TAG v0.9.1
+    OPTIONS
+        "TINYUSDZ_BUILD_TESTS OFF"
+        "TINYUSDZ_BUILD_EXAMPLES OFF"
+        "TINYUSDZ_WITH_OPENSUBDIV OFF"
+        "TINYUSDZ_WITH_AUDIO OFF"
+        "TINYUSDZ_WITH_C_API OFF"
+        "TINYUSDZ_WITH_PYTHON OFF"
+        "TINYUSDZ_WITH_TYDRA ON"
+        "CMAKE_POSITION_INDEPENDENT_CODE ON"
+)
+
+if(tinyusdz_ADDED)
+    # TinyUSDZ doesn't export include directories properly, add them manually
+    if(TARGET tinyusdz_static)
+        target_include_directories(tinyusdz_static PUBLIC
+            ${tinyusdz_SOURCE_DIR}/src
+        )
+    endif()
+    message(STATUS "TinyUSDZ v0.9.1 added (static library with Tydra)")
+endif()
+
 # GLM: Mathematics library for graphics (header-only)
 CPMAddPackage(
     NAME glm
@@ -262,6 +289,9 @@ if(MSVC)
 
     # spdlog
     suppress_warnings_for_target(spdlog)
+
+    # TinyUSDZ
+    suppress_warnings_for_target(tinyusdz_static)
 endif()
 
 # ============================================================================

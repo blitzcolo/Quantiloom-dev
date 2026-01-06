@@ -11,6 +11,7 @@
 #include "core/SpectralData.hpp"
 #include "io/ImageIO.hpp"
 #include "io/GltfLoader.hpp"
+#include "io/UsdLoader.hpp"
 #include "io/SpectralIO.hpp"
 #include "io/SpectralBasisLoader.hpp"
 #include "renderer/VulkanContext.hpp"
@@ -204,6 +205,19 @@ std::vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize) {
 // For glTF scenes, also populates materials and textures
 Result<Scene> LoadSceneFromConfig(const Config& config) {
     Scene scene;
+
+    // Check for USD file (OpenUSD: .usd, .usda, .usdc, .usdz)
+    if (config.Has("scene.usd")) {
+        auto usdPath = config.Get<String>("scene.usd");
+        QL_LOG_INFO("Loading USD scene: {}", usdPath);
+
+        auto result = UsdLoader::LoadFromFile(usdPath);
+        if (!result.has_value()) {
+            return Result<Scene>(Result<Scene>::Err("Failed to load USD: " + result.error()));
+        }
+
+        return Result(std::move(result.value()));
+    }
 
     // Check for glTF file
     if (config.Has("scene.gltf")) {

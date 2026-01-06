@@ -36,6 +36,8 @@ add_library(libQuantiloom SHARED
     io/AtmosphereTransmittanceLUTLoader.hpp
     io/GltfLoader.cpp
     io/GltfLoader.hpp
+    io/UsdLoader.cpp
+    io/UsdLoader.hpp
     io/SpectralCubeIO.cpp
     io/SpectralCubeIO.hpp
 
@@ -164,6 +166,7 @@ target_link_libraries(libQuantiloom
         OpenEXR::OpenEXR
         Imath::Imath
         tinygltf
+        tinyusdz_static
         glm::glm  # Link privately for build, consumers use find_package(glm)
 )
 
