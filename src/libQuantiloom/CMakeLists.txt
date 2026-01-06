@@ -210,6 +210,40 @@ install(FILES ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/quantiloom/core
 )
 
+# ============================================================================
+# Bundle GLM headers into SDK (so consumers don't need separate glm install)
+# ============================================================================
+# Install glm headers (fetched via CPM in root CMakeLists.txt)
+install(DIRECTORY ${glm_SOURCE_DIR}/glm
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "*.h"
+        PATTERN "*.inl"
+)
+
+# Create a minimal glmConfig.cmake for find_package(glm)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
+"# glmConfig.cmake - Bundled with Quantiloom SDK
+# This allows find_package(glm) to work with bundled headers
+
+if(NOT TARGET glm::glm)
+    add_library(glm::glm INTERFACE IMPORTED)
+    get_filename_component(_GLM_PREFIX \"\${CMAKE_CURRENT_LIST_DIR}/../../..\" ABSOLUTE)
+    set_target_properties(glm::glm PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES \"\${_GLM_PREFIX}/include\"
+    )
+    unset(_GLM_PREFIX)
+endif()
+
+set(glm_FOUND TRUE)
+set(glm_VERSION \"1.0.1\")
+")
+
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/glm
+)
+
 # Export targets for find_package
 install(EXPORT QuantiloomTargets
     FILE QuantiloomTargets.cmake
