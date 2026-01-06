@@ -795,10 +795,20 @@ bool ExternalRenderContext::RemoveNode(u32 nodeIndex) {
 }
 
 void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& transform) {
-    // TODO: Implement in Phase 2
-    (void)nodeIndex;
-    (void)transform;
-    QL_LOG_WARN("ExternalRenderContext::SetNodeTransform not implemented yet");
+    if (!m_impl->scene) {
+        QL_LOG_WARN("SetNodeTransform: No scene loaded");
+        return;
+    }
+
+    if (nodeIndex >= m_impl->scene->nodes.size()) {
+        QL_LOG_WARN("SetNodeTransform: Invalid node index {}", nodeIndex);
+        return;
+    }
+
+    // Update the node's transform in the scene
+    m_impl->scene->nodes[nodeIndex].transform = transform;
+
+    QL_LOG_DEBUG("SetNodeTransform: Updated node {} transform", nodeIndex);
 }
 
 void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& material) {
@@ -809,8 +819,46 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
 }
 
 void ExternalRenderContext::RebuildAccelerationStructure() {
-    // TODO: Implement in Phase 2
-    QL_LOG_WARN("ExternalRenderContext::RebuildAccelerationStructure not implemented yet");
+    if (!m_impl->scene || m_impl->blasList.empty()) {
+        QL_LOG_WARN("RebuildAccelerationStructure: No scene or BLAS available");
+        return;
+    }
+
+    QL_LOG_DEBUG("Rebuilding TLAS with updated transforms...");
+
+    // Wait for GPU to finish any pending work
+    vkDeviceWaitIdle(m_impl->device);
+
+    // Reset TLAS
+    m_impl->tlas.reset();
+    m_impl->tlas = std::make_unique<TLAS>(*m_impl->contextAdapter);
+
+    // Execute TLAS build on GPU
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        // Add instances to TLAS with current transforms
+        size_t blasIndex = 0;
+        for (const auto& node : m_impl->scene->nodes) {
+            const Mesh& mesh = m_impl->scene->meshes[node.meshIndex];
+
+            for (const auto& primitive : mesh.primitives) {
+                m_impl->tlas->AddInstance(
+                    *m_impl->blasList[blasIndex],
+                    primitive.materialId,
+                    node.transform
+                );
+                ++blasIndex;
+            }
+        }
+
+        m_impl->tlas->Build(cmd);
+    });
+
+    // Re-bind TLAS to pipeline
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindAccelerationStructure(m_impl->tlas->GetHandle());
+    }
+
+    QL_LOG_DEBUG("TLAS rebuilt successfully");
 }
 
 // ============================================================================
