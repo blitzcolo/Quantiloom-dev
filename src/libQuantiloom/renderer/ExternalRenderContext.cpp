@@ -5,6 +5,9 @@
  * @author wtflmao
  */
 
+// VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition
+#include <vk_mem_alloc.h>
+
 #include "ExternalRenderContext.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
@@ -20,7 +23,6 @@
 #include "io/GltfLoader.hpp"
 #include "io/ImageIO.hpp"
 
-#include <vk_mem_alloc.h>
 #include <glm/gtc/matrix_inverse.hpp>
 #include <chrono>
 
@@ -374,7 +376,8 @@ const Scene* ExternalRenderContext::GetScene() const {
 
 void ExternalRenderContext::RenderFrame(
     VkCommandBuffer cmd,
-    VkImageView targetImageView,
+    VkImage targetImage,
+    VkImageLayout targetLayout,
     u32 width,
     u32 height) {
 
@@ -405,12 +408,107 @@ void ExternalRenderContext::RenderFrame(
         randomSeed
     );
 
-    // Execute ray tracing
+    // Execute ray tracing (writes to internal outputImage in GENERAL layout)
     m_impl->pipeline->TraceRays(cmd, width, height);
 
-    // TODO: Copy from outputImage to target swapchain image
-    // This requires image blit/copy with format conversion
-    (void)targetImageView;  // Unused for now
+    // ========================================================================
+    // Blit outputImage to target swapchain image
+    // ========================================================================
+
+    // Step 1: Transition outputImage from GENERAL to TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier outputBarrier{};
+    outputBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    outputBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    outputBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    outputBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outputBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    outputBarrier.image = m_impl->outputImage->GetImage();
+    outputBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    outputBarrier.subresourceRange.baseMipLevel = 0;
+    outputBarrier.subresourceRange.levelCount = 1;
+    outputBarrier.subresourceRange.baseArrayLayer = 0;
+    outputBarrier.subresourceRange.layerCount = 1;
+    outputBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    outputBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    // Step 2: Transition target image to TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier targetBarrier{};
+    targetBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    targetBarrier.oldLayout = targetLayout;
+    targetBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    targetBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    targetBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    targetBarrier.image = targetImage;
+    targetBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    targetBarrier.subresourceRange.baseMipLevel = 0;
+    targetBarrier.subresourceRange.levelCount = 1;
+    targetBarrier.subresourceRange.baseArrayLayer = 0;
+    targetBarrier.subresourceRange.layerCount = 1;
+    targetBarrier.srcAccessMask = 0;  // Previous access unknown
+    targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageMemoryBarrier barriers[2] = {outputBarrier, targetBarrier};
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        2, barriers
+    );
+
+    // Step 3: Blit (with format conversion: R32G32B32A32_SFLOAT -> B8G8R8A8_SRGB)
+    // vkCmdBlitImage handles HDR->SDR clamping automatically (values > 1.0 become 1.0)
+    VkImageBlit blitRegion{};
+    blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitRegion.srcSubresource.mipLevel = 0;
+    blitRegion.srcSubresource.baseArrayLayer = 0;
+    blitRegion.srcSubresource.layerCount = 1;
+    blitRegion.srcOffsets[0] = {0, 0, 0};
+    blitRegion.srcOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+
+    blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitRegion.dstSubresource.mipLevel = 0;
+    blitRegion.dstSubresource.baseArrayLayer = 0;
+    blitRegion.dstSubresource.layerCount = 1;
+    blitRegion.dstOffsets[0] = {0, 0, 0};
+    blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+
+    vkCmdBlitImage(
+        cmd,
+        m_impl->outputImage->GetImage(),
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        targetImage,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        1,
+        &blitRegion,
+        VK_FILTER_NEAREST  // No filtering needed for same-size blit
+    );
+
+    // Step 4: Transition outputImage back to GENERAL for next frame
+    outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    outputBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    outputBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    outputBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+    // Step 5: Transition target to PRESENT_SRC_KHR for presentation
+    targetBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    targetBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    targetBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    targetBarrier.dstAccessMask = 0;
+
+    barriers[0] = outputBarrier;
+    barriers[1] = targetBarrier;
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        2, barriers
+    );
 
     m_impl->accumulatedSamples++;
     m_impl->frameIndex++;

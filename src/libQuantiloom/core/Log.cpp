@@ -1,16 +1,30 @@
+/**
+ * @file Log.cpp
+ * @brief Logging system implementation with spdlog backend
+ *
+ * spdlog is only included here, not in the public header.
+ *
+ * @author wtflmao
+ */
+
 #include "Log.hpp"
 
 QL_DISABLE_WARNINGS_PUSH
+#include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/sinks/basic_file_sink.h>
 QL_DISABLE_WARNINGS_POP
 
 #include <vector>
+#include <memory>
 
 namespace quantiloom {
 
-// Static member definition
-std::shared_ptr<spdlog::logger> Log::s_Logger;
+// Static member definitions
+Log::Level Log::s_CurrentLevel = Log::Level::Info;
+
+// File-local spdlog logger (hidden from public API)
+static std::shared_ptr<spdlog::logger> s_Logger;
 
 void Log::Init(const char* logFilePath, const Level level) {
     // Create multi-sink logger (console + file)
@@ -55,6 +69,8 @@ void Log::Shutdown() {
 }
 
 void Log::SetLevel(const Level level) {
+    s_CurrentLevel = level;
+
     if (!s_Logger) return;
 
     switch (level) {
@@ -69,22 +85,29 @@ void Log::SetLevel(const Level level) {
 }
 
 Log::Level Log::GetLevel() {
-    if (!s_Logger) return Level::Off;
-
-    switch (s_Logger->level()) {
-        case spdlog::level::trace:    return Level::Trace;
-        case spdlog::level::debug:    return Level::Debug;
-        case spdlog::level::info:     return Level::Info;
-        case spdlog::level::warn:     return Level::Warn;
-        case spdlog::level::err:      return Level::Error;
-        case spdlog::level::critical: return Level::Critical;
-        default:                      return Level::Off;
-    }
+    return s_CurrentLevel;
 }
 
 void Log::Flush() {
     if (s_Logger) {
         s_Logger->flush();
+    }
+}
+
+void Log::LogMessage(Level level, std::string_view message) {
+    if (!s_Logger) return;
+
+    // Convert string_view to string for spdlog
+    std::string msg(message);
+
+    switch (level) {
+        case Level::Trace:    s_Logger->trace("{}", msg); break;
+        case Level::Debug:    s_Logger->debug("{}", msg); break;
+        case Level::Info:     s_Logger->info("{}", msg); break;
+        case Level::Warn:     s_Logger->warn("{}", msg); break;
+        case Level::Error:    s_Logger->error("{}", msg); break;
+        case Level::Critical: s_Logger->critical("{}", msg); break;
+        case Level::Off:      break;
     }
 }
 

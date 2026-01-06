@@ -76,36 +76,23 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
 
     // MS-RT mode: band definitions
     if (config.Has("spectral.bands")) {
-        if (auto bandsTable = config.GetTable("spectral")) {
-            // Try to parse bands array (TOML array of tables)
-            // Note: toml++ doesn't have direct array-of-tables getter,
-            // need to access via root table
-            if (const auto& root = config.GetRoot(); root["spectral"]["bands"].is_array()) {
-                for (const auto& bandsArray = *root["spectral"]["bands"].as_array(); const auto& bandNode : bandsArray) {
-                    if (bandNode.is_table()) {
-                        const auto& bandTable = *bandNode.as_table();
+        // Use GetTableArray to parse array of tables without exposing toml++
+        auto bandConfigs = config.GetTableArray("spectral.bands");
+        for (const auto& bandConfig : bandConfigs) {
+            SpectralBand band;
+            band.name = bandConfig.GetString("name", "");
+            band.center_nm = bandConfig.GetFloat("center_nm", 550.0f);
+            band.fwhm_nm = bandConfig.GetFloat("fwhm_nm", 40.0f);
 
-                        SpectralBand band;
-                        if (bandTable["name"].is_string()) {
-                            band.name = *bandTable["name"].value<std::string>();
-                        }
-                        if (bandTable["center_nm"].is_number()) {
-                            band.center_nm = static_cast<f32>(*bandTable["center_nm"].value<double>());
-                        }
-                        if (bandTable["fwhm_nm"].is_number()) {
-                            band.fwhm_nm = static_cast<f32>(*bandTable["fwhm_nm"].value<double>());
-                        }
-
-                        if (band.IsValid()) {
-                            scene.bands.push_back(band);
-                        } else {
-                            QL_LOG_WARN("Invalid spectral band: {}", band.name);
-                        }
-                    }
-                }
-
-                QL_LOG_INFO("Loaded {} spectral bands", scene.bands.size());
+            if (band.IsValid()) {
+                scene.bands.push_back(band);
+            } else {
+                QL_LOG_WARN("Invalid spectral band: {}", band.name);
             }
+        }
+
+        if (!scene.bands.empty()) {
+            QL_LOG_INFO("Loaded {} spectral bands", scene.bands.size());
         }
     }
 

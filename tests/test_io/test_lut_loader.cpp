@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <cmath>
 
 using namespace quantiloom;
 

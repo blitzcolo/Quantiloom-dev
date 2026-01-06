@@ -4,6 +4,7 @@
 #include "core/Log.hpp"
 #include <stdexcept>
 #include <cstring>
+#include <cmath>
 
 namespace quantiloom {
 

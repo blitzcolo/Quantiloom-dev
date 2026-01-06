@@ -33,7 +33,32 @@
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
 #include <vulkan/vulkan.h>
-#include <vk_mem_alloc.h>
+
+// Forward declarations for VMA types (avoid including heavy vk_mem_alloc.h)
+struct VmaAllocator_T;
+typedef VmaAllocator_T* VmaAllocator;
+struct VmaAllocation_T;
+typedef VmaAllocation_T* VmaAllocation;
+
+// VMA memory usage enum - only define if VMA header not already included
+// Note: This enum is also declared in GpuImage.hpp - both are needed
+//       since headers may be included independently
+// The real VMA header defines AMD_VULKAN_MEMORY_ALLOCATOR_H
+#if !defined(AMD_VULKAN_MEMORY_ALLOCATOR_H) && !defined(QUANTILOOM_VMA_MEMORY_USAGE_DEFINED)
+#define QUANTILOOM_VMA_MEMORY_USAGE_DEFINED
+typedef enum VmaMemoryUsage {
+    VMA_MEMORY_USAGE_UNKNOWN = 0,
+    VMA_MEMORY_USAGE_GPU_ONLY = 1,
+    VMA_MEMORY_USAGE_CPU_ONLY = 2,
+    VMA_MEMORY_USAGE_CPU_TO_GPU = 3,
+    VMA_MEMORY_USAGE_GPU_TO_CPU = 4,
+    VMA_MEMORY_USAGE_CPU_COPY = 5,
+    VMA_MEMORY_USAGE_GPU_LAZILY_ALLOCATED = 6,
+    VMA_MEMORY_USAGE_AUTO = 7,
+    VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE = 8,
+    VMA_MEMORY_USAGE_AUTO_PREFER_HOST = 9,
+} VmaMemoryUsage;
+#endif
 
 // ============================================================================
 // GpuBuffer - RAII wrapper for VkBuffer with VMA allocation

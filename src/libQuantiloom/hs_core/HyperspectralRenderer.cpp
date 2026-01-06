@@ -44,6 +44,7 @@
 #include <chrono>
 #include <filesystem>
 #include <atomic>
+#include <cstring>
 
 namespace quantiloom {
 

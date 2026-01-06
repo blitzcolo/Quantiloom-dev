@@ -33,10 +33,10 @@
 #include "core/Platform.hpp"
 #include <vulkan/vulkan.h>
 
-// VMA configuration: use dynamic Vulkan functions
-#define VMA_STATIC_VULKAN_FUNCTIONS 0
-#define VMA_DYNAMIC_VULKAN_FUNCTIONS 1
-#include <vk_mem_alloc.h>
+// Forward declaration for VMA allocator (avoid including heavy vk_mem_alloc.h)
+// VMA is only needed in .cpp implementation files
+struct VmaAllocator_T;
+typedef VmaAllocator_T* VmaAllocator;
 
 #include <vector>
 

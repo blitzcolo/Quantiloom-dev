@@ -150,19 +150,21 @@ target_include_directories(libQuantiloom
 )
 
 # Link dependencies (from CPM.cmake)
-# PUBLIC: Used in public headers (Log.hpp uses spdlog, Config.hpp uses toml++, headers use glm/VMA)
-# PRIVATE: Implementation details not exposed to consumers
+# PUBLIC: Exposed in public headers (Vulkan types)
+# PRIVATE: Implementation details hidden via PIMPL (spdlog, toml++, VMA)
+# Note: GLM is header-only - exposed via include directories, not link
+#       Consumers must find_package(glm) - see QuantiloomConfig.cmake.in
 target_link_libraries(libQuantiloom
     PUBLIC
+        Vulkan::Vulkan
+    PRIVATE
         spdlog::spdlog
         tomlplusplus::tomlplusplus
-        Vulkan::Vulkan
-        glm::glm
         VMA
-    PRIVATE
         OpenEXR::OpenEXR
         Imath::Imath
         tinygltf
+        glm::glm  # Link privately for build, consumers use find_package(glm)
 )
 
 # Compiler-specific flags
@@ -178,12 +180,9 @@ message(STATUS "libQuantiloom configured successfully")
 # ============================================================================
 # Install Targets for find_package(Quantiloom) Support
 # ============================================================================
-# NOTE: Installation is currently disabled due to CPM dependency export issues.
-# For Qt6 GUI integration, use add_subdirectory() or FetchContent instead.
-# TODO: Enable installation once we have proper dependency handling.
+# Now enabled: spdlog, toml++, VMA are PRIVATE dependencies hidden via PIMPL.
+# Only glm and Vulkan are PUBLIC - consumers need find_package(glm) and Vulkan SDK.
 # ============================================================================
-
-if(FALSE)  # Disabled: CPM dependencies can't be exported properly
 
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
@@ -238,5 +237,3 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/QuantiloomConfigVersion.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
 )
-
-endif()  # if(FALSE) - Disabled install section

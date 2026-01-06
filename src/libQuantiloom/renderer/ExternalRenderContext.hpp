@@ -178,25 +178,30 @@ public:
     /**
      * @brief Render frame to external command buffer
      *
-     * Records ray tracing commands to the provided command buffer.
+     * Records ray tracing commands to the provided command buffer, then copies
+     * the result to the target swapchain image.
+     *
      * The caller is responsible for:
      * - Beginning the command buffer
-     * - Calling vkCmdBeginRendering() with appropriate attachments
-     * - Calling this method to record ray tracing commands
-     * - Calling vkCmdEndRendering()
+     * - Ensuring target image is in TRANSFER_DST_OPTIMAL or GENERAL layout
+     * - Calling this method to record ray tracing and blit commands
+     * - Transitioning target image to PRESENT_SRC_KHR before present
      * - Submitting the command buffer
      *
      * @param cmd Command buffer (must be in recording state)
-     * @param targetImageView Target image view for output
+     * @param targetImage Target swapchain image (from QVulkanWindow::swapChainImage)
+     * @param targetLayout Current layout of target image (typically UNDEFINED or PRESENT_SRC_KHR)
      * @param width Render width
      * @param height Render height
      *
      * @note For real-time preview, use low SPP (1-4)
      * @note Uses progressive accumulation if SPP > 1
+     * @note HDR to SDR conversion uses simple Reinhard tone mapping
      */
     void RenderFrame(
         VkCommandBuffer cmd,
-        VkImageView targetImageView,
+        VkImage targetImage,
+        VkImageLayout targetLayout,
         u32 width,
         u32 height
     );

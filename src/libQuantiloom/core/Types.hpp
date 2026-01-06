@@ -125,7 +125,7 @@ using Optional = std::optional<T>;
 
 /**
  * @class Result
- * @brief C++20-compatible error handling type (variant-based, std::expected alternative)
+ * @brief C++20-compatible error handling type (tagged union, std::expected alternative)
  *
  * Represents either a successful value (T) or an error (E). Provides explicit error handling
  * without exceptions, forcing call sites to check for errors explicitly.
@@ -152,45 +152,51 @@ using Optional = std::optional<T>;
  *
  * @note Prefer this over exceptions for expected failure modes (file I/O, parsing, etc.)
  * @note For unexpected failures (programming errors), use QL_ASSERT or throw exceptions
+ * @note Uses tagged wrapper types to support Result<T,T> where T==E
  * @see ErrorCode for common error categories
  */
 template<typename T, typename E = String>
 class Result {
+private:
+    // Tagged wrapper types to disambiguate when T == E
+    struct ValueTag { T data; };
+    struct ErrorTag { E data; };
+
 public:
     // Construct from success value (implicit for convenient return)
-    Result(T&& value) : m_data(std::move(value)) {}
-    Result(const T& value) : m_data(value) {}
+    Result(T&& value) : m_data(ValueTag{std::move(value)}) {}
+    Result(const T& value) : m_data(ValueTag{value}) {}
 
-    // Construct from error
+    // Construct from error wrapper
     struct Err {
         E error;
         explicit Err(E&& e) : error(std::move(e)) {}
         explicit Err(const E& e) : error(e) {}
     };
 
-    Result(Err&& err) : m_data(std::move(err.error)) {}
-    Result(const Err& err) : m_data(err.error) {}
+    Result(Err&& err) : m_data(ErrorTag{std::move(err.error)}) {}
+    Result(const Err& err) : m_data(ErrorTag{err.error}) {}
 
     // Check if result holds a value
-    [[nodiscard]] bool has_value() const { return std::holds_alternative<T>(m_data); }
+    [[nodiscard]] bool has_value() const { return std::holds_alternative<ValueTag>(m_data); }
     explicit operator bool() const { return has_value(); }
 
     // Access value (throws if error)
-    T& value() & { return std::get<T>(m_data); }
-    [[nodiscard]] const T& value() const & { return std::get<T>(m_data); }
-    T&& value() && { return std::get<T>(std::move(m_data)); }
+    T& value() & { return std::get<ValueTag>(m_data).data; }
+    [[nodiscard]] const T& value() const & { return std::get<ValueTag>(m_data).data; }
+    T&& value() && { return std::move(std::get<ValueTag>(std::move(m_data)).data); }
 
     T& operator*() & { return value(); }
     const T& operator*() const & { return value(); }
     T&& operator*() && { return std::move(value()); }
 
     // Access error (throws if value)
-    [[nodiscard]] const E& error() const & { return std::get<E>(m_data); }
-    E& error() & { return std::get<E>(m_data); }
-    E&& error() && { return std::get<E>(std::move(m_data)); }
+    [[nodiscard]] const E& error() const & { return std::get<ErrorTag>(m_data).data; }
+    E& error() & { return std::get<ErrorTag>(m_data).data; }
+    E&& error() && { return std::move(std::get<ErrorTag>(std::move(m_data)).data); }
 
 private:
-    std::variant<T, E> m_data;
+    std::variant<ValueTag, ErrorTag> m_data;
 };
 
 /**

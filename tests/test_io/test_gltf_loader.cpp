@@ -16,6 +16,7 @@
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include <filesystem>
+#include <fstream>
 
 using namespace quantiloom;
 

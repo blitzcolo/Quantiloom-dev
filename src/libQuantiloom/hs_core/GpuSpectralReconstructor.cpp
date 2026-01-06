@@ -14,6 +14,7 @@
 #include <chrono>
 #include <fstream>
 #include <vector>
+#include <cstring>
 
 namespace quantiloom {
 

@@ -1,3 +1,6 @@
+// VMA must be included FIRST to define VMA_H before GpuImage.hpp
+#include <vk_mem_alloc.h>
+
 #include "GpuImage.hpp"
 #include "core/Log.hpp"
 #include <stdexcept>

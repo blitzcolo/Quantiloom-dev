@@ -1,14 +1,21 @@
+/**
+ * @file Config.hpp
+ * @brief Configuration loader - public API without third-party dependencies
+ *
+ * This header exposes only standard C++ types. The underlying toml++
+ * implementation is hidden using PIMPL pattern.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Platform.hpp"
 #include "Types.hpp"
 
-QL_DISABLE_WARNINGS_PUSH
-#include <toml++/toml.h>
-QL_DISABLE_WARNINGS_POP
-
 #include <filesystem>
 #include <unordered_map>
+#include <memory>
 
 // ============================================================================
 // Configuration Loader (TOML)
@@ -17,7 +24,13 @@ QL_DISABLE_WARNINGS_POP
 
 namespace quantiloom {
 
-/// Configuration manager for Quantiloom (reads TOML files)
+/**
+ * @class Config
+ * @brief Configuration manager for Quantiloom (reads TOML files)
+ *
+ * Public API uses only standard C++ types. The toml++ implementation
+ * is completely hidden, allowing DLL distribution without toml++ headers.
+ */
 class QL_API Config {
 public:
     /// Load a TOML configuration file
@@ -26,217 +39,168 @@ public:
     static Result<Config, String> Load(const std::filesystem::path& filePath);
 
     /// Create an empty configuration
-    Config() = default;
+    Config();
+
+    /// Destructor
+    ~Config();
+
+    /// Copy constructor
+    Config(const Config& other);
+
+    /// Move constructor
+    Config(Config&& other) noexcept;
+
+    /// Copy assignment
+    Config& operator=(const Config& other);
+
+    /// Move assignment
+    Config& operator=(Config&& other) noexcept;
 
     /// Check if a key exists in the configuration
     /// @param key Dot-separated key path (e.g., "renderer.resolution")
     [[nodiscard]] bool Has(StringView key) const;
 
-    /// Get a value from the configuration (with optional default)
-    /// @tparam T Expected value type (i32, f32, String, bool, etc.)
-    /// @param key Dot-separated key path
-    /// @param defaultValue Fallback value if key is missing
-    template<typename T>
-    T Get(StringView key, const T& defaultValue = T{}) const;
+    /// Check if a section (table) exists
+    /// @param key Section name (e.g., "spectral_curves")
+    [[nodiscard]] bool HasSection(StringView key) const;
 
-    /// Get a value (throws if key is missing or wrong type)
-    /// @tparam T Expected value type
-    /// @param key Dot-separated key path
-    template<typename T>
-    Result<T, String> GetRequired(StringView key) const;
+    // ========================================================================
+    // Type-safe Getters (with default values)
+    // ========================================================================
+
+    /// Get string value
+    [[nodiscard]] String GetString(StringView key, const String& defaultValue = "") const;
+
+    /// Get 32-bit signed integer
+    [[nodiscard]] i32 GetInt(StringView key, i32 defaultValue = 0) const;
+
+    /// Get 64-bit signed integer
+    [[nodiscard]] i64 GetInt64(StringView key, i64 defaultValue = 0) const;
+
+    /// Get 32-bit unsigned integer
+    [[nodiscard]] u32 GetUInt(StringView key, u32 defaultValue = 0) const;
+
+    /// Get 64-bit unsigned integer
+    [[nodiscard]] u64 GetUInt64(StringView key, u64 defaultValue = 0) const;
+
+    /// Get 32-bit float
+    [[nodiscard]] f32 GetFloat(StringView key, f32 defaultValue = 0.0f) const;
+
+    /// Get 64-bit double
+    [[nodiscard]] f64 GetDouble(StringView key, f64 defaultValue = 0.0) const;
+
+    /// Get boolean
+    [[nodiscard]] bool GetBool(StringView key, bool defaultValue = false) const;
+
+    // ========================================================================
+    // Required Getters (return Result, error if missing)
+    // ========================================================================
+
+    /// Get required string value
+    [[nodiscard]] Result<String, String> GetRequiredString(StringView key) const;
+
+    /// Get required 32-bit signed integer
+    [[nodiscard]] Result<i32, String> GetRequiredInt(StringView key) const;
+
+    /// Get required 32-bit float
+    [[nodiscard]] Result<f32, String> GetRequiredFloat(StringView key) const;
+
+    /// Get required boolean
+    [[nodiscard]] Result<bool, String> GetRequiredBool(StringView key) const;
+
+    // ========================================================================
+    // Array Getters
+    // ========================================================================
+
+    /// Get array of strings
+    [[nodiscard]] Vector<String> GetStringArray(StringView key) const;
+
+    /// Get array of integers
+    [[nodiscard]] Vector<i32> GetIntArray(StringView key) const;
+
+    /// Get array of floats
+    [[nodiscard]] Vector<f32> GetFloatArray(StringView key) const;
+
+    /// Get array of doubles
+    [[nodiscard]] Vector<f64> GetDoubleArray(StringView key) const;
+
+    // ========================================================================
+    // Section/Table Access
+    // ========================================================================
 
     /// Get a nested table as a Config object
     /// @param key Dot-separated key path
     [[nodiscard]] Result<Config, String> GetTable(StringView key) const;
 
-    /// Check if a section (table) exists
-    /// @param key Section name (e.g., "spectral_curves")
-    [[nodiscard]] bool HasSection(StringView key) const;
+    /// Get an array of tables as a vector of Config objects
+    /// @param key Dot-separated key path to array of tables
+    /// @return Vector of Config objects, empty if not found or not array of tables
+    [[nodiscard]] Vector<Config> GetTableArray(StringView key) const;
 
     /// Get all key-value pairs from a section as a map
     /// @param key Section name
     /// @return Map of string keys to string values
     [[nodiscard]] std::unordered_map<String, String> GetSection(StringView key) const;
 
-    /// Get an array of values
-    /// @tparam T Element type
-    /// @param key Dot-separated key path
+    // ========================================================================
+    // Template Interface (for backward compatibility)
+    // Supported types: String, i32, i64, u32, u64, f32, f64, bool
+    // ========================================================================
+
+    /// Generic getter with default value
+    template<typename T>
+    T Get(StringView key, const T& defaultValue = T{}) const;
+
+    /// Generic required getter
+    template<typename T>
+    Result<T, String> GetRequired(StringView key) const;
+
+    /// Generic array getter
     template<typename T>
     Vector<T> GetArray(StringView key) const;
-
-    /// Access the underlying toml::table (for advanced usage)
-    [[nodiscard]] const toml::table& GetRoot() const { return m_Root; }
 
     /// Print the entire config to stdout (for debugging)
     void Print() const;
 
 private:
-    explicit Config(toml::table&& root);
+    // PIMPL - hide toml++ types
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
 
-    toml::table m_Root;
-
-    /// Helper: Navigate to a nested node by dot-separated path
-    [[nodiscard]] const toml::node* Navigate(StringView key) const;
+    // Private constructor for internal use
+    explicit Config(std::unique_ptr<Impl> impl);
 };
 
 // ============================================================================
-// Template Implementation
+// Template Specialization Declarations
+// (Implementations in Config.cpp via explicit instantiation)
 // ============================================================================
 
-template<typename T>
-T Config::Get(const StringView key, const T& defaultValue) const {
-    const toml::node* node = Navigate(key);
-    if (!node) {
-        return defaultValue;
-    }
+template<> QL_API String Config::Get<String>(StringView key, const String& defaultValue) const;
+template<> QL_API i32 Config::Get<i32>(StringView key, const i32& defaultValue) const;
+template<> QL_API i64 Config::Get<i64>(StringView key, const i64& defaultValue) const;
+template<> QL_API u32 Config::Get<u32>(StringView key, const u32& defaultValue) const;
+template<> QL_API u64 Config::Get<u64>(StringView key, const u64& defaultValue) const;
+template<> QL_API f32 Config::Get<f32>(StringView key, const f32& defaultValue) const;
+template<> QL_API f64 Config::Get<f64>(StringView key, const f64& defaultValue) const;
+template<> QL_API bool Config::Get<bool>(StringView key, const bool& defaultValue) const;
 
-    if constexpr (std::is_same_v<T, String>) {
-        if (const auto val = node->value<std::string>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, i32>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<i32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, i64>) {
-        if (const auto val = node->value<int64_t>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, u32>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<u32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, u64>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<u64>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, f32>) {
-        if (const auto val = node->value<double>()) {
-            return static_cast<f32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, f64>) {
-        if (const auto val = node->value<double>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, bool>) {
-        if (const auto val = node->value<bool>()) {
-            return *val;
-        }
-    }
+template<> QL_API Result<String, String> Config::GetRequired<String>(StringView key) const;
+template<> QL_API Result<i32, String> Config::GetRequired<i32>(StringView key) const;
+template<> QL_API Result<i64, String> Config::GetRequired<i64>(StringView key) const;
+template<> QL_API Result<u32, String> Config::GetRequired<u32>(StringView key) const;
+template<> QL_API Result<u64, String> Config::GetRequired<u64>(StringView key) const;
+template<> QL_API Result<f32, String> Config::GetRequired<f32>(StringView key) const;
+template<> QL_API Result<f64, String> Config::GetRequired<f64>(StringView key) const;
+template<> QL_API Result<bool, String> Config::GetRequired<bool>(StringView key) const;
 
-    return defaultValue;
-}
-
-template<typename T>
-Result<T> Config::GetRequired(const StringView key) const {
-    using ResultType = Result<T>;
-    const toml::node* node = Navigate(key);
-    if (!node) {
-        return typename ResultType::Err("Missing required key: " + String(key));
-    }
-
-    if constexpr (std::is_same_v<T, String>) {
-        if (const auto val = node->value<std::string>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, i32>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<i32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, i64>) {
-        if (const auto val = node->value<int64_t>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, u32>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<u32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, u64>) {
-        if (const auto val = node->value<int64_t>()) {
-            return static_cast<u64>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, f32>) {
-        if (const auto val = node->value<double>()) {
-            return static_cast<f32>(*val);
-        }
-    } else if constexpr (std::is_same_v<T, f64>) {
-        if (const auto val = node->value<double>()) {
-            return *val;
-        }
-    } else if constexpr (std::is_same_v<T, bool>) {
-        if (const auto val = node->value<bool>()) {
-            return *val;
-        }
-    }
-
-    return typename ResultType::Err("Type mismatch for key: " + String(key));
-}
-
-template<typename T>
-Vector<T> Config::GetArray(const StringView key) const {
-    const toml::node* node = Navigate(key);
-    Vector<T> result;
-
-    if (!node || !node->is_array()) {
-        return result;
-    }
-
-    const toml::array* arr = node->as_array();
-    result.reserve(arr->size());
-
-    for (const auto& elem : *arr) {
-        if constexpr (std::is_same_v<T, String>) {
-            if (auto val = elem.value<std::string>()) {
-                result.push_back(*val);
-            }
-        } else if constexpr (std::is_same_v<T, i8>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<i8>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, i16>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<i16>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, i32>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<i32>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, i64>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<i64>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, u8>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<u8>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, u16>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<u16>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, u32>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<u32>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, u64>) {
-            if (auto val = elem.value<int64_t>()) {
-                result.push_back(static_cast<u64>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, f32>) {
-            if (auto val = elem.value<double>()) {
-                result.push_back(static_cast<f32>(*val));
-            }
-        } else if constexpr (std::is_same_v<T, f64>) {
-            if (auto val = elem.value<double>()) {
-                result.push_back(*val);
-            }
-        } else if constexpr (std::is_same_v<T, bool>) {
-            if (auto val = elem.value<bool>()) {
-                result.push_back(*val);
-            }
-        }
-    }
-
-    return result;
-}
+template<> QL_API Vector<String> Config::GetArray<String>(StringView key) const;
+template<> QL_API Vector<i32> Config::GetArray<i32>(StringView key) const;
+template<> QL_API Vector<i64> Config::GetArray<i64>(StringView key) const;
+template<> QL_API Vector<u32> Config::GetArray<u32>(StringView key) const;
+template<> QL_API Vector<u64> Config::GetArray<u64>(StringView key) const;
+template<> QL_API Vector<f32> Config::GetArray<f32>(StringView key) const;
+template<> QL_API Vector<f64> Config::GetArray<f64>(StringView key) const;
+template<> QL_API Vector<bool> Config::GetArray<bool>(StringView key) const;
 
 } // namespace quantiloom

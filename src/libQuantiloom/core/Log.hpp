@@ -1,35 +1,46 @@
+/**
+ * @file Log.hpp
+ * @brief Logging system facade - public API without third-party dependencies
+ *
+ * This header exposes only standard C++ types. The underlying spdlog
+ * implementation is hidden in Log.cpp.
+ *
+ * @author wtflmao
+ */
+
 #pragma once
 
 #include "Platform.hpp"
 #include "Types.hpp"
 
-QL_DISABLE_WARNINGS_PUSH
-#include <spdlog/spdlog.h>
-#include <spdlog/sinks/stdout_color_sinks.h>
-#include <spdlog/sinks/basic_file_sink.h>
-QL_DISABLE_WARNINGS_POP
-
-#include <memory>
+#include <string_view>
+#include <format>
 
 // ============================================================================
 // Logging System Facade
-// Quantiloom M0 - spdlog wrapper with multiple severity levels
+// Quantiloom M0 - PIMPL-based logging with hidden spdlog backend
 // ============================================================================
 
 namespace quantiloom {
 
-/// Centralized logging system using spdlog backend
+/**
+ * @class Log
+ * @brief Centralized logging system with hidden spdlog backend
+ *
+ * Public API uses only standard C++ types. The spdlog implementation
+ * is completely hidden, allowing DLL distribution without spdlog headers.
+ */
 class QL_API Log {
 public:
     /// Log severity levels
     enum class Level {
-        Trace,    // Verbose debugging info
-        Debug,    // Development-time diagnostic
-        Info,     // General informational messages
-        Warn,     // Warnings (non-critical issues)
-        Error,    // Errors (recoverable failures)
-        Critical, // Critical errors (program-terminating)
-        Off       // Disable logging
+        Trace,    ///< Verbose debugging info
+        Debug,    ///< Development-time diagnostic
+        Info,     ///< General informational messages
+        Warn,     ///< Warnings (non-critical issues)
+        Error,    ///< Errors (recoverable failures)
+        Critical, ///< Critical errors (program-terminating)
+        Off       ///< Disable logging
     };
 
     /// Initialize the logging system with console and file output
@@ -46,51 +57,82 @@ public:
     /// Retrieve the current log level
     static Level GetLevel();
 
-    // ========================================================================
-    // Templated Logging Interface (supports fmt-style formatting)
-    // ========================================================================
-
-    template<typename... Args>
-    static void Trace(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->trace(fmt, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    static void Debug(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->debug(fmt, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    static void Info(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->info(fmt, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    static void Warn(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->warn(fmt, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    static void Error(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->error(fmt, std::forward<Args>(args)...);
-    }
-
-    template<typename... Args>
-    static void Critical(spdlog::format_string_t<Args...> fmt, Args&&... args) {
-        s_Logger->critical(fmt, std::forward<Args>(args)...);
-    }
-
     /// Flush all log buffers immediately
     static void Flush();
 
+    // ========================================================================
+    // Core Logging Interface (string_view based)
+    // ========================================================================
+
+    /// Log a message at the specified level
+    static void LogMessage(Level level, std::string_view message);
+
+    /// Log at Trace level
+    static void Trace(std::string_view message) { LogMessage(Level::Trace, message); }
+
+    /// Log at Debug level
+    static void Debug(std::string_view message) { LogMessage(Level::Debug, message); }
+
+    /// Log at Info level
+    static void Info(std::string_view message) { LogMessage(Level::Info, message); }
+
+    /// Log at Warn level
+    static void Warn(std::string_view message) { LogMessage(Level::Warn, message); }
+
+    /// Log at Error level
+    static void Error(std::string_view message) { LogMessage(Level::Error, message); }
+
+    /// Log at Critical level
+    static void Critical(std::string_view message) { LogMessage(Level::Critical, message); }
+
+    // ========================================================================
+    // Formatted Logging Interface (C++20 std::format)
+    // ========================================================================
+
+    /// Log formatted message at Trace level
+    template<typename... Args>
+    static void Trace(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Trace, std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    /// Log formatted message at Debug level
+    template<typename... Args>
+    static void Debug(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Debug, std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    /// Log formatted message at Info level
+    template<typename... Args>
+    static void Info(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Info, std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    /// Log formatted message at Warn level
+    template<typename... Args>
+    static void Warn(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Warn, std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    /// Log formatted message at Error level
+    template<typename... Args>
+    static void Error(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Error, std::format(fmt, std::forward<Args>(args)...));
+    }
+
+    /// Log formatted message at Critical level
+    template<typename... Args>
+    static void Critical(std::format_string<Args...> fmt, Args&&... args) {
+        LogMessage(Level::Critical, std::format(fmt, std::forward<Args>(args)...));
+    }
+
 private:
-    static std::shared_ptr<spdlog::logger> s_Logger;
+    static Level s_CurrentLevel;
 };
 
 } // namespace quantiloom
 
 // ============================================================================
-// Convenience Macros (optional - can be disabled if conflicts exist)
+// Convenience Macros
 // ============================================================================
 
 #define QL_LOG_TRACE(...)    ::quantiloom::Log::Trace(__VA_ARGS__)
@@ -100,7 +142,7 @@ private:
 #define QL_LOG_ERROR(...)    ::quantiloom::Log::Error(__VA_ARGS__)
 #define QL_LOG_CRITICAL(...) ::quantiloom::Log::Critical(__VA_ARGS__)
 
-// Short-form aliases (without QL_ prefix)
+// Short-form aliases
 #define LOG_TRACE(...)    ::quantiloom::Log::Trace(__VA_ARGS__)
 #define LOG_DEBUG(...)    ::quantiloom::Log::Debug(__VA_ARGS__)
 #define LOG_INFO(...)     ::quantiloom::Log::Info(__VA_ARGS__)

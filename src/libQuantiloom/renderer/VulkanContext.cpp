@@ -1,3 +1,6 @@
+// VMA must be included FIRST to define VMA_H
+#include <vk_mem_alloc.h>
+
 #include "VulkanContext.hpp"
 #include "core/Log.hpp"
 #include <stdexcept>

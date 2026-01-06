@@ -1,3 +1,6 @@
+// VMA must be included FIRST to define VMA_H before GpuBuffer.hpp
+#include <vk_mem_alloc.h>
+
 #include "GpuBuffer.hpp"
 #include "core/Log.hpp"
 #include <cstring>
