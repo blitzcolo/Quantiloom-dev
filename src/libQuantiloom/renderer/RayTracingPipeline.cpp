@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <cstring>
 #include <filesystem>
+#include <chrono>
 
 #if defined(_WIN32)
     #include <windows.h>
@@ -15,6 +16,96 @@
 #endif
 
 namespace quantiloom {
+
+// ============================================================================
+// Pipeline Cache Static Methods
+// ============================================================================
+
+VkPipelineCache RayTracingPipeline::LoadPipelineCache(VulkanContext& context, const std::string& cachePath) {
+    VkDevice device = context.GetDevice();
+
+    // Try to load existing cache from disk
+    std::vector<char> cacheData;
+    std::ifstream file(cachePath, std::ios::binary | std::ios::ate);
+
+    if (file.is_open()) {
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        cacheData.resize(fileSize);
+        file.seekg(0);
+        file.read(cacheData.data(), static_cast<std::streamsize>(fileSize));
+        file.close();
+        QL_LOG_INFO("Loaded pipeline cache from disk: {} ({} bytes)", cachePath, fileSize);
+    } else {
+        QL_LOG_INFO("No existing pipeline cache found at: {}", cachePath);
+    }
+
+    VkPipelineCacheCreateInfo createInfo{};
+    createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    createInfo.initialDataSize = cacheData.size();
+    createInfo.pInitialData = cacheData.empty() ? nullptr : cacheData.data();
+
+    VkPipelineCache cache = VK_NULL_HANDLE;
+    VkResult result = vkCreatePipelineCache(device, &createInfo, nullptr, &cache);
+
+    if (result != VK_SUCCESS) {
+        QL_LOG_WARN("Failed to create pipeline cache (VkResult={}), creating empty cache", static_cast<int>(result));
+
+        // Try again without initial data (cache might be corrupted or incompatible)
+        createInfo.initialDataSize = 0;
+        createInfo.pInitialData = nullptr;
+        result = vkCreatePipelineCache(device, &createInfo, nullptr, &cache);
+
+        if (result != VK_SUCCESS) {
+            QL_LOG_ERROR("Failed to create empty pipeline cache");
+            return VK_NULL_HANDLE;
+        }
+    }
+
+    return cache;
+}
+
+bool RayTracingPipeline::SavePipelineCache(VulkanContext& context, VkPipelineCache cache, const std::string& cachePath) {
+    if (cache == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    VkDevice device = context.GetDevice();
+
+    // Get cache data size
+    size_t cacheSize = 0;
+    VkResult result = vkGetPipelineCacheData(device, cache, &cacheSize, nullptr);
+    if (result != VK_SUCCESS || cacheSize == 0) {
+        QL_LOG_WARN("Failed to get pipeline cache size");
+        return false;
+    }
+
+    // Get cache data
+    std::vector<char> cacheData(cacheSize);
+    result = vkGetPipelineCacheData(device, cache, &cacheSize, cacheData.data());
+    if (result != VK_SUCCESS) {
+        QL_LOG_WARN("Failed to get pipeline cache data");
+        return false;
+    }
+
+    // Write to disk
+    std::ofstream file(cachePath, std::ios::binary);
+    if (!file.is_open()) {
+        QL_LOG_WARN("Failed to open pipeline cache file for writing: {}", cachePath);
+        return false;
+    }
+
+    file.write(cacheData.data(), static_cast<std::streamsize>(cacheSize));
+    file.close();
+
+    QL_LOG_INFO("Saved pipeline cache to disk: {} ({} bytes)", cachePath, cacheSize);
+    return true;
+}
+
+void RayTracingPipeline::DestroyPipelineCache(VulkanContext& context, VkPipelineCache cache) {
+    if (cache != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(context.GetDevice(), cache, nullptr);
+    }
+}
 
 // ============================================================================
 // Helper: Get executable directory
@@ -54,11 +145,13 @@ RayTracingPipeline::RayTracingPipeline(
     VulkanContext& context,
     const std::string& raygenPath,
     const std::string& closestHitPath,
-    const std::string& missPath)
+    const std::string& missPath,
+    VkPipelineCache pipelineCache)
     : m_context(context)
     , m_raygenPath(raygenPath)
     , m_closestHitPath(closestHitPath)
     , m_missPath(missPath)
+    , m_pipelineCache(pipelineCache)
 {
     QL_LOG_INFO("Creating Ray Tracing pipeline...");
 
@@ -419,10 +512,17 @@ void RayTracingPipeline::CreatePipelineLayout() {
 // ============================================================================
 
 void RayTracingPipeline::LoadShaders() {
+    QL_LOG_INFO("  [LoadShaders] Loading SPIR-V shaders...");
+
     // Load all shaders
     const auto raygenSpirv = LoadSPIRV(m_raygenPath);
+    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", raygenSpirv.size());
+
     const auto chitSpirv = LoadSPIRV(m_closestHitPath);
+    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", chitSpirv.size());
+
     const auto missSpirv = LoadSPIRV(m_missPath);
+    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", missSpirv.size());
 
     // Create shader modules (will be destroyed after pipeline creation)
     m_shaderModules.resize(3);
@@ -431,6 +531,8 @@ void RayTracingPipeline::LoadShaders() {
     m_shaderModules[2] = CreateShaderModule(missSpirv);
 
     QL_LOG_INFO("  Shaders loaded: {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath);
+    QL_LOG_INFO("  [LoadShaders] All shader modules created successfully");
+    Log::Flush();  // Ensure logs are visible before potential hang
 }
 
 std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
@@ -490,7 +592,11 @@ VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& sp
 // ============================================================================
 
 void RayTracingPipeline::CreatePipeline() {
+    QL_LOG_INFO("  [CreatePipeline] Starting...");
+    Log::Flush();
     VkDevice device = m_context.GetDevice();
+    QL_LOG_INFO("  [CreatePipeline] Got VkDevice: {}", (void*)device);
+    Log::Flush();
 
     // Define shader stages
     std::vector<VkPipelineShaderStageCreateInfo> stages(3);
@@ -550,23 +656,41 @@ void RayTracingPipeline::CreatePipeline() {
     pipelineInfo.maxPipelineRayRecursionDepth = 1;  // No recursion for M1
     pipelineInfo.layout = m_pipelineLayout;
 
+    QL_LOG_INFO("  [CreatePipeline] Pipeline info prepared, getting function pointer...");
+    Log::Flush();
+
     // Get function pointer for vkCreateRayTracingPipelinesKHR
     const auto vkCreateRayTracingPipelinesKHR = reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
         vkGetDeviceProcAddr(device, "vkCreateRayTracingPipelinesKHR"));
+
+    QL_LOG_INFO("  [CreatePipeline] vkGetDeviceProcAddr returned: {}", (void*)vkCreateRayTracingPipelinesKHR);
+    Log::Flush();
 
     if (!vkCreateRayTracingPipelinesKHR) {
         throw std::runtime_error("Failed to load vkCreateRayTracingPipelinesKHR");
     }
 
+    QL_LOG_INFO("  Calling vkCreateRayTracingPipelinesKHR...");
+    QL_LOG_INFO("  (If this is the last log you see, the driver is hanging in pipeline creation)");
+    QL_LOG_INFO("  Using pipeline cache: {}", m_pipelineCache != VK_NULL_HANDLE ? "YES" : "NO");
+    Log::Flush();  // CRITICAL: Flush before potential driver hang
+
+    auto startTime = std::chrono::high_resolution_clock::now();
+
     const VkResult result = vkCreateRayTracingPipelinesKHR(
         device,
-        VK_NULL_HANDLE,  // No pipeline cache for M1
-        VK_NULL_HANDLE,
+        VK_NULL_HANDLE,  // No deferred operation
+        m_pipelineCache,  // Pipeline cache for faster compilation
         1,
         &pipelineInfo,
         nullptr,
         &m_pipeline
     );
+
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+    QL_LOG_INFO("  vkCreateRayTracingPipelinesKHR returned: {} (took {} ms)", static_cast<int>(result), duration.count());
 
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to create ray tracing pipeline");

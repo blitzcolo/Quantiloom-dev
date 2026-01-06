@@ -25,8 +25,92 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <chrono>
+#include <filesystem>
+
+// Platform-specific includes for cache directory
+#if defined(_WIN32)
+    #include <shlobj.h>
+    #include <windows.h>
+#elif defined(__APPLE__)
+    #include <pwd.h>
+    #include <unistd.h>
+#else  // Linux
+    #include <pwd.h>
+    #include <unistd.h>
+#endif
 
 namespace quantiloom {
+
+// ============================================================================
+// Platform-specific cache directory helper
+// ============================================================================
+
+/**
+ * @brief Get the default pipeline cache directory for the current platform
+ * @return Path to cache directory (creates if doesn't exist)
+ *
+ * Platform-specific locations:
+ *   Windows: %LOCALAPPDATA%/Quantiloom/cache/
+ *   Linux:   ~/.cache/Quantiloom/
+ *   macOS:   ~/Library/Caches/Quantiloom/
+ */
+static std::string GetDefaultCacheDirectory() {
+    std::filesystem::path cacheDir;
+
+#if defined(_WIN32)
+    // Windows: Use LOCALAPPDATA
+    wchar_t* localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
+        cacheDir = std::filesystem::path(localAppData) / "Quantiloom" / "cache";
+        CoTaskMemFree(localAppData);
+    } else {
+        // Fallback to temp directory
+        cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
+    }
+
+#elif defined(__APPLE__)
+    // macOS: Use ~/Library/Caches/
+    const char* home = getenv("HOME");
+    if (!home) {
+        struct passwd* pw = getpwuid(getuid());
+        if (pw) home = pw->pw_dir;
+    }
+    if (home) {
+        cacheDir = std::filesystem::path(home) / "Library" / "Caches" / "Quantiloom";
+    } else {
+        cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
+    }
+
+#else  // Linux
+    // Linux: Use XDG_CACHE_HOME or ~/.cache/
+    const char* xdgCache = getenv("XDG_CACHE_HOME");
+    if (xdgCache && xdgCache[0] != '\0') {
+        cacheDir = std::filesystem::path(xdgCache) / "Quantiloom";
+    } else {
+        const char* home = getenv("HOME");
+        if (!home) {
+            struct passwd* pw = getpwuid(getuid());
+            if (pw) home = pw->pw_dir;
+        }
+        if (home) {
+            cacheDir = std::filesystem::path(home) / ".cache" / "Quantiloom";
+        } else {
+            cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
+        }
+    }
+#endif
+
+    // Create directory if it doesn't exist
+    std::error_code ec;
+    std::filesystem::create_directories(cacheDir, ec);
+    if (ec) {
+        QL_LOG_WARN("Failed to create cache directory {}: {}", cacheDir.string(), ec.message());
+        // Fall back to current directory
+        return ".";
+    }
+
+    return cacheDir.string();
+}
 
 // ============================================================================
 // MaterialDataCPU - GPU upload structure (must match shader)
@@ -102,6 +186,8 @@ struct ExternalRenderContext::Impl {
 
     // Ray tracing pipeline
     std::unique_ptr<RayTracingPipeline> pipeline;
+    VkPipelineCache pipelineCache = VK_NULL_HANDLE;
+    std::string pipelineCachePath;  // Set in Create() based on InitParams or platform default
 
     // Command pool for internal operations
     VkCommandPool commandPool = VK_NULL_HANDLE;
@@ -136,6 +222,14 @@ struct ExternalRenderContext::Impl {
 
         // Destroy resources in reverse order
         pipeline.reset();
+
+        // Save and destroy pipeline cache
+        if (pipelineCache != VK_NULL_HANDLE && contextAdapter) {
+            RayTracingPipeline::SavePipelineCache(*contextAdapter, pipelineCache, pipelineCachePath);
+            RayTracingPipeline::DestroyPipelineCache(*contextAdapter, pipelineCache);
+            pipelineCache = VK_NULL_HANDLE;
+        }
+
         textureManager.reset();
 
         if (brdfLutSampler != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
@@ -232,6 +326,20 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
     m_impl->targetColorFormat = params.targetColorFormat;
     m_impl->width = params.width;
     m_impl->height = params.height;
+
+    // Set pipeline cache path (use provided path or platform-specific default)
+    if (!params.pipelineCacheDir.empty()) {
+        m_impl->pipelineCachePath = (std::filesystem::path(params.pipelineCacheDir) / "pipeline_cache.bin").string();
+        // Ensure directory exists
+        std::error_code ec;
+        std::filesystem::create_directories(params.pipelineCacheDir, ec);
+        if (ec) {
+            QL_LOG_WARN("Failed to create cache directory {}: {}", params.pipelineCacheDir, ec.message());
+        }
+    } else {
+        m_impl->pipelineCachePath = (std::filesystem::path(GetDefaultCacheDirectory()) / "pipeline_cache.bin").string();
+    }
+    QL_LOG_INFO("Pipeline cache path: {}", m_impl->pipelineCachePath);
 
     // Create VulkanContextAdapter from external handles
     VulkanContext::ExternalHandles adapterHandles{};
@@ -1070,12 +1178,21 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
 void ExternalRenderContext::CreatePipeline() {
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
-    // Create pipeline using context adapter
+    // Load or create pipeline cache for faster shader compilation
+    if (m_impl->pipelineCache == VK_NULL_HANDLE) {
+        m_impl->pipelineCache = RayTracingPipeline::LoadPipelineCache(
+            *m_impl->contextAdapter,
+            m_impl->pipelineCachePath
+        );
+    }
+
+    // Create pipeline using context adapter with cache
     m_impl->pipeline = std::make_unique<RayTracingPipeline>(
         *m_impl->contextAdapter,
         "raygen.spv",
         "closesthit.spv",
-        "miss.spv"
+        "miss.spv",
+        m_impl->pipelineCache
     );
 
     // Bind resources

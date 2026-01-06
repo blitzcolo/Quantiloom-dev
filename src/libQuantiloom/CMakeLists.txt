@@ -244,6 +244,15 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
     DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/glm
 )
 
+# ============================================================================
+# Install compiled shaders (required at runtime)
+# ============================================================================
+# Shaders are compiled in src/shaders during build
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    FILES_MATCHING PATTERN "*.spv"
+)
+
 # Export targets for find_package
 install(EXPORT QuantiloomTargets
     FILE QuantiloomTargets.cmake

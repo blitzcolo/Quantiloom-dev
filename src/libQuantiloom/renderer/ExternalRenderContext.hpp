@@ -105,6 +105,13 @@ public:
 
         // Optional: VMA allocator (if nullptr, creates internal allocator)
         VmaAllocator externalAllocator = VK_NULL_HANDLE;
+
+        // Optional: Pipeline cache directory path
+        // If empty, uses platform-specific default:
+        //   Windows: %LOCALAPPDATA%/Quantiloom/cache/
+        //   Linux:   ~/.cache/Quantiloom/
+        //   macOS:   ~/Library/Caches/Quantiloom/
+        std::string pipelineCacheDir;
     };
 
     // ========================================================================

@@ -130,15 +130,50 @@ public:
     };
 
     // ========================================================================
+    // Pipeline Cache (for faster startup)
+    // ========================================================================
+
+    /**
+     * @brief Load pipeline cache from disk
+     * @param context VulkanContext to create cache for
+     * @param cachePath Path to cache file (e.g., "pipeline_cache.bin")
+     * @return VkPipelineCache handle (VK_NULL_HANDLE if failed or file doesn't exist)
+     *
+     * Call once at application startup before creating any pipelines.
+     * The cache accelerates shader compilation on subsequent runs.
+     */
+    static VkPipelineCache LoadPipelineCache(VulkanContext& context, const std::string& cachePath);
+
+    /**
+     * @brief Save pipeline cache to disk
+     * @param context VulkanContext that owns the cache
+     * @param cache Pipeline cache to save
+     * @param cachePath Path to save cache file
+     * @return true if saved successfully
+     *
+     * Call at application shutdown after all pipelines are destroyed.
+     */
+    static bool SavePipelineCache(VulkanContext& context, VkPipelineCache cache, const std::string& cachePath);
+
+    /**
+     * @brief Destroy pipeline cache
+     * @param context VulkanContext that owns the cache
+     * @param cache Pipeline cache to destroy
+     */
+    static void DestroyPipelineCache(VulkanContext& context, VkPipelineCache cache);
+
+    // ========================================================================
     // Lifecycle
     // ========================================================================
 
     // Create pipeline with minimal shader set (Raygen + ClosestHit + Miss)
+    // Optional pipelineCache accelerates creation (use LoadPipelineCache() to obtain)
     RayTracingPipeline(
         VulkanContext& context,
         const std::string& raygenPath,
         const std::string& closestHitPath,
-        const std::string& missPath
+        const std::string& missPath,
+        VkPipelineCache pipelineCache = VK_NULL_HANDLE
     );
 
     ~RayTracingPipeline();
@@ -305,6 +340,7 @@ private:
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout m_pipelineLayout = VK_NULL_HANDLE;
     VkPipeline m_pipeline = VK_NULL_HANDLE;
+    VkPipelineCache m_pipelineCache = VK_NULL_HANDLE;  // External, not owned
 
     // Descriptor pool and sets
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;

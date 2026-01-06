@@ -1501,11 +1501,16 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Creating ray tracing pipeline...");
 
+        // Load pipeline cache for faster shader compilation on subsequent runs
+        const std::string pipelineCachePath = "pipeline_cache.bin";
+        VkPipelineCache pipelineCache = RayTracingPipeline::LoadPipelineCache(context, pipelineCachePath);
+
         RayTracingPipeline pipeline(
             context,
             "raygen.spv",
             "closesthit.spv",
-            "miss.spv"
+            "miss.spv",
+            pipelineCache
         );
 
         // Bind resources in correct order (bindings 0-7)
@@ -1905,6 +1910,13 @@ int main(int argc, char* argv[]) {
         // ====================================================================
         // CRITICAL: Clean up manually created Vulkan resources before VulkanContext destructor
         // This prevents validation errors about leaked resources
+
+        // Save pipeline cache for faster startup on subsequent runs
+        if (pipelineCache != VK_NULL_HANDLE) {
+            RayTracingPipeline::SavePipelineCache(context, pipelineCache, pipelineCachePath);
+            RayTracingPipeline::DestroyPipelineCache(context, pipelineCache);
+        }
+
         if (brdfLutSampler != VK_NULL_HANDLE) {
             vkDestroySampler(context.GetDevice(), brdfLutSampler, nullptr);
         }
