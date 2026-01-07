@@ -19,6 +19,8 @@
 #include <prim-types.hh>
 #include <usdGeom.hh>
 #include <usdShade.hh>
+#include <composition.hh>
+#include <asset-resolution.hh>
 #include <tydra/scene-access.hh>
 #include <tydra/render-data.hh>
 
@@ -420,31 +422,113 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path) {
     // Convert to lowercase for comparison
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    tinyusdz::Stage stage;
-    std::string warn, err;
-    bool success = false;
-
-    if (ext == ".usda" || ext == ".usd") {
-        success = tinyusdz::LoadUSDFromFile(path, &stage, &warn, &err);
-    } else if (ext == ".usdc") {
-        success = tinyusdz::LoadUSDCFromFile(path, &stage, &warn, &err);
-    } else if (ext == ".usdz") {
-        success = tinyusdz::LoadUSDZFromFile(path, &stage, &warn, &err);
-    } else {
+    // Supported extensions check
+    if (ext != ".usda" && ext != ".usd" && ext != ".usdc" && ext != ".usdz") {
         return Result<Scene>(Result<Scene>::Err(
             "Unsupported USD file extension: " + ext +
             " (supported: .usd, .usda, .usdc, .usdz)"));
     }
+
+    std::string warn, err;
+
+    // Step 1: Load USD as Layer (not Stage) for manual composition
+    tinyusdz::Layer rootLayer;
+    tinyusdz::USDLoadOptions loadOptions;
+
+    bool success = tinyusdz::LoadLayerFromFile(path, &rootLayer, &warn, &err, loadOptions);
 
     if (!warn.empty()) {
         QL_LOG_WARN("USD warning: {}", warn);
     }
 
     if (!success || !err.empty()) {
-        return Result<Scene>(Result<Scene>::Err("Failed to load USD: " + err));
+        return Result<Scene>(Result<Scene>::Err("Failed to load USD layer: " + err));
     }
 
-    QL_LOG_INFO("  USD file loaded successfully");
+    QL_LOG_INFO("  USD layer loaded successfully");
+
+    // Step 2: Setup asset resolver for composition
+    // Use canonical path with proper separators for Windows compatibility
+    std::filesystem::path baseDirPath = filePath.parent_path();
+    std::string baseDir = baseDirPath.string();
+
+    // On Windows, ensure we use native path separators
+    #ifdef _WIN32
+    std::replace(baseDir.begin(), baseDir.end(), '/', '\\');
+    #endif
+
+    QL_LOG_INFO("  Asset search path: {}", baseDir);
+
+    tinyusdz::AssetResolutionResolver resolver;
+    resolver.set_search_paths({baseDir});
+
+    // Step 3: Compose sublayers (this is critical for NVIDIA Attic-style scenes)
+    tinyusdz::Layer compositedLayer = rootLayer;
+
+    if (!rootLayer.metas().subLayers.empty()) {
+        QL_LOG_INFO("  Compositing {} sublayers...", rootLayer.metas().subLayers.size());
+        tinyusdz::SublayersCompositionOptions subOpts;
+        subOpts.max_depth = 16;
+
+        tinyusdz::Layer sublayerComposited;
+        if (!tinyusdz::CompositeSublayers(resolver, compositedLayer, &sublayerComposited, &warn, &err, subOpts)) {
+            QL_LOG_WARN("  Sublayer composition warning: {}", err.empty() ? warn : err);
+        } else {
+            compositedLayer = std::move(sublayerComposited);
+            QL_LOG_INFO("  Sublayers composited successfully");
+        }
+    }
+
+    // Step 4: Compose references
+    if (tinyusdz::HasReferences(compositedLayer)) {
+        QL_LOG_INFO("  Compositing references...");
+        tinyusdz::ReferencesCompositionOptions refOpts;
+        refOpts.max_depth = 16;
+
+        tinyusdz::Layer refComposited;
+        if (!tinyusdz::CompositeReferences(resolver, compositedLayer, &refComposited, &warn, &err, refOpts)) {
+            QL_LOG_WARN("  Reference composition warning: {}", err.empty() ? warn : err);
+        } else {
+            compositedLayer = std::move(refComposited);
+            QL_LOG_INFO("  References composited successfully");
+        }
+    }
+
+    // Step 5: Compose payloads
+    if (tinyusdz::HasPayload(compositedLayer)) {
+        QL_LOG_INFO("  Compositing payloads...");
+        tinyusdz::PayloadCompositionOptions payOpts;
+        payOpts.max_depth = 16;
+
+        tinyusdz::Layer payloadComposited;
+        if (!tinyusdz::CompositePayload(resolver, compositedLayer, &payloadComposited, &warn, &err, payOpts)) {
+            QL_LOG_WARN("  Payload composition warning: {}", err.empty() ? warn : err);
+        } else {
+            compositedLayer = std::move(payloadComposited);
+            QL_LOG_INFO("  Payloads composited successfully");
+        }
+    }
+
+    // Step 6: Convert composited Layer to Stage
+    tinyusdz::Stage stage;
+    if (!tinyusdz::LayerToStage(compositedLayer, &stage, &warn, &err)) {
+        return Result<Scene>(Result<Scene>::Err("Failed to convert layer to stage: " + err));
+    }
+
+    QL_LOG_INFO("  Layer converted to Stage successfully");
+
+    // Debug: Print stage structure
+    const auto& rootPrims = stage.root_prims();
+    QL_LOG_INFO("  Stage root prims: {}", rootPrims.size());
+    for (const auto& prim : rootPrims) {
+        QL_LOG_INFO("    Root prim: '{}' (type: {})",
+                    prim.element_path().full_path_name(),
+                    prim.prim_type_name());
+
+        // Count children recursively (first level only for logging)
+        size_t childCount = prim.children().size();
+        QL_LOG_INFO("      -> {} direct children", childCount);
+    }
 
     // Use tydra RenderSceneConverter to convert USD stage to render-ready data
     tinyusdz::tydra::RenderSceneConverter converter;

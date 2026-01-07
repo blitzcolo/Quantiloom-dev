@@ -21,6 +21,7 @@
 
 #include "core/Log.hpp"
 #include "io/GltfLoader.hpp"
+#include "io/UsdLoader.hpp"
 #include "io/ImageIO.hpp"
 
 #include <glm/gtc/matrix_inverse.hpp>
@@ -432,7 +433,13 @@ Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
         return LoadSceneFromGltf(gltfPath);
     }
 
-    return Result<void, String>::Err("No scene.gltf specified in config");
+    // Check for USD file
+    if (config.Has("scene.usd")) {
+        auto usdPath = config.Get<String>("scene.usd");
+        return LoadSceneFromUsd(usdPath);
+    }
+
+    return Result<void, String>::Err("No scene.gltf or scene.usd specified in config");
 }
 
 Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltfPath) {
@@ -463,6 +470,41 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
     m_impl->accumulatedSamples = 0;
 
     QL_LOG_INFO("Scene loaded: {} meshes, {} materials, {} textures",
+                m_impl->scene->meshes.size(),
+                m_impl->scene->materials.size(),
+                m_impl->scene->textures.size());
+
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPath) {
+    QL_LOG_INFO("Loading USD scene: {}", usdPath);
+
+    auto result = UsdLoader::LoadFromFile(usdPath);
+    if (!result.has_value()) {
+        return Result<void, String>::Err("Failed to load USD: " + result.error());
+    }
+
+    m_impl->scene = std::make_unique<Scene>(std::move(result.value()));
+
+    // Setup camera from scene
+    m_impl->camera = m_impl->scene->camera;
+    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
+
+    // Upload textures
+    m_impl->textureManager->UploadTextures(m_impl->scene->textures);
+
+    // Build acceleration structures and GPU resources
+    BuildAccelerationStructures();
+    UpdateGpuResources();
+
+    // Create ray tracing pipeline
+    CreatePipeline();
+
+    m_impl->isReady = true;
+    m_impl->accumulatedSamples = 0;
+
+    QL_LOG_INFO("USD scene loaded: {} meshes, {} materials, {} textures",
                 m_impl->scene->meshes.size(),
                 m_impl->scene->materials.size(),
                 m_impl->scene->textures.size());

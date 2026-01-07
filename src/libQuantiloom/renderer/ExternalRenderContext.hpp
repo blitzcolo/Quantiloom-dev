@@ -169,6 +169,21 @@ public:
     Result<void, String> LoadSceneFromGltf(const String& gltfPath);
 
     /**
+     * @brief Load scene from OpenUSD file
+     * @param usdPath Path to USD file (.usd, .usda, .usdc, .usdz)
+     * @return Result indicating success or error
+     *
+     * Supports Quantiloom spectral extensions via custom primvars:
+     * - quantiloom:materialType - Spectral database type
+     * - quantiloom:materialRef - Material name in database
+     * - quantiloom:emissivityCurve - Path to emissivity CSV
+     * - quantiloom:reflectanceCurve - Path to reflectance CSV
+     * - quantiloom:transmittanceCurve - Path to transmittance CSV
+     * - quantiloom:temperature_K - Surface temperature (K)
+     */
+    Result<void, String> LoadSceneFromUsd(const String& usdPath);
+
+    /**
      * @brief Check if scene is loaded
      */
     [[nodiscard]] bool HasScene() const;

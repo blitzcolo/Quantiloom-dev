@@ -1,0 +1,108 @@
+# ============================================================================
+# Quantiloom - USD Spectral Material Test Configuration
+# ============================================================================
+# This configuration loads a USD model with Quantiloom spectral extensions
+# demonstrating material references and IR properties via custom attributes.
+# ============================================================================
+
+[renderer]
+resolution = [1280, 1280]      # Output resolution
+spp = 16                        # Samples per pixel
+output = "usd_spectral_output.exr"
+environment_map = "assets/maps/qwantani_noon_puresky_4k.exr"
+
+[spectral]
+# ============================================================================
+# Spectral Rendering Mode
+# ============================================================================
+# Available modes:
+#   - "rgb_fused"    : RGB rendering with full color (preview quality)
+#   - "single"       : Single wavelength grayscale
+#   - "swir_fused"   : Short-wave IR fusion 1-2.5um
+#   - "mwir_fused"   : Mid-wave IR fusion 3-5um
+#   - "lwir_fused"   : Long-wave IR fusion 8-12um
+# ============================================================================
+mode = "rgb_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+# ============================================================================
+# USD Model Path
+# ============================================================================
+# Supported formats: .usd, .usda, .usdc, .usdz
+#
+# This USD file demonstrates Quantiloom spectral extensions:
+#   - quantiloom:materialType / quantiloom:materialRef (material database reference)
+#   - quantiloom:emissivityCurve / reflectanceCurve / transmittanceCurve (IR CSV paths)
+#   - quantiloom:temperature_K (IR temperature)
+#
+# Example USD spectral attributes (on Material prim):
+#
+#   def Material "AluminumMetal"
+#   {
+#       custom string quantiloom:materialType = "quantiloom_usgs"
+#       custom string quantiloom:materialRef = "Aluminum brushed 293K"
+#       custom string quantiloom:emissivityCurve = "materials/aluminum_emissivity.csv"
+#       custom float quantiloom:temperature_K = 300.0
+#       ...
+#   }
+#
+# ============================================================================
+usd = "F:/Samples/OldAttic/Sublayers/Attic_NVIDIA.usd"
+world_units_to_meters = 1.0
+
+[camera]
+position = [0.0, 2.0, 8.0]
+look_at = [0.0, 0.5, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[lighting]
+sun_direction = [0.5, 0.8, 0.3]
+sun_radiance = [5.0, 5.0, 5.0]
+sky_radiance = [0.5, 0.7, 1.0]
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+# ============================================================================
+# Sensor Simulation
+# ============================================================================
+[sensor]
+enabled = true
+focal_length_mm = 50.0
+f_number = 11.0
+pixel_pitch_um = 5.0
+quantum_efficiency = 0.8
+well_capacity_e = 50000.0
+read_noise_e_rms = 10.0
+dark_current_e_s = 50.0
+integration_time_s = 0.01
+bit_depth = 12
+gain = 5.0
+enable_poisson_noise = true
+enable_read_noise = true
+enable_dark_current = true
+enable_fpn = true
+
+[sensor.fpn]
+prnu_sigma = 0.03
+dsnu_sigma_e = 25.0
+enable_nuc = false
+nuc_efficiency = 0.95
+detector_temperature_k = 77.0
+
+# ============================================================================
+# Atmospheric Scattering
+# ============================================================================
+[atmospheric]
+preset = "disabled"
+rayleigh_enabled = true
+mie_enabled = true
