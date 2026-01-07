@@ -19,6 +19,7 @@
 #include "UsdLoader.hpp"
 #include "SpectralIO.hpp"
 #include "ImageIO.hpp"
+#include "scene/MeshOptimizer.hpp"
 #include "core/Log.hpp"
 
 // Conditional compilation based on OpenUSD availability
@@ -1296,6 +1297,18 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         primitive.indices = std::move(indices);
         primitive.materialId = defaultMaterialId;
         mesh.primitives.push_back(std::move(primitive));
+    }
+
+    // ========================================================================
+    // Vertex Deduplication
+    // ========================================================================
+    // USD face-varying expansion creates many duplicate vertices at shared edges.
+    // Deduplicate to reduce memory and improve cache efficiency.
+    auto dedupeStats = MeshOptimizer::DeduplicateMesh(mesh);
+    if (dedupeStats.WasOptimized()) {
+        QL_LOG_INFO("    Vertex dedup for '{}': {} -> {} vertices ({:.1f}% reduction)",
+                    mesh.name, dedupeStats.originalVertexCount, dedupeStats.optimizedVertexCount,
+                    dedupeStats.vertexReductionPercent);
     }
 
     size_t totalVerts = 0, totalTris = 0;

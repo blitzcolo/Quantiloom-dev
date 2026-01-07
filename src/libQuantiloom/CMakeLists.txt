@@ -77,6 +77,8 @@ add_library(libQuantiloom SHARED
     scene/Camera.cpp
     scene/Camera.hpp
     scene/Mesh.hpp
+    scene/MeshOptimizer.cpp
+    scene/MeshOptimizer.hpp
     scene/Material.cpp
     scene/Material.hpp
     scene/Texture.hpp
@@ -197,6 +199,13 @@ if(QUANTILOOM_USE_BC7ENC)
     if(EXISTS "${BC7ENC_DIR}/bc7enc.h")
         target_include_directories(libQuantiloom PRIVATE ${BC7ENC_DIR})
         target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=1)
+
+        # Add bc7enc_rdo source files (not header-only!)
+        target_sources(libQuantiloom PRIVATE
+            ${BC7ENC_DIR}/bc7enc.cpp
+            ${BC7ENC_DIR}/rgbcx.cpp
+        )
+
         message(STATUS "libQuantiloom: BC7 compression enabled (bc7enc_rdo found)")
     else()
         message(WARNING "libQuantiloom: BC7 compression requested but bc7enc_rdo not found at ${BC7ENC_DIR}")

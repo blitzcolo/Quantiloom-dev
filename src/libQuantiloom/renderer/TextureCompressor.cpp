@@ -24,11 +24,10 @@
 
 #if QUANTILOOM_USE_BC7ENC
 
-// bc7enc_rdo is a single-header library
-// Implementation is defined once here
-#define BC7ENC_RDO_IMPLEMENTATION
-#include <bc7enc_rdo/bc7enc.h>
-#include <bc7enc_rdo/rgbcx.h>
+// bc7enc_rdo source files (bc7enc.cpp, rgbcx.cpp) are compiled separately via CMake
+// Only include headers here
+#include "rgbcx.h"
+#include "bc7enc.h"
 
 namespace quantiloom {
 
@@ -143,11 +142,14 @@ std::optional<BC7CompressedData> TextureCompressor::CompressBC7(
 
     if (highQuality) {
         // Higher quality, slower compression
-        bc7enc_compress_block_params_init_uber_level(&params, 4);
+        // Use perceptual weights (already set by _init) and max uber level
+        params.m_uber_level = BC7ENC_MAX_UBER_LEVEL;  // 4
+        params.m_max_partitions = BC7ENC_MAX_PARTITIONS;
     } else {
         // Fast mode for real-time loading
         bc7enc_compress_block_params_init_linear_weights(&params);
         params.m_uber_level = 0;
+        params.m_max_partitions = 16;  // Fewer partitions for faster encoding
     }
 
     // Compress each 4x4 block

@@ -1,5 +1,6 @@
 #include "GltfLoader.hpp"
 #include "SpectralIO.hpp"
+#include "scene/MeshOptimizer.hpp"
 #include "core/Log.hpp"
 
 #define TINYGLTF_IMPLEMENTATION
@@ -563,6 +564,18 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
 
         QL_LOG_INFO("    Primitive {}: {} vertices, {} triangles, material {}",
                     primIdx, primitive.GetVertexCount(), primitive.GetTriangleCount(), primitive.materialId);
+
+        // Deduplicate vertices before adding to mesh
+        // glTF primitives typically share vertices well, but deduplication can still help
+        // especially after attribute expansion or for poorly optimized assets
+        if (MeshOptimizer::ShouldDeduplicate(primitive)) {
+            auto stats = MeshOptimizer::DeduplicateVertices(primitive);
+            if (stats.WasOptimized()) {
+                QL_LOG_INFO("      Vertex dedup: {} -> {} vertices ({:.1f}% reduction)",
+                            stats.originalVertexCount, stats.optimizedVertexCount,
+                            stats.vertexReductionPercent);
+            }
+        }
 
         mesh.primitives.push_back(std::move(primitive));
     }

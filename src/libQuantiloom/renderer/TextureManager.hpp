@@ -34,6 +34,7 @@
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
 #include "scene/Texture.hpp"
+#include "TextureCompressor.hpp"
 #include "VulkanContext.hpp"
 #include "GpuImage.hpp"
 #include <vulkan/vulkan.h>
@@ -154,6 +155,17 @@ private:
     // Upload a single texture to GPU
     // Returns GpuImage containing VkImage + VkImageView
     [[nodiscard]] std::unique_ptr<GpuImage> UploadTexture(const Texture& texture) const;
+
+    // Upload a BC7 compressed texture to GPU
+    // Returns GpuImage with VK_FORMAT_BC7_*_BLOCK format
+    [[nodiscard]] std::unique_ptr<GpuImage> UploadBC7Texture(
+        const Texture& texture,
+        const BC7CompressedData& compressed) const;
+
+    // Generate mipmaps for an uncompressed texture using vkCmdBlitImage
+    void GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
+                          VkFormat format, u32 texWidth, u32 texHeight,
+                          u32 mipLevels) const;
 
     // Create VkSampler based on TextureSampler settings
     [[nodiscard]] VkSampler CreateSampler(const TextureSampler& samplerInfo) const;

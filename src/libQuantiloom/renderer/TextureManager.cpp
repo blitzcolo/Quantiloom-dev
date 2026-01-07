@@ -1,4 +1,5 @@
 #include "TextureManager.hpp"
+#include "TextureCompressor.hpp"
 #include "GpuBuffer.hpp"
 #include "CommandHelper.hpp"
 #include "core/Log.hpp"
@@ -96,33 +97,46 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         throw std::runtime_error("Only RGBA8 textures are supported");
     }
 
-    VkDeviceSize bufferSize = static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
+    VkDeviceSize uncompressedSize = static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
 
-    if (texture.pixels.size() != bufferSize) {
+    if (texture.pixels.size() != uncompressedSize) {
         QL_LOG_ERROR("Texture '{}' pixel data size mismatch: expected {} bytes, got {}",
-                     texture.name, bufferSize, texture.pixels.size());
+                     texture.name, uncompressedSize, texture.pixels.size());
         throw std::runtime_error("Texture pixel data size mismatch");
     }
 
-    // Choose format based on color space (glTF 2.0 spec)
-    // sRGB textures (baseColor, emissive) need gamma-correct sampling
+    // ========================================================================
+    // Try BC7 Compression (4:1 VRAM savings)
+    // ========================================================================
+    if (TextureCompressor::IsAvailable() && TextureCompressor::CanCompress(texture)) {
+        auto compressed = TextureCompressor::CompressBC7(texture, false /* fast mode */);
+        if (compressed.has_value()) {
+            return UploadBC7Texture(texture, compressed.value());
+        }
+        // Fall through to uncompressed upload if compression failed
+        QL_LOG_WARN("BC7 compression failed for '{}', using uncompressed", texture.name);
+    }
+
+    // ========================================================================
+    // Uncompressed Upload Path (original code)
+    // ========================================================================
     VkFormat format = texture.isSRGB ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
     const char* formatName = texture.isSRGB ? "RGBA8_SRGB" : "RGBA8_UNORM";
 
     QL_LOG_INFO("  Uploading texture '{}': {}x{} {} ({} bytes)",
-                texture.name, texture.width, texture.height, formatName, bufferSize);
+                texture.name, texture.width, texture.height, formatName, uncompressedSize);
 
     // Step 1: Create staging buffer (CPU-accessible)
     GpuBuffer stagingBuffer(
         m_context.GetAllocator(),
-        bufferSize,
+        uncompressedSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_CPU_ONLY
     );
 
     // Step 2: Upload CPU pixel data to staging buffer
     void* data = stagingBuffer.Map();
-    std::memcpy(data, texture.pixels.data(), bufferSize);
+    std::memcpy(data, texture.pixels.data(), uncompressedSize);
     stagingBuffer.Unmap();
 
     // Step 3: Create device-local GPU image with correct format and full mipmap chain
@@ -173,98 +187,7 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         );
 
         // Generate mipmaps using vkCmdBlitImage
-        // Transition base level to TRANSFER_SRC for blit source
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.image = gpuImage->GetImage();
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
-        barrier.subresourceRange.levelCount = 1;
-
-        u32 mipWidth = texture.width;
-        u32 mipHeight = texture.height;
-
-        for (u32 i = 1; i < mipLevels; ++i) {
-            // Transition previous level to TRANSFER_SRC_OPTIMAL
-            barrier.subresourceRange.baseMipLevel = i - 1;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
-
-            // Blit from level i-1 to level i
-            VkImageBlit blit{};
-            blit.srcOffsets[0] = {0, 0, 0};
-            blit.srcOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
-            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            blit.srcSubresource.mipLevel = i - 1;
-            blit.srcSubresource.baseArrayLayer = 0;
-            blit.srcSubresource.layerCount = 1;
-
-            if (mipWidth > 1) mipWidth /= 2;
-            if (mipHeight > 1) mipHeight /= 2;
-
-            blit.dstOffsets[0] = {0, 0, 0};
-            blit.dstOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
-            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            blit.dstSubresource.mipLevel = i;
-            blit.dstSubresource.baseArrayLayer = 0;
-            blit.dstSubresource.layerCount = 1;
-
-            // Transition current level to TRANSFER_DST before blit
-            barrier.subresourceRange.baseMipLevel = i;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            barrier.srcAccessMask = 0;
-            barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
-
-            vkCmdBlitImage(cmd,
-                gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &blit,
-                VK_FILTER_LINEAR);
-
-            // Transition previous level to SHADER_READ_ONLY
-            barrier.subresourceRange.baseMipLevel = i - 1;
-            barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                0, nullptr,
-                0, nullptr,
-                1, &barrier);
-        }
-
-        // Transition last mip level to SHADER_READ_ONLY
-        barrier.subresourceRange.baseMipLevel = mipLevels - 1;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-            0, nullptr,
-            0, nullptr,
-            1, &barrier);
+        GenerateMipmaps(cmd, gpuImage.get(), format, texture.width, texture.height, mipLevels);
     });
 
     return gpuImage;
@@ -358,6 +281,223 @@ Texture TextureManager::CreateDummyTexture() {
     dummy.sampler.wrapT = TextureSampler::WrapMode::Repeat;
 
     return dummy;
+}
+
+// ============================================================================
+// BC7 Compressed Texture Upload
+// ============================================================================
+
+std::unique_ptr<GpuImage> TextureManager::UploadBC7Texture(
+    const Texture& texture,
+    const BC7CompressedData& compressed) const {
+
+    // Choose BC7 format based on color space
+    VkFormat format = compressed.isSRGB ? VK_FORMAT_BC7_SRGB_BLOCK : VK_FORMAT_BC7_UNORM_BLOCK;
+    const char* formatName = compressed.isSRGB ? "BC7_SRGB" : "BC7_UNORM";
+
+    QL_LOG_INFO("  Uploading BC7 texture '{}': {}x{} {} ({} bytes, ratio: {:.1f}x)",
+                texture.name, texture.width, texture.height, formatName,
+                compressed.GetCompressedSize(), compressed.GetCompressionRatio());
+
+    // Get aligned dimensions for BC7 (must be multiple of 4)
+    u32 alignedWidth = compressed.blockCountX * 4;
+    u32 alignedHeight = compressed.blockCountY * 4;
+
+    // Calculate mip levels for BC7 (limited because each level must be at least 4x4)
+    // For BC7, we can't generate mipmaps via blit because it's a block-compressed format
+    // Option 1: Single mip level (simpler, used here)
+    // Option 2: Pre-compress all mip levels on CPU (more complex, future enhancement)
+    u32 mipLevels = 1;
+
+    // Step 1: Create staging buffer for compressed data
+    VkDeviceSize compressedSize = static_cast<VkDeviceSize>(compressed.GetCompressedSize());
+    GpuBuffer stagingBuffer(
+        m_context.GetAllocator(),
+        compressedSize,
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_CPU_ONLY
+    );
+
+    // Step 2: Copy compressed data to staging buffer
+    void* data = stagingBuffer.Map();
+    std::memcpy(data, compressed.data.data(), compressedSize);
+    stagingBuffer.Unmap();
+
+    // Step 3: Create device-local GPU image with BC7 format
+    // Note: For BC7, image dimensions should be the original texture dimensions,
+    // not the aligned dimensions. Vulkan handles the block alignment internally.
+    auto gpuImage = std::make_unique<GpuImage>(
+        m_context.GetAllocator(),
+        m_context.GetDevice(),
+        texture.width,  // Original width (Vulkan handles alignment)
+        texture.height, // Original height
+        format,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        mipLevels
+    );
+
+    // Step 4: Execute upload via command buffer
+    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL
+        CommandHelper::TransitionImageLayout(
+            cmd,
+            gpuImage->GetImage(),
+            format,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            mipLevels
+        );
+
+        // Define copy region for BC7 (buffer -> image)
+        // For block-compressed formats, bufferRowLength/bufferImageHeight are in texels, not blocks
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = alignedWidth;   // Width in texels (aligned to block size)
+        region.bufferImageHeight = alignedHeight; // Height in texels (aligned to block size)
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {0, 0, 0};
+        region.imageExtent = {texture.width, texture.height, 1};
+
+        // Copy compressed data to GPU image
+        vkCmdCopyBufferToImage(
+            cmd,
+            stagingBuffer.GetHandle(),
+            gpuImage->GetImage(),
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1,
+            &region
+        );
+
+        // Transition: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = gpuImage->GetImage();
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        barrier.subresourceRange.baseMipLevel = 0;
+        barrier.subresourceRange.levelCount = mipLevels;
+        barrier.subresourceRange.baseArrayLayer = 0;
+        barrier.subresourceRange.layerCount = 1;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+    });
+
+    return gpuImage;
+}
+
+// ============================================================================
+// Mipmap Generation Helper
+// ============================================================================
+
+void TextureManager::GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
+                                      VkFormat format, u32 texWidth, u32 texHeight,
+                                      u32 mipLevels) const {
+    // Generate mipmaps using vkCmdBlitImage
+    // Transition base level to TRANSFER_SRC for blit source
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.image = gpuImage->GetImage();
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.subresourceRange.levelCount = 1;
+
+    u32 mipWidth = texWidth;
+    u32 mipHeight = texHeight;
+
+    for (u32 i = 1; i < mipLevels; ++i) {
+        // Transition previous level to TRANSFER_SRC_OPTIMAL
+        barrier.subresourceRange.baseMipLevel = i - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+
+        // Blit from level i-1 to level i
+        VkImageBlit blit{};
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.mipLevel = i - 1;
+        blit.srcSubresource.baseArrayLayer = 0;
+        blit.srcSubresource.layerCount = 1;
+
+        if (mipWidth > 1) mipWidth /= 2;
+        if (mipHeight > 1) mipHeight /= 2;
+
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {static_cast<i32>(mipWidth), static_cast<i32>(mipHeight), 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.mipLevel = i;
+        blit.dstSubresource.baseArrayLayer = 0;
+        blit.dstSubresource.layerCount = 1;
+
+        // Transition current level to TRANSFER_DST before blit
+        barrier.subresourceRange.baseMipLevel = i;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcAccessMask = 0;
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+
+        vkCmdBlitImage(cmd,
+            gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            gpuImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            1, &blit,
+            VK_FILTER_LINEAR);
+
+        // Transition previous level to SHADER_READ_ONLY
+        barrier.subresourceRange.baseMipLevel = i - 1;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            0, nullptr,
+            0, nullptr,
+            1, &barrier);
+    }
+
+    // Transition last mip level to SHADER_READ_ONLY
+    barrier.subresourceRange.baseMipLevel = mipLevels - 1;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, nullptr,
+        0, nullptr,
+        1, &barrier);
 }
 
 } // namespace quantiloom

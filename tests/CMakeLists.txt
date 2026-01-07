@@ -191,6 +191,7 @@ set(TEST_SCENE_SOURCES
     test_scene/test_material.cpp
     test_scene/test_camera.cpp
     test_scene/test_mesh.cpp
+    test_scene/test_mesh_optimizer.cpp
     test_scene/test_scene.cpp
 )
 

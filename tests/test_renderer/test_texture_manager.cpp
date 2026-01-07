@@ -495,3 +495,328 @@ TEST(BC7CompressedDataTest, StructFunctionality) {
     // Compression ratio: (256*256*4) / (64*64*16) = 262144 / 65536 = 4.0
     EXPECT_NEAR(data.GetCompressionRatio(), 4.0f, 0.01f);
 }
+
+// ============================================================================
+// BC7 Actual Compression Tests (conditional on BC7 availability)
+// ============================================================================
+
+/**
+ * @test BC7 compress a valid texture and verify output
+ */
+TEST(BC7CompressionActualTest, CompressValidTexture) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available (build with -DQUANTILOOM_USE_BC7ENC=ON)";
+    }
+
+    // Create 64x64 test texture (small for fast test)
+    Texture tex = CreateTestTexture(64, 64, "TestBC7");
+    tex.isSRGB = true;
+
+    ASSERT_TRUE(TextureCompressor::CanCompress(tex));
+
+    auto result = TextureCompressor::CompressBC7(tex, false /* fast mode */);
+    ASSERT_TRUE(result.has_value());
+
+    const auto& compressed = result.value();
+
+    // Verify dimensions preserved
+    EXPECT_EQ(compressed.width, 64);
+    EXPECT_EQ(compressed.height, 64);
+
+    // Verify block counts: 64/4 = 16 blocks per dimension
+    EXPECT_EQ(compressed.blockCountX, 16);
+    EXPECT_EQ(compressed.blockCountY, 16);
+
+    // Verify compressed size: 16*16 blocks * 16 bytes = 4096 bytes
+    EXPECT_EQ(compressed.GetCompressedSize(), 16 * 16 * 16);
+    EXPECT_EQ(compressed.data.size(), compressed.GetCompressedSize());
+
+    // Verify compression ratio ~4.0x
+    EXPECT_NEAR(compressed.GetCompressionRatio(), 4.0f, 0.1f);
+
+    // Verify sRGB flag preserved
+    EXPECT_TRUE(compressed.isSRGB);
+}
+
+/**
+ * @test BC7 compress texture with non-multiple-of-4 dimensions (edge padding)
+ */
+TEST(BC7CompressionActualTest, CompressNonMultipleOf4) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    // Create 63x65 texture (neither dimension is multiple of 4)
+    Texture tex;
+    tex.name = "NonAlignedTexture";
+    tex.width = 63;
+    tex.height = 65;
+    tex.channels = 4;
+    tex.isSRGB = false;
+    tex.pixels.resize(static_cast<size_t>(63) * 65 * 4);
+
+    // Fill with pattern
+    for (size_t i = 0; i < tex.pixels.size(); i += 4) {
+        tex.pixels[i + 0] = static_cast<u8>(i % 256);
+        tex.pixels[i + 1] = static_cast<u8>((i / 4) % 256);
+        tex.pixels[i + 2] = 128;
+        tex.pixels[i + 3] = 255;
+    }
+
+    ASSERT_TRUE(TextureCompressor::CanCompress(tex));
+
+    auto result = TextureCompressor::CompressBC7(tex, false);
+    ASSERT_TRUE(result.has_value());
+
+    const auto& compressed = result.value();
+
+    // Original dimensions should be preserved
+    EXPECT_EQ(compressed.width, 63);
+    EXPECT_EQ(compressed.height, 65);
+
+    // Block count should be based on padded dimensions
+    // 63 -> 64 (ceil to multiple of 4), 65 -> 68 (ceil to multiple of 4)
+    EXPECT_EQ(compressed.blockCountX, 64 / 4);  // 16
+    EXPECT_EQ(compressed.blockCountY, 68 / 4);  // 17
+
+    // Verify compressed data size
+    size_t expectedSize = 16 * 17 * 16;  // blocks * 16 bytes per block
+    EXPECT_EQ(compressed.GetCompressedSize(), expectedSize);
+    EXPECT_EQ(compressed.data.size(), expectedSize);
+
+    // Verify sRGB flag preserved
+    EXPECT_FALSE(compressed.isSRGB);
+}
+
+/**
+ * @test BC7 compression preserves sRGB flag correctly
+ */
+TEST(BC7CompressionActualTest, SRGBFlagPreserved) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    // Test sRGB texture
+    Texture srgbTex = CreateTestTexture(32, 32, "sRGBTexture");
+    srgbTex.isSRGB = true;
+
+    auto srgbResult = TextureCompressor::CompressBC7(srgbTex, false);
+    ASSERT_TRUE(srgbResult.has_value());
+    EXPECT_TRUE(srgbResult->isSRGB);
+
+    // Test linear texture
+    Texture linearTex = CreateTestTexture(32, 32, "LinearTexture");
+    linearTex.isSRGB = false;
+
+    auto linearResult = TextureCompressor::CompressBC7(linearTex, false);
+    ASSERT_TRUE(linearResult.has_value());
+    EXPECT_FALSE(linearResult->isSRGB);
+}
+
+/**
+ * @test BC7 high quality mode produces valid output
+ */
+TEST(BC7CompressionActualTest, HighQualityMode) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    Texture tex = CreateTestTexture(32, 32, "HQTexture");
+
+    // Compress with high quality
+    auto hqResult = TextureCompressor::CompressBC7(tex, true /* high quality */);
+    ASSERT_TRUE(hqResult.has_value());
+
+    // Compress with fast mode
+    auto fastResult = TextureCompressor::CompressBC7(tex, false /* fast mode */);
+    ASSERT_TRUE(fastResult.has_value());
+
+    // Both should produce same size output
+    EXPECT_EQ(hqResult->GetCompressedSize(), fastResult->GetCompressedSize());
+
+    // But data may differ (HQ usually has different block modes)
+    // Just verify data is not empty
+    EXPECT_FALSE(hqResult->data.empty());
+    EXPECT_FALSE(fastResult->data.empty());
+}
+
+/**
+ * @test BC7 compression output contains valid block data
+ */
+TEST(BC7CompressionActualTest, CompressedDataValidity) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    Texture tex = CreateTestTexture(16, 16, "ValidityTest");
+
+    auto result = TextureCompressor::CompressBC7(tex, false);
+    ASSERT_TRUE(result.has_value());
+
+    // 16x16 = 4x4 blocks = 16 blocks * 16 bytes = 256 bytes
+    EXPECT_EQ(result->data.size(), 256);
+
+    // BC7 blocks are not all zeros for non-trivial input
+    // Check that at least some bytes are non-zero
+    size_t nonZeroCount = 0;
+    for (u8 byte : result->data) {
+        if (byte != 0) nonZeroCount++;
+    }
+    EXPECT_GT(nonZeroCount, 0) << "Compressed data should not be all zeros";
+
+    // BC7 block should not be all 0xFF either (unlikely for gradient input)
+    size_t nonFFCount = 0;
+    for (u8 byte : result->data) {
+        if (byte != 0xFF) nonFFCount++;
+    }
+    EXPECT_GT(nonFFCount, 0) << "Compressed data should not be all 0xFF";
+}
+
+/**
+ * @test BC7 compression with solid color texture
+ */
+TEST(BC7CompressionActualTest, CompressSolidColor) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    // Create solid red texture
+    Texture tex;
+    tex.name = "SolidRed";
+    tex.width = 16;
+    tex.height = 16;
+    tex.channels = 4;
+    tex.isSRGB = true;
+    tex.pixels.resize(16 * 16 * 4);
+
+    for (size_t i = 0; i < tex.pixels.size(); i += 4) {
+        tex.pixels[i + 0] = 255;  // R
+        tex.pixels[i + 1] = 0;    // G
+        tex.pixels[i + 2] = 0;    // B
+        tex.pixels[i + 3] = 255;  // A
+    }
+
+    auto result = TextureCompressor::CompressBC7(tex, false);
+    ASSERT_TRUE(result.has_value());
+
+    // Solid color should compress well (all blocks should be similar)
+    EXPECT_EQ(result->GetCompressedSize(), 16 * 16);  // 16 blocks * 16 bytes
+
+    // Verify sRGB preserved
+    EXPECT_TRUE(result->isSRGB);
+}
+
+/**
+ * @test BC7 compression edge case: minimum size (4x4)
+ */
+TEST(BC7CompressionActualTest, CompressMinimumSize) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    // 4x4 is the minimum compressible size
+    Texture tex;
+    tex.name = "MinSize";
+    tex.width = 4;
+    tex.height = 4;
+    tex.channels = 4;
+    tex.isSRGB = false;
+    tex.pixels.resize(4 * 4 * 4);
+
+    // Fill with gradient
+    for (u32 y = 0; y < 4; ++y) {
+        for (u32 x = 0; x < 4; ++x) {
+            size_t idx = (y * 4 + x) * 4;
+            tex.pixels[idx + 0] = static_cast<u8>(x * 85);
+            tex.pixels[idx + 1] = static_cast<u8>(y * 85);
+            tex.pixels[idx + 2] = 128;
+            tex.pixels[idx + 3] = 255;
+        }
+    }
+
+    ASSERT_TRUE(TextureCompressor::CanCompress(tex));
+
+    auto result = TextureCompressor::CompressBC7(tex, false);
+    ASSERT_TRUE(result.has_value());
+
+    // Should produce exactly 1 block (16 bytes)
+    EXPECT_EQ(result->blockCountX, 1);
+    EXPECT_EQ(result->blockCountY, 1);
+    EXPECT_EQ(result->data.size(), 16);
+}
+
+/**
+ * @test BC7 compression fails gracefully for invalid textures
+ */
+TEST(BC7CompressionActualTest, FailsForInvalidTextures) {
+    // Note: These tests work regardless of BC7 availability because
+    // CanCompress() is always implemented
+
+    // Too small (3x3)
+    Texture tooSmall;
+    tooSmall.width = 3;
+    tooSmall.height = 3;
+    tooSmall.channels = 4;
+    tooSmall.pixels.resize(3 * 3 * 4);
+    EXPECT_FALSE(TextureCompressor::CanCompress(tooSmall));
+
+    // Wrong channel count
+    Texture wrongChannels = CreateTestTexture(16, 16);
+    wrongChannels.channels = 3;
+    EXPECT_FALSE(TextureCompressor::CanCompress(wrongChannels));
+
+    // Empty pixels
+    Texture emptyPixels;
+    emptyPixels.width = 16;
+    emptyPixels.height = 16;
+    emptyPixels.channels = 4;
+    emptyPixels.pixels.clear();
+    EXPECT_FALSE(TextureCompressor::CanCompress(emptyPixels));
+
+    // Mismatched pixel size
+    Texture mismatchedSize;
+    mismatchedSize.width = 16;
+    mismatchedSize.height = 16;
+    mismatchedSize.channels = 4;
+    mismatchedSize.pixels.resize(100);  // Wrong size
+    EXPECT_FALSE(TextureCompressor::CanCompress(mismatchedSize));
+
+    // Zero dimensions
+    Texture zeroDim;
+    zeroDim.width = 0;
+    zeroDim.height = 16;
+    zeroDim.channels = 4;
+    EXPECT_FALSE(TextureCompressor::CanCompress(zeroDim));
+}
+
+/**
+ * @test Large texture compression (2048x2048)
+ */
+TEST(BC7CompressionActualTest, CompressLargeTexture) {
+    if (!TextureCompressor::IsAvailable()) {
+        GTEST_SKIP() << "BC7 compression not available";
+    }
+
+    // Create large texture (typical game asset size)
+    Texture tex = CreateTestTexture(2048, 2048, "LargeTexture");
+
+    ASSERT_TRUE(TextureCompressor::CanCompress(tex));
+
+    auto startTime = std::chrono::steady_clock::now();
+    auto result = TextureCompressor::CompressBC7(tex, false /* fast mode */);
+    auto endTime = std::chrono::steady_clock::now();
+
+    ASSERT_TRUE(result.has_value());
+
+    // Verify output size
+    size_t expectedSize = (2048 / 4) * (2048 / 4) * 16;  // 4 MB
+    EXPECT_EQ(result->GetCompressedSize(), expectedSize);
+    EXPECT_EQ(result->data.size(), expectedSize);
+
+    // Verify compression time is reasonable (< 5 seconds for fast mode)
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+    EXPECT_LT(elapsed.count(), 5000) << "Compression took too long: " << elapsed.count() << "ms";
+
+    // Log compression time for profiling
+    std::cout << "  [INFO] 2048x2048 BC7 compression time: " << elapsed.count() << "ms" << std::endl;
+}
