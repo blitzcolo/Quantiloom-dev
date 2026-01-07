@@ -202,19 +202,159 @@ Texture UsdLoader::ParseTexture(const void* /* stagePtr */, const String& assetP
 }
 
 // ============================================================================
-// ParseSpectralExtensions - Parse Quantiloom custom primvars
+// ParseSpectralExtensions - Parse Quantiloom custom attributes on Material prim
+// ============================================================================
+//
+// USD Custom Attributes Format (on Material prim):
+//
+//   def Material "SpectralMetal"
+//   {
+//       # Standard UsdPreviewSurface binding
+//       token outputs:surface.connect = </Materials/SpectralMetal/PBRShader.outputs:surface>
+//
+//       # Quantiloom spectral material reference (similar to glTF quantiloom_material extras)
+//       custom string quantiloom:materialType = "quantiloom_usgs"
+//       custom string quantiloom:materialRef = "Aluminum brushed 293K"
+//
+//       # Quantiloom IR material properties (similar to glTF QUANTILOOM_material_ir extension)
+//       custom asset quantiloom:emissivityCurve = @materials/aluminum_emissivity.csv@
+//       custom asset quantiloom:reflectanceCurve = @materials/aluminum_reflectance.csv@
+//       custom asset quantiloom:transmittanceCurve = @materials/aluminum_transmittance.csv@
+//       custom float quantiloom:temperature_K = 300.0
+//
+//       def Shader "PBRShader" { ... }
+//   }
+//
 // ============================================================================
 
-void UsdLoader::ParseSpectralExtensions(Material& mat, const void* /* primPtr */,
-                                          const String& /* usdFilePath */) {
-    // Spectral extensions via custom primvars would be parsed here
-    // For now, mark as RGB-upsampled; full primvar support requires
-    // additional USD traversal for custom attributes
+void UsdLoader::ParseSpectralExtensions(Material& mat, const void* stagePtr,
+                                         const String& usdFilePath) {
+    if (!stagePtr) {
+        return;
+    }
 
-    if (mat.HasQuantiloomRef() || mat.HasIRData()) {
+    const auto* stage = static_cast<const tinyusdz::Stage*>(stagePtr);
+    std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
+
+    // Find the Material prim by name in the stage
+    // We need to search for a Material prim with matching name
+    const tinyusdz::Prim* matPrim = nullptr;
+    std::string errMsg;
+
+    // Try to find material by traversing the stage
+    // Material prims are typically under /Materials/ scope
+    std::vector<std::string> searchPaths = {
+        "/Materials/" + mat.name,
+        "/" + mat.name,
+    };
+
+    for (const auto& searchPath : searchPaths) {
+        tinyusdz::Path usdPath(searchPath, "");
+        if (stage->find_prim_at_path(usdPath, matPrim, &errMsg)) {
+            break;
+        }
+        matPrim = nullptr;
+    }
+
+    if (!matPrim) {
+        // Material prim not found, skip spectral extensions
+        return;
+    }
+
+    // ========================================================================
+    // Parse Quantiloom material reference (quantiloom:materialType/materialRef)
+    // Similar to glTF quantiloom_material extras
+    // ========================================================================
+    tinyusdz::Attribute typeAttr, refAttr;
+
+    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:materialType", &typeAttr, &errMsg)) {
+        if (auto strVal = typeAttr.get_value<std::string>()) {
+            mat.quantiloomMaterialType = *strVal;
+        }
+    }
+
+    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:materialRef", &refAttr, &errMsg)) {
+        if (auto strVal = refAttr.get_value<std::string>()) {
+            mat.quantiloomMaterialRef = *strVal;
+        }
+    }
+
+    if (mat.HasQuantiloomRef()) {
+        QL_LOG_INFO("  Found Quantiloom material reference: type='{}', name='{}'",
+                    mat.quantiloomMaterialType, mat.quantiloomMaterialRef);
+        mat.spectralSource = Material::SpectralSource::Measured;
+    }
+
+    // ========================================================================
+    // Parse IR material properties (quantiloom:emissivityCurve, etc.)
+    // Similar to glTF QUANTILOOM_material_ir extension
+    // ========================================================================
+
+    // Helper lambda to load spectral curve from asset path attribute
+    auto loadSpectralCurve = [&](const std::string& attrName) -> std::optional<std::vector<std::pair<f32, f32>>> {
+        tinyusdz::Attribute curveAttr;
+        if (!tinyusdz::tydra::GetAttribute(*matPrim, attrName, &curveAttr, &errMsg)) {
+            return std::nullopt;
+        }
+
+        // Asset paths can be stored as string or value::AssetPath
+        std::string curvePath;
+
+        if (auto assetVal = curveAttr.get_value<tinyusdz::value::AssetPath>()) {
+            curvePath = assetVal->GetAssetPath();
+        } else if (auto strVal = curveAttr.get_value<std::string>()) {
+            curvePath = *strVal;
+        }
+
+        if (curvePath.empty()) {
+            return std::nullopt;
+        }
+
+        // Resolve relative path
+        std::filesystem::path fullPath = usdDir / curvePath;
+
+        auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
+        if (result.has_value()) {
+            QL_LOG_INFO("    Loaded {}: {} ({} points)",
+                        attrName, curvePath, result.value().size());
+            return result.value();
+        } else {
+            QL_LOG_ERROR("    Failed to load {}: '{}': {}",
+                         attrName, curvePath, result.error());
+            return std::nullopt;
+        }
+    };
+
+    // Load emissivity curve
+    if (auto curve = loadSpectralCurve("quantiloom:emissivityCurve")) {
+        mat.irEmissivityCurve = std::move(*curve);
+    }
+
+    // Load reflectance curve
+    if (auto curve = loadSpectralCurve("quantiloom:reflectanceCurve")) {
+        mat.irReflectanceCurve = std::move(*curve);
+    }
+
+    // Load transmittance curve
+    if (auto curve = loadSpectralCurve("quantiloom:transmittanceCurve")) {
+        mat.irTransmittanceCurve = std::move(*curve);
+    }
+
+    // Load IR temperature
+    tinyusdz::Attribute tempAttr;
+    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:temperature_K", &tempAttr, &errMsg)) {
+        if (auto floatVal = tempAttr.get_value<float>()) {
+            mat.irTemperature_K = *floatVal;
+            QL_LOG_INFO("    IR temperature: {:.1f} K", mat.irTemperature_K);
+        }
+    }
+
+    // Mark as measured if IR data loaded
+    if (mat.HasIRData()) {
         mat.spectralSource = Material::SpectralSource::Measured;
 
-        if (mat.HasIRData() && !mat.ValidateIRKirchhoffLaw()) {
+        // Validate Kirchhoff's law
+        if (!mat.ValidateIRKirchhoffLaw()) {
             QL_LOG_WARN("  Material '{}' violates Kirchhoff's law (epsilon+rho+tau > 1)", mat.name);
         }
     }
@@ -384,6 +524,9 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path) {
 
         mat.ComputeSpectralAlbedo();
         mat.spectralSource = Material::SpectralSource::RGBUpsampled;
+
+        // Parse Quantiloom spectral extensions (custom attributes on Material prim)
+        ParseSpectralExtensions(mat, &stage, path);
 
         usdMatToSceneMat[static_cast<int>(i)] = static_cast<int>(scene.materials.size());
         scene.materials.push_back(std::move(mat));

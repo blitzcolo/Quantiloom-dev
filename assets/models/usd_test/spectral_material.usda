@@ -1,0 +1,146 @@
+#usda 1.0
+(
+    defaultPrim = "SpectralScene"
+    metersPerUnit = 1.0
+    upAxis = "Y"
+)
+
+def Scope "Materials"
+{
+    def Material "AluminumMetal"
+    {
+        token outputs:surface.connect = </Materials/AluminumMetal/PBRShader.outputs:surface>
+
+        # Quantiloom spectral material reference (like glTF quantiloom_material extras)
+        custom string quantiloom:materialType = "quantiloom_usgs"
+        custom string quantiloom:materialRef = "Aluminum brushed 293K"
+
+        def Shader "PBRShader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.9, 0.9, 0.9)
+            float inputs:metallic = 1.0
+            float inputs:roughness = 0.3
+            color3f inputs:emissiveColor = (0.0, 0.0, 0.0)
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+    }
+
+    def Material "GlassBK7"
+    {
+        token outputs:surface.connect = </Materials/GlassBK7/PBRShader.outputs:surface>
+
+        # Quantiloom IR material properties (like glTF QUANTILOOM_material_ir extension)
+        # Note: These CSV paths are relative to the USD file location
+        # For testing, we use placeholder paths - actual files would be needed for runtime
+        custom string quantiloom:emissivityCurve = "../../materials/ir_materials/glass_bk7_emissivity.csv"
+        custom string quantiloom:reflectanceCurve = "../../materials/ir_materials/glass_bk7_reflectance.csv"
+        custom string quantiloom:transmittanceCurve = "../../materials/ir_materials/glass_bk7_transmittance.csv"
+        custom float quantiloom:temperature_K = 293.0
+
+        def Shader "PBRShader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.95, 0.95, 0.98)
+            float inputs:metallic = 0.0
+            float inputs:roughness = 0.05
+            color3f inputs:emissiveColor = (0.0, 0.0, 0.0)
+            float inputs:opacity = 0.1
+            token outputs:surface
+        }
+    }
+
+    def Material "AsphaltRoad"
+    {
+        token outputs:surface.connect = </Materials/AsphaltRoad/PBRShader.outputs:surface>
+
+        # Combined: both material reference AND IR properties
+        custom string quantiloom:materialType = "quantiloom_usgs"
+        custom string quantiloom:materialRef = "Asphalt paving"
+        custom string quantiloom:reflectanceCurve = "../../materials/ir_materials/asphalt_reflectance.csv"
+        custom float quantiloom:temperature_K = 320.0
+
+        def Shader "PBRShader"
+        {
+            uniform token info:id = "UsdPreviewSurface"
+            color3f inputs:diffuseColor = (0.15, 0.15, 0.15)
+            float inputs:metallic = 0.0
+            float inputs:roughness = 0.9
+            color3f inputs:emissiveColor = (0.0, 0.0, 0.0)
+            float inputs:opacity = 1.0
+            token outputs:surface
+        }
+    }
+}
+
+def Xform "SpectralScene" (
+    kind = "component"
+)
+{
+    def Mesh "AluminumPlate" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/AluminumMetal>
+
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [
+            (-1.0, 0.0, -1.0),
+            (1.0, 0.0, -1.0),
+            (1.0, 0.0, 1.0),
+            (-1.0, 0.0, 1.0)
+        ]
+        normal3f[] primvars:normals = [
+            (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)
+        ] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "GlassPane" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/GlassBK7>
+
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [
+            (-0.5, 0.5, 0.0),
+            (0.5, 0.5, 0.0),
+            (0.5, 1.5, 0.0),
+            (-0.5, 1.5, 0.0)
+        ]
+        normal3f[] primvars:normals = [
+            (0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)
+        ] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+
+    def Mesh "RoadSurface" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        rel material:binding = </Materials/AsphaltRoad>
+
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        point3f[] points = [
+            (-5.0, -0.1, -5.0),
+            (5.0, -0.1, -5.0),
+            (5.0, -0.1, 5.0),
+            (-5.0, -0.1, 5.0)
+        ]
+        normal3f[] primvars:normals = [
+            (0, 1, 0), (0, 1, 0), (0, 1, 0), (0, 1, 0)
+        ] (
+            interpolation = "faceVarying"
+        )
+        uniform token subdivisionScheme = "none"
+    }
+}
