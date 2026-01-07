@@ -118,6 +118,11 @@ public:
     // Returns std::nullopt on failure
     static std::optional<Image> ReadEXR(const std::string& filepath);
 
+    // Read image from any supported format (EXR, PNG, JPEG, BMP, TGA, HDR)
+    // Automatically detects format by extension
+    // Returns std::nullopt on failure
+    static std::optional<Image> ReadImage(const std::string& filepath);
+
     // ========================================================================
     // Utilities
     // ========================================================================

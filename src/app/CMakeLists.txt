@@ -53,6 +53,11 @@ if(WIN32)
             "$<TARGET_FILE_DIR:Quantiloom>"
         COMMENT "Copying Quantiloom.dll to executable directory"
     )
+
+    # Copy OpenUSD DLLs if enabled
+    if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
+        copy_usd_dlls(Quantiloom)
+    endif()
 endif()
 
 # Copy compiled shaders to the executable directory

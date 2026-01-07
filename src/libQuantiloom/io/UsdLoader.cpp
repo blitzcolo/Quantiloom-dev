@@ -1,116 +1,178 @@
 /**
  * @file UsdLoader.cpp
- * @brief OpenUSD scene loader implementation using TinyUSDZ
+ * @brief OpenUSD scene loader implementation using Pixar OpenUSD
  *
  * Implementation of UsdLoader class for loading OpenUSD files.
- * Uses TinyUSDZ library for USD parsing.
+ * Uses Pixar's official OpenUSD library for USD parsing.
+ *
+ * Supports:
+ * - Full USD composition (sublayers, references, payloads, variants, inherits)
+ * - Variant selection via UsdLoadOptions
+ * - UsdPreviewSurface and MaterialX materials
+ * - Texture connection following
+ * - GeomSubsets for multi-material meshes
+ * - PointInstancer expansion
  *
  * @author wtflmao
  */
 
 #include "UsdLoader.hpp"
 #include "SpectralIO.hpp"
+#include "ImageIO.hpp"
 #include "core/Log.hpp"
 
-// TinyUSDZ headers (linking against tinyusdz_static library)
-#include <tinyusdz.hh>
-#include <io-util.hh>
-#include <pprinter.hh>
-#include <prim-types.hh>
-#include <usdGeom.hh>
-#include <usdShade.hh>
-#include <composition.hh>
-#include <asset-resolution.hh>
-#include <tydra/scene-access.hh>
-#include <tydra/render-data.hh>
+// Conditional compilation based on OpenUSD availability
+#if QUANTILOOM_USE_OPENUSD
 
-// Use ImageIO for texture loading (avoids stb_image symbol conflicts with tinygltf)
-#include "ImageIO.hpp"
+// OpenUSD headers
+#include <pxr/pxr.h>
+#include <pxr/usd/usd/stage.h>
+#include <pxr/usd/usd/prim.h>
+#include <pxr/usd/usd/primRange.h>
+#include <pxr/usd/usd/attribute.h>
+#include <pxr/usd/usd/timeCode.h>
+#include <pxr/usd/usd/variantSets.h>
+#include <pxr/usd/usd/editContext.h>
+#include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/subset.h>
+#include <pxr/usd/usdGeom/xform.h>
+#include <pxr/usd/usdGeom/xformable.h>
+#include <pxr/usd/usdGeom/primvarsAPI.h>
+#include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/pointInstancer.h>
+#include <pxr/usd/usdShade/material.h>
+#include <pxr/usd/usdShade/materialBindingAPI.h>
+#include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdShade/connectableAPI.h>
+#include <pxr/usd/sdf/path.h>
+#include <pxr/usd/sdf/assetPath.h>
+#include <pxr/base/gf/matrix4d.h>
+#include <pxr/base/gf/vec2f.h>
+#include <pxr/base/gf/vec3f.h>
+#include <pxr/base/gf/vec4f.h>
+#include <pxr/base/gf/quath.h>
+#include <pxr/base/vt/array.h>
+#include <pxr/base/tf/token.h>
+#include <pxr/base/plug/registry.h>
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/type_ptr.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <algorithm>
 #include <filesystem>
 #include <unordered_map>
+#include <unordered_set>
+#include <cstdlib>
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
+PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace quantiloom {
 
 // ============================================================================
-// Helper: Convert TinyUSDZ types to GLM types
+// InitializeUsdPlugins - Ensure USD plugins are discoverable
 // ============================================================================
 
-[[maybe_unused]]
-static glm::mat4 MatrixFromUsd(const tinyusdz::value::matrix4d& mat) {
+static bool g_usdPluginsInitialized = false;
+
+static void InitializeUsdPlugins() {
+    if (g_usdPluginsInitialized) {
+        return;
+    }
+    g_usdPluginsInitialized = true;
+
+    // Check if PXR_PLUGINPATH_NAME is already set
+    const char* existingPath = std::getenv("PXR_PLUGINPATH_NAME");
+    if (existingPath && existingPath[0] != '\0') {
+        QL_LOG_INFO("USD plugin path already set: {}", existingPath);
+        return;
+    }
+
+    // Try to find usd plugins directory relative to the executable or library
+    // Common locations:
+    // 1. <exe_dir>/usd
+    // 2. <exe_dir>/../lib/usd
+    // 3. USD_ROOT environment variable
+
+    std::vector<std::filesystem::path> searchPaths;
+
+#ifdef _WIN32
+    // Get the path of the current module (DLL or EXE)
+    char modulePath[MAX_PATH];
+    HMODULE hModule = nullptr;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        reinterpret_cast<LPCSTR>(&InitializeUsdPlugins),
+        &hModule);
+    if (GetModuleFileNameA(hModule, modulePath, MAX_PATH) > 0) {
+        std::filesystem::path moduleDir = std::filesystem::path(modulePath).parent_path();
+        searchPaths.push_back(moduleDir / "usd");
+        searchPaths.push_back(moduleDir / ".." / "lib" / "usd");
+    }
+#else
+    // On Linux/macOS, use /proc/self/exe or dladdr
+    std::filesystem::path exePath = std::filesystem::read_symlink("/proc/self/exe");
+    std::filesystem::path exeDir = exePath.parent_path();
+    searchPaths.push_back(exeDir / "usd");
+    searchPaths.push_back(exeDir / ".." / "lib" / "usd");
+#endif
+
+    // Also check USD_ROOT environment variable
+    const char* usdRoot = std::getenv("USD_ROOT");
+    if (usdRoot && usdRoot[0] != '\0') {
+        searchPaths.push_back(std::filesystem::path(usdRoot) / "lib" / "usd");
+    }
+
+    // Find the first valid plugin directory
+    for (const auto& searchPath : searchPaths) {
+        std::filesystem::path plugInfoPath = searchPath / "plugInfo.json";
+        if (std::filesystem::exists(plugInfoPath)) {
+            std::string pluginPath = std::filesystem::absolute(searchPath).string();
+            std::replace(pluginPath.begin(), pluginPath.end(), '\\', '/');
+
+            QL_LOG_INFO("Found USD plugins at: {}", pluginPath);
+
+            // Register the plugin path with USD
+            PlugRegistry::GetInstance().RegisterPlugins(pluginPath);
+            return;
+        }
+    }
+
+    QL_LOG_WARN("Could not find USD plugins directory. USD file loading may fail.");
+    QL_LOG_WARN("Set USD_ROOT or PXR_PLUGINPATH_NAME environment variable to fix this.");
+}
+
+// ============================================================================
+// IsAvailable - Check if OpenUSD support is compiled in
+// ============================================================================
+
+bool UsdLoader::IsAvailable() {
+    return true;
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+static glm::mat4 GfMatrix4dToGlm(const GfMatrix4d& mat) {
     glm::mat4 result;
     for (int i = 0; i < 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            result[i][j] = static_cast<float>(mat.m[i][j]);
+            result[i][j] = static_cast<float>(mat[i][j]);
         }
     }
     return result;
 }
 
-// ============================================================================
-// Helper: Extract vec3 array from VertexAttribute
-// ============================================================================
-
-static std::vector<glm::vec3> ExtractVec3FromVertexAttribute(
-    const tinyusdz::tydra::VertexAttribute& attr) {
-
-    std::vector<glm::vec3> result;
-
-    if (attr.empty()) {
-        return result;
+static UsdTimeCode GetTimeCode(const UsdLoadOptions& options) {
+    if (options.useDefaultTime) {
+        return UsdTimeCode::Default();
     }
-
-    // Check format is Vec3
-    if (attr.format != tinyusdz::tydra::VertexAttributeFormat::Vec3) {
-        return result;
-    }
-
-    size_t count = attr.vertex_count();
-    result.reserve(count);
-
-    const float* floatData = reinterpret_cast<const float*>(attr.data.data());
-
-    for (size_t i = 0; i < count; ++i) {
-        result.emplace_back(floatData[i * 3 + 0],
-                           floatData[i * 3 + 1],
-                           floatData[i * 3 + 2]);
-    }
-
-    return result;
-}
-
-// ============================================================================
-// Helper: Extract vec2 array from VertexAttribute
-// ============================================================================
-
-static std::vector<glm::vec2> ExtractVec2FromVertexAttribute(
-    const tinyusdz::tydra::VertexAttribute& attr) {
-
-    std::vector<glm::vec2> result;
-
-    if (attr.empty()) {
-        return result;
-    }
-
-    // Check format is Vec2
-    if (attr.format != tinyusdz::tydra::VertexAttributeFormat::Vec2) {
-        return result;
-    }
-
-    size_t count = attr.vertex_count();
-    result.reserve(count);
-
-    const float* floatData = reinterpret_cast<const float*>(attr.data.data());
-
-    for (size_t i = 0; i < count; ++i) {
-        result.emplace_back(floatData[i * 2 + 0],
-                           floatData[i * 2 + 1]);
-    }
-
-    return result;
+    return UsdTimeCode(options.timeCode);
 }
 
 // ============================================================================
@@ -143,6 +205,36 @@ std::vector<u32> UsdLoader::TriangulatePolygons(
     return triangleIndices;
 }
 
+std::vector<u32> UsdLoader::TriangulatePolygonsWithFaceMap(
+    const std::vector<i32>& faceVertexCounts,
+    const std::vector<i32>& faceVertexIndices,
+    std::vector<u32>& outTriangleToFace) {
+
+    std::vector<u32> triangleIndices;
+    outTriangleToFace.clear();
+
+    size_t indexOffset = 0;
+    for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
+        i32 vertexCount = faceVertexCounts[faceIdx];
+        if (vertexCount < 3) {
+            indexOffset += vertexCount;
+            continue;
+        }
+
+        // Fan triangulation for convex polygons
+        for (i32 i = 1; i < vertexCount - 1; ++i) {
+            triangleIndices.push_back(static_cast<u32>(faceVertexIndices[indexOffset]));
+            triangleIndices.push_back(static_cast<u32>(faceVertexIndices[indexOffset + i]));
+            triangleIndices.push_back(static_cast<u32>(faceVertexIndices[indexOffset + i + 1]));
+            outTriangleToFace.push_back(static_cast<u32>(faceIdx));
+        }
+
+        indexOffset += vertexCount;
+    }
+
+    return triangleIndices;
+}
+
 // ============================================================================
 // ParseTexture - Load texture from USD asset path using ImageIO
 // ============================================================================
@@ -151,224 +243,420 @@ Texture UsdLoader::ParseTexture(const void* /* stagePtr */, const String& assetP
                                   const String& usdFilePath) {
     Texture tex;
 
+    if (assetPath.empty()) {
+        return tex;
+    }
+
     // Resolve asset path relative to USD file
     std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
     std::filesystem::path fullPath = usdDir / assetPath;
+
+    // Normalize path (resolve .. and .)
+    fullPath = std::filesystem::weakly_canonical(fullPath);
 
     if (!std::filesystem::exists(fullPath)) {
         QL_LOG_ERROR("Texture file not found: {}", fullPath.string());
         return tex;
     }
 
-    // Determine file type
-    String ext = fullPath.extension().string();
-    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-    if (ext == ".exr") {
-        // Load EXR via ImageIO
-        auto imageResult = ImageIO::ReadEXR(fullPath.string());
-        if (!imageResult.has_value()) {
-            QL_LOG_ERROR("Failed to load EXR texture '{}'", assetPath);
-            return tex;
-        }
-
-        const Image& img = imageResult.value();
-
-        tex.name = fullPath.filename().string();
-        tex.width = img.width;
-        tex.height = img.height;
-        tex.channels = img.channels;
-        tex.sourceUri = assetPath;
-
-        // Convert float image data to u8 pixels
-        size_t pixelCount = static_cast<size_t>(img.width) * img.height * img.channels;
-        tex.pixels.resize(pixelCount);
-        for (size_t i = 0; i < pixelCount; ++i) {
-            float val = std::clamp(img.data[i], 0.0f, 1.0f);
-            tex.pixels[i] = static_cast<u8>(val * 255.0f + 0.5f);
-        }
-    } else {
-        // PNG/JPEG textures are loaded by tydra's texture loader
-        // This function is currently unused - tydra handles textures internally
-        // TODO: Add PNG/JPEG support if needed for manual texture loading
-        QL_LOG_WARN("Texture format '{}' not directly supported, use tydra for PNG/JPEG", ext);
-        tex.name = fullPath.filename().string();
-        tex.sourceUri = assetPath;
+    // Load texture using ImageIO::ReadImage (supports EXR, PNG, JPEG, BMP, TGA, HDR)
+    auto imageResult = ImageIO::ReadImage(fullPath.string());
+    if (!imageResult.has_value()) {
+        QL_LOG_ERROR("Failed to load texture '{}'", assetPath);
         return tex;
     }
 
-    QL_LOG_INFO("  Loaded texture '{}' ({}x{}, {} channels)",
-                tex.name, tex.width, tex.height, tex.channels);
+    const Image& img = imageResult.value();
+
+    tex.name = fullPath.filename().string();
+    tex.width = img.width;
+    tex.height = img.height;
+    tex.channels = 4;  // Always output RGBA for renderer compatibility
+    tex.sourceUri = assetPath;
+
+    // Convert to RGBA8 (renderer requires 4 channels)
+    size_t pixelCount = static_cast<size_t>(img.width) * img.height;
+    tex.pixels.resize(pixelCount * 4);
+
+    for (size_t i = 0; i < pixelCount; ++i) {
+        float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
+
+        if (img.channels == 1) {
+            // Grayscale -> RGB (same value for all channels)
+            r = g = b = std::clamp(img.data[i], 0.0f, 1.0f);
+        } else if (img.channels == 2) {
+            // Gray + Alpha
+            r = g = b = std::clamp(img.data[i * 2], 0.0f, 1.0f);
+            a = std::clamp(img.data[i * 2 + 1], 0.0f, 1.0f);
+        } else if (img.channels == 3) {
+            // RGB
+            r = std::clamp(img.data[i * 3], 0.0f, 1.0f);
+            g = std::clamp(img.data[i * 3 + 1], 0.0f, 1.0f);
+            b = std::clamp(img.data[i * 3 + 2], 0.0f, 1.0f);
+        } else if (img.channels >= 4) {
+            // RGBA
+            r = std::clamp(img.data[i * img.channels], 0.0f, 1.0f);
+            g = std::clamp(img.data[i * img.channels + 1], 0.0f, 1.0f);
+            b = std::clamp(img.data[i * img.channels + 2], 0.0f, 1.0f);
+            a = std::clamp(img.data[i * img.channels + 3], 0.0f, 1.0f);
+        }
+
+        tex.pixels[i * 4 + 0] = static_cast<u8>(r * 255.0f + 0.5f);
+        tex.pixels[i * 4 + 1] = static_cast<u8>(g * 255.0f + 0.5f);
+        tex.pixels[i * 4 + 2] = static_cast<u8>(b * 255.0f + 0.5f);
+        tex.pixels[i * 4 + 3] = static_cast<u8>(a * 255.0f + 0.5f);
+    }
+
+    QL_LOG_INFO("    Loaded texture '{}' ({}x{}, {} -> 4 channels)",
+                tex.name, tex.width, tex.height, img.channels);
 
     return tex;
 }
 
 // ============================================================================
-// ParseSpectralExtensions - Parse Quantiloom custom attributes on Material prim
-// ============================================================================
-//
-// USD Custom Attributes Format (on Material prim):
-//
-//   def Material "SpectralMetal"
-//   {
-//       # Standard UsdPreviewSurface binding
-//       token outputs:surface.connect = </Materials/SpectralMetal/PBRShader.outputs:surface>
-//
-//       # Quantiloom spectral material reference (similar to glTF quantiloom_material extras)
-//       custom string quantiloom:materialType = "quantiloom_usgs"
-//       custom string quantiloom:materialRef = "Aluminum brushed 293K"
-//
-//       # Quantiloom IR material properties (similar to glTF QUANTILOOM_material_ir extension)
-//       custom asset quantiloom:emissivityCurve = @materials/aluminum_emissivity.csv@
-//       custom asset quantiloom:reflectanceCurve = @materials/aluminum_reflectance.csv@
-//       custom asset quantiloom:transmittanceCurve = @materials/aluminum_transmittance.csv@
-//       custom float quantiloom:temperature_K = 300.0
-//
-//       def Shader "PBRShader" { ... }
-//   }
-//
+// GetTextureAssetPath - Follow shader connection to find texture file
 // ============================================================================
 
-void UsdLoader::ParseSpectralExtensions(Material& mat, const void* stagePtr,
+String UsdLoader::GetTextureAssetPath(const void* shaderInputPtr) {
+    if (!shaderInputPtr) {
+        return "";
+    }
+
+    const auto* input = static_cast<const UsdShadeInput*>(shaderInputPtr);
+
+    // Check if input is connected
+    UsdShadeConnectableAPI source;
+    TfToken sourceName;
+    UsdShadeAttributeType sourceType;
+
+    if (input->GetConnectedSource(&source, &sourceName, &sourceType)) {
+        // Get the source shader
+        UsdShadeShader sourceShader(source.GetPrim());
+        if (sourceShader) {
+            TfToken shaderId;
+            sourceShader.GetIdAttr().Get(&shaderId);
+
+            // Check if it's a UsdUVTexture
+            if (shaderId == TfToken("UsdUVTexture")) {
+                // Get the file input
+                if (UsdShadeInput fileInput = sourceShader.GetInput(TfToken("file"))) {
+                    SdfAssetPath assetPath;
+                    if (fileInput.Get(&assetPath)) {
+                        return assetPath.GetAssetPath();
+                    }
+                }
+            }
+        }
+    }
+
+    return "";
+}
+
+// ============================================================================
+// ParseSpectralExtensions - Parse Quantiloom custom attributes
+// ============================================================================
+
+void UsdLoader::ParseSpectralExtensions(Material& mat, const void* primPtr,
                                          const String& usdFilePath) {
-    if (!stagePtr) {
+    if (!primPtr) {
         return;
     }
 
-    const auto* stage = static_cast<const tinyusdz::Stage*>(stagePtr);
+    const auto* prim = static_cast<const UsdPrim*>(primPtr);
     std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
 
-    // Find the Material prim by name in the stage
-    // We need to search for a Material prim with matching name
-    const tinyusdz::Prim* matPrim = nullptr;
-    std::string errMsg;
-
-    // Try to find material by traversing the stage
-    // Material prims are typically under /Materials/ scope
-    std::vector<std::string> searchPaths = {
-        "/Materials/" + mat.name,
-        "/" + mat.name,
-    };
-
-    for (const auto& searchPath : searchPaths) {
-        tinyusdz::Path usdPath(searchPath, "");
-        if (stage->find_prim_at_path(usdPath, matPrim, &errMsg)) {
-            break;
-        }
-        matPrim = nullptr;
-    }
-
-    if (!matPrim) {
-        // Material prim not found, skip spectral extensions
-        return;
-    }
-
-    // ========================================================================
-    // Parse Quantiloom material reference (quantiloom:materialType/materialRef)
-    // Similar to glTF quantiloom_material extras
-    // ========================================================================
-    tinyusdz::Attribute typeAttr, refAttr;
-
-    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:materialType", &typeAttr, &errMsg)) {
-        if (auto strVal = typeAttr.get_value<std::string>()) {
-            mat.quantiloomMaterialType = *strVal;
+    // Parse Quantiloom material reference
+    if (UsdAttribute typeAttr = prim->GetAttribute(TfToken("quantiloom:materialType"))) {
+        std::string typeStr;
+        if (typeAttr.Get(&typeStr)) {
+            mat.quantiloomMaterialType = typeStr;
         }
     }
 
-    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:materialRef", &refAttr, &errMsg)) {
-        if (auto strVal = refAttr.get_value<std::string>()) {
-            mat.quantiloomMaterialRef = *strVal;
+    if (UsdAttribute refAttr = prim->GetAttribute(TfToken("quantiloom:materialRef"))) {
+        std::string refStr;
+        if (refAttr.Get(&refStr)) {
+            mat.quantiloomMaterialRef = refStr;
         }
     }
 
     if (mat.HasQuantiloomRef()) {
-        QL_LOG_INFO("  Found Quantiloom material reference: type='{}', name='{}'",
+        QL_LOG_INFO("    Found Quantiloom material reference: type='{}', name='{}'",
                     mat.quantiloomMaterialType, mat.quantiloomMaterialRef);
         mat.spectralSource = Material::SpectralSource::Measured;
     }
 
-    // ========================================================================
-    // Parse IR material properties (quantiloom:emissivityCurve, etc.)
-    // Similar to glTF QUANTILOOM_material_ir extension
-    // ========================================================================
-
     // Helper lambda to load spectral curve from asset path attribute
-    auto loadSpectralCurve = [&](const std::string& attrName) -> std::optional<std::vector<std::pair<f32, f32>>> {
-        tinyusdz::Attribute curveAttr;
-        if (!tinyusdz::tydra::GetAttribute(*matPrim, attrName, &curveAttr, &errMsg)) {
-            return std::nullopt;
+    auto loadSpectralCurve = [&](const char* attrName) -> std::optional<std::vector<std::pair<f32, f32>>> {
+        if (UsdAttribute curveAttr = prim->GetAttribute(TfToken(attrName))) {
+            std::string curvePath;
+            if (curveAttr.Get(&curvePath) && !curvePath.empty()) {
+                std::filesystem::path fullPath = usdDir / curvePath;
+                auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
+                if (result.has_value()) {
+                    QL_LOG_INFO("      Loaded {}: {} ({} points)",
+                                attrName, curvePath, result.value().size());
+                    return result.value();
+                } else {
+                    QL_LOG_ERROR("      Failed to load {}: '{}': {}",
+                                 attrName, curvePath, result.error());
+                }
+            }
         }
-
-        // Asset paths can be stored as string or value::AssetPath
-        std::string curvePath;
-
-        if (auto assetVal = curveAttr.get_value<tinyusdz::value::AssetPath>()) {
-            curvePath = assetVal->GetAssetPath();
-        } else if (auto strVal = curveAttr.get_value<std::string>()) {
-            curvePath = *strVal;
-        }
-
-        if (curvePath.empty()) {
-            return std::nullopt;
-        }
-
-        // Resolve relative path
-        std::filesystem::path fullPath = usdDir / curvePath;
-
-        auto result = SpectralIO::LoadSpectralCurveCSV(fullPath);
-        if (result.has_value()) {
-            QL_LOG_INFO("    Loaded {}: {} ({} points)",
-                        attrName, curvePath, result.value().size());
-            return result.value();
-        } else {
-            QL_LOG_ERROR("    Failed to load {}: '{}': {}",
-                         attrName, curvePath, result.error());
-            return std::nullopt;
-        }
+        return std::nullopt;
     };
 
-    // Load emissivity curve
+    // Load spectral curves
     if (auto curve = loadSpectralCurve("quantiloom:emissivityCurve")) {
         mat.irEmissivityCurve = std::move(*curve);
     }
-
-    // Load reflectance curve
     if (auto curve = loadSpectralCurve("quantiloom:reflectanceCurve")) {
         mat.irReflectanceCurve = std::move(*curve);
     }
-
-    // Load transmittance curve
     if (auto curve = loadSpectralCurve("quantiloom:transmittanceCurve")) {
         mat.irTransmittanceCurve = std::move(*curve);
     }
 
     // Load IR temperature
-    tinyusdz::Attribute tempAttr;
-    if (tinyusdz::tydra::GetAttribute(*matPrim, "quantiloom:temperature_K", &tempAttr, &errMsg)) {
-        if (auto floatVal = tempAttr.get_value<float>()) {
-            mat.irTemperature_K = *floatVal;
-            QL_LOG_INFO("    IR temperature: {:.1f} K", mat.irTemperature_K);
+    if (UsdAttribute tempAttr = prim->GetAttribute(TfToken("quantiloom:temperature_K"))) {
+        float temp;
+        if (tempAttr.Get(&temp)) {
+            mat.irTemperature_K = temp;
+            QL_LOG_INFO("      IR temperature: {:.1f} K", mat.irTemperature_K);
         }
     }
 
     // Mark as measured if IR data loaded
     if (mat.HasIRData()) {
         mat.spectralSource = Material::SpectralSource::Measured;
-
-        // Validate Kirchhoff's law
         if (!mat.ValidateIRKirchhoffLaw()) {
-            QL_LOG_WARN("  Material '{}' violates Kirchhoff's law (epsilon+rho+tau > 1)", mat.name);
+            QL_LOG_WARN("    Material '{}' violates Kirchhoff's law", mat.name);
         }
     }
 }
 
 // ============================================================================
-// ParseMaterial - Convert UsdPreviewSurface to Quantiloom Material
+// ParseUsdPreviewSurface - Parse UsdPreviewSurface shader
 // ============================================================================
 
-Material UsdLoader::ParseMaterial(const void* /* stagePtr */, const void* /* matPtr */,
-                                    const std::vector<Texture>& /* textures */,
-                                    const String& /* usdFilePath */) {
+void UsdLoader::ParseUsdPreviewSurface(Material& mat, const void* shaderPtr,
+                                        std::vector<Texture>& textures,
+                                        const String& usdFilePath,
+                                        const UsdLoadOptions& options) {
+    if (!shaderPtr) {
+        return;
+    }
+
+    const auto* shader = static_cast<const UsdShadeShader*>(shaderPtr);
+
+    // Helper to get scalar or textured value
+    auto getColorOrTexture = [&](const char* inputName, glm::vec3& outColor, int& outTexIndex) {
+        outTexIndex = -1;
+        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
+            // First check for texture connection
+            if (options.loadTextures) {
+                String texPath = GetTextureAssetPath(&input);
+                if (!texPath.empty()) {
+                    Texture tex = ParseTexture(nullptr, texPath, usdFilePath);
+                    if (tex.width > 0) {
+                        outTexIndex = static_cast<int>(textures.size());
+                        textures.push_back(std::move(tex));
+                        return;
+                    }
+                }
+            }
+
+            // Fall back to scalar value
+            GfVec3f color;
+            if (input.Get(&color)) {
+                outColor = glm::vec3(color[0], color[1], color[2]);
+            }
+        }
+    };
+
+    auto getFloatOrTexture = [&](const char* inputName, float& outValue, int& outTexIndex) {
+        outTexIndex = -1;
+        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
+            // First check for texture connection
+            if (options.loadTextures) {
+                String texPath = GetTextureAssetPath(&input);
+                if (!texPath.empty()) {
+                    Texture tex = ParseTexture(nullptr, texPath, usdFilePath);
+                    if (tex.width > 0) {
+                        outTexIndex = static_cast<int>(textures.size());
+                        textures.push_back(std::move(tex));
+                        return;
+                    }
+                }
+            }
+
+            // Fall back to scalar value
+            float value;
+            if (input.Get(&value)) {
+                outValue = value;
+            }
+        }
+    };
+
+    // Parse diffuseColor
+    glm::vec3 baseColor(0.8f);
+    int baseColorTexIndex = -1;
+    getColorOrTexture("diffuseColor", baseColor, baseColorTexIndex);
+    mat.baseColorFactor = glm::vec4(baseColor, 1.0f);
+    mat.baseColorTextureIndex = baseColorTexIndex;
+
+    // Parse metallic
+    float metallic = 0.0f;
+    int metallicTexIndex = -1;
+    getFloatOrTexture("metallic", metallic, metallicTexIndex);
+    mat.metallicFactor = metallic;
+    mat.metallicRoughnessTextureIndex = metallicTexIndex;
+
+    // Parse roughness
+    float roughness = 0.5f;
+    int roughnessTexIndex = -1;
+    getFloatOrTexture("roughness", roughness, roughnessTexIndex);
+    mat.roughnessFactor = roughness;
+    if (roughnessTexIndex >= 0 && mat.metallicRoughnessTextureIndex < 0) {
+        mat.metallicRoughnessTextureIndex = roughnessTexIndex;
+    }
+
+    // Parse emissiveColor
+    glm::vec3 emissive(0.0f);
+    int emissiveTexIndex = -1;
+    getColorOrTexture("emissiveColor", emissive, emissiveTexIndex);
+    mat.emissiveFactor = emissive;
+    mat.emissiveTextureIndex = emissiveTexIndex;
+
+    // Parse normal map
+    if (options.loadTextures) {
+        if (UsdShadeInput normalInput = shader->GetInput(TfToken("normal"))) {
+            String texPath = GetTextureAssetPath(&normalInput);
+            if (!texPath.empty()) {
+                Texture tex = ParseTexture(nullptr, texPath, usdFilePath);
+                if (tex.width > 0) {
+                    mat.normalTextureIndex = static_cast<int>(textures.size());
+                    textures.push_back(std::move(tex));
+                }
+            }
+        }
+    }
+
+    // Parse opacity
+    if (UsdShadeInput opacityInput = shader->GetInput(TfToken("opacity"))) {
+        float opacity = 1.0f;
+        if (opacityInput.Get(&opacity)) {
+            if (opacity < 1.0f) {
+                mat.alphaMode = Material::AlphaMode::Blend;
+                mat.baseColorFactor.a = opacity;
+            }
+        }
+    }
+
+    // Note: Material doesn't have IOR field - UsdPreviewSurface IOR is not mapped
+}
+
+// ============================================================================
+// ParseMaterialXSurface - Parse MaterialX standard_surface shader
+// ============================================================================
+
+void UsdLoader::ParseMaterialXSurface(Material& mat, const void* shaderPtr,
+                                       std::vector<Texture>& textures,
+                                       const String& usdFilePath,
+                                       const UsdLoadOptions& options) {
+    if (!shaderPtr) {
+        return;
+    }
+
+    const auto* shader = static_cast<const UsdShadeShader*>(shaderPtr);
+
+    // MaterialX standard_surface input names
+    // base, base_color, metalness, specular_roughness, emission, emission_color, normal
+
+    // Helper to get value
+    auto getFloat = [&](const char* inputName, float defaultValue) -> float {
+        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
+            float value;
+            if (input.Get(&value)) {
+                return value;
+            }
+        }
+        return defaultValue;
+    };
+
+    auto getColor3 = [&](const char* inputName, glm::vec3 defaultValue) -> glm::vec3 {
+        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
+            GfVec3f color;
+            if (input.Get(&color)) {
+                return glm::vec3(color[0], color[1], color[2]);
+            }
+        }
+        return defaultValue;
+    };
+
+    // Parse base (weight for base color)
+    float base = getFloat("base", 1.0f);
+
+    // Parse base_color
+    glm::vec3 baseColor = getColor3("base_color", glm::vec3(0.8f));
+    mat.baseColorFactor = glm::vec4(baseColor * base, 1.0f);
+
+    // Parse metalness
+    mat.metallicFactor = getFloat("metalness", 0.0f);
+
+    // Parse specular_roughness
+    mat.roughnessFactor = getFloat("specular_roughness", 0.5f);
+
+    // Parse emission and emission_color
+    float emission = getFloat("emission", 0.0f);
+    glm::vec3 emissionColor = getColor3("emission_color", glm::vec3(1.0f));
+    mat.emissiveFactor = emissionColor * emission;
+
+    // Note: specular_IOR is not mapped - Material doesn't have IOR field
+
+    // Parse transmission (for glass-like materials)
+    float transmission = getFloat("transmission", 0.0f);
+    if (transmission > 0.0f) {
+        mat.alphaMode = Material::AlphaMode::Blend;
+        mat.baseColorFactor.a = 1.0f - transmission;
+    }
+
+    // Texture loading for MaterialX (if enabled)
+    if (options.loadTextures) {
+        // Check base_color for texture
+        if (UsdShadeInput input = shader->GetInput(TfToken("base_color"))) {
+            String texPath = GetTextureAssetPath(&input);
+            if (!texPath.empty()) {
+                Texture tex = ParseTexture(nullptr, texPath, usdFilePath);
+                if (tex.width > 0) {
+                    mat.baseColorTextureIndex = static_cast<int>(textures.size());
+                    textures.push_back(std::move(tex));
+                }
+            }
+        }
+
+        // Check normal for texture
+        if (UsdShadeInput input = shader->GetInput(TfToken("normal"))) {
+            String texPath = GetTextureAssetPath(&input);
+            if (!texPath.empty()) {
+                Texture tex = ParseTexture(nullptr, texPath, usdFilePath);
+                if (tex.width > 0) {
+                    mat.normalTextureIndex = static_cast<int>(textures.size());
+                    textures.push_back(std::move(tex));
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// ParseMaterial - Convert UsdShadeMaterial to Quantiloom Material
+// ============================================================================
+
+Material UsdLoader::ParseMaterial(const void* stagePtr, const void* primPtr,
+                                    std::vector<Texture>& textures,
+                                    const String& usdFilePath,
+                                    const UsdLoadOptions& options) {
     Material mat;
 
     // Default material values
@@ -379,8 +667,52 @@ Material UsdLoader::ParseMaterial(const void* /* stagePtr */, const void* /* mat
     mat.alphaMode = Material::AlphaMode::Opaque;
     mat.alphaCutoff = 0.5f;
 
-    mat.spectralSource = Material::SpectralSource::RGBUpsampled;
+    if (!primPtr) {
+        mat.spectralSource = Material::SpectralSource::RGBUpsampled;
+        mat.ComputeSpectralAlbedo();
+        return mat;
+    }
+
+    const auto* prim = static_cast<const UsdPrim*>(primPtr);
+    UsdShadeMaterial shadeMat(*prim);
+    mat.name = prim->GetName().GetString();
+
+    // Get surface shader output
+    UsdShadeShader surfaceShader = shadeMat.ComputeSurfaceSource();
+    if (surfaceShader) {
+        TfToken shaderId;
+        surfaceShader.GetIdAttr().Get(&shaderId);
+        std::string shaderIdStr = shaderId.GetString();
+
+        QL_LOG_INFO("    Material '{}' uses shader: {}", mat.name, shaderIdStr);
+
+        if (shaderId == TfToken("UsdPreviewSurface")) {
+            ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
+        }
+        else if (options.enableMaterialX) {
+            // MaterialX shaders have IDs like:
+            // - ND_standard_surface_surfaceshader
+            // - ND_UsdPreviewSurface_surfaceshader
+            // - ND_gltf_pbr_surfaceshader
+            if (shaderIdStr.find("standard_surface") != std::string::npos) {
+                ParseMaterialXSurface(mat, &surfaceShader, textures, usdFilePath, options);
+            }
+            else if (shaderIdStr.find("gltf_pbr") != std::string::npos) {
+                // glTF PBR is similar to UsdPreviewSurface
+                ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
+            }
+            else {
+                QL_LOG_WARN("    Unknown shader type '{}', using default parsing", shaderIdStr);
+                ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
+            }
+        }
+    }
+
     mat.ComputeSpectralAlbedo();
+    mat.spectralSource = Material::SpectralSource::RGBUpsampled;
+
+    // Parse Quantiloom spectral extensions
+    ParseSpectralExtensions(mat, primPtr, usdFilePath);
 
     return mat;
 }
@@ -389,236 +721,703 @@ Material UsdLoader::ParseMaterial(const void* /* stagePtr */, const void* /* mat
 // ParseMesh - Convert UsdGeomMesh to Quantiloom Mesh
 // ============================================================================
 
-Mesh UsdLoader::ParseMesh(const void* /* stagePtr */, const void* /* meshPtr */,
-                            const std::vector<Material>& /* materials */) {
+Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
+                          const std::unordered_map<String, int>& materialPathMap,
+                          const String& usdFilePath,
+                          const UsdLoadOptions& options) {
     Mesh mesh;
+
+    if (!primPtr) {
+        return mesh;
+    }
+
+    const auto* prim = static_cast<const UsdPrim*>(primPtr);
+    UsdGeomMesh geomMesh(*prim);
+    mesh.name = prim->GetName().GetString();
+
+    UsdTimeCode timeCode = GetTimeCode(options);
+
+    // ========================================================================
+    // Get vertex positions (points)
+    // ========================================================================
+    VtArray<GfVec3f> points;
+    if (!geomMesh.GetPointsAttr().Get(&points, timeCode)) {
+        QL_LOG_WARN("    Mesh '{}' has no points", mesh.name);
+        return mesh;
+    }
+
+    std::vector<glm::vec3> positions;
+    positions.reserve(points.size());
+    for (const auto& p : points) {
+        positions.emplace_back(p[0], p[1], p[2]);
+    }
+
+    // ========================================================================
+    // Get face topology
+    // ========================================================================
+    VtArray<int> faceVertexCounts, faceVertexIndices;
+    geomMesh.GetFaceVertexCountsAttr().Get(&faceVertexCounts, timeCode);
+    geomMesh.GetFaceVertexIndicesAttr().Get(&faceVertexIndices, timeCode);
+
+    std::vector<i32> fvcVec(faceVertexCounts.begin(), faceVertexCounts.end());
+    std::vector<i32> fviVec(faceVertexIndices.begin(), faceVertexIndices.end());
+
+    // Triangulate with face mapping for GeomSubsets
+    std::vector<u32> triangleToFace;
+    std::vector<u32> indices = TriangulatePolygonsWithFaceMap(fvcVec, fviVec, triangleToFace);
+
+    // ========================================================================
+    // Check subdivision scheme
+    // ========================================================================
+    TfToken subdivisionScheme;
+    geomMesh.GetSubdivisionSchemeAttr().Get(&subdivisionScheme, timeCode);
+    bool isSubdivisionSurface = (subdivisionScheme == UsdGeomTokens->catmullClark ||
+                                  subdivisionScheme == UsdGeomTokens->loop ||
+                                  subdivisionScheme == UsdGeomTokens->bilinear);
+
+    if (isSubdivisionSurface) {
+        QL_LOG_INFO("    Mesh '{}' is subdivision surface (scheme: {}), treating as polygon mesh",
+                    mesh.name, subdivisionScheme.GetString());
+        // Note: Full subdivision would require a subdivision library (OpenSubdiv)
+        // For now, we treat it as a polygon mesh and compute smooth normals later
+    }
+
+    // ========================================================================
+    // Get normals
+    // ========================================================================
+    UsdGeomPrimvarsAPI primvarsAPI(*prim);
+    std::vector<glm::vec3> normals;
+
+    UsdGeomPrimvar normalsPrimvar = primvarsAPI.GetPrimvar(TfToken("normals"));
+    if (!normalsPrimvar) {
+        normalsPrimvar = UsdGeomPrimvar(geomMesh.GetNormalsAttr());
+    }
+
+    bool hasFaceVaryingNormals = false;
+    bool hasUniformNormals = false;
+    bool hasConstantNormal = false;
+    VtArray<GfVec3f> usdNormals;
+
+    if (normalsPrimvar && normalsPrimvar.HasValue()) {
+        normalsPrimvar.Get(&usdNormals, timeCode);
+        TfToken interpolation = normalsPrimvar.GetInterpolation();
+
+        QL_LOG_INFO("    Mesh '{}' normals: {} values, interpolation={}",
+                    mesh.name, usdNormals.size(), interpolation.GetString());
+
+        if (interpolation == UsdGeomTokens->vertex ||
+            interpolation == UsdGeomTokens->varying) {
+            // Per-vertex normals (smooth shading)
+            normals.reserve(usdNormals.size());
+            for (const auto& n : usdNormals) {
+                normals.emplace_back(n[0], n[1], n[2]);
+            }
+        } else if (interpolation == UsdGeomTokens->faceVarying) {
+            // Per-face-vertex normals (allows hard edges)
+            hasFaceVaryingNormals = true;
+        } else if (interpolation == UsdGeomTokens->uniform) {
+            // Per-face normals (flat shading)
+            hasUniformNormals = true;
+        } else if (interpolation == UsdGeomTokens->constant) {
+            // Single normal for entire mesh
+            hasConstantNormal = true;
+            if (!usdNormals.empty()) {
+                glm::vec3 constNormal(usdNormals[0][0], usdNormals[0][1], usdNormals[0][2]);
+                normals.resize(positions.size(), constNormal);
+            }
+        }
+    }
+
+    // ========================================================================
+    // Get UVs
+    // ========================================================================
+    std::vector<glm::vec2> uvs;
+    bool hasFaceVaryingUVs = false;
+    VtArray<GfVec2f> usdUVs;
+
+    UsdGeomPrimvar uvPrimvar = primvarsAPI.GetPrimvar(TfToken("st"));
+    if (!uvPrimvar) {
+        uvPrimvar = primvarsAPI.GetPrimvar(TfToken("uv"));
+    }
+
+    if (uvPrimvar && uvPrimvar.HasValue()) {
+        uvPrimvar.Get(&usdUVs, timeCode);
+        TfToken interpolation = uvPrimvar.GetInterpolation();
+
+        if (interpolation == UsdGeomTokens->vertex ||
+            interpolation == UsdGeomTokens->varying) {
+            uvs.reserve(usdUVs.size());
+            for (const auto& uv : usdUVs) {
+                uvs.emplace_back(uv[0], uv[1]);
+            }
+        } else if (interpolation == UsdGeomTokens->faceVarying) {
+            hasFaceVaryingUVs = true;
+        }
+    }
+
+    // ========================================================================
+    // Handle face-varying/uniform attributes by expanding geometry
+    // ========================================================================
+    if (hasFaceVaryingNormals || hasFaceVaryingUVs || hasUniformNormals) {
+        std::vector<glm::vec3> expandedPositions;
+        std::vector<glm::vec3> expandedNormals;
+        std::vector<glm::vec2> expandedUVs;
+        std::vector<u32> newIndices;
+        std::vector<u32> newTriangleToFace;
+
+        expandedPositions.reserve(indices.size());
+        expandedNormals.reserve(indices.size());
+        if (hasFaceVaryingUVs) expandedUVs.reserve(indices.size());
+
+        size_t fvIndexOffset = 0;
+        size_t newVertexIndex = 0;
+
+        for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
+            int vertexCount = faceVertexCounts[faceIdx];
+            if (vertexCount < 3) {
+                fvIndexOffset += vertexCount;
+                continue;
+            }
+
+            // Get face normal for uniform interpolation
+            glm::vec3 faceNormal(0.0f, 1.0f, 0.0f);
+            if (hasUniformNormals && faceIdx < usdNormals.size()) {
+                faceNormal = glm::vec3(usdNormals[faceIdx][0],
+                                        usdNormals[faceIdx][1],
+                                        usdNormals[faceIdx][2]);
+            }
+
+            // Fan triangulation with face-varying data
+            for (int i = 1; i < vertexCount - 1; ++i) {
+                // Vertex 0
+                int posIdx0 = faceVertexIndices[fvIndexOffset];
+                expandedPositions.push_back(positions[posIdx0]);
+                if (hasFaceVaryingNormals && fvIndexOffset < usdNormals.size()) {
+                    expandedNormals.emplace_back(
+                        usdNormals[fvIndexOffset][0],
+                        usdNormals[fvIndexOffset][1],
+                        usdNormals[fvIndexOffset][2]);
+                } else if (hasUniformNormals) {
+                    expandedNormals.push_back(faceNormal);
+                }
+                if (hasFaceVaryingUVs && fvIndexOffset < usdUVs.size()) {
+                    expandedUVs.emplace_back(usdUVs[fvIndexOffset][0], usdUVs[fvIndexOffset][1]);
+                }
+                newIndices.push_back(static_cast<u32>(newVertexIndex++));
+
+                // Vertex i
+                int posIdx1 = faceVertexIndices[fvIndexOffset + i];
+                expandedPositions.push_back(positions[posIdx1]);
+                if (hasFaceVaryingNormals && (fvIndexOffset + i) < usdNormals.size()) {
+                    expandedNormals.emplace_back(
+                        usdNormals[fvIndexOffset + i][0],
+                        usdNormals[fvIndexOffset + i][1],
+                        usdNormals[fvIndexOffset + i][2]);
+                } else if (hasUniformNormals) {
+                    expandedNormals.push_back(faceNormal);
+                }
+                if (hasFaceVaryingUVs && (fvIndexOffset + i) < usdUVs.size()) {
+                    expandedUVs.emplace_back(usdUVs[fvIndexOffset + i][0], usdUVs[fvIndexOffset + i][1]);
+                }
+                newIndices.push_back(static_cast<u32>(newVertexIndex++));
+
+                // Vertex i+1
+                int posIdx2 = faceVertexIndices[fvIndexOffset + i + 1];
+                expandedPositions.push_back(positions[posIdx2]);
+                if (hasFaceVaryingNormals && (fvIndexOffset + i + 1) < usdNormals.size()) {
+                    expandedNormals.emplace_back(
+                        usdNormals[fvIndexOffset + i + 1][0],
+                        usdNormals[fvIndexOffset + i + 1][1],
+                        usdNormals[fvIndexOffset + i + 1][2]);
+                } else if (hasUniformNormals) {
+                    expandedNormals.push_back(faceNormal);
+                }
+                if (hasFaceVaryingUVs && (fvIndexOffset + i + 1) < usdUVs.size()) {
+                    expandedUVs.emplace_back(usdUVs[fvIndexOffset + i + 1][0], usdUVs[fvIndexOffset + i + 1][1]);
+                }
+                newIndices.push_back(static_cast<u32>(newVertexIndex++));
+
+                newTriangleToFace.push_back(static_cast<u32>(faceIdx));
+            }
+
+            fvIndexOffset += vertexCount;
+        }
+
+        positions = std::move(expandedPositions);
+        normals = std::move(expandedNormals);
+        uvs = std::move(expandedUVs);
+        indices = std::move(newIndices);
+        triangleToFace = std::move(newTriangleToFace);
+    }
+
+    // ========================================================================
+    // Compute missing normals if not provided by USD
+    // ========================================================================
+    if (normals.empty() && !positions.empty() && !indices.empty()) {
+        if (isSubdivisionSurface) {
+            QL_LOG_INFO("    Computing smooth normals for subdivision mesh '{}' (scheme: {}, {} vertices)",
+                        mesh.name, subdivisionScheme.GetString(), positions.size());
+        } else {
+            QL_LOG_INFO("    Computing smooth normals for polygon mesh '{}' ({} vertices, {} triangles)",
+                        mesh.name, positions.size(), indices.size() / 3);
+        }
+
+        // Initialize normals to zero
+        normals.resize(positions.size(), glm::vec3(0.0f));
+
+        // Accumulate face normals to vertices (area-weighted smooth normals)
+        for (size_t i = 0; i < indices.size(); i += 3) {
+            u32 i0 = indices[i];
+            u32 i1 = indices[i + 1];
+            u32 i2 = indices[i + 2];
+
+            if (i0 >= positions.size() || i1 >= positions.size() || i2 >= positions.size()) {
+                continue;
+            }
+
+            const glm::vec3& v0 = positions[i0];
+            const glm::vec3& v1 = positions[i1];
+            const glm::vec3& v2 = positions[i2];
+
+            // Compute face normal (cross product of two edges)
+            // The magnitude is proportional to face area (area-weighted averaging)
+            glm::vec3 edge1 = v1 - v0;
+            glm::vec3 edge2 = v2 - v0;
+            glm::vec3 faceNormal = glm::cross(edge1, edge2);
+
+            // Accumulate to each vertex
+            normals[i0] += faceNormal;
+            normals[i1] += faceNormal;
+            normals[i2] += faceNormal;
+        }
+
+        // Normalize all vertex normals
+        for (auto& n : normals) {
+            float len = glm::length(n);
+            if (len > 1e-6f) {
+                n /= len;
+            } else {
+                n = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up normal
+            }
+        }
+    }
+
+    // ========================================================================
+    // Handle GeomSubsets (multi-material per mesh)
+    // ========================================================================
+    std::vector<UsdGeomSubset> geomSubsets = UsdGeomSubset::GetAllGeomSubsets(geomMesh);
+
+    // Get default material binding
+    UsdShadeMaterialBindingAPI bindingAPI(*prim);
+    UsdShadeMaterial defaultBoundMat = bindingAPI.ComputeBoundMaterial();
+    int defaultMaterialId = 0;
+
+    if (defaultBoundMat) {
+        String matPath = defaultBoundMat.GetPrim().GetPath().GetString();
+        if (auto it = materialPathMap.find(matPath); it != materialPathMap.end()) {
+            defaultMaterialId = it->second;
+        }
+    }
+
+    if (options.enableGeomSubsets && !geomSubsets.empty()) {
+        // Create separate primitives for each GeomSubset
+        std::unordered_set<u32> assignedFaces;
+
+        for (const auto& subset : geomSubsets) {
+            // Check if this is a material binding subset
+            TfToken familyName;
+            if (subset.GetFamilyNameAttr().Get(&familyName)) {
+                // Skip non-material subsets (e.g., "materialBind" is the standard family for materials)
+                if (!familyName.IsEmpty() && familyName != TfToken("materialBind")) {
+                    continue;
+                }
+            }
+
+            // Get face indices for this subset
+            VtArray<int> subsetIndices;
+            subset.GetIndicesAttr().Get(&subsetIndices, timeCode);
+
+            if (subsetIndices.empty()) {
+                continue;
+            }
+
+            // Get material binding for this subset
+            UsdShadeMaterialBindingAPI subsetBindingAPI(subset.GetPrim());
+            UsdShadeMaterial subsetMat = subsetBindingAPI.ComputeBoundMaterial();
+            int subsetMaterialId = defaultMaterialId;
+
+            if (subsetMat) {
+                String matPath = subsetMat.GetPrim().GetPath().GetString();
+                if (auto it = materialPathMap.find(matPath); it != materialPathMap.end()) {
+                    subsetMaterialId = it->second;
+                }
+            }
+
+            // Create set of faces in this subset
+            std::unordered_set<u32> subsetFaces(subsetIndices.begin(), subsetIndices.end());
+
+            // Create primitive for this subset
+            GeometryPrimitive primitive;
+            primitive.materialId = subsetMaterialId;
+
+            // Collect triangles belonging to this subset
+            for (size_t triIdx = 0; triIdx < triangleToFace.size(); ++triIdx) {
+                u32 faceIdx = triangleToFace[triIdx];
+                if (subsetFaces.count(faceIdx) > 0) {
+                    u32 baseIdx = static_cast<u32>(triIdx) * 3;
+                    primitive.indices.push_back(indices[baseIdx]);
+                    primitive.indices.push_back(indices[baseIdx + 1]);
+                    primitive.indices.push_back(indices[baseIdx + 2]);
+                    assignedFaces.insert(faceIdx);
+                }
+            }
+
+            if (!primitive.indices.empty()) {
+                primitive.positions = positions;
+                primitive.normals = normals;
+                primitive.uvs = uvs;
+                mesh.primitives.push_back(std::move(primitive));
+            }
+        }
+
+        // Create primitive for unassigned faces
+        GeometryPrimitive remainingPrimitive;
+        remainingPrimitive.materialId = defaultMaterialId;
+
+        for (size_t triIdx = 0; triIdx < triangleToFace.size(); ++triIdx) {
+            u32 faceIdx = triangleToFace[triIdx];
+            if (assignedFaces.count(faceIdx) == 0) {
+                u32 baseIdx = static_cast<u32>(triIdx) * 3;
+                remainingPrimitive.indices.push_back(indices[baseIdx]);
+                remainingPrimitive.indices.push_back(indices[baseIdx + 1]);
+                remainingPrimitive.indices.push_back(indices[baseIdx + 2]);
+            }
+        }
+
+        if (!remainingPrimitive.indices.empty()) {
+            remainingPrimitive.positions = positions;
+            remainingPrimitive.normals = normals;
+            remainingPrimitive.uvs = uvs;
+            mesh.primitives.push_back(std::move(remainingPrimitive));
+        }
+    } else {
+        // No GeomSubsets - create single primitive
+        GeometryPrimitive primitive;
+        primitive.positions = std::move(positions);
+        primitive.normals = std::move(normals);
+        primitive.uvs = std::move(uvs);
+        primitive.indices = std::move(indices);
+        primitive.materialId = defaultMaterialId;
+        mesh.primitives.push_back(std::move(primitive));
+    }
+
+    size_t totalVerts = 0, totalTris = 0;
+    for (const auto& p : mesh.primitives) {
+        totalVerts += p.GetVertexCount();
+        totalTris += p.GetTriangleCount();
+    }
+    QL_LOG_INFO("    Loaded mesh '{}': {} vertices, {} triangles, {} primitives",
+                mesh.name, totalVerts, totalTris, mesh.primitives.size());
+
     return mesh;
 }
 
 // ============================================================================
-// FlattenXformHierarchy - Flatten USD scene graph to world-space nodes
+// ParsePointInstancer - Expand PointInstancer to scene nodes
 // ============================================================================
 
-std::vector<SceneNode> UsdLoader::FlattenXformHierarchy(const void* /* stagePtr */) {
-    std::vector<SceneNode> nodes;
-    return nodes;
+void UsdLoader::ParsePointInstancer(const void* stagePtr, const void* primPtr,
+                                     Scene& scene,
+                                     const std::unordered_map<String, int>& materialPathMap,
+                                     const String& usdFilePath,
+                                     const UsdLoadOptions& options) {
+    if (!primPtr) {
+        return;
+    }
+
+    const auto* prim = static_cast<const UsdPrim*>(primPtr);
+    UsdGeomPointInstancer instancer(*prim);
+    UsdTimeCode timeCode = GetTimeCode(options);
+
+    // Get prototype relationships
+    SdfPathVector protoPaths;
+    instancer.GetPrototypesRel().GetTargets(&protoPaths);
+    if (protoPaths.empty()) {
+        return;
+    }
+
+    // Load prototype meshes
+    const UsdStagePtr stage = prim->GetStage();
+    std::vector<u32> protoMeshIndices;
+
+    for (const auto& protoPath : protoPaths) {
+        UsdPrim protoPrim = stage->GetPrimAtPath(protoPath);
+        if (!protoPrim) {
+            continue;
+        }
+
+        // Find or create mesh for this prototype
+        if (protoPrim.IsA<UsdGeomMesh>()) {
+            Mesh protoMesh = ParseMesh(&(*stage), &protoPrim, materialPathMap, usdFilePath, options);
+            protoMeshIndices.push_back(static_cast<u32>(scene.meshes.size()));
+            scene.meshes.push_back(std::move(protoMesh));
+        }
+    }
+
+    if (protoMeshIndices.empty()) {
+        return;
+    }
+
+    // Get instance data
+    VtArray<int> protoIndices;
+    VtArray<GfVec3f> positions;
+    VtArray<GfQuath> orientations;
+    VtArray<GfVec3f> scales;
+
+    instancer.GetProtoIndicesAttr().Get(&protoIndices, timeCode);
+    instancer.GetPositionsAttr().Get(&positions, timeCode);
+    instancer.GetOrientationsAttr().Get(&orientations, timeCode);
+    instancer.GetScalesAttr().Get(&scales, timeCode);
+
+    if (protoIndices.empty() || positions.empty()) {
+        return;
+    }
+
+    // Create scene nodes for each instance
+    for (size_t i = 0; i < protoIndices.size(); ++i) {
+        int protoIdx = protoIndices[i];
+        if (protoIdx < 0 || protoIdx >= static_cast<int>(protoMeshIndices.size())) {
+            continue;
+        }
+
+        SceneNode node;
+        node.meshIndex = protoMeshIndices[protoIdx];
+        node.name = prim->GetName().GetString() + "_instance_" + std::to_string(i);
+
+        // Build transform matrix
+        glm::vec3 pos(0.0f);
+        glm::quat rot = glm::identity<glm::quat>();
+        glm::vec3 scale(1.0f);
+
+        if (i < positions.size()) {
+            pos = glm::vec3(positions[i][0], positions[i][1], positions[i][2]);
+        }
+
+        if (i < orientations.size()) {
+            GfQuath q = orientations[i];
+            rot = glm::quat(q.GetReal(), q.GetImaginary()[0], q.GetImaginary()[1], q.GetImaginary()[2]);
+        }
+
+        if (i < scales.size()) {
+            scale = glm::vec3(scales[i][0], scales[i][1], scales[i][2]);
+        }
+
+        // Compose transform: T * R * S
+        glm::mat4 T = glm::translate(glm::mat4(1.0f), pos);
+        glm::mat4 R = glm::mat4_cast(rot);
+        glm::mat4 S = glm::scale(glm::mat4(1.0f), scale);
+        node.transform = T * R * S;
+
+        scene.nodes.push_back(node);
+    }
+
+    QL_LOG_INFO("    Expanded PointInstancer '{}': {} instances",
+                prim->GetName().GetString(), protoIndices.size());
 }
 
 // ============================================================================
-// LoadFromFile - Main entry point using tydra RenderSceneConverter
+// FlattenXformHierarchy - Not used, transforms computed in LoadFromFile
+// ============================================================================
+
+std::vector<SceneNode> UsdLoader::FlattenXformHierarchy(const void* /* stagePtr */) {
+    return {};
+}
+
+// ============================================================================
+// ListVariants - List available variants for a prim
+// ============================================================================
+
+Result<std::unordered_map<String, std::vector<String>>, String>
+UsdLoader::ListVariants(const String& path, const String& primPath) {
+    InitializeUsdPlugins();
+
+    if (!std::filesystem::exists(path)) {
+        return Result<std::unordered_map<String, std::vector<String>>>(
+            Result<std::unordered_map<String, std::vector<String>>>::Err("File not found: " + path));
+    }
+
+    // Normalize path for OpenUSD
+    std::string normalizedPath = std::filesystem::absolute(path).string();
+    std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+
+    UsdStageRefPtr stage = UsdStage::Open(std::string(normalizedPath.c_str()));
+    if (!stage) {
+        return Result<std::unordered_map<String, std::vector<String>>>(
+            Result<std::unordered_map<String, std::vector<String>>>::Err("Failed to open USD stage"));
+    }
+
+    UsdPrim prim = stage->GetPrimAtPath(SdfPath(primPath));
+    if (!prim) {
+        return Result<std::unordered_map<String, std::vector<String>>>(
+            Result<std::unordered_map<String, std::vector<String>>>::Err("Prim not found: " + primPath));
+    }
+
+    std::unordered_map<String, std::vector<String>> result;
+
+    UsdVariantSets variantSets = prim.GetVariantSets();
+    std::vector<std::string> setNames = variantSets.GetNames();
+
+    for (const auto& setName : setNames) {
+        UsdVariantSet vs = variantSets.GetVariantSet(setName);
+        std::vector<std::string> variants = vs.GetVariantNames();
+        result[setName] = std::vector<String>(variants.begin(), variants.end());
+    }
+
+    return Result(std::move(result));
+}
+
+// ============================================================================
+// ListPrimsWithVariants - Find all prims with variant sets
+// ============================================================================
+
+Result<std::vector<String>, String> UsdLoader::ListPrimsWithVariants(const String& path) {
+    InitializeUsdPlugins();
+
+    if (!std::filesystem::exists(path)) {
+        return Result<std::vector<String>>(
+            Result<std::vector<String>>::Err("File not found: " + path));
+    }
+
+    // Normalize path for OpenUSD
+    std::string normalizedPath = std::filesystem::absolute(path).string();
+    std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
+
+    UsdStageRefPtr stage = UsdStage::Open(std::string(normalizedPath.c_str()));
+    if (!stage) {
+        return Result<std::vector<String>>(
+            Result<std::vector<String>>::Err("Failed to open USD stage"));
+    }
+
+    std::vector<String> result;
+
+    for (const UsdPrim& prim : stage->Traverse()) {
+        UsdVariantSets variantSets = prim.GetVariantSets();
+        if (!variantSets.GetNames().empty()) {
+            result.push_back(prim.GetPath().GetString());
+        }
+    }
+
+    return Result(std::move(result));
+}
+
+// ============================================================================
+// LoadFromFile - Main entry point (default options)
 // ============================================================================
 
 Result<Scene, String> UsdLoader::LoadFromFile(const String& path) {
+    return LoadFromFile(path, UsdLoadOptions::Default());
+}
+
+// ============================================================================
+// LoadFromFile - Main entry point with options
+// ============================================================================
+
+Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadOptions& options) {
+    // Ensure USD plugins are initialized
+    InitializeUsdPlugins();
+
     QL_LOG_INFO("Loading USD scene from: {}", path);
 
     if (!std::filesystem::exists(path)) {
         return Result<Scene>(Result<Scene>::Err("File not found: " + path));
     }
 
-    // Determine file type and load appropriately
+    // Determine file type and check extension
     std::filesystem::path filePath(path);
     String ext = filePath.extension().string();
-
-    // Convert to lowercase for comparison
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
-    // Supported extensions check
     if (ext != ".usda" && ext != ".usd" && ext != ".usdc" && ext != ".usdz") {
         return Result<Scene>(Result<Scene>::Err(
             "Unsupported USD file extension: " + ext +
             " (supported: .usd, .usda, .usdc, .usdz)"));
     }
 
-    std::string warn, err;
+    // Normalize path for OpenUSD
+    // Convert to absolute path and use forward slashes
+    std::string normalizedPath = std::filesystem::absolute(filePath).string();
+    std::replace(normalizedPath.begin(), normalizedPath.end(), '\\', '/');
 
-    // Step 1: Load USD as Layer (not Stage) for manual composition
-    tinyusdz::Layer rootLayer;
-    tinyusdz::USDLoadOptions loadOptions;
+    QL_LOG_INFO("  Normalized path: {}", normalizedPath);
 
-    bool success = tinyusdz::LoadLayerFromFile(path, &rootLayer, &warn, &err, loadOptions);
+    // ========================================================================
+    // Open USD Stage with load policy
+    // ========================================================================
+    UsdStage::InitialLoadSet loadSet = (options.payloadPolicy == UsdLoadOptions::PayloadPolicy::LoadAll)
+        ? UsdStage::LoadAll
+        : UsdStage::LoadNone;
 
-    if (!warn.empty()) {
-        QL_LOG_WARN("USD warning: {}", warn);
+    UsdStageRefPtr stage = UsdStage::Open(normalizedPath, loadSet);
+    if (!stage) {
+        return Result<Scene>(Result<Scene>::Err("Failed to open USD stage: " + path));
     }
 
-    if (!success || !err.empty()) {
-        return Result<Scene>(Result<Scene>::Err("Failed to load USD layer: " + err));
-    }
+    QL_LOG_INFO("  USD stage opened successfully");
 
-    QL_LOG_INFO("  USD layer loaded successfully");
+    // ========================================================================
+    // Apply variant selections
+    // ========================================================================
+    for (const auto& [primPath, variantMap] : options.variantSelections) {
+        UsdPrim prim = stage->GetPrimAtPath(SdfPath(primPath));
+        if (!prim) {
+            QL_LOG_WARN("  Variant selection: prim '{}' not found", primPath);
+            continue;
+        }
 
-    // Step 2: Setup asset resolver for composition
-    // Use canonical path with proper separators for Windows compatibility
-    std::filesystem::path baseDirPath = filePath.parent_path();
-    std::string baseDir = baseDirPath.string();
-
-    // On Windows, ensure we use native path separators
-    #ifdef _WIN32
-    std::replace(baseDir.begin(), baseDir.end(), '/', '\\');
-    #endif
-
-    QL_LOG_INFO("  Asset search path: {}", baseDir);
-
-    tinyusdz::AssetResolutionResolver resolver;
-    resolver.set_search_paths({baseDir});
-
-    // Step 3: Compose sublayers (this is critical for NVIDIA Attic-style scenes)
-    tinyusdz::Layer compositedLayer = rootLayer;
-
-    if (!rootLayer.metas().subLayers.empty()) {
-        QL_LOG_INFO("  Compositing {} sublayers...", rootLayer.metas().subLayers.size());
-        tinyusdz::SublayersCompositionOptions subOpts;
-        subOpts.max_depth = 16;
-
-        tinyusdz::Layer sublayerComposited;
-        if (!tinyusdz::CompositeSublayers(resolver, compositedLayer, &sublayerComposited, &warn, &err, subOpts)) {
-            QL_LOG_WARN("  Sublayer composition warning: {}", err.empty() ? warn : err);
-        } else {
-            compositedLayer = std::move(sublayerComposited);
-            QL_LOG_INFO("  Sublayers composited successfully");
+        UsdVariantSets variantSets = prim.GetVariantSets();
+        for (const auto& [setName, variantName] : variantMap) {
+            if (variantSets.HasVariantSet(setName)) {
+                UsdVariantSet vs = variantSets.GetVariantSet(setName);
+                if (vs.SetVariantSelection(variantName)) {
+                    QL_LOG_INFO("  Applied variant: {}[{}={}]", primPath, setName, variantName);
+                } else {
+                    QL_LOG_WARN("  Failed to set variant {}[{}={}]", primPath, setName, variantName);
+                }
+            } else {
+                QL_LOG_WARN("  Variant set '{}' not found on '{}'", setName, primPath);
+            }
         }
     }
-
-    // Step 4: Compose references
-    if (tinyusdz::HasReferences(compositedLayer)) {
-        QL_LOG_INFO("  Compositing references...");
-        tinyusdz::ReferencesCompositionOptions refOpts;
-        refOpts.max_depth = 16;
-
-        tinyusdz::Layer refComposited;
-        if (!tinyusdz::CompositeReferences(resolver, compositedLayer, &refComposited, &warn, &err, refOpts)) {
-            QL_LOG_WARN("  Reference composition warning: {}", err.empty() ? warn : err);
-        } else {
-            compositedLayer = std::move(refComposited);
-            QL_LOG_INFO("  References composited successfully");
-        }
-    }
-
-    // Step 5: Compose payloads
-    if (tinyusdz::HasPayload(compositedLayer)) {
-        QL_LOG_INFO("  Compositing payloads...");
-        tinyusdz::PayloadCompositionOptions payOpts;
-        payOpts.max_depth = 16;
-
-        tinyusdz::Layer payloadComposited;
-        if (!tinyusdz::CompositePayload(resolver, compositedLayer, &payloadComposited, &warn, &err, payOpts)) {
-            QL_LOG_WARN("  Payload composition warning: {}", err.empty() ? warn : err);
-        } else {
-            compositedLayer = std::move(payloadComposited);
-            QL_LOG_INFO("  Payloads composited successfully");
-        }
-    }
-
-    // Step 6: Convert composited Layer to Stage
-    tinyusdz::Stage stage;
-    if (!tinyusdz::LayerToStage(compositedLayer, &stage, &warn, &err)) {
-        return Result<Scene>(Result<Scene>::Err("Failed to convert layer to stage: " + err));
-    }
-
-    QL_LOG_INFO("  Layer converted to Stage successfully");
 
     // Debug: Print stage structure
-    const auto& rootPrims = stage.root_prims();
-    QL_LOG_INFO("  Stage root prims: {}", rootPrims.size());
-    for (const auto& prim : rootPrims) {
-        QL_LOG_INFO("    Root prim: '{}' (type: {})",
-                    prim.element_path().full_path_name(),
-                    prim.prim_type_name());
-
-        // Count children recursively (first level only for logging)
-        size_t childCount = prim.children().size();
-        QL_LOG_INFO("      -> {} direct children", childCount);
+    size_t primCount = 0;
+    for (const UsdPrim& prim : stage->Traverse()) {
+        (void)prim;
+        ++primCount;
     }
-
-    // Use tydra RenderSceneConverter to convert USD stage to render-ready data
-    tinyusdz::tydra::RenderSceneConverter converter;
-    tinyusdz::tydra::RenderSceneConverterEnv env(stage);
-
-    // Configure converter
-    env.timecode = tinyusdz::value::TimeCode::Default();
-    env.mesh_config.triangulate = true;
-
-    tinyusdz::tydra::RenderScene renderScene;
-
-    // ConvertToRenderScene takes only 2 arguments: (env, scene*)
-    bool converged = converter.ConvertToRenderScene(env, &renderScene);
-
-    if (!converged) {
-        std::string convErr = converter.GetError();
-        if (!convErr.empty()) {
-            QL_LOG_WARN("USD conversion warning: {}", convErr);
-        }
-    }
-
-    QL_LOG_INFO("  Converted to render scene: {} meshes, {} materials",
-                renderScene.meshes.size(),
-                renderScene.materials.size());
+    QL_LOG_INFO("  Stage contains {} prims", primCount);
 
     // Build Quantiloom Scene
     Scene scene;
     scene.name = filePath.stem().string();
 
     // ========================================================================
-    // Load Materials from RenderScene
+    // Pass 1: Collect all Materials
     // ========================================================================
-    std::unordered_map<int, int> usdMatToSceneMat;
+    std::unordered_map<String, int> materialPathMap;
 
-    for (size_t i = 0; i < renderScene.materials.size(); ++i) {
-        const auto& usdMat = renderScene.materials[i];
+    for (const UsdPrim& prim : stage->Traverse()) {
+        if (prim.IsA<UsdShadeMaterial>()) {
+            Material mat = ParseMaterial(&(*stage), &prim, scene.textures, path, options);
+            String matPath = prim.GetPath().GetString();
+            materialPathMap[matPath] = static_cast<int>(scene.materials.size());
+            scene.materials.push_back(std::move(mat));
 
-        Material mat;
-        mat.name = usdMat.name.empty() ? ("Material_" + std::to_string(i)) : usdMat.name;
-
-        // UsdPreviewSurface PBR parameters from tydra surfaceShader
-        const auto& shader = usdMat.surfaceShader;
-
-        // Diffuse color
-        if (shader.diffuseColor.is_texture()) {
-            // Texture binding - would need texture ID lookup
-            mat.baseColorFactor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
-        } else {
-            const auto& color = shader.diffuseColor.value;
-            mat.baseColorFactor = glm::vec4(color[0], color[1], color[2], 1.0f);
+            QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
+                        scene.materials.back().name,
+                        scene.materials.back().metallicFactor,
+                        scene.materials.back().roughnessFactor);
         }
-
-        // Metallic
-        if (!shader.metallic.is_texture()) {
-            mat.metallicFactor = shader.metallic.value;
-        }
-
-        // Roughness
-        if (!shader.roughness.is_texture()) {
-            mat.roughnessFactor = shader.roughness.value;
-        }
-
-        // Emissive
-        if (!shader.emissiveColor.is_texture()) {
-            const auto& emiss = shader.emissiveColor.value;
-            mat.emissiveFactor = glm::vec3(emiss[0], emiss[1], emiss[2]);
-        }
-
-        // Opacity
-        if (!shader.opacity.is_texture()) {
-            float opacity = shader.opacity.value;
-            if (opacity < 1.0f) {
-                mat.alphaMode = Material::AlphaMode::Blend;
-                mat.baseColorFactor.a = opacity;
-            }
-        }
-
-        mat.ComputeSpectralAlbedo();
-        mat.spectralSource = Material::SpectralSource::RGBUpsampled;
-
-        // Parse Quantiloom spectral extensions (custom attributes on Material prim)
-        ParseSpectralExtensions(mat, &stage, path);
-
-        usdMatToSceneMat[static_cast<int>(i)] = static_cast<int>(scene.materials.size());
-        scene.materials.push_back(std::move(mat));
-
-        QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
-                    scene.materials.back().name,
-                    scene.materials.back().metallicFactor,
-                    scene.materials.back().roughnessFactor);
     }
 
     // Ensure at least one default material exists
@@ -627,116 +1426,33 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path) {
     }
 
     // ========================================================================
-    // Load Meshes from RenderScene
+    // Pass 2: Collect all Meshes and PointInstancers
     // ========================================================================
-    for (size_t i = 0; i < renderScene.meshes.size(); ++i) {
-        const auto& usdMesh = renderScene.meshes[i];
-
-        Mesh mesh;
-        mesh.name = usdMesh.prim_name.empty() ? ("Mesh_" + std::to_string(i)) : usdMesh.prim_name;
-
-        GeometryPrimitive primitive;
-
-        // Convert positions (points is std::vector<vec3>)
-        primitive.positions.reserve(usdMesh.points.size());
-        for (const auto& p : usdMesh.points) {
-            primitive.positions.emplace_back(p[0], p[1], p[2]);
-        }
-
-        // Convert normals from VertexAttribute
-        if (!usdMesh.normals.empty()) {
-            std::vector<glm::vec3> normals = ExtractVec3FromVertexAttribute(usdMesh.normals);
-            primitive.normals = std::move(normals);
-        }
-
-        // Convert UVs (texcoords is unordered_map<uint32_t, VertexAttribute>)
-        // Use slot 0 as primary UV
-        auto uvIt = usdMesh.texcoords.find(0);
-        if (uvIt != usdMesh.texcoords.end()) {
-            std::vector<glm::vec2> uvs = ExtractVec2FromVertexAttribute(uvIt->second);
-            primitive.uvs = std::move(uvs);
-        }
-
-        // Get triangle indices (tydra already triangulated if configured)
-        const auto& indices = usdMesh.faceVertexIndices();
-        primitive.indices.reserve(indices.size());
-        for (const auto idx : indices) {
-            primitive.indices.push_back(static_cast<u32>(idx));
-        }
-
-        // Material assignment
-        int materialId = 0;
-        if (usdMesh.material_id >= 0) {
-            if (auto it = usdMatToSceneMat.find(usdMesh.material_id); it != usdMatToSceneMat.end()) {
-                materialId = it->second;
-            }
-        }
-        primitive.materialId = materialId;
-
-        // Handle face-varying data expansion if needed
-        if (!primitive.normals.empty() &&
-            primitive.normals.size() != primitive.positions.size() &&
-            primitive.normals.size() == primitive.indices.size()) {
-
-            QL_LOG_DEBUG("  Expanding face-varying data for mesh '{}'", mesh.name);
-
-            std::vector<glm::vec3> newPositions;
-            std::vector<glm::vec3> newNormals;
-            std::vector<glm::vec2> newUVs;
-            std::vector<u32> newIndices;
-
-            newPositions.reserve(primitive.indices.size());
-            newNormals.reserve(primitive.indices.size());
-            if (!primitive.uvs.empty()) {
-                newUVs.reserve(primitive.indices.size());
+    for (const UsdPrim& prim : stage->Traverse()) {
+        if (prim.IsA<UsdGeomMesh>()) {
+            // Skip meshes that are prototypes of PointInstancers
+            if (prim.IsInPrototype()) {
+                continue;
             }
 
-            for (size_t idx = 0; idx < primitive.indices.size(); ++idx) {
-                u32 vertexIdx = primitive.indices[idx];
-                newPositions.push_back(primitive.positions[vertexIdx]);
-                newNormals.push_back(primitive.normals[idx]);
+            Mesh mesh = ParseMesh(&(*stage), &prim, materialPathMap, path, options);
 
-                if (!primitive.uvs.empty()) {
-                    if (idx < primitive.uvs.size()) {
-                        newUVs.push_back(primitive.uvs[idx]);
-                    } else if (vertexIdx < primitive.uvs.size()) {
-                        newUVs.push_back(primitive.uvs[vertexIdx]);
-                    }
-                }
+            // Get world transform
+            UsdGeomXformable xformable(prim);
+            GfMatrix4d worldXform = xformable.ComputeLocalToWorldTransform(GetTimeCode(options));
 
-                newIndices.push_back(static_cast<u32>(idx));
-            }
+            // Create scene node
+            SceneNode node;
+            node.meshIndex = static_cast<u32>(scene.meshes.size());
+            node.name = prim.GetName().GetString();
+            node.transform = GfMatrix4dToGlm(worldXform);
 
-            primitive.positions = std::move(newPositions);
-            primitive.normals = std::move(newNormals);
-            primitive.uvs = std::move(newUVs);
-            primitive.indices = std::move(newIndices);
+            scene.meshes.push_back(std::move(mesh));
+            scene.nodes.push_back(node);
         }
-
-        mesh.primitives.push_back(std::move(primitive));
-
-        QL_LOG_INFO("  Loaded mesh '{}': {} vertices, {} triangles, material {}",
-                    mesh.name,
-                    mesh.primitives[0].GetVertexCount(),
-                    mesh.primitives[0].GetTriangleCount(),
-                    mesh.primitives[0].materialId);
-
-        scene.meshes.push_back(std::move(mesh));
-    }
-
-    // ========================================================================
-    // Build Scene Nodes (one per mesh with identity or world transform)
-    // ========================================================================
-    for (size_t i = 0; i < scene.meshes.size(); ++i) {
-        SceneNode node;
-        node.meshIndex = static_cast<u32>(i);
-        node.name = scene.meshes[i].name;
-
-        // tydra RenderMesh has world transform baked in
-        // For now, use identity transform since tydra handles flattening
-        node.transform = glm::mat4(1.0f);
-
-        scene.nodes.push_back(node);
+        else if (options.enablePointInstancer && prim.IsA<UsdGeomPointInstancer>()) {
+            ParsePointInstancer(&(*stage), &prim, scene, materialPathMap, path, options);
+        }
     }
 
     QL_LOG_INFO("  Scene '{}' loaded: {} meshes, {} nodes, {} materials, {} textures",
@@ -747,3 +1463,105 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path) {
 }
 
 } // namespace quantiloom
+
+#else // QUANTILOOM_USE_OPENUSD not defined
+
+// ============================================================================
+// Stub implementation when OpenUSD is not available
+// ============================================================================
+
+namespace quantiloom {
+
+bool UsdLoader::IsAvailable() {
+    return false;
+}
+
+Result<Scene, String> UsdLoader::LoadFromFile(const String& /* path */) {
+    return Result<Scene>(Result<Scene>::Err(
+        "OpenUSD support not available. "
+        "Please set USD_ROOT to OpenUSD installation path and rebuild."));
+}
+
+Result<Scene, String> UsdLoader::LoadFromFile(const String& /* path */, const UsdLoadOptions& /* options */) {
+    return Result<Scene>(Result<Scene>::Err(
+        "OpenUSD support not available. "
+        "Please set USD_ROOT to OpenUSD installation path and rebuild."));
+}
+
+Result<std::unordered_map<String, std::vector<String>>, String>
+UsdLoader::ListVariants(const String& /* path */, const String& /* primPath */) {
+    return Result<std::unordered_map<String, std::vector<String>>>(
+        Result<std::unordered_map<String, std::vector<String>>>::Err("OpenUSD support not available"));
+}
+
+Result<std::vector<String>, String> UsdLoader::ListPrimsWithVariants(const String& /* path */) {
+    return Result<std::vector<String>>(
+        Result<std::vector<String>>::Err("OpenUSD support not available"));
+}
+
+std::vector<u32> UsdLoader::TriangulatePolygons(
+    const std::vector<i32>& /* faceVertexCounts */,
+    const std::vector<i32>& /* faceVertexIndices */) {
+    return {};
+}
+
+std::vector<u32> UsdLoader::TriangulatePolygonsWithFaceMap(
+    const std::vector<i32>& /* faceVertexCounts */,
+    const std::vector<i32>& /* faceVertexIndices */,
+    std::vector<u32>& /* outTriangleToFace */) {
+    return {};
+}
+
+Texture UsdLoader::ParseTexture(const void* /* stage */, const String& /* assetPath */,
+                                  const String& /* usdFilePath */) {
+    return Texture{};
+}
+
+String UsdLoader::GetTextureAssetPath(const void* /* shaderInput */) {
+    return "";
+}
+
+void UsdLoader::ParseSpectralExtensions(Material& /* mat */, const void* /* prim */,
+                                         const String& /* usdFilePath */) {
+}
+
+void UsdLoader::ParseUsdPreviewSurface(Material& /* mat */, const void* /* shader */,
+                                        std::vector<Texture>& /* textures */,
+                                        const String& /* usdFilePath */,
+                                        const UsdLoadOptions& /* options */) {
+}
+
+void UsdLoader::ParseMaterialXSurface(Material& /* mat */, const void* /* shader */,
+                                       std::vector<Texture>& /* textures */,
+                                       const String& /* usdFilePath */,
+                                       const UsdLoadOptions& /* options */) {
+}
+
+Material UsdLoader::ParseMaterial(const void* /* stage */, const void* /* prim */,
+                                    std::vector<Texture>& /* textures */,
+                                    const String& /* usdFilePath */,
+                                    const UsdLoadOptions& /* options */) {
+    return Material{};
+}
+
+Mesh UsdLoader::ParseMesh(const void* /* stage */, const void* /* prim */,
+                          const std::unordered_map<String, int>& /* materialPathMap */,
+                          const String& /* usdFilePath */,
+                          const UsdLoadOptions& /* options */) {
+    return Mesh{};
+}
+
+void UsdLoader::ParsePointInstancer(const void* /* stage */, const void* /* instancer */,
+                                     Scene& /* scene */,
+                                     const std::unordered_map<String, int>& /* materialPathMap */,
+                                     const String& /* usdFilePath */,
+                                     const UsdLoadOptions& /* options */) {
+}
+
+std::vector<SceneNode> UsdLoader::FlattenXformHierarchy(const void* /* stage */) {
+    return {};
+}
+
+} // namespace quantiloom
+
+#endif // QUANTILOOM_USE_OPENUSD

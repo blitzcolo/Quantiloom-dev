@@ -1,5 +1,10 @@
 #include "ImageIO.hpp"
 
+// stb_image for PNG/JPEG/BMP/TGA/HDR reading
+// Note: STB_IMAGE_IMPLEMENTATION is defined in GltfLoader.cpp via tinygltf
+// We only need to include the header here
+#include <stb_image.h>
+
 // stb_image_write for PNG output (header-only library)
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -265,6 +270,93 @@ std::optional<Image> ImageIO::ReadEXR(const std::string& filepath) {
         QL_LOG_ERROR("ImageIO::ReadEXR: Failed to read {}: {}", filepath, e.what());
         return std::nullopt;
     }
+}
+
+// ============================================================================
+// Public API: ReadImage (supports EXR, PNG, JPEG, BMP, TGA, HDR)
+// ============================================================================
+
+std::optional<Image> ImageIO::ReadImage(const std::string& filepath) {
+    if (!FileExists(filepath)) {
+        QL_LOG_ERROR("ImageIO::ReadImage: File not found: {}", filepath);
+        return std::nullopt;
+    }
+
+    // Determine format by extension
+    std::string ext = std::filesystem::path(filepath).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+
+    // EXR files use OpenEXR library
+    if (ext == ".exr") {
+        return ReadEXR(filepath);
+    }
+
+    // All other formats (PNG, JPEG, BMP, TGA, HDR, PSD, GIF, PIC, PNM) use stb_image
+    // stb_image supports: JPEG, PNG, BMP, PSD, TGA, GIF, HDR, PIC, PNM
+
+    int width = 0, height = 0, channels = 0;
+
+    // Check if it's an HDR file (Radiance .hdr format)
+    bool isHDR = (ext == ".hdr");
+    float* floatData = nullptr;
+    unsigned char* byteData = nullptr;
+
+    if (isHDR) {
+        // Load as float for HDR files
+        floatData = stbi_loadf(filepath.c_str(), &width, &height, &channels, 0);
+        if (!floatData) {
+            QL_LOG_ERROR("ImageIO::ReadImage: stbi_loadf failed for {}: {}",
+                         filepath, stbi_failure_reason());
+            return std::nullopt;
+        }
+    } else {
+        // Load as 8-bit for LDR files
+        byteData = stbi_load(filepath.c_str(), &width, &height, &channels, 0);
+        if (!byteData) {
+            QL_LOG_ERROR("ImageIO::ReadImage: stbi_load failed for {}: {}",
+                         filepath, stbi_failure_reason());
+            return std::nullopt;
+        }
+    }
+
+    // Create Image and fill with data
+    Image img;
+    img.width = static_cast<u32>(width);
+    img.height = static_cast<u32>(height);
+    img.channels = static_cast<u32>(channels);
+    img.data.resize(static_cast<size_t>(width) * height * channels);
+
+    // Set default channel names based on channel count
+    if (channels == 1) {
+        img.channelNames = {"Gray"};
+    } else if (channels == 2) {
+        img.channelNames = {"Gray", "Alpha"};
+    } else if (channels == 3) {
+        img.channelNames = {"R", "G", "B"};
+    } else if (channels == 4) {
+        img.channelNames = {"R", "G", "B", "A"};
+    } else {
+        for (u32 c = 0; c < img.channels; ++c) {
+            img.channelNames.push_back("Channel" + std::to_string(c));
+        }
+    }
+
+    if (isHDR) {
+        // Direct copy for HDR (already float)
+        std::memcpy(img.data.data(), floatData,
+                    static_cast<size_t>(width) * height * channels * sizeof(float));
+        stbi_image_free(floatData);
+    } else {
+        // Convert 8-bit to float [0, 1]
+        for (size_t i = 0; i < img.data.size(); ++i) {
+            img.data[i] = static_cast<float>(byteData[i]) / 255.0f;
+        }
+        stbi_image_free(byteData);
+    }
+
+    QL_LOG_INFO("ImageIO::ReadImage: Read {}x{} image with {} channels from {}",
+                width, height, channels, filepath);
+    return img;
 }
 
 // ============================================================================

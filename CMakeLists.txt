@@ -53,6 +53,7 @@ include("${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
 if(WIN32)
     set(QUANTILOOM_PLATFORM_WINDOWS 1)
     add_compile_definitions(QUANTILOOM_PLATFORM_WINDOWS)
+    add_compile_definitions(NOMINMAX)
 elseif(UNIX AND NOT APPLE)
     set(QUANTILOOM_PLATFORM_LINUX 1)
     add_compile_definitions(QUANTILOOM_PLATFORM_LINUX)
@@ -220,31 +221,125 @@ if(tinygltf_ADDED)
     message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
 endif()
 
-# TinyUSDZ: OpenUSD loader (static library)
-# Supports USDA (ASCII), USDC (Crate binary), and USDZ (zipped) formats
-CPMAddPackage(
-    NAME tinyusdz
-    GIT_REPOSITORY https://github.com/lighttransport/tinyusdz.git
-    GIT_TAG v0.9.1
-    OPTIONS
-        "TINYUSDZ_BUILD_TESTS OFF"
-        "TINYUSDZ_BUILD_EXAMPLES OFF"
-        "TINYUSDZ_WITH_OPENSUBDIV OFF"
-        "TINYUSDZ_WITH_AUDIO OFF"
-        "TINYUSDZ_WITH_C_API OFF"
-        "TINYUSDZ_WITH_PYTHON OFF"
-        "TINYUSDZ_WITH_TYDRA ON"
-        "CMAKE_POSITION_INDEPENDENT_CODE ON"
-)
+# ============================================================================
+# OpenUSD (Pixar USD) - Official USD Library
+# ============================================================================
+# Replaces TinyUSDZ for full USD composition support (sublayers, references, payloads)
+# Build OpenUSD with: scripts/build_openusd.ps1 (Windows) or scripts/build_openusd.sh (Linux)
+#
+# Required build flags for OpenUSD:
+#   --no-python --no-imaging --no-usdview (minimal core libraries)
+# ============================================================================
 
-if(tinyusdz_ADDED)
-    # TinyUSDZ doesn't export include directories properly, add them manually
-    if(TARGET tinyusdz_static)
-        target_include_directories(tinyusdz_static PUBLIC
-            ${tinyusdz_SOURCE_DIR}/src
-        )
+set(USD_ROOT "" CACHE PATH "Path to OpenUSD installation (e.g., C:/openusd or /opt/openusd)")
+
+# Allow environment variable override
+if(NOT USD_ROOT AND DEFINED ENV{USD_ROOT})
+    set(USD_ROOT $ENV{USD_ROOT})
+endif()
+
+if(USD_ROOT)
+    message(STATUS "OpenUSD root: ${USD_ROOT}")
+    list(APPEND CMAKE_PREFIX_PATH "${USD_ROOT}")
+
+    # Find OpenUSD package
+    find_package(pxr CONFIG REQUIRED)
+
+    # Define USD libraries to link (core only, no Python/Imaging)
+    # Note: OpenUSD 24.x uses usd_ prefix for library names
+    set(USD_LIBRARIES
+        usd_usd
+        usd_usdGeom
+        usd_usdShade
+        usd_sdf
+        usd_tf
+        usd_gf
+        usd_ar
+        usd_plug
+        usd_vt
+        usd_work
+        usd_arch
+        usd_pcp
+        usd_sdr
+        usd_kind
+        usd_js
+        usd_trace
+    )
+
+    # Find TBB (required by OpenUSD)
+    find_package(TBB CONFIG QUIET)
+    if(NOT TBB_FOUND AND NOT TARGET TBB::tbb)
+        # Try to find TBB from OpenUSD's bundled version
+        if(EXISTS "${USD_ROOT}/lib/cmake/TBB")
+            list(APPEND CMAKE_PREFIX_PATH "${USD_ROOT}/lib/cmake/TBB")
+            find_package(TBB CONFIG REQUIRED)
+        elseif(EXISTS "${USD_ROOT}/include/tbb/tbb.h")
+            # TBB 2020.x doesn't have CMake config - create target manually
+            message(STATUS "Creating TBB target from USD_ROOT bundled TBB (legacy)")
+            add_library(TBB::tbb SHARED IMPORTED)
+            set_target_properties(TBB::tbb PROPERTIES
+                INTERFACE_INCLUDE_DIRECTORIES "${USD_ROOT}/include"
+            )
+            if(WIN32)
+                set_target_properties(TBB::tbb PROPERTIES
+                    IMPORTED_LOCATION "${USD_ROOT}/bin/tbb.dll"
+                    IMPORTED_IMPLIB "${USD_ROOT}/lib/tbb.lib"
+                )
+            else()
+                set_target_properties(TBB::tbb PROPERTIES
+                    IMPORTED_LOCATION "${USD_ROOT}/lib/libtbb.so"
+                )
+            endif()
+            set(TBB_FOUND TRUE)
+            set(TBB_VERSION "2020.3 (bundled)")
+        else()
+            message(FATAL_ERROR "TBB not found. Please install oneTBB or ensure USD_ROOT contains bundled TBB.")
+        endif()
+    elseif(TARGET TBB::tbb)
+        set(TBB_FOUND TRUE)
+        set(TBB_VERSION "from OpenUSD")
     endif()
-    message(STATUS "TinyUSDZ v0.9.1 added (static library with Tydra)")
+
+    math(EXPR USD_BITS "${CMAKE_SIZEOF_VOID_P} * 8")
+    message(STATUS "OpenUSD found with ${USD_BITS}-bit libraries")
+    message(STATUS "  TBB: ${TBB_VERSION}")
+
+    set(QUANTILOOM_USE_OPENUSD ON)
+
+    # Helper function to copy USD DLLs to target output directory (Windows only)
+    if(WIN32)
+        function(copy_usd_dlls target_name)
+            # Copy USD library DLLs
+            file(GLOB USD_DLLS "${USD_ROOT}/lib/usd_*.dll")
+            # Copy TBB DLLs
+            file(GLOB TBB_DLLS "${USD_ROOT}/bin/tbb*.dll")
+            # Copy MaterialX DLLs (if present)
+            file(GLOB MATERIALX_DLLS "${USD_ROOT}/bin/MaterialX*.dll")
+
+            foreach(dll_file ${USD_DLLS} ${TBB_DLLS} ${MATERIALX_DLLS})
+                add_custom_command(TARGET ${target_name} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                        "${dll_file}"
+                        "$<TARGET_FILE_DIR:${target_name}>"
+                    COMMENT "Copying ${dll_file} to output directory"
+                )
+            endforeach()
+
+            # Also copy the USD plugInfo resources if they exist
+            if(EXISTS "${USD_ROOT}/lib/usd")
+                add_custom_command(TARGET ${target_name} POST_BUILD
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory
+                        "${USD_ROOT}/lib/usd"
+                        "$<TARGET_FILE_DIR:${target_name}>/usd"
+                    COMMENT "Copying USD plugins to output directory"
+                )
+            endif()
+        endfunction()
+    endif()
+else()
+    message(WARNING "USD_ROOT not set. OpenUSD support will be disabled.")
+    message(WARNING "Set USD_ROOT to OpenUSD installation path, or run scripts/build_openusd.ps1")
+    set(QUANTILOOM_USE_OPENUSD OFF)
 endif()
 
 # GLM: Mathematics library for graphics (header-only)
@@ -289,9 +384,6 @@ if(MSVC)
 
     # spdlog
     suppress_warnings_for_target(spdlog)
-
-    # TinyUSDZ
-    suppress_warnings_for_target(tinyusdz_static)
 endif()
 
 # ============================================================================

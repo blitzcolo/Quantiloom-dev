@@ -166,9 +166,26 @@ target_link_libraries(libQuantiloom
         OpenEXR::OpenEXR
         Imath::Imath
         tinygltf
-        tinyusdz_static
         glm::glm  # Link privately for build, consumers use find_package(glm)
 )
+
+# OpenUSD linking (conditional)
+if(QUANTILOOM_USE_OPENUSD)
+    target_link_libraries(libQuantiloom
+        PRIVATE
+            ${USD_LIBRARIES}
+            TBB::tbb
+    )
+    target_include_directories(libQuantiloom
+        PRIVATE
+            ${USD_ROOT}/include
+    )
+    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_OPENUSD=1)
+    message(STATUS "libQuantiloom: OpenUSD support enabled")
+else()
+    message(WARNING "libQuantiloom: OpenUSD support disabled (USD_ROOT not set)")
+    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_OPENUSD=0)
+endif()
 
 # Compiler-specific flags
 if(MSVC)

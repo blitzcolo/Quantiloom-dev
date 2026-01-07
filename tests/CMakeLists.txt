@@ -303,6 +303,11 @@ if(WIN32 AND NOT QUANTILOOM_STANDALONE_TESTS)
             "$<TARGET_FILE_DIR:libquantiloom_tests>"
         COMMENT "Copying Quantiloom.dll to test directory"
     )
+
+    # Copy OpenUSD DLLs if enabled
+    if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
+        copy_usd_dlls(libquantiloom_tests)
+    endif()
 endif()
 
 # ============================================================================

@@ -27,6 +27,9 @@ using namespace quantiloom;
 class UsdLoaderTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // Check if OpenUSD is available
+        hasOpenUSD = UsdLoader::IsAvailable();
+
         // Try multiple paths to find USD test assets
         std::vector<std::filesystem::path> searchPaths = {
             // Running from build directory (build/tests/Release/)
@@ -176,6 +179,7 @@ def Xform "Sphere" (
         return assetsPath / fileName;
     }
 
+    bool hasOpenUSD;
     bool hasTestAssets;
     std::filesystem::path assetsPath;
 };
@@ -230,6 +234,9 @@ TEST_F(UsdLoaderTest, UnsupportedExtension) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, LoadSimpleCube) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -267,6 +274,9 @@ TEST_F(UsdLoaderTest, LoadSimpleCube) {
 }
 
 TEST_F(UsdLoaderTest, LoadPBRMaterial) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -308,6 +318,9 @@ TEST_F(UsdLoaderTest, LoadPBRMaterial) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, LoadedSceneIsValid) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -336,6 +349,9 @@ TEST_F(UsdLoaderTest, LoadedSceneIsValid) {
 }
 
 TEST_F(UsdLoaderTest, MeshBounds) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -372,6 +388,9 @@ TEST_F(UsdLoaderTest, MeshBounds) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, MaterialPBRProperties) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -408,6 +427,9 @@ TEST_F(UsdLoaderTest, MaterialPBRProperties) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, MeshTriangleIndices) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -440,6 +462,9 @@ TEST_F(UsdLoaderTest, MeshTriangleIndices) {
 }
 
 TEST_F(UsdLoaderTest, MeshAttributeConsistency) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -479,6 +504,9 @@ TEST_F(UsdLoaderTest, MeshAttributeConsistency) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, NodeTransformsValid) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -510,6 +538,9 @@ TEST_F(UsdLoaderTest, NodeTransformsValid) {
 }
 
 TEST_F(UsdLoaderTest, NodeMeshReferences) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -536,6 +567,9 @@ TEST_F(UsdLoaderTest, NodeMeshReferences) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, SpectralMaterialReference) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -584,6 +618,9 @@ TEST_F(UsdLoaderTest, SpectralMaterialReference) {
 }
 
 TEST_F(UsdLoaderTest, SpectralIRProperties) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -614,6 +651,9 @@ TEST_F(UsdLoaderTest, SpectralIRProperties) {
 }
 
 TEST_F(UsdLoaderTest, SpectralMaterialPBRFallback) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
@@ -643,6 +683,9 @@ TEST_F(UsdLoaderTest, SpectralMaterialPBRFallback) {
 // ============================================================================
 
 TEST_F(UsdLoaderTest, SceneResourceCounts) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
     if (!hasTestAssets) {
         GTEST_SKIP() << "USD test assets not found";
     }
