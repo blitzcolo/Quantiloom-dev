@@ -63,6 +63,8 @@ add_library(libQuantiloom SHARED
     renderer/BRDFLutGenerator.hpp
     renderer/PerformanceLogger.cpp
     renderer/PerformanceLogger.hpp
+    renderer/TextureCompressor.cpp
+    renderer/TextureCompressor.hpp
     renderer/AtmosphericConfig.cpp
     renderer/AtmosphericConfig.hpp
     renderer/LightingParams.hpp
@@ -185,6 +187,26 @@ if(QUANTILOOM_USE_OPENUSD)
 else()
     message(WARNING "libQuantiloom: OpenUSD support disabled (USD_ROOT not set)")
     target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_OPENUSD=0)
+endif()
+
+# BC7 texture compression (optional, requires bc7enc_rdo)
+option(QUANTILOOM_USE_BC7ENC "Enable BC7 texture compression (requires bc7enc_rdo)" OFF)
+if(QUANTILOOM_USE_BC7ENC)
+    # Look for bc7enc_rdo in vendor directory
+    set(BC7ENC_DIR "${CMAKE_SOURCE_DIR}/vendor/bc7enc_rdo")
+    if(EXISTS "${BC7ENC_DIR}/bc7enc.h")
+        target_include_directories(libQuantiloom PRIVATE ${BC7ENC_DIR})
+        target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=1)
+        message(STATUS "libQuantiloom: BC7 compression enabled (bc7enc_rdo found)")
+    else()
+        message(WARNING "libQuantiloom: BC7 compression requested but bc7enc_rdo not found at ${BC7ENC_DIR}")
+        message(WARNING "  Download from: https://github.com/richgel999/bc7enc_rdo")
+        message(WARNING "  Place files in: vendor/bc7enc_rdo/")
+        target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=0)
+    endif()
+else()
+    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=0)
+    message(STATUS "libQuantiloom: BC7 compression disabled (use -DQUANTILOOM_USE_BC7ENC=ON to enable)")
 endif()
 
 # Compiler-specific flags

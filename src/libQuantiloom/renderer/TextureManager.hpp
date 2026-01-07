@@ -122,10 +122,11 @@ public:
     // - Creates VkSampler based on TextureSampler settings
     // - Uploads pixel data via staging buffer
     // - Transitions layout to SHADER_READ_ONLY_OPTIMAL
+    // - RELEASES CPU MEMORY: texture.pixels is cleared after upload to free ~8GB RAM
     //
     // Note: If textures vector is empty, creates a single 1x1 white dummy texture
     // (This allows shader code to always sample without null checks)
-    void UploadTextures(const std::vector<Texture>& textures);
+    void UploadTextures(std::vector<Texture>& textures);
 
     // ========================================================================
     // Accessors

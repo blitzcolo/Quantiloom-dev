@@ -211,6 +211,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_lighting_params.cpp
     test_renderer/test_acceleration_structure.cpp
     test_renderer/test_atmospheric_config.cpp
+    test_renderer/test_texture_manager.cpp
 )
 
 # Postprocess tests (sensor simulation, multiband fusion)

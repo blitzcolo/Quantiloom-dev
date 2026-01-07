@@ -255,6 +255,25 @@ public:
      */
     static Result<std::vector<String>, String> ListPrimsWithVariants(const String& path);
 
+    // ========================================================================
+    // Texture Utility Functions (public for parallel loading support)
+    // ========================================================================
+
+    /**
+     * @brief Parse texture from USD shader node
+     * @note Loads image via ImageIO (PNG/JPEG/EXR)
+     * @note Made public for parallel texture loading optimization
+     */
+    static Texture ParseTexture(const void* stage, const String& assetPath,
+                                 const String& usdFilePath);
+
+    /**
+     * @brief Get texture asset path from shader input connection
+     * @return Asset path if connected to UsdUVTexture, empty string otherwise
+     * @note Made public for texture path collection in parallel loading
+     */
+    static String GetTextureAssetPath(const void* shaderInput);
+
 private:
     // ========================================================================
     // Internal Parsing Functions
@@ -296,19 +315,6 @@ private:
                                        std::vector<Texture>& textures,
                                        const String& usdFilePath,
                                        const UsdLoadOptions& options);
-
-    /**
-     * @brief Parse texture from USD shader node
-     * @note Loads image via ImageIO (PNG/JPEG/EXR)
-     */
-    static Texture ParseTexture(const void* stage, const String& assetPath,
-                                 const String& usdFilePath);
-
-    /**
-     * @brief Get texture asset path from shader input connection
-     * @return Asset path if connected to UsdUVTexture, empty string otherwise
-     */
-    static String GetTextureAssetPath(const void* shaderInput);
 
     /**
      * @brief Flatten USD Xform hierarchy to world-space nodes

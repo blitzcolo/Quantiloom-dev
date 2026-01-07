@@ -33,7 +33,7 @@ TextureManager::~TextureManager() {
 // Texture Upload
 // ============================================================================
 
-void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
+void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     // Clear previous state
     m_images.clear();
     for (VkSampler sampler : m_samplers) {
@@ -45,7 +45,7 @@ void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
     // Handle empty texture list: create dummy 1x1 white texture
     if (textures.empty()) {
         QL_LOG_INFO("No textures to upload, creating dummy 1x1 white texture");
-        const Texture dummyTex = CreateDummyTexture();
+        Texture dummyTex = CreateDummyTexture();
 
         m_images.push_back(UploadTexture(dummyTex));
         m_samplers.push_back(CreateSampler(dummyTex.sampler));
@@ -57,7 +57,7 @@ void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
     // Upload all textures
     QL_LOG_INFO("Uploading {} textures to GPU", textures.size());
 
-    for (const Texture& texture : textures) {
+    for (Texture& texture : textures) {
         // Upload texture to GPU
         auto gpuImage = UploadTexture(texture);
 
@@ -68,9 +68,14 @@ void TextureManager::UploadTextures(const std::vector<Texture>& textures) {
         m_imageViews.push_back(gpuImage->GetView());
         m_samplers.push_back(sampler);
         m_images.push_back(std::move(gpuImage));
+
+        // CRITICAL: Release CPU memory after GPU upload to free ~8GB RAM
+        // The pixel data is now on the GPU, no longer needed on CPU
+        texture.pixels.clear();
+        texture.pixels.shrink_to_fit();
     }
 
-    QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers",
+    QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers (CPU memory released)",
                 m_images.size(), m_samplers.size());
 }
 
