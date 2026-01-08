@@ -304,6 +304,42 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
     FILES_MATCHING PATTERN "*.spv"
 )
 
+# ============================================================================
+# Install OpenUSD Runtime Dependencies (required for USD file loading)
+# ============================================================================
+if(QUANTILOOM_USE_OPENUSD AND WIN32)
+    # Install USD DLLs
+    file(GLOB USD_DLLS "${USD_ROOT}/lib/usd_*.dll")
+    if(USD_DLLS)
+        install(FILES ${USD_DLLS}
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+
+    # Install TBB DLLs
+    file(GLOB TBB_DLLS "${USD_ROOT}/bin/tbb*.dll")
+    if(TBB_DLLS)
+        install(FILES ${TBB_DLLS}
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+
+    # Install MaterialX DLLs (optional)
+    file(GLOB MATERIALX_DLLS "${USD_ROOT}/bin/MaterialX*.dll")
+    if(MATERIALX_DLLS)
+        install(FILES ${MATERIALX_DLLS}
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+
+    # Install USD plugin directory
+    if(EXISTS "${USD_ROOT}/lib/usd")
+        install(DIRECTORY "${USD_ROOT}/lib/usd"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}
+        )
+    endif()
+endif()
+
 # Export targets for find_package
 install(EXPORT QuantiloomTargets
     FILE QuantiloomTargets.cmake

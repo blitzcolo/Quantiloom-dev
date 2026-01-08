@@ -17,6 +17,9 @@
 #include "core/Log.hpp"
 #include <cstring>
 #include <algorithm>
+#include <future>
+#include <thread>
+#include <chrono>
 
 // ============================================================================
 // BC7 Compression with bc7enc_rdo
@@ -191,6 +194,95 @@ void TextureCompressor::GetAlignedDimensions(u32 width, u32 height, u32& outWidt
     outHeight = (height + 3) & ~3u;
 }
 
+void TextureCompressor::ParallelCompressTextures(
+    std::vector<Texture>& textures,
+    bool highQuality,
+    unsigned int maxThreads)
+{
+    if (!IsAvailable()) {
+        QL_LOG_WARN("TextureCompressor: BC7 not available, skipping parallel compression");
+        return;
+    }
+
+    // Count compressible textures
+    std::vector<size_t> compressibleIndices;
+    compressibleIndices.reserve(textures.size());
+    for (size_t i = 0; i < textures.size(); ++i) {
+        if (CanCompress(textures[i])) {
+            compressibleIndices.push_back(i);
+        }
+    }
+
+    if (compressibleIndices.empty()) {
+        QL_LOG_INFO("TextureCompressor: No textures eligible for BC7 compression");
+        return;
+    }
+
+    // Determine thread count
+    unsigned int numThreads = maxThreads;
+    if (numThreads == 0) {
+        numThreads = std::thread::hardware_concurrency();
+    }
+    numThreads = std::min(numThreads, static_cast<unsigned int>(compressibleIndices.size()));
+    if (numThreads == 0) numThreads = 4;
+    numThreads = std::min(numThreads, 8u);  // Cap at 8 threads
+
+    QL_LOG_INFO("TextureCompressor: Parallel BC7 compression of {} textures using {} threads (quality: {})",
+                compressibleIndices.size(), numThreads, highQuality ? "high" : "fast");
+
+    auto startTime = std::chrono::steady_clock::now();
+
+    // Launch async compression tasks
+    std::vector<std::future<std::pair<size_t, std::optional<BC7CompressedData>>>> futures;
+    futures.reserve(compressibleIndices.size());
+
+    for (size_t idx : compressibleIndices) {
+        const Texture& tex = textures[idx];
+        futures.push_back(std::async(std::launch::async, [&tex, idx, highQuality]() {
+            auto result = CompressBC7(tex, highQuality);
+            return std::make_pair(idx, std::move(result));
+        }));
+    }
+
+    // Collect results and store in texture.bc7Data
+    size_t successCount = 0;
+    size_t totalCompressedBytes = 0;
+    size_t totalUncompressedBytes = 0;
+
+    for (auto& f : futures) {
+        auto [idx, compressedOpt] = f.get();
+        if (compressedOpt.has_value()) {
+            const auto& compressed = compressedOpt.value();
+            Texture& tex = textures[idx];
+
+            // Convert BC7CompressedData to PrecompressedBC7
+            PrecompressedBC7 precompressed;
+            precompressed.data = std::move(compressedOpt->data);
+            precompressed.blockCountX = compressed.blockCountX;
+            precompressed.blockCountY = compressed.blockCountY;
+
+            tex.bc7Data = std::move(precompressed);
+            successCount++;
+
+            totalCompressedBytes += compressed.GetCompressedSize();
+            totalUncompressedBytes += static_cast<size_t>(tex.width) * tex.height * 4;
+        }
+    }
+
+    auto endTime = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
+
+    float ratio = totalUncompressedBytes > 0
+        ? static_cast<float>(totalUncompressedBytes) / static_cast<float>(totalCompressedBytes)
+        : 0.0f;
+
+    QL_LOG_INFO("TextureCompressor: BC7 compression complete: {}/{} textures, {:.1f}MB -> {:.1f}MB ({:.1f}x), took {}ms",
+                successCount, compressibleIndices.size(),
+                totalUncompressedBytes / (1024.0 * 1024.0),
+                totalCompressedBytes / (1024.0 * 1024.0),
+                ratio, elapsed.count());
+}
+
 } // namespace quantiloom
 
 #else // QUANTILOOM_USE_BC7ENC not defined
@@ -229,6 +321,15 @@ size_t TextureCompressor::GetBC7CompressedSize(u32 width, u32 height) {
 void TextureCompressor::GetAlignedDimensions(u32 width, u32 height, u32& outWidth, u32& outHeight) {
     outWidth = (width + 3) & ~3u;
     outHeight = (height + 3) & ~3u;
+}
+
+void TextureCompressor::ParallelCompressTextures(
+    std::vector<Texture>& /* textures */,
+    bool /* highQuality */,
+    unsigned int /* maxThreads */)
+{
+    QL_LOG_WARN("TextureCompressor: BC7 compression not available. "
+                "Build with -DQUANTILOOM_USE_BC7ENC=ON and add bc7enc_rdo to vendor/");
 }
 
 } // namespace quantiloom

@@ -71,9 +71,8 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         m_images.push_back(std::move(gpuImage));
 
         // CRITICAL: Release CPU memory after GPU upload to free ~8GB RAM
-        // The pixel data is now on the GPU, no longer needed on CPU
-        texture.pixels.clear();
-        texture.pixels.shrink_to_fit();
+        // The pixel data and BC7 compressed data are now on the GPU
+        texture.ReleaseCPUMemory();
     }
 
     QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers (CPU memory released)",
@@ -108,6 +107,23 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
     // ========================================================================
     // Try BC7 Compression (4:1 VRAM savings)
     // ========================================================================
+
+    // Check for pre-compressed BC7 data first (from parallel compression during loading)
+    if (texture.HasBC7Data()) {
+        // Use pre-compressed data directly
+        BC7CompressedData compressed;
+        compressed.width = texture.width;
+        compressed.height = texture.height;
+        compressed.blockCountX = texture.bc7Data->blockCountX;
+        compressed.blockCountY = texture.bc7Data->blockCountY;
+        compressed.isSRGB = texture.isSRGB;
+        compressed.data = texture.bc7Data->data;  // Copy to avoid modifying original
+
+        QL_LOG_DEBUG("  Using pre-compressed BC7 data for '{}'", texture.name);
+        return UploadBC7Texture(texture, compressed);
+    }
+
+    // Fall back to runtime compression if no pre-compressed data
     if (TextureCompressor::IsAvailable() && TextureCompressor::CanCompress(texture)) {
         auto compressed = TextureCompressor::CompressBC7(texture, false /* fast mode */);
         if (compressed.has_value()) {

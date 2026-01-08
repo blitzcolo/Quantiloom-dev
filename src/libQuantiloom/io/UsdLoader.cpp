@@ -20,6 +20,7 @@
 #include "SpectralIO.hpp"
 #include "ImageIO.hpp"
 #include "scene/MeshOptimizer.hpp"
+#include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
 // Conditional compilation based on OpenUSD availability
@@ -218,6 +219,12 @@ static void ParallelLoadTextures(
     }
 
     QL_LOG_INFO("  Parallel texture loading complete: {} textures loaded", outTextures.size());
+
+    // Parallel BC7 compression (if available)
+    // This happens after loading so textures are compressed in parallel
+    if (TextureCompressor::IsAvailable() && !outTextures.empty()) {
+        TextureCompressor::ParallelCompressTextures(outTextures, false /* fast mode */);
+    }
 }
 
 // ============================================================================

@@ -1,6 +1,7 @@
 #include "GltfLoader.hpp"
 #include "SpectralIO.hpp"
 #include "scene/MeshOptimizer.hpp"
+#include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
 #define TINYGLTF_IMPLEMENTATION
@@ -716,6 +717,12 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
             scene.textures[mat.emissiveTextureIndex].isSRGB = true;
             QL_LOG_DEBUG("  [DEBUG] Marked texture {} (emissive) as sRGB", mat.emissiveTextureIndex);
         }
+    }
+
+    // Parallel BC7 compression (if available)
+    // This happens after sRGB marking so compression respects color space
+    if (TextureCompressor::IsAvailable() && !scene.textures.empty()) {
+        TextureCompressor::ParallelCompressTextures(scene.textures, false /* fast mode */);
     }
 
     // Load meshes

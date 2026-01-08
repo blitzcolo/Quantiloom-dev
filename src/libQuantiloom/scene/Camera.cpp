@@ -60,9 +60,9 @@ void Camera::UpdateVectors() {
     // Recompute orthogonal up vector
     m_up = glm::normalize(glm::cross(m_right, m_forward));
 
-    QL_LOG_DEBUG("Camera updated: pos=({:.2f}, {:.2f}, {:.2f}), fwd=({:.2f}, {:.2f}, {:.2f})",
+    /*QL_LOG_DEBUG("Camera updated: pos=({:.2f}, {:.2f}, {:.2f}), fwd=({:.2f}, {:.2f}, {:.2f})",
                  m_position.x, m_position.y, m_position.z,
-                 m_forward.x, m_forward.y, m_forward.z);
+                 m_forward.x, m_forward.y, m_forward.z);*/
 }
 
 Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio) {

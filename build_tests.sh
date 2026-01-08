@@ -16,7 +16,10 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH \
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=ON \
     -DENABLE_COVERAGE=ON \
-    -DQUANTILOOM_BUILD_TESTS=ON
+    -DQUANTILOOM_BUILD_TESTS=ON \
+    -DQUANTILOOM_USE_BC7ENC=ON \
+    -DQUANTILOOM_USE_OPENUSD=ON \
+    -DUSD_ROOT=/opt/openusd
 
 echo ""
 echo "========================================"

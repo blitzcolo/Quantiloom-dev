@@ -21,6 +21,11 @@
  * - Metallic/roughness/normal: Linear (isSRGB = false, no gamma)
  * - Emissive textures: sRGB (glTF 2.0 spec)
  *
+ * BC7 Compression (optional):
+ * - Loaders can pre-compress textures in parallel for faster GPU upload
+ * - If bc7Data is populated, TextureManager uses it instead of compressing
+ * - After GPU upload, bc7Data should be cleared to free CPU memory
+ *
  * @note Texture data remains in CPU memory until GPU upload
  * @note TextureManager handles GPU resource creation
  * @note Material texture indices must reference valid Scene::textures entries
@@ -32,6 +37,7 @@
 
 #include "core/Types.hpp"
 #include <string>
+#include <optional>
 
 // ============================================================================
 // Texture - GPU texture resource metadata
@@ -76,6 +82,36 @@ struct TextureSampler {
     WrapMode wrapT = WrapMode::Repeat;
 };
 
+/**
+ * @struct PrecompressedBC7
+ * @brief Pre-compressed BC7 texture data for GPU upload optimization
+ *
+ * When loaders pre-compress textures in parallel, the compressed data
+ * is stored here. TextureManager checks for this and skips compression
+ * if data is already available.
+ *
+ * BC7 format: 16 bytes per 4x4 pixel block
+ * Total size = blockCountX * blockCountY * 16 bytes
+ */
+struct PrecompressedBC7 {
+    std::vector<u8> data;       ///< Compressed block data (16 bytes per block)
+    u32 blockCountX = 0;        ///< Number of 4x4 blocks in X direction
+    u32 blockCountY = 0;        ///< Number of 4x4 blocks in Y direction
+
+    /// Check if compressed data is valid
+    [[nodiscard]] bool IsValid() const {
+        return !data.empty() &&
+               blockCountX > 0 &&
+               blockCountY > 0 &&
+               data.size() == static_cast<size_t>(blockCountX) * blockCountY * 16;
+    }
+
+    /// Get compressed data size in bytes
+    [[nodiscard]] size_t GetCompressedSize() const {
+        return data.size();
+    }
+};
+
 // Texture image data (CPU-side)
 struct Texture {
     // Image metadata
@@ -95,6 +131,10 @@ struct Texture {
     // Metadata
     String name;  // Texture name (for debugging)
     String sourceUri;  // Original file path (if from external file)
+
+    // Pre-compressed BC7 data (optional, for parallel compression optimization)
+    // If populated, TextureManager will use this instead of compressing on upload
+    std::optional<PrecompressedBC7> bc7Data;
 
     // ========================================================================
     // Utilities
@@ -120,6 +160,11 @@ struct Texture {
         return true;
     }
 
+    /// Check if BC7 pre-compressed data is available
+    [[nodiscard]] bool HasBC7Data() const {
+        return bc7Data.has_value() && bc7Data->IsValid();
+    }
+
     // Get size in bytes
     [[nodiscard]] size_t GetSizeInBytes() const {
         return pixels.size();
@@ -128,6 +173,17 @@ struct Texture {
     // Get pixel data pointer (for GPU upload)
     [[nodiscard]] const u8* GetData() const {
         return pixels.data();
+    }
+
+    /// Release CPU memory after GPU upload
+    void ReleaseCPUMemory() {
+        pixels.clear();
+        pixels.shrink_to_fit();
+        if (bc7Data.has_value()) {
+            bc7Data->data.clear();
+            bc7Data->data.shrink_to_fit();
+            bc7Data.reset();
+        }
     }
 };
 
