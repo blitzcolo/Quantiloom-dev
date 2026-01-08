@@ -739,9 +739,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ====================================================================
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: approximate RGB as flat spectrum (for legacy compatibility)
-        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
-        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+        // Fallback: Convert RGB radiance to spectral radiance density
+        // RGB represents integrated radiance (W·sr⁻¹·m⁻²) over visible spectrum.
+        // To create flat spectrum: spectral_density = luminance / bandwidth
+        // Luminance = 0.2126*R + 0.7152*G + 0.0722*B (Rec. 709)
+        // Bandwidth = LAMBDA_MAX_VIS - LAMBDA_MIN_VIS = 400nm
+        // Result: spectral_density (W·sr⁻¹·m⁻²·nm⁻¹)
+        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
+                              0.7152 * lut.sunRadiance_rgb.g +
+                              0.0722 * lut.sunRadiance_rgb.b;
+        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
+                              0.7152 * lut.skyRadiance_rgb.g +
+                              0.0722 * lut.skyRadiance_rgb.b;
+        float visible_bandwidth = LAMBDA_MAX_VIS - LAMBDA_MIN_VIS;  // 400nm
+        float sun_power_rgb = sun_luminance / visible_bandwidth;  // Per nm
+        float sky_power_rgb = sky_luminance / visible_bandwidth;  // Per nm
 
         // Loop over wavelengths
         [unroll]
@@ -809,8 +821,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             XYZ_accum.z += L_lambda * z_bar * LAMBDA_STEP;
         }
 
-        // Normalize by CIE Y integral for proper luminance scaling
-        XYZ_accum /= CIE_Y_INTEGRAL;
+        // NOTE: XYZ_accum from Riemann sum is already correctly normalized.
+        // The integration XYZ_accum += L(λ) × CMF(λ) × Δλ already has proper units.
+        // DO NOT divide by CIE_Y_INTEGRAL (106.9), as that would make output 107x too dark!
+        // The constant 106.9 is for 1nm sampling, but we use LAMBDA_STEP ≈ 12.9nm.
+        // Riemann sum normalization is: XYZ = Σ[L(λᵢ) × CMF(λᵢ) × Δλ] (already correct)
+        // XYZ_accum /= CIE_Y_INTEGRAL;  // REMOVED: This was causing 107x darkening bug
 
         // XYZ → Linear RGB (sRGB D65)
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
@@ -945,9 +961,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Check if we have spectral solar LUT for accurate SWIR illumination
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: flat spectrum from RGB average
-        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
-        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+        // Fallback: Convert RGB radiance to spectral density for SWIR band
+        // Note: This is an approximation. Real solar spectrum extends into SWIR,
+        // but visible RGB only covers 380-780nm. We extrapolate the luminance.
+        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
+                              0.7152 * lut.sunRadiance_rgb.g +
+                              0.0722 * lut.sunRadiance_rgb.b;
+        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
+                              0.7152 * lut.skyRadiance_rgb.g +
+                              0.0722 * lut.skyRadiance_rgb.b;
+        float swir_bandwidth = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;  // 1500nm
+        float sun_power_rgb = sun_luminance / swir_bandwidth;  // Per nm (approximate)
+        float sky_power_rgb = sky_luminance / swir_bandwidth;  // Per nm (approximate)
 
         // Material IR properties (for thermal contribution, usually negligible in SWIR)
         // Use effective emissivity that derives from metallic factor when not set (P1 fix)
@@ -1042,9 +1067,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Check if we have spectral solar LUT for accurate NIR illumination
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: flat spectrum from RGB average
-        float sun_power_rgb = (lut.sunRadiance_rgb.r + lut.sunRadiance_rgb.g + lut.sunRadiance_rgb.b) / 3.0;
-        float sky_power_rgb = (lut.skyRadiance_rgb.r + lut.skyRadiance_rgb.g + lut.skyRadiance_rgb.b) / 3.0;
+        // Fallback: Convert RGB radiance to spectral density for NIR band
+        // Note: This is an approximation. Real solar spectrum extends into NIR,
+        // but visible RGB only covers 380-780nm. We extrapolate the luminance.
+        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
+                              0.7152 * lut.sunRadiance_rgb.g +
+                              0.0722 * lut.sunRadiance_rgb.b;
+        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
+                              0.7152 * lut.skyRadiance_rgb.g +
+                              0.0722 * lut.skyRadiance_rgb.b;
+        float nir_bandwidth = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;  // 620nm
+        float sun_power_rgb = sun_luminance / nir_bandwidth;  // Per nm (approximate)
+        float sky_power_rgb = sky_luminance / nir_bandwidth;  // Per nm (approximate)
 
         [unroll]
         for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {

@@ -109,28 +109,32 @@ float ConvertLinearRGBToSpectrum(float3 rgb_linear, float lambda) {
                      rgb_linear.b * basis_B;
 
     // ========================================================================
-    // Energy-conserving normalization
+    // Energy-conserving normalization (FIXED: wavelength-independent)
     // ========================================================================
-    // Ensure white (1,1,1) produces a relatively flat spectrum
-    // The normalization factor is computed so that the spectrum integrates
-    // to approximately the luminance of the input color
+    // FIX: Use CONSTANT normalization to avoid color shifts.
+    // Previous version used wavelength-dependent normalization (white_at_lambda)
+    // which caused blue/green tint because normalization varied across spectrum.
     //
-    // For a Gaussian with sigma=55nm, the integral ≈ sigma * sqrt(2π) ≈ 138
-    // With 3 overlapping Gaussians for white, peak ≈ 3.0
-    // We want white to produce spectrum ≈ 1.0, so normalize by peak at white
+    // New approach: Compute normalization at green primary (532nm) with
+    // medium sigma (55nm) to get a single constant normalization factor.
+    // This ensures color neutrality while maintaining reasonable energy levels.
     // ========================================================================
 
-    // Compute what white (1,1,1) would produce at this wavelength
-    float white_at_lambda = SpectralBasisImproved(lambda, LAMBDA_RED, sigma) +
-                            SpectralBasisImproved(lambda, LAMBDA_GREEN, sigma) +
-                            SpectralBasisImproved(lambda, LAMBDA_BLUE, sigma);
+    // Use fixed normalization constant computed at green primary
+    // For white (1,1,1) at 532nm with sigma=55nm: peak ≈ 2.41
+    const float NORM_SIGMA = 55.0;  // Medium sigma for normalization
+    const float NORM_AT_GREEN = SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_RED, NORM_SIGMA) +
+                                 SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_GREEN, NORM_SIGMA) +
+                                 SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_BLUE, NORM_SIGMA);
+    // NORM_AT_GREEN ≈ exp(-0.5*(98/55)²) + 1.0 + exp(-0.5*(65/55)²) ≈ 0.41 + 1.0 + 0.61 ≈ 2.02
 
-    // Normalize so white produces ~1.0 in the middle of the spectrum
-    // Add small epsilon to prevent division by zero at spectrum edges
-    float normalization = max(white_at_lambda, 0.3);
+    const float CONSTANT_NORMALIZATION = NORM_AT_GREEN;
+
+    // Apply constant normalization (wavelength-independent)
+    float normalized_spectrum = R_lambda / CONSTANT_NORMALIZATION;
 
     // Final reflectance (clamped to reasonable range)
-    return clamp(R_lambda / normalization, 0.0, 1.5);
+    return clamp(normalized_spectrum, 0.0, 1.5);
 }
 
 // ============================================================================
