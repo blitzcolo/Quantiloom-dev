@@ -4,7 +4,7 @@
  *
  * This header provides the core type system for Quantiloom, including:
  * - Fixed-width integer and floating-point type aliases (i8/u8, i32/u32, f32/f64)
- * - Spectral rendering mode enumeration (Single, RGB_Fused, MWIR_Fused, LWIR_Fused, etc.)
+ * - Spectral rendering mode enumeration (RGB, VIS_Fused, Single, MWIR_Fused, LWIR_Fused, etc.)
  * - Result<T,E> error handling type (variant-based, std::expected alternative)
  * - Error code definitions for all subsystems
  * - Container type aliases (Vector, Array, Span, Optional, etc.)
@@ -69,24 +69,26 @@ using Wavelength = f32;
  * @brief Defines different spectral rendering pipelines supported by Quantiloom
  *
  * Controls how the renderer interprets wavelengths and produces output:
+ * - RGB: Fast RGB-only pipeline (no spectral integration, best performance)
+ * - VIS_Fused: 32-wavelength visible spectral integration with CIE XYZ color matching
  * - Single: Monochromatic rendering at one wavelength (EXR grayscale output)
- * - RGB_Fused: Standard visible-light RGB rendering with CIE XYZ color matching
  * - IR bands: Thermal/near-IR fusion modes with wavelength-specific processing
  *
  * @note CRITICAL: Must match shader defines in common.hlsli exactly!
- * @note RGB_Fused outputs both EXR (HDR) and PNG (tone-mapped preview)
+ * @note RGB/VIS_Fused outputs both EXR (HDR) and PNG (sRGB-encoded preview)
  * @note IR modes (MWIR/LWIR/SWIR/NIR) output thermal/reflectance imagery
  *
  * @see SpectralData.hpp for wavelength-dependent material properties
  */
 enum class SpectralMode : u32 {
     Single       = 0,  // Single wavelength (grayscale output, EXR only)
-    RGB_Fused    = 1,  // RGB fusion with CIE XYZ -> sRGB (outputs EXR + PNG)
+    VIS_Fused    = 1,  // Visible spectral integration with CIE XYZ -> sRGB (outputs EXR + PNG)
     Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
     MWIR_Fused   = 3,  // Mid-wave IR fusion 3000-5000nm (outputs EXR + PNG)
     LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
     SWIR_Fused   = 5,  // Short-wave IR fusion 1000-2500nm (outputs EXR + PNG)
-    NIR_Fused    = 6   // Near IR fusion 780-1400nm (outputs EXR + PNG) - reflected solar
+    NIR_Fused    = 6,  // Near IR fusion 780-1400nm (outputs EXR + PNG) - reflected solar
+    RGB          = 7   // Fast RGB-only pipeline (no spectral integration, default)
 };
 
 // ============================================================================
@@ -265,9 +267,12 @@ auto Err(E&& error) {
 inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str) {
     if (mode_str == "single" || mode_str == "single_wavelength") {
         return Result(SpectralMode::Single);
-    } else if (mode_str == "rgb_fused" || mode_str == "rgb" || mode_str == "RGB") {
-        // Accept both new name (rgb_fused) and legacy name (rgb) for compatibility
-        return Result(SpectralMode::RGB_Fused);
+    } else if (mode_str == "rgb" || mode_str == "RGB") {
+        // Fast RGB-only mode (default, no spectral integration)
+        return Result(SpectralMode::RGB);
+    } else if (mode_str == "vis_fused" || mode_str == "VIS") {
+        // Visible spectral integration mode (32-wavelength CIE XYZ)
+        return Result(SpectralMode::VIS_Fused);
     } else if (mode_str == "multispectral") {
         return Result(SpectralMode::Multispectral);
     } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {

@@ -36,7 +36,8 @@ TEST(LightingParamsTest, FieldOffsets) {
     EXPECT_EQ(offsetof(LightingParams, transmittance), 44u);
     EXPECT_EQ(offsetof(LightingParams, worldUnitsToMeters), 48u);
     EXPECT_EQ(offsetof(LightingParams, atmosphereTemperature_K), 52u);
-    EXPECT_EQ(offsetof(LightingParams, _padding), 56u);
+    EXPECT_EQ(offsetof(LightingParams, chromaR_correction), 56u);
+    EXPECT_EQ(offsetof(LightingParams, chromaB_correction), 60u);
 }
 
 TEST(LightingParamsTest, Alignment16Byte) {
@@ -198,4 +199,17 @@ TEST(LightingParamsTest, DefaultConstantsConsistency) {
     EXPECT_FLOAT_EQ(params.transmittance, LightingDefaults::TRANSMITTANCE);
     EXPECT_FLOAT_EQ(params.worldUnitsToMeters, LightingDefaults::WORLD_UNITS_TO_METERS);
     EXPECT_FLOAT_EQ(params.atmosphereTemperature_K, LightingDefaults::ATMOSPHERE_TEMPERATURE_K);
+    EXPECT_FLOAT_EQ(params.chromaR_correction, LightingDefaults::CHROMA_R_CORRECTION);
+    EXPECT_FLOAT_EQ(params.chromaB_correction, LightingDefaults::CHROMA_B_CORRECTION);
+}
+
+TEST(LightingParamsTest, ChromaCorrectionDefaults) {
+    // Verify chromaticity correction factors have correct defaults
+    LightingParams params = CreateDefaultLightingParams();
+
+    // Default corrections compensate for CIE CMF integral differences
+    // R correction: 1.266 (compensates for ∫x̄ ≈ 95.05 vs ∫ȳ ≈ 106.9)
+    // B correction: 1.146 (compensates for ∫z̄ ≈ 108.89 vs ∫ȳ ≈ 106.9)
+    EXPECT_NEAR(params.chromaR_correction, 1.266f, 0.001f);
+    EXPECT_NEAR(params.chromaB_correction, 1.146f, 0.001f);
 }

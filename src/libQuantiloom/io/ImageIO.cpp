@@ -158,6 +158,17 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
 // Public API: WritePNG
 // ============================================================================
 
+// Helper: Apply sRGB gamma encoding (IEC 61966-2-1)
+// Input: linear value [0, 1]
+// Output: sRGB encoded value [0, 1]
+static float LinearToSRGB(float linear) {
+    if (linear <= 0.0031308f) {
+        return 12.92f * linear;
+    } else {
+        return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+    }
+}
+
 bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
     if (!image.IsValid()) {
         QL_LOG_ERROR("ImageIO::WritePNG: Invalid image");
@@ -172,7 +183,7 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
     }
 
     try {
-        // Convert float [0,1] to uint8 [0,255] with clamping
+        // Convert float [0,1] to uint8 [0,255] with clamping and sRGB gamma
         std::vector<uint8_t> pixels(image.width * image.height * image.channels);
 
         for (u32 y = 0; y < image.height; ++y) {
@@ -183,7 +194,13 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
                     // Clamp to [0, 1] range (HDR values may exceed 1.0)
                     value = std::clamp(value, 0.0f, 1.0f);
 
-                    // Convert to 8-bit (image data is already in sRGB if from CIE XYZ conversion)
+                    // Apply sRGB gamma encoding (shader outputs linear RGB)
+                    // Alpha channel (c == 3) should NOT be gamma encoded
+                    if (c < 3) {
+                        value = LinearToSRGB(value);
+                    }
+
+                    // Convert to 8-bit
                     pixels[(y * image.width + x) * image.channels + c] =
                         static_cast<uint8_t>(value * 255.0f + 0.5f);
                 }
@@ -205,7 +222,7 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
             return false;
         }
 
-        QL_LOG_INFO("ImageIO::WritePNG: Wrote {}x{} image with {} channels to {}",
+        QL_LOG_INFO("ImageIO::WritePNG: Wrote {}x{} image with {} channels to {} (sRGB encoded)",
                     image.width, image.height, image.channels, filepath);
         return true;
 

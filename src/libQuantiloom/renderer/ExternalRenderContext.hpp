@@ -277,7 +277,7 @@ public:
 
     /**
      * @brief Set spectral rendering mode
-     * @param mode Spectral mode (Single, RGB_Fused, MWIR_Fused, etc.)
+     * @param mode Spectral mode (RGB, VIS_Fused, Single, MWIR_Fused, etc.)
      */
     void SetSpectralMode(SpectralMode mode);
 

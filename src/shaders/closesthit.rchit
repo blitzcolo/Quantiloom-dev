@@ -513,8 +513,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 sunRadiance;
     float3 skyRadiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
-        // RGB mode: Use full RGB lighting
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB || camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+        // RGB and VIS_FUSED modes: Use full RGB lighting
         sunRadiance = lut.sunRadiance_rgb;
         skyRadiance = lut.skyRadiance_rgb;
     } else {
@@ -651,6 +651,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     float3 iblSpecular = float3(0.0, 0.0, 0.0);
 
+    // Declare IBL variables outside conditional for use in spectral integration
+    float3 prefilteredColor = float3(0.0, 0.0, 0.0);
+    float2 envBRDF = float2(0.0, 0.0);
+
     // Only compute IBL for surfaces with non-zero metallic or roughness < 1.0
     // This optimization skips perfectly diffuse surfaces (no specular reflection)
     if (metallic > 0.01 || roughness < 0.99) {
@@ -667,12 +671,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // 3. Sample prefiltered environment map
         //    SampleLevel = explicit LOD (required in ray tracing shaders)
-        float3 prefilteredColor = prefilteredEnvMap.SampleLevel(iblSampler, R, lod).rgb;
+        prefilteredColor = prefilteredEnvMap.SampleLevel(iblSampler, R, lod).rgb;
 
         // 4. Sample BRDF integration LUT
         //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
         float NdotV_clamped = max(dot(normal, V), 0.0);
-        float2 envBRDF = brdfLUT.SampleLevel(iblSampler, float2(NdotV_clamped, roughness), 0.0).rg;
+        envBRDF = brdfLUT.SampleLevel(iblSampler, float2(NdotV_clamped, roughness), 0.0).rg;
 
         // 5. Split-sum approximation
         //    L_ibl = ∫ L(l) * BRDF(l,v) * (n·l) dl
@@ -698,9 +702,27 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     float3 output_radiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
         // ====================================================================
-        // RGB_Fused Mode: True 32-Wavelength Spectral Integration
+        // RGB Mode: Fast Pure-RGB Pipeline (No Spectral Integration)
+        // ====================================================================
+        // Direct RGB rendering without spectral wavelength sampling.
+        // Uses standard PBR calculations already computed above.
+        //
+        // This is the FASTEST mode with no spectral integration overhead.
+        // For physically-correct spectral rendering, use VIS_FUSED mode.
+        // ====================================================================
+        output_radiance = radiance;
+
+        // Validation: clamp and sanitize to prevent NaN/Inf
+        if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
+            output_radiance = float3(0.0, 0.0, 0.0);
+        }
+        output_radiance = clamp(output_radiance, 0.0, 1000.0);
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+        // ====================================================================
+        // VIS_Fused Mode: True 32-Wavelength Spectral Integration
         // ====================================================================
         // Physically-correct spectral rendering with full wavelength sampling:
         //   1. Sample 32 wavelengths uniformly across visible spectrum (380-780nm)
@@ -709,11 +731,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //   4. Convert XYZ → Linear RGB (sRGB D65)
         //
         // This is the TRUE HS-OFF spectral rendering for visible light.
-        // Performance: ~10-15x slower than single wavelength, but physically accurate.
+        // Performance: ~10-15x slower than RGB mode, but physically accurate.
         //
         // SPECTRAL REFLECTANCE SOURCE (priority order):
         //   1. Measured spectral curve (spectralReflectanceCurveIndex >= 0)
         //   2. RGB texture upsampling via Gaussian basis (fallback)
+        //
+        // ILLUMINATION SOURCE (priority order):
+        //   1. SolarSpectralLUT with measured ASTM G-173 spectra (preferred)
+        //   2. RGB values converted to colored spectrum via ConvertLinearRGBToSpectrum
         // ====================================================================
 
         // Spectral integration parameters
@@ -722,38 +748,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float  LAMBDA_MAX_VIS = 780.0;  // nm
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
-        // CIE XYZ normalization factor
-        // For equal-energy white (E), Y should integrate to 1.0
-        // ∫ȳ(λ)dλ ≈ 106.9 over 380-780nm, so normalize by this
-        const float CIE_Y_INTEGRAL = 106.9;
-
         // Accumulate XYZ tristimulus values
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
-        // ====================================================================
-        // Solar Spectral LUT: Use true spectral irradiance when available
-        // ====================================================================
-        // Priority:
-        // 1. SolarSpectralLUT with measured ASTM G-173 spectra (preferred)
-        // 2. LightingParams RGB values approximated as flat spectrum (fallback)
-        // ====================================================================
+        // Check if we have physical spectral irradiance data
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: Convert RGB radiance to spectral radiance density
-        // RGB represents integrated radiance (W·sr⁻¹·m⁻²) over visible spectrum.
-        // To create flat spectrum: spectral_density = luminance / bandwidth
-        // Luminance = 0.2126*R + 0.7152*G + 0.0722*B (Rec. 709)
-        // Bandwidth = LAMBDA_MAX_VIS - LAMBDA_MIN_VIS = 400nm
-        // Result: spectral_density (W·sr⁻¹·m⁻²·nm⁻¹)
-        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
-                              0.7152 * lut.sunRadiance_rgb.g +
-                              0.0722 * lut.sunRadiance_rgb.b;
-        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
-                              0.7152 * lut.skyRadiance_rgb.g +
-                              0.0722 * lut.skyRadiance_rgb.b;
-        float visible_bandwidth = LAMBDA_MAX_VIS - LAMBDA_MIN_VIS;  // 400nm
-        float sun_power_rgb = sun_luminance / visible_bandwidth;  // Per nm
-        float sky_power_rgb = sky_luminance / visible_bandwidth;  // Per nm
+        // Precompute IBL parameters for spectral integration
+        // F0 scalar: average of RGB F0 for spectral Fresnel approximation
+        float F0_scalar = (F0.r + F0.g + F0.b) / 3.0;
+        bool useIBL = (metallic > 0.01 || roughness < 0.99);
 
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
@@ -779,9 +783,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // For sky dome, we assume uniform sky approximation: L_sky ≈ E_sky / π
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // FALLBACK: Use flat spectrum approximation from RGB values
-                sun_radiance_lambda = sun_power_rgb;
-                sky_radiance_lambda = sky_power_rgb;
+                // CORRECTED FALLBACK: Convert RGB to colored spectrum (not flat!)
+                // This preserves the color information of the light source
+                sun_radiance_lambda = ConvertLinearRGBToSpectrum(lut.sunRadiance_rgb, lambda);
+                sky_radiance_lambda = ConvertLinearRGBToSpectrum(lut.skyRadiance_rgb, lambda);
             }
 
             // 1. Get spectral reflectance at this wavelength
@@ -809,9 +814,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // This ensures proper color reproduction for self-luminous surfaces
             float L_emissive = ConvertLinearRGBToSpectrum(emissive, lambda);
 
-            float L_lambda = L_direct + L_ambient + L_emissive;
+            // 5. IBL specular contribution (spectrally integrated)
+            // Convert prefiltered environment RGB to spectrum at this wavelength
+            float L_ibl = 0.0;
+            if (useIBL) {
+                float ibl_spectrum = ConvertLinearRGBToSpectrum(prefilteredColor, lambda);
+                L_ibl = ibl_spectrum * (F0_scalar * envBRDF.x + envBRDF.y);
+            }
 
-            // 5. Weight by CIE XYZ color matching functions
+            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
+
+            // 6. Weight by CIE XYZ color matching functions
             float x_bar = CIE_X(lambda);
             float y_bar = CIE_Y(lambda);
             float z_bar = CIE_Z(lambda);
@@ -827,7 +840,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // DO NOT divide by CIE_Y_INTEGRAL (106.9), as that would make output 107x too dark!
         // The constant 106.9 is for 1nm sampling, but we use LAMBDA_STEP ≈ 12.9nm.
         // Riemann sum normalization is: XYZ = Σ[L(λᵢ) × CMF(λᵢ) × Δλ] (already correct)
-        // XYZ_accum /= CIE_Y_INTEGRAL;  // REMOVED: This was causing 107x darkening bug
 
         // XYZ → Linear RGB (sRGB D65)
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
@@ -838,31 +850,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Problem: CIE color matching functions have different integrals:
         //   ∫x̄(λ)dλ ≈ 95.05, ∫ȳ(λ)dλ ≈ 106.9, ∫z̄(λ)dλ ≈ 108.89
         //
-        // For FLAT spectrum (fallback mode), XYZ ratio is (95:107:109)
+        // For FLAT spectrum material (gray colors), XYZ ratio is (95:107:109)
         // After sRGB matrix, this produces GREEN-BIASED output:
         //   RGB ∝ (89.3, 113.0, 98.6) ≈ (0.79, 1.00, 0.87)
         //
         // This correction neutralizes the chromaticity shift by scaling
         // R and B channels to match G, ensuring flat spectrum → neutral gray.
         //
-        // Correction factors derived from CMF integral ratios:
-        //   R_factor = G_output / R_output = 113.0 / 89.3 ≈ 1.266
-        //   B_factor = G_output / B_output = 113.0 / 98.6 ≈ 1.146
-        //
-        // NOTE: This correction is ALWAYS applied because ConvertLinearRGBToSpectrum
-        // produces flat reflectance for achromatic (gray) colors, which causes
-        // the green bias even when using spectral illumination data.
+        // Correction factors are configurable via LightingParams (default 1.266, 1.146)
         // ====================================================================
-        const float CHROMA_R_CORRECTION = 1.266;
-        const float CHROMA_B_CORRECTION = 1.146;
-        output_radiance.r *= CHROMA_R_CORRECTION;
-        output_radiance.b *= CHROMA_B_CORRECTION;
+        output_radiance.r *= lut.chromaR_correction;
+        output_radiance.b *= lut.chromaB_correction;
 
-        // Add IBL specular reflection (already computed in RGB)
-        // NOTE: IBL uses prefiltered environment map which is already in RGB space.
-        // For full spectral correctness, IBL would need spectral environment maps,
-        // but this is computationally prohibitive and rarely done in practice.
-        output_radiance += iblSpecular;
+        // NOTE: IBL is now integrated in the spectral loop above (L_ibl term)
+        // No need to add iblSpecular separately
 
         // Validation: clamp and sanitize to prevent NaN/Inf
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {

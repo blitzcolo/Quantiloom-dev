@@ -76,19 +76,26 @@ TEST(TypesTest, ParseSpectralModeSingle) {
     EXPECT_EQ(res2.value(), SpectralMode::Single);
 }
 
-TEST(TypesTest, ParseSpectralModeRGBFused) {
-    auto res1 = ParseSpectralMode("rgb_fused");
+TEST(TypesTest, ParseSpectralModeRGB) {
+    // "rgb" and "RGB" map to the fast RGB mode (default)
+    auto res1 = ParseSpectralMode("rgb");
     EXPECT_TRUE(res1.has_value());
-    EXPECT_EQ(res1.value(), SpectralMode::RGB_Fused);
+    EXPECT_EQ(res1.value(), SpectralMode::RGB);
 
-    // Legacy name for backward compatibility
-    auto res2 = ParseSpectralMode("rgb");
+    auto res2 = ParseSpectralMode("RGB");
     EXPECT_TRUE(res2.has_value());
-    EXPECT_EQ(res2.value(), SpectralMode::RGB_Fused);
+    EXPECT_EQ(res2.value(), SpectralMode::RGB);
+}
 
-    auto res3 = ParseSpectralMode("RGB");
-    EXPECT_TRUE(res3.has_value());
-    EXPECT_EQ(res3.value(), SpectralMode::RGB_Fused);
+TEST(TypesTest, ParseSpectralModeVISFused) {
+    // "vis_fused" and "VIS" map to visible spectral integration mode
+    auto res1 = ParseSpectralMode("vis_fused");
+    EXPECT_TRUE(res1.has_value());
+    EXPECT_EQ(res1.value(), SpectralMode::VIS_Fused);
+
+    auto res2 = ParseSpectralMode("VIS");
+    EXPECT_TRUE(res2.has_value());
+    EXPECT_EQ(res2.value(), SpectralMode::VIS_Fused);
 }
 
 TEST(TypesTest, ParseSpectralModeMultispectral) {
@@ -154,20 +161,22 @@ TEST(TypesTest, SpectralModeEnumValues) {
     // CRITICAL: These values MUST match #define SPECTRAL_MODE_* in common.hlsli
     // Shader defines:
     //   #define SPECTRAL_MODE_SINGLE       0
-    //   #define SPECTRAL_MODE_RGB_FUSED    1
+    //   #define SPECTRAL_MODE_VIS_FUSED    1
     //   #define SPECTRAL_MODE_MULTISPECTRAL 2
     //   #define SPECTRAL_MODE_MWIR_FUSED   3
     //   #define SPECTRAL_MODE_LWIR_FUSED   4
     //   #define SPECTRAL_MODE_SWIR_FUSED   5
     //   #define SPECTRAL_MODE_NIR_FUSED    6
+    //   #define SPECTRAL_MODE_RGB          7
 
     EXPECT_EQ(static_cast<u32>(SpectralMode::Single), 0u);
-    EXPECT_EQ(static_cast<u32>(SpectralMode::RGB_Fused), 1u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::VIS_Fused), 1u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::Multispectral), 2u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::MWIR_Fused), 3u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::LWIR_Fused), 4u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::SWIR_Fused), 5u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::NIR_Fused), 6u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::RGB), 7u);
 }
 
 TEST(TypesTest, SpectralModeEnumSize) {
@@ -179,7 +188,8 @@ TEST(TypesTest, SpectralModeAllModesAccepted) {
     // Verify all modes have at least one valid string representation
     const char* modeStrings[] = {
         "single",        // Single
-        "rgb_fused",     // RGB_Fused
+        "rgb",           // RGB (default fast mode)
+        "vis_fused",     // VIS_Fused (spectral integration)
         "multispectral", // Multispectral
         "mwir_fused",    // MWIR_Fused
         "lwir_fused",    // LWIR_Fused

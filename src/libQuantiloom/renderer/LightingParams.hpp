@@ -55,13 +55,14 @@ namespace quantiloom {
  * Offset  0: sunDirection (vec3, 12 bytes) + sunRadiance_spectral (f32, 4 bytes)
  * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
  * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
- * Offset 48: worldUnitsToMeters (f32, 4 bytes) + atmosphereTemperature_K (f32, 4 bytes) + _padding (vec2, 8 bytes)
+ * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
  * Total: 64 bytes
  * @endcode
  *
  * @note MUST match shader struct in common.hlsli (verified at compile time)
- * @note Use RGB values for RGB_Fused mode, spectral values for Single/MWIR/LWIR modes
+ * @note Use RGB values for RGB mode, spectral values for Single/MWIR/LWIR modes
  * @note atmosphereTemperature_K used for IR downwelling thermal radiation
+ * @note chromaR/B_correction used for VIS_FUSED mode chromaticity correction
  */
 struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
@@ -75,7 +76,8 @@ struct LightingParams {
 
     f32 worldUnitsToMeters;         // Conversion factor: world_units × this = meters, offset 48
     f32 atmosphereTemperature_K;    // Effective atmosphere temperature (K) for IR downwelling, offset 52
-    glm::vec2 _padding;             // Padding for 16-byte alignment, offset 56
+    f32 chromaR_correction;         // VIS_FUSED chromaticity correction for R channel, offset 56
+    f32 chromaB_correction;         // VIS_FUSED chromaticity correction for B channel, offset 60
 };  // Total: 64 bytes
 
 // ============================================================================
@@ -104,8 +106,10 @@ static_assert(offsetof(LightingParams, worldUnitsToMeters) == 48,
     "worldUnitsToMeters offset mismatch");
 static_assert(offsetof(LightingParams, atmosphereTemperature_K) == 52,
     "atmosphereTemperature_K offset mismatch");
-static_assert(offsetof(LightingParams, _padding) == 56,
-    "_padding offset mismatch");
+static_assert(offsetof(LightingParams, chromaR_correction) == 56,
+    "chromaR_correction offset mismatch");
+static_assert(offsetof(LightingParams, chromaB_correction) == 60,
+    "chromaB_correction offset mismatch");
 
 // ============================================================================
 // Default Values
@@ -135,6 +139,11 @@ namespace LightingDefaults {
     constexpr f32 ATMOSPHERE_TEMPERATURE_K = 260.0f;
     constexpr f32 ATMOSPHERE_TEMPERATURE_K_MIN = 150.0f;  // Extreme cold
     constexpr f32 ATMOSPHERE_TEMPERATURE_K_MAX = 350.0f;  // Extreme hot
+
+    // VIS_FUSED chromaticity correction factors
+    // Derived from CIE CMF integral ratios for flat spectrum correction
+    constexpr f32 CHROMA_R_CORRECTION = 1.266f;
+    constexpr f32 CHROMA_B_CORRECTION = 1.146f;
 }
 
 // ============================================================================
@@ -152,7 +161,8 @@ inline LightingParams CreateDefaultLightingParams() {
     params.transmittance = LightingDefaults::TRANSMITTANCE;
     params.worldUnitsToMeters = LightingDefaults::WORLD_UNITS_TO_METERS;
     params.atmosphereTemperature_K = LightingDefaults::ATMOSPHERE_TEMPERATURE_K;
-    params._padding = glm::vec2(0.0f);
+    params.chromaR_correction = LightingDefaults::CHROMA_R_CORRECTION;
+    params.chromaB_correction = LightingDefaults::CHROMA_B_CORRECTION;
     return params;
 }
 

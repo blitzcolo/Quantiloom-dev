@@ -106,11 +106,13 @@ Defined in `common.hlsli`:
 | Mode | Value | Description |
 |------|-------|-------------|
 | `SPECTRAL_MODE_SINGLE` | 0 | Single wavelength (grayscale) |
-| `SPECTRAL_MODE_RGB_FUSED` | 1 | 32-wavelength spectral integration |
+| `SPECTRAL_MODE_VIS_FUSED` | 1 | 32-wavelength visible spectral integration |
 | `SPECTRAL_MODE_MULTISPECTRAL` | 2 | Hyperspectral cube (TBD) |
 | `SPECTRAL_MODE_MWIR_FUSED` | 3 | Mid-wave IR (3000-5000nm) |
 | `SPECTRAL_MODE_LWIR_FUSED` | 4 | Long-wave IR (8000-12000nm) |
 | `SPECTRAL_MODE_SWIR_FUSED` | 5 | Short-wave IR (1000-2500nm) |
+| `SPECTRAL_MODE_NIR_FUSED` | 6 | Near-IR (780-1400nm) |
+| `SPECTRAL_MODE_RGB` | 7 | Fast RGB-only pipeline (default, no spectral integration) |
 
 ## Current Features
 

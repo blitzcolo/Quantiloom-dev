@@ -138,10 +138,16 @@ void main(inout Payload payload) {
     // ========================================================================
 
     // Choose sky radiance based on spectral mode
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB_FUSED) {
-        // RGB mode: Use full RGB sky radiance or integrate spectral
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+        // RGB mode: Direct RGB sky color (no spectral integration)
+        payload.radiance = lut.skyRadiance_rgb;
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+        // VIS_FUSED mode: Use full RGB sky radiance (consistent with closesthit)
+        // When closesthit uses ConvertLinearRGBToSpectrum for illumination,
+        // miss shader should return the same RGB sky for consistency
         if (hasSpectralSolarLUT) {
-            // For miss shader, use average sky radiance across visible spectrum
+            // For miss shader with spectral LUT, use average sky radiance
             // Use center of visible spectrum (550nm) as representative
             float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], 550.0);
             float sky_radiance = sky_irr / PI;  // Convert irradiance to radiance (diffuse hemisphere)
@@ -150,6 +156,7 @@ void main(inout Payload payload) {
             // Fallback: Use LightingParams RGB values
             payload.radiance = lut.skyRadiance_rgb;
         }
+
     } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
         // Single wavelength mode: Query spectral sky at current wavelength
         float radiance_spectral;

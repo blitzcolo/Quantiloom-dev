@@ -194,7 +194,7 @@ struct ExternalRenderContext::Impl {
     VkCommandPool commandPool = VK_NULL_HANDLE;
 
     // Rendering state
-    SpectralMode spectralMode = SpectralMode::RGB_Fused;
+    SpectralMode spectralMode = SpectralMode::RGB;  // Default: Fast RGB mode
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
     LightingParams lightingParams;

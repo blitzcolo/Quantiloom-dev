@@ -630,7 +630,7 @@ int main(int argc, char* argv[]) {
         f32 sunRadiance_spectral = (sunRadiance.r + sunRadiance.g + sunRadiance.b) / 3.0f;
         f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
-        if (spectral_mode == SpectralMode::RGB_Fused) {
+        if (spectral_mode == SpectralMode::RGB || spectral_mode == SpectralMode::VIS_Fused) {
             QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
                         sunRadiance.r, sunRadiance.g, sunRadiance.b);
             QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
@@ -639,6 +639,10 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  Sun spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", sunRadiance_spectral);
             QL_LOG_INFO("  Sky spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", skyRadiance_spectral);
         }
+
+        // Read chromaticity correction factors from config (optional, defaults to standard values)
+        f32 chromaR_correction = config.Get<f32>("quality.chroma_r_correction", LightingDefaults::CHROMA_R_CORRECTION);
+        f32 chromaB_correction = config.Get<f32>("quality.chroma_b_correction", LightingDefaults::CHROMA_B_CORRECTION);
 
         LightingParams lightingParams{};
         lightingParams.sunDirection = sunDirection;
@@ -651,7 +655,8 @@ int main(int argc, char* argv[]) {
         lightingParams.transmittance = transmittance;
         lightingParams.worldUnitsToMeters = worldUnitsToMeters;
         lightingParams.atmosphereTemperature_K = atmosphereTemperature_K;
-        lightingParams._padding = glm::vec2(0.0f);
+        lightingParams.chromaR_correction = chromaR_correction;
+        lightingParams.chromaB_correction = chromaB_correction;
 
         GpuBuffer lightingParamsBuffer(
             context.GetAllocator(),
@@ -1792,9 +1797,12 @@ int main(int argc, char* argv[]) {
             img.metadata["quality_level"] = "PREVIEW_ONLY";
             img.metadata["warning"] = "RGB-averaged spectral albedo, not quantitative";
             img.metadata["note"] = "For quantitative results provide measured spectral curves";
-        } else if (spectral_mode == SpectralMode::RGB_Fused) {
+        } else if (spectral_mode == SpectralMode::RGB) {
             img.metadata["quality_level"] = "PREVIEW";
-            img.metadata["note"] = "RGB rendering, preview quality";
+            img.metadata["note"] = "RGB rendering (fast, no spectral integration)";
+        } else if (spectral_mode == SpectralMode::VIS_Fused) {
+            img.metadata["quality_level"] = "SPECTRAL";
+            img.metadata["note"] = "32-wavelength spectral integration";
         }
         img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
         img.metadata["spp"] = std::to_string(spp);
@@ -1877,9 +1885,10 @@ int main(int argc, char* argv[]) {
             QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outputPath);
         }
 
-        // For fused modes (RGB, MWIR, LWIR), also save PNG preview
+        // For fused modes (RGB, VIS_FUSED, MWIR, LWIR), also save PNG preview
         // These modes output both EXR (HDR/physical) and PNG (LDR preview)
-        bool isFusedMode = (spectral_mode == SpectralMode::RGB_Fused ||
+        bool isFusedMode = (spectral_mode == SpectralMode::RGB ||
+                           spectral_mode == SpectralMode::VIS_Fused ||
                            spectral_mode == SpectralMode::MWIR_Fused ||
                            spectral_mode == SpectralMode::LWIR_Fused ||
                            spectral_mode == SpectralMode::SWIR_Fused);

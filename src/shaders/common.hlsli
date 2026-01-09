@@ -20,12 +20,13 @@
 
 // IMPORTANT: These values MUST match SpectralMode enum in C++ code!
 #define SPECTRAL_MODE_SINGLE       0  // Single wavelength (grayscale output)
-#define SPECTRAL_MODE_RGB_FUSED    1  // RGB rendering with 32-wavelength spectral integration
+#define SPECTRAL_MODE_VIS_FUSED    1  // Visible spectral integration (32-wavelength CIE XYZ)
 #define SPECTRAL_MODE_MULTISPECTRAL 2  // Multiple wavelengths (hyperspectral cube) - TBD
 #define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
 #define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)
 #define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion (1000-2500nm)
 #define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion (780-1400nm) - reflected solar
+#define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
 
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
@@ -401,7 +402,8 @@ struct LightingParams {
 
     float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
     float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation
-    float2 _padding;             // Padding for 16-byte alignment
+    float  chromaR_correction;   // VIS_FUSED chromaticity correction for R channel (default: 1.266)
+    float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.146)
 };
 
 // ============================================================================

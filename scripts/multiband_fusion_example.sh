@@ -45,17 +45,17 @@ echo "Output: $OUTPUT_DIR"
 echo ""
 
 # ============================================================================
-# Step 1: Render VIS band (RGB_Fused mode)
+# Step 1: Render VIS band (RGB mode for fast preview, or vis_fused for spectral)
 # ============================================================================
 
-echo "[1/4] Rendering VIS band (RGB_Fused)..."
+echo "[1/4] Rendering VIS band (rgb mode)..."
 
 # Create temporary config for VIS
 VIS_CONFIG="${OUTPUT_DIR}/vis_config.toml"
 cp "$CONFIG_FILE" "$VIS_CONFIG"
 
-# Modify spectral mode to rgb_fused
-sed -i 's/^mode = .*/mode = "rgb_fused"/' "$VIS_CONFIG"
+# Modify spectral mode to rgb (fast mode)
+sed -i 's/^mode = .*/mode = "rgb"/' "$VIS_CONFIG"
 # Modify output path
 sed -i "s|^output = .*|output = \"${OUTPUT_DIR}/vis_output.exr\"|" "$VIS_CONFIG"
 
