@@ -120,15 +120,14 @@ float ConvertLinearRGBToSpectrum(float3 rgb_linear, float lambda) {
     // This ensures color neutrality while maintaining reasonable energy levels.
     // ========================================================================
 
-    // Use fixed normalization constant computed at green primary
-    // For white (1,1,1) at 532nm with sigma=55nm: peak ≈ 2.41
-    const float NORM_SIGMA = 55.0;  // Medium sigma for normalization
-    const float NORM_AT_GREEN = SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_RED, NORM_SIGMA) +
-                                 SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_GREEN, NORM_SIGMA) +
-                                 SpectralBasisImproved(LAMBDA_GREEN, LAMBDA_BLUE, NORM_SIGMA);
-    // NORM_AT_GREEN ≈ exp(-0.5*(98/55)²) + 1.0 + exp(-0.5*(65/55)²) ≈ 0.41 + 1.0 + 0.61 ≈ 2.02
-
-    const float CONSTANT_NORMALIZATION = NORM_AT_GREEN;
+    // Use fixed normalization constant (precomputed to avoid compilation issues)
+    // Computed for white (1,1,1) at lambda=532nm (green primary) with sigma=55nm:
+    //   NORM = exp(-0.5*((532-630)/55)²) + exp(-0.5*((532-532)/55)²) + exp(-0.5*((532-467)/55)²)
+    //        = exp(-0.5*3.175) + 1.0 + exp(-0.5*1.397)
+    //        = exp(-1.587) + 1.0 + exp(-0.698)
+    //        = 0.205 + 1.0 + 0.497
+    //        = 1.702
+    const float CONSTANT_NORMALIZATION = 1.702;
 
     // Apply constant normalization (wavelength-independent)
     float normalized_spectrum = R_lambda / CONSTANT_NORMALIZATION;
