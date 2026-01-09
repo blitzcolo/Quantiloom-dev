@@ -756,7 +756,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float sky_power_rgb = sky_luminance / visible_bandwidth;  // Per nm
 
         // Loop over wavelengths
-        [unroll]
+        // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
+        // Modern GPUs handle small loops efficiently without forced unrolling
         for (uint i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i) {
             float lambda = LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP;
 
@@ -979,7 +980,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float emissivity = GetEffectiveIREmissivity(material);
         float reflectance = GetEffectiveIRReflectance(material);
 
-        [unroll]
+        // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
             float lambda = SWIR_LAMBDA_MIN + float(i) * lambda_step;
 
@@ -1080,7 +1081,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float sun_power_rgb = sun_luminance / nir_bandwidth;  // Per nm (approximate)
         float sky_power_rgb = sky_luminance / nir_bandwidth;  // Per nm (approximate)
 
-        [unroll]
+        // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {
             float lambda = NIR_LAMBDA_MIN + float(i) * lambda_step;
 
@@ -1197,7 +1198,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float SUN_SOLID_ANGLE_SR = 6.8e-5;
 
         // Loop over wavelengths in IR band
-        [unroll]
+        // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
