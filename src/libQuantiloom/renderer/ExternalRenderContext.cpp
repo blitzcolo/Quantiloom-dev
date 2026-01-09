@@ -877,18 +877,26 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
 
     // Execute TLAS build on GPU
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        // Build mapping from mesh index to BLAS starting index
+        std::vector<size_t> meshToBlasStart;
+        meshToBlasStart.reserve(m_impl->scene->meshes.size());
+        size_t blasStart = 0;
+        for (const auto& mesh : m_impl->scene->meshes) {
+            meshToBlasStart.push_back(blasStart);
+            blasStart += mesh.primitives.size();
+        }
+
         // Add instances to TLAS with current transforms
-        size_t blasIndex = 0;
         for (const auto& node : m_impl->scene->nodes) {
             const Mesh& mesh = m_impl->scene->meshes[node.meshIndex];
+            size_t blasBase = meshToBlasStart[node.meshIndex];
 
-            for (const auto& primitive : mesh.primitives) {
+            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
                 m_impl->tlas->AddInstance(
-                    *m_impl->blasList[blasIndex],
-                    primitive.materialId,
+                    *m_impl->blasList[blasBase + primIdx],
+                    mesh.primitives[primIdx].materialId,
                     node.transform
                 );
-                ++blasIndex;
             }
         }
 
@@ -951,18 +959,27 @@ void ExternalRenderContext::BuildAccelerationStructures() {
             blas->Build(cmd);
         }
 
+        // Build mapping from mesh index to BLAS starting index
+        // This allows multiple nodes to reference the same mesh correctly
+        std::vector<size_t> meshToBlasStart;
+        meshToBlasStart.reserve(m_impl->scene->meshes.size());
+        size_t blasStart = 0;
+        for (const auto& mesh : m_impl->scene->meshes) {
+            meshToBlasStart.push_back(blasStart);
+            blasStart += mesh.primitives.size();
+        }
+
         // Add instances to TLAS
-        size_t blasIndex = 0;
         for (const auto& node : m_impl->scene->nodes) {
             const Mesh& mesh = m_impl->scene->meshes[node.meshIndex];
+            size_t blasBase = meshToBlasStart[node.meshIndex];
 
-            for (const auto& primitive : mesh.primitives) {
+            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
                 m_impl->tlas->AddInstance(
-                    *m_impl->blasList[blasIndex],
-                    primitive.materialId,
+                    *m_impl->blasList[blasBase + primIdx],
+                    mesh.primitives[primIdx].materialId,
                     node.transform
                 );
-                ++blasIndex;
             }
         }
 

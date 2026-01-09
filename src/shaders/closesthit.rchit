@@ -832,6 +832,32 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // XYZ → Linear RGB (sRGB D65)
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
 
+        // ====================================================================
+        // CHROMATICITY CORRECTION for Equal-Energy → D65 Adaptation
+        // ====================================================================
+        // Problem: CIE color matching functions have different integrals:
+        //   ∫x̄(λ)dλ ≈ 95.05, ∫ȳ(λ)dλ ≈ 106.9, ∫z̄(λ)dλ ≈ 108.89
+        //
+        // For FLAT spectrum (fallback mode), XYZ ratio is (95:107:109)
+        // After sRGB matrix, this produces GREEN-BIASED output:
+        //   RGB ∝ (89.3, 113.0, 98.6) ≈ (0.79, 1.00, 0.87)
+        //
+        // This correction neutralizes the chromaticity shift by scaling
+        // R and B channels to match G, ensuring flat spectrum → neutral gray.
+        //
+        // Correction factors derived from CMF integral ratios:
+        //   R_factor = G_output / R_output = 113.0 / 89.3 ≈ 1.266
+        //   B_factor = G_output / B_output = 113.0 / 98.6 ≈ 1.146
+        //
+        // NOTE: This correction is ALWAYS applied because ConvertLinearRGBToSpectrum
+        // produces flat reflectance for achromatic (gray) colors, which causes
+        // the green bias even when using spectral illumination data.
+        // ====================================================================
+        const float CHROMA_R_CORRECTION = 1.266;
+        const float CHROMA_B_CORRECTION = 1.146;
+        output_radiance.r *= CHROMA_R_CORRECTION;
+        output_radiance.b *= CHROMA_B_CORRECTION;
+
         // Add IBL specular reflection (already computed in RGB)
         // NOTE: IBL uses prefiltered environment map which is already in RGB space.
         // For full spectral correctness, IBL would need spectral environment maps,

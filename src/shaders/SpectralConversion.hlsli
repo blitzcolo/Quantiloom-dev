@@ -109,28 +109,33 @@ float ConvertLinearRGBToSpectrum(float3 rgb_linear, float lambda) {
                      rgb_linear.b * basis_B;
 
     // ========================================================================
-    // Energy-conserving normalization (FIXED: wavelength-independent)
+    // Wavelength-dependent normalization for achromatic color preservation
     // ========================================================================
-    // FIX: Use CONSTANT normalization to avoid color shifts.
-    // Previous version used wavelength-dependent normalization (white_at_lambda)
-    // which caused blue/green tint because normalization varied across spectrum.
+    // CRITICAL FIX: Use per-wavelength normalization to ensure achromatic
+    // (gray/white) colors produce FLAT spectra across all wavelengths.
     //
-    // New approach: Compute normalization at green primary (532nm) with
-    // medium sigma (55nm) to get a single constant normalization factor.
-    // This ensures color neutrality while maintaining reasonable energy levels.
+    // For input (g, g, g):
+    //   R_lambda = g * (basis_R + basis_G + basis_B)
+    //   white_at_lambda = basis_R + basis_G + basis_B
+    //   normalized = R_lambda / white_at_lambda = g
+    //
+    // This guarantees gray input produces gray output (flat spectrum).
+    //
+    // Previous CONSTANT normalization (1.702 at 532nm) caused green tint
+    // because basis function overlap varies across wavelengths:
+    //   - At 532nm (green): high overlap → higher output
+    //   - At 630nm (red): low overlap → lower output
+    //   - Result: green bias for achromatic colors
     // ========================================================================
 
-    // Use fixed normalization constant (precomputed to avoid compilation issues)
-    // Computed for white (1,1,1) at lambda=532nm (green primary) with sigma=55nm:
-    //   NORM = exp(-0.5*((532-630)/55)²) + exp(-0.5*((532-532)/55)²) + exp(-0.5*((532-467)/55)²)
-    //        = exp(-0.5*3.175) + 1.0 + exp(-0.5*1.397)
-    //        = exp(-1.587) + 1.0 + exp(-0.698)
-    //        = 0.205 + 1.0 + 0.497
-    //        = 1.702
-    const float CONSTANT_NORMALIZATION = 1.702;
+    // Compute white reference at current wavelength (sum of all basis functions)
+    float white_at_lambda = basis_R + basis_G + basis_B;
 
-    // Apply constant normalization (wavelength-independent)
-    float normalized_spectrum = R_lambda / CONSTANT_NORMALIZATION;
+    // Prevent division by zero (happens at extreme UV/IR edges)
+    white_at_lambda = max(white_at_lambda, 0.001);
+
+    // Apply wavelength-dependent normalization
+    float normalized_spectrum = R_lambda / white_at_lambda;
 
     // Final reflectance (clamped to reasonable range)
     return clamp(normalized_spectrum, 0.0, 1.5);

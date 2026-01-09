@@ -570,18 +570,27 @@ int main(int argc, char* argv[]) {
                 blas.Build(cmd);
             }
 
+            // Build mapping from mesh index to BLAS starting index
+            // This allows multiple nodes to reference the same mesh correctly
+            std::vector<size_t> meshToBlasStart;
+            meshToBlasStart.reserve(loadedScene.meshes.size());
+            size_t blasStart = 0;
+            for (const auto& mesh : loadedScene.meshes) {
+                meshToBlasStart.push_back(blasStart);
+                blasStart += mesh.primitives.size();
+            }
+
             // Add instances to TLAS
-            size_t blasIndex = 0;
             for (const auto& node : loadedScene.nodes) {
                 const Mesh& mesh = loadedScene.meshes[node.meshIndex];
+                size_t blasBase = meshToBlasStart[node.meshIndex];
 
-                for (const auto & primitive : mesh.primitives) {
+                for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
                     tlas.AddInstance(
-                        blasList[blasIndex],
-                        primitive.materialId,
+                        blasList[blasBase + primIdx],
+                        mesh.primitives[primIdx].materialId,
                         node.transform
                     );
-                    ++blasIndex;
                 }
             }
 
