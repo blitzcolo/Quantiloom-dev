@@ -1340,5 +1340,244 @@ void main(inout Payload payload, in HitAttributes attribs) {
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     }
 
+    // ========================================================================
+    // Debug Visualization Output
+    // ========================================================================
+    // If debug mode is enabled, output debug visualization instead of normal radiance
+    // This allows inspecting intermediate rendering data for debugging pipeline issues
+    // ========================================================================
+
+    if (camera.debug_mode != DEBUG_MODE_NONE) {
+        float3 debug_output = float3(1.0, 0.0, 1.0);  // Magenta = unhandled mode
+
+        switch (camera.debug_mode) {
+            // ----------------------------------------------------------------
+            // Geometry Debug (1-9)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_WORLD_POSITION: {
+                // World position (use frac for visibility, scaled by 0.1)
+                float3 worldPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+                debug_output = frac(worldPos * 0.1);
+                break;
+            }
+            case DEBUG_MODE_GEOMETRIC_NORMAL:
+                // Raw geometric normal (remap [-1,1] to [0,1])
+                debug_output = worldNormal * 0.5 + 0.5;
+                break;
+
+            case DEBUG_MODE_SHADED_NORMAL:
+                // Final shaded normal with normal map (remap [-1,1] to [0,1])
+                debug_output = normal * 0.5 + 0.5;
+                break;
+
+            case DEBUG_MODE_TANGENT:
+                // Tangent vector (remap [-1,1] to [0,1])
+                debug_output = worldTangent * 0.5 + 0.5;
+                break;
+
+            case DEBUG_MODE_UV:
+                // UV coordinates (use frac for tiling visibility)
+                debug_output = float3(frac(uv), 0.0);
+                break;
+
+            case DEBUG_MODE_MATERIAL_ID:
+                // Material index hashed to color
+                debug_output = HashToColor(materialID);
+                break;
+
+            case DEBUG_MODE_TRIANGLE_ID:
+                // Triangle/primitive index hashed to color
+                debug_output = HashToColor(PrimitiveIndex());
+                break;
+
+            case DEBUG_MODE_BARYCENTRIC:
+                // Barycentric coordinates (b0, b1, b2) where b0 = 1 - b1 - b2
+                debug_output = float3(1.0 - attribs.bary.x - attribs.bary.y,
+                                      attribs.bary.x,
+                                      attribs.bary.y);
+                break;
+
+            // ----------------------------------------------------------------
+            // Material Debug (10-19)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_BASE_COLOR:
+                // Albedo/base color RGB
+                debug_output = baseColor.rgb;
+                break;
+
+            case DEBUG_MODE_METALLIC:
+                // Metallic factor (grayscale)
+                debug_output = float3(metallic, metallic, metallic);
+                break;
+
+            case DEBUG_MODE_ROUGHNESS:
+                // Roughness factor (grayscale)
+                debug_output = float3(roughness, roughness, roughness);
+                break;
+
+            case DEBUG_MODE_NORMAL_MAP_DELTA: {
+                // Normal map contribution (difference from geometric normal)
+                float3 delta = normal - worldNormal;
+                debug_output = delta * 0.5 + 0.5;
+                break;
+            }
+
+            case DEBUG_MODE_EMISSIVE:
+                // Emissive RGB (tone map for visibility)
+                debug_output = emissive / (1.0 + emissive);  // Simple Reinhard
+                break;
+
+            case DEBUG_MODE_ALPHA:
+                // Alpha channel (grayscale)
+                debug_output = float3(baseColor.a, baseColor.a, baseColor.a);
+                break;
+
+            // ----------------------------------------------------------------
+            // Lighting Debug (20-29)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_NDOTL:
+                // N dot L (grayscale)
+                debug_output = float3(NdotL, NdotL, NdotL);
+                break;
+
+            case DEBUG_MODE_NDOTV: {
+                // N dot V (grayscale)
+                float NdotV_val = max(dot(normal, V), 0.0);
+                debug_output = float3(NdotV_val, NdotV_val, NdotV_val);
+                break;
+            }
+
+            case DEBUG_MODE_DIRECT_SUN:
+                // Direct sun contribution (tone map for visibility)
+                debug_output = directSun / (1.0 + directSun);
+                break;
+
+            case DEBUG_MODE_DIFFUSE:
+                // Diffuse component (kD * albedo)
+                debug_output = kD * albedo;
+                break;
+
+            case DEBUG_MODE_ATMOSPHERIC_TRANS:
+                // Atmospheric transmittance (grayscale)
+                debug_output = float3(atmosphericTransmittance, atmosphericTransmittance, atmosphericTransmittance);
+                break;
+
+            // ----------------------------------------------------------------
+            // BRDF Debug (30-39)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_FRESNEL_F0:
+                // Fresnel at normal incidence (F0)
+                debug_output = F0;
+                break;
+
+            case DEBUG_MODE_FRESNEL: {
+                // Fresnel at current viewing angle
+                float NdotV_fresnel = max(dot(normal, V), 0.0);
+                debug_output = FresnelSchlick(F0, NdotV_fresnel);
+                break;
+            }
+
+            case DEBUG_MODE_BRDF:
+                // Full Cook-Torrance BRDF (scale for visibility)
+                debug_output = brdf * 0.1;  // Scale down since BRDF can be large
+                break;
+
+            // ----------------------------------------------------------------
+            // IBL Debug (40-49)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_REFLECTION_DIR: {
+                // Reflection direction (remap [-1,1] to [0,1])
+                float3 R = reflect(-V, normal);
+                debug_output = R * 0.5 + 0.5;
+                break;
+            }
+
+            case DEBUG_MODE_PREFILTERED_ENV:
+                // Prefiltered environment map sample
+                debug_output = prefilteredColor;
+                break;
+
+            case DEBUG_MODE_BRDF_LUT:
+                // BRDF LUT sample (scale, bias, 0)
+                debug_output = float3(envBRDF, 0.0);
+                break;
+
+            case DEBUG_MODE_IBL_SPECULAR:
+                // IBL specular contribution
+                debug_output = iblSpecular;
+                break;
+
+            case DEBUG_MODE_SKY_AMBIENT:
+                // Sky ambient/diffuse contribution
+                debug_output = skyAmbient;
+                break;
+
+            // ----------------------------------------------------------------
+            // Spectral Debug (50-59)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_XYZ:
+                // For spectral modes, this would show XYZ values
+                // For RGB mode, show a placeholder
+                debug_output = output_radiance;  // Current output as fallback
+                break;
+
+            case DEBUG_MODE_BEFORE_CHROMA:
+                // RGB before chromaticity correction (same as XYZ for now)
+                debug_output = output_radiance;
+                break;
+
+            case DEBUG_MODE_SPECTRAL_REFL: {
+                // Spectral reflectance at 550nm (green)
+                float refl550 = (albedo.r + albedo.g + albedo.b) / 3.0;  // Approximate
+                debug_output = float3(refl550, refl550, refl550);
+                break;
+            }
+
+            // ----------------------------------------------------------------
+            // IR Debug (60-69)
+            // ----------------------------------------------------------------
+            case DEBUG_MODE_TEMPERATURE: {
+                // Surface temperature (colormap 200K - 500K for visibility)
+                float temp_K = material.irTemperature_K;
+                if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
+                debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
+                break;
+            }
+
+            case DEBUG_MODE_IR_EMISSIVITY: {
+                // IR emissivity (grayscale)
+                float emissivity = GetEffectiveIREmissivity(material);
+                debug_output = float3(emissivity, emissivity, emissivity);
+                break;
+            }
+
+            case DEBUG_MODE_IR_EMISSION: {
+                // Thermal emission component (grayscale, scaled)
+                float temp_K = material.irTemperature_K;
+                if (temp_K <= 0.0) temp_K = 300.0;
+                float emission = GetEffectiveIREmissivity(material) * IRPlanckRadiance(temp_K, 10000.0);
+                emission = emission / (1.0 + emission);  // Tone map
+                debug_output = float3(emission, emission, emission);
+                break;
+            }
+
+            case DEBUG_MODE_IR_REFLECTION: {
+                // IR reflection component (grayscale)
+                float refl = GetEffectiveIRReflectance(material);
+                debug_output = float3(refl, refl, refl);
+                break;
+            }
+
+            default:
+                // Unknown mode: show magenta error color
+                debug_output = float3(1.0, 0.0, 1.0);
+                break;
+        }
+
+        // Apply debug output and return early
+        payload.radiance = debug_output;
+        return;
+    }
+
     payload.radiance = output_radiance;
 }

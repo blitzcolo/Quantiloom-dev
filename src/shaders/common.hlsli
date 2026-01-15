@@ -29,6 +29,64 @@
 #define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
 
 // ============================================================================
+// Debug Visualization Modes
+// ============================================================================
+// IMPORTANT: These values MUST match DebugVisualizationMode enum in C++ code!
+// ============================================================================
+
+#define DEBUG_MODE_NONE                    0   // Normal rendering
+
+// Geometry (1-9)
+#define DEBUG_MODE_WORLD_POSITION          1   // Hit point world coordinates
+#define DEBUG_MODE_GEOMETRIC_NORMAL        2   // Raw geometric normal
+#define DEBUG_MODE_SHADED_NORMAL           3   // Final shaded normal (with normal map)
+#define DEBUG_MODE_TANGENT                 4   // Tangent vector
+#define DEBUG_MODE_UV                      5   // Texture coordinates
+#define DEBUG_MODE_MATERIAL_ID             6   // Material index (hashed to color)
+#define DEBUG_MODE_TRIANGLE_ID             7   // Triangle index (hashed to color)
+#define DEBUG_MODE_BARYCENTRIC             8   // Barycentric coordinates
+
+// Material (10-19)
+#define DEBUG_MODE_BASE_COLOR              10  // Albedo RGB
+#define DEBUG_MODE_METALLIC                11  // Metallic factor
+#define DEBUG_MODE_ROUGHNESS               12  // Roughness factor
+#define DEBUG_MODE_NORMAL_MAP_DELTA        13  // Normal map contribution
+#define DEBUG_MODE_EMISSIVE                14  // Emissive RGB
+#define DEBUG_MODE_ALPHA                   15  // Alpha channel
+
+// Lighting (20-29)
+#define DEBUG_MODE_NDOTL                   20  // Dot(Normal, LightDir)
+#define DEBUG_MODE_NDOTV                   21  // Dot(Normal, ViewDir)
+#define DEBUG_MODE_DIRECT_SUN              22  // Direct sun lighting
+#define DEBUG_MODE_DIFFUSE                 23  // Diffuse component (kD * albedo)
+#define DEBUG_MODE_ATMOSPHERIC_TRANS       24  // Atmospheric transmittance
+
+// BRDF (30-39)
+#define DEBUG_MODE_FRESNEL_F0              30  // Fresnel at normal incidence
+#define DEBUG_MODE_FRESNEL                 31  // Fresnel at current angle
+#define DEBUG_MODE_BRDF                    32  // Full Cook-Torrance BRDF
+#define DEBUG_MODE_SPECULAR_D              33  // GGX distribution term
+#define DEBUG_MODE_SPECULAR_G              34  // Geometry/masking term
+
+// IBL (40-49)
+#define DEBUG_MODE_REFLECTION_DIR          40  // Reflection direction
+#define DEBUG_MODE_PREFILTERED_ENV         41  // Prefiltered environment sample
+#define DEBUG_MODE_BRDF_LUT                42  // BRDF LUT sample
+#define DEBUG_MODE_IBL_SPECULAR            43  // IBL specular contribution
+#define DEBUG_MODE_SKY_AMBIENT             44  // Sky ambient contribution
+
+// Spectral (50-59)
+#define DEBUG_MODE_XYZ                     50  // CIE XYZ tristimulus values
+#define DEBUG_MODE_BEFORE_CHROMA           51  // RGB before chromaticity correction
+#define DEBUG_MODE_SPECTRAL_REFL           52  // Spectral reflectance at 550nm
+
+// IR (60-69)
+#define DEBUG_MODE_TEMPERATURE             60  // Surface temperature (colormap)
+#define DEBUG_MODE_IR_EMISSIVITY           61  // IR emissivity
+#define DEBUG_MODE_IR_EMISSION             62  // Thermal emission component
+#define DEBUG_MODE_IR_REFLECTION           63  // IR reflection component
+
+// ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline
@@ -411,6 +469,7 @@ struct LightingParams {
 // ============================================================================
 // Camera parameters for ray generation
 // Must match CPU-side CameraData structure in Camera.hpp
+// Size: 80 bytes (16-byte aligned)
 // ============================================================================
 
 struct CameraData {
@@ -422,6 +481,8 @@ struct CameraData {
     float  wavelength_nm;  // Current wavelength (nanometers) for spectral rendering
     float3 up;             // Up vector (normalized)
     uint   spectral_mode;  // Spectral rendering mode (see SPECTRAL_MODE_* defines)
+    uint   debug_mode;     // Debug visualization mode (see DEBUG_MODE_* defines)
+    uint   _padding[3];    // Padding for 16-byte alignment
 };
 
 // ============================================================================
@@ -650,5 +711,59 @@ struct AtmosphericParams {
 
     uint   _padding;                 // Padding for 16-byte alignment
 };
+
+// ============================================================================
+// Debug Visualization Helper Functions
+// ============================================================================
+
+// Hash integer to RGB color (for MaterialID, TriangleID visualization)
+// Uses simple integer hash and converts to visually distinct colors
+float3 HashToColor(uint id) {
+    // Simple integer hash (similar to Wang hash but simpler)
+    uint hash = id;
+    hash = (hash ^ 61) ^ (hash >> 16);
+    hash = hash * 9;
+    hash = hash ^ (hash >> 4);
+    hash = hash * 0x27d4eb2d;
+    hash = hash ^ (hash >> 15);
+
+    // Convert hash to RGB (use different bits for each channel)
+    float r = float((hash >> 0) & 0xFF) / 255.0;
+    float g = float((hash >> 8) & 0xFF) / 255.0;
+    float b = float((hash >> 16) & 0xFF) / 255.0;
+
+    // Boost saturation for better visibility
+    float3 color = float3(r, g, b);
+    float gray = dot(color, float3(0.299, 0.587, 0.114));
+    return lerp(float3(gray, gray, gray), color, 1.5);
+}
+
+// Temperature to color (simple hot-cold colormap)
+// Maps temperature from minT to maxT into blue->cyan->green->yellow->red
+float3 TemperatureToColor(float temp, float minT, float maxT) {
+    float t = saturate((temp - minT) / (maxT - minT));
+
+    // Simple rainbow colormap: blue -> cyan -> green -> yellow -> red
+    float3 color;
+    if (t < 0.25) {
+        // Blue to Cyan
+        float s = t / 0.25;
+        color = lerp(float3(0.0, 0.0, 1.0), float3(0.0, 1.0, 1.0), s);
+    } else if (t < 0.5) {
+        // Cyan to Green
+        float s = (t - 0.25) / 0.25;
+        color = lerp(float3(0.0, 1.0, 1.0), float3(0.0, 1.0, 0.0), s);
+    } else if (t < 0.75) {
+        // Green to Yellow
+        float s = (t - 0.5) / 0.25;
+        color = lerp(float3(0.0, 1.0, 0.0), float3(1.0, 1.0, 0.0), s);
+    } else {
+        // Yellow to Red
+        float s = (t - 0.75) / 0.25;
+        color = lerp(float3(1.0, 1.0, 0.0), float3(1.0, 0.0, 0.0), s);
+    }
+
+    return color;
+}
 
 #endif // QUANTILOOM_COMMON_HLSLI

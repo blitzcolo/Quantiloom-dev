@@ -92,6 +92,82 @@ enum class SpectralMode : u32 {
 };
 
 // ============================================================================
+// Debug Visualization Modes
+// ============================================================================
+/**
+ * @enum DebugVisualizationMode
+ * @brief Shader debug visualization modes for rendering pipeline debugging
+ *
+ * Enables visualization of intermediate rendering data for debugging:
+ * - Geometry: normals, UVs, positions, material IDs
+ * - Material: albedo, metallic, roughness, emissive
+ * - Lighting: NdotL, NdotV, direct sun, diffuse
+ * - BRDF: Fresnel F0, full BRDF evaluation
+ * - IBL: prefiltered env, BRDF LUT, specular
+ * - Spectral: XYZ tristimulus, pre-correction RGB
+ * - IR: temperature, emissivity, emission/reflection
+ *
+ * Values are grouped by category (1-9: geometry, 10-19: material, etc.)
+ * for easy navigation and future expansion.
+ *
+ * @note CRITICAL: Must match shader defines in common.hlsli exactly!
+ * @note Set via CameraData.debug_mode, 0 = normal rendering
+ */
+enum class DebugVisualizationMode : u32 {
+    None = 0,              // Normal rendering (no debug output)
+
+    // Geometry (1-9)
+    WorldPosition = 1,     // Hit point world coordinates (frac for visibility)
+    GeometricNormal = 2,   // Raw geometric normal (before normal map)
+    ShadedNormal = 3,      // Final shaded normal (with normal map applied)
+    Tangent = 4,           // Tangent vector
+    UV = 5,                // Texture coordinates (U, V, 0)
+    MaterialID = 6,        // Material index (hashed to color)
+    TriangleID = 7,        // Triangle index (hashed to color)
+    Barycentric = 8,       // Barycentric coordinates (b0, b1, b2)
+
+    // Material (10-19)
+    BaseColor = 10,        // Albedo RGB (texture × factor)
+    Metallic = 11,         // Metallic factor (grayscale)
+    Roughness = 12,        // Roughness factor (grayscale)
+    NormalMapDelta = 13,   // Normal map contribution (dx, dy, 0.5)
+    Emissive = 14,         // Emissive RGB (HDR)
+    Alpha = 15,            // Alpha channel (grayscale)
+
+    // Lighting (20-29)
+    NdotL = 20,            // Dot(Normal, LightDir) (grayscale)
+    NdotV = 21,            // Dot(Normal, ViewDir) (grayscale)
+    DirectSun = 22,        // Direct sun lighting contribution
+    Diffuse = 23,          // Diffuse component (kD × albedo)
+    AtmosphericTransmittance = 24, // Atmospheric transmittance (grayscale)
+
+    // BRDF (30-39)
+    FresnelF0 = 30,        // Fresnel at normal incidence (F0)
+    Fresnel = 31,          // Fresnel at current angle
+    BRDF_Full = 32,        // Full Cook-Torrance BRDF evaluation
+    SpecularD = 33,        // GGX distribution term D
+    SpecularG = 34,        // Geometry/masking term G
+
+    // IBL (40-49)
+    ReflectionDir = 40,    // Reflection direction vector
+    PrefilteredEnv = 41,   // Prefiltered environment map sample
+    BrdfLut = 42,          // BRDF LUT sample (scale, bias, 0)
+    IblSpecular = 43,      // IBL specular contribution
+    SkyAmbient = 44,       // Sky ambient/diffuse contribution
+
+    // Spectral (50-59)
+    XYZ_Tristimulus = 50,  // CIE XYZ tristimulus values (before matrix)
+    BeforeChromaCorrection = 51, // RGB before chromaticity correction
+    SpectralReflectance550 = 52, // Spectral reflectance at 550nm
+
+    // IR (60-69)
+    Temperature = 60,      // Surface temperature (colormap)
+    IREmissivity = 61,     // IR emissivity (grayscale)
+    IREmission = 62,       // Thermal emission component
+    IRReflection = 63,     // IR reflection component
+};
+
+// ============================================================================
 // String Types
 // ============================================================================
 using String = std::string;

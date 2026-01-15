@@ -195,6 +195,7 @@ struct ExternalRenderContext::Impl {
 
     // Rendering state
     SpectralMode spectralMode = SpectralMode::RGB;  // Default: Fast RGB mode
+    DebugVisualizationMode debugMode = DebugVisualizationMode::None;  // Debug visualization mode
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
     LightingParams lightingParams;
@@ -206,6 +207,9 @@ struct ExternalRenderContext::Impl {
     // Statistics
     f32 lastFrameTimeMs = 0.0f;
     std::chrono::steady_clock::time_point frameStartTime;
+
+    // Pixel readback buffer (for debug hover display)
+    std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
 
     // Ready flag
     bool isReady = false;
@@ -248,6 +252,7 @@ struct ExternalRenderContext::Impl {
         materialBuffer.reset();
         lightingParamsBuffer.reset();
         outputImage.reset();
+        pixelReadbackBuffer.reset();
 
         tlas.reset();
         blasList.clear();
@@ -547,6 +552,7 @@ void ExternalRenderContext::RenderFrame(
     CameraData cameraData = m_impl->camera.GetCameraData();
     cameraData.wavelength_nm = m_impl->wavelength_nm;
     cameraData.spectral_mode = static_cast<u32>(m_impl->spectralMode);
+    cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
     m_impl->pipeline->SetCameraData(cameraData);
 
     // Set sampling parameters
@@ -784,6 +790,21 @@ u32 ExternalRenderContext::GetSPP() const {
 }
 
 // ============================================================================
+// Debug Visualization
+// ============================================================================
+
+void ExternalRenderContext::SetDebugMode(DebugVisualizationMode mode) {
+    if (m_impl->debugMode != mode) {
+        m_impl->debugMode = mode;
+        ResetAccumulation();  // Reset accumulation when debug mode changes
+    }
+}
+
+DebugVisualizationMode ExternalRenderContext::GetDebugMode() const {
+    return m_impl->debugMode;
+}
+
+// ============================================================================
 // Lighting Parameters
 // ============================================================================
 
@@ -925,6 +946,134 @@ f32 ExternalRenderContext::GetLastFrameTimeMs() const {
 
 bool ExternalRenderContext::IsReady() const {
     return m_impl->isReady;
+}
+
+Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
+    // Validate bounds
+    if (x >= m_impl->width || y >= m_impl->height) {
+        return Result<glm::vec4, String>::Err("Pixel coordinates out of bounds");
+    }
+
+    if (!m_impl->isReady || !m_impl->outputImage) {
+        return Result<glm::vec4, String>::Err("Render context not ready");
+    }
+
+    // Create staging buffer if not exists (16 bytes = sizeof(float4))
+    if (!m_impl->pixelReadbackBuffer) {
+        m_impl->pixelReadbackBuffer = std::make_unique<GpuBuffer>(
+            m_impl->contextAdapter->GetAllocator(),
+            16,  // sizeof(float) * 4
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_TO_CPU  // CPU-readable staging buffer
+        );
+    }
+
+    // Allocate command buffer for copy operation
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.commandPool = m_impl->commandPool;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd;
+    if (vkAllocateCommandBuffers(m_impl->device, &allocInfo, &cmd) != VK_SUCCESS) {
+        return Result<glm::vec4, String>::Err("Failed to allocate command buffer");
+    }
+
+    // Begin command buffer
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(cmd, &beginInfo);
+
+    // Transition outputImage to TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;  // outputImage is kept in GENERAL
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = m_impl->outputImage->GetImage();
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &barrier
+    );
+
+    // Copy single pixel to staging buffer
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = 0;    // Tightly packed
+    region.bufferImageHeight = 0;  // Tightly packed
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = {static_cast<i32>(x), static_cast<i32>(y), 0};
+    region.imageExtent = {1, 1, 1};  // Single pixel
+
+    vkCmdCopyImageToBuffer(
+        cmd,
+        m_impl->outputImage->GetImage(),
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        m_impl->pixelReadbackBuffer->GetHandle(),
+        1, &region
+    );
+
+    // Transition outputImage back to GENERAL
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        0,
+        0, nullptr,
+        0, nullptr,
+        1, &barrier
+    );
+
+    // End and submit command buffer
+    vkEndCommandBuffer(cmd);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmd;
+
+    vkQueueSubmit(m_impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(m_impl->graphicsQueue);  // Wait for copy to complete
+
+    // Free command buffer
+    vkFreeCommandBuffers(m_impl->device, m_impl->commandPool, 1, &cmd);
+
+    // Map staging buffer and read pixel value
+    void* mappedData = m_impl->pixelReadbackBuffer->Map();
+    if (mappedData == nullptr) {
+        return Result<glm::vec4, String>::Err("Failed to map pixel readback buffer");
+    }
+
+    f32* pixelData = static_cast<f32*>(mappedData);
+    glm::vec4 result(pixelData[0], pixelData[1], pixelData[2], pixelData[3]);
+
+    m_impl->pixelReadbackBuffer->Unmap();
+
+    return result;
 }
 
 // ============================================================================

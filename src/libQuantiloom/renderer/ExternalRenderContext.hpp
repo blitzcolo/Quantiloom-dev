@@ -309,6 +309,32 @@ public:
     [[nodiscard]] u32 GetSPP() const;
 
     // ========================================================================
+    // Debug Visualization
+    // ========================================================================
+
+    /**
+     * @brief Set debug visualization mode
+     * @param mode Debug mode (None for normal rendering)
+     *
+     * Enables visualization of intermediate rendering data for debugging:
+     * - Geometry: normals, UVs, positions, material IDs
+     * - Material: albedo, metallic, roughness, emissive
+     * - Lighting: NdotL, NdotV, direct sun, diffuse
+     * - BRDF: Fresnel F0, full BRDF evaluation
+     * - IBL: prefiltered env, BRDF LUT, specular
+     * - Spectral: XYZ tristimulus, pre-correction RGB
+     * - IR: temperature, emissivity, emission/reflection
+     *
+     * @note Resets accumulation when mode changes
+     */
+    void SetDebugMode(DebugVisualizationMode mode);
+
+    /**
+     * @brief Get current debug visualization mode
+     */
+    [[nodiscard]] DebugVisualizationMode GetDebugMode() const;
+
+    // ========================================================================
     // Lighting Parameters
     // ========================================================================
 
@@ -399,6 +425,28 @@ public:
      * @brief Check if context is ready for rendering
      */
     [[nodiscard]] bool IsReady() const;
+
+    // ========================================================================
+    // Debug Pixel Reading
+    // ========================================================================
+
+    /**
+     * @brief Read raw pixel value from render output
+     *
+     * Reads the raw float4 value from the outputImage at the specified
+     * pixel position. This is useful for debug visualization to show
+     * the actual rendered values (before swapchain format conversion).
+     *
+     * @param x X coordinate (pixels, 0 = left)
+     * @param y Y coordinate (pixels, 0 = top)
+     * @return Raw float4 value from outputImage, or error if out of bounds
+     *
+     * @note Call this AFTER RenderFrame to get meaningful results
+     * @note The returned value is the mapped debug output, use inverse
+     *       mapping to recover original values (e.g., for normals:
+     *       original = (output - 0.5) * 2)
+     */
+    [[nodiscard]] Result<glm::vec4, String> ReadPixelValue(u32 x, u32 y);
 
 private:
     // Private constructor - use Create() factory method

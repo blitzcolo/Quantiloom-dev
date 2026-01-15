@@ -39,9 +39,11 @@ namespace quantiloom {
  * - FOV scale (tan(fovY/2)) for ray direction calculation
  * - Aspect ratio for x/y scaling
  * - Wavelength and spectral mode for spectral rendering
+ * - Debug mode for pipeline visualization
  *
  * @note MUST match shader definition in common.hlsli exactly
  * @note Used in push constants or uniform buffers
+ * @note Size: 80 bytes (16-byte aligned for GPU)
  */
 struct CameraData {
     glm::vec3 origin;        // Camera position (world space)
@@ -52,6 +54,8 @@ struct CameraData {
     f32 wavelength_nm;       // Current wavelength (nanometers) for spectral rendering
     glm::vec3 up;            // Up vector (normalized)
     u32 spectral_mode;       // Spectral rendering mode (see SpectralMode enum)
+    u32 debug_mode;          // Debug visualization mode (see DebugVisualizationMode enum)
+    u32 _padding[3];         // Padding for 16-byte alignment (total: 80 bytes)
 };
 
 /**

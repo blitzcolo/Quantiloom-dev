@@ -9,6 +9,7 @@
 #include "common.hlsli"
 #include "pbr.hlsli"
 #include "atmospheric.hlsli"
+#include "SpectralConversion.hlsli"
 
 // ============================================================================
 // Bindings
@@ -143,19 +144,63 @@ void main(inout Payload payload) {
         payload.radiance = lut.skyRadiance_rgb;
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
-        // VIS_FUSED mode: Use full RGB sky radiance (consistent with closesthit)
-        // When closesthit uses ConvertLinearRGBToSpectrum for illumination,
-        // miss shader should return the same RGB sky for consistency
-        if (hasSpectralSolarLUT) {
-            // For miss shader with spectral LUT, use average sky radiance
-            // Use center of visible spectrum (550nm) as representative
-            float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], 550.0);
-            float sky_radiance = sky_irr / PI;  // Convert irradiance to radiance (diffuse hemisphere)
-            payload.radiance = float3(sky_radiance, sky_radiance, sky_radiance);
-        } else {
-            // Fallback: Use LightingParams RGB values
-            payload.radiance = lut.skyRadiance_rgb;
+        // ================================================================
+        // VIS_FUSED mode: 32-wavelength spectral integration
+        // ================================================================
+        // Consistent with closesthit.rchit VIS_FUSED implementation:
+        //   1. Sample 32 wavelengths uniformly across visible spectrum (380-780nm)
+        //   2. Query spectral sky radiance at each wavelength
+        //   3. Integrate via CIE XYZ color matching functions
+        //   4. Convert XYZ → Linear RGB (sRGB D65)
+        //   5. Apply chromaticity correction
+        //
+        // This ensures sky background color matches object reflections,
+        // eliminating the "color discontinuity" issue.
+        // ================================================================
+
+        const uint   NUM_WAVELENGTH_SAMPLES = 32;
+        const float  LAMBDA_MIN_VIS = 380.0;
+        const float  LAMBDA_MAX_VIS = 780.0;
+        const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
+
+        float3 XYZ_accum = float3(0.0, 0.0, 0.0);
+
+        for (uint i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i) {
+            float lambda = LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP;
+
+            // Query sky radiance at this wavelength
+            float sky_radiance_lambda;
+            if (hasSpectralSolarLUT) {
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
+                sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
+            }
+
+            // Weight by CIE color matching functions
+            float x_bar = CIE_X(lambda);
+            float y_bar = CIE_Y(lambda);
+            float z_bar = CIE_Z(lambda);
+
+            // Riemann sum: XYZ += L(λ) × CMF(λ) × Δλ
+            XYZ_accum.x += sky_radiance_lambda * x_bar * LAMBDA_STEP;
+            XYZ_accum.y += sky_radiance_lambda * y_bar * LAMBDA_STEP;
+            XYZ_accum.z += sky_radiance_lambda * z_bar * LAMBDA_STEP;
         }
+
+        // XYZ → Linear RGB (sRGB D65)
+        payload.radiance = ConvertXYZToLinearRGB(XYZ_accum);
+
+        // Apply chromaticity correction (consistent with closesthit)
+        payload.radiance.r *= lut.chromaR_correction;
+        payload.radiance.b *= lut.chromaB_correction;
+
+        // Validation
+        if (!isfinite(payload.radiance.r) || !isfinite(payload.radiance.g) || !isfinite(payload.radiance.b)) {
+            payload.radiance = float3(0.0, 0.0, 0.0);
+        }
+        payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
         // Single wavelength mode: Query spectral sky at current wavelength
