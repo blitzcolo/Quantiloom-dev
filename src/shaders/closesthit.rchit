@@ -569,9 +569,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Clamp to [0, 1] to prevent numerical issues
     atmosphericTransmittance = clamp(atmosphericTransmittance, 0.0, 1.0);
 
-    // Apply transmittance to sun radiance (direct lighting attenuated by atmosphere)
+    // Apply transmittance to sun radiance for RGB mode only
+    // VIS_FUSED mode computes wavelength-dependent transmittance inside the spectral loop
     // Sky radiance is NOT attenuated (it's already the result of atmospheric scattering)
-    sunRadiance *= atmosphericTransmittance;
+    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+        sunRadiance *= atmosphericTransmittance;
+    }
+    // Note: For VIS_FUSED, transmittance is applied per-wavelength in the loop below
 
     // ========================================================================
     // PBR Shading
@@ -783,11 +787,38 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // For sky dome, we assume uniform sky approximation: L_sky ≈ E_sky / π
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // CORRECTED FALLBACK: Convert RGB to colored spectrum (not flat!)
-                // This preserves the color information of the light source
-                sun_radiance_lambda = ConvertLinearRGBToSpectrum(lut.sunRadiance_rgb, lambda);
-                sky_radiance_lambda = ConvertLinearRGBToSpectrum(lut.skyRadiance_rgb, lambda);
+                // CORRECTED FALLBACK: Convert RGB to colored illuminant spectrum
+                // Use illuminant function (no clamp) instead of reflectance function (clamped to 1.5)
+                // This preserves HDR intensity of light sources
+                sun_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.sunRadiance_rgb, lambda);
+                sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
             }
+
+            // ================================================================
+            // Wavelength-Dependent Atmospheric Transmittance (Fix 3)
+            // ================================================================
+            // Rayleigh scattering: β(λ) ∝ λ^-4 (strong wavelength dependence)
+            // Mie scattering: β(λ) ∝ λ^-α where α ≈ 0.84 (weaker dependence)
+            //
+            // This causes blue light (400nm) to be scattered ~9x more than red (700nm),
+            // producing the familiar reddening of distant objects and sunset colors.
+            // ================================================================
+            float transmittance_lambda = 1.0;
+            if (atmo.beta_rayleigh_550nm.x > 1e-9) {
+                // Physical mode: compute wavelength-dependent extinction
+                float beta_r = RayleighScatteringCoeff_Scalar(lambda, atmo.beta_rayleigh_550nm.x);
+                float beta_m = MieScatteringCoeff_Scalar(lambda, atmo.beta_mie_550nm.x, atmo.mie_alpha);
+                float extinction_lambda = beta_r + beta_m;
+                transmittance_lambda = exp(-extinction_lambda * pathLength_m);
+            } else {
+                // LUT fallback: use pre-computed scalar transmittance (wavelength-independent)
+                transmittance_lambda = atmosphericTransmittance;
+            }
+            transmittance_lambda = clamp(transmittance_lambda, 0.0, 1.0);
+
+            // Apply wavelength-dependent transmittance to direct sunlight
+            // Note: sky_radiance is already scattered light, don't attenuate twice
+            sun_radiance_lambda *= transmittance_lambda;
 
             // 1. Get spectral reflectance at this wavelength
             float rho_lambda;
@@ -811,14 +842,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 4. Emissive contribution (spectrally integrated)
             // Convert emissive RGB to spectral radiance at this wavelength
-            // This ensures proper color reproduction for self-luminous surfaces
-            float L_emissive = ConvertLinearRGBToSpectrum(emissive, lambda);
+            // Use illuminant function (no clamp) to preserve HDR emissive intensity
+            float L_emissive = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda);
 
             // 5. IBL specular contribution (spectrally integrated)
             // Convert prefiltered environment RGB to spectrum at this wavelength
+            // Use illuminant function (no clamp) to preserve HDR environment intensity
             float L_ibl = 0.0;
             if (useIBL) {
-                float ibl_spectrum = ConvertLinearRGBToSpectrum(prefilteredColor, lambda);
+                float ibl_spectrum = ConvertLinearRGBToIlluminantSpectrum(prefilteredColor, lambda);
                 L_ibl = ibl_spectrum * (F0_scalar * envBRDF.x + envBRDF.y);
             }
 

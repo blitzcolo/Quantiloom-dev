@@ -529,6 +529,75 @@ float3 ConvertSRGBToLinearRGB_Fast(float3 srgb) {
 }
 
 // ============================================================================
+// RGB → Illuminant Spectrum (For Light Sources, NOT Reflectance)
+// ============================================================================
+// CRITICAL: This function is for light sources (sun, sky, emissive, IBL).
+// Unlike ConvertLinearRGBToSpectrum() which is for reflectance (clamped to 1.5),
+// this function preserves HDR values without clamping.
+//
+// DIFFERENCES FROM REFLECTANCE VERSION:
+//   1. No per-wavelength normalization (not needed for light sources)
+//   2. No 1.5 clamp (HDR light sources can have arbitrary intensity)
+//   3. Simple Gaussian basis weighted sum (preserves color and intensity)
+//
+// PHYSICAL JUSTIFICATION:
+//   For reflectance: R(λ) ∈ [0, 1] by definition (energy conservation)
+//   For light sources: L(λ) can be arbitrary positive value (HDR)
+//
+// USAGE:
+//   - Sun radiance:  ConvertLinearRGBToIlluminantSpectrum(sunRadiance_rgb, lambda)
+//   - Sky radiance:  ConvertLinearRGBToIlluminantSpectrum(skyRadiance_rgb, lambda)
+//   - Emissive:      ConvertLinearRGBToIlluminantSpectrum(emissiveFactor, lambda)
+//   - IBL:           ConvertLinearRGBToIlluminantSpectrum(prefilteredColor, lambda)
+//
+// DO NOT USE FOR:
+//   - Material base color (use ConvertLinearRGBToSpectrum instead)
+//   - Albedo textures (use ConvertLinearRGBToSpectrum instead)
+// ============================================================================
+
+float ConvertLinearRGBToIlluminantSpectrum(float3 rgb_linear, float lambda) {
+    // Clamp to [0, inf) - allow HDR but not negative (non-physical)
+    rgb_linear = max(rgb_linear, 0.0);
+
+    // Primary wavelengths matching sRGB primaries
+    const float LAMBDA_RED   = 630.0;
+    const float LAMBDA_GREEN = 532.0;
+    const float LAMBDA_BLUE  = 467.0;
+    const float SIGMA = 50.0;  // Fixed width for light sources
+
+    // Compute Gaussian basis functions
+    float basis_R = SpectralBasisImproved(lambda, LAMBDA_RED, SIGMA);
+    float basis_G = SpectralBasisImproved(lambda, LAMBDA_GREEN, SIGMA);
+    float basis_B = SpectralBasisImproved(lambda, LAMBDA_BLUE, SIGMA);
+
+    // Weighted sum
+    float L_lambda = rgb_linear.r * basis_R +
+                     rgb_linear.g * basis_G +
+                     rgb_linear.b * basis_B;
+
+    // ================================================================
+    // CRITICAL: Per-wavelength normalization for color accuracy
+    // ================================================================
+    // This ensures gray (1,1,1) → flat spectrum (1.0 at all wavelengths)
+    // Without normalization, gray produces non-flat spectrum which causes
+    // XYZ integration to produce Y >> X, leading to negative R after
+    // XYZ→RGB conversion → cyan (0, G, B) output!
+    //
+    // The key difference from ConvertLinearRGBToSpectrum():
+    //   - We normalize for color accuracy (same as reflectance version)
+    //   - But we DO NOT clamp to 1.5 (allow full HDR for light sources)
+    // ================================================================
+    float white_at_lambda = basis_R + basis_G + basis_B;
+    white_at_lambda = max(white_at_lambda, 0.001);
+
+    float normalized = L_lambda / white_at_lambda;
+
+    // NO CLAMP - allow full HDR range for light sources
+    // Only prevent negative values (non-physical)
+    return max(normalized, 0.0);
+}
+
+// ============================================================================
 // Helper: Wavelength-dependent reflectance from RGB texture
 // ============================================================================
 // Convenience function that combines:
