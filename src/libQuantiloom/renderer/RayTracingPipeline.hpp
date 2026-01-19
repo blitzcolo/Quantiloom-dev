@@ -370,6 +370,10 @@ private:
     // Ray Tracing properties (cached from context)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
 
+    // Dynamic texture limit (based on device capabilities)
+    // 1024 if descriptor indexing available, 32 otherwise
+    u32 m_maxTextures = 1024;
+
     // Push constants (camera + sampling parameters)
     PushConstantsRayGen m_pushConstants{};
 };

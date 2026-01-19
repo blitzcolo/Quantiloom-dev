@@ -175,6 +175,18 @@ public:
         return m_rtPipelineProperties;
     }
 
+    // Device capability flags (runtime feature detection)
+    struct DeviceCapabilities {
+        bool hasVulkan13 = false;                // VK 1.3 API support
+        bool hasSynchronization2 = false;        // synchronization2 feature (VK 1.3)
+        bool hasDynamicRendering = false;        // dynamicRendering feature (VK 1.3)
+        bool hasDescriptorIndexing = false;      // Full descriptor indexing (VK 1.2)
+        bool hasRayTracing = false;              // RT pipeline + AS support
+    };
+
+    // Get device capabilities
+    [[nodiscard]] const DeviceCapabilities& GetCapabilities() const { return m_capabilities; }
+
 private:
     // ========================================================================
     // Initialization Steps
@@ -220,6 +232,9 @@ private:
     // Ray Tracing properties (if supported)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtPipelineProperties{};
     VkPhysicalDeviceAccelerationStructurePropertiesKHR m_asProperties{};
+
+    // Device capabilities (runtime feature detection)
+    DeviceCapabilities m_capabilities{};
 
     VmaAllocator m_allocator = VK_NULL_HANDLE;  // Last created, first destroyed
 

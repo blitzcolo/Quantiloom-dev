@@ -98,7 +98,9 @@ VulkanContext::VulkanContext(const ExternalHandles& handles, bool createAllocato
         vulkanFunctions.vkGetDeviceProcAddr = &vkGetDeviceProcAddr;
 
         VmaAllocatorCreateInfo allocatorInfo{};
-        allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+        // Use VK 1.3 if available, otherwise VK 1.2
+        u32 apiVersion = m_capabilities.hasVulkan13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
+        allocatorInfo.vulkanApiVersion = apiVersion;
         allocatorInfo.instance = m_instance;
         allocatorInfo.physicalDevice = m_physicalDevice;
         allocatorInfo.device = m_device;
@@ -173,7 +175,7 @@ void VulkanContext::CreateInstance() {
     appInfo.applicationVersion = VK_MAKE_VERSION(0, 0, 1);
     appInfo.pEngineName = "Quantiloom HS-core";
     appInfo.engineVersion = VK_MAKE_VERSION(0, 0, 1);
-    appInfo.apiVersion = VK_API_VERSION_1_3;  // Vulkan 1.3 for ray tracing
+    appInfo.apiVersion = VK_API_VERSION_1_2;  // Vulkan 1.2 minimum (RT extensions available)
 
     const auto extensions = GetRequiredInstanceExtensions();
     const auto layers = GetRequiredValidationLayers();
@@ -190,7 +192,7 @@ void VulkanContext::CreateInstance() {
         throw std::runtime_error("Failed to create Vulkan instance");
     }
 
-    QL_LOG_INFO("Vulkan instance created (API version 1.3)");
+    QL_LOG_INFO("Vulkan instance created (API version 1.2+)");
 }
 
 // ============================================================================
@@ -267,6 +269,47 @@ void VulkanContext::SelectPhysicalDevice() {
             m_asProperties.pNext = nullptr;
             m_rtPipelineProperties.pNext = nullptr;
 
+            // ========================================================================
+            // Detect Device Capabilities (Runtime Feature Detection)
+            // ========================================================================
+
+            m_capabilities.hasRayTracing = true;  // Already validated in IsDeviceSuitable()
+
+            // Check Vulkan 1.3 support
+            if (m_deviceProperties.apiVersion >= VK_API_VERSION_1_3) {
+                m_capabilities.hasVulkan13 = true;
+
+                // Query VK 1.3 features availability
+                VkPhysicalDeviceVulkan13Features features13{};
+                features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
+                VkPhysicalDeviceFeatures2 features2{};
+                features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+                features2.pNext = &features13;
+
+                vkGetPhysicalDeviceFeatures2(m_physicalDevice, &features2);
+
+                m_capabilities.hasSynchronization2 = features13.synchronization2;
+                m_capabilities.hasDynamicRendering = features13.dynamicRendering;
+            }
+
+            // Query VK 1.2 descriptor indexing features
+            VkPhysicalDeviceVulkan12Features features12{};
+            features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &features12;
+
+            vkGetPhysicalDeviceFeatures2(m_physicalDevice, &features2);
+
+            // Descriptor indexing requires ALL 4 sub-features for full bindless support
+            m_capabilities.hasDescriptorIndexing =
+                features12.descriptorIndexing &&
+                features12.runtimeDescriptorArray &&
+                features12.descriptorBindingPartiallyBound &&
+                features12.shaderSampledImageArrayNonUniformIndexing;
+
             // Log detailed info
             QL_LOG_INFO("========================================");
             QL_LOG_INFO("Selected GPU: {}", m_deviceProperties.deviceName);
@@ -282,6 +325,11 @@ void VulkanContext::SelectPhysicalDevice() {
             QL_LOG_INFO("  Max recursion depth: {}", m_rtPipelineProperties.maxRayRecursionDepth);
             QL_LOG_INFO("  Shader group handle size: {}", m_rtPipelineProperties.shaderGroupHandleSize);
             QL_LOG_INFO("  Max geometry count: {}", m_asProperties.maxGeometryCount);
+            QL_LOG_INFO("Device Capabilities:");
+            QL_LOG_INFO("  Vulkan 1.3: {}", m_capabilities.hasVulkan13 ? "YES" : "NO");
+            QL_LOG_INFO("  Descriptor Indexing: {}", m_capabilities.hasDescriptorIndexing ? "YES" : "NO");
+            QL_LOG_INFO("  Synchronization2: {}", m_capabilities.hasSynchronization2 ? "YES" : "NO");
+            QL_LOG_INFO("  Dynamic Rendering: {}", m_capabilities.hasDynamicRendering ? "YES" : "NO");
             QL_LOG_INFO("========================================");
 
             return;
@@ -291,15 +339,16 @@ void VulkanContext::SelectPhysicalDevice() {
     // No suitable device found - provide helpful error message
     std::string errorMsg =
         "No GPU with Ray Tracing support found.\n\n"
-        "Quantiloom requires a GPU with the following:\n"
-        "  - Vulkan Ray Tracing (VK_KHR_ray_tracing_pipeline)\n"
-        "  - Acceleration Structure (VK_KHR_acceleration_structure)\n"
-        "  - Vulkan 1.3 or newer\n\n"
+        "Quantiloom requires:\n"
+        "  - Vulkan 1.2 or newer (1.3+ recommended)\n"
+        "  - VK_KHR_ray_tracing_pipeline extension\n"
+        "  - VK_KHR_acceleration_structure extension\n"
+        "  - VK_KHR_buffer_device_address (VK 1.2 core feature)\n\n"
         "Supported GPUs:\n"
         "  - NVIDIA RTX 20xx series or newer (driver 450+)\n"
         "  - AMD RX 6000 series or newer (driver 21.10+)\n"
         "  - Intel Arc A-series (driver 30.0.100+)\n\n"
-        "Please update your GPU drivers or use a compatible GPU.";
+        "Note: Integrated GPUs (Intel Iris Xe, AMD Vega) typically do NOT support hardware RT.";
 
     throw std::runtime_error(errorMsg);
 }
@@ -335,21 +384,37 @@ void VulkanContext::CreateDevice() {
         VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
     };
 
-    // Enable Vulkan 1.3 features
+    // Enable Vulkan 1.3 features (conditional - only if device supports)
     VkPhysicalDeviceVulkan13Features features13{};
     features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    features13.synchronization2 = VK_TRUE;
-    features13.dynamicRendering = VK_TRUE;
 
-    // Enable Vulkan 1.2 features
+    // Conditionally enable VK 1.3 features if available
+    // NOTE: These are NOT currently used (ghost features), but enabled for future-proofing
+    if (m_capabilities.hasVulkan13) {
+        if (m_capabilities.hasSynchronization2) {
+            features13.synchronization2 = VK_TRUE;
+            QL_LOG_INFO("  Enabling synchronization2 (for future use)");
+        }
+        if (m_capabilities.hasDynamicRendering) {
+            features13.dynamicRendering = VK_TRUE;
+            QL_LOG_INFO("  Enabling dynamicRendering (for future use)");
+        }
+    }
+
+    // Enable Vulkan 1.2 features (MANDATORY)
     VkPhysicalDeviceVulkan12Features features12{};
     features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    features12.bufferDeviceAddress = VK_TRUE;
+    features12.bufferDeviceAddress = VK_TRUE;  // MANDATORY for RT
     features12.descriptorIndexing = VK_TRUE;
     features12.runtimeDescriptorArray = VK_TRUE;
     features12.descriptorBindingPartiallyBound = VK_TRUE;  // Required for PARTIALLY_BOUND_BIT
     features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;  // Required for NonUniformResourceIndex
     features12.pNext = &features13;
+
+    // Log warning if descriptor indexing not fully supported
+    if (!m_capabilities.hasDescriptorIndexing) {
+        QL_LOG_WARN("Descriptor indexing NOT fully supported - bindless texture limit reduced to 32");
+    }
 
     // Enable Ray Tracing features
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
@@ -405,7 +470,9 @@ void VulkanContext::CreateAllocator() {
     vulkanFunctions.vkGetDeviceProcAddr = &vkGetDeviceProcAddr;
 
     VmaAllocatorCreateInfo allocatorInfo{};
-    allocatorInfo.vulkanApiVersion = VK_API_VERSION_1_3;
+    // Use VK 1.3 if available, otherwise VK 1.2
+    u32 apiVersion = m_capabilities.hasVulkan13 ? VK_API_VERSION_1_3 : VK_API_VERSION_1_2;
+    allocatorInfo.vulkanApiVersion = apiVersion;
     allocatorInfo.instance = m_instance;
     allocatorInfo.physicalDevice = m_physicalDevice;
     allocatorInfo.device = m_device;
@@ -450,10 +517,25 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) {
     VkPhysicalDeviceProperties deviceProperties;
     vkGetPhysicalDeviceProperties(device, &deviceProperties);
 
-    // Require discrete GPU for performance (can be relaxed later)
-    if (deviceProperties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-        QL_LOG_WARN("  Skipping {}: Not a discrete GPU", deviceProperties.deviceName);
+    // Query Vulkan 1.2 features for validation
+    VkPhysicalDeviceVulkan12Features features12Query{};
+    features12Query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    VkPhysicalDeviceFeatures2 features2Query{};
+    features2Query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2Query.pNext = &features12Query;
+
+    vkGetPhysicalDeviceFeatures2(device, &features2Query);
+
+    // bufferDeviceAddress is MANDATORY for Ray Tracing (BLAS/TLAS addressing)
+    if (!features12Query.bufferDeviceAddress) {
+        QL_LOG_WARN("  Skipping {}: Missing bufferDeviceAddress (required for Ray Tracing)", deviceProperties.deviceName);
         return false;
+    }
+
+    // Warn about integrated GPU (not blocking, just informational)
+    if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
+        QL_LOG_WARN("  Integrated GPU detected: {} (may have reduced performance)", deviceProperties.deviceName);
     }
 
     // Check for graphics queue

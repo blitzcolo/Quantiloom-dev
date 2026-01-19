@@ -18,6 +18,17 @@
 namespace quantiloom {
 
 // ============================================================================
+// Helper: Get Maximum Texture Count
+// ============================================================================
+// Dynamic texture limit based on device capabilities
+// Returns 1024 if descriptor indexing available, 32 otherwise
+// ============================================================================
+
+static u32 GetMaxTexturesForDevice(const VulkanContext& ctx) {
+    return ctx.GetCapabilities().hasDescriptorIndexing ? 1024 : 32;
+}
+
+// ============================================================================
 // Pipeline Cache Static Methods
 // ============================================================================
 
@@ -158,6 +169,10 @@ RayTracingPipeline::RayTracingPipeline(
     // Cache RT properties
     m_rtProperties = m_context.GetRayTracingProperties();
 
+    // Initialize dynamic texture limit based on device capabilities
+    m_maxTextures = GetMaxTexturesForDevice(m_context);
+    QL_LOG_INFO("Texture limit: {} textures", m_maxTextures);
+
     // Create pipeline in order with exception safety
     try {
         CreateDescriptorSetLayout();
@@ -233,10 +248,8 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     VkDevice device = m_context.GetDevice();
 
     // Define bindings (matches shader layout)
-    // NOTE: Using fixed array size for textures (max 1024) for simplicity
-    // Can be made dynamic via VkDescriptorSetVariableDescriptorCountAllocateInfo in M2+
-    constexpr u32 MAX_TEXTURES = 1024;
-
+    // NOTE: Texture array size dynamically adjusted based on device capabilities
+    // 1024 if descriptor indexing available, 32 otherwise
     std::vector<VkDescriptorSetLayoutBinding> bindings(19);  // Added InstanceGeometryInfo (binding 18)
 
     // Binding 0: Output image (RWTexture2D)
@@ -283,16 +296,17 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
 
     // Binding 6: Texture array (Texture2D[])
     // Uses VK_EXT_descriptor_indexing for runtime array indexing
+    // Array size dynamic: 1024 if descriptor indexing available, 32 otherwise
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    bindings[6].descriptorCount = MAX_TEXTURES;
+    bindings[6].descriptorCount = m_maxTextures;
     bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[6].pImmutableSamplers = nullptr;
 
     // Binding 7: Sampler array (SamplerState[])
     bindings[7].binding = 7;
     bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-    bindings[7].descriptorCount = MAX_TEXTURES;
+    bindings[7].descriptorCount = m_maxTextures;
     bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[7].pImmutableSamplers = nullptr;
 
@@ -461,9 +475,9 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     poolSizes[2].descriptorCount = 12;  // LUT + vertex + index + material + UV + tangent + normal + spectral curves + CRI + solar LUT + atmospheric params + instance geometry info
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[3].descriptorCount = MAX_TEXTURES + 2;  // Texture array + prefiltered env + BRDF LUT
+    poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[4].descriptorCount = MAX_TEXTURES + 1;  // Sampler array + IBL sampler
+    poolSizes[4].descriptorCount = m_maxTextures + 1;  // Sampler array + IBL sampler
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1014,6 +1028,14 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     }
 
     u32 textureCount = static_cast<u32>(imageViews.size());
+
+    // Validate texture count against device capability limit
+    if (textureCount > m_maxTextures) {
+        QL_LOG_ERROR("Scene has {} textures, but device limit is {} - cannot render",
+                     textureCount, m_maxTextures);
+        throw std::runtime_error("Scene texture count exceeds device capability");
+    }
+
     QL_LOG_INFO("Binding {} textures to descriptor set", textureCount);
 
     // Build descriptor image info array for textures
