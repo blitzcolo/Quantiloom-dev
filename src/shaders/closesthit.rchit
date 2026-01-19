@@ -100,6 +100,23 @@
 [[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
 
 // ============================================================================
+// Instance Geometry Info Buffer (Binding 18)
+// ============================================================================
+// Per-TLAS-instance geometry offset information for multi-BLAS support.
+// When scene has multiple BLAS, each instance's geometry data is merged into
+// global buffers. This buffer tells us where each instance's data starts.
+//
+// USAGE:
+//   uint instIdx = InstanceIndex();
+//   InstanceGeometryInfo geo = instanceGeometryInfo[instIdx];
+//   uint idx = indexBuffer[geo.indexOffset + PrimitiveIndex() * 3 + i];
+//   float3 pos = vertexBuffer[geo.vertexOffset + idx];
+//   float3 nrm = normalBuffer[geo.normalOffset + idx];
+// ============================================================================
+
+[[vk::binding(18, 0)]] StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo;
+
+// ============================================================================
 // IBL (Image-Based Lighting) Resources
 // ============================================================================
 // Added for physically-based specular reflections on metallic surfaces
@@ -352,10 +369,18 @@ float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavele
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
-    // Fetch material properties
+    // Get instance geometry info for multi-BLAS support
+    // ========================================================================
+    // InstanceIndex() returns the TLAS instance index
+    // instanceGeometryInfo provides offsets into merged global geometry buffers
+    // This allows correct geometry access when scene has multiple BLAS
     // ========================================================================
 
-    uint materialID = InstanceID();
+    uint instanceIdx = InstanceIndex();
+    InstanceGeometryInfo geoInfo = instanceGeometryInfo[instanceIdx];
+
+    // Material ID is stored in InstanceGeometryInfo (not InstanceID anymore)
+    uint materialID = geoInfo.materialId;
     MaterialData material = materials[materialID];
 
     // ========================================================================
@@ -364,21 +389,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     uint primitiveID = PrimitiveIndex();
 
-    // Read triangle indices
-    uint idx0 = indexBuffer[primitiveID * 3 + 0];
-    uint idx1 = indexBuffer[primitiveID * 3 + 1];
-    uint idx2 = indexBuffer[primitiveID * 3 + 2];
+    // Read triangle indices with offset into global index buffer
+    uint idx0 = indexBuffer[geoInfo.indexOffset + primitiveID * 3 + 0];
+    uint idx1 = indexBuffer[geoInfo.indexOffset + primitiveID * 3 + 1];
+    uint idx2 = indexBuffer[geoInfo.indexOffset + primitiveID * 3 + 2];
 
-    // Read vertex positions
-    float3 v0 = vertexBuffer[idx0];
-    float3 v1 = vertexBuffer[idx1];
-    float3 v2 = vertexBuffer[idx2];
+    // Read vertex positions with offset into global vertex buffer
+    float3 v0 = vertexBuffer[geoInfo.vertexOffset + idx0];
+    float3 v1 = vertexBuffer[geoInfo.vertexOffset + idx1];
+    float3 v2 = vertexBuffer[geoInfo.vertexOffset + idx2];
 
-    // Read per-vertex normals and interpolate using barycentric coordinates
+    // Read per-vertex normals with offset into global normal buffer
     // This gives smooth shading (Gouraud/Phong) instead of flat shading
-    float3 n0 = normalBuffer[idx0];
-    float3 n1 = normalBuffer[idx1];
-    float3 n2 = normalBuffer[idx2];
+    float3 n0 = normalBuffer[geoInfo.normalOffset + idx0];
+    float3 n1 = normalBuffer[geoInfo.normalOffset + idx1];
+    float3 n2 = normalBuffer[geoInfo.normalOffset + idx2];
 
     // Barycentric interpolation: n = n0 * w0 + n1 * w1 + n2 * w2
     // where w0 = (1 - bary.x - bary.y), w1 = bary.x, w2 = bary.y
@@ -392,21 +417,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3x3 normalTransform = (float3x3)WorldToObject3x4();
     float3 worldNormal = SafeNormalize(mul(objectNormal, normalTransform), float3(0.0, 1.0, 0.0));
 
-    // UV coordinates: Use real UVs from buffer (interpolated with barycentrics)
+    // UV coordinates with offset into global UV buffer
     // Barycentric interpolation: uv = u0 * (1 - b1 - b2) + u1 * b1 + u2 * b2
-    float2 uv0 = uvBuffer[idx0];
-    float2 uv1 = uvBuffer[idx1];
-    float2 uv2 = uvBuffer[idx2];
+    float2 uv0 = uvBuffer[geoInfo.uvOffset + idx0];
+    float2 uv1 = uvBuffer[geoInfo.uvOffset + idx1];
+    float2 uv2 = uvBuffer[geoInfo.uvOffset + idx2];
     float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
 
-    // Read tangent from buffer (or fallback to fake tangent)
+    // Read tangent from buffer with offset (or fallback to fake tangent)
     float3 worldTangent;
     if (material.normalTextureIndex >= 0) {  // Only compute tangent if normal map is used
-        // TODO: Check if tangent buffer is bound (requires push constant or flag)
-        // For now, attempt to read from buffer and fall back to fake tangent if data is invalid
-        float4 tangent4_0 = tangentBuffer[idx0];
-        float4 tangent4_1 = tangentBuffer[idx1];
-        float4 tangent4_2 = tangentBuffer[idx2];
+        // Read tangents with offset into global tangent buffer
+        float4 tangent4_0 = tangentBuffer[geoInfo.tangentOffset + idx0];
+        float4 tangent4_1 = tangentBuffer[geoInfo.tangentOffset + idx1];
+        float4 tangent4_2 = tangentBuffer[geoInfo.tangentOffset + idx2];
 
         // Barycentric interpolation of tangents
         float4 tangent4 = tangent4_0 * (1.0 - attribs.bary.x - attribs.bary.y) +

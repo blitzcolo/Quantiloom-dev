@@ -24,13 +24,14 @@ environment_map = "D:/Quantiloom-dev/assets/maps/qwantani_noon_puresky_4k.exr"  
 # For quantitative results, provide measured spectral curves via [spectral_curves].
 # ============================================================================
 # Available modes:
-#   - "rgb_fused"    : RGB rendering with full color (preview quality)
+#   - "rgb"          : RGB rendering with full color (fast, default)
+#   - "vis_fused"    : Visible spectral integration (32-wavelength CIE XYZ)
 #   - "single"       : Single wavelength grayscale (PREVIEW ONLY, not quantitative)
 #   - "swir_fused"   : Short-wave IR fusion 1-2.5μm (PREVIEW ONLY, not quantitative)
 #   - "mwir_fused"   : Mid-wave IR fusion 3-5μm (PREVIEW ONLY, not quantitative)
 #   - "lwir_fused"   : Long-wave IR fusion 8-12μm (PREVIEW ONLY, not quantitative)
 # ============================================================================
-mode = "rgb_fused"                   # RGB mode for full color rendering
+mode = "rgb"                         # RGB mode for full color rendering
 #wavelength_nm = 550.0          # Target wavelength (nm) for single/IR modes
 
 # Available basis files:

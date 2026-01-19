@@ -713,6 +713,37 @@ struct AtmosphericParams {
 };
 
 // ============================================================================
+// Instance Geometry Info (Per-TLAS-Instance Offsets)
+// ============================================================================
+// Provides geometry buffer offsets for multi-BLAS support.
+// Each TLAS instance stores its offset into merged global geometry buffers.
+// Indexed by InstanceIndex() in closest hit shader.
+//
+// WHY NEEDED:
+// In a multi-BLAS scene, each BLAS has its own local vertex/index/normal buffers.
+// We merge all BLAS data into global buffers for efficient shader access.
+// InstanceGeometryInfo tells the shader where each instance's data starts.
+//
+// USAGE IN SHADER:
+//   uint instIdx = InstanceIndex();
+//   InstanceGeometryInfo geo = instanceGeometryInfo[instIdx];
+//   uint idx = indexBuffer[geo.indexOffset + PrimitiveIndex() * 3 + localVertexIdx];
+//   float3 v = vertexBuffer[geo.vertexOffset + idx];
+//
+// SIZE: 32 bytes (must match CPU-side InstanceGeometryInfo)
+// ============================================================================
+
+struct InstanceGeometryInfo {
+    uint vertexOffset;    // Offset into global vertex buffer (vertex count)
+    uint indexOffset;     // Offset into global index buffer (index count)
+    uint normalOffset;    // Offset into global normal buffer (normal count)
+    uint uvOffset;        // Offset into global UV buffer (UV count)
+    uint tangentOffset;   // Offset into global tangent buffer (tangent count)
+    uint materialId;      // Material index (used instead of InstanceID for material lookup)
+    uint pad[2];          // Padding for 32-byte alignment
+};
+
+// ============================================================================
 // Debug Visualization Helper Functions
 // ============================================================================
 

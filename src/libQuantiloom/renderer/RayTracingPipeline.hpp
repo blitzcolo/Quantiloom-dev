@@ -278,6 +278,17 @@ public:
     // Pass nullptr to disable Delta-Tracking
     void BindAtmosphericParams(const GpuBuffer* buffer) const;
 
+    // ========================================================================
+    // Instance Geometry Info Buffer (Binding 18)
+    // ========================================================================
+    // Bind per-instance geometry offset information for multi-BLAS support
+    // Each TLAS instance has its own offset into the merged global geometry buffers
+    // Structure: InstanceGeometryInfo (32 bytes) with vertex/index/normal/UV/tangent offsets
+    // ========================================================================
+
+    // Bind instance geometry info buffer (binding 18)
+    void BindInstanceGeometryBuffer(const GpuBuffer& buffer) const;
+
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
 
