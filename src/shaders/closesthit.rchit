@@ -141,7 +141,7 @@
 // ============================================================================
 
 struct HitAttributes {
-    float2 bary;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
+    [[vk::location(0)]] float2 bary : SV_Barycentrics;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
 };
 
 // ============================================================================
@@ -399,6 +399,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 v1 = vertexBuffer[geoInfo.vertexOffset + idx1];
     float3 v2 = vertexBuffer[geoInfo.vertexOffset + idx2];
 
+    // ========================================================================
+    // Compute TRUE geometric normal from triangle edges (flat normal)
+    // This is the actual surface normal, NOT the interpolated shading normal
+    // ========================================================================
+    float3 edge1 = v1 - v0;
+    float3 edge2 = v2 - v0;
+    float3 objectGeometricNormal = SafeNormalize(cross(edge1, edge2), float3(0.0, 1.0, 0.0));
+
+    // Transform geometric normal to world space using inverse-transpose
+    // mul(v, M) = v * M = transpose(M) * v, and we want transpose(inverse(ObjectToWorld)) * v
+    // WorldToObject = inverse(ObjectToWorld), so mul(v, WorldToObject) = transpose(WorldToObject) * v ✓
+    float3x3 normalTransform = (float3x3)WorldToObject3x4();
+    float3 worldGeometricNormal = SafeNormalize(mul(objectGeometricNormal, normalTransform), float3(0.0, 1.0, 0.0));
+
+    // Face forward: ensure geometric normal points toward camera (opposite to ray direction)
+    float3 rayDir = WorldRayDirection();
+    if (dot(worldGeometricNormal, rayDir) > 0.0) {
+        worldGeometricNormal = -worldGeometricNormal;
+    }
+
     // Read per-vertex normals with offset into global normal buffer
     // This gives smooth shading (Gouraud/Phong) instead of flat shading
     float3 n0 = normalBuffer[geoInfo.normalOffset + idx0];
@@ -412,9 +432,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         + n2 * attribs.bary.y;
     objectNormal = SafeNormalize(objectNormal, float3(0.0, 1.0, 0.0));
 
-    // Transform normal to world space
+    // Transform shading normal to world space
     // FIXED: Use SafeNormalize to prevent NaN propagation
-    float3x3 normalTransform = (float3x3)WorldToObject3x4();
     float3 worldNormal = SafeNormalize(mul(objectNormal, normalTransform), float3(0.0, 1.0, 0.0));
 
     // UV coordinates with offset into global UV buffer
@@ -1385,8 +1404,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 break;
             }
             case DEBUG_MODE_GEOMETRIC_NORMAL:
-                // Raw geometric normal (remap [-1,1] to [0,1])
-                debug_output = worldNormal * 0.5 + 0.5;
+                // TRUE geometric normal from triangle edges (flat normal, remap [-1,1] to [0,1])
+                // This is NOT the interpolated shading normal - it's the actual surface orientation
+                debug_output = worldGeometricNormal * 0.5 + 0.5;
                 break;
 
             case DEBUG_MODE_SHADED_NORMAL:

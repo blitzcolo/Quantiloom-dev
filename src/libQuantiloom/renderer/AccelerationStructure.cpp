@@ -175,8 +175,11 @@ void BLAS::UploadGeometryBuffers() {
         normalStaging.Upload(m_primitive.normals.data(), normalBufferSize);
         QL_LOG_DEBUG("  BLAS: Prepared {} real normals for upload", normalCount);
     } else {
-        // Generate flat normals (geometric normals, one per triangle vertex)
+        // Generate smooth normals via area-weighted accumulation
+        // Initialize to zero for accumulation
         std::vector<glm::vec3> fallbackNormals(normalCount, glm::vec3(0.0f));
+
+        // Accumulate face normals (cross product magnitude = 2 * triangle area for weighting)
         for (size_t i = 0; i < m_primitive.indices.size(); i += 3) {
             const u32 i0 = m_primitive.indices[i + 0];
             const u32 i1 = m_primitive.indices[i + 1];
@@ -186,17 +189,28 @@ void BLAS::UploadGeometryBuffers() {
             const glm::vec3 v1 = m_primitive.positions[i1];
             const glm::vec3 v2 = m_primitive.positions[i2];
 
-            const glm::vec3 edge1 = v1 - v0;
-            const glm::vec3 edge2 = v2 - v0;
-            const glm::vec3 normal = glm::normalize(glm::cross(edge1, edge2));
+            // Un-normalized cross product: magnitude = 2 * triangle area (natural area weighting)
+            const glm::vec3 faceNormal = glm::cross(v1 - v0, v2 - v0);
 
-            // All 3 vertices of this triangle share the same normal (flat shading)
-            fallbackNormals[i0] = normal;
-            fallbackNormals[i1] = normal;
-            fallbackNormals[i2] = normal;
+            // Accumulate (not overwrite) - shared vertices get contribution from all adjacent faces
+            fallbackNormals[i0] += faceNormal;
+            fallbackNormals[i1] += faceNormal;
+            fallbackNormals[i2] += faceNormal;
         }
+
+        // Normalize accumulated normals
+        for (size_t i = 0; i < normalCount; ++i) {
+            glm::vec3& n = fallbackNormals[i];
+            float len = glm::length(n);
+            if (len > 1e-8f) {
+                n /= len;
+            } else {
+                n = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector for degenerate cases
+            }
+        }
+
         normalStaging.Upload(fallbackNormals.data(), normalBufferSize);
-        QL_LOG_DEBUG("  BLAS: Prepared {} generated flat normals for upload", normalCount);
+        QL_LOG_DEBUG("  BLAS: Prepared {} generated smooth normals for upload", normalCount);
     }
 
     // Execute copy commands (staging buffers remain valid throughout)
