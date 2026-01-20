@@ -1119,6 +1119,34 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     return result;
 }
 
+Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
+    if (!m_impl->isReady || !m_impl->outputImage) {
+        return Result<Image, String>::Err("Render context not ready");
+    }
+
+    // Read back entire outputImage using CommandHelper
+    std::vector<f32> pixels = CommandHelper::ReadbackImage(
+        *m_impl->contextAdapter,
+        m_impl->outputImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        m_impl->width,
+        m_impl->height
+    );
+
+    // Create Image from pixel data
+    Image screenshot(m_impl->width, m_impl->height, 4);  // RGBA
+    screenshot.data = std::move(pixels);
+    screenshot.channelNames = {"R", "G", "B", "A"};
+
+    // Add metadata
+    screenshot.metadata["spectral_mode"] = std::to_string(static_cast<int>(m_impl->spectralMode));
+    screenshot.metadata["wavelength_nm"] = std::to_string(m_impl->wavelength_nm);
+    screenshot.metadata["accumulated_samples"] = std::to_string(m_impl->accumulatedSamples);
+    screenshot.metadata["spp_target"] = std::to_string(m_impl->spp);
+
+    return std::move(screenshot);
+}
+
 // ============================================================================
 // Private Helper Methods
 // ============================================================================

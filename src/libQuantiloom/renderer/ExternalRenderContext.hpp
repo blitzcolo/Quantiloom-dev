@@ -44,6 +44,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "renderer/LightingParams.hpp"
+#include "core/Image.hpp"
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
@@ -447,6 +448,21 @@ public:
      *       original = (output - 0.5) * 2)
      */
     [[nodiscard]] Result<glm::vec4, String> ReadPixelValue(u32 x, u32 y);
+
+    /**
+     * @brief Capture current render output to CPU Image
+     *
+     * Reads the entire outputImage from GPU to CPU memory.
+     * The resulting Image contains HDR data (f32 RGBA) before
+     * any swapchain format conversion or tone mapping.
+     *
+     * @return Image with current render output, or error if not ready
+     *
+     * @note Call this AFTER RenderFrame to capture the frame
+     * @note Blocks until GPU transfer completes (synchronous)
+     * @note Performs layout transition internally (GENERAL → TRANSFER_SRC → GENERAL)
+     */
+    [[nodiscard]] Result<Image, String> CaptureScreenshot();
 
 private:
     // Private constructor - use Create() factory method
