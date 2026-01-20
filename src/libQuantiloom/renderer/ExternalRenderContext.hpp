@@ -44,6 +44,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "renderer/LightingParams.hpp"
+#include "renderer/AtmosphericConfig.hpp"
 #include "core/Image.hpp"
 
 #include <vulkan/vulkan.h>
@@ -367,6 +368,61 @@ public:
      * @brief Get current lighting parameters
      */
     [[nodiscard]] const LightingParams& GetLightingParams() const;
+
+    // ========================================================================
+    // Atmospheric Rendering
+    // ========================================================================
+
+    /**
+     * @brief Set atmospheric scattering configuration
+     * @param config Atmospheric configuration (use presets or custom)
+     *
+     * Example:
+     * @code
+     * context->SetAtmosphericConfig(AtmosphericConfig::ClearDay());
+     * context->SetAtmosphericConfig(AtmosphericConfig::Disabled());
+     * @endcode
+     *
+     * @note Resets accumulation when config changes
+     */
+    void SetAtmosphericConfig(const AtmosphericConfig& config);
+
+    /**
+     * @brief Set atmospheric configuration by preset name
+     * @param preset Preset name: "clear_day", "hazy", "polluted_urban",
+     *               "mountain_top", "mars", "disabled"
+     *
+     * Convenience method for setting atmospheric config from config files.
+     */
+    void SetAtmosphericPreset(const String& preset);
+
+    /**
+     * @brief Get current atmospheric configuration
+     */
+    [[nodiscard]] const AtmosphericConfig& GetAtmosphericConfig() const;
+
+    // ========================================================================
+    // Environment Map (IBL)
+    // ========================================================================
+
+    /**
+     * @brief Load HDR environment map for IBL
+     * @param hdrPath Path to equirectangular HDR image (.exr, .hdr)
+     * @return Result indicating success or error
+     *
+     * Loads the HDR image, converts equirectangular to cubemap, and generates
+     * prefiltered mip chain for specular IBL.
+     *
+     * @note Replaces the fallback sky-blue environment map
+     * @note Resets accumulation when environment changes
+     */
+    Result<void, String> LoadEnvironmentMap(const String& hdrPath);
+
+    /**
+     * @brief Check if custom environment map is loaded
+     * @return true if LoadEnvironmentMap() succeeded, false if using fallback
+     */
+    [[nodiscard]] bool HasEnvironmentMap() const;
 
     // ========================================================================
     // Scene Editing (Phase 2)

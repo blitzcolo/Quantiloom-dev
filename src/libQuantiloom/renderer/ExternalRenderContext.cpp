@@ -18,6 +18,7 @@
 #include "CommandHelper.hpp"
 #include "BRDFLutGenerator.hpp"
 #include "LightingParams.hpp"
+#include "AtmosphericConfig.hpp"
 
 #include "core/Log.hpp"
 #include "io/GltfLoader.hpp"
@@ -236,6 +237,13 @@ struct ExternalRenderContext::Impl {
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
     LightingParams lightingParams;
+
+    // Atmospheric configuration
+    AtmosphericConfig atmosphericConfig;  // CPU-side config (default: disabled)
+    bool atmosphericDirty = true;         // Need upload to GPU
+
+    // Environment map state
+    bool hasCustomEnvMap = false;         // True if LoadEnvironmentMap succeeded
 
     // Accumulation
     u32 accumulatedSamples = 0;
@@ -1864,6 +1872,321 @@ void ExternalRenderContext::TransitionImageLayoutImmediate(
     vkFreeCommandBuffers(m_impl->device, m_impl->commandPool, 1, &cmd);
 
     (void)format;  // Format used for barrier determination in more complex cases
+}
+
+// ============================================================================
+// Atmospheric Configuration
+// ============================================================================
+
+void ExternalRenderContext::SetAtmosphericConfig(const AtmosphericConfig& config) {
+    m_impl->atmosphericConfig = config;
+    m_impl->atmosphericDirty = true;
+
+    // Upload to GPU immediately if buffer exists
+    if (m_impl->atmosphericBuffer) {
+        AtmosphericParamsGPU gpuParams = config.ToGPU();
+        m_impl->atmosphericBuffer->Upload(&gpuParams, sizeof(AtmosphericParamsGPU));
+        m_impl->atmosphericDirty = false;
+    }
+
+    ResetAccumulation();
+    QL_LOG_DEBUG("Atmospheric config updated: {}",
+                 config.IsEnabled() ? "enabled" : "disabled");
+}
+
+void ExternalRenderContext::SetAtmosphericPreset(const String& preset) {
+    AtmosphericConfig config;
+
+    if (preset == "clear_day") {
+        config = AtmosphericConfig::ClearDay();
+    } else if (preset == "hazy") {
+        config = AtmosphericConfig::Hazy();
+    } else if (preset == "polluted_urban") {
+        config = AtmosphericConfig::PollutedUrban();
+    } else if (preset == "mountain_top") {
+        config = AtmosphericConfig::MountainTop();
+    } else if (preset == "mars") {
+        config = AtmosphericConfig::Mars();
+    } else {
+        config = AtmosphericConfig::Disabled();
+    }
+
+    SetAtmosphericConfig(config);
+    QL_LOG_INFO("Atmospheric preset set to: {}", preset);
+}
+
+const AtmosphericConfig& ExternalRenderContext::GetAtmosphericConfig() const {
+    return m_impl->atmosphericConfig;
+}
+
+// ============================================================================
+// Environment Map (IBL)
+// ============================================================================
+
+Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdrPath) {
+    QL_LOG_INFO("Loading environment map: {}", hdrPath);
+
+    // Check if file exists
+    if (!ImageIO::FileExists(hdrPath)) {
+        return Result<void, String>::Err("Environment map file not found: " + hdrPath);
+    }
+
+    // Load HDR image
+    auto equirectOpt = ImageIO::ReadImage(hdrPath);
+    if (!equirectOpt.has_value()) {
+        return Result<void, String>::Err("Failed to load HDR image: " + hdrPath);
+    }
+
+    Image& equirect = equirectOpt.value();
+    QL_LOG_INFO("  HDR image loaded: {}x{}, {} channels",
+                equirect.width, equirect.height, equirect.channels);
+
+    // Convert equirectangular to cubemap using CPU-based conversion
+    constexpr u32 envMapSize = 512;
+    constexpr u32 envMapMips = 8;
+
+    // Helper: Get cubemap face direction
+    auto cubemapFaceDirection = [](u32 face, f32 u, f32 v) -> glm::vec3 {
+        f32 uc = 2.0f * u - 1.0f;
+        f32 vc = 2.0f * v - 1.0f;
+
+        switch (face) {
+            case 0: return glm::normalize(glm::vec3( 1.0f,   -vc,   -uc));  // +X
+            case 1: return glm::normalize(glm::vec3(-1.0f,   -vc,    uc));  // -X
+            case 2: return glm::normalize(glm::vec3(   uc,  1.0f,    vc));  // +Y
+            case 3: return glm::normalize(glm::vec3(   uc, -1.0f,   -vc));  // -Y
+            case 4: return glm::normalize(glm::vec3(   uc,   -vc,  1.0f));  // +Z
+            case 5: return glm::normalize(glm::vec3(  -uc,   -vc, -1.0f));  // -Z
+            default: return glm::vec3(0.0f);
+        }
+    };
+
+    // Helper: Sample equirectangular map
+    auto sampleEquirect = [&equirect](const glm::vec3& dir) -> glm::vec3 {
+        f32 theta = std::atan2(dir.z, dir.x);
+        f32 phi = std::asin(glm::clamp(dir.y, -1.0f, 1.0f));
+
+        f32 u = (theta + glm::pi<f32>()) / (2.0f * glm::pi<f32>());
+        f32 v = (phi + glm::pi<f32>() / 2.0f) / glm::pi<f32>();
+
+        u32 width = equirect.width;
+        u32 height = equirect.height;
+
+        f32 fx = u * static_cast<f32>(width - 1);
+        f32 fy = v * static_cast<f32>(height - 1);
+
+        u32 x0 = static_cast<u32>(fx) % width;
+        u32 y0 = static_cast<u32>(fy) % height;
+        u32 x1 = (x0 + 1) % width;
+        u32 y1 = std::min(y0 + 1, height - 1);
+
+        f32 wx = fx - std::floor(fx);
+        f32 wy = fy - std::floor(fy);
+
+        glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
+        glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
+        glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
+        glm::vec3 c11(equirect(x1, y1, 0), equirect(x1, y1, 1), equirect(x1, y1, 2));
+
+        glm::vec3 c0 = c00 * (1.0f - wx) + c10 * wx;
+        glm::vec3 c1 = c01 * (1.0f - wx) + c11 * wx;
+
+        return c0 * (1.0f - wy) + c1 * wy;
+    };
+
+    // Convert equirectangular to cubemap faces
+    QL_LOG_INFO("  Converting equirectangular to cubemap ({}x{} per face)...", envMapSize, envMapSize);
+    std::vector<Image> cubemapFaces(6);
+    for (u32 face = 0; face < 6; ++face) {
+        cubemapFaces[face] = Image(envMapSize, envMapSize, 3);
+        for (u32 y = 0; y < envMapSize; ++y) {
+            for (u32 x = 0; x < envMapSize; ++x) {
+                f32 u = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(envMapSize);
+                f32 v = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(envMapSize);
+                glm::vec3 dir = cubemapFaceDirection(face, u, v);
+                glm::vec3 color = sampleEquirect(dir);
+                cubemapFaces[face](x, y, 0) = color.r;
+                cubemapFaces[face](x, y, 1) = color.g;
+                cubemapFaces[face](x, y, 2) = color.b;
+            }
+        }
+    }
+
+    // Wait for GPU
+    vkDeviceWaitIdle(m_impl->device);
+
+    auto allocator = m_impl->contextAdapter->GetAllocator();
+
+    // Recreate GPU environment map
+    m_impl->envMapImage.reset();
+    m_impl->envMapImage = std::make_unique<GpuImage>(
+        allocator,
+        m_impl->device,
+        envMapSize, envMapSize,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        envMapMips,
+        6,
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+        VK_IMAGE_VIEW_TYPE_CUBE
+    );
+
+    // Transition to TRANSFER_DST
+    CommandHelper::TransitionImageLayoutImmediate(
+        *m_impl->contextAdapter,
+        m_impl->envMapImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        envMapMips,
+        6
+    );
+
+    // Upload base mip level (mip 0)
+    QL_LOG_INFO("  Uploading cubemap to GPU...");
+    for (u32 face = 0; face < 6; ++face) {
+        const Image& faceImage = cubemapFaces[face];
+
+        std::vector<f32> pixelData(envMapSize * envMapSize * 4);
+        for (u32 y = 0; y < envMapSize; ++y) {
+            for (u32 x = 0; x < envMapSize; ++x) {
+                u32 idx = (y * envMapSize + x) * 4;
+                pixelData[idx + 0] = faceImage(x, y, 0);
+                pixelData[idx + 1] = faceImage(x, y, 1);
+                pixelData[idx + 2] = faceImage(x, y, 2);
+                pixelData[idx + 3] = 1.0f;
+            }
+        }
+
+        GpuBuffer stagingBuffer(
+            allocator,
+            pixelData.size() * sizeof(f32),
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        stagingBuffer.Upload(pixelData.data(), pixelData.size() * sizeof(f32));
+
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = face;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {envMapSize, envMapSize, 1};
+
+            vkCmdCopyBufferToImage(
+                cmd,
+                stagingBuffer.GetHandle(),
+                m_impl->envMapImage->GetImage(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1,
+                &region
+            );
+        });
+    }
+
+    // Generate simple mipmaps (box filter)
+    QL_LOG_INFO("  Generating mipmap chain...");
+    for (u32 mip = 1; mip < envMapMips; ++mip) {
+        u32 mipSize = envMapSize >> mip;
+        if (mipSize == 0) mipSize = 1;
+        u32 prevMipSize = envMapSize >> (mip - 1);
+
+        for (u32 face = 0; face < 6; ++face) {
+            std::vector<f32> mipData(mipSize * mipSize * 4);
+            const Image& baseFace = cubemapFaces[face];
+
+            for (u32 y = 0; y < mipSize; ++y) {
+                for (u32 x = 0; x < mipSize; ++x) {
+                    glm::vec4 sum(0.0f);
+                    u32 srcX = x * 2;
+                    u32 srcY = y * 2;
+                    u32 count = 0;
+                    for (u32 dy = 0; dy < 2 && (srcY + dy) < prevMipSize; ++dy) {
+                        for (u32 dx = 0; dx < 2 && (srcX + dx) < prevMipSize; ++dx) {
+                            // Sample from base face (approximation)
+                            u32 sx = std::min((srcX + dx) * (envMapSize / prevMipSize), envMapSize - 1);
+                            u32 sy = std::min((srcY + dy) * (envMapSize / prevMipSize), envMapSize - 1);
+                            sum.r += baseFace(sx, sy, 0);
+                            sum.g += baseFace(sx, sy, 1);
+                            sum.b += baseFace(sx, sy, 2);
+                            sum.a += 1.0f;
+                            count++;
+                        }
+                    }
+                    if (count > 0) {
+                        sum /= static_cast<f32>(count);
+                    }
+                    u32 idx = (y * mipSize + x) * 4;
+                    mipData[idx + 0] = sum.r;
+                    mipData[idx + 1] = sum.g;
+                    mipData[idx + 2] = sum.b;
+                    mipData[idx + 3] = 1.0f;
+                }
+            }
+
+            GpuBuffer stagingBuffer(
+                allocator,
+                mipData.size() * sizeof(f32),
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            stagingBuffer.Upload(mipData.data(), mipData.size() * sizeof(f32));
+
+            CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+                VkBufferImageCopy region{};
+                region.bufferOffset = 0;
+                region.bufferRowLength = 0;
+                region.bufferImageHeight = 0;
+                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                region.imageSubresource.mipLevel = mip;
+                region.imageSubresource.baseArrayLayer = face;
+                region.imageSubresource.layerCount = 1;
+                region.imageOffset = {0, 0, 0};
+                region.imageExtent = {mipSize, mipSize, 1};
+
+                vkCmdCopyBufferToImage(
+                    cmd,
+                    stagingBuffer.GetHandle(),
+                    m_impl->envMapImage->GetImage(),
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    1,
+                    &region
+                );
+            });
+        }
+    }
+
+    // Transition to SHADER_READ_ONLY
+    CommandHelper::TransitionImageLayoutImmediate(
+        *m_impl->contextAdapter,
+        m_impl->envMapImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        envMapMips,
+        6
+    );
+
+    // Re-bind to pipeline if exists
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMapImage->GetView());
+    }
+
+    m_impl->hasCustomEnvMap = true;
+    ResetAccumulation();
+
+    QL_LOG_INFO("Environment map loaded successfully: {}", hdrPath);
+    return Result<void, String>::Ok();
+}
+
+bool ExternalRenderContext::HasEnvironmentMap() const {
+    return m_impl->hasCustomEnvMap;
 }
 
 } // namespace quantiloom
