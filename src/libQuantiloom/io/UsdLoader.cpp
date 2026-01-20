@@ -1260,25 +1260,29 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
     }
 
     // ========================================================================
-    // Vertex Deduplication
+    // Generate normals BEFORE deduplication (CRITICAL ORDER)
     // ========================================================================
-    // USD face-varying expansion creates many duplicate vertices at shared edges.
-    // Deduplicate to reduce memory and improve cache efficiency.
-    auto dedupeStats = MeshOptimizer::DeduplicateMesh(mesh);
-    if (dedupeStats.WasOptimized()) {
-        QL_LOG_INFO("    Vertex dedup for '{}': {} -> {} vertices ({:.1f}% reduction)",
-                    mesh.name, dedupeStats.originalVertexCount, dedupeStats.optimizedVertexCount,
-                    dedupeStats.vertexReductionPercent);
-    }
-
-    // ========================================================================
-    // Generate normals with dihedral angle-based hard/smooth edge detection
-    // ========================================================================
+    // NormalGenerator::GenerateWithDihedralAngle() duplicates vertices at hard edges.
+    // Deduplication must run AFTER to preserve these intentional splits.
+    // Swapping this order causes hard edges to be smoothed incorrectly.
     for (auto& primitive : mesh.primitives) {
         if (primitive.normals.empty()) {
             QL_LOG_DEBUG("    Generating normals for USD primitive with dihedral angle threshold");
             NormalGenerator::GenerateWithDihedralAngle(primitive);
         }
+    }
+
+    // ========================================================================
+    // Vertex Deduplication (AFTER normal generation)
+    // ========================================================================
+    // USD face-varying expansion creates many duplicate vertices at shared edges.
+    // Deduplicate to reduce memory and improve cache efficiency.
+    // This preserves hard edges created by NormalGenerator.
+    auto dedupeStats = MeshOptimizer::DeduplicateMesh(mesh);
+    if (dedupeStats.WasOptimized()) {
+        QL_LOG_INFO("    Vertex dedup for '{}': {} -> {} vertices ({:.1f}% reduction)",
+                    mesh.name, dedupeStats.originalVertexCount, dedupeStats.optimizedVertexCount,
+                    dedupeStats.vertexReductionPercent);
     }
 
     size_t totalVerts = 0, totalTris = 0;

@@ -436,6 +436,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // FIXED: Use SafeNormalize to prevent NaN propagation
     float3 worldNormal = SafeNormalize(mul(objectNormal, normalTransform), float3(0.0, 1.0, 0.0));
 
+    // Ensure smooth shading normal and geometric normal are in the same hemisphere
+    // This prevents shading artifacts from normal interpolation across hard edges
+    if (dot(worldNormal, worldGeometricNormal) < 0.0) {
+        worldNormal = -worldNormal;
+    }
+
     // UV coordinates with offset into global UV buffer
     // Barycentric interpolation: uv = u0 * (1 - b1 - b2) + u1 * b1 + u2 * b2
     float2 uv0 = uvBuffer[geoInfo.uvOffset + idx0];
@@ -527,6 +533,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Transform to world space
         normal = ApplyNormalMap(tangentNormal, worldNormal, worldTangent);
+    }
+
+    // CRITICAL: Face-forward correction for shading normal
+    // Ensures normal always points toward camera (opposite to ray direction)
+    // This prevents BRDF breakdown for thin geometry (grass, leaves) and backface hits
+    // Without this, NdotV can be negative -> Fresnel/GGX produce NaN/white spots
+    if (dot(normal, rayDir) > 0.0) {
+        normal = -normal;
     }
 
     // Emissive texture

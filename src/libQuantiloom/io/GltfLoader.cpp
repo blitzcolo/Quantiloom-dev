@@ -567,9 +567,17 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
         QL_LOG_INFO("    Primitive {}: {} vertices, {} triangles, material {}",
                     primIdx, primitive.GetVertexCount(), primitive.GetTriangleCount(), primitive.materialId);
 
-        // Deduplicate vertices before adding to mesh
-        // glTF primitives typically share vertices well, but deduplication can still help
-        // especially after attribute expansion or for poorly optimized assets
+        // CRITICAL: Generate normals BEFORE deduplication
+        // NormalGenerator::GenerateWithDihedralAngle() duplicates vertices at hard edges
+        // Deduplication must run AFTER to preserve these intentional splits
+        // Swapping this order causes hard edges to be smoothed incorrectly
+        if (primitive.normals.empty()) {
+            QL_LOG_DEBUG("    Generating normals with dihedral angle threshold");
+            NormalGenerator::GenerateWithDihedralAngle(primitive);
+        }
+
+        // Deduplicate vertices AFTER normal generation
+        // This preserves hard edges created by NormalGenerator
         if (MeshOptimizer::ShouldDeduplicate(primitive)) {
             auto stats = MeshOptimizer::DeduplicateVertices(primitive);
             if (stats.WasOptimized()) {
@@ -577,13 +585,6 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
                             stats.originalVertexCount, stats.optimizedVertexCount,
                             stats.vertexReductionPercent);
             }
-        }
-
-        // Generate normals with dihedral angle-based hard/smooth edge detection
-        // Only runs if normals are missing (no-op otherwise)
-        if (primitive.normals.empty()) {
-            QL_LOG_DEBUG("    Generating normals with dihedral angle threshold");
-            NormalGenerator::GenerateWithDihedralAngle(primitive);
         }
 
         mesh.primitives.push_back(std::move(primitive));
