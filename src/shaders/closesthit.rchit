@@ -269,9 +269,10 @@ float2 ComputeUVDifferentialY(float3 rayDir, float3 dDdy, float t, float3 edge1,
 }
 
 // Compute TBN matrix for normal mapping (Gram-Schmidt orthogonalization)
-// N: geometric normal, T: tangent, returns orthonormal TBN matrix
-// FIXED: Use SafeNormalize to prevent NaN when vectors are near-parallel
-float3x3 ComputeTBN(float3 N, float3 T) {
+// N: geometric normal, T: tangent, handedness: ±1 for bitangent direction
+// returns orthonormal TBN matrix with correct bitangent orientation
+// FIXED: Apply handedness to bitangent to fix mirrored UV and inverted normal map issues
+float3x3 ComputeTBN(float3 N, float3 T, float handedness) {
     // Orthogonalize tangent with respect to normal (Gram-Schmidt)
     // Use SafeNormalize to handle edge case where T is parallel to N
     float3 T_ortho = T - N * dot(N, T);
@@ -279,14 +280,18 @@ float3x3 ComputeTBN(float3 N, float3 T) {
 
     // Compute bitangent and NORMALIZE it
     // FIXED: cross(N, T) must be normalized for correct TBN transform
+    // FIXED: Apply handedness (tangent.w) to bitangent direction
+    // glTF spec: handedness = +1 for right-handed (bitangent = cross(N,T))
+    //            handedness = -1 for left-handed (bitangent = -cross(N,T))
     float3 B = SafeNormalize(cross(N, T), cross(N, float3(1.0, 0.0, 0.0)));
+    B *= handedness;
 
     return float3x3(T, B, N);
 }
 
 // Transform normal from tangent space to world space
-// FIXED: Added safety checks to prevent NaN propagation
-float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTangent) {
+// FIXED: Added handedness parameter for correct bitangent orientation
+float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTangent, float handedness) {
     // Validate tangent normal before transformation
     // If tangent normal is degenerate, return geometric normal
     float tangentLenSq = dot(tangentNormal, tangentNormal);
@@ -294,8 +299,8 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
         return worldNormal;
     }
 
-    // Build TBN matrix
-    float3x3 TBN = ComputeTBN(worldNormal, worldTangent);
+    // Build TBN matrix with handedness
+    float3x3 TBN = ComputeTBN(worldNormal, worldTangent, handedness);
 
     // Transform tangent-space normal to world space
     float3 normal = mul(tangentNormal, TBN);
@@ -454,6 +459,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Read tangent from buffer with offset (or fallback to fake tangent)
     float3 worldTangent;
+    float worldHandedness = 1.0;  // Default handedness (right-handed)
     if (material.normalTextureIndex >= 0) {  // Only compute tangent if normal map is used
         // Read tangents with offset into global tangent buffer
         float4 tangent4_0 = tangentBuffer[geoInfo.tangentOffset + idx0];
@@ -466,7 +472,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                           tangent4_2 * attribs.bary.y;
 
         float3 tangent = tangent4.xyz;
-        float handedness = tangent4.w;  // ±1 for bitangent orientation
+        worldHandedness = tangent4.w;  // ±1 for bitangent orientation
 
         // Transform tangent to world space
         float3x3 objectToWorld = (float3x3)ObjectToWorld3x4();
@@ -479,6 +485,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Fallback: fake tangent (for backward compatibility)
             float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
             worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
+            worldHandedness = 1.0;  // Reset to default for fallback
         }
     } else {
         // No normal map: use fake tangent (doesn't matter since it won't be used)
@@ -534,8 +541,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // This can happen with extreme normalScale values or degenerate texture data
         tangentNormal = SafeNormalize(tangentNormal, float3(0.0, 0.0, 1.0));
 
-        // Transform to world space
-        normal = ApplyNormalMap(tangentNormal, worldNormal, worldTangent);
+        // Transform to world space (pass handedness for correct bitangent orientation)
+        normal = ApplyNormalMap(tangentNormal, worldNormal, worldTangent, worldHandedness);
     }
 
     // CRITICAL: Face-forward correction for shading normal

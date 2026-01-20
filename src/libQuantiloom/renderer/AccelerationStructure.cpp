@@ -158,9 +158,40 @@ void BLAS::UploadGeometryBuffers() {
         tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
         QL_LOG_DEBUG("  BLAS: Prepared {} real tangents for upload", tangentCount);
     } else {
-        const std::vector<glm::vec4> fallbackTangents(tangentCount, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+        // Generate fallback tangents dynamically based on vertex normals
+        // This ensures the tangent is always perpendicular to the normal,
+        // avoiding TBN matrix degeneration when normal is parallel to X-axis
+        std::vector<glm::vec4> fallbackTangents;
+        fallbackTangents.reserve(tangentCount);
+
+        // Use normals if available, otherwise generate from face
+        const bool hasNormals = !m_primitive.normals.empty();
+
+        for (size_t i = 0; i < tangentCount; ++i) {
+            glm::vec3 normal;
+            if (hasNormals && i < m_primitive.normals.size()) {
+                normal = glm::normalize(m_primitive.normals[i]);
+            } else {
+                // Fallback to up vector if no normals
+                normal = glm::vec3(0.0f, 1.0f, 0.0f);
+            }
+
+            // Choose a reference vector that is not parallel to the normal
+            // If normal is close to Y-axis (up/down), use X-axis as reference
+            // Otherwise, use Y-axis as reference
+            glm::vec3 refVector = (std::abs(normal.y) > 0.9f)
+                ? glm::vec3(1.0f, 0.0f, 0.0f)
+                : glm::vec3(0.0f, 1.0f, 0.0f);
+
+            // Compute tangent as cross product of normal and reference vector
+            glm::vec3 tangent = glm::normalize(glm::cross(normal, refVector));
+
+            // Store tangent with handedness = +1 (right-handed)
+            fallbackTangents.emplace_back(tangent, 1.0f);
+        }
+
         tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
-        QL_LOG_DEBUG("  BLAS: Prepared {} fallback tangents for upload", tangentCount);
+        QL_LOG_DEBUG("  BLAS: Prepared {} dynamic fallback tangents for upload", tangentCount);
     }
 
     // Create normal staging buffer

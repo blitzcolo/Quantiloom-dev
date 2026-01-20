@@ -82,6 +82,86 @@ static glm::mat4 ParseNodeTransform(const tinygltf::Node& node) {
 // ReadAccessor (Template Specializations)
 // ============================================================================
 
+// ============================================================================
+// Helper: Get byte size of glTF component type
+// ============================================================================
+static size_t GetComponentByteSize(int componentType) {
+    switch (componentType) {
+        case TINYGLTF_COMPONENT_TYPE_BYTE:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+            return 1;
+        case TINYGLTF_COMPONENT_TYPE_SHORT:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+            return 2;
+        case TINYGLTF_COMPONENT_TYPE_INT:
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+        case TINYGLTF_COMPONENT_TYPE_FLOAT:
+            return 4;
+        default:
+            return 4;  // Fallback to float size
+    }
+}
+
+// ============================================================================
+// Helper: Read a single component from raw bytes and convert to float
+// Handles all glTF component types with proper normalization
+// ============================================================================
+static float ReadComponentAsFloat(const u8* ptr, int componentType, bool normalized) {
+    switch (componentType) {
+        case TINYGLTF_COMPONENT_TYPE_BYTE: {
+            const auto value = *reinterpret_cast<const int8_t*>(ptr);
+            if (normalized) {
+                // Normalized BYTE: map [-128, 127] to [-1.0, 1.0]
+                return std::max(static_cast<float>(value) / 127.0f, -1.0f);
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: {
+            const auto value = *ptr;
+            if (normalized) {
+                // Normalized UNSIGNED_BYTE: map [0, 255] to [0.0, 1.0]
+                return static_cast<float>(value) / 255.0f;
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_SHORT: {
+            const auto value = *reinterpret_cast<const int16_t*>(ptr);
+            if (normalized) {
+                // Normalized SHORT: map [-32768, 32767] to [-1.0, 1.0]
+                return std::max(static_cast<float>(value) / 32767.0f, -1.0f);
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+            const auto value = *reinterpret_cast<const uint16_t*>(ptr);
+            if (normalized) {
+                // Normalized UNSIGNED_SHORT: map [0, 65535] to [0.0, 1.0]
+                return static_cast<float>(value) / 65535.0f;
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_INT: {
+            const auto value = *reinterpret_cast<const int32_t*>(ptr);
+            if (normalized) {
+                // Normalized INT: map to [-1.0, 1.0]
+                return std::max(static_cast<float>(value) / 2147483647.0f, -1.0f);
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: {
+            const auto value = *reinterpret_cast<const uint32_t*>(ptr);
+            if (normalized) {
+                // Normalized UNSIGNED_INT: map to [0.0, 1.0]
+                return static_cast<float>(value) / 4294967295.0f;
+            }
+            return static_cast<float>(value);
+        }
+        case TINYGLTF_COMPONENT_TYPE_FLOAT:
+        default:
+            return *reinterpret_cast<const float*>(ptr);
+    }
+}
+
 template<>
 std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModelPtr, const int accessorIndex) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
@@ -95,14 +175,21 @@ std::vector<glm::vec3> GltfLoader::ReadAccessor<glm::vec3>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 3;
+    const size_t componentSize = GetComponentByteSize(accessor.componentType);
+    const size_t elementSize = componentSize * 3;  // VEC3 = 3 components
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : elementSize;
+    const bool normalized = accessor.normalized;
 
     std::vector<glm::vec3> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
-        result.emplace_back(floatPtr[0], floatPtr[1], floatPtr[2]);
+        const u8* elemPtr = dataPtr + i * stride;
+        result.emplace_back(
+            ReadComponentAsFloat(elemPtr + 0 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 1 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 2 * componentSize, accessor.componentType, normalized)
+        );
     }
 
     return result;
@@ -121,14 +208,20 @@ std::vector<glm::vec2> GltfLoader::ReadAccessor<glm::vec2>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 2;
+    const size_t componentSize = GetComponentByteSize(accessor.componentType);
+    const size_t elementSize = componentSize * 2;  // VEC2 = 2 components
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : elementSize;
+    const bool normalized = accessor.normalized;
 
     std::vector<glm::vec2> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
-        result.emplace_back(floatPtr[0], floatPtr[1]);
+        const u8* elemPtr = dataPtr + i * stride;
+        result.emplace_back(
+            ReadComponentAsFloat(elemPtr + 0 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 1 * componentSize, accessor.componentType, normalized)
+        );
     }
 
     return result;
@@ -147,14 +240,22 @@ std::vector<glm::vec4> GltfLoader::ReadAccessor<glm::vec4>(const void* gltfModel
     const auto& buffer = model.buffers[bufferView.buffer];
 
     const u8* dataPtr = buffer.data.data() + bufferView.byteOffset + accessor.byteOffset;
-    const size_t stride = bufferView.byteStride ? bufferView.byteStride : sizeof(float) * 4;
+    const size_t componentSize = GetComponentByteSize(accessor.componentType);
+    const size_t elementSize = componentSize * 4;  // VEC4 = 4 components
+    const size_t stride = bufferView.byteStride ? bufferView.byteStride : elementSize;
+    const bool normalized = accessor.normalized;
 
     std::vector<glm::vec4> result;
     result.reserve(accessor.count);
 
     for (size_t i = 0; i < accessor.count; ++i) {
-        const auto* floatPtr = reinterpret_cast<const float*>(dataPtr + i * stride);
-        result.emplace_back(floatPtr[0], floatPtr[1], floatPtr[2], floatPtr[3]);
+        const u8* elemPtr = dataPtr + i * stride;
+        result.emplace_back(
+            ReadComponentAsFloat(elemPtr + 0 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 1 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 2 * componentSize, accessor.componentType, normalized),
+            ReadComponentAsFloat(elemPtr + 3 * componentSize, accessor.componentType, normalized)
+        );
     }
 
     return result;
