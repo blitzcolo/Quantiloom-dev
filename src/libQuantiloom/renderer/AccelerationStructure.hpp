@@ -168,7 +168,8 @@ public:
 
     // Add BLAS instance to TLAS (must call before Build)
     // materialId: Index into Scene::materials, passed to shader via instanceCustomIndex
-    void AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform = glm::mat4(1.0f));
+    // doubleSided: If true, disable backface culling; if false, enable hardware culling
+    void AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform = glm::mat4(1.0f), bool doubleSided = true);
 
     // Build TLAS from instances (records commands into cmd buffer)
     void Build(VkCommandBuffer cmd);

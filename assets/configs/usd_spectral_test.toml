@@ -9,7 +9,7 @@
 resolution = [1280, 1280]      # Output resolution
 spp = 16                        # Samples per pixel
 output = "usd_spectral_output.exr"
-environment_map = "assets/maps/qwantani_noon_puresky_4k.exr"
+environment_map = ""
 
 [spectral]
 # ============================================================================
@@ -24,8 +24,8 @@ environment_map = "assets/maps/qwantani_noon_puresky_4k.exr"
 #   - "lwir_fused"   : Long-wave IR fusion 8-12um
 # ============================================================================
 mode = "rgb"
-basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
-materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+basis_file = ""
+materials_json = ""
 band = "VIS"
 
 [scene]
@@ -51,19 +51,19 @@ band = "VIS"
 #   }
 #
 # ============================================================================
-usd = "F:/Samples/OldAttic/Sublayers/Attic_NVIDIA.usd"
+gltf = "D:/Quantiloom-Qt/assets/models/222.glb"
 world_units_to_meters = 1.0
 
 [camera]
-position = [0.0, 2.0, 8.0]
+position = [-6.0, 4.0, 6.0]
 look_at = [0.0, 0.5, 0.0]
 up = [0.0, 1.0, 0.0]
 fov_y = 45.0
 
 [lighting]
 sun_direction = [0.5, 0.8, 0.3]
-sun_radiance = [5.0, 5.0, 5.0]
-sky_radiance = [0.5, 0.7, 1.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.7, 0.7, 0.7]
 atmosphere_temperature_k = 260.0
 
 [material]
@@ -77,7 +77,7 @@ log_material_sources = true
 # Sensor Simulation
 # ============================================================================
 [sensor]
-enabled = true
+enabled = false
 focal_length_mm = 50.0
 f_number = 11.0
 pixel_pitch_um = 5.0

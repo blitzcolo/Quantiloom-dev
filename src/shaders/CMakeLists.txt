@@ -56,6 +56,7 @@ set(SHADER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/raygen.rgen
     ${CMAKE_CURRENT_SOURCE_DIR}/closesthit.rchit
     ${CMAKE_CURRENT_SOURCE_DIR}/miss.rmiss
+    ${CMAKE_CURRENT_SOURCE_DIR}/shadow_miss.rmiss
 )
 
 # Compiled shader output directory
@@ -65,7 +66,7 @@ set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 set(DXC_FLAGS
     -spirv                          # Generate SPIR-V
     -T lib_6_3                      # Shader model 6.3 (required for ray tracing)
-    -fspv-target-env=vulkan1.3      # Target Vulkan 1.3
+    -fspv-target-env=vulkan1.2      # Target Vulkan 1.3
     -WX                             # Treat warnings as errors
     -Qembed_debug                   # Embed debug info
     -Zi                             # Generate PDB file, -Qembed_debug requires it

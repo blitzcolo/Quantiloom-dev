@@ -421,3 +421,43 @@ TEST(MaterialTest, RealisticGlassMaterial) {
 
     EXPECT_TRUE(mat.IsValid());
 }
+
+// ============================================================================
+// Double-Sided Rendering Tests
+// ============================================================================
+// glTF 2.0 and USD both support double-sided materials for thin geometry
+// like leaves, paper, and cloth where both sides should be rendered.
+// ============================================================================
+
+TEST(MaterialTest, DoubleSidedDefaultFalse) {
+    Material mat;
+    EXPECT_FALSE(mat.doubleSided);  // Default: single-sided (enable backface culling)
+}
+
+TEST(MaterialTest, DoubleSidedSetTrue) {
+    Material mat;
+    mat.doubleSided = true;
+    EXPECT_TRUE(mat.doubleSided);
+    EXPECT_TRUE(mat.IsValid());  // doubleSided doesn't affect validity
+}
+
+TEST(MaterialTest, DoubleSidedSetFalse) {
+    Material mat;
+    mat.doubleSided = true;  // First set to true
+    mat.doubleSided = false; // Then reset to false
+    EXPECT_FALSE(mat.doubleSided);
+    EXPECT_TRUE(mat.IsValid());
+}
+
+TEST(MaterialTest, DoubleSidedWithAlphaMode) {
+    // Common use case: transparent materials (leaves, curtains) often need doubleSided
+    Material mat;
+    mat.doubleSided = true;
+    mat.alphaMode = Material::AlphaMode::Mask;
+    mat.alphaCutoff = 0.5f;
+
+    EXPECT_TRUE(mat.doubleSided);
+    EXPECT_EQ(mat.alphaMode, Material::AlphaMode::Mask);
+    EXPECT_TRUE(mat.IsValid());
+}
+

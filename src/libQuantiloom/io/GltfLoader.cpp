@@ -361,6 +361,10 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         mat.alphaMode = Material::AlphaMode::Blend;
     }
 
+    // Double-sided rendering
+    mat.doubleSided = gltfMaterial.doubleSided;
+    QL_LOG_DEBUG("  doubleSided: {}", mat.doubleSided);
+
     // Compute spectral albedo for M1 compatibility
     mat.ComputeSpectralAlbedo();
 

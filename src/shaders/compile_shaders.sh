@@ -28,10 +28,10 @@ echo "DXC found: $(command -v dxc)"
 echo ""
 
 # Compilation flags
-FLAGS="-spirv -T lib_6_3 -fspv-target-env=vulkan1.3"
+FLAGS="-spirv -T lib_6_3 -fspv-target-env=vulkan1.2"
 
 # Compile raygen shader
-echo "[1/3] Compiling raygen.rgen..."
+echo "[1/4] Compiling raygen.rgen..."
 dxc $FLAGS -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/raygen.spv created"
@@ -41,7 +41,7 @@ else
 fi
 
 # Compile closesthit shader
-echo "[2/3] Compiling closesthit.rchit..."
+echo "[2/4] Compiling closesthit.rchit..."
 dxc $FLAGS -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/closesthit.spv created"
@@ -51,7 +51,7 @@ else
 fi
 
 # Compile miss shader
-echo "[3/3] Compiling miss.rmiss..."
+echo "[3/4] Compiling miss.rmiss..."
 dxc $FLAGS -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/miss.spv created"
@@ -60,9 +60,19 @@ else
     exit 1
 fi
 
+# Compile shadow_miss shader
+echo "[4/4] Compiling shadow_miss.rmiss..."
+dxc $FLAGS -Fo src/shaders/shadow_miss.spv src/shaders/shadow_miss.rmiss
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/shadow_miss.spv created"
+else
+    echo "      ✗ Failed to compile src/shaders/shadow_miss.rmiss"
+    exit 1
+fi
+
 echo ""
 echo "========================================="
 echo "  All shaders compiled successfully!"
 echo "========================================="
 echo ""
-echo "You can now run the M1 test application."
+

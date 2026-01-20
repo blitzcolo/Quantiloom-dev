@@ -123,6 +123,13 @@ struct Material {
     f32 alphaCutoff = 0.5f;  // Threshold for AlphaMode::Mask
 
     // ========================================================================
+    // Double-Sided Rendering (glTF 2.0 / USD)
+    // ========================================================================
+    // When true: disable backface culling, flip normal for backface hits
+    // When false: enable hardware backface culling (rays pass through backfaces)
+    bool doubleSided = false;
+
+    // ========================================================================
     // Spectral Mode (M1 compatibility and M2+ full spectral)
     // ========================================================================
     // LEGACY (M1): Scalar spectral reflectance for single-wavelength rendering

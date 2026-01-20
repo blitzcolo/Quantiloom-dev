@@ -26,10 +26,10 @@ echo DXC found
 echo.
 
 REM Compilation flags
-set FLAGS=-spirv -T lib_6_3 -fspv-target-env="vulkan1.3"
+set FLAGS=-spirv -T lib_6_3 -fspv-target-env="vulkan1.2"
 
 REM Compile raygen shader
-echo [1/3] Compiling raygen.rgen...
+echo [1/4] Compiling raygen.rgen...
 dxc %FLAGS% -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile raygen.rgen
@@ -39,7 +39,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/raygen.spv created
 
 REM Compile closesthit shader
-echo [2/3] Compiling closesthit.rchit...
+echo [2/4] Compiling closesthit.rchit...
 dxc %FLAGS% -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile closesthit.rchit
@@ -49,7 +49,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/closesthit.spv created
 
 REM Compile miss shader
-echo [3/3] Compiling miss.rmiss...
+echo [3/4] Compiling miss.rmiss...
 dxc %FLAGS% -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile miss.rmiss
@@ -58,11 +58,20 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/miss.spv created
 
+REM Compile shadow_miss shader
+echo [4/4] Compiling shadow_miss.rmiss...
+dxc %FLAGS% -Fo src/shaders/shadow_miss.spv src/shaders/shadow_miss.rmiss
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile shadow_miss.rmiss
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/shadow_miss.spv created
 
 echo.
 echo =========================================
 echo   All shaders compiled successfully!
 echo =========================================
 echo.
-echo You can now run the M1 application.
+
 

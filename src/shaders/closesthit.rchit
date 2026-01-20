@@ -29,6 +29,9 @@
 // Bindings
 // ============================================================================
 
+// Acceleration structure for shadow rays (binding 1, shared with raygen)
+[[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
+
 [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
 [[vk::binding(3, 0)]] StructuredBuffer<float3> vertexBuffer;    // Vertex positions
 [[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
@@ -659,7 +662,74 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // where τ(λ, d) is atmospheric transmittance computed from Beer-Lambert law
     // NOTE: sunRadiance already includes atmosphericTransmittance (applied above)
     float NdotL = max(dot(normal, L), 0.0);
-    float3 directSun = brdf * sunRadiance * NdotL;
+
+    // ========================================================================
+    // Shadow Ray Tracing
+    // ========================================================================
+    // Trace a shadow ray toward the sun to determine if this point is occluded
+    // Uses geometric normal for self-shadowing check to avoid "terminator problem"
+    // ========================================================================
+
+    float shadowFactor = 1.0;  // 1.0 = fully lit, 0.0 = fully shadowed
+
+    // TEMPORARY: Disable shadow rays for debugging GPU crash
+    // TODO: Re-enable once issue is resolved
+    const bool ENABLE_SHADOW_RAYS = false;
+
+    // Step 1: Geometric normal check - prevents self-shadowing artifacts on curved surfaces
+    // Use worldGeometricNormal (computed earlier) instead of shading normal
+    float NdotL_geom = dot(worldGeometricNormal, L);
+
+    if (NdotL_geom <= 0.0) {
+        // Surface is physically facing away from the light - self-shadowed
+        // No need to trace shadow ray, directly treat as fully shadowed
+        shadowFactor = 0.0;
+    } else if (ENABLE_SHADOW_RAYS && NdotL > 0.0) {
+        // Step 2: Surface faces the light (both geometric and shading normals)
+        // Trace shadow ray to check for occlusion by other geometry
+
+        // Compute shadow ray origin with geometric normal offset
+        // CRITICAL: Use geometric normal for offset, NOT shading normal
+        // Shading normal can push origin inside geometry on curved surfaces
+        float3 hitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        const float SHADOW_BIAS = 0.001;  // Adjust based on scene scale
+        float3 shadowOrigin = hitPos + worldGeometricNormal * SHADOW_BIAS;
+
+        // Create shadow ray descriptor
+        RayDesc shadowRay;
+        shadowRay.Origin = shadowOrigin;
+        shadowRay.Direction = L;  // Direction toward light (sun)
+        shadowRay.TMin = 0.0;
+        shadowRay.TMax = 1e10;  // Infinite distance (directional light)
+
+        // Initialize shadow payload - assume shadowed (will be cleared by shadow_miss)
+        Payload shadowPayload;
+        shadowPayload.radiance = float3(0.0, 0.0, 0.0);
+        shadowPayload.dDdx = float3(0.0, 0.0, 0.0);
+        shadowPayload.dDdy = float3(0.0, 0.0, 0.0);
+        shadowPayload.isShadowed = 1;  // Assume shadowed, shadow_miss will clear this
+
+        // Trace shadow ray with optimized flags:
+        // - RAY_FLAG_SKIP_CLOSEST_HIT_SHADER: Don't run closest hit, just check occlusion
+        // - RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH: Accept first hit and terminate (fast shadow test)
+        TraceRay(
+            scene,                                              // Acceleration structure
+            RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |                  // Skip closest hit shader
+            RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,           // Accept first hit, terminate search
+            0xFF,                                               // Instance mask (all instances)
+            0,                                                  // SBT hit group offset
+            0,                                                  // SBT multiplier
+            1,                                                  // Miss index = 1 (shadow_miss)
+            shadowRay,
+            shadowPayload
+        );
+
+        // shadowPayload.isShadowed: 1 = hit occluder (shadowed), 0 = miss (lit)
+        shadowFactor = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
+    }
+
+    // Apply shadow factor to direct sun lighting
+    float3 directSun = brdf * sunRadiance * NdotL * shadowFactor;
 
     // ========================================================================
     // Image-Based Lighting (IBL) - Diffuse and Specular
@@ -890,8 +960,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness);
 
-            // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) + kD × ρ(λ)/π × L_sky(λ)
-            float L_direct = brdf_lambda * sun_radiance_lambda * NdotL;
+            // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) × shadow + kD × ρ(λ)/π × L_sky(λ)
+            // shadowFactor is computed in RGB mode block and reused here for consistency
+            float L_direct = brdf_lambda * sun_radiance_lambda * NdotL * shadowFactor;
 
             // Diffuse ambient (simplified Fresnel for diffuse coefficient)
             float kD_lambda = (1.0 - metallic);  // Metals have no diffuse
@@ -1030,9 +1101,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             roughness
         );
 
-        // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L)
+        // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L) * shadow
         //    Use spectral sun radiance at wavelength λ
-        float directSun_scalar = brdf_scalar * sunRadiance_lambda * NdotL;
+        //    shadowFactor is computed in RGB mode block and reused here for consistency
+        float directSun_scalar = brdf_scalar * sunRadiance_lambda * NdotL * shadowFactor;
 
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)

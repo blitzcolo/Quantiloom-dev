@@ -166,6 +166,16 @@ RayTracingPipeline::RayTracingPipeline(
 {
     QL_LOG_INFO("Creating Ray Tracing pipeline...");
 
+    // Derive shadow miss shader path from miss shader path
+    // e.g., "miss.rmiss.spv" -> "shadow_miss.rmiss.spv"
+    // or "shaders/miss.spv" -> "shaders/shadow_miss.spv"
+    std::filesystem::path missFsPath(missPath);
+    std::filesystem::path shadowMissName = "shadow_" + missFsPath.filename().string();
+    m_shadowMissPath = (missFsPath.parent_path() / shadowMissName).string();
+    if (m_shadowMissPath.empty()) {
+        m_shadowMissPath = shadowMissName.string();
+    }
+
     // Cache RT properties
     m_rtProperties = m_context.GetRayTracingProperties();
 
@@ -553,13 +563,17 @@ void RayTracingPipeline::LoadShaders() {
     const auto missSpirv = LoadSPIRV(m_missPath);
     QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", missSpirv.size());
 
+    const auto shadowMissSpirv = LoadSPIRV(m_shadowMissPath);
+    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", shadowMissSpirv.size());
+
     // Create shader modules (will be destroyed after pipeline creation)
-    m_shaderModules.resize(3);
+    m_shaderModules.resize(4);
     m_shaderModules[0] = CreateShaderModule(raygenSpirv);
     m_shaderModules[1] = CreateShaderModule(chitSpirv);
     m_shaderModules[2] = CreateShaderModule(missSpirv);
+    m_shaderModules[3] = CreateShaderModule(shadowMissSpirv);
 
-    QL_LOG_INFO("  Shaders loaded: {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath);
+    QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath);
     QL_LOG_INFO("  [LoadShaders] All shader modules created successfully");
     Log::Flush();  // Ensure logs are visible before potential hang
 }
@@ -627,29 +641,35 @@ void RayTracingPipeline::CreatePipeline() {
     QL_LOG_INFO("  [CreatePipeline] Got VkDevice: {}", (void*)device);
     Log::Flush();
 
-    // Define shader stages
-    std::vector<VkPipelineShaderStageCreateInfo> stages(3);
+    // Define shader stages (4 stages: raygen, closesthit, miss, shadow_miss)
+    std::vector<VkPipelineShaderStageCreateInfo> stages(4);
 
-    // Raygen
+    // Stage 0: Raygen
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = m_shaderModules[0];
     stages[0].pName = "main";
 
-    // Closest Hit
+    // Stage 1: Closest Hit
     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     stages[1].module = m_shaderModules[1];
     stages[1].pName = "main";
 
-    // Miss
+    // Stage 2: Miss (primary rays - sky background)
     stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
     stages[2].module = m_shaderModules[2];
     stages[2].pName = "main";
 
-    // Define shader groups
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(3);
+    // Stage 3: Shadow Miss (shadow rays - not occluded)
+    stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[3].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
+    stages[3].module = m_shaderModules[3];
+    stages[3].pName = "main";
+
+    // Define shader groups (4 groups: raygen, hit, miss, shadow_miss)
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(4);
 
     // Group 0: Raygen
     groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
@@ -667,13 +687,21 @@ void RayTracingPipeline::CreatePipeline() {
     groups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Group 2: Miss
+    // Group 2: Miss (primary rays)
     groups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[2].generalShader = 2;
     groups[2].closestHitShader = VK_SHADER_UNUSED_KHR;
     groups[2].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
+
+    // Group 3: Shadow Miss
+    groups[3].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+    groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+    groups[3].generalShader = 3;
+    groups[3].closestHitShader = VK_SHADER_UNUSED_KHR;
+    groups[3].anyHitShader = VK_SHADER_UNUSED_KHR;
+    groups[3].intersectionShader = VK_SHADER_UNUSED_KHR;
 
     // Create pipeline
     VkRayTracingPipelineCreateInfoKHR pipelineInfo{};
@@ -682,7 +710,7 @@ void RayTracingPipeline::CreatePipeline() {
     pipelineInfo.pStages = stages.data();
     pipelineInfo.groupCount = static_cast<u32>(groups.size());
     pipelineInfo.pGroups = groups.data();
-    pipelineInfo.maxPipelineRayRecursionDepth = 1;  // No recursion for M1
+    pipelineInfo.maxPipelineRayRecursionDepth = 2;  // Recursion depth 2: raygen → closesthit → shadow TraceRay
     pipelineInfo.layout = m_pipelineLayout;
 
     QL_LOG_INFO("  [CreatePipeline] Pipeline info prepared, getting function pointer...");
@@ -757,14 +785,18 @@ void RayTracingPipeline::CreateShaderBindingTable() {
 
     const u32 handleSizeAligned = AlignedSize(handleSize, handleAlignment);
 
-    // SBT layout: [Raygen] [Miss] [Hit]
+    // SBT layout: [Raygen] [Miss (primary + shadow)] [Hit]
+    // Group order in pipeline: 0=Raygen, 1=Hit, 2=Miss(primary), 3=Miss(shadow)
+    // SBT order must be: Raygen, Miss, Hit (miss before hit)
     const u32 raygenSize = AlignedSize(handleSizeAligned, baseAlignment);
-    const u32 missSize = AlignedSize(handleSizeAligned, baseAlignment);
+    const u32 missStride = AlignedSize(handleSizeAligned, baseAlignment);
+    const u32 missCount = 2;  // Primary miss + Shadow miss
+    const u32 missSize = missCount * missStride;
     const u32 hitSize = AlignedSize(handleSizeAligned, baseAlignment);
     const u32 sbtSize = raygenSize + missSize + hitSize;
 
-    // Get shader group handles
-    constexpr u32 groupCount = 3;
+    // Get shader group handles (4 groups now)
+    constexpr u32 groupCount = 4;
     std::vector<u8> handleData(groupCount * handleSize);
 
     const VkResult result = vkGetRayTracingShaderGroupHandlesKHR(
@@ -784,9 +816,15 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     std::vector<u8> sbtData(sbtSize, 0);
 
     // Copy handles with alignment
-    std::memcpy(sbtData.data(), handleData.data(), handleSize);  // Raygen
-    std::memcpy(sbtData.data() + raygenSize, handleData.data() + handleSize * 2, handleSize);  // Miss
-    std::memcpy(sbtData.data() + raygenSize + missSize, handleData.data() + handleSize * 1, handleSize);  // Hit
+    // Group indices: 0=Raygen, 1=Hit, 2=Miss(primary), 3=Miss(shadow)
+    // Raygen at offset 0
+    std::memcpy(sbtData.data(), handleData.data() + handleSize * 0, handleSize);
+    // Miss (primary) at offset raygenSize
+    std::memcpy(sbtData.data() + raygenSize, handleData.data() + handleSize * 2, handleSize);
+    // Miss (shadow) at offset raygenSize + missStride
+    std::memcpy(sbtData.data() + raygenSize + missStride, handleData.data() + handleSize * 3, handleSize);
+    // Hit at offset raygenSize + missSize
+    std::memcpy(sbtData.data() + raygenSize + missSize, handleData.data() + handleSize * 1, handleSize);
 
     // Create SBT buffer
     m_sbtBuffer = std::make_unique<GpuBuffer>(
@@ -805,8 +843,11 @@ void RayTracingPipeline::CreateShaderBindingTable() {
     m_raygenRegion.stride = raygenSize;
     m_raygenRegion.size = raygenSize;
 
+    // Miss region contains 2 miss shaders:
+    // - missIndex=0: Primary miss (sky background)
+    // - missIndex=1: Shadow miss (not occluded)
     m_missRegion.deviceAddress = sbtAddress + raygenSize;
-    m_missRegion.stride = missSize;
+    m_missRegion.stride = missStride;
     m_missRegion.size = missSize;
 
     m_hitRegion.deviceAddress = sbtAddress + raygenSize + missSize;
@@ -815,7 +856,7 @@ void RayTracingPipeline::CreateShaderBindingTable() {
 
     m_callableRegion = {};  // No callable shaders
 
-    QL_LOG_INFO("  Shader Binding Table created (size: {} bytes)", sbtSize);
+    QL_LOG_INFO("  Shader Binding Table created (size: {} bytes, {} miss entries)", sbtSize, missCount);
 }
 
 u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {

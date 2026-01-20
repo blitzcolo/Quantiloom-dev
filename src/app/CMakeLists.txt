@@ -67,6 +67,9 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/spectral_reconstruct.spv"
         "$<TARGET_FILE_DIR:Quantiloom>"
     COMMENT "Copying shaders to executable directory"
     DEPENDS CompileShaders

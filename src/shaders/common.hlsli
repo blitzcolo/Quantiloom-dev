@@ -123,9 +123,13 @@ struct Payload {
     float3 dDdx;  // ∂D/∂x (ray direction differential)                 // 12 bytes
     float3 dDdy;  // ∂D/∂y (ray direction differential)                 // 12 bytes
 
-    // TOTAL: 36 bytes (was 60 bytes)
+    // Shadow ray result (set by shadow miss shader)
+    // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
+    uint isShadowed;  // Shadow occlusion flag                          // 4 bytes
+
+    // TOTAL: 40 bytes
     // Note: If payload exceeds 32 bytes, consider using min16float for differentials
-    // to reduce to 24 bytes total (3×float3 = 36 -> 1×float3 + 2×min16float3 = 12+12 = 24)
+    // to reduce size. Still under 64-byte limit, so this is acceptable.
 
     // REMOVED for performance (if needed, can be recomputed or approximated):
     // float3 dOdx;  // ∂O/∂x (ray origin differential) - usually ~0 for primary rays
@@ -531,7 +535,8 @@ struct MaterialData {
     // Normal mapping
     int    normalTextureIndex;       // -1 = no normal map                   // Offset: 32-36
     float  normalScale;              // Normal intensity [0, inf]            // Offset: 36-40
-    float2 _padding0;                // Explicit padding to align emissiveFactor to 16-byte boundary // Offset: 40-48
+    uint   doubleSided;              // 0=single-sided (cull backface), 1=double-sided // Offset: 40-44
+    float  _padding0;                // Explicit padding to align emissiveFactor to 16-byte boundary // Offset: 44-48
 
     // Emissive (now 16-byte aligned at offset 48)
     float3 emissiveFactor;           // RGB [0, inf] (HDR allowed)           // Offset: 48-60

@@ -59,7 +59,8 @@ struct MaterialDataCPU {
 
     i32 normalTextureIndex;              // offset 32, size 4
     f32 normalScale;                     // offset 36, size 4
-    glm::vec2 _padding0;                 // offset 40, size 8 (align emissiveFactor to 16-byte)
+    u32 doubleSided;                     // offset 40, size 4 (0=single-sided, 1=double-sided)
+    f32 _padding0;                       // offset 44, size 4 (align emissiveFactor to 16-byte)
 
     glm::vec3 emissiveFactor;            // offset 48, size 12
     i32 emissiveTextureIndex;            // offset 60, size 4
@@ -82,7 +83,8 @@ struct MaterialDataCPU {
 static_assert(sizeof(MaterialDataCPU) == 96, "MaterialDataCPU size mismatch! Expected 96 bytes to match GPU MaterialData struct");
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, _padding0) == 40, "_padding0 offset mismatch");
+static_assert(offsetof(MaterialDataCPU, doubleSided) == 40, "doubleSided offset mismatch");
+static_assert(offsetof(MaterialDataCPU, _padding0) == 44, "_padding0 offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 48, "emissiveFactor offset mismatch");
 static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 60, "emissiveTextureIndex offset mismatch");
 static_assert(offsetof(MaterialDataCPU, alphaMode) == 64, "alphaMode offset mismatch");
@@ -92,6 +94,31 @@ static_assert(offsetof(MaterialDataCPU, irEmissivity) == 80, "irEmissivity offse
 static_assert(offsetof(MaterialDataCPU, irTransmittance) == 84, "irTransmittance offset mismatch");
 static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 88, "irTemperature_K offset mismatch");
 static_assert(offsetof(MaterialDataCPU, complexRefractiveIndexIndex) == 92, "complexRefractiveIndexIndex offset mismatch");
+
+// ============================================================================
+// InstanceGeometryInfo - Per-instance geometry offset info (must match shader)
+// ============================================================================
+// When multiple BLAS exist, shader needs to know where each instance's geometry
+// data starts in the merged global buffers. This structure provides those offsets.
+//
+// Shader usage:
+//   uint instanceIdx = InstanceIndex();
+//   InstanceGeometryInfo geo = instanceGeometryInfo[instanceIdx];
+//   uint globalIdx = geo.indexOffset + PrimitiveIndex() * 3 + localVertexIdx;
+//   float3 v = vertexBuffer[geo.vertexOffset + indexBuffer[globalIdx]];
+// ============================================================================
+
+struct InstanceGeometryInfoCPU {
+    u32 vertexOffset;   // Offset into global vertex buffer (in vertex count)
+    u32 indexOffset;    // Offset into global index buffer (in index count)
+    u32 normalOffset;   // Offset into global normal buffer (in normal count)
+    u32 uvOffset;       // Offset into global UV buffer (in UV count)
+    u32 tangentOffset;  // Offset into global tangent buffer (in tangent count)
+    u32 materialId;     // Material index (replaces instanceCustomIndex usage)
+    u32 pad[2];         // Padding for 32-byte alignment
+};
+
+static_assert(sizeof(InstanceGeometryInfoCPU) == 32, "InstanceGeometryInfoCPU size mismatch");
 
 // ============================================================================
 // Environment Map Helpers
@@ -586,10 +613,19 @@ int main(int argc, char* argv[]) {
                 size_t blasBase = meshToBlasStart[node.meshIndex];
 
                 for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+                    const auto& primitive = mesh.primitives[primIdx];
+                    // Get material's doubleSided property for hardware backface culling control
+                    bool doubleSided = true;  // Default: disable culling (backward compatible)
+                    if (primitive.materialId >= 0 &&
+                        static_cast<size_t>(primitive.materialId) < loadedScene.materials.size()) {
+                        doubleSided = loadedScene.materials[primitive.materialId].doubleSided;
+                    }
+
                     tlas.AddInstance(
                         blasList[blasBase + primIdx],
-                        mesh.primitives[primIdx].materialId,
-                        node.transform
+                        primitive.materialId,
+                        node.transform,
+                        doubleSided
                     );
                 }
             }
@@ -1114,6 +1150,9 @@ int main(int argc, char* argv[]) {
             cpuMat.normalTextureIndex = mat.normalTextureIndex;
             cpuMat.normalScale = mat.normalScale;
 
+            // Double-sided rendering
+            cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
+
             // Emissive
             cpuMat.emissiveFactor = mat.emissiveFactor;
             cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
@@ -1583,6 +1622,67 @@ int main(int argc, char* argv[]) {
 
         // Bind atmospheric parameters buffer (binding 17)
         pipeline.BindAtmosphericParams(atmosphericParamsBuffer.get());
+
+        // ====================================================================
+        // Create and Bind Instance Geometry Info Buffer (Binding 18)
+        // ====================================================================
+        // Each TLAS instance needs to know where its geometry data starts
+        // in the global buffers. For single-BLAS scenes, all offsets are 0.
+        // For multi-BLAS scenes, this would track cumulative offsets.
+        // ====================================================================
+        std::vector<InstanceGeometryInfoCPU> instanceGeoInfo;
+        u32 currentVertexOffset = 0;
+        u32 currentIndexOffset = 0;
+        u32 currentNormalOffset = 0;
+        u32 currentUVOffset = 0;
+        u32 currentTangentOffset = 0;
+
+        for (size_t nodeIdx = 0; nodeIdx < loadedScene.nodes.size(); ++nodeIdx) {
+            const auto& node = loadedScene.nodes[nodeIdx];
+            const Mesh& mesh = loadedScene.meshes[node.meshIndex];
+
+            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+                const auto& primitive = mesh.primitives[primIdx];
+
+                InstanceGeometryInfoCPU info{};
+                info.vertexOffset = currentVertexOffset;
+                info.indexOffset = currentIndexOffset;
+                info.normalOffset = currentNormalOffset;
+                info.uvOffset = currentUVOffset;
+                info.tangentOffset = currentTangentOffset;
+                info.materialId = primitive.materialId;
+                info.pad[0] = 0;
+                info.pad[1] = 0;
+
+                instanceGeoInfo.push_back(info);
+
+                // Accumulate offsets for next instance
+                // NOTE: Currently only first BLAS buffers are bound, so all instances
+                // use the same geometry. For proper multi-BLAS support, we would need
+                // to merge all BLAS data into global buffers like ExternalRenderContext.
+                currentVertexOffset += static_cast<u32>(primitive.positions.size());
+                currentIndexOffset += static_cast<u32>(primitive.indices.size());
+                currentNormalOffset += static_cast<u32>(primitive.normals.empty() ?
+                    primitive.positions.size() : primitive.normals.size());
+                currentUVOffset += static_cast<u32>(primitive.uvs.empty() ?
+                    primitive.positions.size() : primitive.uvs.size());
+                currentTangentOffset += static_cast<u32>(primitive.tangents.empty() ?
+                    primitive.positions.size() : primitive.tangents.size());
+            }
+        }
+
+        // Create and upload instance geometry buffer
+        GpuBuffer instanceGeometryBuffer(
+            context.GetAllocator(),
+            instanceGeoInfo.size() * sizeof(InstanceGeometryInfoCPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        instanceGeometryBuffer.Upload(instanceGeoInfo.data(),
+            instanceGeoInfo.size() * sizeof(InstanceGeometryInfoCPU));
+
+        pipeline.BindInstanceGeometryBuffer(instanceGeometryBuffer);  // Binding 18
+        QL_LOG_INFO("  Instance geometry buffer created: {} instances", instanceGeoInfo.size());
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();

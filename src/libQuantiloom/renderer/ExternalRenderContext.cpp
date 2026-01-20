@@ -27,6 +27,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <chrono>
 #include <filesystem>
+#include <random>
 
 // Platform-specific includes for cache directory
 #if defined(_WIN32)
@@ -125,7 +126,8 @@ struct MaterialDataCPU {
     i32 metallicRoughnessTextureIndex;
     i32 normalTextureIndex;
     f32 normalScale;
-    glm::vec2 _padding0;
+    u32 doubleSided;
+    f32 _padding0;
     glm::vec3 emissiveFactor;
     i32 emissiveTextureIndex;
     u32 alphaMode;
@@ -238,6 +240,11 @@ struct ExternalRenderContext::Impl {
     // Accumulation
     u32 accumulatedSamples = 0;
     u32 frameIndex = 0;
+
+    // Random number generator for better sample distribution
+    // Uses Mersenne Twister for high-quality randomness (matches CLI app)
+    std::mt19937 rng{std::random_device{}()};
+    std::uniform_int_distribution<u32> randDist{0, std::numeric_limits<u32>::max()};
 
     // Statistics
     f32 lastFrameTimeMs = 0.0f;
@@ -599,7 +606,8 @@ void ExternalRenderContext::RenderFrame(
     m_impl->pipeline->SetCameraData(cameraData);
 
     // Set sampling parameters
-    u32 randomSeed = m_impl->frameIndex * 997 + m_impl->accumulatedSamples * 1009;
+    // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
+    u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->frameIndex * 997 + m_impl->accumulatedSamples * 1009);
     m_impl->pipeline->SetSamplingParams(
         m_impl->frameIndex,
         m_impl->accumulatedSamples,
@@ -956,10 +964,19 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
             size_t blasBase = meshToBlasStart[node.meshIndex];
 
             for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+                const auto& primitive = mesh.primitives[primIdx];
+                // Get material's doubleSided property for hardware backface culling control
+                bool doubleSided = true;  // Default: disable culling (backward compatible)
+                if (primitive.materialId >= 0 &&
+                    static_cast<size_t>(primitive.materialId) < m_impl->scene->materials.size()) {
+                    doubleSided = m_impl->scene->materials[primitive.materialId].doubleSided;
+                }
+
                 m_impl->tlas->AddInstance(
                     *m_impl->blasList[blasBase + primIdx],
-                    mesh.primitives[primIdx].materialId,
-                    node.transform
+                    primitive.materialId,
+                    node.transform,
+                    doubleSided
                 );
             }
         }
@@ -1379,13 +1396,20 @@ void ExternalRenderContext::BuildAccelerationStructures() {
                 info.pad[1] = 0;
                 instanceInfos.push_back(info);
 
+                // Get material's doubleSided property for hardware backface culling control
+                bool doubleSided = true;  // Default: disable culling (backward compatible)
+                if (static_cast<size_t>(geoOffset.materialId) < m_impl->scene->materials.size()) {
+                    doubleSided = m_impl->scene->materials[geoOffset.materialId].doubleSided;
+                }
+
                 // Add TLAS instance
                 // Note: instanceCustomIndex is now the TLAS instance index (for InstanceGeometryInfo lookup)
                 // Material ID is stored in InstanceGeometryInfo instead
                 m_impl->tlas->AddInstance(
                     *m_impl->blasList[globalBlasIdx],
                     static_cast<u32>(instanceInfos.size() - 1),  // Instance index for geometry info lookup
-                    node.transform
+                    node.transform,
+                    doubleSided
                 );
             }
         }
@@ -1431,6 +1455,7 @@ void ExternalRenderContext::UpdateGpuResources() {
         cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
         cpuMat.normalTextureIndex = mat.normalTextureIndex;
         cpuMat.normalScale = mat.normalScale;
+        cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
         cpuMat.emissiveFactor = mat.emissiveFactor;
         cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
         cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);

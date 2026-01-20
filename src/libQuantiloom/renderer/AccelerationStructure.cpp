@@ -489,7 +489,7 @@ TLAS& TLAS::operator=(TLAS&& other) noexcept {
     return *this;
 }
 
-void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform) {
+void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transform, bool doubleSided) {
     if (m_built) {
         throw std::runtime_error("Cannot add instance to already-built TLAS");
     }
@@ -508,13 +508,22 @@ void TLAS::AddInstance(const BLAS& blas, u32 materialId, const glm::mat4& transf
     instance.instanceCustomIndex = materialId;  // Material ID accessible in shader via InstanceID()
     instance.mask = 0xFF;  // Visible to all rays
     instance.instanceShaderBindingTableRecordOffset = 0;  // Single hit group
-    instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+
+    // Set backface culling based on material's doubleSided property
+    // - doubleSided=true: Disable culling, backfaces will be shaded (normal flipped in shader)
+    // - doubleSided=false: Enable culling, rays pass through backfaces (no hit)
+    if (doubleSided) {
+        instance.flags = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+    } else {
+        instance.flags = 0;  // Enable backface culling (default Vulkan behavior)
+    }
+
     instance.accelerationStructureReference = blas.GetDeviceAddress();
 
     m_instances.push_back(instance);
 
-    QL_LOG_INFO("  Added instance {} to TLAS (material {}, BLAS addr: 0x{:x})",
-                m_instances.size() - 1, materialId, blas.GetDeviceAddress());
+    QL_LOG_INFO("  Added instance {} to TLAS (material {}, doubleSided={}, BLAS addr: 0x{:x})",
+                m_instances.size() - 1, materialId, doubleSided, blas.GetDeviceAddress());
 }
 
 void TLAS::Build(VkCommandBuffer cmd) {

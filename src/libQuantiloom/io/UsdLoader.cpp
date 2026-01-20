@@ -37,6 +37,7 @@
 #include <pxr/usd/usd/variantSets.h>
 #include <pxr/usd/usd/editContext.h>
 #include <pxr/usd/usdGeom/mesh.h>
+#include <pxr/usd/usdGeom/gprim.h>
 #include <pxr/usd/usdGeom/subset.h>
 #include <pxr/usd/usdGeom/xform.h>
 #include <pxr/usd/usdGeom/xformable.h>
@@ -1638,6 +1639,32 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
             }
 
             Mesh mesh = ParseMesh(&(*stage), &prim, materialPathMap, path, options);
+
+            // ================================================================
+            // Read doubleSided attribute from geometry and propagate to material
+            // ================================================================
+            // USD stores doubleSided on geometry, not on material. We read it here
+            // and update the bound material. If multiple meshes share a material
+            // with different doubleSided values, we use OR logic (safer: render both sides).
+            UsdGeomMesh geomMesh(prim);
+            bool geomDoubleSided = false;
+            if (auto attr = geomMesh.GetDoubleSidedAttr()) {
+                attr.Get(&geomDoubleSided, GetTimeCode(options));
+            }
+
+            if (geomDoubleSided) {
+                // Update all materials used by this mesh's primitives
+                for (const auto& primitive : mesh.primitives) {
+                    if (primitive.materialId >= 0 && static_cast<size_t>(primitive.materialId) < scene.materials.size()) {
+                        Material& mat = scene.materials[primitive.materialId];
+                        if (!mat.doubleSided) {
+                            QL_LOG_DEBUG("  Mesh '{}' has doubleSided=true, updating material '{}'",
+                                        mesh.name, mat.name);
+                            mat.doubleSided = true;
+                        }
+                    }
+                }
+            }
 
             // Get world transform
             UsdGeomXformable xformable(prim);

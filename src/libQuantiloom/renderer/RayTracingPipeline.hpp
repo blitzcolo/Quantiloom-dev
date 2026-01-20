@@ -346,6 +346,7 @@ private:
     std::string m_raygenPath;
     std::string m_closestHitPath;
     std::string m_missPath;
+    std::string m_shadowMissPath;  // Auto-derived from missPath or explicitly set
 
     // Pipeline objects
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
