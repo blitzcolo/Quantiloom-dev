@@ -20,6 +20,7 @@
 #include "SpectralIO.hpp"
 #include "ImageIO.hpp"
 #include "scene/MeshOptimizer.hpp"
+#include "scene/NormalGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
@@ -1146,56 +1147,8 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
     }
 
     // ========================================================================
-    // Compute missing normals if not provided by USD
+    // Note: Normals will be generated later by NormalGenerator if missing
     // ========================================================================
-    if (normals.empty() && !positions.empty() && !indices.empty()) {
-        if (isSubdivisionSurface) {
-            QL_LOG_INFO("    Computing smooth normals for subdivision mesh '{}' (scheme: {}, {} vertices)",
-                        mesh.name, subdivisionScheme.GetString(), positions.size());
-        } else {
-            QL_LOG_INFO("    Computing smooth normals for polygon mesh '{}' ({} vertices, {} triangles)",
-                        mesh.name, positions.size(), indices.size() / 3);
-        }
-
-        // Initialize normals to zero
-        normals.resize(positions.size(), glm::vec3(0.0f));
-
-        // Accumulate face normals to vertices (area-weighted smooth normals)
-        for (size_t i = 0; i < indices.size(); i += 3) {
-            u32 i0 = indices[i];
-            u32 i1 = indices[i + 1];
-            u32 i2 = indices[i + 2];
-
-            if (i0 >= positions.size() || i1 >= positions.size() || i2 >= positions.size()) {
-                continue;
-            }
-
-            const glm::vec3& v0 = positions[i0];
-            const glm::vec3& v1 = positions[i1];
-            const glm::vec3& v2 = positions[i2];
-
-            // Compute face normal (cross product of two edges)
-            // The magnitude is proportional to face area (area-weighted averaging)
-            glm::vec3 edge1 = v1 - v0;
-            glm::vec3 edge2 = v2 - v0;
-            glm::vec3 faceNormal = glm::cross(edge1, edge2);
-
-            // Accumulate to each vertex
-            normals[i0] += faceNormal;
-            normals[i1] += faceNormal;
-            normals[i2] += faceNormal;
-        }
-
-        // Normalize all vertex normals
-        for (auto& n : normals) {
-            float len = glm::length(n);
-            if (len > 1e-6f) {
-                n /= len;
-            } else {
-                n = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up normal
-            }
-        }
-    }
 
     // ========================================================================
     // Handle GeomSubsets (multi-material per mesh)
@@ -1316,6 +1269,16 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         QL_LOG_INFO("    Vertex dedup for '{}': {} -> {} vertices ({:.1f}% reduction)",
                     mesh.name, dedupeStats.originalVertexCount, dedupeStats.optimizedVertexCount,
                     dedupeStats.vertexReductionPercent);
+    }
+
+    // ========================================================================
+    // Generate normals with dihedral angle-based hard/smooth edge detection
+    // ========================================================================
+    for (auto& primitive : mesh.primitives) {
+        if (primitive.normals.empty()) {
+            QL_LOG_DEBUG("    Generating normals for USD primitive with dihedral angle threshold");
+            NormalGenerator::GenerateWithDihedralAngle(primitive);
+        }
     }
 
     size_t totalVerts = 0, totalTris = 0;

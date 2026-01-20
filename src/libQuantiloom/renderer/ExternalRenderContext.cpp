@@ -1213,41 +1213,11 @@ void ExternalRenderContext::BuildAccelerationStructures() {
                 std::copy(primitive.normals.begin(), primitive.normals.end(),
                          mergedNormals.begin() + offset.normalOffset);
             } else {
-                // Generate smooth normals via area-weighted accumulation
-                // First initialize to zero for accumulation
+                // Loaders should have generated normals - this is a fallback for edge cases
+                QL_LOG_WARN("ExternalRenderContext: Primitive has no normals after loading - using fallback up vector");
                 std::fill(mergedNormals.begin() + offset.normalOffset,
                          mergedNormals.begin() + offset.normalOffset + primitive.positions.size(),
-                         glm::vec3(0.0f));
-
-                // Accumulate face normals (cross product magnitude = 2 * triangle area for weighting)
-                for (size_t i = 0; i < primitive.indices.size(); i += 3) {
-                    const u32 i0 = primitive.indices[i + 0];
-                    const u32 i1 = primitive.indices[i + 1];
-                    const u32 i2 = primitive.indices[i + 2];
-
-                    const glm::vec3& v0 = primitive.positions[i0];
-                    const glm::vec3& v1 = primitive.positions[i1];
-                    const glm::vec3& v2 = primitive.positions[i2];
-
-                    // Un-normalized cross product: magnitude = 2 * triangle area (natural area weighting)
-                    glm::vec3 faceNormal = glm::cross(v1 - v0, v2 - v0);
-
-                    // Accumulate (not overwrite) - shared vertices get contribution from all adjacent faces
-                    mergedNormals[offset.normalOffset + i0] += faceNormal;
-                    mergedNormals[offset.normalOffset + i1] += faceNormal;
-                    mergedNormals[offset.normalOffset + i2] += faceNormal;
-                }
-
-                // Normalize accumulated normals
-                for (size_t i = 0; i < primitive.positions.size(); ++i) {
-                    glm::vec3& n = mergedNormals[offset.normalOffset + i];
-                    float len = glm::length(n);
-                    if (len > 1e-8f) {
-                        n /= len;
-                    } else {
-                        n = glm::vec3(0.0f, 1.0f, 0.0f);  // Default up vector for degenerate cases
-                    }
-                }
+                         glm::vec3(0.0f, 1.0f, 0.0f));
             }
 
             // Copy UVs (or generate fallback)

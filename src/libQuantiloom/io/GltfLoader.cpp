@@ -1,6 +1,7 @@
 #include "GltfLoader.hpp"
 #include "SpectralIO.hpp"
 #include "scene/MeshOptimizer.hpp"
+#include "scene/NormalGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
@@ -576,6 +577,13 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
                             stats.originalVertexCount, stats.optimizedVertexCount,
                             stats.vertexReductionPercent);
             }
+        }
+
+        // Generate normals with dihedral angle-based hard/smooth edge detection
+        // Only runs if normals are missing (no-op otherwise)
+        if (primitive.normals.empty()) {
+            QL_LOG_DEBUG("    Generating normals with dihedral angle threshold");
+            NormalGenerator::GenerateWithDihedralAngle(primitive);
         }
 
         mesh.primitives.push_back(std::move(primitive));
