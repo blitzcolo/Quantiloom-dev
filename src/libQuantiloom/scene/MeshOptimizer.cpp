@@ -214,6 +214,64 @@ MeshOptimizationStats MeshOptimizer::DeduplicateVertices(GeometryPrimitive& prim
                              static_cast<f32>(stats.originalVertexCount));
     }
 
+    // ========================================================================
+    // Validation: Verify triangle integrity after deduplication
+    // ========================================================================
+    if (primitive.indices.size() >= 3) {
+        QL_LOG_DEBUG("=== MeshOptimizer Post-Dedup Validation ===");
+        QL_LOG_DEBUG("  Vertices: {} -> {}, Indices: {}",
+                    stats.originalVertexCount, stats.optimizedVertexCount,
+                    primitive.indices.size());
+
+        // Check first 12 triangles (if cube, this is all of them)
+        size_t numTriangles = primitive.indices.size() / 3;
+        for (size_t triIdx = 0; triIdx < std::min(numTriangles, size_t(12)); ++triIdx) {
+            u32 idx0 = primitive.indices[triIdx * 3 + 0];
+            u32 idx1 = primitive.indices[triIdx * 3 + 1];
+            u32 idx2 = primitive.indices[triIdx * 3 + 2];
+
+            if (idx0 >= primitive.positions.size() ||
+                idx1 >= primitive.positions.size() ||
+                idx2 >= primitive.positions.size()) {
+                QL_LOG_ERROR("  Triangle {}: INVALID post-dedup indices [{}, {}, {}] (max={})",
+                            triIdx, idx0, idx1, idx2, primitive.positions.size() - 1);
+                continue;
+            }
+
+            glm::vec3 v0 = primitive.positions[idx0];
+            glm::vec3 v1 = primitive.positions[idx1];
+            glm::vec3 v2 = primitive.positions[idx2];
+
+            // Compute geometric normal
+            glm::vec3 e0 = v1 - v0;
+            glm::vec3 e1 = v2 - v0;
+            glm::vec3 cross = glm::cross(e0, e1);
+            float len = glm::length(cross);
+
+            if (len < 1e-8f) {
+                QL_LOG_WARN("  Triangle {}: DEGENERATE (near-zero area)", triIdx);
+                continue;
+            }
+
+            glm::vec3 geoNormal = cross / len;
+
+            // Check if axis-aligned (cube validation)
+            bool axisAligned =
+                (std::abs(std::abs(geoNormal.x) - 1.0f) < 0.01f &&
+                 std::abs(geoNormal.y) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                (std::abs(geoNormal.x) < 0.01f &&
+                 std::abs(std::abs(geoNormal.y) - 1.0f) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                (std::abs(geoNormal.x) < 0.01f && std::abs(geoNormal.y) < 0.01f &&
+                 std::abs(std::abs(geoNormal.z) - 1.0f) < 0.01f);
+
+            QL_LOG_DEBUG("  Tri {}: [{},{},{}] -> geoN=({:.3f},{:.3f},{:.3f}) {}",
+                        triIdx, idx0, idx1, idx2,
+                        geoNormal.x, geoNormal.y, geoNormal.z,
+                        axisAligned ? "FINE" : "SKEWED");
+        }
+        QL_LOG_DEBUG("=== End Post-Dedup Validation ===");
+    }
+
     return stats;
 }
 

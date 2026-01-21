@@ -120,6 +120,15 @@ void GpuBuffer::Upload(const void* data, const VkDeviceSize uploadSize, const Vk
 
     if (void* mapped = Map(); mapped != nullptr) {
         std::memcpy(static_cast<char*>(mapped) + offset, data, uploadSize);
+
+        // Flush the memory range to ensure GPU can see the data
+        // This is required for non-HOST_COHERENT memory (common with VMA_MEMORY_USAGE_CPU_TO_GPU)
+        VkResult flushResult = vmaFlushAllocation(m_allocator, m_allocation, offset, uploadSize);
+        if (flushResult != VK_SUCCESS) {
+            QL_LOG_WARN("vmaFlushAllocation failed with code {}, data may not be visible to GPU",
+                        static_cast<int>(flushResult));
+        }
+
         Unmap();
     }
 }

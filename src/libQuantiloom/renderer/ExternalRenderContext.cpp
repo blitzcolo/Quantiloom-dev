@@ -1298,6 +1298,63 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     }
 
     // ========================================================================
+    // Phase 2.5: Validate merged buffer data (diagnostic logging)
+    // ========================================================================
+
+    QL_LOG_DEBUG("=== Buffer Merge Validation ===");
+    QL_LOG_DEBUG("  Total vertices: {}, Total indices: {}", totalVertices, totalIndices);
+
+    // Validate triangles and compute geometric normals
+    size_t numTriangles = totalIndices / 3;
+    QL_LOG_DEBUG("  Total triangles: {}", numTriangles);
+
+    for (size_t triIdx = 0; triIdx < std::min(numTriangles, size_t(12)); ++triIdx) {
+        u32 idx0 = mergedIndices[triIdx * 3 + 0];
+        u32 idx1 = mergedIndices[triIdx * 3 + 1];
+        u32 idx2 = mergedIndices[triIdx * 3 + 2];
+
+        // Validate index bounds
+        if (idx0 >= totalVertices || idx1 >= totalVertices || idx2 >= totalVertices) {
+            QL_LOG_ERROR("  Triangle {}: INVALID INDICES [{}, {}, {}] (max={})",
+                        triIdx, idx0, idx1, idx2, totalVertices - 1);
+            continue;
+        }
+
+        glm::vec3 v0 = mergedVertices[idx0];
+        glm::vec3 v1 = mergedVertices[idx1];
+        glm::vec3 v2 = mergedVertices[idx2];
+
+        // Compute geometric normal
+        glm::vec3 e0 = v1 - v0;
+        glm::vec3 e1 = v2 - v0;
+        glm::vec3 geoNormal = glm::normalize(glm::cross(e0, e1));
+
+        // Check if axis-aligned (for cube validation)
+        bool axisAligned = (std::abs(std::abs(geoNormal.x) - 1.0f) < 0.01f &&
+                           std::abs(geoNormal.y) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                          (std::abs(geoNormal.x) < 0.01f &&
+                           std::abs(std::abs(geoNormal.y) - 1.0f) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                          (std::abs(geoNormal.x) < 0.01f && std::abs(geoNormal.y) < 0.01f &&
+                           std::abs(std::abs(geoNormal.z) - 1.0f) < 0.01f);
+
+        QL_LOG_DEBUG("  Triangle {}: indices=[{}, {}, {}], geoNormal=({:.3f}, {:.3f}, {:.3f}) {}",
+                    triIdx, idx0, idx1, idx2,
+                    geoNormal.x, geoNormal.y, geoNormal.z,
+                    axisAligned ? "FINE" : "SKEWED");
+    }
+
+    // Also log stored normals for comparison
+    if (!mergedNormals.empty()) {
+        QL_LOG_DEBUG("  --- Stored vertex normals (first 8) ---");
+        for (size_t i = 0; i < std::min(size_t(8), mergedNormals.size()); ++i) {
+            QL_LOG_DEBUG("    normal[{}] = ({:.3f}, {:.3f}, {:.3f})",
+                        i, mergedNormals[i].x, mergedNormals[i].y, mergedNormals[i].z);
+        }
+    }
+
+    QL_LOG_DEBUG("=== End Buffer Merge Validation ===");
+
+    // ========================================================================
     // Phase 3: Create merged GPU buffers and upload data
     // ========================================================================
 
@@ -1403,6 +1460,12 @@ void ExternalRenderContext::BuildAccelerationStructures() {
                 info.pad[0] = 0;
                 info.pad[1] = 0;
                 instanceInfos.push_back(info);
+
+                // Log instance geometry info for debugging
+                QL_LOG_DEBUG("  Instance {}: vertexOff={}, indexOff={}, normalOff={}, uvOff={}, tangentOff={}, matId={}",
+                            instanceInfos.size() - 1,
+                            info.vertexOffset, info.indexOffset, info.normalOffset,
+                            info.uvOffset, info.tangentOffset, info.materialId);
 
                 // Get material's doubleSided property for hardware backface culling control
                 bool doubleSided = true;  // Default: disable culling (backward compatible)

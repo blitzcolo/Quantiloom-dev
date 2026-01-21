@@ -165,6 +165,16 @@ enum class DebugVisualizationMode : u32 {
     IREmissivity = 61,     // IR emissivity (grayscale)
     IREmission = 62,       // Thermal emission component
     IRReflection = 63,     // IR reflection component
+
+    // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
+    VertexPositions = 70,  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)
+    IndexValues = 71,      // Triangle indices as colors (normalized by 32)
+    InstanceID = 72,       // Instance index (hashed to color)
+    PrimitiveID = 73,      // PrimitiveIndex() value (R=id/12 for cube)
+    IndexBufferPos = 74,   // Index buffer read position (debug offset calc)
+    V0Position = 75,       // v0 vertex position directly (mapped to 0-1)
+    RawIdx0 = 76,          // Raw idx0 value and read address
+    V0Raw = 77,            // v0 position clamped (not frac)
 };
 
 // ============================================================================

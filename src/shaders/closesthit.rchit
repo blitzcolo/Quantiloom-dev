@@ -33,14 +33,16 @@
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
 
 [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;
-[[vk::binding(3, 0)]] StructuredBuffer<float3> vertexBuffer;    // Vertex positions
+// Use ByteAddressBuffer for vertex/normal to avoid float3 stride alignment issues
+// StructuredBuffer<float3> may use 16-byte stride on some drivers, causing out-of-bounds reads
+[[vk::binding(3, 0)]] ByteAddressBuffer vertexBuffer;    // Vertex positions (12 bytes each)
 [[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
 [[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
 [[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
 [[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
 [[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
 [[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
-[[vk::binding(16, 0)]] StructuredBuffer<float3> normalBuffer;   // Normal vectors (required for smooth shading)
+[[vk::binding(16, 0)]] ByteAddressBuffer normalBuffer;   // Normal vectors (12 bytes each)
 
 // ============================================================================
 // NEW (M2+): Spectral Curve Buffer
@@ -403,9 +405,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
     uint idx2 = indexBuffer[geoInfo.indexOffset + primitiveID * 3 + 2];
 
     // Read vertex positions with offset into global vertex buffer
-    float3 v0 = vertexBuffer[geoInfo.vertexOffset + idx0];
-    float3 v1 = vertexBuffer[geoInfo.vertexOffset + idx1];
-    float3 v2 = vertexBuffer[geoInfo.vertexOffset + idx2];
+    // Use ByteAddressBuffer.Load3 with explicit byte offset (12 bytes per vec3)
+    // This avoids StructuredBuffer<float3> stride alignment issues (some drivers use 16-byte stride)
+    float3 v0 = asfloat(vertexBuffer.Load3((geoInfo.vertexOffset + idx0) * 12));
+    float3 v1 = asfloat(vertexBuffer.Load3((geoInfo.vertexOffset + idx1) * 12));
+    float3 v2 = asfloat(vertexBuffer.Load3((geoInfo.vertexOffset + idx2) * 12));
 
     // ========================================================================
     // Compute TRUE geometric normal from triangle edges (flat normal)
@@ -429,9 +433,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Read per-vertex normals with offset into global normal buffer
     // This gives smooth shading (Gouraud/Phong) instead of flat shading
-    float3 n0 = normalBuffer[geoInfo.normalOffset + idx0];
-    float3 n1 = normalBuffer[geoInfo.normalOffset + idx1];
-    float3 n2 = normalBuffer[geoInfo.normalOffset + idx2];
+    float3 n0 = asfloat(normalBuffer.Load3((geoInfo.normalOffset + idx0) * 12));
+    float3 n1 = asfloat(normalBuffer.Load3((geoInfo.normalOffset + idx1) * 12));
+    float3 n2 = asfloat(normalBuffer.Load3((geoInfo.normalOffset + idx2) * 12));
 
     // Barycentric interpolation: n = n0 * w0 + n1 * w1 + n2 * w2
     // where w0 = (1 - bary.x - bary.y), w1 = bary.x, w2 = bary.y
@@ -1702,6 +1706,108 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // IR reflection component (grayscale)
                 float refl = GetEffectiveIRReflectance(material);
                 debug_output = float3(refl, refl, refl);
+                break;
+            }
+
+            // ================================================================
+            // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
+            // ================================================================
+            // These modes help identify issues where triangles read vertices
+            // from wrong locations, causing incorrect geometric normals.
+            // ================================================================
+
+            case DEBUG_MODE_VERTEX_POSITIONS: {
+                // Hash each vertex position to RGB color
+                // Same face should show similar colors (shared vertices)
+                float hash0 = frac(v0.x * 12.9898 + v0.y * 78.233 + v0.z * 37.719);
+                float hash1 = frac(v1.x * 12.9898 + v1.y * 78.233 + v1.z * 37.719);
+                float hash2 = frac(v2.x * 12.9898 + v2.y * 78.233 + v2.z * 37.719);
+                debug_output = float3(hash0, hash1, hash2);
+                break;
+            }
+
+            case DEBUG_MODE_INDEX_VALUES: {
+                // Show triangle indices as colors (normalized to 0-1 range)
+                // Use 32.0 for small meshes like cube (24 vertices)
+                float maxIdx = 32.0;
+                debug_output = float3(
+                    float(idx0) / maxIdx,
+                    float(idx1) / maxIdx,
+                    float(idx2) / maxIdx
+                );
+                break;
+            }
+
+            case DEBUG_MODE_INSTANCE_ID: {
+                // Instance index hashed to color
+                // Useful for verifying TLAS instance mapping
+                float h = float(instanceIdx);
+                debug_output = float3(
+                    frac(h * 0.123456789),
+                    frac(h * 0.234567891),
+                    frac(h * 0.345678912)
+                );
+                break;
+            }
+
+            case DEBUG_MODE_PRIMITIVE_ID: {
+                // Show PrimitiveIndex() directly
+                // For 12-triangle cube: each face pair should have consecutive colors
+                float pid = float(primitiveID);
+                debug_output = float3(
+                    pid / 12.0,                    // R: linear gradient 0-1 over 12 triangles
+                    frac(pid * 0.5),               // G: alternates for triangle pairs
+                    float(primitiveID % 2)         // B: 0 or 1 for even/odd triangles
+                );
+                break;
+            }
+
+            case DEBUG_MODE_INDEX_BUFFER_POS: {
+                // Show the actual index buffer position we're reading from
+                // This helps debug if indexOffset or primitiveID*3 calculation is wrong
+                uint basePos = geoInfo.indexOffset + primitiveID * 3;
+                debug_output = float3(
+                    float(basePos) / 36.0,         // R: read position (0-35 for cube)
+                    float(geoInfo.indexOffset) / 36.0,  // G: offset (should be 0 for single BLAS)
+                    float(primitiveID) / 12.0      // B: primitive ID
+                );
+                break;
+            }
+
+            case DEBUG_MODE_V0_POSITION: {
+                // Show v0 vertex position directly (use frac to map to 0-1)
+                // For cube vertices at +/-1, frac gives 0 or 1-epsilon
+                debug_output = float3(
+                    frac(v0.x * 0.5 + 0.5),  // Map [-1,1] to [0,1]
+                    frac(v0.y * 0.5 + 0.5),
+                    frac(v0.z * 0.5 + 0.5)
+                );
+                break;
+            }
+
+            case DEBUG_MODE_RAW_IDX0: {
+                // Show raw idx0 value and the actual read address
+                // R = idx0 / 32 (for 24-vertex cube, range 0-0.75)
+                // G = actual buffer read address (geoInfo.vertexOffset + idx0) / 32
+                // B = geoInfo.vertexOffset / 32 (should be 0 for single BLAS)
+                uint readAddr = geoInfo.vertexOffset + idx0;
+                debug_output = float3(
+                    float(idx0) / 32.0,
+                    float(readAddr) / 32.0,
+                    float(geoInfo.vertexOffset) / 32.0
+                );
+                break;
+            }
+
+            case DEBUG_MODE_V0_RAW: {
+                // Show v0 position directly clamped (not frac)
+                // This shows the actual sign: negative = 0, positive = 1
+                // For cube at ±1: x=-1 gives 0, x=+1 gives 1
+                debug_output = float3(
+                    saturate(v0.x * 0.5 + 0.5),  // -1→0, 0→0.5, +1→1
+                    saturate(v0.y * 0.5 + 0.5),
+                    saturate(v0.z * 0.5 + 0.5)
+                );
                 break;
             }
 

@@ -1294,6 +1294,70 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
     QL_LOG_INFO("    Loaded mesh '{}': {} vertices, {} triangles, {} primitives",
                 mesh.name, totalVerts, totalTris, mesh.primitives.size());
 
+    // ========================================================================
+    // DIAGNOSTIC: Dump primitive data for debugging cube rendering artifacts
+    // ========================================================================
+    // This diagnostic helps identify issues where triangles on the same face
+    // show different normals (e.g., diagonal normals instead of axis-aligned).
+    // ========================================================================
+    for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+        const auto& primitive = mesh.primitives[primIdx];
+        QL_LOG_DEBUG("USD Primitive {} dump:", primIdx);
+        QL_LOG_DEBUG("  Positions: {} vertices", primitive.positions.size());
+        QL_LOG_DEBUG("  Normals: {} normals", primitive.normals.size());
+        QL_LOG_DEBUG("  Indices: {} indices ({} triangles)",
+                     primitive.indices.size(), primitive.indices.size() / 3);
+
+        // Dump first 8 vertices
+        for (size_t i = 0; i < std::min(size_t(8), primitive.positions.size()); ++i) {
+            QL_LOG_DEBUG("    pos[{}] = ({:.4f}, {:.4f}, {:.4f})", i,
+                primitive.positions[i].x, primitive.positions[i].y, primitive.positions[i].z);
+        }
+
+        // Dump first few triangles with their computed geometric normals
+        size_t numTrisToDump = std::min(size_t(12), primitive.indices.size() / 3);
+        for (size_t triIdx = 0; triIdx < numTrisToDump; ++triIdx) {
+            u32 idx0 = primitive.indices[triIdx * 3 + 0];
+            u32 idx1 = primitive.indices[triIdx * 3 + 1];
+            u32 idx2 = primitive.indices[triIdx * 3 + 2];
+
+            if (idx0 >= primitive.positions.size() ||
+                idx1 >= primitive.positions.size() ||
+                idx2 >= primitive.positions.size()) {
+                QL_LOG_ERROR("  Triangle {}: INVALID INDICES [{}, {}, {}] (max={})",
+                             triIdx, idx0, idx1, idx2, primitive.positions.size() - 1);
+                continue;
+            }
+
+            const glm::vec3& v0 = primitive.positions[idx0];
+            const glm::vec3& v1 = primitive.positions[idx1];
+            const glm::vec3& v2 = primitive.positions[idx2];
+
+            glm::vec3 edge1 = v1 - v0;
+            glm::vec3 edge2 = v2 - v0;
+            glm::vec3 geoNormal = glm::normalize(glm::cross(edge1, edge2));
+
+            // Check if geometric normal is axis-aligned (expected for cube)
+            bool axisAligned =
+                (std::abs(std::abs(geoNormal.x) - 1.0f) < 0.01f &&
+                 std::abs(geoNormal.y) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                (std::abs(geoNormal.x) < 0.01f &&
+                 std::abs(std::abs(geoNormal.y) - 1.0f) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
+                (std::abs(geoNormal.x) < 0.01f && std::abs(geoNormal.y) < 0.01f &&
+                 std::abs(std::abs(geoNormal.z) - 1.0f) < 0.01f);
+
+            const char* status = axisAligned ? "" : " [NON-AXIS-ALIGNED!]";
+            QL_LOG_DEBUG("  Triangle {}: indices=[{}, {}, {}], geoNormal=({:.3f}, {:.3f}, {:.3f}){}",
+                         triIdx, idx0, idx1, idx2, geoNormal.x, geoNormal.y, geoNormal.z, status);
+
+            if (!axisAligned) {
+                QL_LOG_DEBUG("    v0=({:.4f}, {:.4f}, {:.4f})", v0.x, v0.y, v0.z);
+                QL_LOG_DEBUG("    v1=({:.4f}, {:.4f}, {:.4f})", v1.x, v1.y, v1.z);
+                QL_LOG_DEBUG("    v2=({:.4f}, {:.4f}, {:.4f})", v2.x, v2.y, v2.z);
+            }
+        }
+    }
+
     return mesh;
 }
 

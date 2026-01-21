@@ -86,6 +86,16 @@
 #define DEBUG_MODE_IR_EMISSION             62  // Thermal emission component
 #define DEBUG_MODE_IR_REFLECTION           63  // IR reflection component
 
+// Geometry Diagnostics (70-79) - For debugging mesh/index corruption
+#define DEBUG_MODE_VERTEX_POSITIONS        70  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)
+#define DEBUG_MODE_INDEX_VALUES            71  // Triangle indices as colors (normalized by 32)
+#define DEBUG_MODE_INSTANCE_ID             72  // Instance index (hashed to color)
+#define DEBUG_MODE_PRIMITIVE_ID            73  // PrimitiveIndex() value (R=id/12 for cube)
+#define DEBUG_MODE_INDEX_BUFFER_POS        74  // Index buffer read position (debug offset calc)
+#define DEBUG_MODE_V0_POSITION             75  // v0 vertex position directly (frac of xyz)
+#define DEBUG_MODE_RAW_IDX0                76  // Raw idx0 value and read address
+#define DEBUG_MODE_V0_RAW                  77  // v0 position clamped (not frac)
+
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
 // ============================================================================
@@ -729,11 +739,12 @@ struct AtmosphericParams {
 // We merge all BLAS data into global buffers for efficient shader access.
 // InstanceGeometryInfo tells the shader where each instance's data starts.
 //
-// USAGE IN SHADER:
+// USAGE IN SHADER (with ByteAddressBuffer for vertex/normal to avoid stride issues):
 //   uint instIdx = InstanceIndex();
 //   InstanceGeometryInfo geo = instanceGeometryInfo[instIdx];
 //   uint idx = indexBuffer[geo.indexOffset + PrimitiveIndex() * 3 + localVertexIdx];
-//   float3 v = vertexBuffer[geo.vertexOffset + idx];
+//   float3 v = asfloat(vertexBuffer.Load3((geo.vertexOffset + idx) * 12));  // 12 = sizeof(float3)
+//   float3 n = asfloat(normalBuffer.Load3((geo.normalOffset + idx) * 12));
 //
 // SIZE: 32 bytes (must match CPU-side InstanceGeometryInfo)
 // ============================================================================
