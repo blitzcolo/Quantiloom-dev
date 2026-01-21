@@ -24,6 +24,7 @@
 #include "blackbody.hlsli"
 #include "spectral_query.hlsli"
 #include "atmospheric.hlsli"
+#include "volumetric.hlsli"
 
 // ============================================================================
 // Bindings
@@ -1808,6 +1809,72 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     saturate(v0.y * 0.5 + 0.5),
                     saturate(v0.z * 0.5 + 0.5)
                 );
+                break;
+            }
+
+            // ================================================================
+            // Transmission Debug (80-89) - For debugging transmission materials
+            // ================================================================
+            // These modes help visualize transmission material properties
+            // and verify correct Fresnel/refraction calculations.
+            // ================================================================
+
+            case DEBUG_MODE_TRANSMISSION: {
+                // Transmission factor (grayscale)
+                // 0 = opaque, 1 = fully transparent
+                float trans = material.transmission;
+                debug_output = float3(trans, trans, trans);
+                break;
+            }
+
+            case DEBUG_MODE_IOR: {
+                // Index of refraction (normalized for visualization)
+                // Maps IOR range [1.0, 3.0] to [0.0, 1.0]
+                // Common values: 1.0=air, 1.33=water, 1.5=glass, 2.4=diamond
+                float ior_norm = saturate((material.ior - 1.0) / 2.0);
+                debug_output = float3(ior_norm, ior_norm, ior_norm);
+                break;
+            }
+
+            case DEBUG_MODE_FRESNEL_DIELECTRIC: {
+                // Dielectric Fresnel reflectance at current view angle
+                // Uses exact Fresnel equations (not Schlick approximation)
+                float cosI = abs(dot(normal, V));
+                float n1 = 1.0;  // Air
+                float n2 = material.ior;
+                float F = FresnelDielectric(cosI, n1, n2);
+                debug_output = float3(F, F, F);
+                break;
+            }
+
+            case DEBUG_MODE_ATTENUATION: {
+                // Volume attenuation color
+                // Shows the color that light becomes after traveling attenuationDistance
+                debug_output = material.attenuationColor;
+                break;
+            }
+
+            case DEBUG_MODE_ENERGY_AUDIT: {
+                // Energy conservation visualization
+                // R = reflected energy (Fresnel)
+                // G = transmitted energy (1 - Fresnel, before absorption)
+                // B = would-be absorbed energy (absorption coefficient indicator)
+                //
+                // For energy conservation: R + G + B should integrate to ~1
+                float cosI = abs(dot(normal, V));
+                float n1 = 1.0;
+                float n2 = material.ior;
+                float F = FresnelDielectric(cosI, n1, n2);
+                float T = 1.0 - F;
+
+                // Absorption indicator (0 = no absorption, 1 = full absorption at ref distance)
+                float absorption_indicator = 0.0;
+                if (material.attenuationDistance > 0.0) {
+                    float3 atten = BeerLambertAbsorption(material.attenuationColor, material.attenuationDistance, material.attenuationDistance);
+                    absorption_indicator = 1.0 - (atten.r + atten.g + atten.b) / 3.0;
+                }
+
+                debug_output = float3(F, T * (1.0 - absorption_indicator), T * absorption_indicator);
                 break;
             }
 

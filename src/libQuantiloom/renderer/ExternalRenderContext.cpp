@@ -139,9 +139,33 @@ struct MaterialDataCPU {
     f32 irTransmittance;
     f32 irTemperature_K;
     i32 complexRefractiveIndexIndex;
+
+    // ========================================================================
+    // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
+    // ========================================================================
+    f32 ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)
+    f32 transmission;                 // Transmission strength [0,1]
+    i32 transmissionTextureIndex;     // Transmission texture (-1 = no texture)
+    f32 _padding1;                    // Padding for alignment
+
+    glm::vec3 attenuationColor;       // Color at attenuation distance
+    f32 attenuationDistance;          // Distance for attenuation (m, 0 = no attenuation)
+
+    f32 thicknessFactor;              // Thickness for thin-walled approximation
+    i32 thicknessTextureIndex;        // Thickness texture (-1 = no texture)
+    f32 dispersion;                   // Abbe number reciprocal (0 = no dispersion)
+    f32 _padding2;                    // Padding for alignment
+
+    // ========================================================================
+    // Participating Media Properties (fog, smoke, SSS)
+    // ========================================================================
+    f32 volumeDensity;                // Medium density multiplier (0 = no volume)
+    f32 scatteringCoeff;              // Scattering coefficient σ_s (m⁻¹)
+    f32 absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)
+    f32 phaseG;                       // Henyey-Greenstein g parameter [-1,1]
 };
 
-static_assert(sizeof(MaterialDataCPU) == 96, "MaterialDataCPU size mismatch");
+static_assert(sizeof(MaterialDataCPU) == 160, "MaterialDataCPU size mismatch");
 
 // ============================================================================
 // InstanceGeometryInfo - Per-instance geometry offset info (must match shader)
@@ -1535,8 +1559,27 @@ void ExternalRenderContext::UpdateGpuResources() {
         cpuMat.spectralReflectanceCurveIndex = -1;
         cpuMat.irEmissivity = 0.0f;
         cpuMat.irTransmittance = 0.0f;
-        cpuMat.irTemperature_K = 0.0f;
+        cpuMat.irTemperature_K = mat.irTemperature_K;
         cpuMat.complexRefractiveIndexIndex = -1;
+
+        // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
+        cpuMat.ior = mat.ior;
+        cpuMat.transmission = mat.transmission;
+        cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
+        cpuMat._padding1 = 0.0f;
+        cpuMat.attenuationColor = mat.attenuationColor;
+        cpuMat.attenuationDistance = mat.attenuationDistance;
+        cpuMat.thicknessFactor = mat.thicknessFactor;
+        cpuMat.thicknessTextureIndex = mat.thicknessTextureIndex;
+        cpuMat.dispersion = mat.dispersion;
+        cpuMat._padding2 = 0.0f;
+
+        // Volume properties (fog, smoke, SSS)
+        cpuMat.volumeDensity = mat.volumeDensity;
+        cpuMat.scatteringCoeff = mat.scatteringCoeff;
+        cpuMat.absorptionCoeff = mat.absorptionCoeff;
+        cpuMat.phaseG = mat.phaseG;
+
         materialData.push_back(cpuMat);
     }
 

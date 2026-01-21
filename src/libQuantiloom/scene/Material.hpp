@@ -177,6 +177,53 @@ struct Material {
     f32 irTemperature_K = 0.0f;
 
     // ========================================================================
+    // Transmission Properties (KHR_materials_transmission, KHR_materials_volume)
+    // ========================================================================
+    // Physical transparency for glass, water, and other dielectric materials.
+    // Based on glTF 2.0 KHR_materials_transmission and KHR_materials_volume extensions.
+    //
+    // PHYSICS:
+    // - IOR determines refraction angle (Snell's law) and Fresnel reflection ratio
+    // - Transmission controls how much light passes through (vs absorbed/reflected)
+    // - Attenuation models Beer-Lambert absorption in colored glass/liquids
+    // - Dispersion causes wavelength-dependent refraction (rainbows, prism effects)
+    //
+    // ENERGY CONSERVATION:
+    //   Incident = Reflected + Transmitted + Absorbed
+    //   F = Fresnel(n1, n2, θ) = reflection ratio
+    //   T = 1 - F = transmission ratio (before volume absorption)
+    //   Final_transmission = T × exp(-σ × distance)  where σ = absorption coefficient
+
+    f32 ior = 1.5f;                    // Index of refraction (1.0=air, 1.33=water, 1.5=glass, 2.4=diamond)
+    f32 transmission = 0.0f;           // Transmission strength [0,1] (0=opaque, 1=fully transparent)
+    i32 transmissionTextureIndex = -1; // Transmission texture index (-1 = no texture)
+
+    // Volume attenuation (KHR_materials_volume)
+    glm::vec3 attenuationColor = {1.0f, 1.0f, 1.0f}; // Color after light travels attenuationDistance
+    f32 attenuationDistance = 0.0f;    // Distance at which light attenuates to attenuationColor (0 = infinite, no attenuation)
+    f32 thicknessFactor = 0.0f;        // Thickness for thin-walled approximation (0 = solid)
+    i32 thicknessTextureIndex = -1;    // Thickness texture index (-1 = no texture)
+
+    // Dispersion (wavelength-dependent IOR)
+    f32 dispersion = 0.0f;             // Abbe number reciprocal (0 = no dispersion)
+
+    // ========================================================================
+    // Participating Media Properties (fog, smoke, subsurface scattering)
+    // ========================================================================
+    // For volume rendering with scattering and absorption.
+    // Uses delta-tracking algorithm (same as atmospheric scattering).
+    //
+    // PHYSICS:
+    //   σ_t = σ_a + σ_s (extinction = absorption + scattering)
+    //   Beer-Lambert: T = exp(-σ_t × d)
+    //   Single scattering albedo: ω = σ_s / σ_t
+
+    f32 volumeDensity = 0.0f;          // Medium density multiplier (0 = no volume)
+    f32 scatteringCoeff = 0.0f;        // Scattering coefficient σ_s (m⁻¹)
+    f32 absorptionCoeff = 0.0f;        // Absorption coefficient σ_a (m⁻¹)
+    f32 phaseG = 0.0f;                 // Henyey-Greenstein g parameter [-1,1] (0=isotropic, >0=forward)
+
+    // ========================================================================
     // Quantiloom Spectral Material Reference (from glTF extras)
     // ========================================================================
     // When set, this material uses pre-computed spectral data from external databases.

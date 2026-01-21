@@ -96,6 +96,13 @@
 #define DEBUG_MODE_RAW_IDX0                76  // Raw idx0 value and read address
 #define DEBUG_MODE_V0_RAW                  77  // v0 position clamped (not frac)
 
+// Transmission (80-89) - For debugging transmission materials
+#define DEBUG_MODE_TRANSMISSION            80  // Transmission factor
+#define DEBUG_MODE_IOR                     81  // Index of refraction (normalized)
+#define DEBUG_MODE_FRESNEL_DIELECTRIC      82  // Dielectric Fresnel reflectance
+#define DEBUG_MODE_ATTENUATION             83  // Volume attenuation color
+#define DEBUG_MODE_ENERGY_AUDIT            84  // Energy conservation (R=reflected, G=transmitted, B=absorbed)
+
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
 // ============================================================================
@@ -441,6 +448,178 @@ float3 FresnelSchlickRGB(float cosTheta, float3 F0) {
 }
 
 // ============================================================================
+// Fresnel Equations for Dielectric (Transmission Materials)
+// ============================================================================
+// Computes exact Fresnel reflectance for dielectric-dielectric interface.
+// Used for glass, water, and other transparent materials.
+//
+// Unlike FresnelSchlick (approximation), this is the exact physical formula
+// that handles total internal reflection (TIR) correctly.
+//
+// PHYSICS:
+//   At interface between media with refractive indices n1 and n2:
+//   - Rs = reflection of s-polarized light
+//   - Rp = reflection of p-polarized light
+//   - R = (Rs + Rp) / 2 for unpolarized light
+//
+//   Total Internal Reflection occurs when:
+//   sin(θ_t) = (n1/n2) × sin(θ_i) > 1  →  R = 1 (100% reflection)
+//
+// Input:
+//   cosI: cos(incident angle), typically dot(N, -rayDir) or dot(N, viewDir)
+//   n1: refractive index of incident medium (e.g., 1.0 for air)
+//   n2: refractive index of transmission medium (e.g., 1.5 for glass)
+//
+// Returns:
+//   Fresnel reflectance [0, 1]
+// ============================================================================
+
+float FresnelDielectric(float cosI, float n1, float n2) {
+    // Ensure cosI is positive (we handle sign externally based on ray direction)
+    cosI = abs(cosI);
+
+    // Compute sin²(θ_i) from cos²(θ_i)
+    float sin2I = 1.0 - cosI * cosI;
+
+    // Snell's law: n1 × sin(θ_i) = n2 × sin(θ_t)
+    // => sin²(θ_t) = (n1/n2)² × sin²(θ_i)
+    float eta = n1 / n2;
+    float sin2T = eta * eta * sin2I;
+
+    // Total Internal Reflection check
+    if (sin2T > 1.0) {
+        return 1.0;  // 100% reflection
+    }
+
+    float cosT = sqrt(1.0 - sin2T);
+
+    // Fresnel equations for s and p polarization
+    // Rs = ((n1 × cosI - n2 × cosT) / (n1 × cosI + n2 × cosT))²
+    // Rp = ((n1 × cosT - n2 × cosI) / (n1 × cosT + n2 × cosI))²
+    float n1CosI = n1 * cosI;
+    float n2CosT = n2 * cosT;
+    float n1CosT = n1 * cosT;
+    float n2CosI = n2 * cosI;
+
+    float Rs_num = n1CosI - n2CosT;
+    float Rs_den = n1CosI + n2CosT;
+    float Rs = (Rs_num * Rs_num) / (Rs_den * Rs_den + 1e-8);
+
+    float Rp_num = n1CosT - n2CosI;
+    float Rp_den = n1CosT + n2CosI;
+    float Rp = (Rp_num * Rp_num) / (Rp_den * Rp_den + 1e-8);
+
+    // Average for unpolarized light
+    return 0.5 * (Rs + Rp);
+}
+
+// ============================================================================
+// Snell's Law Refraction (Transmission Direction)
+// ============================================================================
+// Computes the refracted ray direction at a dielectric interface.
+//
+// PHYSICS:
+//   Snell's law: n1 × sin(θ_i) = n2 × sin(θ_t)
+//
+//   Refracted direction:
+//   t = η × i + (η × cos(θ_i) - cos(θ_t)) × n
+//   where: η = n1/n2, i = incident direction, n = surface normal
+//
+// Input:
+//   I: incident ray direction (normalized, pointing INTO the surface)
+//   N: surface normal (normalized, pointing OUT of the surface)
+//   eta: ratio of indices of refraction (n1/n2)
+//
+// Returns:
+//   Refracted direction (normalized), or float3(0) if total internal reflection
+// ============================================================================
+
+float3 Refract(float3 I, float3 N, float eta) {
+    float cosI = -dot(N, I);
+    float sin2T = eta * eta * (1.0 - cosI * cosI);
+
+    // Total Internal Reflection check
+    if (sin2T > 1.0) {
+        return float3(0.0, 0.0, 0.0);  // TIR - no refraction
+    }
+
+    float cosT = sqrt(1.0 - sin2T);
+
+    // Refracted direction
+    return eta * I + (eta * cosI - cosT) * N;
+}
+
+// ============================================================================
+// Beer-Lambert Volume Absorption
+// ============================================================================
+// Computes transmittance through an absorbing medium using Beer-Lambert law.
+//
+// PHYSICS:
+//   T(d) = exp(-σ × d)
+//   where σ = absorption coefficient, d = distance traveled
+//
+// For colored glass/liquids, the absorption coefficient is derived from:
+//   attenuationColor = exp(-σ × attenuationDistance)
+//   => σ = -ln(attenuationColor) / attenuationDistance
+//
+// Input:
+//   absorptionColor: color remaining after traveling attenuationDistance
+//   distance: actual distance traveled through the medium
+//   attenDist: reference distance for absorption color (0 = no attenuation)
+//
+// Returns:
+//   RGB transmittance [0, 1] per channel
+// ============================================================================
+
+float3 BeerLambertAbsorption(float3 absorptionColor, float distance, float attenDist) {
+    // No attenuation if distance is zero or infinite reference distance
+    if (attenDist <= 0.0 || distance <= 0.0) {
+        return float3(1.0, 1.0, 1.0);
+    }
+
+    // Compute absorption coefficient from attenuation color
+    // σ = -ln(color) / attenDist
+    // Clamp color to avoid log(0) = -inf
+    float3 safeColor = max(absorptionColor, float3(0.001, 0.001, 0.001));
+    float3 sigma = -log(safeColor) / attenDist;
+
+    // Beer-Lambert transmittance
+    return exp(-sigma * distance);
+}
+
+// ============================================================================
+// Cauchy Dispersion Formula (Wavelength-Dependent IOR)
+// ============================================================================
+// Computes wavelength-dependent refractive index using Cauchy's equation.
+//
+// PHYSICS:
+//   n(λ) = A + B/λ² + C/λ⁴ + ...
+//   Simplified: n(λ) ≈ n_d + dispersion / λ²
+//
+// For typical glass:
+//   - n_d (D-line, 589nm): 1.5 for crown glass, 1.7+ for flint glass
+//   - dispersion: controls color spread (related to Abbe number)
+//
+// Input:
+//   ior_d: refractive index at D-line (589nm)
+//   dispersion: dispersion coefficient (related to 1/Abbe number)
+//   wavelength_nm: wavelength in nanometers
+//
+// Returns:
+//   Refractive index at the given wavelength
+// ============================================================================
+
+float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
+    // Convert nm to μm for numerical stability
+    float lambda_um = wavelength_nm / 1000.0;
+    float lambda_um2 = lambda_um * lambda_um;
+
+    // Cauchy formula: n(λ) = n_d + B/λ²
+    // dispersion coefficient B is scaled for reasonable values
+    return ior_d + dispersion * 0.01 / lambda_um2;
+}
+
+// ============================================================================
 // Lighting Parameters Structure
 // ============================================================================
 // Runtime lighting parameters for shading (NOT a precomputed LUT).
@@ -572,6 +751,49 @@ struct MaterialData {
     // When >= 0, uses measured n,k data from RefractiveIndex.INFO for accurate Fresnel
     // When < 0, uses metallicFactor-based F0 approximation (standard PBR)
     int    complexRefractiveIndexIndex; // Index into complexRefractiveIndex buffer (-1 = use PBR approximation) // Offset: 92-96
+
+    // ========================================================================
+    // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
+    // ========================================================================
+    // Physical transparency for glass, water, and other dielectric materials.
+    //
+    // PHYSICS:
+    // - IOR determines refraction angle (Snell's law) and Fresnel reflection ratio
+    // - Transmission controls how much light passes through (vs absorbed/reflected)
+    // - Attenuation models Beer-Lambert absorption in colored glass/liquids
+    //
+    // ENERGY CONSERVATION:
+    //   F = FresnelDielectric(n1, n2, θ) = reflection ratio
+    //   T = 1 - F = transmission ratio (before volume absorption)
+    //   Final_transmission = T × exp(-σ × distance)
+
+    float  ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)    // Offset: 96-100
+    float  transmission;                 // Transmission strength [0,1]                              // Offset: 100-104
+    int    transmissionTextureIndex;     // Transmission texture (-1 = no texture)                  // Offset: 104-108
+    float  _padding1;                    // Padding for alignment                                    // Offset: 108-112
+
+    // Volume attenuation (Beer-Lambert absorption)
+    float3 attenuationColor;             // Color at attenuation distance                           // Offset: 112-124
+    float  attenuationDistance;          // Distance for attenuation (mm, 0 = no attenuation)       // Offset: 124-128
+
+    float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 128-132
+    int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 132-136
+    float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 136-140
+    float  _padding2;                    // Padding for alignment                                    // Offset: 140-144
+
+    // ========================================================================
+    // Participating Media Properties (fog, smoke, SSS)
+    // ========================================================================
+    // For volume rendering with scattering and absorption.
+    //
+    // PHYSICS:
+    //   σ_t = σ_a + σ_s (extinction = absorption + scattering)
+    //   T = exp(-σ_t × d) (Beer-Lambert transmittance)
+
+    float  volumeDensity;                // Medium density multiplier (0 = no volume)               // Offset: 144-148
+    float  scatteringCoeff;              // Scattering coefficient σ_s (m⁻¹)                        // Offset: 148-152
+    float  absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)                        // Offset: 152-156
+    float  phaseG;                       // Henyey-Greenstein g parameter [-1,1]                    // Offset: 156-160
 
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity

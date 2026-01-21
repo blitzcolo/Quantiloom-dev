@@ -594,6 +594,131 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         }
     }
 
+    // ========================================================================
+    // KHR_materials_transmission extension (glass, water transparency)
+    // ========================================================================
+    // glTF extension format:
+    //   "extensions": {
+    //     "KHR_materials_transmission": {
+    //       "transmissionFactor": 1.0,
+    //       "transmissionTexture": { "index": 0 }
+    //     }
+    //   }
+    if (auto transExtIt = gltfMaterial.extensions.find("KHR_materials_transmission"); transExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_transmission extension for material '{}'", mat.name);
+
+        const tinygltf::Value& transExt = transExtIt->second;
+
+        // Transmission factor
+        if (transExt.Has("transmissionFactor")) {
+            mat.transmission = static_cast<f32>(transExt.Get("transmissionFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    transmissionFactor: {:.3f}", mat.transmission);
+        }
+
+        // Transmission texture (optional)
+        if (transExt.Has("transmissionTexture")) {
+            const auto& texInfo = transExt.Get("transmissionTexture");
+            if (texInfo.Has("index")) {
+                mat.transmissionTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    transmissionTexture: index {}", mat.transmissionTextureIndex);
+            }
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_ior extension (index of refraction)
+    // ========================================================================
+    // glTF extension format:
+    //   "extensions": {
+    //     "KHR_materials_ior": {
+    //       "ior": 1.5
+    //     }
+    //   }
+    if (auto iorExtIt = gltfMaterial.extensions.find("KHR_materials_ior"); iorExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_ior extension for material '{}'", mat.name);
+
+        const tinygltf::Value& iorExt = iorExtIt->second;
+
+        if (iorExt.Has("ior")) {
+            mat.ior = static_cast<f32>(iorExt.Get("ior").GetNumberAsDouble());
+            QL_LOG_INFO("    ior: {:.4f}", mat.ior);
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_volume extension (volume absorption for colored glass)
+    // ========================================================================
+    // glTF extension format:
+    //   "extensions": {
+    //     "KHR_materials_volume": {
+    //       "thicknessFactor": 0.0,
+    //       "thicknessTexture": { "index": 0 },
+    //       "attenuationDistance": 1.0,
+    //       "attenuationColor": [1.0, 0.5, 0.2]
+    //     }
+    //   }
+    if (auto volExtIt = gltfMaterial.extensions.find("KHR_materials_volume"); volExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_volume extension for material '{}'", mat.name);
+
+        const tinygltf::Value& volExt = volExtIt->second;
+
+        // Thickness factor
+        if (volExt.Has("thicknessFactor")) {
+            mat.thicknessFactor = static_cast<f32>(volExt.Get("thicknessFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    thicknessFactor: {:.4f}", mat.thicknessFactor);
+        }
+
+        // Thickness texture (optional)
+        if (volExt.Has("thicknessTexture")) {
+            const auto& texInfo = volExt.Get("thicknessTexture");
+            if (texInfo.Has("index")) {
+                mat.thicknessTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    thicknessTexture: index {}", mat.thicknessTextureIndex);
+            }
+        }
+
+        // Attenuation distance (in meters)
+        if (volExt.Has("attenuationDistance")) {
+            mat.attenuationDistance = static_cast<f32>(volExt.Get("attenuationDistance").GetNumberAsDouble());
+            QL_LOG_INFO("    attenuationDistance: {:.4f} m", mat.attenuationDistance);
+        }
+
+        // Attenuation color
+        if (volExt.Has("attenuationColor")) {
+            const auto& colorVal = volExt.Get("attenuationColor");
+            if (colorVal.IsArray() && colorVal.ArrayLen() >= 3) {
+                mat.attenuationColor = glm::vec3(
+                    static_cast<f32>(colorVal.Get(0).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(1).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(2).GetNumberAsDouble())
+                );
+                QL_LOG_INFO("    attenuationColor: [{:.3f}, {:.3f}, {:.3f}]",
+                            mat.attenuationColor.r, mat.attenuationColor.g, mat.attenuationColor.b);
+            }
+        }
+    }
+
+    // ========================================================================
+    // QUANTILOOM_materials_dispersion extension (wavelength-dependent IOR)
+    // ========================================================================
+    // Custom extension for spectral rendering with chromatic dispersion.
+    // glTF extension format:
+    //   "extensions": {
+    //     "QUANTILOOM_materials_dispersion": {
+    //       "dispersion": 0.02
+    //     }
+    //   }
+    if (auto dispExtIt = gltfMaterial.extensions.find("QUANTILOOM_materials_dispersion"); dispExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading QUANTILOOM_materials_dispersion extension for material '{}'", mat.name);
+
+        const tinygltf::Value& dispExt = dispExtIt->second;
+
+        if (dispExt.Has("dispersion")) {
+            mat.dispersion = static_cast<f32>(dispExt.Get("dispersion").GetNumberAsDouble());
+            QL_LOG_INFO("    dispersion: {:.6f}", mat.dispersion);
+        }
+    }
+
     QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
                 mat.name, mat.metallicFactor, mat.roughnessFactor);
 

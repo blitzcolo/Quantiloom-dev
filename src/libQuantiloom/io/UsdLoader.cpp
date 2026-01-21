@@ -750,7 +750,15 @@ void UsdLoader::ParseUsdPreviewSurface(Material& mat, const void* shaderPtr,
         }
     }
 
-    // Note: Material doesn't have IOR field - UsdPreviewSurface IOR is not mapped
+    // Parse IOR (index of refraction) for transmission materials
+    // UsdPreviewSurface IOR default is 1.5 (glass)
+    if (UsdShadeInput iorInput = shader->GetInput(TfToken("ior"))) {
+        float ior = 1.5f;
+        if (iorInput.Get(&ior)) {
+            mat.ior = ior;
+            QL_LOG_DEBUG("    Parsed ior: {:.4f}", ior);
+        }
+    }
 }
 
 // ============================================================================
@@ -809,13 +817,37 @@ void UsdLoader::ParseMaterialXSurface(Material& mat, const void* shaderPtr,
     glm::vec3 emissionColor = getColor3("emission_color", glm::vec3(1.0f));
     mat.emissiveFactor = emissionColor * emission;
 
-    // Note: specular_IOR is not mapped - Material doesn't have IOR field
+    // Note: specular_IOR is mapped to Material::ior
+    float specularIOR = getFloat("specular_IOR", 1.5f);
+    mat.ior = specularIOR;
+    if (specularIOR != 1.5f) {
+        QL_LOG_DEBUG("    Parsed specular_IOR: {:.4f}", specularIOR);
+    }
 
     // Parse transmission (for glass-like materials)
     float transmission = getFloat("transmission", 0.0f);
     if (transmission > 0.0f) {
+        mat.transmission = transmission;
+        // Also set alpha mode to blend for backward compatibility
         mat.alphaMode = Material::AlphaMode::Blend;
         mat.baseColorFactor.a = 1.0f - transmission;
+        QL_LOG_DEBUG("    Parsed transmission: {:.4f}", transmission);
+
+        // Parse transmission_color for volume attenuation
+        glm::vec3 transmissionColor = getColor3("transmission_color", glm::vec3(1.0f));
+        if (transmissionColor != glm::vec3(1.0f)) {
+            mat.attenuationColor = transmissionColor;
+            mat.attenuationDistance = 1.0f;  // Default 1 meter
+            QL_LOG_DEBUG("    Parsed transmission_color: [{:.3f}, {:.3f}, {:.3f}]",
+                        transmissionColor.r, transmissionColor.g, transmissionColor.b);
+        }
+
+        // Parse transmission_depth for attenuation distance
+        float transmissionDepth = getFloat("transmission_depth", 0.0f);
+        if (transmissionDepth > 0.0f) {
+            mat.attenuationDistance = transmissionDepth;
+            QL_LOG_DEBUG("    Parsed transmission_depth: {:.4f} m", transmissionDepth);
+        }
     }
 
     // Texture loading for MaterialX (if enabled)
