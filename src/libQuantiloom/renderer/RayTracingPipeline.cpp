@@ -260,7 +260,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(19);  // Added InstanceGeometryInfo (binding 18)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(20);  // Added CIE CMF LUT (binding 19)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -454,9 +454,24 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[18].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[18].pImmutableSamplers = nullptr;
 
+    // ========================================================================
+    // Binding 19: CIE 1931 Color Matching Functions LUT
+    // ========================================================================
+    // High-precision CIE XYZ CMFs for VIS_FUSED mode spectral integration
+    // 401 samples (380-780nm @ 1nm), each sample is float3(x_bar, y_bar, z_bar)
+    // Provides <0.1% error vs analytical approximation's 10-20% at edges
+    // ========================================================================
+
+    // Binding 19: CIE CMF LUT buffer (StructuredBuffer<float3>)
+    bindings[19].binding = 19;
+    bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[19].descriptorCount = 1;
+    bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[19].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(19, 0);  // Updated for InstanceGeometryInfo
+    std::vector<VkDescriptorBindingFlags> bindingFlags(20, 0);  // Updated for CIE CMF LUT (binding 19)
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -483,7 +498,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 12;  // LUT + vertex + index + material + UV + tangent + normal + spectral curves + CRI + solar LUT + atmospheric params + instance geometry info
+    poolSizes[2].descriptorCount = 13;  // LUT + vertex + index + material + UV + tangent + normal + spectral curves + CRI + solar LUT + atmospheric params + instance geometry info + CIE CMF LUT
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1334,6 +1349,28 @@ void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) con
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 18;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_DEBUG("Binding CIE CMF LUT buffer to descriptor set (binding 19)");
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 19;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;

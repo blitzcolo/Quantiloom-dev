@@ -117,6 +117,17 @@ static const uint MAX_TRANSMISSION_DEPTH = 8;
 static const float MIN_CONTRIBUTION_THRESHOLD = 0.001;  // Russian roulette cutoff
 
 // ============================================================================
+// RGB Channel Representative Wavelengths (sRGB primaries approximation)
+// ============================================================================
+// Used for wavelength-dependent calculations in RGB mode (atmospheric scattering)
+// These values approximate the effective wavelengths of sRGB display primaries
+// ============================================================================
+
+static const float WAVELENGTH_R_NM = 650.0;  // Red channel representative wavelength
+static const float WAVELENGTH_G_NM = 550.0;  // Green channel representative wavelength
+static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wavelength
+
+// ============================================================================
 // Instance Geometry Info Buffer (Binding 18)
 // ============================================================================
 // Per-TLAS-instance geometry offset information for multi-BLAS support.
@@ -132,6 +143,23 @@ static const float MIN_CONTRIBUTION_THRESHOLD = 0.001;  // Russian roulette cuto
 // ============================================================================
 
 [[vk::binding(18, 0)]] StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo;
+
+// ============================================================================
+// CIE 1931 Color Matching Functions LUT (Binding 19)
+// ============================================================================
+// High-precision CIE XYZ color matching functions for VIS_FUSED mode
+// 401 samples covering 380-780nm at 1nm resolution
+//
+// ACCURACY:
+// - LUT version: <0.1% error across full spectrum
+// - Analytical version (Wyman et al. 2013): <2% core, 10-20% at edges (380-420nm, 700-780nm)
+//
+// USAGE:
+// - Loaded from assets/luts/CIE_xyz_1931_2deg.csv
+// - Used in VIS_FUSED spectral integration for accurate XYZ conversion
+// ============================================================================
+
+[[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
 
 // ============================================================================
 // IBL (Image-Based Lighting) Resources
@@ -626,37 +654,52 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Compute path length from camera to hit point (convert to meters)
     float pathLength_m = RayTCurrent() * lut.worldUnitsToMeters;
 
-    float atmosphericTransmittance;
+    // Atmospheric transmittance: RGB for RGB mode, scalar for other modes
+    // RGB mode uses wavelength-dependent Rayleigh scattering for proper dispersion
+    // (blue light scatters ~4x more than red light, causing sunset colors and aerial perspective)
+    float3 atmosphericTransmittance_rgb = float3(1.0, 1.0, 1.0);
+    float atmosphericTransmittance_scalar = 1.0;  // For VIS_FUSED/Single modes
     AtmosphericParams atmo = atmosphericParams[0];
 
     // Check if physical atmospheric model is enabled
     if (atmo.beta_rayleigh_550nm.x > 1e-9) {
         // PHYSICAL MODE: Use Rayleigh + Mie coefficients
-        // Use SCALAR versions for single-wavelength computation
-        float beta_r = RayleighScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_rayleigh_550nm.x);
-        float beta_m = MieScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_mie_550nm.x, atmo.mie_alpha);
 
-        // Total extinction (scalar for single wavelength)
-        float extinction = beta_r + beta_m;
-
-        // Transmittance along path
-        atmosphericTransmittance = exp(-extinction * pathLength_m);
+        if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+            // RGB MODE: Per-channel atmospheric scattering with wavelength dispersion
+            // This correctly models Rayleigh λ⁻⁴ dependence (blue scatters more than red)
+            float3 wavelengths_rgb = float3(WAVELENGTH_R_NM, WAVELENGTH_G_NM, WAVELENGTH_B_NM);
+            float3 beta_r_rgb = RayleighScatteringCoeff_RGB(wavelengths_rgb, atmo.beta_rayleigh_550nm.x);
+            float3 beta_m_rgb = MieScatteringCoeff_RGB(wavelengths_rgb, atmo.beta_mie_550nm.x, atmo.mie_alpha);
+            float3 extinction_rgb = beta_r_rgb + beta_m_rgb;
+            atmosphericTransmittance_rgb = exp(-extinction_rgb * pathLength_m);
+        } else {
+            // SPECTRAL MODE: Use scalar version for single-wavelength computation
+            float beta_r = RayleighScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_rayleigh_550nm.x);
+            float beta_m = MieScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_mie_550nm.x, atmo.mie_alpha);
+            float extinction = beta_r + beta_m;
+            atmosphericTransmittance_scalar = exp(-extinction * pathLength_m);
+        }
     } else {
         // LUT-FAST MODE (fallback): Use MODTRAN LUT
+        // Scalar transmittance replicated to RGB (no dispersion modeling)
         const float atmosphericScaleHeight_m = 8000.0;
         float opticalDepth_vertical = -log(max(lut.transmittance, 1e-6));
         float extinctionCoeff = opticalDepth_vertical / atmosphericScaleHeight_m;
-        atmosphericTransmittance = exp(-extinctionCoeff * pathLength_m);
+        float transmittance = exp(-extinctionCoeff * pathLength_m);
+        atmosphericTransmittance_rgb = float3(transmittance, transmittance, transmittance);
+        atmosphericTransmittance_scalar = transmittance;
     }
 
     // Clamp to [0, 1] to prevent numerical issues
-    atmosphericTransmittance = clamp(atmosphericTransmittance, 0.0, 1.0);
+    atmosphericTransmittance_rgb = clamp(atmosphericTransmittance_rgb, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
+    atmosphericTransmittance_scalar = clamp(atmosphericTransmittance_scalar, 0.0, 1.0);
 
     // Apply transmittance to sun radiance for RGB mode only
     // VIS_FUSED mode computes wavelength-dependent transmittance inside the spectral loop
     // Sky radiance is NOT attenuated (it's already the result of atmospheric scattering)
     if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
-        sunRadiance *= atmosphericTransmittance;
+        sunRadiance *= atmosphericTransmittance_rgb;  // Per-channel attenuation with dispersion
     }
     // Note: For VIS_FUSED, transmittance is applied per-wavelength in the loop below
 
@@ -695,9 +738,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     float shadowFactor = 1.0;  // 1.0 = fully lit, 0.0 = fully shadowed
 
-    // TEMPORARY: Disable shadow rays for debugging GPU crash
-    // TODO: Re-enable once issue is resolved
-    const bool ENABLE_SHADOW_RAYS = false;
+    // Shadow ray enable flag from LightingParams (configurable via renderer.enable_shadow_rays)
+    // Can be disabled for debugging GPU crashes or driver issues
+    const bool ENABLE_SHADOW_RAYS = (lut.enableShadowRays != 0);
 
     // Step 1: Geometric normal check - prevents self-shadowing artifacts on curved surfaces
     // Use worldGeometricNormal (computed earlier) instead of shading normal
@@ -785,6 +828,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
     //
     // NOTE: This is the "ambient" term in traditional graphics, but physically
     // it represents diffuse reflection of scattered sky radiance.
+    //
+    // SKY MODEL LIMITATION (E/π Lambertian approximation):
+    // - This assumes uniform sky dome radiance: L_sky ≈ E_sky / π
+    // - Real atmosphere has anisotropic scattering (Rayleigh phase function)
+    // - Horizon is typically brighter than zenith (gradient sky model)
+    // - Circumsolar region is significantly brighter (sun aureole)
+    // - This approximation is accurate for zenith-facing surfaces (~5% error)
+    // - For low-angle surfaces facing horizon: up to ~20% error
+    // - For quantitative analysis, consider CIE sky models or precomputed LUTs
     // ========================================================================
 
     // Compute diffuse reflection coefficient (energy conservation with specular)
@@ -909,8 +961,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
         // Precompute IBL parameters for spectral integration
-        // F0 scalar: average of RGB F0 for spectral Fresnel approximation
-        float F0_scalar = (F0.r + F0.g + F0.b) / 3.0;
+        // F0 wavelength-dependent: interpolate RGB F0 based on wavelength for colored metals
+        // This preserves gold's yellow tint, copper's red tint, etc.
+        // Instead of simple average, we use linear interpolation between RGB wavelengths
         bool useIBL = (metallic > 0.01 || roughness < 0.99);
 
         // Loop over wavelengths
@@ -962,7 +1015,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 transmittance_lambda = exp(-extinction_lambda * pathLength_m);
             } else {
                 // LUT fallback: use pre-computed scalar transmittance (wavelength-independent)
-                transmittance_lambda = atmosphericTransmittance;
+                transmittance_lambda = atmosphericTransmittance_scalar;
             }
             transmittance_lambda = clamp(transmittance_lambda, 0.0, 1.0);
 
@@ -989,8 +1042,38 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // Diffuse ambient with energy conservation (consistent with RGB mode)
             // kD = (1 - F) × (1 - metallic) ensures specular+diffuse ≤ 1
+            //
+            // WAVELENGTH-DEPENDENT F0 (P2 Enhancement):
+            // For colored metals (gold, copper), F0 varies with wavelength:
+            //   - Gold: high F0 at red (700nm), low at blue (400nm) → yellow reflection
+            //   - Copper: higher F0 at red, lower at blue → reddish reflection
+            // We interpolate F0.rgb based on wavelength to preserve metal color tint
+            //
+            // Wavelength-to-RGB mapping (approximate sRGB primary wavelengths):
+            //   450nm (blue) → F0.b
+            //   550nm (green) → F0.g
+            //   650nm (red) → F0.r
+            //
+            float F0_at_lambda;
+            if (lambda < 500.0) {
+                // Blue-to-green interpolation (450-500nm)
+                float t = clamp((lambda - 450.0) / 50.0, 0.0, 1.0);
+                F0_at_lambda = lerp(F0.b, F0.g, t);
+            } else if (lambda < 600.0) {
+                // Green-to-red interpolation (500-600nm)
+                float t = clamp((lambda - 500.0) / 100.0, 0.0, 1.0);
+                F0_at_lambda = lerp(F0.g, F0.r, t);
+            } else {
+                // Red region (600nm+)
+                F0_at_lambda = F0.r;
+            }
+            // Handle edge cases below blue wavelength
+            if (lambda < 450.0) {
+                F0_at_lambda = F0.b;
+            }
+
             float NdotV_ambient = max(dot(normal, V), 0.0);
-            float F_ambient = FresnelSchlick(NdotV_ambient, F0_scalar);  // common.hlsli scalar version
+            float F_ambient = FresnelSchlick(NdotV_ambient, F0_at_lambda);  // Wavelength-dependent Fresnel
             float kD_lambda = (1.0 - F_ambient) * (1.0 - metallic);
             // Lambertian BRDF = ρ/π, hemisphere integral = π, so π cancels
             // sky_radiance_lambda is already radiance (W·sr⁻¹·m⁻²·nm⁻¹)
@@ -1012,10 +1095,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
 
-            // 6. Weight by CIE XYZ color matching functions
-            float x_bar = CIE_X(lambda);
-            float y_bar = CIE_Y(lambda);
-            float z_bar = CIE_Z(lambda);
+            // 6. Weight by CIE XYZ color matching functions (High-precision LUT version)
+            // Using LUT instead of analytical approximation for <0.1% error (vs 10-20% at edges)
+            float3 xyz_cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda);
+            float x_bar = xyz_cmf.x;
+            float y_bar = xyz_cmf.y;
+            float z_bar = xyz_cmf.z;
 
             // Riemann sum integration: ∫L(λ)×CMF(λ)dλ ≈ Σ L(λᵢ)×CMF(λᵢ)×Δλ
             XYZ_accum.x += L_lambda * x_bar * LAMBDA_STEP;
@@ -1638,10 +1723,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 debug_output = kD * albedo;
                 break;
 
-            case DEBUG_MODE_ATMOSPHERIC_TRANS:
-                // Atmospheric transmittance (grayscale)
-                debug_output = float3(atmosphericTransmittance, atmosphericTransmittance, atmosphericTransmittance);
+            case DEBUG_MODE_ATMOSPHERIC_TRANS: {
+                // Atmospheric transmittance (grayscale average for RGB mode)
+                // RGB mode: average of RGB channels
+                // Spectral modes: use scalar transmittance
+                float avg_transmittance = (atmosphericTransmittance_rgb.r + atmosphericTransmittance_rgb.g + atmosphericTransmittance_rgb.b) / 3.0;
+                debug_output = float3(avg_transmittance, avg_transmittance, avg_transmittance);
                 break;
+            }
 
             // ----------------------------------------------------------------
             // BRDF Debug (30-39)

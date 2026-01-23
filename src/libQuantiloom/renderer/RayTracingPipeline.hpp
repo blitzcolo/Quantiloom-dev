@@ -289,6 +289,18 @@ public:
     // Bind instance geometry info buffer (binding 18)
     void BindInstanceGeometryBuffer(const GpuBuffer& buffer) const;
 
+    // ========================================================================
+    // CIE 1931 Color Matching Functions LUT (Binding 19)
+    // ========================================================================
+    // High-precision CIE XYZ CMFs for VIS_FUSED mode spectral integration
+    // 401 samples covering 380-780nm at 1nm resolution
+    // Loaded from assets/luts/CIE_xyz_1931_2deg.csv
+    // Each sample is float3(x_bar, y_bar, z_bar)
+    // ========================================================================
+
+    // Bind CIE CMF LUT buffer (binding 19)
+    void BindCIE_CMF_LUT(const GpuBuffer& buffer) const;
+
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
 

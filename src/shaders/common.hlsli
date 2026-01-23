@@ -642,7 +642,8 @@ float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
 // Runtime lighting parameters for shading (NOT a precomputed LUT).
 // This provides fallback RGB/scalar values when SolarSpectralLUT is unavailable.
 //
-// Must match CPU-side LightingParams data layout in main.cpp.
+// Must match CPU-side LightingParams data layout in LightingParams.hpp.
+// Size: 80 bytes (16-byte aligned)
 //
 // DUAL MODE SUPPORT:
 // - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb (float3)
@@ -656,6 +657,10 @@ float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
 // - worldUnitsToMeters: Conversion factor from scene units to meters
 // - Required for correct Beer-Lambert attenuation calculation
 // - Example: if scene uses centimeters, worldUnitsToMeters = 0.01
+//
+// SHADOW RAYS:
+// - enableShadowRays: 0 = disabled (for debugging GPU crashes), 1 = enabled
+// - Can be controlled via config: renderer.enable_shadow_rays = true/false
 // ============================================================================
 
 struct LightingParams {
@@ -672,6 +677,9 @@ struct LightingParams {
     float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation
     float  chromaR_correction;   // VIS_FUSED chromaticity correction for R channel (default: 1.266)
     float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.146)
+
+    uint   enableShadowRays;     // Shadow ray enable flag: 0 = disabled, 1 = enabled (configurable)
+    float  _padding[3];          // Padding to 80 bytes (16-byte aligned)
 };
 
 // ============================================================================

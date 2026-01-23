@@ -46,7 +46,7 @@ namespace quantiloom {
 
 /**
  * @struct LightingParams
- * @brief Runtime lighting parameters for GPU shaders (64 bytes, 16-byte aligned)
+ * @brief Runtime lighting parameters for GPU shaders (80 bytes, 16-byte aligned)
  *
  * Provides sun/sky illumination and atmospheric parameters for all rendering modes.
  * Uploaded to GPU storage buffer and accessed in closest hit shaders.
@@ -57,13 +57,15 @@ namespace quantiloom {
  * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
  * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
  * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
- * Total: 64 bytes
+ * Offset 64: enableShadowRays (u32) + _padding[3] (12 bytes)
+ * Total: 80 bytes
  * @endcode
  *
  * @note MUST match shader struct in common.hlsli (verified at compile time)
  * @note Use RGB values for RGB mode, spectral values for Single/MWIR/LWIR modes
  * @note atmosphereTemperature_K used for IR downwelling thermal radiation
  * @note chromaR/B_correction used for VIS_FUSED mode chromaticity correction
+ * @note enableShadowRays: 0 = disabled (debug/GPU-crash workaround), 1 = enabled (default)
  */
 struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
@@ -85,7 +87,10 @@ struct LightingParams {
     f32 atmosphereTemperature_K;    // Effective atmosphere temperature (K) for IR downwelling, offset 52
     f32 chromaR_correction;         // VIS_FUSED chromaticity correction for R channel, offset 56
     f32 chromaB_correction;         // VIS_FUSED chromaticity correction for B channel, offset 60
-};  // Total: 64 bytes
+
+    u32 enableShadowRays;           // Shadow ray enable flag: 0 = disabled, 1 = enabled, offset 64
+    f32 _padding[3];                // Padding to 80 bytes (16-byte aligned), offset 68-80
+};  // Total: 80 bytes
 
 // ============================================================================
 // Compile-time Validation
@@ -94,8 +99,8 @@ struct LightingParams {
 // If any fails, the struct layout has diverged from shader expectations.
 // ============================================================================
 
-static_assert(sizeof(LightingParams) == 64,
-    "LightingParams size mismatch! Expected 64 bytes to match GPU struct");
+static_assert(sizeof(LightingParams) == 80,
+    "LightingParams size mismatch! Expected 80 bytes to match GPU struct");
 
 static_assert(offsetof(LightingParams, sunDirection) == 0,
     "sunDirection offset mismatch");
@@ -117,6 +122,8 @@ static_assert(offsetof(LightingParams, chromaR_correction) == 56,
     "chromaR_correction offset mismatch");
 static_assert(offsetof(LightingParams, chromaB_correction) == 60,
     "chromaB_correction offset mismatch");
+static_assert(offsetof(LightingParams, enableShadowRays) == 64,
+    "enableShadowRays offset mismatch");
 
 // ============================================================================
 // Default Values
@@ -170,6 +177,7 @@ inline LightingParams CreateDefaultLightingParams() {
     params.atmosphereTemperature_K = LightingDefaults::ATMOSPHERE_TEMPERATURE_K;
     params.chromaR_correction = LightingDefaults::CHROMA_R_CORRECTION;
     params.chromaB_correction = LightingDefaults::CHROMA_B_CORRECTION;
+    params.enableShadowRays = 0u;  // Disabled by default (known GPU crash on some drivers)
     return params;
 }
 

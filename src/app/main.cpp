@@ -37,6 +37,8 @@
 
 #include <glm/glm.hpp>
 #include <iostream>
+#include <fstream>
+#include <sstream>
 #include <filesystem>
 #include <stdexcept>
 #include <cstddef>  // For offsetof
@@ -672,13 +674,23 @@ int main(int argc, char* argv[]) {
             QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
                         skyRadiance.r, skyRadiance.g, skyRadiance.b);
         } else {
-            QL_LOG_INFO("  Sun spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", sunRadiance_spectral);
-            QL_LOG_INFO("  Sky spectral radiance: {:.3f} W*sr^-1*m^-2*nm^-2", skyRadiance_spectral);
+            // NOTE: These are RGB-average fallback values, NOT true spectral density
+            // Unit: W·sr⁻¹·m⁻² (same as RGB), NOT W·sr⁻¹·m⁻²·nm⁻¹
+            QL_LOG_INFO("  Sun fallback radiance (RGB avg): {:.3f} W*sr^-1*m^-2", sunRadiance_spectral);
+            QL_LOG_INFO("  Sky fallback radiance (RGB avg): {:.3f} W*sr^-1*m^-2", skyRadiance_spectral);
         }
 
         // Read chromaticity correction factors from config (optional, defaults to standard values)
         f32 chromaR_correction = config.Get<f32>("quality.chroma_r_correction", LightingDefaults::CHROMA_R_CORRECTION);
         f32 chromaB_correction = config.Get<f32>("quality.chroma_b_correction", LightingDefaults::CHROMA_B_CORRECTION);
+
+        // Read shadow ray enable flag from config (optional, defaults to DISABLED)
+        // Known GPU crash issue on some drivers when shadow rays are enabled
+        // Users can enable via config: renderer.enable_shadow_rays = true
+        bool enableShadowRays = config.Get<bool>("renderer.enable_shadow_rays", false);
+        if (enableShadowRays) {
+            QL_LOG_INFO("Shadow rays ENABLED via config");
+        }
 
         LightingParams lightingParams{};
         lightingParams.sunDirection = sunDirection;
@@ -693,6 +705,7 @@ int main(int argc, char* argv[]) {
         lightingParams.atmosphereTemperature_K = atmosphereTemperature_K;
         lightingParams.chromaR_correction = chromaR_correction;
         lightingParams.chromaB_correction = chromaB_correction;
+        lightingParams.enableShadowRays = enableShadowRays ? 1u : 0u;
 
         GpuBuffer lightingParamsBuffer(
             context.GetAllocator(),
@@ -1124,6 +1137,77 @@ int main(int argc, char* argv[]) {
                     atmosphericConfig.IsEnabled() ? "ENABLED" : "DISABLED",
                     atmosphericConfig.rayleigh_enabled,
                     atmosphericConfig.mie_enabled);
+
+        // ====================================================================
+        // Load CIE 1931 Color Matching Functions LUT (for VIS_FUSED mode)
+        // ====================================================================
+        QL_LOG_INFO("Loading CIE 1931 CMF LUT...");
+
+        std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
+        std::vector<glm::vec3> cieCMF_data;
+
+        // CIE CMF LUT is always used in VIS_FUSED mode for high accuracy
+        // Covers 380-780nm at 1nm resolution (401 samples)
+        std::filesystem::path cieLUTPath = "assets/luts/CIE_xyz_1931_2deg.csv";
+
+        if (std::filesystem::exists(cieLUTPath)) {
+            QL_LOG_INFO("  Loading CIE CMF from: {}", cieLUTPath.string());
+
+            std::ifstream file(cieLUTPath);
+            if (file.is_open()) {
+                std::string line;
+                while (std::getline(file, line)) {
+                    // Parse CSV: wavelength,x_bar,y_bar,z_bar
+                    std::istringstream ss(line);
+                    std::string token;
+                    std::vector<f32> values;
+
+                    while (std::getline(ss, token, ',')) {
+                        values.push_back(std::stof(token));
+                    }
+
+                    if (values.size() >= 4) {
+                        f32 wavelength = values[0];
+                        // Only include 380-780nm range (401 samples)
+                        if (wavelength >= 380.0f && wavelength <= 780.0f) {
+                            cieCMF_data.push_back(glm::vec3(values[1], values[2], values[3]));
+                        }
+                    }
+                }
+                file.close();
+
+                QL_LOG_INFO("  Loaded {} CIE CMF samples (380-780nm)", cieCMF_data.size());
+
+                // Create GPU buffer
+                cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
+                    context.GetAllocator(),
+                    cieCMF_data.size() * sizeof(glm::vec3),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                    VMA_MEMORY_USAGE_CPU_TO_GPU
+                );
+                cieCMF_LUTBuffer->Upload(cieCMF_data.data(), cieCMF_data.size() * sizeof(glm::vec3));
+
+                QL_LOG_INFO("  CIE CMF LUT uploaded to GPU (binding 19)");
+            } else {
+                QL_LOG_ERROR("  Failed to open CIE LUT file: {}", cieLUTPath.string());
+            }
+        } else {
+            QL_LOG_WARN("  CIE LUT not found at: {}", cieLUTPath.string());
+            QL_LOG_WARN("  VIS_FUSED mode will use analytical approximation (lower accuracy at edges)");
+        }
+
+        // If CIE LUT not loaded, create dummy buffer to avoid binding errors
+        if (!cieCMF_LUTBuffer) {
+            QL_LOG_INFO("  Creating dummy CIE CMF buffer (1 sample)");
+            cieCMF_data.push_back(glm::vec3(0.0f, 0.0f, 0.0f));
+            cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
+                context.GetAllocator(),
+                sizeof(glm::vec3),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU
+            );
+            cieCMF_LUTBuffer->Upload(cieCMF_data.data(), sizeof(glm::vec3));
+        }
 
         // ====================================================================
         // Create Material Buffer (PBR)
@@ -1683,6 +1767,9 @@ int main(int argc, char* argv[]) {
 
         pipeline.BindInstanceGeometryBuffer(instanceGeometryBuffer);  // Binding 18
         QL_LOG_INFO("  Instance geometry buffer created: {} instances", instanceGeoInfo.size());
+
+        // Bind CIE CMF LUT (binding 19)
+        pipeline.BindCIE_CMF_LUT(*cieCMF_LUTBuffer);  // Binding 19
 
         // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();
