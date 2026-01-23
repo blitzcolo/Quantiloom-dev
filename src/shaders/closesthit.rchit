@@ -1108,11 +1108,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
             XYZ_accum.z += L_lambda * z_bar * LAMBDA_STEP;
         }
 
-        // NOTE: XYZ_accum from Riemann sum is already correctly normalized.
-        // The integration XYZ_accum += L(λ) × CMF(λ) × Δλ already has proper units.
-        // DO NOT divide by CIE_Y_INTEGRAL (106.9), as that would make output 107x too dark!
-        // The constant 106.9 is for 1nm sampling, but we use LAMBDA_STEP ≈ 12.9nm.
-        // Riemann sum normalization is: XYZ = Σ[L(λᵢ) × CMF(λᵢ) × Δλ] (already correct)
+        // ====================================================================
+        // XYZ Normalization for RGB Input Compatibility
+        // ====================================================================
+        // The Riemann sum XYZ = Σ[L(λ) × CMF(λ) × Δλ] produces values proportional
+        // to CIE integrals (∫ȳdλ ≈ 106.9 for Y channel).
+        //
+        // For NORMALIZED RGB input (0-1 range from config), we must divide by
+        // CIE_Y_INTEGRAL to get normalized output:
+        //   - Input white (1,1,1) → XYZ_y ≈ 106.9 → after normalization → 1.0 ✓
+        //   - Input gray (0.7,0.7,0.7) → XYZ_y ≈ 74.8 → after normalization → 0.7 ✓
+        //
+        // NOTE: If using physical radiance units (W/sr/m²/nm), comment out this
+        // normalization to preserve absolute values.
+        // ====================================================================
+        XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);

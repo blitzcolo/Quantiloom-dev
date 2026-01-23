@@ -1178,6 +1178,19 @@ int main(int argc, char* argv[]) {
 
                 QL_LOG_INFO("  Loaded {} CIE CMF samples (380-780nm)", cieCMF_data.size());
 
+                // Validate data completeness
+                if (cieCMF_data.size() != 401) {
+                    QL_LOG_WARN("  WARNING: Expected 401 samples, got {}. VIS_FUSED accuracy may be reduced.", cieCMF_data.size());
+                }
+
+                // Debug: Print sample values for validation
+                if (!cieCMF_data.empty() && cieCMF_data.size() >= 171) {
+                    auto& s380 = cieCMF_data[0];    // 380nm
+                    auto& s550 = cieCMF_data[170];  // 550nm (170 = 550-380)
+                    QL_LOG_DEBUG("  Sample 380nm: X={:.6f}, Y={:.6f}, Z={:.6f}", s380.x, s380.y, s380.z);
+                    QL_LOG_DEBUG("  Sample 550nm: X={:.6f}, Y={:.6f}, Z={:.6f}", s550.x, s550.y, s550.z);
+                }
+
                 // Create GPU buffer
                 cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
                     context.GetAllocator(),
@@ -1198,7 +1211,8 @@ int main(int argc, char* argv[]) {
 
         // If CIE LUT not loaded, create dummy buffer to avoid binding errors
         if (!cieCMF_LUTBuffer) {
-            QL_LOG_INFO("  Creating dummy CIE CMF buffer (1 sample)");
+            QL_LOG_WARN("  FALLBACK: Creating dummy CIE CMF buffer (1 sample)");
+            QL_LOG_WARN("  VIS_FUSED mode will produce INCORRECT colors! Check CIE LUT path.");
             cieCMF_data.push_back(glm::vec3(0.0f, 0.0f, 0.0f));
             cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
                 context.GetAllocator(),

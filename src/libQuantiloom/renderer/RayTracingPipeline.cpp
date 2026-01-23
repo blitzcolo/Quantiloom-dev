@@ -466,7 +466,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[19].binding = 19;
     bindings[19].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[19].descriptorCount = 1;
-    bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;  // Allow both hit and miss shaders to access CIE LUT
     bindings[19].pImmutableSamplers = nullptr;
 
     // Enable descriptor indexing flags for texture arrays

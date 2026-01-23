@@ -38,6 +38,16 @@
 [[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
 
 // ============================================================================
+// CIE 1931 Color Matching Functions LUT (Binding 19)
+// ============================================================================
+// High-precision CIE XYZ CMFs for VIS_FUSED mode spectral integration
+// 401 samples (380-780nm @ 1nm resolution): float3(x_bar, y_bar, z_bar)
+// Provides <0.1% error vs analytical approximation's 10-20% at edges
+// ============================================================================
+
+[[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
+
+// ============================================================================
 // Push Constants
 // ============================================================================
 // Camera data for accessing spectral mode and wavelength
@@ -178,16 +188,20 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
             }
 
-            // Weight by CIE color matching functions
-            float x_bar = CIE_X(lambda);
-            float y_bar = CIE_Y(lambda);
-            float z_bar = CIE_Z(lambda);
+            // Weight by CIE color matching functions (use LUT for high precision)
+            float3 xyz_cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda);
+            float x_bar = xyz_cmf.x;
+            float y_bar = xyz_cmf.y;
+            float z_bar = xyz_cmf.z;
 
             // Riemann sum: XYZ += L(λ) × CMF(λ) × Δλ
             XYZ_accum.x += sky_radiance_lambda * x_bar * LAMBDA_STEP;
             XYZ_accum.y += sky_radiance_lambda * y_bar * LAMBDA_STEP;
             XYZ_accum.z += sky_radiance_lambda * z_bar * LAMBDA_STEP;
         }
+
+        // Normalize XYZ for RGB input compatibility (see closesthit.rchit for details)
+        XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
         payload.radiance = ConvertXYZToLinearRGB(XYZ_accum);
