@@ -1255,7 +1255,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // In SWIR band, solar radiation is still significant (unlike MWIR/LWIR).
         // Physics model combines:
         //   1. Reflected solar irradiance (dominant for passive imaging)
-        //   2. Minor thermal emission (only for very hot objects T > 500K)
+        //   2. Minor thermal emission (only for very hot objects T > 500K, Wien peak ~5.8μm)
         //
         // L_total(λ) = ρ(λ) × [L_sun(λ) + L_sky(λ)] + ε(λ) × L_bb(T,λ)
         //
@@ -1324,8 +1324,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 4. Thermal emission (minor in SWIR for T < 500K)
             float L_emission = 0.0;
-            if (material.irTemperature_K > 400.0) {
-                // Only compute if object is hot enough for SWIR emission
+            if (material.irTemperature_K > 500.0) {
+                // Only compute if object is hot enough for significant SWIR emission
+                // At 500K, Wien peak is at 5.8μm, but emission tail reaches SWIR band
                 float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
                 L_emission = emissivity * L_blackbody;
             }
@@ -1336,7 +1337,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             radiance_accum += L_lambda * lambda_step;
         }
 
-        // Normalize by band width
+        // Normalize by band width to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
+        // This allows fair comparison across bands with different bandwidths.
+        // For sensor simulation, use radiance_accum (band-integrated radiance) instead.
         float band_width = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
         float radiance_avg = radiance_accum / band_width;
 
@@ -1432,7 +1435,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             radiance_accum += L_reflected * lambda_step;
         }
 
-        // Normalize by band width
+        // Normalize by band width to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
+        // This allows fair comparison across bands with different bandwidths.
+        // For sensor simulation, use radiance_accum (band-integrated radiance) instead.
         float band_width = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
         float radiance_avg = radiance_accum / band_width;
 
@@ -1535,13 +1540,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     sun_irr_lambda = SampleSunIrradiance(solarSpectralLUT[0], lambda);
                 } else {
                     // Fallback: Planck approximation for sun at 5778K
-                    // L_sun(λ) = B(T_sun, λ) × Ω_sun × (R_sun / D_earth-sun)²
-                    // The irradiance at Earth is already factored into typical solar data
-                    // Here we use Planck at 5778K scaled to match AM0 solar constant
+                    // L_sun(λ) = B(T_sun, λ) × Ω_sun
+                    // IRPlanckRadiance returns W·sr⁻¹·m⁻²·nm⁻¹
+                    // Multiply by sun solid angle to get irradiance in W·m⁻²·nm⁻¹
                     float L_sun_surface = IRPlanckRadiance(5778.0, lambda);
-                    // Scale by sun solid angle to get approximate irradiance
-                    // This is a rough approximation; use spectral LUT for accuracy
-                    sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR * 1e4;  // W/m²/μm approximate
+                    // CRITICAL: Stay in nm⁻¹ for consistency with entire spectral pipeline
+                    // Previous 1e4 factor was a unit conversion error (10x too large)
+                    sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR;  // W·m⁻²·nm⁻¹
                 }
 
                 // Convert irradiance to radiance and apply Lambertian BRDF
@@ -1552,7 +1557,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
                 // Apply atmospheric transmittance on sun-surface path (if available)
                 // TODO: Query AtmosphereTransmittanceLUT for accurate path transmittance
-                // For now, assume typical MWIR transmittance of ~0.8 for clear sky
+                // WARNING: MWIR transmittance varies 0.4-0.95 across 3-5μm due to H₂O, CO₂ absorption
+                // This 0.8 value is a rough clear-sky average. For quantitative results,
+                // implement wavelength-dependent MODTRAN LUT query.
                 const float MWIR_ATM_TRANSMITTANCE_APPROX = 0.8;
                 L_reflected_sun *= MWIR_ATM_TRANSMITTANCE_APPROX;
             }
@@ -1587,7 +1594,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             radiance_accum += L_lambda * lambda_step;
         }
 
-        // Normalize by wavelength range to get average radiance over band
+        // Normalize by wavelength range to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
+        // This allows fair comparison across bands with different bandwidths.
+        // For sensor simulation or thermal analysis, use radiance_accum (band-integrated radiance).
         float band_width = lambda_max - lambda_min;
         float radiance_avg = radiance_accum / band_width;
 
