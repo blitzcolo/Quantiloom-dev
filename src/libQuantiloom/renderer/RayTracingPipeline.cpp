@@ -710,7 +710,9 @@ void RayTracingPipeline::CreatePipeline() {
     pipelineInfo.pStages = stages.data();
     pipelineInfo.groupCount = static_cast<u32>(groups.size());
     pipelineInfo.pGroups = groups.data();
-    pipelineInfo.maxPipelineRayRecursionDepth = 2;  // Recursion depth 2: raygen → closesthit → shadow TraceRay
+    // Recursion depth 10: supports 8 transmission bounces + shadow rays
+    // Required for glass/water refraction with multiple internal reflections
+    pipelineInfo.maxPipelineRayRecursionDepth = 10;
     pipelineInfo.layout = m_pipelineLayout;
 
     QL_LOG_INFO("  [CreatePipeline] Pipeline info prepared, getting function pointer...");

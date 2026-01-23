@@ -106,6 +106,17 @@
 [[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
 
 // ============================================================================
+// Transmission Ray Tracing Constants
+// ============================================================================
+// Maximum recursion depth for reflection/refraction rays
+// Higher values allow more accurate glass rendering but increase GPU cost
+// Typical values: 4-8 for real-time, 16+ for offline rendering
+// ============================================================================
+
+static const uint MAX_TRANSMISSION_DEPTH = 8;
+static const float MIN_CONTRIBUTION_THRESHOLD = 0.001;  // Russian roulette cutoff
+
+// ============================================================================
 // Instance Geometry Info Buffer (Binding 18)
 // ============================================================================
 // Per-TLAS-instance geometry offset information for multi-BLAS support.
@@ -1446,8 +1457,31 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_reflected_sun *= MWIR_ATM_TRANSMITTANCE_APPROX;
             }
 
-            // 4. Total spectral radiance at this wavelength
-            float L_lambda = L_emission + L_reflected_atm + L_reflected_sun;
+            // 4. IR Transmittance: Background radiation through transparent materials
+            // ================================================================
+            // For IR-transparent materials (ZnSe, Ge, CaF2 windows, thin films):
+            //   L_transmitted = τ(λ) × L_background(λ)
+            //
+            // Energy conservation: ε + ρ + τ = 1 (Kirchhoff's law)
+            // This enables rendering of IR optics and windows.
+            // ================================================================
+            float L_transmitted = 0.0;
+            float transmittance = material.irTransmittance;
+
+            if (transmittance > 0.001 && payload.depth < MAX_TRANSMISSION_DEPTH) {
+                // Trace transmission ray to get background radiance
+                // For IR, we approximate background as atmospheric thermal emission
+                // In a full implementation, would trace through and sample far surface
+                float L_background = IRPlanckRadiance(T_atmosphere, lambda);
+                L_transmitted = transmittance * L_background;
+
+                // Note: For accurate IR window simulation, should trace recursive ray
+                // and sample the transmitted scene radiance. This simplified model
+                // uses atmospheric background which is valid for outdoor scenes.
+            }
+
+            // 5. Total spectral radiance at this wavelength (with transmittance)
+            float L_lambda = L_emission + L_reflected_atm + L_reflected_sun + L_transmitted;
 
             // Accumulate (Riemann sum)
             radiance_accum += L_lambda * lambda_step;
@@ -1878,6 +1912,87 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 break;
             }
 
+            case DEBUG_MODE_DISPERSION: {
+                // Dispersion coefficient visualization
+                // Shows dispersion strength (0 = no dispersion, 1 = high dispersion)
+                // Color indicates: R = low dispersion, G = medium, B = high
+                float disp = saturate(material.dispersion * 10.0);  // Scale for visibility
+                debug_output = float3(1.0 - disp, 1.0 - abs(disp - 0.5) * 2.0, disp);
+                break;
+            }
+
+            case DEBUG_MODE_IOR_VARIATION: {
+                // IOR variation across RGB wavelengths (Cauchy dispersion)
+                // Shows how much IOR differs between R (650nm), G (550nm), B (450nm)
+                float ior_R = CauchyIOR(material.ior, material.dispersion, 650.0);
+                float ior_G = CauchyIOR(material.ior, material.dispersion, 550.0);
+                float ior_B = CauchyIOR(material.ior, material.dispersion, 450.0);
+
+                // Normalize to 0-1 range for visualization
+                // IOR typically ranges 1.0 - 2.5
+                debug_output = float3(
+                    saturate((ior_R - 1.0) / 1.5),
+                    saturate((ior_G - 1.0) / 1.5),
+                    saturate((ior_B - 1.0) / 1.5)
+                );
+                break;
+            }
+
+            // ================================================================
+            // Volume/Participating Media Debug (90-99)
+            // ================================================================
+
+            case DEBUG_MODE_VOLUME_DENSITY: {
+                // Volume density (grayscale, scaled for visibility)
+                float density = saturate(material.volumeDensity * 10.0);
+                debug_output = float3(density, density, density);
+                break;
+            }
+
+            case DEBUG_MODE_SCATTERING_COEFF: {
+                // Scattering coefficient σ_s (scaled for visibility)
+                float sigma_s = saturate(material.scatteringCoeff * 0.1);
+                debug_output = float3(sigma_s, sigma_s, sigma_s);
+                break;
+            }
+
+            case DEBUG_MODE_ABSORPTION_COEFF: {
+                // Absorption coefficient σ_a (scaled for visibility)
+                float sigma_a = saturate(material.absorptionCoeff * 0.1);
+                debug_output = float3(sigma_a, sigma_a, sigma_a);
+                break;
+            }
+
+            case DEBUG_MODE_EXTINCTION_COEFF: {
+                // Extinction coefficient σ_t = σ_s + σ_a (scaled)
+                float sigma_t = saturate((material.scatteringCoeff + material.absorptionCoeff) * 0.1);
+                debug_output = float3(sigma_t, sigma_t, sigma_t);
+                break;
+            }
+
+            case DEBUG_MODE_SINGLE_SCATTER_ALBEDO: {
+                // Single scattering albedo ω = σ_s / σ_t
+                // 0 = pure absorption, 1 = pure scattering
+                float sigma_t = material.scatteringCoeff + material.absorptionCoeff;
+                float albedo = (sigma_t > 0.001) ? material.scatteringCoeff / sigma_t : 0.0;
+                debug_output = float3(albedo, albedo, albedo);
+                break;
+            }
+
+            case DEBUG_MODE_PHASE_G: {
+                // Henyey-Greenstein g parameter visualization
+                // R channel: forward scattering (g > 0)
+                // B channel: backward scattering (g < 0)
+                // G channel: isotropic (g ≈ 0)
+                float g = material.phaseG;
+                debug_output = float3(
+                    saturate(g),           // R: forward (g > 0)
+                    1.0 - abs(g),          // G: isotropic (g ≈ 0)
+                    saturate(-g)           // B: backward (g < 0)
+                );
+                break;
+            }
+
             default:
                 // Unknown mode: show magenta error color
                 debug_output = float3(1.0, 0.0, 1.0);
@@ -1887,6 +2002,292 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Apply debug output and return early
         payload.radiance = debug_output;
         return;
+    }
+
+    // ========================================================================
+    // Participating Media Handling (Fog, Smoke, Clouds)
+    // ========================================================================
+    // For materials with volumeDensity > 0, compute volumetric effects:
+    //   - Single scattering from light sources
+    //   - Transmittance attenuation
+    //   - Phase function for directional scattering
+    //
+    // PHYSICS:
+    //   σ_t = σ_s + σ_a (extinction = scattering + absorption)
+    //   T(d) = exp(-σ_t × d) (Beer-Lambert transmittance)
+    //   L_inscatter = σ_s × phase(θ) × L_sun × visibility
+    //
+    // This is a simplified single-scattering model. For multiple scattering
+    // (clouds, dense fog), use the full delta-tracking in volumetric.hlsli.
+    // ========================================================================
+
+    if (material.volumeDensity > 0.0 && material.scatteringCoeff > 0.0) {
+        // Create medium properties from material
+        MediumProperties medium = CreateMediumFromMaterial(material);
+
+        // Distance traveled through the medium (ray path length)
+        float pathLength = RayTCurrent();
+
+        // Compute transmittance using Beer-Lambert law
+        float3 volumeTransmittance = BeerLambertTransmittance(pathLength, medium);
+
+        // ====================================================================
+        // Single Scattering: In-scattered Light from Sun
+        // ====================================================================
+        // Compute light scattered toward camera from particles along the ray
+        // Using simplified single-scattering approximation
+        // ====================================================================
+
+        float3 inScatteredLight = float3(0.0, 0.0, 0.0);
+
+        // Sun direction and radiance
+        float3 sunDir = normalize(lut.sunDirection);
+        float3 sunRadiance = lut.sunRadiance_rgb * lut.sunIntensity;
+
+        // Phase function: Henyey-Greenstein
+        float cosTheta = dot(-WorldRayDirection(), sunDir);
+        float phase = HenyeyGreenstein(cosTheta, medium.g);
+
+        // Estimate average scattering along ray (simplified)
+        // For proper integration, would need to march along ray
+        // Here we use midpoint approximation
+        float3 midPoint = WorldRayOrigin() + WorldRayDirection() * (pathLength * 0.5);
+
+        // Shadow test at midpoint for sun visibility
+        RayDesc shadowRay;
+        shadowRay.Origin = midPoint;
+        shadowRay.Direction = sunDir;
+        shadowRay.TMin = 0.001;
+        shadowRay.TMax = 10000.0;
+
+        Payload shadowPayload;
+        shadowPayload.radiance = float3(0.0, 0.0, 0.0);
+        shadowPayload.isShadowed = 1;  // Assume shadowed until miss shader says otherwise
+        shadowPayload.depth = payload.depth + 1;
+        shadowPayload.rngState = payload.rngState;
+
+        // Trace shadow ray (uses miss shader index 1 for shadows)
+        TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+                 0xFF, 0, 0, 1, shadowRay, shadowPayload);
+
+        float sunVisibility = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
+
+        // In-scattering: σ_s × phase × L_sun × visibility × (1 - T) / σ_t
+        // The (1 - T) / σ_t term integrates scattering over the path
+        float3 sigma_t = medium.sigma_t;
+        float sigma_t_avg = (sigma_t.r + sigma_t.g + sigma_t.b) / 3.0;
+
+        if (sigma_t_avg > 0.001) {
+            float3 oneMinusT = float3(1.0, 1.0, 1.0) - volumeTransmittance;
+            inScatteredLight = medium.sigma_s * phase * sunRadiance * sunVisibility * oneMinusT / sigma_t;
+        }
+
+        // ====================================================================
+        // Apply Volume Effects to Output
+        // ====================================================================
+        // Final = surface_radiance × transmittance + in_scattered
+        // ====================================================================
+
+        output_radiance = output_radiance * volumeTransmittance + inScatteredLight;
+    }
+
+    // ========================================================================
+    // Transmission Material Handling (Glass, Water, etc.)
+    // ========================================================================
+    // For materials with transmission > 0, we need to trace additional rays
+    // to compute refraction and reflection contributions.
+    //
+    // PHYSICS:
+    //   At a dielectric interface (air/glass):
+    //   - Fresnel equations determine reflection vs transmission ratio
+    //   - Snell's law determines refraction angle
+    //   - Beer-Lambert law models volume absorption (colored glass)
+    //
+    // ALGORITHM:
+    //   1. Check if material has transmission and depth allows recursion
+    //   2. Compute Fresnel reflectance F (exact dielectric formula)
+    //   3. Use Russian roulette to choose reflection OR refraction (not both)
+    //   4. Trace the chosen ray and accumulate contribution
+    //   5. Apply Beer-Lambert absorption for refracted rays inside medium
+    //
+    // ENERGY CONSERVATION:
+    //   E_incident = F × E_reflected + (1-F) × E_transmitted
+    //   Russian roulette ensures unbiased estimation of both paths
+    // ========================================================================
+
+    if (material.transmission > 0.0 && payload.depth < MAX_TRANSMISSION_DEPTH) {
+        // Get hit point and ray direction
+        float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        float3 rayDir = WorldRayDirection();
+
+        // Determine if entering or exiting the medium
+        // Entering: ray direction and normal point in opposite directions (dot < 0)
+        bool entering = dot(rayDir, normal) < 0.0;
+
+        // Use geometric normal facing the ray
+        float3 N = entering ? normal : -normal;
+
+        // Compute Fresnel reflectance (exact dielectric formula)
+        float cosI = abs(dot(N, -rayDir));
+
+        // Scale transmission contribution by material.transmission factor
+        // This allows partial transmission (frosted glass effect)
+        float transmissionWeight = material.transmission;
+
+        // Compute reflection direction (same for all wavelengths)
+        float3 reflectDir = reflect(rayDir, N);
+
+        // ====================================================================
+        // Dispersion Handling: Wavelength-Dependent IOR
+        // ====================================================================
+        // When material.dispersion > 0, different wavelengths refract at
+        // different angles (chromatic dispersion / rainbow effect).
+        //
+        // For RGB mode: Approximate by tracing 3 rays at R/G/B wavelengths
+        // For VIS_FUSED: Use central wavelength (550nm) for single ray
+        // For SINGLE: Use camera.wavelength_nm
+        //
+        // Cauchy formula: n(λ) = n_d + dispersion × 0.01 / λ²
+        // ====================================================================
+
+        float3 transmissionRadiance = float3(0.0, 0.0, 0.0);
+
+        // PCG random number for reflection/refraction decision
+        uint rngState = payload.rngState;
+        rngState = rngState * 747796405u + 2891336453u;
+        uint word = ((rngState >> ((rngState >> 28u) + 4u)) ^ rngState) * 277803737u;
+        word = (word >> 22u) ^ word;
+        float xi = float(word) / 4294967296.0;
+        payload.rngState = rngState;
+
+        // Prepare recursive ray template
+        RayDesc recursiveRay;
+        recursiveRay.Origin = hitPoint;
+        recursiveRay.TMin = 0.001;
+        recursiveRay.TMax = 10000.0;
+
+        // Prepare recursive payload template
+        Payload recursivePayload;
+        recursivePayload.dDdx = payload.dDdx;
+        recursivePayload.dDdy = payload.dDdy;
+        recursivePayload.isShadowed = 0;
+        recursivePayload.depth = payload.depth + 1;
+        recursivePayload.rngState = rngState;
+
+        // Check if dispersion is enabled and significant
+        bool hasDispersion = (material.dispersion > 0.001) &&
+                            (camera.spectral_mode == SPECTRAL_MODE_RGB ||
+                             camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED);
+
+        if (hasDispersion && camera.spectral_mode == SPECTRAL_MODE_RGB) {
+            // ================================================================
+            // RGB Dispersion: Trace 3 separate rays for R, G, B wavelengths
+            // ================================================================
+            // This produces chromatic aberration / rainbow effects at edges
+            // Wavelengths: R=650nm, G=550nm, B=450nm (approximate primaries)
+            // ================================================================
+
+            float wavelengths[3] = { 650.0, 550.0, 450.0 };  // nm
+            float3 channelRadiance = float3(0.0, 0.0, 0.0);
+
+            for (int ch = 0; ch < 3; ch++) {
+                float lambda = wavelengths[ch];
+                float ior_lambda = CauchyIOR(material.ior, material.dispersion, lambda);
+
+                float n1 = entering ? 1.0 : ior_lambda;
+                float n2 = entering ? ior_lambda : 1.0;
+                float eta = n1 / n2;
+
+                float F = FresnelDielectric(cosI, n1, n2);
+                float3 refractDir = Refract(rayDir, N, eta);
+                bool hasTIR = (length(refractDir) < 0.001);
+
+                if (hasTIR) F = 1.0;
+
+                recursivePayload.radiance = float3(0.0, 0.0, 0.0);
+
+                // Use same random decision for all channels for consistency
+                if (xi < F) {
+                    // Reflection
+                    recursiveRay.Direction = reflectDir;
+                } else {
+                    // Refraction with wavelength-specific direction
+                    recursiveRay.Direction = refractDir;
+                }
+
+                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+
+                // Extract the channel-specific contribution
+                float channelValue = (ch == 0) ? recursivePayload.radiance.r :
+                                     (ch == 1) ? recursivePayload.radiance.g :
+                                                 recursivePayload.radiance.b;
+
+                // Apply Beer-Lambert absorption for this channel
+                if (!entering && material.attenuationDistance > 0.0) {
+                    float travelDistance = RayTCurrent();
+                    float3 volumeAtten = BeerLambertAbsorption(
+                        material.attenuationColor, travelDistance, material.attenuationDistance);
+                    float attenValue = (ch == 0) ? volumeAtten.r :
+                                       (ch == 1) ? volumeAtten.g : volumeAtten.b;
+                    channelValue *= attenValue;
+                }
+
+                if (ch == 0) channelRadiance.r = channelValue;
+                else if (ch == 1) channelRadiance.g = channelValue;
+                else channelRadiance.b = channelValue;
+            }
+
+            transmissionRadiance = channelRadiance;
+
+        } else {
+            // ================================================================
+            // Standard Refraction (no dispersion or single wavelength mode)
+            // ================================================================
+
+            // Compute IOR (wavelength-dependent if in spectral mode with dispersion)
+            float effectiveIOR = material.ior;
+            if (material.dispersion > 0.001 && camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+                effectiveIOR = CauchyIOR(material.ior, material.dispersion, camera.wavelength_nm);
+            } else if (material.dispersion > 0.001 && camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+                // Use central visible wavelength for VIS_FUSED
+                effectiveIOR = CauchyIOR(material.ior, material.dispersion, 550.0);
+            }
+
+            float n1 = entering ? 1.0 : effectiveIOR;
+            float n2 = entering ? effectiveIOR : 1.0;
+            float eta = n1 / n2;
+
+            float F = FresnelDielectric(cosI, n1, n2);
+            float3 refractDir = Refract(rayDir, N, eta);
+            bool hasTIR = (length(refractDir) < 0.001);
+
+            if (hasTIR) F = 1.0;
+
+            recursivePayload.radiance = float3(0.0, 0.0, 0.0);
+
+            if (xi < F) {
+                // Reflection path
+                recursiveRay.Direction = reflectDir;
+                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+                transmissionRadiance = recursivePayload.radiance;
+            } else {
+                // Refraction path
+                recursiveRay.Direction = refractDir;
+                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+
+                // Apply Beer-Lambert absorption
+                float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
+                if (!entering && material.attenuationDistance > 0.0) {
+                    float travelDistance = RayTCurrent();
+                    volumeAttenuation = BeerLambertAbsorption(
+                        material.attenuationColor, travelDistance, material.attenuationDistance);
+                }
+                transmissionRadiance = recursivePayload.radiance * volumeAttenuation;
+            }
+        }
+
+        // Blend transmission with surface shading
+        output_radiance = lerp(output_radiance, transmissionRadiance, transmissionWeight);
     }
 
     payload.radiance = output_radiance;

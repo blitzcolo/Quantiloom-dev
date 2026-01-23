@@ -178,6 +178,15 @@ void main() {
     payload.dDdx = dDdx;
     payload.dDdy = dDdy;
 
+    // Initialize shadow flag (will be set by shadow miss shader)
+    payload.isShadowed = 0;
+
+    // Initialize recursion depth (0 = primary ray)
+    payload.depth = 0;
+
+    // Initialize RNG state from pixel seed for stochastic decisions
+    payload.rngState = seed;
+
     // Trace ray (hit group index 0, miss index 0)
     TraceRay(
         scene,              // Acceleration structure

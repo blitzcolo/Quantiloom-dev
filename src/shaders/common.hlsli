@@ -102,6 +102,16 @@
 #define DEBUG_MODE_FRESNEL_DIELECTRIC      82  // Dielectric Fresnel reflectance
 #define DEBUG_MODE_ATTENUATION             83  // Volume attenuation color
 #define DEBUG_MODE_ENERGY_AUDIT            84  // Energy conservation (R=reflected, G=transmitted, B=absorbed)
+#define DEBUG_MODE_DISPERSION              85  // Dispersion coefficient visualization
+#define DEBUG_MODE_IOR_VARIATION           86  // IOR variation across RGB wavelengths
+
+// Volume/Participating Media (90-99) - For debugging fog, smoke, SSS
+#define DEBUG_MODE_VOLUME_DENSITY          90  // Volume density (grayscale)
+#define DEBUG_MODE_SCATTERING_COEFF        91  // Scattering coefficient σ_s
+#define DEBUG_MODE_ABSORPTION_COEFF        92  // Absorption coefficient σ_a
+#define DEBUG_MODE_EXTINCTION_COEFF        93  // Extinction coefficient σ_t = σ_s + σ_a
+#define DEBUG_MODE_SINGLE_SCATTER_ALBEDO   94  // Single scattering albedo ω = σ_s / σ_t
+#define DEBUG_MODE_PHASE_G                 95  // Henyey-Greenstein g parameter
 
 // ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
@@ -144,9 +154,16 @@ struct Payload {
     // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
     uint isShadowed;  // Shadow occlusion flag                          // 4 bytes
 
-    // TOTAL: 40 bytes
-    // Note: If payload exceeds 32 bytes, consider using min16float for differentials
-    // to reduce size. Still under 64-byte limit, so this is acceptable.
+    // Recursion depth for transmission/reflection rays
+    // 0 = primary ray, incremented for each bounce
+    // Used to limit recursion and for Russian roulette termination
+    uint depth;       // Current recursion depth                         // 4 bytes
+
+    // Random number generator state for stochastic decisions
+    // Used for Russian roulette termination and importance sampling
+    uint rngState;    // PCG hash state                                  // 4 bytes
+
+    // TOTAL: 48 bytes (under 64-byte RT Core limit)
 
     // REMOVED for performance (if needed, can be recomputed or approximated):
     // float3 dOdx;  // ∂O/∂x (ray origin differential) - usually ~0 for primary rays
