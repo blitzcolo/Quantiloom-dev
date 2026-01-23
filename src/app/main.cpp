@@ -1144,7 +1144,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("Loading CIE 1931 CMF LUT...");
 
         std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
-        std::vector<glm::vec3> cieCMF_data;
+        std::vector<glm::vec4> cieCMF_data;  // vec4 for 16-byte alignment matching GPU StructuredBuffer stride
 
         // CIE CMF LUT is always used in VIS_FUSED mode for high accuracy
         // Covers 380-780nm at 1nm resolution (401 samples)
@@ -1170,7 +1170,7 @@ int main(int argc, char* argv[]) {
                         f32 wavelength = values[0];
                         // Only include 380-780nm range (401 samples)
                         if (wavelength >= 380.0f && wavelength <= 780.0f) {
-                            cieCMF_data.push_back(glm::vec3(values[1], values[2], values[3]));
+                            cieCMF_data.push_back(glm::vec4(values[1], values[2], values[3], 0.0f));
                         }
                     }
                 }
@@ -1194,11 +1194,11 @@ int main(int argc, char* argv[]) {
                 // Create GPU buffer
                 cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
                     context.GetAllocator(),
-                    cieCMF_data.size() * sizeof(glm::vec3),
+                    cieCMF_data.size() * sizeof(glm::vec4),
                     VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                     VMA_MEMORY_USAGE_CPU_TO_GPU
                 );
-                cieCMF_LUTBuffer->Upload(cieCMF_data.data(), cieCMF_data.size() * sizeof(glm::vec3));
+                cieCMF_LUTBuffer->Upload(cieCMF_data.data(), cieCMF_data.size() * sizeof(glm::vec4));
 
                 QL_LOG_INFO("  CIE CMF LUT uploaded to GPU (binding 19)");
             } else {
@@ -1213,14 +1213,14 @@ int main(int argc, char* argv[]) {
         if (!cieCMF_LUTBuffer) {
             QL_LOG_WARN("  FALLBACK: Creating dummy CIE CMF buffer (1 sample)");
             QL_LOG_WARN("  VIS_FUSED mode will produce INCORRECT colors! Check CIE LUT path.");
-            cieCMF_data.push_back(glm::vec3(0.0f, 0.0f, 0.0f));
+            cieCMF_data.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
             cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
                 context.GetAllocator(),
-                sizeof(glm::vec3),
+                sizeof(glm::vec4),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                 VMA_MEMORY_USAGE_CPU_TO_GPU
             );
-            cieCMF_LUTBuffer->Upload(cieCMF_data.data(), sizeof(glm::vec3));
+            cieCMF_LUTBuffer->Upload(cieCMF_data.data(), sizeof(glm::vec4));
         }
 
         // ====================================================================

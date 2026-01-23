@@ -207,9 +207,10 @@ TEST(LightingParamsTest, ChromaCorrectionDefaults) {
     // Verify chromaticity correction factors have correct defaults
     LightingParams params = CreateDefaultLightingParams();
 
-    // Default corrections compensate for CIE CMF integral differences
-    // R correction: 1.266 (compensates for ∫x̄ ≈ 95.05 vs ∫ȳ ≈ 106.9)
-    // B correction: 1.146 (compensates for ∫z̄ ≈ 108.89 vs ∫ȳ ≈ 106.9)
-    EXPECT_NEAR(params.chromaR_correction, 1.266f, 0.001f);
-    EXPECT_NEAR(params.chromaB_correction, 1.146f, 0.001f);
+    // Default corrections for EQUAL-INTEGRAL CIE CMF data (∫x̄=∫ȳ=∫z̄≈106.85)
+    // For flat spectrum, XYZ→RGB produces ratio ≈ (1.27:1.0:0.96)
+    // R correction: 0.7872 = G/R ratio (reduces red excess)
+    // B correction: 1.0437 = G/B ratio (compensates blue deficit)
+    EXPECT_NEAR(params.chromaR_correction, 0.7872f, 0.001f);
+    EXPECT_NEAR(params.chromaB_correction, 1.0437f, 0.001f);
 }

@@ -155,9 +155,13 @@ namespace LightingDefaults {
     constexpr f32 ATMOSPHERE_TEMPERATURE_K_MAX = 350.0f;  // Extreme hot
 
     // VIS_FUSED chromaticity correction factors
-    // Derived from CIE CMF integral ratios for flat spectrum correction
-    constexpr f32 CHROMA_R_CORRECTION = 1.266f;
-    constexpr f32 CHROMA_B_CORRECTION = 1.146f;
+    // Derived from XYZ→RGB conversion for equal-integral CIE CMF data
+    // For flat spectrum (gray input), XYZ ratio = (1:1:1), producing RGB ratio ≈ (1.27:1.0:0.96)
+    // Correction factors normalize RGB output to neutral gray
+    // NOTE: These values are for EQUAL-INTEGRAL CMF data (∫x̄=∫ȳ=∫z̄≈106.85)
+    //       Standard CIE 1931 has UNEQUAL integrals and needs different factors!
+    constexpr f32 CHROMA_R_CORRECTION = 0.7872f;  // G/R ratio to neutralize red shift
+    constexpr f32 CHROMA_B_CORRECTION = 1.0437f;  // G/B ratio to neutralize blue deficit
 }
 
 // ============================================================================

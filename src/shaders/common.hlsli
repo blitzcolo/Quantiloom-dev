@@ -675,8 +675,8 @@ struct LightingParams {
 
     float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
     float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation
-    float  chromaR_correction;   // VIS_FUSED chromaticity correction for R channel (default: 1.266)
-    float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.146)
+    float  chromaR_correction;   // VIS_FUSED chromaticity correction for R channel (default: 0.7872)
+    float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.0437)
 
     uint   enableShadowRays;     // Shadow ray enable flag: 0 = disabled, 1 = enabled (configurable)
     float  _padding[3];          // Padding to 80 bytes (16-byte aligned)

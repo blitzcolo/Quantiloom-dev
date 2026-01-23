@@ -1128,19 +1128,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
 
         // ====================================================================
-        // CHROMATICITY CORRECTION for Equal-Energy → D65 Adaptation
+        // CHROMATICITY CORRECTION for Equal-Integral CIE CMF Data
         // ====================================================================
-        // Problem: CIE color matching functions have different integrals:
-        //   ∫x̄(λ)dλ ≈ 95.05, ∫ȳ(λ)dλ ≈ 106.9, ∫z̄(λ)dλ ≈ 108.89
+        // Our CIE CMF LUT uses EQUAL-INTEGRAL normalization:
+        //   ∫x̄(λ)dλ ≈ ∫ȳ(λ)dλ ≈ ∫z̄(λ)dλ ≈ 106.85
         //
-        // For FLAT spectrum material (gray colors), XYZ ratio is (95:107:109)
-        // After sRGB matrix, this produces GREEN-BIASED output:
-        //   RGB ∝ (89.3, 113.0, 98.6) ≈ (0.79, 1.00, 0.87)
+        // For FLAT spectrum material (gray colors), XYZ ratio is (1.0 : 1.0 : 1.0)
+        // After sRGB matrix, this produces RED-BIASED output:
+        //   RGB ∝ (1.27, 1.00, 0.96) due to XYZ→RGB matrix properties
         //
         // This correction neutralizes the chromaticity shift by scaling
         // R and B channels to match G, ensuring flat spectrum → neutral gray.
         //
-        // Correction factors are configurable via LightingParams (default 1.266, 1.146)
+        // Correction factors (default 0.7872, 1.0437) derived from G/R and G/B ratios
         // ====================================================================
         output_radiance.r *= lut.chromaR_correction;
         output_radiance.b *= lut.chromaB_correction;
