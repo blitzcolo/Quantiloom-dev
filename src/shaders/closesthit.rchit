@@ -987,9 +987,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // shadowFactor is computed in RGB mode block and reused here for consistency
             float L_direct = brdf_lambda * sun_radiance_lambda * NdotL * shadowFactor;
 
-            // Diffuse ambient (simplified Fresnel for diffuse coefficient)
-            float kD_lambda = (1.0 - metallic);  // Metals have no diffuse
-            float L_ambient = kD_lambda * rho_lambda / PI * sky_radiance_lambda;
+            // Diffuse ambient with energy conservation (consistent with RGB mode)
+            // kD = (1 - F) × (1 - metallic) ensures specular+diffuse ≤ 1
+            float NdotV_ambient = max(dot(normal, V), 0.0);
+            float F_ambient = FresnelSchlick(NdotV_ambient, F0_scalar);  // common.hlsli scalar version
+            float kD_lambda = (1.0 - F_ambient) * (1.0 - metallic);
+            // Lambertian BRDF = ρ/π, hemisphere integral = π, so π cancels
+            // sky_radiance_lambda is already radiance (W·sr⁻¹·m⁻²·nm⁻¹)
+            float L_ambient = kD_lambda * rho_lambda * sky_radiance_lambda;
 
             // 4. Emissive contribution (spectrally integrated)
             // Convert emissive RGB to spectral radiance at this wavelength
@@ -997,12 +1002,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float L_emissive = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda);
 
             // 5. IBL specular contribution (spectrally integrated)
-            // Convert prefiltered environment RGB to spectrum at this wavelength
-            // Use illuminant function (no clamp) to preserve HDR environment intensity
+            // Apply Fresnel × BRDF in RGB space first, then convert to spectrum
+            // This preserves colored metal reflections (gold, copper)
             float L_ibl = 0.0;
             if (useIBL) {
-                float ibl_spectrum = ConvertLinearRGBToIlluminantSpectrum(prefilteredColor, lambda);
-                L_ibl = ibl_spectrum * (F0_scalar * envBRDF.x + envBRDF.y);
+                float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+                L_ibl = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
             }
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
@@ -2042,7 +2047,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Sun direction and radiance
         float3 sunDir = normalize(lut.sunDirection);
-        float3 sunRadiance = lut.sunRadiance_rgb * lut.sunIntensity;
+        float3 sunRadiance = lut.sunRadiance_rgb;
 
         // Phase function: Henyey-Greenstein
         float cosTheta = dot(-WorldRayDirection(), sunDir);

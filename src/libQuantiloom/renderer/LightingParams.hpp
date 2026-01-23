@@ -10,11 +10,12 @@
  *
  * Dual-mode support:
  * - RGB mode: Uses sunRadiance_rgb and skyRadiance_rgb
- * - Spectral mode: Uses sunRadiance_spectral and skyRadiance_spectral
- * - When SolarSpectralLUT available, these values serve as fallback
+ * - VIS_Fused mode: Uses RGB-to-spectrum conversion (spectral fields are fallback only)
+ * - When SolarSpectralLUT available, these RGB values serve as additional fallback
  *
  * Physical units:
- * - Radiance: W·sr⁻¹·m⁻² (RGB mode) or W·sr⁻¹·m⁻²·nm⁻¹ (spectral mode)
+ * - RGB radiance: W·sr⁻¹·m⁻² (per RGB channel)
+ * - Spectral fallback: W·sr⁻¹·m⁻² (RGB average, NOT per-nm spectral density)
  * - Temperature: Kelvin (K)
  * - worldUnitsToMeters: Conversion factor for scene unit scaling
  *
@@ -66,10 +67,16 @@ namespace quantiloom {
  */
 struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
-    f32 sunRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 12
+    // NOTE: sunRadiance_spectral is RGB average fallback, NOT true spectral density
+    // Unit: W·sr⁻¹·m⁻² (same as RGB), NOT W·sr⁻¹·m⁻²·nm⁻¹
+    // VIS_Fused mode uses RGB-to-spectrum conversion, ignoring this field
+    f32 sunRadiance_spectral;       // Spectral radiance fallback (RGB average), offset 12
 
     glm::vec3 sunRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 16
-    f32 skyRadiance_spectral;       // Spectral radiance at current λ (fallback), offset 28
+    // NOTE: skyRadiance_spectral is RGB average fallback, NOT true spectral density
+    // Unit: W·sr⁻¹·m⁻² (same as RGB), NOT W·sr⁻¹·m⁻²·nm⁻¹
+    // VIS_Fused mode uses RGB-to-spectrum conversion, ignoring this field
+    f32 skyRadiance_spectral;       // Spectral radiance fallback (RGB average), offset 28
 
     glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 32
     f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
