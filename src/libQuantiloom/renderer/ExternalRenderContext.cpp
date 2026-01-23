@@ -21,6 +21,7 @@
 #include "AtmosphericConfig.hpp"
 
 #include "core/Log.hpp"
+#include "core/CIE_CMF_Data.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/UsdLoader.hpp"
 #include "io/ImageIO.hpp"
@@ -228,6 +229,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> criBuffer;
     std::unique_ptr<GpuBuffer> solarLutBuffer;
     std::unique_ptr<GpuBuffer> atmosphericBuffer;
+    std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
 
     // Merged global geometry buffers (for multi-BLAS support)
     // All BLAS geometry data is merged into single global buffers
@@ -1650,6 +1652,29 @@ void ExternalRenderContext::CreateDummyBuffers() {
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
     m_impl->atmosphericBuffer->Upload(&dummyAtmo, sizeof(DummyAtmospheric));
+
+    // Create CIE 1931 CMF LUT buffer (required for VIS_Fused mode)
+    // Use hardcoded CIE data from CIE_CMF_Data.hpp (401 samples, 380-780nm at 1nm)
+    std::vector<glm::vec4> cieCmfData;
+    cieCmfData.reserve(CIE_CMF_LUT_SIZE);
+    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
+        cieCmfData.emplace_back(
+            CIE_1931_2DEG[i][0],  // x_bar
+            CIE_1931_2DEG[i][1],  // y_bar
+            CIE_1931_2DEG[i][2],  // z_bar
+            0.0f                   // padding for 16-byte alignment
+        );
+    }
+
+    m_impl->cieCmfBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        cieCmfData.size() * sizeof(glm::vec4),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU
+    );
+    m_impl->cieCmfBuffer->Upload(cieCmfData.data(), cieCmfData.size() * sizeof(glm::vec4));
+
+    QL_LOG_DEBUG("  CIE CMF LUT created ({} samples)", CIE_CMF_LUT_SIZE);
 }
 
 void ExternalRenderContext::CreateBRDFLut() {
@@ -1908,6 +1933,11 @@ void ExternalRenderContext::CreatePipeline() {
     m_impl->pipeline->BindComplexRefractiveIndexBuffer(m_impl->criBuffer.get());
     m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
     m_impl->pipeline->BindAtmosphericParams(m_impl->atmosphericBuffer.get());
+
+    // Bind CIE CMF LUT (required for VIS_Fused spectral mode)
+    if (m_impl->cieCmfBuffer) {
+        m_impl->pipeline->BindCIE_CMF_LUT(*m_impl->cieCmfBuffer);
+    }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
 }
