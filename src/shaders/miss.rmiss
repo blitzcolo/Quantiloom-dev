@@ -10,6 +10,7 @@
 #include "pbr.hlsli"
 #include "atmospheric.hlsli"
 #include "SpectralConversion.hlsli"
+#include "blackbody.hlsli"
 
 // ============================================================================
 // Bindings
@@ -228,8 +229,153 @@ void main(inout Payload payload) {
         }
 
         payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+    } else if (camera.spectral_mode == SPECTRAL_MODE_SWIR_FUSED) {
+        // ================================================================
+        // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
+        // ================================================================
+        // Must match closesthit.rchit calculation for unit consistency.
+        // SWIR is reflection-dominated; use solar/sky spectral radiance.
+        // ================================================================
+
+        const float SWIR_LAMBDA_MIN = 1000.0;
+        const float SWIR_LAMBDA_MAX = 2500.0;
+        const uint  NUM_SWIR_SAMPLES = 16;
+        const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
+
+        float radiance_accum = 0.0;
+
+        // Fallback: RGB luminance / bandwidth (same as closesthit)
+        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
+                              0.7152 * lut.skyRadiance_rgb.g +
+                              0.0722 * lut.skyRadiance_rgb.b;
+        float swir_bandwidth = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
+        float sky_power_rgb = sky_luminance / swir_bandwidth;
+
+        for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
+            float lambda = SWIR_LAMBDA_MIN + float(i) * lambda_step;
+
+            float sky_radiance_lambda;
+            if (hasSpectralSolarLUT) {
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                sky_radiance_lambda = sky_power_rgb;
+            }
+
+            radiance_accum += sky_radiance_lambda * lambda_step;
+        }
+
+        float band_width = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
+        }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+
+        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_NIR_FUSED) {
+        // ================================================================
+        // NIR_FUSED mode: Sky radiance integration (780-1400nm)
+        // ================================================================
+        // Near-IR is purely reflection-dominated (no thermal emission).
+        // Uses same approach as SWIR with different wavelength range.
+        // ================================================================
+
+        const float NIR_LAMBDA_MIN = 780.0;
+        const float NIR_LAMBDA_MAX = 1400.0;
+        const uint  NUM_NIR_SAMPLES = 16;
+        const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
+
+        float radiance_accum = 0.0;
+
+        // Fallback: RGB luminance / bandwidth
+        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
+                              0.7152 * lut.skyRadiance_rgb.g +
+                              0.0722 * lut.skyRadiance_rgb.b;
+        float nir_bandwidth = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
+        float sky_power_rgb = sky_luminance / nir_bandwidth;
+
+        for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {
+            float lambda = NIR_LAMBDA_MIN + float(i) * lambda_step;
+
+            float sky_radiance_lambda;
+            if (hasSpectralSolarLUT) {
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                sky_radiance_lambda = sky_irr / PI;
+            } else {
+                sky_radiance_lambda = sky_power_rgb;
+            }
+
+            radiance_accum += sky_radiance_lambda * lambda_step;
+        }
+
+        float band_width = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
+        }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+
+        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+
+    } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED ||
+               camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
+        // ================================================================
+        // MWIR/LWIR_FUSED mode: Atmospheric thermal background
+        // ================================================================
+        // Thermal IR bands: sky is a blackbody emitter at atmosphere temperature.
+        // MWIR: 3000-5000nm, LWIR: 8000-12000nm
+        // Uses Planck radiation at atmosphere temperature for sky radiance.
+        // ================================================================
+
+        float lambda_min, lambda_max;
+        if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED) {
+            lambda_min = 3000.0;
+            lambda_max = 5000.0;
+        } else {
+            lambda_min = 8000.0;
+            lambda_max = 12000.0;
+        }
+
+        const uint NUM_IR_SAMPLES = 16;
+        const float lambda_step = (lambda_max - lambda_min) / float(NUM_IR_SAMPLES - 1);
+
+        float radiance_accum = 0.0;
+        float T_atmosphere = lut.atmosphereTemperature_K;
+
+        // Fallback if atmosphere temperature not set
+        if (T_atmosphere <= 0.0) {
+            T_atmosphere = 250.0;  // Typical cold sky effective temperature
+        }
+
+        for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
+            float lambda = lambda_min + float(i) * lambda_step;
+
+            // Sky thermal radiation (Planck blackbody at atmosphere temperature)
+            float L_sky = IRPlanckRadiance(T_atmosphere, lambda);
+            radiance_accum += L_sky * lambda_step;
+        }
+
+        float band_width = lambda_max - lambda_min;
+        float radiance_avg = radiance_accum / band_width;
+
+        // Validation
+        if (!isfinite(radiance_avg)) {
+            radiance_avg = 0.0;
+        }
+        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+
+        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+
     } else {
-        // Other spectral modes (MWIR, LWIR, etc.): Use scalar fallback
+        // ================================================================
+        // Fallback: Unknown mode (MULTISPECTRAL TBD, etc.)
+        // ================================================================
         float radiance_spectral = lut.skyRadiance_spectral;
         payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
     }
