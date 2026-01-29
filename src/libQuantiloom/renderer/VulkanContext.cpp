@@ -85,6 +85,58 @@ VulkanContext::VulkanContext(const ExternalHandles& handles, bool createAllocato
     m_rtPipelineProperties.pNext = nullptr;
 
     m_rayTracingSupported = true;  // Assume external context has RT support
+    m_capabilities.hasRayTracing = true;
+
+    // ========================================================================
+    // Query device capabilities (CRITICAL for descriptor indexing support)
+    // ========================================================================
+    // This was missing before, causing hasDescriptorIndexing to remain false
+    // and texture limit to be reduced to 32 instead of 1024.
+    // ========================================================================
+
+    // Check Vulkan 1.3 support
+    if (m_deviceProperties.apiVersion >= VK_API_VERSION_1_3) {
+        m_capabilities.hasVulkan13 = true;
+
+        // Query VK 1.3 features availability
+        VkPhysicalDeviceVulkan13Features features13{};
+        features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+
+        VkPhysicalDeviceFeatures2 features2_13{};
+        features2_13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features2_13.pNext = &features13;
+
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &features2_13);
+
+        m_capabilities.hasSynchronization2 = features13.synchronization2;
+        m_capabilities.hasDynamicRendering = features13.dynamicRendering;
+    }
+
+    // Query VK 1.2 descriptor indexing features (required for bindless textures)
+    VkPhysicalDeviceVulkan12Features features12{};
+    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+
+    VkPhysicalDeviceFeatures2 features2_12{};
+    features2_12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2_12.pNext = &features12;
+
+    vkGetPhysicalDeviceFeatures2(m_physicalDevice, &features2_12);
+
+    // Descriptor indexing requires ALL 4 sub-features for full bindless support
+    m_capabilities.hasDescriptorIndexing =
+        features12.descriptorIndexing &&
+        features12.runtimeDescriptorArray &&
+        features12.descriptorBindingPartiallyBound &&
+        features12.shaderSampledImageArrayNonUniformIndexing;
+
+    QL_LOG_INFO("  Vulkan 1.3: {}", m_capabilities.hasVulkan13 ? "YES" : "NO");
+    QL_LOG_INFO("  Descriptor Indexing: {}", m_capabilities.hasDescriptorIndexing ? "YES" : "NO");
+    QL_LOG_INFO("  Synchronization2: {}", m_capabilities.hasSynchronization2 ? "YES" : "NO");
+    QL_LOG_INFO("  Dynamic Rendering: {}", m_capabilities.hasDynamicRendering ? "YES" : "NO");
+
+    if (!m_capabilities.hasDescriptorIndexing) {
+        QL_LOG_WARN("Descriptor indexing NOT fully supported - bindless texture limit reduced to 32");
+    }
 
     // Handle allocator
     if (handles.allocator != VK_NULL_HANDLE) {
