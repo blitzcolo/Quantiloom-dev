@@ -1286,10 +1286,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float sun_power_rgb = sun_luminance / swir_bandwidth;  // Per nm (approximate)
         float sky_power_rgb = sky_luminance / swir_bandwidth;  // Per nm (approximate)
 
-        // Material IR properties (for thermal contribution, usually negligible in SWIR)
-        // Use effective emissivity that derives from metallic factor when not set (P1 fix)
-        float emissivity = GetEffectiveIREmissivity(material);
-        float reflectance = GetEffectiveIRReflectance(material);
+        // Compute view angle for angle-dependent emissivity
+        float NdotV_swir = max(dot(normal, V), 0.0);
+
+        // Material IR properties with angle-dependent correction (P1 fix + angle correction)
+        float baseEmissivity_swir = GetEffectiveIREmissivity(material);
+        float emissivity = GetAngleDependentIREmissivity(baseEmissivity_swir, NdotV_swir, material.metallicFactor);
+        float reflectance = GetAngleDependentIRReflectance(baseEmissivity_swir, material.irTransmittance,
+                                                           NdotV_swir, material.metallicFactor);
+
+        // Sample surface temperature from texture or use scalar value
+        float T_surface_swir = material.irTemperature_K;
+        if (material.temperatureTextureIndex >= 0) {
+            float texTemp = SampleTexture(
+                material.temperatureTextureIndex,
+                material.temperatureTextureIndex,
+                uv,
+                float4(0.5, 0, 0, 0)
+            ).r;
+            T_surface_swir = texTemp * material.temperatureScale + material.temperatureOffset;
+        }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
@@ -1324,10 +1340,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 4. Thermal emission (minor in SWIR for T < 500K)
             float L_emission = 0.0;
-            if (material.irTemperature_K > 500.0) {
+            if (T_surface_swir > 500.0) {
                 // Only compute if object is hot enough for significant SWIR emission
                 // At 500K, Wien peak is at 5.8μm, but emission tail reaches SWIR band
-                float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
+                float L_blackbody = IRPlanckRadiance(T_surface_swir, lambda);
                 L_emission = emissivity * L_blackbody;
             }
 
@@ -1499,9 +1515,28 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Accumulate band-integrated radiance
         float radiance_accum = 0.0;
 
-        // Material IR properties (P1 fix: use effective emissivity from metallic factor)
-        float emissivity = GetEffectiveIREmissivity(material);
-        float reflectance = GetEffectiveIRReflectance(material);
+        // Compute view angle for angle-dependent emissivity
+        float NdotV = max(dot(normal, V), 0.0);
+
+        // Material IR properties with angle-dependent correction (Fresnel effect)
+        float baseEmissivity = GetEffectiveIREmissivity(material);
+        float emissivity = GetAngleDependentIREmissivity(baseEmissivity, NdotV, material.metallicFactor);
+        float reflectance = GetAngleDependentIRReflectance(baseEmissivity, material.irTransmittance,
+                                                           NdotV, material.metallicFactor);
+
+        // Sample surface temperature from texture or use scalar value
+        float T_surface = material.irTemperature_K;
+        if (material.temperatureTextureIndex >= 0) {
+            // Temperature texture: R channel contains normalized temperature [0,1]
+            // T(K) = texValue * temperatureScale + temperatureOffset
+            float texTemp = SampleTexture(
+                material.temperatureTextureIndex,
+                material.temperatureTextureIndex,  // Use same index for sampler
+                uv,
+                float4(0.5, 0, 0, 0)  // Fallback: mid-range if texture missing
+            ).r;
+            T_surface = texTemp * material.temperatureScale + material.temperatureOffset;
+        }
 
         // Atmospheric downwelling radiation temperature
         float T_atmosphere = lut.atmosphereTemperature_K;
@@ -1520,8 +1555,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)
             float L_emission = 0.0;
-            if (material.irTemperature_K > 0.0) {
-                float L_blackbody = IRPlanckRadiance(material.irTemperature_K, lambda);
+            if (T_surface > 0.0) {
+                float L_blackbody = IRPlanckRadiance(T_surface, lambda);
                 L_emission = emissivity * L_blackbody;
             }
 
@@ -1555,13 +1590,33 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 float sun_radiance_lambda = sun_irr_lambda / PI;
                 L_reflected_sun = reflectance * sun_radiance_lambda * NdotL;
 
-                // Apply atmospheric transmittance on sun-surface path (if available)
-                // TODO: Query AtmosphereTransmittanceLUT for accurate path transmittance
-                // WARNING: MWIR transmittance varies 0.4-0.95 across 3-5μm due to H₂O, CO₂ absorption
-                // This 0.8 value is a rough clear-sky average. For quantitative results,
-                // implement wavelength-dependent MODTRAN LUT query.
-                const float MWIR_ATM_TRANSMITTANCE_APPROX = 0.8;
-                L_reflected_sun *= MWIR_ATM_TRANSMITTANCE_APPROX;
+                // Apply wavelength-dependent atmospheric transmittance
+                // MWIR band (3000-5000nm) has significant H₂O and CO₂ absorption
+                //
+                // Approximate transmittance model based on typical clear-sky conditions:
+                // - 3000-3200nm: τ ≈ 0.65 (H₂O absorption edge)
+                // - 3200-4200nm: τ ≈ 0.85 (atmospheric window)
+                // - 4200-4500nm: τ ≈ 0.50 (strong CO₂ absorption at 4.3μm)
+                // - 4500-5000nm: τ ≈ 0.75 (partial window)
+                //
+                // For quantitative radiometry, use MODTRAN/HITRAN LUT instead
+                float tau_atm = 0.8;  // Default
+                if (lambda < 3200.0) {
+                    // H₂O absorption increasing toward 3μm
+                    tau_atm = lerp(0.50, 0.70, (lambda - 3000.0) / 200.0);
+                } else if (lambda < 4200.0) {
+                    // Main atmospheric window
+                    tau_atm = 0.85;
+                } else if (lambda < 4500.0) {
+                    // CO₂ absorption band at 4.3μm
+                    float t = (lambda - 4200.0) / 300.0;
+                    float co2_absorption = 0.35 * exp(-((lambda - 4300.0) * (lambda - 4300.0)) / (80.0 * 80.0));
+                    tau_atm = 0.85 - co2_absorption;
+                } else {
+                    // Recovery toward 5μm
+                    tau_atm = lerp(0.60, 0.75, (lambda - 4500.0) / 500.0);
+                }
+                L_reflected_sun *= tau_atm;
             }
 
             // 4. IR Transmittance: Background radiation through transparent materials

@@ -777,6 +777,12 @@ struct MaterialData {
     // When < 0, uses metallicFactor-based F0 approximation (standard PBR)
     int    complexRefractiveIndexIndex; // Index into complexRefractiveIndex buffer (-1 = use PBR approximation) // Offset: 92-96
 
+    // Temperature texture fields (per-pixel temperature map)
+    int    temperatureTextureIndex;      // Index into texture array (-1 = use scalar irTemperature_K) // Offset: 96-100
+    float  temperatureScale;             // T(K) = tex.r * scale + offset                             // Offset: 100-104
+    float  temperatureOffset;            // Kelvin offset                                              // Offset: 104-108
+    float  _padding3;                    // Alignment padding                                          // Offset: 108-112
+
     // ========================================================================
     // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
     // ========================================================================
@@ -792,19 +798,19 @@ struct MaterialData {
     //   T = 1 - F = transmission ratio (before volume absorption)
     //   Final_transmission = T × exp(-σ × distance)
 
-    float  ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)    // Offset: 96-100
-    float  transmission;                 // Transmission strength [0,1]                              // Offset: 100-104
-    int    transmissionTextureIndex;     // Transmission texture (-1 = no texture)                  // Offset: 104-108
-    float  _padding1;                    // Padding for alignment                                    // Offset: 108-112
+    float  ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)    // Offset: 112-116
+    float  transmission;                 // Transmission strength [0,1]                              // Offset: 116-120
+    int    transmissionTextureIndex;     // Transmission texture (-1 = no texture)                  // Offset: 120-124
+    float  _padding1;                    // Padding for alignment                                    // Offset: 124-128
 
     // Volume attenuation (Beer-Lambert absorption)
-    float3 attenuationColor;             // Color at attenuation distance                           // Offset: 112-124
-    float  attenuationDistance;          // Distance for attenuation (mm, 0 = no attenuation)       // Offset: 124-128
+    float3 attenuationColor;             // Color at attenuation distance                           // Offset: 128-140
+    float  attenuationDistance;          // Distance for attenuation (mm, 0 = no attenuation)       // Offset: 140-144
 
-    float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 128-132
-    int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 132-136
-    float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 136-140
-    float  _padding2;                    // Padding for alignment                                    // Offset: 140-144
+    float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 144-148
+    int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 148-152
+    float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 152-156
+    float  _padding2;                    // Padding for alignment                                    // Offset: 156-160
 
     // ========================================================================
     // Participating Media Properties (fog, smoke, SSS)
@@ -815,10 +821,10 @@ struct MaterialData {
     //   σ_t = σ_a + σ_s (extinction = absorption + scattering)
     //   T = exp(-σ_t × d) (Beer-Lambert transmittance)
 
-    float  volumeDensity;                // Medium density multiplier (0 = no volume)               // Offset: 144-148
-    float  scatteringCoeff;              // Scattering coefficient σ_s (m⁻¹)                        // Offset: 148-152
-    float  absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)                        // Offset: 152-156
-    float  phaseG;                       // Henyey-Greenstein g parameter [-1,1]                    // Offset: 156-160
+    float  volumeDensity;                // Medium density multiplier (0 = no volume)               // Offset: 160-164
+    float  scatteringCoeff;              // Scattering coefficient σ_s (m⁻¹)                        // Offset: 164-168
+    float  absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)                        // Offset: 168-172
+    float  phaseG;                       // Henyey-Greenstein g parameter [-1,1]                    // Offset: 172-176
 
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity
@@ -912,6 +918,50 @@ float GetEffectiveIREmissivity(MaterialData mat) {
 float GetEffectiveIRReflectance(MaterialData mat) {
     float emissivity = GetEffectiveIREmissivity(mat);
     return saturate(1.0 - emissivity - mat.irTransmittance);
+}
+
+// ============================================================================
+// Angle-Dependent IR Emissivity (Fresnel Effect for Thermal Radiation)
+// ============================================================================
+// Implements the angular dependence of thermal emissivity:
+// - Metals: emissivity INCREASES at grazing angles (Hagen-Rubens effect)
+// - Dielectrics: emissivity DECREASES at grazing angles (Fresnel effect)
+//
+// Physics: By Kirchhoff's law, ε = 1 - ρ. At grazing angles:
+// - Metal reflectance stays high but decreases slightly → ε increases
+// - Dielectric reflectance increases sharply (Fresnel) → ε decreases
+//
+// Reference: "Radiative Heat Transfer" (Modest, 3rd ed.), Chapter 3
+// ============================================================================
+
+float GetAngleDependentIREmissivity(float baseEmissivity, float NdotV, float metallic) {
+    // Clamp NdotV to avoid division issues at grazing angles
+    float cosTheta = max(NdotV, 0.01);
+
+    if (metallic > 0.5) {
+        // METALS: Hagen-Rubens approximation
+        // At grazing angles, emissivity approaches ~1.0 for real metals
+        // ε(θ) ≈ ε₀ × (1 + α × (1 - cos(θ)))
+        // α controls the strength of the effect (typical: 0.5-1.5)
+        const float METAL_GRAZING_ALPHA = 1.0;
+        float grazingFactor = 1.0 + METAL_GRAZING_ALPHA * (1.0 - cosTheta);
+        return saturate(baseEmissivity * grazingFactor);
+    } else {
+        // DIELECTRICS: Fresnel-like behavior
+        // At grazing angles, reflectance → 1, so emissivity → 0
+        // ε(θ) ≈ ε₀ × cos^β(θ)
+        // β controls sharpness (typical: 0.5-1.0, higher = sharper transition)
+        const float DIELECTRIC_GRAZING_BETA = 0.7;
+        float grazingFactor = pow(cosTheta, DIELECTRIC_GRAZING_BETA);
+        return baseEmissivity * grazingFactor;
+    }
+}
+
+// Corresponding reflectance adjustment (energy conservation)
+float GetAngleDependentIRReflectance(float baseEmissivity, float transmittance,
+                                      float NdotV, float metallic) {
+    float angleEmissivity = GetAngleDependentIREmissivity(baseEmissivity, NdotV, metallic);
+    return saturate(1.0 - angleEmissivity - transmittance);
 }
 
 // ============================================================================

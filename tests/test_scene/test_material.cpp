@@ -461,3 +461,170 @@ TEST(MaterialTest, DoubleSidedWithAlphaMode) {
     EXPECT_TRUE(mat.IsValid());
 }
 
+// ============================================================================
+// Kirchhoff's Law Energy Conservation Tests
+// ============================================================================
+// Kirchhoff's law states: ε + ρ + τ = 1 (at thermal equilibrium)
+// where ε = emissivity, ρ = reflectance, τ = transmittance
+//
+// For opaque materials: τ = 0, so ε + ρ = 1
+// This means high-emissivity materials (ε → 1) have low reflectance (ρ → 0)
+// and vice versa for metals (low ε, high ρ).
+// ============================================================================
+
+TEST(MaterialTest, KirchhoffLaw_ValidOpaqueHotBody) {
+    // Ideal blackbody: ε = 1.0, ρ = 0.0, τ = 0.0 (sum = 1.0)
+    Material mat;
+    mat.name = "IdealBlackbody";
+    mat.irEmissivityCurve = {{3000.0f, 1.0f}, {10000.0f, 1.0f}};
+    mat.irReflectanceCurve = {{3000.0f, 0.0f}, {10000.0f, 0.0f}};
+    mat.irTransmittanceCurve = {};  // Opaque
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_ValidOpaqueMetal) {
+    // Polished metal: low emissivity, high reflectance
+    // ε = 0.05, ρ = 0.95, τ = 0.0 (sum = 1.0)
+    Material mat;
+    mat.name = "PolishedAluminum";
+    mat.irEmissivityCurve = {{3000.0f, 0.05f}, {5000.0f, 0.06f}, {10000.0f, 0.04f}};
+    mat.irReflectanceCurve = {{3000.0f, 0.95f}, {5000.0f, 0.94f}, {10000.0f, 0.96f}};
+    mat.irTransmittanceCurve = {};  // Metals are opaque
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_ValidSemiTransparent) {
+    // IR window material (like ZnSe or Ge):
+    // ε = 0.1, ρ = 0.2, τ = 0.7 (sum = 1.0)
+    Material mat;
+    mat.name = "ZnSeWindow";
+    mat.irEmissivityCurve = {{8000.0f, 0.1f}, {12000.0f, 0.1f}};
+    mat.irReflectanceCurve = {{8000.0f, 0.2f}, {12000.0f, 0.2f}};
+    mat.irTransmittanceCurve = {{8000.0f, 0.7f}, {12000.0f, 0.7f}};
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_InvalidViolation) {
+    // Physically impossible: ε + ρ > 1 violates energy conservation
+    Material mat;
+    mat.name = "ImpossibleMaterial";
+    mat.irEmissivityCurve = {{3000.0f, 0.8f}};
+    mat.irReflectanceCurve = {{3000.0f, 0.5f}};  // 0.8 + 0.5 = 1.3 > 1.0
+
+    EXPECT_FALSE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_InvalidWithTransmittance) {
+    // ε + ρ + τ > 1 is physically impossible
+    Material mat;
+    mat.name = "ImpossibleTransparent";
+    mat.irEmissivityCurve = {{10000.0f, 0.5f}};
+    mat.irReflectanceCurve = {{10000.0f, 0.3f}};
+    mat.irTransmittanceCurve = {{10000.0f, 0.4f}};  // 0.5 + 0.3 + 0.4 = 1.2 > 1.0
+
+    EXPECT_FALSE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_EmptyDataPasses) {
+    // Materials without IR data should pass validation (nothing to violate)
+    Material mat;
+    mat.name = "NoIRData";
+    // No IR curves set
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_ToleranceBoundary) {
+    // Test near the tolerance boundary (1e-3)
+    Material mat;
+    mat.name = "NearBoundary";
+    // Sum = 1.0005, within tolerance of 1e-3
+    mat.irEmissivityCurve = {{5000.0f, 0.6005f}};
+    mat.irReflectanceCurve = {{5000.0f, 0.4f}};
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+
+    // Sum = 1.002, exceeds tolerance
+    mat.irEmissivityCurve = {{5000.0f, 0.602f}};
+    EXPECT_FALSE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_MultipleWavelengths) {
+    // Valid at all wavelengths
+    Material mat;
+    mat.name = "BroadbandValid";
+    mat.irEmissivityCurve = {
+        {3000.0f, 0.7f}, {4000.0f, 0.75f}, {5000.0f, 0.8f},
+        {8000.0f, 0.85f}, {10000.0f, 0.9f}, {12000.0f, 0.92f}
+    };
+    mat.irReflectanceCurve = {
+        {3000.0f, 0.3f}, {4000.0f, 0.25f}, {5000.0f, 0.2f},
+        {8000.0f, 0.15f}, {10000.0f, 0.1f}, {12000.0f, 0.08f}
+    };
+
+    EXPECT_TRUE(mat.ValidateIRKirchhoffLaw());
+}
+
+TEST(MaterialTest, KirchhoffLaw_FailsAtOneWavelength) {
+    // Valid at most wavelengths, but fails at one
+    Material mat;
+    mat.name = "PartiallyInvalid";
+    mat.irEmissivityCurve = {
+        {3000.0f, 0.7f}, {5000.0f, 0.9f}, {10000.0f, 0.85f}  // 5000nm: 0.9 + 0.3 = 1.2 > 1
+    };
+    mat.irReflectanceCurve = {
+        {3000.0f, 0.3f}, {5000.0f, 0.3f}, {10000.0f, 0.15f}
+    };
+
+    EXPECT_FALSE(mat.ValidateIRKirchhoffLaw());
+}
+
+// ============================================================================
+// IR Property Getter Tests
+// ============================================================================
+
+TEST(MaterialTest, GetIREmissivity_CurveInterpolation) {
+    Material mat;
+    mat.irEmissivityCurve = {{3000.0f, 0.8f}, {5000.0f, 0.9f}};
+
+    // At data points
+    EXPECT_NEAR(mat.GetIREmissivity(3000.0f), 0.8f, 1e-6f);
+    EXPECT_NEAR(mat.GetIREmissivity(5000.0f), 0.9f, 1e-6f);
+
+    // Interpolation midpoint
+    EXPECT_NEAR(mat.GetIREmissivity(4000.0f), 0.85f, 1e-6f);
+}
+
+TEST(MaterialTest, GetIREmissivity_Extrapolation) {
+    Material mat;
+    mat.irEmissivityCurve = {{3000.0f, 0.8f}, {5000.0f, 0.9f}};
+
+    // Below range: clamp to first value
+    EXPECT_NEAR(mat.GetIREmissivity(1000.0f), 0.8f, 1e-6f);
+
+    // Above range: clamp to last value
+    EXPECT_NEAR(mat.GetIREmissivity(15000.0f), 0.9f, 1e-6f);
+}
+
+TEST(MaterialTest, GetIRReflectance_CurveQuery) {
+    // When reflectance curve exists, query from curve
+    Material mat;
+    mat.irReflectanceCurve = {{3000.0f, 0.15f}, {5000.0f, 0.25f}};
+
+    EXPECT_NEAR(mat.GetIRReflectance(3000.0f), 0.15f, 1e-6f);
+    EXPECT_NEAR(mat.GetIRReflectance(5000.0f), 0.25f, 1e-6f);
+    EXPECT_NEAR(mat.GetIRReflectance(4000.0f), 0.20f, 1e-6f);  // Interpolation
+}
+
+TEST(MaterialTest, GetIRReflectance_FallbackToSpectralAlbedo) {
+    // When reflectance curve is empty, fallback to spectralAlbedo
+    Material mat;
+    mat.spectralAlbedo = 0.5f;
+    // irReflectanceCurve is empty
+
+    EXPECT_NEAR(mat.GetIRReflectance(5000.0f), 0.5f, 1e-6f);
+}
+

@@ -37,6 +37,7 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Platform.hpp"
 #include <glm/glm.hpp>
 #include <string>
 
@@ -83,7 +84,7 @@ namespace quantiloom {
  * @see SpectralCurve for spectral reflectance curves
  * @see main.cpp MaterialDataCPU for GPU upload structure
  */
-struct Material {
+struct QL_API Material {
     // ========================================================================
     // PBR Base Color
     // ========================================================================
@@ -175,6 +176,14 @@ struct Material {
     // Surface temperature (K) for self-emission calculation
     // If <= 0, no thermal emission (or use scene ambient temperature)
     f32 irTemperature_K = 0.0f;
+
+    // Temperature texture for per-pixel temperature field
+    // When >= 0, samples texture R channel and computes:
+    //   T(K) = texValue * temperatureScale + temperatureOffset
+    // When < 0 (default), uses scalar irTemperature_K
+    i32 temperatureTextureIndex = -1;
+    f32 temperatureScale = 500.0f;    // Default: [0,1] -> [200K, 700K]
+    f32 temperatureOffset = 200.0f;
 
     // ========================================================================
     // Transmission Properties (KHR_materials_transmission, KHR_materials_volume)

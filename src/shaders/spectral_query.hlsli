@@ -34,7 +34,7 @@
 // from the StructuredBuffer, minimizing register pressure.
 //
 // Returns 0.0 if:
-// - Curve index is invalid (< 0)
+// - Curve index is invalid (< 0 or >= MAX_SPECTRAL_CURVES)
 // - Curve has no samples (numSamples == 0)
 //
 // Algorithm (O(1) complexity):
@@ -51,13 +51,16 @@
 // This eliminates the need for searching entirely!
 // ============================================================================
 
+// Maximum number of spectral curves (defensive upper bound check)
+// This should match the CPU-side buffer allocation limit
+static const int MAX_SPECTRAL_CURVES = 4096;
+
 float EvaluateSpectralCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                            int curveIndex,
                            float lambda_nm) {
-    // Invalid index check (bounds checking)
-    // Note: We can't check upper bound without knowing buffer size
-    // Rely on descriptor validation and runtime bounds checking
-    if (curveIndex < 0) {
+    // Bounds checking: lower AND upper bound for safety
+    // Upper bound prevents GPU memory access violations if curveIndex is corrupted
+    if (curveIndex < 0 || curveIndex >= MAX_SPECTRAL_CURVES) {
         return 0.0;
     }
 

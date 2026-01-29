@@ -543,6 +543,23 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
             QL_LOG_INFO("    IR temperature: {:.1f} K", mat.irTemperature_K);
         }
 
+        // Load temperature texture for per-pixel temperature field
+        if (irExt.Has("temperatureTexture")) {
+            const auto& texInfo = irExt.Get("temperatureTexture");
+            if (texInfo.Has("index")) {
+                mat.temperatureTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    temperatureTexture: index {}", mat.temperatureTextureIndex);
+            }
+        }
+        if (irExt.Has("temperatureScale")) {
+            mat.temperatureScale = static_cast<f32>(irExt.Get("temperatureScale").GetNumberAsDouble());
+            QL_LOG_INFO("    temperatureScale: {:.1f}", mat.temperatureScale);
+        }
+        if (irExt.Has("temperatureOffset")) {
+            mat.temperatureOffset = static_cast<f32>(irExt.Get("temperatureOffset").GetNumberAsDouble());
+            QL_LOG_INFO("    temperatureOffset: {:.1f} K", mat.temperatureOffset);
+        }
+
         // If we loaded any IR curves, mark as measured spectral data
         if (mat.HasIRData()) {
             mat.spectralSource = Material::SpectralSource::Measured;

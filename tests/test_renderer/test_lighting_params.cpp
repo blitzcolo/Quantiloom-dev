@@ -21,8 +21,8 @@ using namespace quantiloom;
 // ============================================================================
 
 TEST(LightingParamsTest, StructSize) {
-    // LightingParams must be exactly 64 bytes to match GPU layout
-    EXPECT_EQ(sizeof(LightingParams), 64u);
+    // LightingParams must be exactly 80 bytes to match GPU layout
+    EXPECT_EQ(sizeof(LightingParams), 80u);
 }
 
 TEST(LightingParamsTest, FieldOffsets) {
@@ -38,6 +38,7 @@ TEST(LightingParamsTest, FieldOffsets) {
     EXPECT_EQ(offsetof(LightingParams, atmosphereTemperature_K), 52u);
     EXPECT_EQ(offsetof(LightingParams, chromaR_correction), 56u);
     EXPECT_EQ(offsetof(LightingParams, chromaB_correction), 60u);
+    EXPECT_EQ(offsetof(LightingParams, enableShadowRays), 64u);
 }
 
 TEST(LightingParamsTest, Alignment16Byte) {

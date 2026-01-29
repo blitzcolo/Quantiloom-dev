@@ -101,11 +101,12 @@ float IRPlanckRadiance(float temperature_K, float wavelength_nm) {
     float lambda_m = wavelength_nm * 1e-9;
     float exponent = C2 / (lambda_m * temperature_K);
 
-    // Optimized: Remove branching - rely on IEEE 754 float behavior
-    // If exponent is large, exp(exponent) may overflow to INF
-    // INF / INF = NaN, but (exp(x) - 1.0) handles this gracefully
-    // For very large exponent: exp(x) - 1 ≈ exp(x) automatically
-    // The max() clamp prevents division by zero
+    // Clamp exponent to prevent float32 overflow in exp()
+    // exp(88) ≈ 1.65e38 ≈ FLT_MAX; beyond this exp() returns INF
+    // When exponent > 80, the result is effectively zero anyway
+    // (Wien limit: radiance drops exponentially for hc/λkT >> 1)
+    exponent = min(exponent, 80.0);
+
     float denominator = exp(exponent) - 1.0;
 
     // L_λ in W·sr⁻¹·m⁻²·nm⁻¹

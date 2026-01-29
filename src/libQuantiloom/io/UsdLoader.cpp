@@ -623,6 +623,22 @@ void UsdLoader::ParseSpectralExtensions(Material& mat, const void* primPtr,
         }
     }
 
+    // Parse temperature texture scale and offset (texture loaded in ParseMaterial)
+    if (UsdAttribute scaleAttr = prim->GetAttribute(TfToken("quantiloom:temperatureScale"))) {
+        float scale;
+        if (scaleAttr.Get(&scale)) {
+            mat.temperatureScale = scale;
+            QL_LOG_INFO("      temperatureScale: {:.1f}", scale);
+        }
+    }
+    if (UsdAttribute offsetAttr = prim->GetAttribute(TfToken("quantiloom:temperatureOffset"))) {
+        float offset;
+        if (offsetAttr.Get(&offset)) {
+            mat.temperatureOffset = offset;
+            QL_LOG_INFO("      temperatureOffset: {:.1f} K", offset);
+        }
+    }
+
     // Mark as measured if IR data loaded
     if (mat.HasIRData()) {
         mat.spectralSource = Material::SpectralSource::Measured;
@@ -942,6 +958,23 @@ Material UsdLoader::ParseMaterial(const void* stagePtr, const void* primPtr,
 
     // Parse Quantiloom spectral extensions
     ParseSpectralExtensions(mat, primPtr, usdFilePath);
+
+    // Load temperature texture if specified (after ParseSpectralExtensions set the path)
+    // Temperature texture uses linear space (not sRGB) - R channel contains normalized temperature
+    if (UsdAttribute tempTexAttr = prim->GetAttribute(TfToken("quantiloom:temperatureTexture"))) {
+        SdfAssetPath texPath;
+        if (tempTexAttr.Get(&texPath) && !texPath.GetAssetPath().empty()) {
+            int texIndex = LoadTextureWithCache(texPath.GetAssetPath(), usdFilePath, textures);
+            if (texIndex >= 0) {
+                mat.temperatureTextureIndex = texIndex;
+                // Mark as linear space (not sRGB) since it's data, not color
+                if (static_cast<size_t>(texIndex) < textures.size()) {
+                    textures[texIndex].isSRGB = false;
+                }
+                QL_LOG_INFO("    Loaded temperature texture: index {}", texIndex);
+            }
+        }
+    }
 
     return mat;
 }
