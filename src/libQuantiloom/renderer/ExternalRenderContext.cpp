@@ -317,6 +317,11 @@ struct ExternalRenderContext::Impl {
     VkShaderModule claheApplyShader = VK_NULL_HANDLE;
     bool claheInitialized = false;
 
+    // Cached min/max values for CLAHE (computed after frame completion)
+    f32 cachedImageMin = 0.0f;
+    f32 cachedImageMax = 1.0f;
+    bool hasCachedMinMax = false;
+
     // Ready flag
     bool isReady = false;
 
@@ -701,6 +706,23 @@ void ExternalRenderContext::RenderFrame(
     }
 
     m_impl->frameStartTime = std::chrono::steady_clock::now();
+
+    // Update CLAHE min/max cache from previous frame's output image
+    // This is safe here because QVulkanWindow ensures the previous frame's
+    // GPU work is complete before calling startNextFrame/RenderFrame again
+    // Only update every N frames to reduce readback overhead, but always update
+    // on frame 1 (after first render) and whenever cache is invalid
+    constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized &&
+        m_impl->accumulatedSamples > 0 &&
+        (!m_impl->hasCachedMinMax ||
+         m_impl->accumulatedSamples == 1 ||  // Always update after first frame
+         m_impl->frameIndex % minMaxUpdateInterval == 0)) {
+        ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
+        m_impl->hasCachedMinMax = true;
+        QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
+                     m_impl->cachedImageMin, m_impl->cachedImageMax);
+    }
 
     // Handle resize
     if (width != m_impl->width || height != m_impl->height) {
@@ -2149,6 +2171,36 @@ void ExternalRenderContext::CreatePipeline() {
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
 }
 
+// ============================================================================
+// Helper: Get executable directory for shader loading
+// ============================================================================
+
+static std::filesystem::path GetExecutableDirectory() {
+#if defined(_WIN32)
+    wchar_t buffer[MAX_PATH];
+    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
+    std::filesystem::path exePath(buffer);
+    return exePath.parent_path();
+#elif defined(__linux__)
+    char buffer[PATH_MAX];
+    ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+    if (len != -1) {
+        buffer[len] = '\0';
+        return std::filesystem::path(buffer).parent_path();
+    }
+    return std::filesystem::current_path();
+#elif defined(__APPLE__)
+    char buffer[PATH_MAX];
+    uint32_t size = sizeof(buffer);
+    if (_NSGetExecutablePath(buffer, &size) == 0) {
+        return std::filesystem::path(buffer).parent_path();
+    }
+    return std::filesystem::current_path();
+#else
+    return std::filesystem::current_path();
+#endif
+}
+
 void ExternalRenderContext::CreateCLAHEPipeline() {
     if (m_impl->claheInitialized) return;
 
@@ -2174,19 +2226,23 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     };
 
     // Try multiple paths for shader location
-    std::vector<String> shaderPaths = {
+    // Include executable directory for SDK installations
+    auto exeDir = GetExecutableDirectory();
+    std::vector<std::filesystem::path> shaderPaths = {
         "clahe_histogram.spv",
+        exeDir / "clahe_histogram.spv",  // SDK installation directory
         "shaders/clahe_histogram.spv",
+        exeDir / "shaders" / "clahe_histogram.spv",
         "../shaders/clahe_histogram.spv",
         "src/shaders/clahe_histogram.spv"
     };
 
     std::vector<u32> histogramCode, cdfCode, applyCode;
     for (const auto& basePath : shaderPaths) {
-        String histPath = basePath;
-        String cdfPath = basePath;
-        String applyPath = basePath;
-        // Replace "histogram" with appropriate suffix
+        // Convert path to string and replace "histogram" with cdf/apply
+        String histPath = basePath.string();
+        String cdfPath = histPath;
+        String applyPath = histPath;
         size_t pos = histPath.find("histogram");
         if (pos != String::npos) {
             cdfPath.replace(pos, 9, "cdf");
@@ -2382,7 +2438,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     m_impl->claheHistogramBuffer = std::make_unique<GpuBuffer>(
         allocator,
         maxTiles * histogramBins * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
@@ -2480,11 +2536,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
 }
 
 void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
-    // Read back a subset of pixels to estimate min/max
-    // For efficiency, we sample instead of reading entire image
-    // In production, this could be done on GPU with reduction
-
-    // For now, use full readback (acceptable for moderate image sizes)
+    // Read back image pixels
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *m_impl->contextAdapter,
         m_impl->outputImage->GetImage(),
@@ -2493,10 +2545,13 @@ void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
         m_impl->height
     );
 
-    outMin = std::numeric_limits<f32>::max();
-    outMax = std::numeric_limits<f32>::lowest();
+    // Collect valid luminance values and find absolute range
+    std::vector<f32> luminances;
+    luminances.reserve(pixels.size() / 4);
 
-    // Use luminance for range calculation
+    f32 absMin = std::numeric_limits<f32>::max();
+    f32 absMax = std::numeric_limits<f32>::lowest();
+
     for (size_t i = 0; i < pixels.size(); i += 4) {
         f32 r = pixels[i];
         f32 g = pixels[i + 1];
@@ -2508,33 +2563,99 @@ void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
 
         // BT.709 luminance
         f32 lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
-        outMin = std::min(outMin, lum);
-        outMax = std::max(outMax, lum);
+        luminances.push_back(lum);
+        absMin = std::min(absMin, lum);
+        absMax = std::max(absMax, lum);
     }
 
     // Fallback if no valid pixels
-    if (outMin >= outMax) {
+    if (luminances.empty() || absMin >= absMax) {
         outMin = 0.0f;
         outMax = 1.0f;
+        return;
     }
+
+    // Check if range is "narrow" enough to not need percentile clipping
+    // If max/min ratio < 100, use absolute min/max (like SWIR/MWIR)
+    f32 ratio = (absMin > 1e-10f) ? (absMax / absMin) : (absMax - absMin + 1.0f);
+    if (ratio < 100.0f) {
+        outMin = absMin;
+        outMax = absMax;
+        QL_LOG_DEBUG("CLAHE: Using absolute min/max (ratio {:.1f}x)", ratio);
+        return;
+    }
+
+    // Wide range detected - use percentile-based normalization
+    // Build histogram for percentile calculation (more efficient than sorting)
+    constexpr size_t histBins = 65536;
+    std::vector<u32> histogram(histBins, 0);
+
+    // Map luminance to histogram bins
+    f32 scale = (histBins - 1) / (absMax - absMin);
+    for (f32 lum : luminances) {
+        size_t bin = static_cast<size_t>((lum - absMin) * scale);
+        bin = std::min(bin, histBins - 1);
+        histogram[bin]++;
+    }
+
+    // Find 1st and 99th percentile bins
+    size_t totalPixels = luminances.size();
+    size_t target01 = static_cast<size_t>(totalPixels * 0.01f);
+    size_t target99 = static_cast<size_t>(totalPixels * 0.99f);
+
+    size_t cumulative = 0;
+    size_t bin01 = 0, bin99 = histBins - 1;
+
+    for (size_t i = 0; i < histBins; ++i) {
+        cumulative += histogram[i];
+        if (cumulative >= target01 && bin01 == 0) {
+            bin01 = i;
+        }
+        if (cumulative >= target99) {
+            bin99 = i;
+            break;
+        }
+    }
+
+    // Convert bins back to luminance values
+    f32 invScale = (absMax - absMin) / (histBins - 1);
+    outMin = absMin + bin01 * invScale;
+    outMax = absMin + bin99 * invScale;
+
+    // Ensure valid range
+    if (outMin >= outMax) {
+        outMin = absMin;
+        outMax = absMax;
+    }
+
+    QL_LOG_DEBUG("CLAHE: Using 1st/99th percentile (ratio {:.1f}x, clipped [{:.6g}, {:.6g}] -> [{:.6g}, {:.6g}])",
+                 ratio, absMin, absMax, outMin, outMax);
 }
 
 void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
     if (!m_impl->claheInitialized) return;
 
-    // Calculate tile count based on tile size
-    u32 tileSize = static_cast<u32>(m_impl->claheParams.tileSize);
-    u32 tileCountX = (width + tileSize - 1) / tileSize;
-    u32 tileCountY = (height + tileSize - 1) / tileSize;
+    // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
+    // NOT pixels per tile
+    u32 tileCountX = static_cast<u32>(m_impl->claheParams.tileSize);
+    u32 tileCountY = static_cast<u32>(m_impl->claheParams.tileSize);
 
-    // Clamp to max tiles
+    // Clamp to max tiles (matching buffer allocation)
     tileCountX = std::min(tileCountX, 64u);
     tileCountY = std::min(tileCountY, 64u);
 
-    // Compute min/max for normalization
-    // TODO: Move this to GPU for better performance
-    f32 inputMin, inputMax;
-    ComputeImageMinMax(inputMin, inputMax);
+    // Ensure at least 1 tile
+    tileCountX = std::max(tileCountX, 1u);
+    tileCountY = std::max(tileCountY, 1u);
+
+    QL_LOG_DEBUG("CLAHE: Executing with {}x{} tiles on {}x{} image",
+                 tileCountX, tileCountY, width, height);
+
+    // Use cached min/max values from previous frame
+    // This avoids GPU sync issues during command buffer recording
+    // First frame uses default values until cache is populated
+    f32 inputMin = m_impl->cachedImageMin;
+    f32 inputMax = m_impl->cachedImageMax;
 
     // Push constants structure (must match shader)
     struct CLAHEPushConstants {
@@ -2564,15 +2685,41 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     VkMemoryBarrier memBarrier{};
     memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
     vkCmdPipelineBarrier(
         cmd,
         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
         0,
         1, &memBarrier,
         0, nullptr,
+        0, nullptr
+    );
+
+    // Clear histogram buffer to zero before Pass 1
+    // Without this, garbage data from uninitialized GPU memory causes
+    // corrupted histograms and eventual TDR timeout (GPU crash)
+    vkCmdFillBuffer(cmd, m_impl->claheHistogramBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
+
+    // Buffer barrier: fill write → compute shader read/write
+    VkBufferMemoryBarrier fillBarrier{};
+    fillBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    fillBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    fillBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    fillBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    fillBarrier.buffer = m_impl->claheHistogramBuffer->GetHandle();
+    fillBarrier.offset = 0;
+    fillBarrier.size = VK_WHOLE_SIZE;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        0, nullptr,
+        1, &fillBarrier,
         0, nullptr
     );
 

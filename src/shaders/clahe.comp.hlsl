@@ -353,15 +353,18 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
         float normalizedLum = NormalizeValue(luminance, globalMin, globalMax);
         uint bin = ValueToBin(normalizedLum);
 
-        // Get interpolated CDF value
+        // Get interpolated CDF value (already in [0, 1] range)
         float mappedLum = InterpolateCDF(pixelCenter, bin);
 
         // Scale RGB by luminance ratio
-        if (luminance > 1e-6f) {
-            // Map to HDR output range (0 to max)
-            float targetLum = mappedLum * (globalMax - globalMin) + globalMin;
-            float scale = targetLum / luminance;
-            result.rgb = pixel.rgb * scale;
+        // Output is normalized to [0, 1] for display (not HDR physical values)
+        if (normalizedLum > 1e-6f) {
+            float scale = mappedLum / normalizedLum;
+            result.rgb = saturate(float3(
+                NormalizeValue(pixel.r, globalMin, globalMax) * scale,
+                NormalizeValue(pixel.g, globalMin, globalMax) * scale,
+                NormalizeValue(pixel.b, globalMin, globalMax) * scale
+            ));
         } else {
             result.rgb = float3(mappedLum, mappedLum, mappedLum);
         }
@@ -380,11 +383,10 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
         );
 
         // Get interpolated CDF values for each channel
-        // Note: This uses luminance-based histogram for all channels
-        // which may cause some color shift but is faster
-        result.r = InterpolateCDF(pixelCenter, bins.r) * (globalMax - globalMin) + globalMin;
-        result.g = InterpolateCDF(pixelCenter, bins.g) * (globalMax - globalMin) + globalMin;
-        result.b = InterpolateCDF(pixelCenter, bins.b) * (globalMax - globalMin) + globalMin;
+        // Output is directly in [0, 1] range for display
+        result.r = InterpolateCDF(pixelCenter, bins.r);
+        result.g = InterpolateCDF(pixelCenter, bins.g);
+        result.b = InterpolateCDF(pixelCenter, bins.b);
     }
 
     result.a = pixel.a;
