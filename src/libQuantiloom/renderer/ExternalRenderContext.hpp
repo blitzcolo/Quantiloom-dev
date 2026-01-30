@@ -425,6 +425,57 @@ public:
     [[nodiscard]] bool HasEnvironmentMap() const;
 
     // ========================================================================
+    // Display Enhancement (CLAHE)
+    // ========================================================================
+
+    /**
+     * @struct CLAHEParams
+     * @brief Parameters for GPU CLAHE display enhancement
+     *
+     * Controls Contrast Limited Adaptive Histogram Equalization for
+     * improving visibility of low-contrast images (especially IR bands).
+     */
+    struct CLAHEParams {
+        bool enabled = false;           ///< Enable CLAHE processing
+        f32 clipLimit = 2.0f;           ///< Contrast limit (1.0 = no limit, typical 2.0-4.0)
+        i32 tileSize = 8;              ///< Tile grid size (4, 8, 16, or 32)
+        bool luminanceOnly = true;     ///< Apply only to luminance channel (preserve color)
+        bool normalizeOutput = true;   ///< Normalize output to [0,1] range
+    };
+
+    /**
+     * @brief Set CLAHE display enhancement parameters
+     *
+     * When enabled, a display image is maintained separately from the
+     * raw output image. The display image has CLAHE applied and is used
+     * for screen presentation. The raw output image is preserved for
+     * export/analysis via CaptureScreenshot().
+     *
+     * @param params CLAHE parameters
+     * @note Takes effect on the next RenderFrame() call
+     */
+    void SetCLAHEParams(const CLAHEParams& params);
+
+    /**
+     * @brief Get current CLAHE parameters
+     */
+    [[nodiscard]] const CLAHEParams& GetCLAHEParams() const;
+
+    /**
+     * @brief Capture display image (with CLAHE applied if enabled)
+     *
+     * Returns the image as shown on screen. If CLAHE is enabled,
+     * the returned image has CLAHE processing applied.
+     * If CLAHE is disabled, this is equivalent to CaptureScreenshot().
+     *
+     * Use this for "what you see is what you get" screenshots.
+     * Use CaptureScreenshot() for raw HDR data export.
+     *
+     * @return Image with display content, or error if not ready
+     */
+    [[nodiscard]] Result<Image, String> CaptureDisplayImage();
+
+    // ========================================================================
     // Scene Editing (Phase 2)
     // ========================================================================
 
@@ -544,6 +595,15 @@ private:
 
     // Create ray tracing pipeline and bind resources
     void CreatePipeline();
+
+    // Create CLAHE compute pipeline resources
+    void CreateCLAHEPipeline();
+
+    // Execute CLAHE compute passes on the display image
+    void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
+
+    // Compute min/max of output image for CLAHE normalization
+    void ComputeImageMinMax(f32& outMin, f32& outMax);
 
     // Transition image layout (internal helper)
     void TransitionImageLayoutImmediate(

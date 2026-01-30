@@ -29,6 +29,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <random>
 
 // Platform-specific includes for cache directory
@@ -298,6 +299,24 @@ struct ExternalRenderContext::Impl {
     // Pixel readback buffer (for debug hover display)
     std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
 
+    // CLAHE display enhancement resources
+    ExternalRenderContext::CLAHEParams claheParams;
+    std::unique_ptr<GpuImage> displayImage;           // CLAHE-processed output for display
+    std::unique_ptr<GpuBuffer> claheHistogramBuffer;  // Per-tile histograms
+    std::unique_ptr<GpuBuffer> claheCdfBuffer;        // Per-tile CDFs
+    std::unique_ptr<GpuBuffer> claheMinMaxBuffer;     // Per-tile min/max for normalization
+    VkDescriptorSetLayout claheDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout clahePipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool claheDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet claheDescriptorSet = VK_NULL_HANDLE;
+    VkPipeline claheHistogramPipeline = VK_NULL_HANDLE;
+    VkPipeline claheCdfPipeline = VK_NULL_HANDLE;
+    VkPipeline claheApplyPipeline = VK_NULL_HANDLE;
+    VkShaderModule claheHistogramShader = VK_NULL_HANDLE;
+    VkShaderModule claheCdfShader = VK_NULL_HANDLE;
+    VkShaderModule claheApplyShader = VK_NULL_HANDLE;
+    bool claheInitialized = false;
+
     // Ready flag
     bool isReady = false;
 
@@ -340,6 +359,51 @@ struct ExternalRenderContext::Impl {
         lightingParamsBuffer.reset();
         outputImage.reset();
         pixelReadbackBuffer.reset();
+
+        // Cleanup CLAHE resources
+        displayImage.reset();
+        claheHistogramBuffer.reset();
+        claheCdfBuffer.reset();
+        claheMinMaxBuffer.reset();
+        if (device != VK_NULL_HANDLE) {
+            if (claheHistogramPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, claheHistogramPipeline, nullptr);
+                claheHistogramPipeline = VK_NULL_HANDLE;
+            }
+            if (claheCdfPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, claheCdfPipeline, nullptr);
+                claheCdfPipeline = VK_NULL_HANDLE;
+            }
+            if (claheApplyPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, claheApplyPipeline, nullptr);
+                claheApplyPipeline = VK_NULL_HANDLE;
+            }
+            if (claheHistogramShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, claheHistogramShader, nullptr);
+                claheHistogramShader = VK_NULL_HANDLE;
+            }
+            if (claheCdfShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, claheCdfShader, nullptr);
+                claheCdfShader = VK_NULL_HANDLE;
+            }
+            if (claheApplyShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, claheApplyShader, nullptr);
+                claheApplyShader = VK_NULL_HANDLE;
+            }
+            if (claheDescriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, claheDescriptorPool, nullptr);
+                claheDescriptorPool = VK_NULL_HANDLE;
+            }
+            if (clahePipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, clahePipelineLayout, nullptr);
+                clahePipelineLayout = VK_NULL_HANDLE;
+            }
+            if (claheDescriptorSetLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, claheDescriptorSetLayout, nullptr);
+                claheDescriptorSetLayout = VK_NULL_HANDLE;
+            }
+        }
+        claheInitialized = false;
 
         // Reset merged global geometry buffers
         globalVertexBuffer.reset();
@@ -663,18 +727,29 @@ void ExternalRenderContext::RenderFrame(
     // Execute ray tracing (writes to internal outputImage in GENERAL layout)
     m_impl->pipeline->TraceRays(cmd, width, height);
 
+    // Determine which image to blit to the swapchain
+    // If CLAHE is enabled, run compute passes and blit displayImage
+    // Otherwise, blit outputImage directly
+    VkImage blitSourceImage = m_impl->outputImage->GetImage();
+
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+        // Execute CLAHE compute passes: outputImage -> displayImage
+        ExecuteCLAHE(cmd, width, height);
+        blitSourceImage = m_impl->displayImage->GetImage();
+    }
+
     // ========================================================================
-    // Blit outputImage to target swapchain image
+    // Blit source image to target swapchain image
     // ========================================================================
 
-    // Step 1: Transition outputImage from GENERAL to TRANSFER_SRC_OPTIMAL
+    // Step 1: Transition source image from GENERAL to TRANSFER_SRC_OPTIMAL
     VkImageMemoryBarrier outputBarrier{};
     outputBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     outputBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     outputBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     outputBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outputBarrier.image = m_impl->outputImage->GetImage();
+    outputBarrier.image = blitSourceImage;
     outputBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outputBarrier.subresourceRange.baseMipLevel = 0;
     outputBarrier.subresourceRange.levelCount = 1;
@@ -700,9 +775,13 @@ void ExternalRenderContext::RenderFrame(
     targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
     VkImageMemoryBarrier barriers[2] = {outputBarrier, targetBarrier};
+    // Use appropriate source stage based on whether CLAHE was applied
+    VkPipelineStageFlags srcStage = (blitSourceImage == m_impl->outputImage->GetImage())
+        ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     vkCmdPipelineBarrier(
         cmd,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        srcStage,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         0,
         0, nullptr,
@@ -729,7 +808,7 @@ void ExternalRenderContext::RenderFrame(
 
     vkCmdBlitImage(
         cmd,
-        m_impl->outputImage->GetImage(),
+        blitSourceImage,
         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
         targetImage,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -738,7 +817,7 @@ void ExternalRenderContext::RenderFrame(
         VK_FILTER_NEAREST  // No filtering needed for same-size blit
     );
 
-    // Step 4: Transition outputImage back to GENERAL for next frame
+    // Step 4: Transition source image back to GENERAL for next frame
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     outputBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     outputBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -752,10 +831,14 @@ void ExternalRenderContext::RenderFrame(
 
     barriers[0] = outputBarrier;
     barriers[1] = targetBarrier;
+    // Use appropriate destination stage for the source image
+    VkPipelineStageFlags dstStage = (blitSourceImage == m_impl->outputImage->GetImage())
+        ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     vkCmdPipelineBarrier(
         cmd,
         VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+        dstStage | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
         0,
         0, nullptr,
         0, nullptr,
@@ -805,6 +888,52 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
     // Re-bind output image
     if (m_impl->pipeline) {
         m_impl->pipeline->BindOutputImage(*m_impl->outputImage);
+    }
+
+    // Recreate CLAHE display image if initialized
+    if (m_impl->claheInitialized && m_impl->displayImage) {
+        m_impl->displayImage = std::make_unique<GpuImage>(
+            m_impl->contextAdapter->GetAllocator(),
+            m_impl->contextAdapter->GetDevice(),
+            width, height,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+
+        TransitionImageLayoutImmediate(
+            m_impl->displayImage->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL
+        );
+
+        // Update CLAHE descriptor set with new images
+        VkDescriptorImageInfo inputImageInfo{};
+        inputImageInfo.imageView = m_impl->outputImage->GetView();
+        inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputImageInfo{};
+        outputImageInfo.imageView = m_impl->displayImage->GetView();
+        outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        std::vector<VkWriteDescriptorSet> writes(2);
+
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->claheDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputImageInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->claheDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputImageInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
     }
 
     // Update camera aspect ratio
@@ -1207,6 +1336,67 @@ Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
     screenshot.metadata["spp_target"] = std::to_string(m_impl->spp);
 
     return std::move(screenshot);
+}
+
+// ============================================================================
+// CLAHE Display Enhancement
+// ============================================================================
+
+void ExternalRenderContext::SetCLAHEParams(const CLAHEParams& params) {
+    bool wasEnabled = m_impl->claheParams.enabled;
+    m_impl->claheParams = params;
+
+    // Initialize CLAHE resources if enabling for the first time
+    if (params.enabled && !wasEnabled && !m_impl->claheInitialized) {
+        CreateCLAHEPipeline();
+    }
+
+    QL_LOG_DEBUG("CLAHE params: enabled={}, clipLimit={}, tileSize={}, luminanceOnly={}",
+                 params.enabled, params.clipLimit, params.tileSize, params.luminanceOnly);
+}
+
+const ExternalRenderContext::CLAHEParams& ExternalRenderContext::GetCLAHEParams() const {
+    return m_impl->claheParams;
+}
+
+Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
+    if (!m_impl->isReady) {
+        return Result<Image, String>::Err("Render context not ready");
+    }
+
+    // If CLAHE is enabled and displayImage exists, capture it
+    // Otherwise fall back to outputImage (same as CaptureScreenshot)
+    VkImage sourceImage = m_impl->outputImage->GetImage();
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+        sourceImage = m_impl->displayImage->GetImage();
+    }
+
+    // Read back the appropriate image using CommandHelper
+    std::vector<f32> pixels = CommandHelper::ReadbackImage(
+        *m_impl->contextAdapter,
+        sourceImage,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        m_impl->width,
+        m_impl->height
+    );
+
+    // Create Image from pixel data
+    Image displayImage(m_impl->width, m_impl->height, 4);  // RGBA
+    displayImage.data = std::move(pixels);
+    displayImage.channelNames = {"R", "G", "B", "A"};
+
+    // Add metadata
+    displayImage.metadata["spectral_mode"] = std::to_string(static_cast<int>(m_impl->spectralMode));
+    displayImage.metadata["wavelength_nm"] = std::to_string(m_impl->wavelength_nm);
+    displayImage.metadata["accumulated_samples"] = std::to_string(m_impl->accumulatedSamples);
+    displayImage.metadata["spp_target"] = std::to_string(m_impl->spp);
+    displayImage.metadata["clahe_applied"] = m_impl->claheParams.enabled ? "true" : "false";
+    if (m_impl->claheParams.enabled) {
+        displayImage.metadata["clahe_clip_limit"] = std::to_string(m_impl->claheParams.clipLimit);
+        displayImage.metadata["clahe_tile_size"] = std::to_string(m_impl->claheParams.tileSize);
+    }
+
+    return std::move(displayImage);
 }
 
 // ============================================================================
@@ -1957,6 +2147,502 @@ void ExternalRenderContext::CreatePipeline() {
     }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
+}
+
+void ExternalRenderContext::CreateCLAHEPipeline() {
+    if (m_impl->claheInitialized) return;
+
+    QL_LOG_INFO("Creating CLAHE compute pipeline...");
+
+    auto device = m_impl->device;
+    auto allocator = m_impl->contextAdapter->GetAllocator();
+
+    // Helper function to load shader file
+    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            return {};
+        }
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        if (fileSize == 0 || fileSize % 4 != 0) {
+            return {};
+        }
+        std::vector<u32> code(fileSize / 4);
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(code.data()), fileSize);
+        return code;
+    };
+
+    // Try multiple paths for shader location
+    std::vector<String> shaderPaths = {
+        "clahe_histogram.spv",
+        "shaders/clahe_histogram.spv",
+        "../shaders/clahe_histogram.spv",
+        "src/shaders/clahe_histogram.spv"
+    };
+
+    std::vector<u32> histogramCode, cdfCode, applyCode;
+    for (const auto& basePath : shaderPaths) {
+        String histPath = basePath;
+        String cdfPath = basePath;
+        String applyPath = basePath;
+        // Replace "histogram" with appropriate suffix
+        size_t pos = histPath.find("histogram");
+        if (pos != String::npos) {
+            cdfPath.replace(pos, 9, "cdf");
+            applyPath.replace(pos, 9, "apply");
+        }
+
+        histogramCode = loadShaderFile(histPath);
+        if (!histogramCode.empty()) {
+            cdfCode = loadShaderFile(cdfPath);
+            applyCode = loadShaderFile(applyPath);
+            if (!cdfCode.empty() && !applyCode.empty()) {
+                QL_LOG_DEBUG("CLAHE: Loaded shaders from {}", histPath);
+                break;
+            }
+        }
+    }
+
+    if (histogramCode.empty() || cdfCode.empty() || applyCode.empty()) {
+        QL_LOG_WARN("CLAHE: Could not load shader files, CLAHE disabled");
+        return;
+    }
+
+    // Create shader modules
+    auto createShaderModule = [device](const std::vector<u32>& code) -> VkShaderModule {
+        VkShaderModuleCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.size() * sizeof(u32);
+        createInfo.pCode = code.data();
+        VkShaderModule module;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        return module;
+    };
+
+    m_impl->claheHistogramShader = createShaderModule(histogramCode);
+    m_impl->claheCdfShader = createShaderModule(cdfCode);
+    m_impl->claheApplyShader = createShaderModule(applyCode);
+
+    if (m_impl->claheHistogramShader == VK_NULL_HANDLE ||
+        m_impl->claheCdfShader == VK_NULL_HANDLE ||
+        m_impl->claheApplyShader == VK_NULL_HANDLE) {
+        QL_LOG_WARN("CLAHE: Failed to create shader modules");
+        return;
+    }
+
+    // Create descriptor set layout
+    // binding 0: inputImage (storage image)
+    // binding 1: outputImage (storage image)
+    // binding 2: histogramBuffer (storage buffer)
+    // binding 3: cdfBuffer (storage buffer)
+    // binding 4: minMaxBuffer (storage buffer)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(5);
+
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[2].binding = 2;
+    bindings[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[2].descriptorCount = 1;
+    bindings[2].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[3].binding = 3;
+    bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[3].descriptorCount = 1;
+    bindings[3].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[4].binding = 4;
+    bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[4].descriptorCount = 1;
+    bindings[4].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_impl->claheDescriptorSetLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("CLAHE: Failed to create descriptor set layout");
+        return;
+    }
+
+    // Create pipeline layout with push constants
+    // Push constants match CLAHEPushConstants in shader
+    struct CLAHEPushConstants {
+        u32 imageWidth;
+        u32 imageHeight;
+        u32 tileCountX;
+        u32 tileCountY;
+        f32 clipLimit;
+        u32 luminanceOnly;
+        f32 inputMin;
+        f32 inputMax;
+        u32 passIndex;
+        u32 padding[3];
+    };
+
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = sizeof(CLAHEPushConstants);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &m_impl->claheDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_impl->clahePipelineLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("CLAHE: Failed to create pipeline layout");
+        return;
+    }
+
+    // Create compute pipelines for each pass
+    auto createComputePipeline = [device, this](VkShaderModule shader) -> VkPipeline {
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = shader;
+        stageInfo.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = stageInfo;
+        pipelineInfo.layout = m_impl->clahePipelineLayout;
+
+        VkPipeline pipeline;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        return pipeline;
+    };
+
+    m_impl->claheHistogramPipeline = createComputePipeline(m_impl->claheHistogramShader);
+    m_impl->claheCdfPipeline = createComputePipeline(m_impl->claheCdfShader);
+    m_impl->claheApplyPipeline = createComputePipeline(m_impl->claheApplyShader);
+
+    if (m_impl->claheHistogramPipeline == VK_NULL_HANDLE ||
+        m_impl->claheCdfPipeline == VK_NULL_HANDLE ||
+        m_impl->claheApplyPipeline == VK_NULL_HANDLE) {
+        QL_LOG_WARN("CLAHE: Failed to create compute pipelines");
+        return;
+    }
+
+    // Create descriptor pool
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3}
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+    poolInfo.maxSets = 1;
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_impl->claheDescriptorPool) != VK_SUCCESS) {
+        QL_LOG_WARN("CLAHE: Failed to create descriptor pool");
+        return;
+    }
+
+    // Create display image (same format as outputImage)
+    m_impl->displayImage = std::make_unique<GpuImage>(
+        allocator,
+        device,
+        m_impl->width, m_impl->height,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    // Transition display image to GENERAL layout
+    TransitionImageLayoutImmediate(
+        m_impl->displayImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL
+    );
+
+    // Create buffers for CLAHE
+    // Max 64x64 tiles, 256 bins per tile
+    constexpr u32 maxTiles = 64 * 64;
+    constexpr u32 histogramBins = 256;
+
+    m_impl->claheHistogramBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        maxTiles * histogramBins * sizeof(u32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    m_impl->claheCdfBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        maxTiles * histogramBins * sizeof(f32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    m_impl->claheMinMaxBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        maxTiles * 2 * sizeof(f32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_impl->claheDescriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_impl->claheDescriptorSetLayout;
+
+    if (vkAllocateDescriptorSets(device, &allocInfo, &m_impl->claheDescriptorSet) != VK_SUCCESS) {
+        QL_LOG_WARN("CLAHE: Failed to allocate descriptor set");
+        return;
+    }
+
+    // Update descriptor set
+    VkDescriptorImageInfo inputImageInfo{};
+    inputImageInfo.imageView = m_impl->outputImage->GetView();
+    inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo outputImageInfo{};
+    outputImageInfo.imageView = m_impl->displayImage->GetView();
+    outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorBufferInfo histogramBufferInfo{};
+    histogramBufferInfo.buffer = m_impl->claheHistogramBuffer->GetHandle();
+    histogramBufferInfo.offset = 0;
+    histogramBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo cdfBufferInfo{};
+    cdfBufferInfo.buffer = m_impl->claheCdfBuffer->GetHandle();
+    cdfBufferInfo.offset = 0;
+    cdfBufferInfo.range = VK_WHOLE_SIZE;
+
+    VkDescriptorBufferInfo minMaxBufferInfo{};
+    minMaxBufferInfo.buffer = m_impl->claheMinMaxBuffer->GetHandle();
+    minMaxBufferInfo.offset = 0;
+    minMaxBufferInfo.range = VK_WHOLE_SIZE;
+
+    std::vector<VkWriteDescriptorSet> writes(5);
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_impl->claheDescriptorSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorCount = 1;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[0].pImageInfo = &inputImageInfo;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_impl->claheDescriptorSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorCount = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    writes[1].pImageInfo = &outputImageInfo;
+
+    writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[2].dstSet = m_impl->claheDescriptorSet;
+    writes[2].dstBinding = 2;
+    writes[2].descriptorCount = 1;
+    writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[2].pBufferInfo = &histogramBufferInfo;
+
+    writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[3].dstSet = m_impl->claheDescriptorSet;
+    writes[3].dstBinding = 3;
+    writes[3].descriptorCount = 1;
+    writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[3].pBufferInfo = &cdfBufferInfo;
+
+    writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[4].dstSet = m_impl->claheDescriptorSet;
+    writes[4].dstBinding = 4;
+    writes[4].descriptorCount = 1;
+    writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[4].pBufferInfo = &minMaxBufferInfo;
+
+    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+
+    m_impl->claheInitialized = true;
+    QL_LOG_INFO("CLAHE: Compute pipeline created successfully");
+}
+
+void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
+    // Read back a subset of pixels to estimate min/max
+    // For efficiency, we sample instead of reading entire image
+    // In production, this could be done on GPU with reduction
+
+    // For now, use full readback (acceptable for moderate image sizes)
+    std::vector<f32> pixels = CommandHelper::ReadbackImage(
+        *m_impl->contextAdapter,
+        m_impl->outputImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        m_impl->width,
+        m_impl->height
+    );
+
+    outMin = std::numeric_limits<f32>::max();
+    outMax = std::numeric_limits<f32>::lowest();
+
+    // Use luminance for range calculation
+    for (size_t i = 0; i < pixels.size(); i += 4) {
+        f32 r = pixels[i];
+        f32 g = pixels[i + 1];
+        f32 b = pixels[i + 2];
+
+        // Skip invalid pixels
+        if (!std::isfinite(r) || !std::isfinite(g) || !std::isfinite(b))
+            continue;
+
+        // BT.709 luminance
+        f32 lum = 0.2126f * r + 0.7152f * g + 0.0722f * b;
+        outMin = std::min(outMin, lum);
+        outMax = std::max(outMax, lum);
+    }
+
+    // Fallback if no valid pixels
+    if (outMin >= outMax) {
+        outMin = 0.0f;
+        outMax = 1.0f;
+    }
+}
+
+void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
+    if (!m_impl->claheInitialized) return;
+
+    // Calculate tile count based on tile size
+    u32 tileSize = static_cast<u32>(m_impl->claheParams.tileSize);
+    u32 tileCountX = (width + tileSize - 1) / tileSize;
+    u32 tileCountY = (height + tileSize - 1) / tileSize;
+
+    // Clamp to max tiles
+    tileCountX = std::min(tileCountX, 64u);
+    tileCountY = std::min(tileCountY, 64u);
+
+    // Compute min/max for normalization
+    // TODO: Move this to GPU for better performance
+    f32 inputMin, inputMax;
+    ComputeImageMinMax(inputMin, inputMax);
+
+    // Push constants structure (must match shader)
+    struct CLAHEPushConstants {
+        u32 imageWidth;
+        u32 imageHeight;
+        u32 tileCountX;
+        u32 tileCountY;
+        f32 clipLimit;
+        u32 luminanceOnly;
+        f32 inputMin;
+        f32 inputMax;
+        u32 passIndex;
+        u32 padding[3];
+    };
+
+    CLAHEPushConstants pushConstants{};
+    pushConstants.imageWidth = width;
+    pushConstants.imageHeight = height;
+    pushConstants.tileCountX = tileCountX;
+    pushConstants.tileCountY = tileCountY;
+    pushConstants.clipLimit = m_impl->claheParams.clipLimit;
+    pushConstants.luminanceOnly = m_impl->claheParams.luminanceOnly ? 1 : 0;
+    pushConstants.inputMin = inputMin;
+    pushConstants.inputMax = inputMax;
+
+    // Memory barrier: wait for ray tracing to finish
+    VkMemoryBarrier memBarrier{};
+    memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        1, &memBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Pass 1: Build histograms
+    // Dispatch one workgroup per tile
+    pushConstants.passIndex = 0;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheHistogramPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            m_impl->clahePipelineLayout, 0, 1,
+                            &m_impl->claheDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(pushConstants), &pushConstants);
+    vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
+
+    // Barrier between passes
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        1, &memBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Pass 2: Clip, redistribute, compute CDF
+    pushConstants.passIndex = 1;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheCdfPipeline);
+    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(pushConstants), &pushConstants);
+    vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
+
+    // Barrier between passes
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,
+        1, &memBarrier,
+        0, nullptr,
+        0, nullptr
+    );
+
+    // Pass 3: Apply interpolated mapping
+    pushConstants.passIndex = 2;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheApplyPipeline);
+    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+                       VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       sizeof(pushConstants), &pushConstants);
+    // Dispatch one thread per pixel
+    u32 groupCountX = (width + 15) / 16;
+    u32 groupCountY = (height + 15) / 16;
+    vkCmdDispatch(cmd, groupCountX, groupCountY, 1);
+
+    // Final barrier: CLAHE output ready for blit
+    memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(
+        cmd,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0,
+        1, &memBarrier,
+        0, nullptr,
+        0, nullptr
+    );
 }
 
 void ExternalRenderContext::TransitionImageLayoutImmediate(

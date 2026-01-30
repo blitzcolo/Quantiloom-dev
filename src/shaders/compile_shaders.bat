@@ -27,9 +27,10 @@ echo.
 
 REM Compilation flags
 set FLAGS=-spirv -T lib_6_3 -fspv-target-env="vulkan1.2"
+set COMP_FLAGS=-spirv -T cs_6_0 -fspv-target-env="vulkan1.2"
 
 REM Compile raygen shader
-echo [1/4] Compiling raygen.rgen...
+echo [1/7] Compiling raygen.rgen...
 dxc %FLAGS% -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile raygen.rgen
@@ -39,7 +40,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/raygen.spv created
 
 REM Compile closesthit shader
-echo [2/4] Compiling closesthit.rchit...
+echo [2/7] Compiling closesthit.rchit...
 dxc %FLAGS% -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile closesthit.rchit
@@ -49,7 +50,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/closesthit.spv created
 
 REM Compile miss shader
-echo [3/4] Compiling miss.rmiss...
+echo [3/7] Compiling miss.rmiss...
 dxc %FLAGS% -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile miss.rmiss
@@ -59,7 +60,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/miss.spv created
 
 REM Compile shadow_miss shader
-echo [4/4] Compiling shadow_miss.rmiss...
+echo [4/7] Compiling shadow_miss.rmiss...
 dxc %FLAGS% -Fo src/shaders/shadow_miss.spv src/shaders/shadow_miss.rmiss
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile shadow_miss.rmiss
@@ -67,6 +68,34 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo       OK src/shaders/shadow_miss.spv created
+
+REM Compile CLAHE compute shaders (3 passes)
+echo [5/7] Compiling clahe_histogram.comp...
+dxc %COMP_FLAGS% -E main -D CLAHE_PASS_HISTOGRAM -Fo src/shaders/clahe_histogram.spv src/shaders/clahe.comp.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile clahe_histogram
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/clahe_histogram.spv created
+
+echo [6/7] Compiling clahe_cdf.comp...
+dxc %COMP_FLAGS% -E main -D CLAHE_PASS_CDF -Fo src/shaders/clahe_cdf.spv src/shaders/clahe.comp.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile clahe_cdf
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/clahe_cdf.spv created
+
+echo [7/7] Compiling clahe_apply.comp...
+dxc %COMP_FLAGS% -E main -D CLAHE_PASS_APPLY -Fo src/shaders/clahe_apply.spv src/shaders/clahe.comp.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile clahe_apply
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/clahe_apply.spv created
 
 echo.
 echo =========================================
