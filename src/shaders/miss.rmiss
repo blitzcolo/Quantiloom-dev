@@ -79,7 +79,18 @@ void main(inout Payload payload) {
     // ========================================================================
     // Atmospheric Scattering (Delta-Tracking)
     // ========================================================================
-    if (atmosphereEnabled) {
+    // NOTE: Only use single-wavelength atmospheric scattering for modes where
+    // camera.wavelength_nm is meaningful (RGB and SINGLE).
+    // For fused modes (VIS_FUSED, NIR_FUSED, SWIR_FUSED, MWIR_FUSED, LWIR_FUSED),
+    // atmospheric scattering using 550nm wavelength produces physically incorrect
+    // results because the scattering coefficients are wavelength-dependent.
+    // Those modes should integrate atmospheric effects at each wavelength in their
+    // respective branches (TODO: per-wavelength atmospheric integration).
+    bool useAtmosphericScattering = atmosphereEnabled &&
+        (camera.spectral_mode == SPECTRAL_MODE_RGB ||
+         camera.spectral_mode == SPECTRAL_MODE_SINGLE);
+
+    if (useAtmosphericScattering) {
         // Planet center: assume camera at surface, planet center below
         // TODO: Make this configurable via uniform buffer
         float3 planet_center = float3(0.0, -atmo.planet_radius, 0.0);
