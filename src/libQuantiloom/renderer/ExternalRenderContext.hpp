@@ -650,7 +650,10 @@ private:
     // Create GPU sensor compute pipeline resources
     void CreateGPUSensorPipeline();
 
-    // Execute GPU sensor chain (5 compute passes)
+    // Generate and upload FPN (Fixed Pattern Noise) maps to GPU
+    void GenerateAndUploadFPNMaps();
+
+    // Execute GPU sensor chain (6 compute passes)
     void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
 
     // Transition image layout (internal helper)

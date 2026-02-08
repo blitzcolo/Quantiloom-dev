@@ -207,7 +207,7 @@ std::vector<f32> CommandHelper::ReadbackImage(
     constexpr u32 bytesPerPixel = 4 * sizeof(f32);
     const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * height * bytesPerPixel;
 
-    QL_LOG_INFO("Reading back image ({}x{}, {} bytes)...", width, height, bufferSize);
+    //QL_LOG_DEBUG("Reading back image ({}x{}, {} bytes)...", width, height, bufferSize);
 
     // Create staging buffer (GPU -> CPU)
     GpuBuffer stagingBuffer(
@@ -262,7 +262,7 @@ std::vector<f32> CommandHelper::ReadbackImage(
     std::memcpy(pixels.data(), mappedData, bufferSize);
     stagingBuffer.Unmap();
 
-    QL_LOG_INFO("  Readback complete ({} pixels)", width * height);
+    //QL_LOG_DEBUG("  Readback complete ({} pixels)", width * height);
 
     return pixels;
 }

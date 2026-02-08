@@ -37,8 +37,8 @@ struct SensorPSFParams {
 // Bindings
 // ============================================================================
 
-// Input image
-[[vk::binding(0, 0)]] Texture2D<float4> inputImage;
+// Input image (storage image for compute shader)
+[[vk::binding(0, 0)]] RWTexture2D<float4> inputImage;
 
 // Output image
 [[vk::binding(1, 0)]] RWTexture2D<float4> outputImage;

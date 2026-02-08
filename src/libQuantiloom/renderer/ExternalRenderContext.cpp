@@ -341,6 +341,14 @@ struct ExternalRenderContext::Impl {
     VkShaderModule sensorPsfBlurHorizontalShader = VK_NULL_HANDLE;
     VkShaderModule sensorPsfBlurVerticalShader = VK_NULL_HANDLE;
     VkShaderModule sensorQuantizeToRadianceShader = VK_NULL_HANDLE;
+    VkPipeline sensorFpnPipeline = VK_NULL_HANDLE;
+    VkShaderModule sensorFpnShader = VK_NULL_HANDLE;
+    std::unique_ptr<GpuImage> fpnPrnuMap;              // PRNU map (width x height, R32_SFLOAT)
+    std::unique_ptr<GpuImage> fpnDsnuMap;              // DSNU map (width x height, R32_SFLOAT)
+    VkDescriptorSetLayout sensorFpnDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout sensorFpnPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorSet sensorFpnDescriptorSet = VK_NULL_HANDLE;
+    bool fpnMapsGenerated = false;
     bool sensorInitialized = false;
 
     // Ready flag
@@ -487,7 +495,27 @@ struct ExternalRenderContext::Impl {
                 vkDestroyDescriptorSetLayout(device, sensorDescriptorSetLayout, nullptr);
                 sensorDescriptorSetLayout = VK_NULL_HANDLE;
             }
+            // Destroy FPN resources
+            if (sensorFpnPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorFpnPipeline, nullptr);
+                sensorFpnPipeline = VK_NULL_HANDLE;
+            }
+            if (sensorFpnShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorFpnShader, nullptr);
+                sensorFpnShader = VK_NULL_HANDLE;
+            }
+            if (sensorFpnPipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, sensorFpnPipelineLayout, nullptr);
+                sensorFpnPipelineLayout = VK_NULL_HANDLE;
+            }
+            if (sensorFpnDescriptorSetLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, sensorFpnDescriptorSetLayout, nullptr);
+                sensorFpnDescriptorSetLayout = VK_NULL_HANDLE;
+            }
         }
+        fpnPrnuMap.reset();
+        fpnDsnuMap.reset();
+        fpnMapsGenerated = false;
         sensorInitialized = false;
 
         // Reset merged global geometry buffers
@@ -800,8 +828,8 @@ void ExternalRenderContext::RenderFrame(
          m_impl->frameIndex % minMaxUpdateInterval == 0)) {
         ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
-        QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
-                     m_impl->cachedImageMin, m_impl->cachedImageMax);
+        //QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
+        //             m_impl->cachedImageMin, m_impl->cachedImageMax);
     }
 
     // Handle resize
@@ -1049,6 +1077,76 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
         writes[1].pImageInfo = &outputImageInfo;
 
         vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    }
+
+    // Recreate sensor images if initialized
+    if (m_impl->sensorInitialized && m_impl->sensorImage) {
+        auto sensorAllocator = m_impl->contextAdapter->GetAllocator();
+        auto sensorDevice = m_impl->contextAdapter->GetDevice();
+
+        m_impl->sensorImage = std::make_unique<GpuImage>(
+            sensorAllocator, sensorDevice,
+            width, height,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+
+        m_impl->sensorTempImage = std::make_unique<GpuImage>(
+            sensorAllocator, sensorDevice,
+            width, height,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY
+        );
+
+        TransitionImageLayoutImmediate(
+            m_impl->sensorImage->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL
+        );
+
+        TransitionImageLayoutImmediate(
+            m_impl->sensorTempImage->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL
+        );
+
+        // Recreate FPN map images for new dimensions
+        if (m_impl->fpnPrnuMap) {
+            m_impl->fpnPrnuMap = std::make_unique<GpuImage>(
+                sensorAllocator, sensorDevice,
+                width, height,
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VMA_MEMORY_USAGE_GPU_ONLY
+            );
+            m_impl->fpnDsnuMap = std::make_unique<GpuImage>(
+                sensorAllocator, sensorDevice,
+                width, height,
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VMA_MEMORY_USAGE_GPU_ONLY
+            );
+
+            TransitionImageLayoutImmediate(
+                m_impl->fpnPrnuMap->GetImage(),
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL
+            );
+            TransitionImageLayoutImmediate(
+                m_impl->fpnDsnuMap->GetImage(),
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL
+            );
+        }
+
+        // Invalidate FPN maps so they get regenerated for new dimensions
+        m_impl->fpnMapsGenerated = false;
     }
 
     // Update camera aspect ratio
@@ -1519,11 +1617,22 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
         return Result<Image, String>::Err("Render context not ready");
     }
 
-    // If CLAHE is enabled and displayImage exists, capture it
-    // Otherwise fall back to outputImage (same as CaptureScreenshot)
+    // Determine source image: priority displayImage → sensorImage → outputImage
     VkImage sourceImage = m_impl->outputImage->GetImage();
+
+    // Priority 1: CLAHE output (includes all effects)
     if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
         sourceImage = m_impl->displayImage->GetImage();
+        QL_LOG_DEBUG("CaptureDisplayImage: Using displayImage (CLAHE enabled)");
+    }
+    // Priority 2: Sensor output (includes sensor effects)
+    else if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
+        sourceImage = m_impl->sensorImage->GetImage();
+        QL_LOG_DEBUG("CaptureDisplayImage: Using sensorImage (GPU sensor enabled)");
+    }
+    // Priority 3: Raw output
+    else {
+        QL_LOG_DEBUG("CaptureDisplayImage: Using outputImage (no post-processing)");
     }
 
     // Read back the appropriate image using CommandHelper
@@ -1549,6 +1658,11 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     if (m_impl->claheParams.enabled) {
         displayImage.metadata["clahe_clip_limit"] = std::to_string(m_impl->claheParams.clipLimit);
         displayImage.metadata["clahe_tile_size"] = std::to_string(m_impl->claheParams.tileSize);
+    }
+    displayImage.metadata["gpu_sensor_applied"] = m_impl->gpuSensorEnabled ? "true" : "false";
+    if (m_impl->gpuSensorEnabled) {
+        displayImage.metadata["sensor_f_number"] = std::to_string(m_impl->gpuSensorParams.fNumber);
+        displayImage.metadata["sensor_quantum_efficiency"] = std::to_string(m_impl->gpuSensorParams.quantumEfficiency);
     }
 
     return std::move(displayImage);
@@ -2707,7 +2821,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         "src/shaders/sensor_radiance_to_electrons.spv"
     };
 
-    std::vector<u32> radianceToElectronsCode, poissonNoiseCode, psfBlurHorizontalCode, psfBlurVerticalCode, quantizeToRadianceCode;
+    std::vector<u32> radianceToElectronsCode, poissonNoiseCode, psfBlurHorizontalCode, psfBlurVerticalCode, quantizeToRadianceCode, fpnCode;
 
     for (const auto& basePath : shaderPaths) {
         String radiancePath = basePath.string();
@@ -2715,6 +2829,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         String blurHPath = radiancePath;
         String blurVPath = radiancePath;
         String quantizePath = radiancePath;
+        String fpnPath = radiancePath;
 
         size_t pos = radiancePath.find("radiance_to_electrons");
         if (pos != String::npos) {
@@ -2722,6 +2837,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
             blurHPath.replace(pos, 21, "psf_blur_horizontal");
             blurVPath.replace(pos, 21, "psf_blur_vertical");
             quantizePath.replace(pos, 21, "quantize_to_radiance");
+            fpnPath.replace(fpnPath.find("radiance_to_electrons"), 21, "fpn");
         }
 
         radianceToElectronsCode = loadShaderFile(radiancePath);
@@ -2730,10 +2846,14 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
             psfBlurHorizontalCode = loadShaderFile(blurHPath);
             psfBlurVerticalCode = loadShaderFile(blurVPath);
             quantizeToRadianceCode = loadShaderFile(quantizePath);
+            fpnCode = loadShaderFile(fpnPath);
 
             if (!poissonNoiseCode.empty() && !psfBlurHorizontalCode.empty() &&
                 !psfBlurVerticalCode.empty() && !quantizeToRadianceCode.empty()) {
                 QL_LOG_DEBUG("GPU Sensor: Loaded shaders from {}", radiancePath);
+                if (fpnCode.empty()) {
+                    QL_LOG_WARN("GPU Sensor: FPN shader not found at {}, FPN will be disabled", fpnPath);
+                }
                 break;
             }
         }
@@ -2764,6 +2884,9 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     m_impl->sensorPsfBlurHorizontalShader = createShaderModule(psfBlurHorizontalCode);
     m_impl->sensorPsfBlurVerticalShader = createShaderModule(psfBlurVerticalCode);
     m_impl->sensorQuantizeToRadianceShader = createShaderModule(quantizeToRadianceCode);
+    if (!fpnCode.empty()) {
+        m_impl->sensorFpnShader = createShaderModule(fpnCode);
+    }
 
     if (m_impl->sensorRadianceToElectronsShader == VK_NULL_HANDLE ||
         m_impl->sensorPoissonNoiseShader == VK_NULL_HANDLE ||
@@ -2853,15 +2976,16 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     }
 
     // Create descriptor pool
+    // 5 passes × 2 bindings = 10, plus FPN pass with 4 bindings = 14 total
     std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10}  // Need multiple sets for ping-pong
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 14}
     };
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 5;  // One set per pass
+    poolInfo.maxSets = 6;  // 5 existing + 1 FPN
 
     if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_impl->sensorDescriptorPool) != VK_SUCCESS) {
         QL_LOG_WARN("GPU Sensor: Failed to create descriptor pool");
@@ -2914,8 +3038,367 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         return;
     }
 
+    // ========================================================================
+    // FPN: Create descriptor set layout (4 bindings), pipeline, and FPN maps
+    // ========================================================================
+    if (m_impl->sensorFpnShader != VK_NULL_HANDLE) {
+        // FPN descriptor set layout: 4 storage images
+        // binding 0: inputImage (electron image, in)
+        // binding 1: outputImage (electron image, out)
+        // binding 2: prnuMap (PRNU texture)
+        // binding 3: dsnuMap (DSNU texture)
+        std::vector<VkDescriptorSetLayoutBinding> fpnBindings(4);
+        for (u32 i = 0; i < 4; ++i) {
+            fpnBindings[i].binding = i;
+            fpnBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            fpnBindings[i].descriptorCount = 1;
+            fpnBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            fpnBindings[i].pImmutableSamplers = nullptr;
+        }
+
+        VkDescriptorSetLayoutCreateInfo fpnLayoutInfo{};
+        fpnLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        fpnLayoutInfo.bindingCount = static_cast<u32>(fpnBindings.size());
+        fpnLayoutInfo.pBindings = fpnBindings.data();
+
+        if (vkCreateDescriptorSetLayout(device, &fpnLayoutInfo, nullptr, &m_impl->sensorFpnDescriptorSetLayout) != VK_SUCCESS) {
+            QL_LOG_WARN("GPU Sensor: Failed to create FPN descriptor set layout");
+        } else {
+            // FPN pipeline layout
+            VkPushConstantRange fpnPushRange{};
+            fpnPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            fpnPushRange.offset = 0;
+            fpnPushRange.size = 128;
+
+            VkPipelineLayoutCreateInfo fpnPipeLayoutInfo{};
+            fpnPipeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            fpnPipeLayoutInfo.setLayoutCount = 1;
+            fpnPipeLayoutInfo.pSetLayouts = &m_impl->sensorFpnDescriptorSetLayout;
+            fpnPipeLayoutInfo.pushConstantRangeCount = 1;
+            fpnPipeLayoutInfo.pPushConstantRanges = &fpnPushRange;
+
+            if (vkCreatePipelineLayout(device, &fpnPipeLayoutInfo, nullptr, &m_impl->sensorFpnPipelineLayout) != VK_SUCCESS) {
+                QL_LOG_WARN("GPU Sensor: Failed to create FPN pipeline layout");
+            } else {
+                // FPN compute pipeline
+                VkPipelineShaderStageCreateInfo fpnStageInfo{};
+                fpnStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                fpnStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+                fpnStageInfo.module = m_impl->sensorFpnShader;
+                fpnStageInfo.pName = "main";
+
+                VkComputePipelineCreateInfo fpnPipeInfo{};
+                fpnPipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+                fpnPipeInfo.stage = fpnStageInfo;
+                fpnPipeInfo.layout = m_impl->sensorFpnPipelineLayout;
+
+                if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &fpnPipeInfo, nullptr, &m_impl->sensorFpnPipeline) != VK_SUCCESS) {
+                    QL_LOG_WARN("GPU Sensor: Failed to create FPN compute pipeline");
+                }
+            }
+        }
+
+        // Create FPN map images and allocate FPN descriptor set
+        if (m_impl->sensorFpnPipeline != VK_NULL_HANDLE) {
+            // PRNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
+            m_impl->fpnPrnuMap = std::make_unique<GpuImage>(
+                allocator, device,
+                m_impl->width, m_impl->height,
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VMA_MEMORY_USAGE_GPU_ONLY
+            );
+
+            // DSNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
+            m_impl->fpnDsnuMap = std::make_unique<GpuImage>(
+                allocator, device,
+                m_impl->width, m_impl->height,
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VMA_MEMORY_USAGE_GPU_ONLY
+            );
+
+            // Transition FPN maps to GENERAL layout
+            TransitionImageLayoutImmediate(
+                m_impl->fpnPrnuMap->GetImage(),
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL
+            );
+            TransitionImageLayoutImmediate(
+                m_impl->fpnDsnuMap->GetImage(),
+                VK_FORMAT_R32G32B32A32_SFLOAT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_GENERAL
+            );
+
+            // Allocate FPN descriptor set
+            VkDescriptorSetAllocateInfo fpnAllocInfo{};
+            fpnAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            fpnAllocInfo.descriptorPool = m_impl->sensorDescriptorPool;
+            fpnAllocInfo.descriptorSetCount = 1;
+            fpnAllocInfo.pSetLayouts = &m_impl->sensorFpnDescriptorSetLayout;
+
+            if (vkAllocateDescriptorSets(device, &fpnAllocInfo, &m_impl->sensorFpnDescriptorSet) != VK_SUCCESS) {
+                QL_LOG_WARN("GPU Sensor: Failed to allocate FPN descriptor set");
+                m_impl->sensorFpnPipeline = VK_NULL_HANDLE;  // Disable FPN
+            } else {
+                QL_LOG_INFO("GPU Sensor: FPN pipeline and maps created successfully");
+            }
+        }
+    }
+
     m_impl->sensorInitialized = true;
     QL_LOG_INFO("GPU Sensor: Compute pipeline created successfully");
+}
+
+// ============================================================================
+// GPU Sensor: Generate and Upload FPN Maps
+// ============================================================================
+
+void ExternalRenderContext::GenerateAndUploadFPNMaps() {
+    if (!m_impl->sensorInitialized || m_impl->sensorFpnPipeline == VK_NULL_HANDLE) return;
+    if (m_impl->fpnMapsGenerated) return;
+
+    const auto& params = m_impl->gpuSensorParams;
+    const u32 width = m_impl->width;
+    const u32 height = m_impl->height;
+    auto allocator = m_impl->contextAdapter->GetAllocator();
+
+    QL_LOG_INFO("GPU Sensor: Generating FPN maps {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
+                width, height, params.prnuSigma * 100.0f, params.dsnuSigma_e);
+
+    std::mt19937 rng(42);  // Fixed seed for reproducible FPN pattern
+
+    // Helper: 1D Gaussian kernel
+    auto makeGaussianKernel = [](f32 sigma) -> std::vector<f32> {
+        i32 radius = static_cast<i32>(std::ceil(3.0f * sigma));
+        std::vector<f32> kernel(2 * radius + 1);
+        f32 sum = 0.0f;
+        for (i32 i = -radius; i <= radius; ++i) {
+            kernel[i + radius] = std::exp(-0.5f * (i * i) / (sigma * sigma));
+            sum += kernel[i + radius];
+        }
+        for (auto& v : kernel) v /= sum;
+        return kernel;
+    };
+
+    // ---- Generate PRNU map (vertical stripes = per-column) ----
+    // RGBA float data for the full image
+    std::vector<f32> prnuData(width * height * 4, 0.0f);
+
+    if (params.prnuSigma > 1e-6f) {
+        std::normal_distribution<f32> prnuDist(0.0f, params.prnuSigma);
+
+        // Per-column random values
+        std::vector<f32> columnNoise(width);
+        for (u32 x = 0; x < width; ++x) {
+            columnNoise[x] = prnuDist(rng);
+        }
+
+        // Smooth with sigma=8 for wider stripes
+        auto kernel = makeGaussianKernel(8.0f);
+        i32 radius = static_cast<i32>(kernel.size()) / 2;
+        std::vector<f32> smoothed(width);
+        for (u32 x = 0; x < width; ++x) {
+            f32 sum = 0.0f;
+            for (i32 k = -radius; k <= radius; ++k) {
+                i32 xk = std::clamp(static_cast<i32>(x) + k, 0, static_cast<i32>(width) - 1);
+                sum += columnNoise[xk] * kernel[k + radius];
+            }
+            smoothed[x] = sum;
+        }
+
+        // Expand to 2D with 10% pixel-level variation
+        std::normal_distribution<f32> pixelNoise(0.0f, params.prnuSigma * 0.1f);
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                prnuData[(y * width + x) * 4 + 0] = smoothed[x] + pixelNoise(rng);
+            }
+        }
+
+        // Renormalize to target sigma
+        f32 mean = 0.0f;
+        for (u32 i = 0; i < width * height; ++i) mean += prnuData[i * 4];
+        mean /= static_cast<f32>(width * height);
+
+        f32 variance = 0.0f;
+        for (u32 i = 0; i < width * height; ++i) {
+            f32 diff = prnuData[i * 4] - mean;
+            variance += diff * diff;
+        }
+        variance /= static_cast<f32>(width * height);
+        f32 currentSigma = std::sqrt(variance);
+
+        if (currentSigma > 1e-6f) {
+            f32 scale = params.prnuSigma / currentSigma;
+            for (u32 i = 0; i < width * height; ++i) {
+                prnuData[i * 4] = (prnuData[i * 4] - mean) * scale;
+            }
+        }
+    }
+
+    // ---- Generate DSNU map (horizontal stripes = per-row) ----
+    std::vector<f32> dsnuData(width * height * 4, 0.0f);
+
+    if (params.dsnuSigma_e > 1e-6f) {
+        std::normal_distribution<f32> dsnuDist(0.0f, params.dsnuSigma_e);
+
+        // Per-row random values
+        std::vector<f32> rowNoise(height);
+        for (u32 y = 0; y < height; ++y) {
+            rowNoise[y] = dsnuDist(rng);
+        }
+
+        // Smooth with sigma=5 for wider stripes
+        auto kernel = makeGaussianKernel(5.0f);
+        i32 radius = static_cast<i32>(kernel.size()) / 2;
+        std::vector<f32> smoothed(height);
+        for (u32 y = 0; y < height; ++y) {
+            f32 sum = 0.0f;
+            for (i32 k = -radius; k <= radius; ++k) {
+                i32 yk = std::clamp(static_cast<i32>(y) + k, 0, static_cast<i32>(height) - 1);
+                sum += rowNoise[yk] * kernel[k + radius];
+            }
+            smoothed[y] = sum;
+        }
+
+        // Expand to 2D with 10% pixel-level variation
+        std::normal_distribution<f32> pixelNoise(0.0f, params.dsnuSigma_e * 0.1f);
+        for (u32 y = 0; y < height; ++y) {
+            for (u32 x = 0; x < width; ++x) {
+                dsnuData[(y * width + x) * 4 + 0] = smoothed[y] + pixelNoise(rng);
+            }
+        }
+
+        // Renormalize to target sigma
+        f32 mean = 0.0f;
+        for (u32 i = 0; i < width * height; ++i) mean += dsnuData[i * 4];
+        mean /= static_cast<f32>(width * height);
+
+        f32 variance = 0.0f;
+        for (u32 i = 0; i < width * height; ++i) {
+            f32 diff = dsnuData[i * 4] - mean;
+            variance += diff * diff;
+        }
+        variance /= static_cast<f32>(width * height);
+        f32 currentSigma = std::sqrt(variance);
+
+        if (currentSigma > 1e-6f) {
+            f32 scale = params.dsnuSigma_e / currentSigma;
+            for (u32 i = 0; i < width * height; ++i) {
+                dsnuData[i * 4] = (dsnuData[i * 4] - mean) * scale;
+            }
+        }
+    }
+
+    // ---- Upload PRNU and DSNU maps to GPU ----
+    const VkDeviceSize mapSize = width * height * 4 * sizeof(f32);
+
+    // Upload PRNU map
+    {
+        GpuBuffer stagingBuffer(allocator, mapSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        stagingBuffer.Upload(prnuData.data(), mapSize);
+
+        TransitionImageLayoutImmediate(
+            m_impl->fpnPrnuMap->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        );
+
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {width, height, 1};
+
+            vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
+                m_impl->fpnPrnuMap->GetImage(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        });
+
+        TransitionImageLayoutImmediate(
+            m_impl->fpnPrnuMap->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL
+        );
+    }
+
+    // Upload DSNU map
+    {
+        GpuBuffer stagingBuffer(allocator, mapSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        stagingBuffer.Upload(dsnuData.data(), mapSize);
+
+        TransitionImageLayoutImmediate(
+            m_impl->fpnDsnuMap->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+        );
+
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            VkBufferImageCopy region{};
+            region.bufferOffset = 0;
+            region.bufferRowLength = 0;
+            region.bufferImageHeight = 0;
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.mipLevel = 0;
+            region.imageSubresource.baseArrayLayer = 0;
+            region.imageSubresource.layerCount = 1;
+            region.imageOffset = {0, 0, 0};
+            region.imageExtent = {width, height, 1};
+
+            vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
+                m_impl->fpnDsnuMap->GetImage(),
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        });
+
+        TransitionImageLayoutImmediate(
+            m_impl->fpnDsnuMap->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_IMAGE_LAYOUT_GENERAL
+        );
+    }
+
+    // Update FPN descriptor set with map images
+    VkDescriptorImageInfo fpnPrnuInfo{};
+    fpnPrnuInfo.imageView = m_impl->fpnPrnuMap->GetView();
+    fpnPrnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkDescriptorImageInfo fpnDsnuInfo{};
+    fpnDsnuInfo.imageView = m_impl->fpnDsnuMap->GetView();
+    fpnDsnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet fpnWrites[2] = {};
+    fpnWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    fpnWrites[0].dstSet = m_impl->sensorFpnDescriptorSet;
+    fpnWrites[0].dstBinding = 2;
+    fpnWrites[0].descriptorCount = 1;
+    fpnWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    fpnWrites[0].pImageInfo = &fpnPrnuInfo;
+
+    fpnWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    fpnWrites[1].dstSet = m_impl->sensorFpnDescriptorSet;
+    fpnWrites[1].dstBinding = 3;
+    fpnWrites[1].descriptorCount = 1;
+    fpnWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    fpnWrites[1].pImageInfo = &fpnDsnuInfo;
+
+    vkUpdateDescriptorSets(m_impl->device, 2, fpnWrites, 0, nullptr);
+
+    m_impl->fpnMapsGenerated = true;
+    QL_LOG_INFO("GPU Sensor: FPN maps generated and uploaded ({}x{})", width, height);
 }
 
 // ============================================================================
@@ -2924,6 +3407,11 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
 
 void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height) {
     if (!m_impl->sensorInitialized) return;
+
+    // Generate FPN maps on first use (lazy initialization)
+    if (!m_impl->fpnMapsGenerated && m_impl->sensorFpnPipeline != VK_NULL_HANDLE) {
+        GenerateAndUploadFPNMaps();
+    }
 
     const auto& params = m_impl->gpuSensorParams;
 
@@ -2949,8 +3437,122 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &initialBarrier, 0, nullptr, 0, nullptr);
 
+    // Calculate PSF sigma from f-number and wavelength
+    // σ_psf ≈ 1.22 × λ × f# / pixel_pitch (result is in pixels)
+    // wavelength_nm * 1e-9 = wavelength in meters
+    // pixelPitch_um * 1e-6 = pixel pitch in meters
+    // Division gives result directly in pixels
+    f32 psfSigma = 1.22f * (params.wavelength_nm * 1e-9f) * params.fNumber / (params.pixelPitch_um * 1e-6f);
+    // Clamp to reasonable range
+    psfSigma = std::max(0.1f, std::min(psfSigma, 10.0f));
+    u32 kernelRadius = static_cast<u32>(std::ceil(3.0f * psfSigma));
+
     // ========================================================================
-    // Pass 1: Radiance → Photo-electrons
+    // Pass 1: PSF Blur Horizontal (on radiance, matching CPU order)
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 sigma;
+            u32 kernelRadius;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 passIndex;
+            u32 padding[3];
+        } pushConstants;
+
+        pushConstants.sigma = psfSigma;
+        pushConstants.kernelRadius = kernelRadius;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+        pushConstants.passIndex = 0;  // Horizontal
+
+        // Update descriptor set: outputImage → sensorTempImage
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->outputImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorTempImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurHorizontalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // ========================================================================
+    // Pass 2: PSF Blur Vertical (on radiance, matching CPU order)
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 sigma;
+            u32 kernelRadius;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 passIndex;
+            u32 padding[3];
+        } pushConstants;
+
+        pushConstants.sigma = psfSigma;
+        pushConstants.kernelRadius = kernelRadius;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+        pushConstants.passIndex = 1;  // Vertical
+
+        // Update descriptor set: sensorTempImage → sensorImage
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->sensorTempImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurVerticalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // ========================================================================
+    // Pass 3: Radiance → Photo-electrons (after PSF blur on clean radiance)
     // ========================================================================
     {
         struct PushConstants {
@@ -2986,9 +3588,9 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
         pushConstants.imageWidth = width;
         pushConstants.imageHeight = height;
 
-        // Update descriptor set: outputImage → sensorTempImage (electrons)
+        // Update descriptor set: sensorImage → sensorTempImage
         VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->outputImage->GetView();
+        inputInfo.imageView = m_impl->sensorImage->GetView();
         inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputInfo{};
@@ -3020,7 +3622,7 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
     }
 
     // ========================================================================
-    // Pass 2: Poisson + Read Noise
+    // Pass 4: Poisson + Read Noise
     // ========================================================================
     {
         struct PushConstants {
@@ -3067,122 +3669,56 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
         insertBarrier();
     }
 
-    // Calculate PSF sigma from f-number and wavelength
-    // σ_psf ≈ 1.22 × λ × f# / pixel_pitch (result is in pixels)
-    // wavelength_nm * 1e-9 = wavelength in meters
-    // pixelPitch_um * 1e-6 = pixel pitch in meters
-    // Division gives result directly in pixels
-    f32 psfSigma = 1.22f * (params.wavelength_nm * 1e-9f) * params.fNumber / (params.pixelPitch_um * 1e-6f);
-    // Clamp to reasonable range
-    psfSigma = std::max(0.1f, std::min(psfSigma, 10.0f));
-    u32 kernelRadius = static_cast<u32>(std::ceil(3.0f * psfSigma));
-
     // ========================================================================
-    // Pass 3: PSF Blur Horizontal
+    // Pass 5: FPN (PRNU + DSNU) - in electron domain
     // ========================================================================
-    {
+    if (m_impl->sensorFpnPipeline != VK_NULL_HANDLE && m_impl->fpnMapsGenerated &&
+        params.enableFPN) {
         struct PushConstants {
-            f32 sigma;
-            u32 kernelRadius;
+            u32 enableFPN;
+            u32 enableNUC;
+            f32 nucEfficiency;
             u32 imageWidth;
             u32 imageHeight;
-            u32 passIndex;
             u32 padding[3];
         } pushConstants;
 
-        pushConstants.sigma = psfSigma;
-        pushConstants.kernelRadius = kernelRadius;
+        pushConstants.enableFPN = 1u;
+        pushConstants.enableNUC = params.enableNUC ? 1u : 0u;
+        pushConstants.nucEfficiency = params.nucEfficiency;
         pushConstants.imageWidth = width;
         pushConstants.imageHeight = height;
-        pushConstants.passIndex = 0;  // Horizontal
 
-        // Update descriptor set: sensorTempImage → sensorImage
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->sensorTempImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        // Update FPN descriptor set: bindings 0,1 = sensorTempImage (in/out)
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageView = m_impl->sensorTempImage->GetView();
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = m_impl->sensorFpnDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
+        writes[0].pImageInfo = &imageInfo;
 
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1] = writes[0];
         writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
 
         vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurHorizontalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorFpnPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+            m_impl->sensorFpnPipelineLayout, 0, 1,
+            &m_impl->sensorFpnDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorFpnPipelineLayout,
+            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
 
     // ========================================================================
-    // Pass 4: PSF Blur Vertical
-    // ========================================================================
-    {
-        struct PushConstants {
-            f32 sigma;
-            u32 kernelRadius;
-            u32 imageWidth;
-            u32 imageHeight;
-            u32 passIndex;
-            u32 padding[3];
-        } pushConstants;
-
-        pushConstants.sigma = psfSigma;
-        pushConstants.kernelRadius = kernelRadius;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-        pushConstants.passIndex = 1;  // Vertical
-
-        // Update descriptor set: sensorImage → sensorTempImage
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->sensorImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorTempImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
-
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurVerticalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 5: Quantize → Radiance
+    // Pass 6: Quantize → Radiance
     // ========================================================================
     {
         struct PushConstants {
@@ -3295,7 +3831,7 @@ void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
     if (ratio < 100.0f) {
         outMin = absMin;
         outMax = absMax;
-        QL_LOG_DEBUG("CLAHE: Using absolute min/max (ratio {:.1f}x)", ratio);
+        //QL_LOG_DEBUG("CLAHE: Using absolute min/max (ratio {:.1f}x)", ratio);
         return;
     }
 
@@ -3342,12 +3878,40 @@ void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
         outMax = absMax;
     }
 
-    QL_LOG_DEBUG("CLAHE: Using 1st/99th percentile (ratio {:.1f}x, clipped [{:.6g}, {:.6g}] -> [{:.6g}, {:.6g}])",
-                 ratio, absMin, absMax, outMin, outMax);
+    //QL_LOG_DEBUG("CLAHE: Using 1st/99th percentile (ratio {:.1f}x, clipped [{:.6g}, {:.6g}] -> [{:.6g}, {:.6g}])",
+    //             ratio, absMin, absMax, outMin, outMax);
 }
 
 void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
     if (!m_impl->claheInitialized) return;
+
+    // Dynamically update input image binding based on sensor state
+    VkImageView inputView = m_impl->outputImage->GetView();
+
+    // If sensor is enabled, CLAHE should process sensor output
+    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
+        inputView = m_impl->sensorImage->GetView();
+        //QL_LOG_DEBUG("CLAHE: Processing sensor output");
+    } else {
+        //QL_LOG_DEBUG("CLAHE: Processing raw output");
+    }
+
+    // Update descriptor set binding 0 (input image)
+    VkDescriptorImageInfo inputImageInfo{};
+    inputImageInfo.imageView = inputView;
+    inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    inputImageInfo.sampler = VK_NULL_HANDLE;
+
+    VkWriteDescriptorSet inputWrite{};
+    inputWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    inputWrite.dstSet = m_impl->claheDescriptorSet;
+    inputWrite.dstBinding = 0;
+    inputWrite.dstArrayElement = 0;
+    inputWrite.descriptorCount = 1;
+    inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    inputWrite.pImageInfo = &inputImageInfo;
+
+    vkUpdateDescriptorSets(m_impl->device, 1, &inputWrite, 0, nullptr);
 
     // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
     // NOT pixels per tile
@@ -3362,8 +3926,8 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     tileCountX = std::max(tileCountX, 1u);
     tileCountY = std::max(tileCountY, 1u);
 
-    QL_LOG_DEBUG("CLAHE: Executing with {}x{} tiles on {}x{} image",
-                 tileCountX, tileCountY, width, height);
+    //QL_LOG_DEBUG("CLAHE: Executing with {}x{} tiles on {}x{} image",
+    //             tileCountX, tileCountY, width, height);
 
     // Use cached min/max values from previous frame
     // This avoids GPU sync issues during command buffer recording
