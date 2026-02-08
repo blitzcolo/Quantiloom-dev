@@ -32,7 +32,7 @@ FLAGS="-spirv -T lib_6_3 -fspv-target-env=vulkan1.2"
 COMP_FLAGS="-spirv -T cs_6_0 -fspv-target-env=vulkan1.2"
 
 # Compile raygen shader
-echo "[1/7] Compiling raygen.rgen..."
+echo "[1/12] Compiling raygen.rgen..."
 dxc $FLAGS -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/raygen.spv created"
@@ -42,7 +42,7 @@ else
 fi
 
 # Compile closesthit shader
-echo "[2/7] Compiling closesthit.rchit..."
+echo "[2/12] Compiling closesthit.rchit..."
 dxc $FLAGS -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/closesthit.spv created"
@@ -52,7 +52,7 @@ else
 fi
 
 # Compile miss shader
-echo "[3/7] Compiling miss.rmiss..."
+echo "[3/12] Compiling miss.rmiss..."
 dxc $FLAGS -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/miss.spv created"
@@ -62,7 +62,7 @@ else
 fi
 
 # Compile shadow_miss shader
-echo "[4/7] Compiling shadow_miss.rmiss..."
+echo "[4/12] Compiling shadow_miss.rmiss..."
 dxc $FLAGS -Fo src/shaders/shadow_miss.spv src/shaders/shadow_miss.rmiss
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/shadow_miss.spv created"
@@ -72,7 +72,7 @@ else
 fi
 
 # Compile CLAHE compute shaders (3 passes)
-echo "[5/7] Compiling clahe_histogram.comp..."
+echo "[5/12] Compiling clahe_histogram.comp..."
 dxc $COMP_FLAGS -E main -D CLAHE_PASS_HISTOGRAM -Fo src/shaders/clahe_histogram.spv src/shaders/clahe.comp.hlsl
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/clahe_histogram.spv created"
@@ -81,7 +81,7 @@ else
     exit 1
 fi
 
-echo "[6/7] Compiling clahe_cdf.comp..."
+echo "[6/12] Compiling clahe_cdf.comp..."
 dxc $COMP_FLAGS -E main -D CLAHE_PASS_CDF -Fo src/shaders/clahe_cdf.spv src/shaders/clahe.comp.hlsl
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/clahe_cdf.spv created"
@@ -90,12 +90,58 @@ else
     exit 1
 fi
 
-echo "[7/7] Compiling clahe_apply.comp..."
+echo "[7/12] Compiling clahe_apply.comp..."
 dxc $COMP_FLAGS -E main -D CLAHE_PASS_APPLY -Fo src/shaders/clahe_apply.spv src/shaders/clahe.comp.hlsl
 if [ $? -eq 0 ]; then
     echo "      ✓ src/shaders/clahe_apply.spv created"
 else
     echo "      ✗ Failed to compile clahe_apply"
+    exit 1
+fi
+
+# Compile GPU Sensor compute shaders (5 passes)
+echo "[8/12] Compiling sensor_radiance_to_electrons.comp..."
+dxc $COMP_FLAGS -E main -Fo src/shaders/sensor_radiance_to_electrons.spv src/shaders/sensor_radiance_to_electrons.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/sensor_radiance_to_electrons.spv created"
+else
+    echo "      ✗ Failed to compile sensor_radiance_to_electrons"
+    exit 1
+fi
+
+echo "[9/12] Compiling sensor_poisson_noise.comp..."
+dxc $COMP_FLAGS -E main -Fo src/shaders/sensor_poisson_noise.spv src/shaders/sensor_poisson_noise.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/sensor_poisson_noise.spv created"
+else
+    echo "      ✗ Failed to compile sensor_poisson_noise"
+    exit 1
+fi
+
+echo "[10/12] Compiling sensor_psf_blur_horizontal.comp..."
+dxc $COMP_FLAGS -E main -D SENSOR_PSF_HORIZONTAL -Fo src/shaders/sensor_psf_blur_horizontal.spv src/shaders/sensor_psf_blur.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/sensor_psf_blur_horizontal.spv created"
+else
+    echo "      ✗ Failed to compile sensor_psf_blur_horizontal"
+    exit 1
+fi
+
+echo "[11/12] Compiling sensor_psf_blur_vertical.comp..."
+dxc $COMP_FLAGS -E main -D SENSOR_PSF_VERTICAL -Fo src/shaders/sensor_psf_blur_vertical.spv src/shaders/sensor_psf_blur.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/sensor_psf_blur_vertical.spv created"
+else
+    echo "      ✗ Failed to compile sensor_psf_blur_vertical"
+    exit 1
+fi
+
+echo "[12/12] Compiling sensor_quantize_to_radiance.comp..."
+dxc $COMP_FLAGS -E main -Fo src/shaders/sensor_quantize_to_radiance.spv src/shaders/sensor_quantize_to_radiance.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/sensor_quantize_to_radiance.spv created"
+else
+    echo "      ✗ Failed to compile sensor_quantize_to_radiance"
     exit 1
 fi
 

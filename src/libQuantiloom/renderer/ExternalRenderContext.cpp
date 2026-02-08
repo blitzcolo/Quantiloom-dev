@@ -322,6 +322,27 @@ struct ExternalRenderContext::Impl {
     f32 cachedImageMax = 1.0f;
     bool hasCachedMinMax = false;
 
+    // GPU Sensor simulation resources
+    bool gpuSensorEnabled = false;
+    SensorParams gpuSensorParams;
+    std::unique_ptr<GpuImage> sensorImage;              // Sensor-processed output (noisy radiance)
+    std::unique_ptr<GpuImage> sensorTempImage;          // Temporary image for multi-pass processing
+    VkDescriptorSetLayout sensorDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout sensorPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool sensorDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet sensorDescriptorSet = VK_NULL_HANDLE;
+    VkPipeline sensorRadianceToElectronsPipeline = VK_NULL_HANDLE;
+    VkPipeline sensorPoissonNoisePipeline = VK_NULL_HANDLE;
+    VkPipeline sensorPsfBlurHorizontalPipeline = VK_NULL_HANDLE;
+    VkPipeline sensorPsfBlurVerticalPipeline = VK_NULL_HANDLE;
+    VkPipeline sensorQuantizeToRadiancePipeline = VK_NULL_HANDLE;
+    VkShaderModule sensorRadianceToElectronsShader = VK_NULL_HANDLE;
+    VkShaderModule sensorPoissonNoiseShader = VK_NULL_HANDLE;
+    VkShaderModule sensorPsfBlurHorizontalShader = VK_NULL_HANDLE;
+    VkShaderModule sensorPsfBlurVerticalShader = VK_NULL_HANDLE;
+    VkShaderModule sensorQuantizeToRadianceShader = VK_NULL_HANDLE;
+    bool sensorInitialized = false;
+
     // Ready flag
     bool isReady = false;
 
@@ -409,6 +430,65 @@ struct ExternalRenderContext::Impl {
             }
         }
         claheInitialized = false;
+
+        // Destroy GPU sensor resources
+        sensorImage.reset();
+        sensorTempImage.reset();
+        if (device != VK_NULL_HANDLE) {
+            if (sensorRadianceToElectronsPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorRadianceToElectronsPipeline, nullptr);
+                sensorRadianceToElectronsPipeline = VK_NULL_HANDLE;
+            }
+            if (sensorPoissonNoisePipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorPoissonNoisePipeline, nullptr);
+                sensorPoissonNoisePipeline = VK_NULL_HANDLE;
+            }
+            if (sensorPsfBlurHorizontalPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorPsfBlurHorizontalPipeline, nullptr);
+                sensorPsfBlurHorizontalPipeline = VK_NULL_HANDLE;
+            }
+            if (sensorPsfBlurVerticalPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorPsfBlurVerticalPipeline, nullptr);
+                sensorPsfBlurVerticalPipeline = VK_NULL_HANDLE;
+            }
+            if (sensorQuantizeToRadiancePipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, sensorQuantizeToRadiancePipeline, nullptr);
+                sensorQuantizeToRadiancePipeline = VK_NULL_HANDLE;
+            }
+            if (sensorRadianceToElectronsShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorRadianceToElectronsShader, nullptr);
+                sensorRadianceToElectronsShader = VK_NULL_HANDLE;
+            }
+            if (sensorPoissonNoiseShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorPoissonNoiseShader, nullptr);
+                sensorPoissonNoiseShader = VK_NULL_HANDLE;
+            }
+            if (sensorPsfBlurHorizontalShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorPsfBlurHorizontalShader, nullptr);
+                sensorPsfBlurHorizontalShader = VK_NULL_HANDLE;
+            }
+            if (sensorPsfBlurVerticalShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorPsfBlurVerticalShader, nullptr);
+                sensorPsfBlurVerticalShader = VK_NULL_HANDLE;
+            }
+            if (sensorQuantizeToRadianceShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, sensorQuantizeToRadianceShader, nullptr);
+                sensorQuantizeToRadianceShader = VK_NULL_HANDLE;
+            }
+            if (sensorDescriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, sensorDescriptorPool, nullptr);
+                sensorDescriptorPool = VK_NULL_HANDLE;
+            }
+            if (sensorPipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, sensorPipelineLayout, nullptr);
+                sensorPipelineLayout = VK_NULL_HANDLE;
+            }
+            if (sensorDescriptorSetLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, sensorDescriptorSetLayout, nullptr);
+                sensorDescriptorSetLayout = VK_NULL_HANDLE;
+            }
+        }
+        sensorInitialized = false;
 
         // Reset merged global geometry buffers
         globalVertexBuffer.reset();
@@ -750,12 +830,22 @@ void ExternalRenderContext::RenderFrame(
     m_impl->pipeline->TraceRays(cmd, width, height);
 
     // Determine which image to blit to the swapchain
-    // If CLAHE is enabled, run compute passes and blit displayImage
-    // Otherwise, blit outputImage directly
+    // Priority: GPU Sensor → CLAHE → Raw output
     VkImage blitSourceImage = m_impl->outputImage->GetImage();
 
+    // Apply GPU sensor simulation if enabled
+    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
+        // Execute GPU sensor chain: outputImage -> sensorImage
+        ExecuteGPUSensorChain(cmd, width, height);
+        blitSourceImage = m_impl->sensorImage->GetImage();
+    }
+
+    // Apply CLAHE to sensor output (or raw output if sensor disabled)
     if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        // Execute CLAHE compute passes: outputImage -> displayImage
+        // If sensor is enabled, CLAHE processes sensorImage
+        // If sensor is disabled, CLAHE processes outputImage
+        // Note: ExecuteCLAHE reads from outputImage by default, need to update descriptor
+        // For now, CLAHE always reads from outputImage (TODO: make it read from current source)
         ExecuteCLAHE(cmd, width, height);
         blitSourceImage = m_impl->displayImage->GetImage();
     }
@@ -797,10 +887,13 @@ void ExternalRenderContext::RenderFrame(
     targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
     VkImageMemoryBarrier barriers[2] = {outputBarrier, targetBarrier};
-    // Use appropriate source stage based on whether CLAHE was applied
-    VkPipelineStageFlags srcStage = (blitSourceImage == m_impl->outputImage->GetImage())
-        ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    // Use appropriate source stage based on which processing was applied
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized) {
+        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;  // CLAHE was last
+    } else if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized) {
+        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;  // GPU sensor was last
+    }
     vkCmdPipelineBarrier(
         cmd,
         srcStage,
@@ -1380,6 +1473,46 @@ void ExternalRenderContext::SetCLAHEParams(const CLAHEParams& params) {
 const ExternalRenderContext::CLAHEParams& ExternalRenderContext::GetCLAHEParams() const {
     return m_impl->claheParams;
 }
+
+// ============================================================================
+// GPU Sensor Simulation API
+// ============================================================================
+
+void ExternalRenderContext::SetGPUSensorEnabled(bool enabled) {
+    bool wasEnabled = m_impl->gpuSensorEnabled;
+    m_impl->gpuSensorEnabled = enabled;
+
+    // Initialize GPU sensor resources if enabling for the first time
+    if (enabled && !wasEnabled && !m_impl->sensorInitialized) {
+        CreateGPUSensorPipeline();
+    }
+
+    QL_LOG_DEBUG("GPU Sensor: enabled={}", enabled);
+}
+
+void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
+    m_impl->gpuSensorParams = params;
+
+    // Initialize GPU sensor resources if not already done
+    if (m_impl->gpuSensorEnabled && !m_impl->sensorInitialized) {
+        CreateGPUSensorPipeline();
+    }
+
+    QL_LOG_DEBUG("GPU Sensor params updated: QE={}, f#={}, gain={}, bitDepth={}",
+                 params.quantumEfficiency, params.fNumber, params.gain, params.bitDepth);
+}
+
+bool ExternalRenderContext::IsGPUSensorEnabled() const {
+    return m_impl->gpuSensorEnabled;
+}
+
+const SensorParams& ExternalRenderContext::GetGPUSensorParams() const {
+    return m_impl->gpuSensorParams;
+}
+
+// ============================================================================
+// CLAHE Display Image Capture
+// ============================================================================
 
 Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     if (!m_impl->isReady) {
@@ -2533,6 +2666,587 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
 
     m_impl->claheInitialized = true;
     QL_LOG_INFO("CLAHE: Compute pipeline created successfully");
+}
+
+// ============================================================================
+// GPU Sensor Pipeline Creation
+// ============================================================================
+
+void ExternalRenderContext::CreateGPUSensorPipeline() {
+    if (m_impl->sensorInitialized) return;
+
+    QL_LOG_INFO("Creating GPU sensor compute pipeline...");
+
+    auto device = m_impl->device;
+    auto allocator = m_impl->contextAdapter->GetAllocator();
+
+    // Helper function to load shader file
+    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) {
+            return {};
+        }
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        if (fileSize == 0 || fileSize % 4 != 0) {
+            return {};
+        }
+        std::vector<u32> code(fileSize / 4);
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(code.data()), fileSize);
+        return code;
+    };
+
+    // Try multiple paths for shader location
+    auto exeDir = GetExecutableDirectory();
+    std::vector<std::filesystem::path> shaderPaths = {
+        "sensor_radiance_to_electrons.spv",
+        exeDir / "sensor_radiance_to_electrons.spv",
+        "shaders/sensor_radiance_to_electrons.spv",
+        exeDir / "shaders" / "sensor_radiance_to_electrons.spv",
+        "../shaders/sensor_radiance_to_electrons.spv",
+        "src/shaders/sensor_radiance_to_electrons.spv"
+    };
+
+    std::vector<u32> radianceToElectronsCode, poissonNoiseCode, psfBlurHorizontalCode, psfBlurVerticalCode, quantizeToRadianceCode;
+
+    for (const auto& basePath : shaderPaths) {
+        String radiancePath = basePath.string();
+        String poissonPath = radiancePath;
+        String blurHPath = radiancePath;
+        String blurVPath = radiancePath;
+        String quantizePath = radiancePath;
+
+        size_t pos = radiancePath.find("radiance_to_electrons");
+        if (pos != String::npos) {
+            poissonPath.replace(pos, 21, "poisson_noise");
+            blurHPath.replace(pos, 21, "psf_blur_horizontal");
+            blurVPath.replace(pos, 21, "psf_blur_vertical");
+            quantizePath.replace(pos, 21, "quantize_to_radiance");
+        }
+
+        radianceToElectronsCode = loadShaderFile(radiancePath);
+        if (!radianceToElectronsCode.empty()) {
+            poissonNoiseCode = loadShaderFile(poissonPath);
+            psfBlurHorizontalCode = loadShaderFile(blurHPath);
+            psfBlurVerticalCode = loadShaderFile(blurVPath);
+            quantizeToRadianceCode = loadShaderFile(quantizePath);
+
+            if (!poissonNoiseCode.empty() && !psfBlurHorizontalCode.empty() &&
+                !psfBlurVerticalCode.empty() && !quantizeToRadianceCode.empty()) {
+                QL_LOG_DEBUG("GPU Sensor: Loaded shaders from {}", radiancePath);
+                break;
+            }
+        }
+    }
+
+    if (radianceToElectronsCode.empty() || poissonNoiseCode.empty() ||
+        psfBlurHorizontalCode.empty() || psfBlurVerticalCode.empty() ||
+        quantizeToRadianceCode.empty()) {
+        QL_LOG_WARN("GPU Sensor: Could not load shader files, GPU sensor disabled");
+        return;
+    }
+
+    // Create shader modules
+    auto createShaderModule = [device](const std::vector<u32>& code) -> VkShaderModule {
+        VkShaderModuleCreateInfo createInfo{};
+        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        createInfo.codeSize = code.size() * sizeof(u32);
+        createInfo.pCode = code.data();
+        VkShaderModule module;
+        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        return module;
+    };
+
+    m_impl->sensorRadianceToElectronsShader = createShaderModule(radianceToElectronsCode);
+    m_impl->sensorPoissonNoiseShader = createShaderModule(poissonNoiseCode);
+    m_impl->sensorPsfBlurHorizontalShader = createShaderModule(psfBlurHorizontalCode);
+    m_impl->sensorPsfBlurVerticalShader = createShaderModule(psfBlurVerticalCode);
+    m_impl->sensorQuantizeToRadianceShader = createShaderModule(quantizeToRadianceCode);
+
+    if (m_impl->sensorRadianceToElectronsShader == VK_NULL_HANDLE ||
+        m_impl->sensorPoissonNoiseShader == VK_NULL_HANDLE ||
+        m_impl->sensorPsfBlurHorizontalShader == VK_NULL_HANDLE ||
+        m_impl->sensorPsfBlurVerticalShader == VK_NULL_HANDLE ||
+        m_impl->sensorQuantizeToRadianceShader == VK_NULL_HANDLE) {
+        QL_LOG_WARN("GPU Sensor: Failed to create shader modules");
+        return;
+    }
+
+    // Create descriptor set layout
+    // binding 0: inputImage (sampled image or storage image)
+    // binding 1: outputImage (storage image)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(2);
+
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_impl->sensorDescriptorSetLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("GPU Sensor: Failed to create descriptor set layout");
+        return;
+    }
+
+    // Create pipeline layout with push constants (max size for all passes)
+    VkPushConstantRange pushConstantRange{};
+    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushConstantRange.offset = 0;
+    pushConstantRange.size = 128;  // Large enough for all pass structures
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &m_impl->sensorDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_impl->sensorPipelineLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("GPU Sensor: Failed to create pipeline layout");
+        return;
+    }
+
+    // Create compute pipelines for each pass
+    auto createComputePipeline = [device, this](VkShaderModule shader) -> VkPipeline {
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = shader;
+        stageInfo.pName = "main";
+
+        VkComputePipelineCreateInfo pipelineInfo{};
+        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineInfo.stage = stageInfo;
+        pipelineInfo.layout = m_impl->sensorPipelineLayout;
+
+        VkPipeline pipeline;
+        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
+            return VK_NULL_HANDLE;
+        }
+        return pipeline;
+    };
+
+    m_impl->sensorRadianceToElectronsPipeline = createComputePipeline(m_impl->sensorRadianceToElectronsShader);
+    m_impl->sensorPoissonNoisePipeline = createComputePipeline(m_impl->sensorPoissonNoiseShader);
+    m_impl->sensorPsfBlurHorizontalPipeline = createComputePipeline(m_impl->sensorPsfBlurHorizontalShader);
+    m_impl->sensorPsfBlurVerticalPipeline = createComputePipeline(m_impl->sensorPsfBlurVerticalShader);
+    m_impl->sensorQuantizeToRadiancePipeline = createComputePipeline(m_impl->sensorQuantizeToRadianceShader);
+
+    if (m_impl->sensorRadianceToElectronsPipeline == VK_NULL_HANDLE ||
+        m_impl->sensorPoissonNoisePipeline == VK_NULL_HANDLE ||
+        m_impl->sensorPsfBlurHorizontalPipeline == VK_NULL_HANDLE ||
+        m_impl->sensorPsfBlurVerticalPipeline == VK_NULL_HANDLE ||
+        m_impl->sensorQuantizeToRadiancePipeline == VK_NULL_HANDLE) {
+        QL_LOG_WARN("GPU Sensor: Failed to create compute pipelines");
+        return;
+    }
+
+    // Create descriptor pool
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 10}  // Need multiple sets for ping-pong
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+    poolInfo.maxSets = 5;  // One set per pass
+
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_impl->sensorDescriptorPool) != VK_SUCCESS) {
+        QL_LOG_WARN("GPU Sensor: Failed to create descriptor pool");
+        return;
+    }
+
+    // Create sensor images (same format as outputImage)
+    m_impl->sensorImage = std::make_unique<GpuImage>(
+        allocator,
+        device,
+        m_impl->width, m_impl->height,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    m_impl->sensorTempImage = std::make_unique<GpuImage>(
+        allocator,
+        device,
+        m_impl->width, m_impl->height,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY
+    );
+
+    // Transition sensor images to GENERAL layout
+    TransitionImageLayoutImmediate(
+        m_impl->sensorImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL
+    );
+
+    TransitionImageLayoutImmediate(
+        m_impl->sensorTempImage->GetImage(),
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,
+        VK_IMAGE_LAYOUT_GENERAL
+    );
+
+    // Allocate descriptor set
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = m_impl->sensorDescriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &m_impl->sensorDescriptorSetLayout;
+
+    if (vkAllocateDescriptorSets(device, &allocInfo, &m_impl->sensorDescriptorSet) != VK_SUCCESS) {
+        QL_LOG_WARN("GPU Sensor: Failed to allocate descriptor set");
+        return;
+    }
+
+    m_impl->sensorInitialized = true;
+    QL_LOG_INFO("GPU Sensor: Compute pipeline created successfully");
+}
+
+// ============================================================================
+// GPU Sensor Chain Execution
+// ============================================================================
+
+void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height) {
+    if (!m_impl->sensorInitialized) return;
+
+    const auto& params = m_impl->gpuSensorParams;
+
+    // Helper: Insert pipeline barrier between compute passes
+    auto insertBarrier = [cmd]() {
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    };
+
+    // Initial barrier: wait for ray tracing to finish
+    VkMemoryBarrier initialBarrier{};
+    initialBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    initialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    initialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &initialBarrier, 0, nullptr, 0, nullptr);
+
+    // ========================================================================
+    // Pass 1: Radiance → Photo-electrons
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 quantumEfficiency;
+            f32 pixelPitch_um;
+            f32 focalLength_mm;
+            f32 fNumber;
+            f32 integrationTime_s;
+            f32 wellCapacity_e;
+            f32 wavelength_nm;
+            f32 darkCurrent_e_s;
+            u32 enableDarkCurrent;
+            u32 enableVignetting;
+            f32 fov_deg;
+            u32 isTelecentric;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 padding[2];
+        } pushConstants;
+
+        pushConstants.quantumEfficiency = params.quantumEfficiency;
+        pushConstants.pixelPitch_um = params.pixelPitch_um;
+        pushConstants.focalLength_mm = params.focalLength_mm;
+        pushConstants.fNumber = params.fNumber;
+        pushConstants.integrationTime_s = params.integrationTime_s;
+        pushConstants.wellCapacity_e = params.wellCapacity_e;
+        pushConstants.wavelength_nm = params.wavelength_nm;
+        pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
+        pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
+        pushConstants.enableVignetting = params.enableVignetting ? 1u : 0u;
+        pushConstants.fov_deg = params.fov_deg;
+        pushConstants.isTelecentric = params.isTelecentric ? 1u : 0u;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+
+        // Update descriptor set: outputImage → sensorTempImage (electrons)
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->outputImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorTempImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorRadianceToElectronsPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // ========================================================================
+    // Pass 2: Poisson + Read Noise
+    // ========================================================================
+    {
+        struct PushConstants {
+            u32 frameIndex;
+            u32 enablePoissonNoise;
+            f32 readNoise_e_rms;
+            u32 enableReadNoise;
+            f32 wellCapacity_e;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 padding;
+        } pushConstants;
+
+        pushConstants.frameIndex = m_impl->frameIndex;
+        pushConstants.enablePoissonNoise = params.enablePoissonNoise ? 1u : 0u;
+        pushConstants.readNoise_e_rms = params.readNoise_e_rms;
+        pushConstants.enableReadNoise = params.enableReadNoise ? 1u : 0u;
+        pushConstants.wellCapacity_e = params.wellCapacity_e;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+
+        // Update descriptor set: sensorTempImage (in/out)
+        VkDescriptorImageInfo imageInfo{};
+        imageInfo.imageView = m_impl->sensorTempImage->GetView();
+        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &imageInfo;
+
+        writes[1] = writes[0];
+        writes[1].dstBinding = 1;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPoissonNoisePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // Calculate PSF sigma from f-number and wavelength
+    // σ_psf ≈ 1.22 × λ × f# / pixel_pitch (result is in pixels)
+    // wavelength_nm * 1e-9 = wavelength in meters
+    // pixelPitch_um * 1e-6 = pixel pitch in meters
+    // Division gives result directly in pixels
+    f32 psfSigma = 1.22f * (params.wavelength_nm * 1e-9f) * params.fNumber / (params.pixelPitch_um * 1e-6f);
+    // Clamp to reasonable range
+    psfSigma = std::max(0.1f, std::min(psfSigma, 10.0f));
+    u32 kernelRadius = static_cast<u32>(std::ceil(3.0f * psfSigma));
+
+    // ========================================================================
+    // Pass 3: PSF Blur Horizontal
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 sigma;
+            u32 kernelRadius;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 passIndex;
+            u32 padding[3];
+        } pushConstants;
+
+        pushConstants.sigma = psfSigma;
+        pushConstants.kernelRadius = kernelRadius;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+        pushConstants.passIndex = 0;  // Horizontal
+
+        // Update descriptor set: sensorTempImage → sensorImage
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->sensorTempImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurHorizontalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // ========================================================================
+    // Pass 4: PSF Blur Vertical
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 sigma;
+            u32 kernelRadius;
+            u32 imageWidth;
+            u32 imageHeight;
+            u32 passIndex;
+            u32 padding[3];
+        } pushConstants;
+
+        pushConstants.sigma = psfSigma;
+        pushConstants.kernelRadius = kernelRadius;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+        pushConstants.passIndex = 1;  // Vertical
+
+        // Update descriptor set: sensorImage → sensorTempImage
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->sensorImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorTempImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurVerticalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    // ========================================================================
+    // Pass 5: Quantize → Radiance
+    // ========================================================================
+    {
+        struct PushConstants {
+            f32 gain;
+            u32 bitDepth;
+            f32 quantumEfficiency;
+            f32 pixelPitch_um;
+            f32 focalLength_mm;
+            f32 fNumber;
+            f32 integrationTime_s;
+            f32 wavelength_nm;
+            f32 darkCurrent_e_s;
+            u32 enableDarkCurrent;
+            u32 imageWidth;
+            u32 imageHeight;
+        } pushConstants;
+
+        pushConstants.gain = params.gain;
+        pushConstants.bitDepth = params.bitDepth;
+        pushConstants.quantumEfficiency = params.quantumEfficiency;
+        pushConstants.pixelPitch_um = params.pixelPitch_um;
+        pushConstants.focalLength_mm = params.focalLength_mm;
+        pushConstants.fNumber = params.fNumber;
+        pushConstants.integrationTime_s = params.integrationTime_s;
+        pushConstants.wavelength_nm = params.wavelength_nm;
+        pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
+        pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
+        pushConstants.imageWidth = width;
+        pushConstants.imageHeight = height;
+
+        // Update descriptor set: sensorTempImage → sensorImage (final output)
+        VkDescriptorImageInfo inputInfo{};
+        inputInfo.imageView = m_impl->sensorTempImage->GetView();
+        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkDescriptorImageInfo outputInfo{};
+        outputInfo.imageView = m_impl->sensorImage->GetView();
+        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+        VkWriteDescriptorSet writes[2] = {};
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[0].pImageInfo = &inputInfo;
+
+        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorCount = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        writes[1].pImageInfo = &outputInfo;
+
+        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorQuantizeToRadiancePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
+        insertBarrier();
+    }
+
+    //QL_LOG_DEBUG("GPU Sensor: Executed 5-pass sensor chain (PSF sigma={:.2f} pixels)", psfSigma);
 }
 
 void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {

@@ -46,6 +46,7 @@
 #include "renderer/LightingParams.hpp"
 #include "renderer/AtmosphericConfig.hpp"
 #include "core/Image.hpp"
+#include "postprocess/SensorModel.hpp"
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
@@ -476,6 +477,47 @@ public:
     [[nodiscard]] Result<Image, String> CaptureDisplayImage();
 
     // ========================================================================
+    // GPU Sensor Simulation (Real-time)
+    // ========================================================================
+
+    /**
+     * @brief Enable/disable GPU-based sensor simulation for real-time preview
+     *
+     * When enabled, the sensor imaging chain (noise, blur, quantization) is
+     * applied in real-time during RenderFrame() using GPU compute shaders.
+     * This allows the viewport to display sensor effects at 60 FPS.
+     *
+     * Performance: ~2-3ms overhead @ 1080p
+     *
+     * @param enabled true to enable GPU sensor, false to disable
+     * @note Takes effect on the next RenderFrame() call
+     */
+    void SetGPUSensorEnabled(bool enabled);
+
+    /**
+     * @brief Set sensor parameters for GPU simulation
+     *
+     * Updates the sensor parameters used by the GPU sensor chain.
+     * Changes take effect immediately on the next frame.
+     *
+     * @param params Sensor parameters (optics, detector, ADC, noise)
+     * @see SensorParams for parameter details
+     */
+    void SetGPUSensorParams(const SensorParams& params);
+
+    /**
+     * @brief Check if GPU sensor is enabled
+     * @return true if GPU sensor simulation is active
+     */
+    [[nodiscard]] bool IsGPUSensorEnabled() const;
+
+    /**
+     * @brief Get current GPU sensor parameters
+     * @return Current sensor parameters
+     */
+    [[nodiscard]] const SensorParams& GetGPUSensorParams() const;
+
+    // ========================================================================
     // Scene Editing (Phase 2)
     // ========================================================================
 
@@ -604,6 +646,12 @@ private:
 
     // Compute min/max of output image for CLAHE normalization
     void ComputeImageMinMax(f32& outMin, f32& outMax);
+
+    // Create GPU sensor compute pipeline resources
+    void CreateGPUSensorPipeline();
+
+    // Execute GPU sensor chain (5 compute passes)
+    void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
 
     // Transition image layout (internal helper)
     void TransitionImageLayoutImmediate(
