@@ -122,6 +122,19 @@ else()
 endif()
 
 # ============================================================================
+# GCC 13 ICE Workaround
+# ============================================================================
+# GCC 13.x has internal compiler errors (segfaults in RTL passes: reload,
+# cse_local, dse1, ree) when compiling C++20 code at -O2/-O3.
+# Use -O1 as workaround. Recommend upgrading to GCC 14+.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS "14")
+    string(REPLACE "-O3" "-O1" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}")
+    string(REPLACE "-O2" "-O1" CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
+    message(WARNING "GCC <14 detected: using -O1 to work around ICE bugs. "
+                    "Recommend upgrading to GCC 14+ for full optimization.")
+endif()
+
+# ============================================================================
 # Include Directories
 # ============================================================================
 
