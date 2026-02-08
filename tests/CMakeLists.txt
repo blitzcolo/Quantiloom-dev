@@ -219,6 +219,9 @@ set(TEST_RENDERER_SOURCES
 set(TEST_POSTPROCESS_SOURCES
     test_postprocess/test_generic_sensor.cpp
     test_postprocess/test_multiband_fusion.cpp
+    test_postprocess/test_gpu_sensor_math.cpp
+    test_postprocess/test_sensor_config.cpp
+    test_postprocess/test_sensor_chain_order.cpp
 )
 
 # Hyperspectral core tests
@@ -366,7 +369,7 @@ add_custom_target(test_renderer
 
 # Run only postprocess tests (sensor simulation, fusion)
 add_custom_target(test_postprocess
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=GenericSensorTest.*:MultibandFusionTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
