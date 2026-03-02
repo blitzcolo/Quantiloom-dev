@@ -66,6 +66,7 @@ class RayTracingPipeline;
 class TextureManager;
 class BLAS;
 class TLAS;
+struct ComplexRefractiveIndex;
 
 /**
  * @class ExternalRenderContext
@@ -549,6 +550,17 @@ public:
      * @param material New material properties
      */
     void UpdateMaterial(u32 materialIndex, const Material& material);
+
+    /**
+     * @brief Add complex refractive index data for physical Fresnel
+     * @param cri CPU-side complex refractive index (n,k curves)
+     * @return Index into CRI buffer (for Material::complexRefractiveIndexIndex)
+     *
+     * Converts CRI to GPU format (ComplexRefractiveIndexGPU, 64 uniform samples),
+     * appends to CRI buffer, and rebinds descriptor. The returned index can be
+     * assigned to Material::complexRefractiveIndexIndex before calling UpdateMaterial().
+     */
+    i32 AddComplexRefractiveIndex(const ComplexRefractiveIndex& cri);
 
     /**
      * @brief Rebuild acceleration structure after scene changes

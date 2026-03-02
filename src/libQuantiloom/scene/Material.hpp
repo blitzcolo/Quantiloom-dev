@@ -158,6 +158,14 @@ struct QL_API Material {
     SpectralSource spectralSource = SpectralSource::Unknown;
 
     // ========================================================================
+    // Complex Refractive Index (for physical Fresnel)
+    // ========================================================================
+    // Index into the CRI buffer (binding 14) for wavelength-dependent Fresnel.
+    // -1 = use standard PBR Schlick approximation (backward compatible default)
+    // >= 0 = use physical Fresnel with measured n(λ), k(λ) data
+    i32 complexRefractiveIndexIndex = -1;
+
+    // ========================================================================
     // Infrared Material Properties (for MWIR/LWIR modes)
     // ========================================================================
     // Spectral curves for infrared rendering (3-12μm wavelength range)

@@ -22,6 +22,7 @@
 
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
+#include "core/SpectralData.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/UsdLoader.hpp"
 #include "io/ImageIO.hpp"
@@ -242,6 +243,9 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> solarLutBuffer;
     std::unique_ptr<GpuBuffer> atmosphericBuffer;
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
+
+    // CRI management (CPU-side copy for rebuild when new entries are added)
+    std::vector<ComplexRefractiveIndexGPU> criEntries;
 
     // Merged global geometry buffers (for multi-BLAS support)
     // All BLAS geometry data is merged into single global buffers
@@ -1277,6 +1281,58 @@ const LightingParams& ExternalRenderContext::GetLightingParams() const {
 }
 
 // ============================================================================
+// Material CPU↔GPU conversion helper
+// ============================================================================
+
+static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
+    MaterialDataCPU cpuMat{};
+    cpuMat.baseColorFactor = mat.baseColorFactor;
+    cpuMat.baseColorTextureIndex = mat.baseColorTextureIndex;
+    cpuMat.metallicFactor = mat.metallicFactor;
+    cpuMat.roughnessFactor = mat.roughnessFactor;
+    cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
+    cpuMat.normalTextureIndex = mat.normalTextureIndex;
+    cpuMat.normalScale = mat.normalScale;
+    cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
+    cpuMat.emissiveFactor = mat.emissiveFactor;
+    cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
+    cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
+    cpuMat.alphaCutoff = mat.alphaCutoff;
+    cpuMat.spectralAlbedo = mat.spectralAlbedo;
+    cpuMat.spectralReflectanceCurveIndex = -1;
+    cpuMat.irEmissivity = 0.0f;
+    cpuMat.irTransmittance = 0.0f;
+    cpuMat.irTemperature_K = mat.irTemperature_K;
+    cpuMat.complexRefractiveIndexIndex = mat.complexRefractiveIndexIndex;
+
+    // Temperature texture fields (per-pixel temperature map)
+    cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
+    cpuMat.temperatureScale = mat.temperatureScale;
+    cpuMat.temperatureOffset = mat.temperatureOffset;
+    cpuMat._padding3 = 0.0f;
+
+    // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
+    cpuMat.ior = mat.ior;
+    cpuMat.transmission = mat.transmission;
+    cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
+    cpuMat._padding1 = 0.0f;
+    cpuMat.attenuationColor = mat.attenuationColor;
+    cpuMat.attenuationDistance = mat.attenuationDistance;
+    cpuMat.thicknessFactor = mat.thicknessFactor;
+    cpuMat.thicknessTextureIndex = mat.thicknessTextureIndex;
+    cpuMat.dispersion = mat.dispersion;
+    cpuMat._padding2 = 0.0f;
+
+    // Volume properties (fog, smoke, SSS)
+    cpuMat.volumeDensity = mat.volumeDensity;
+    cpuMat.scatteringCoeff = mat.scatteringCoeff;
+    cpuMat.absorptionCoeff = mat.absorptionCoeff;
+    cpuMat.phaseG = mat.phaseG;
+
+    return cpuMat;
+}
+
+// ============================================================================
 // Scene Editing (Stubs for Phase 2)
 // ============================================================================
 
@@ -1313,10 +1369,71 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
 }
 
 void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& material) {
-    // TODO: Implement in Phase 2
-    (void)materialIndex;
-    (void)material;
-    QL_LOG_WARN("ExternalRenderContext::UpdateMaterial not implemented yet");
+    if (!m_impl->scene) {
+        QL_LOG_WARN("UpdateMaterial: No scene loaded");
+        return;
+    }
+    if (materialIndex >= m_impl->scene->materials.size()) {
+        QL_LOG_WARN("UpdateMaterial: Invalid material index {}", materialIndex);
+        return;
+    }
+    if (!m_impl->materialBuffer) {
+        QL_LOG_WARN("UpdateMaterial: No material buffer");
+        return;
+    }
+
+    // 1. Update CPU-side scene data
+    m_impl->scene->materials[materialIndex] = material;
+
+    // 2. Convert to GPU format
+    MaterialDataCPU cpuMat = ConvertMaterialToCPU(material);
+
+    // 3. Partial upload at offset
+    VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
+    m_impl->materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
+
+    // 4. Reset accumulation (visual feedback)
+    m_impl->accumulatedSamples = 0;
+
+    QL_LOG_DEBUG("UpdateMaterial: Updated material {} ('{}')", materialIndex, material.name);
+}
+
+i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveIndex& cri) {
+    if (!cri.IsValid()) {
+        QL_LOG_WARN("AddComplexRefractiveIndex: Invalid CRI data");
+        return -1;
+    }
+
+    // Convert CPU → GPU format (resample to uniform 64-sample grid)
+    ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
+
+    // Append to entries
+    i32 index = static_cast<i32>(m_impl->criEntries.size());
+    m_impl->criEntries.push_back(gpuCRI);
+
+    // Rebuild GPU buffer
+    auto allocator = m_impl->contextAdapter->GetAllocator();
+    m_impl->criBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU
+    );
+    m_impl->criBuffer->Upload(
+        m_impl->criEntries.data(),
+        m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU));
+
+    // Rebind descriptor
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindComplexRefractiveIndexBuffer(m_impl->criBuffer.get());
+    }
+
+    QL_LOG_INFO("AddComplexRefractiveIndex: Added CRI at index {} "
+                "(wavelength range: {:.0f}-{:.0f} nm, {} samples)",
+                index, cri.wavelengths_nm.front(), cri.wavelengths_nm.back(),
+                cri.wavelengths_nm.size());
+
+    return index;
 }
 
 void ExternalRenderContext::RebuildAccelerationStructure() {
@@ -2014,51 +2131,7 @@ void ExternalRenderContext::UpdateGpuResources() {
     materialData.reserve(m_impl->scene->materials.size());
 
     for (const auto& mat : m_impl->scene->materials) {
-        MaterialDataCPU cpuMat{};
-        cpuMat.baseColorFactor = mat.baseColorFactor;
-        cpuMat.baseColorTextureIndex = mat.baseColorTextureIndex;
-        cpuMat.metallicFactor = mat.metallicFactor;
-        cpuMat.roughnessFactor = mat.roughnessFactor;
-        cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
-        cpuMat.normalTextureIndex = mat.normalTextureIndex;
-        cpuMat.normalScale = mat.normalScale;
-        cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
-        cpuMat.emissiveFactor = mat.emissiveFactor;
-        cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
-        cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
-        cpuMat.alphaCutoff = mat.alphaCutoff;
-        cpuMat.spectralAlbedo = mat.spectralAlbedo;
-        cpuMat.spectralReflectanceCurveIndex = -1;
-        cpuMat.irEmissivity = 0.0f;
-        cpuMat.irTransmittance = 0.0f;
-        cpuMat.irTemperature_K = mat.irTemperature_K;
-        cpuMat.complexRefractiveIndexIndex = -1;
-
-        // Temperature texture fields (per-pixel temperature map)
-        cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
-        cpuMat.temperatureScale = mat.temperatureScale;
-        cpuMat.temperatureOffset = mat.temperatureOffset;
-        cpuMat._padding3 = 0.0f;
-
-        // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
-        cpuMat.ior = mat.ior;
-        cpuMat.transmission = mat.transmission;
-        cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
-        cpuMat._padding1 = 0.0f;
-        cpuMat.attenuationColor = mat.attenuationColor;
-        cpuMat.attenuationDistance = mat.attenuationDistance;
-        cpuMat.thicknessFactor = mat.thicknessFactor;
-        cpuMat.thicknessTextureIndex = mat.thicknessTextureIndex;
-        cpuMat.dispersion = mat.dispersion;
-        cpuMat._padding2 = 0.0f;
-
-        // Volume properties (fog, smoke, SSS)
-        cpuMat.volumeDensity = mat.volumeDensity;
-        cpuMat.scatteringCoeff = mat.scatteringCoeff;
-        cpuMat.absorptionCoeff = mat.absorptionCoeff;
-        cpuMat.phaseG = mat.phaseG;
-
-        materialData.push_back(cpuMat);
+        materialData.push_back(ConvertMaterialToCPU(mat));
     }
 
     if (!materialData.empty()) {
