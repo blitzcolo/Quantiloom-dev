@@ -4,8 +4,8 @@
 // Tests cover:
 // - Scene::FromConfig TOML parsing
 // - Camera configuration loading
-// - Spectral band parsing (MS-RT mode)
-// - Wavelength range parsing (HS-OFF mode)
+// - Spectral band parsing (band mode)
+// - Wavelength range parsing (continuous mode)
 // - Resolution configuration
 // - Scene validation
 // - Metadata parsing
@@ -175,7 +175,7 @@ step_nm = 5.0
 // Spectral Configuration Tests
 // ============================================================================
 
-TEST_F(SceneTest, HSOffModeConfiguration) {
+TEST_F(SceneTest, ContinuousModeConfiguration) {
     std::string configContent = R"(
 [renderer]
 resolution = [640, 480]
@@ -190,7 +190,7 @@ range_nm = [380.0, 760.0]
 step_nm = 5.0
 )";
 
-    auto filepath = GetTempFilePath("hsoff_config.toml");
+    auto filepath = GetTempFilePath("continuous_config.toml");
     CreateConfigFile(filepath, configContent);
 
     auto config = Config::Load(filepath.string());
@@ -203,10 +203,10 @@ step_nm = 5.0
     EXPECT_NEAR(scene.lambda_min, 380.0f, 1e-5f);
     EXPECT_NEAR(scene.lambda_max, 760.0f, 1e-5f);
     EXPECT_NEAR(scene.delta_lambda, 5.0f, 1e-5f);
-    EXPECT_TRUE(scene.bands.empty());  // No bands in HS-OFF mode
+    EXPECT_TRUE(scene.bands.empty());  // No discrete bands in continuous mode
 }
 
-TEST_F(SceneTest, MSRTModeBandsConfiguration) {
+TEST_F(SceneTest, BandModeConfiguration) {
     std::string configContent = R"(
 [renderer]
 resolution = [640, 480]
@@ -232,7 +232,7 @@ center_nm = 650.0
 fwhm_nm = 50.0
 )";
 
-    auto filepath = GetTempFilePath("msrt_config.toml");
+    auto filepath = GetTempFilePath("band_config.toml");
     CreateConfigFile(filepath, configContent);
 
     auto config = Config::Load(filepath.string());
@@ -255,7 +255,7 @@ fwhm_nm = 50.0
     EXPECT_NEAR(scene.bands[2].center_nm, 650.0f, 1e-5f);
 }
 
-TEST_F(SceneTest, MSRTModeMultipleBands) {
+TEST_F(SceneTest, BandModeMultipleBands) {
     std::string configContent = R"(
 [renderer]
 resolution = [640, 480]

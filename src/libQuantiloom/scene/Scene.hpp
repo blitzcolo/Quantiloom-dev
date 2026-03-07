@@ -148,8 +148,8 @@ public:
     std::vector<Texture> textures;       // Texture images (CPU-side data)
 
     // Spectral configuration
-    std::vector<SpectralBand> bands;  // For MS-RT mode
-    f32 lambda_min = 380.0f;          // For HS-OFF mode (nm)
+    std::vector<SpectralBand> bands;  // Discrete band definitions
+    f32 lambda_min = 380.0f;          // Continuous wavelength range start (nm)
     f32 lambda_max = 760.0f;
     f32 delta_lambda = 5.0f;
 

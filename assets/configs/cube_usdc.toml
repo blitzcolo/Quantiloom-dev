@@ -1,5 +1,5 @@
 # ============================================================================
-# Quantiloom - glTF PBR Test Configuration
+# Quantiloom - cube.usdc Test Configuration
 # ============================================================================
 # This configuration loads a glTF 2.0 model with full PBR material support
 # ============================================================================
@@ -7,8 +7,8 @@
 [renderer]
 resolution = [1280, 1280]      # Output resolution
 spp = 16                        # Samples per pixel (M1: single sample)
-output = "gltf_pbr_output.exr" # Output file path (OpenEXR format)
-environment_map = "D:/Quantiloom-dev/assets/maps/qwantani_noon_puresky_4k.exr"  # EXR environment map
+output = "cube_usdc_output.exr" # Output file path (OpenEXR format)
+environment_map = ""  # EXR environment map
 
 [spectral]
 # ============================================================================
@@ -40,8 +40,8 @@ mode = "rgb"                         # RGB mode for full color rendering
 # Available materials files:
 #   - "quantiloom_materials_usgs.json" : USGS data source, VIS/NIR/SWIR only
 #   - "quantiloom_materials_rii.json" : RefractiveIndex.info data source, VIS/NIR/SWIR/MWIR/LWIR included
-basis_file = "D:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
-materials_json = "D:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+basis_file = ""
+materials_json = ""
 band = "VIS"  # or "NIR", "SWIR", "MWIR", "LWIR"
 
 [scene]
@@ -65,7 +65,7 @@ world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 [camera]
 # Camera setup for viewing the glTF model
 # Adjust position and look_at based on your model's size and location
-position = [0.0, 0.0, 3.0]     # Camera position (world space, meters)
+position = [1.7, 2.0, 3.0]     # Camera position (world space, meters)
 look_at = [0.0, 0.0, 0.0]      # Look-at target (usually model center)
 up = [0.0, 1.0, 0.0]           # Up vector (Y-up coordinate system)
 fov_y = 45.0                   # Vertical field of view (degrees)
@@ -78,8 +78,8 @@ fov_y = 45.0                   # Vertical field of view (degrees)
 # Sky: ambient hemispherical lighting (diffuse approximation)
 # ============================================================================
 sun_direction = [0.5, 0.8, 0.3]   # FROM surface TO sun (normalized automatically)
-sun_radiance = [5.0, 5.0, 5.0]    # Sun radiance (RGB, averaged to spectral scalar)
-sky_radiance = [0.5, 0.7, 1.0]    # Sky radiance (RGB, averaged to spectral scalar)
+sun_radiance = [1.0, 1.0, 1.0]    # Sun radiance (RGB, averaged to spectral scalar)
+sky_radiance = [0.7, 0.7, 0.7]    # Sky radiance (RGB, averaged to spectral scalar)
 #solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"   # Solar LUT for MODTRAN, if not povided, will use sun_radiance and sky_radiance as fallback
 atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default sky. 280K: Warm sky. 290K: Tropical humid sky.
 
@@ -88,16 +88,16 @@ atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default 
 albedo = [0.8, 0.8, 0.8]
 
 # ============================================================================
-# Quality Control (for HS-OFF / quantitative modes)
+# Quality Control (for quantitative spectral rendering)
 # ============================================================================
 [quality]
-# Enforce spectral data validation for HS-OFF mode (R5 risk mitigation)
+# Enforce spectral data validation for quantitative mode (R5 risk mitigation)
 # If true, rendering will abort if RGB-upsampled materials are detected
 fail_on_srgb_upsample = false     # Set to true for strict quantitative mode
 log_material_sources = true       # Log spectral source for each material
 
 # ============================================================================
-# Spectral Curves for Quantitative Rendering (HS-OFF Mode)
+# Spectral Curves for Quantitative Rendering
 # ============================================================================
 # Map glTF material names to measured spectral reflectance CSV files.
 # Format: "MaterialName" = "path/to/reflectance.csv"
@@ -116,7 +116,7 @@ log_material_sources = true       # Log spectral source for each material
 # NOTE: The material name must match the glTF material name exactly.
 #
 # NOTE: If a material is not listed here, it will use RGB→Spectrum upsampling
-# (approximate, not physically accurate). For quantitative rendering (HS-OFF),
+# (approximate, not physically accurate). For quantitative rendering,
 # ALL materials should have measured spectral curves.
 # ============================================================================
 # [spectral_curves]
@@ -165,7 +165,7 @@ log_material_sources = true       # Log spectral source for each material
 # If enabled, simulates realistic sensor characteristics (PSF blur, noise, ADC).
 # ============================================================================
 [sensor]
-enabled = true                 # Set to true to enable sensor simulation
+enabled = false                 # Set to true to enable sensor simulation
 
 # Optics parameters (aggressive settings for demo)
 focal_length_mm = 50.0          # Focal length (mm)
@@ -184,10 +184,10 @@ bit_depth = 12                  # ADC bit depth (12/14/16) - LOWER BIT DEPTH = V
 gain = 5.0                      # Gain (electrons/DN) - HIGHER GAIN to avoid saturation
 
 # Noise flags (all enabled for maximum realism)
-enable_poisson_noise = true     # Shot noise (photon counting)
-enable_read_noise = true        # Readout noise
-enable_dark_current = true      # Dark current noise
-enable_fpn = true                # Fixed pattern noise (PRNU/DSNU)
+enable_poisson_noise = false     # Shot noise (photon counting)
+enable_read_noise = false        # Readout noise
+enable_dark_current = false      # Dark current noise
+enable_fpn = false                # Fixed pattern noise (PRNU/DSNU)
 
 # FPN parameters (Fixed Pattern Noise) - Only used if enable_fpn = true
 [sensor.fpn]
@@ -209,7 +209,7 @@ detector_temperature_k = 77.0   # Detector temperature (K) for IR
 [fusion]
 # Fusion algorithm selection
 # Options: "laplacian_pyramid", "weighted_average", "max_response", "pseudo_color"
-method = "weighted_average"
+method = ""
 
 # Auto-normalization (applies to all methods)
 auto_normalize = true           # Normalize each band to [0, 1] before fusion

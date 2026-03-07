@@ -88,16 +88,16 @@ atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default 
 albedo = [0.8, 0.8, 0.8]
 
 # ============================================================================
-# Quality Control (for HS-OFF / quantitative modes)
+# Quality Control (for quantitative spectral rendering)
 # ============================================================================
 [quality]
-# Enforce spectral data validation for HS-OFF mode (R5 risk mitigation)
+# Enforce spectral data validation for quantitative mode (R5 risk mitigation)
 # If true, rendering will abort if RGB-upsampled materials are detected
 fail_on_srgb_upsample = false     # Set to true for strict quantitative mode
 log_material_sources = true       # Log spectral source for each material
 
 # ============================================================================
-# Spectral Curves for Quantitative Rendering (HS-OFF Mode)
+# Spectral Curves for Quantitative Rendering
 # ============================================================================
 # Map glTF material names to measured spectral reflectance CSV files.
 # Format: "MaterialName" = "path/to/reflectance.csv"
@@ -116,7 +116,7 @@ log_material_sources = true       # Log spectral source for each material
 # NOTE: The material name must match the glTF material name exactly.
 #
 # NOTE: If a material is not listed here, it will use RGB→Spectrum upsampling
-# (approximate, not physically accurate). For quantitative rendering (HS-OFF),
+# (approximate, not physically accurate). For quantitative rendering,
 # ALL materials should have measured spectral curves.
 # ============================================================================
 # [spectral_curves]

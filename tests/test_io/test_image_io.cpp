@@ -223,7 +223,7 @@ TEST_F(ImageIOTest, PreserveMetadata) {
     Image original(10, 10, 3);
 
     original.metadata["spp"] = "64";
-    original.metadata["mode"] = "MS-RT";
+    original.metadata["mode"] = "multispectral";
     original.metadata["seconds_per_frame"] = "2.5";
     original.metadata["renderer"] = "Quantiloom";
 
@@ -236,7 +236,7 @@ TEST_F(ImageIOTest, PreserveMetadata) {
 
     // Metadata should be preserved
     EXPECT_EQ(loaded->metadata["spp"], "64");
-    EXPECT_EQ(loaded->metadata["mode"], "MS-RT");
+    EXPECT_EQ(loaded->metadata["mode"], "multispectral");
     EXPECT_EQ(loaded->metadata["seconds_per_frame"], "2.5");
     EXPECT_EQ(loaded->metadata["renderer"], "Quantiloom");
 }

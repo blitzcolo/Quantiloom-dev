@@ -74,7 +74,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
     // Spectral Configuration
     // ========================================================================
 
-    // MS-RT mode: band definitions
+    // Discrete band definitions
     if (config.Has("spectral.bands")) {
         // Use GetTableArray to parse array of tables without exposing toml++
         auto bandConfigs = config.GetTableArray("spectral.bands");
@@ -96,7 +96,7 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
         }
     }
 
-    // HS-OFF mode: wavelength range
+    // Continuous wavelength range
     if (config.Has("spectral.range_nm")) {
         if (auto range = config.GetArray<f32>("spectral.range_nm"); range.size() == 2) {
             scene.lambda_min = range[0];
@@ -155,7 +155,7 @@ bool Scene::IsValid() const {
         return false;
     }
 
-    // Must have either bands (MS-RT) or wavelength range (HS-OFF)
+    // Must have either discrete bands or a valid wavelength range
     if (bands.empty() && (lambda_min >= lambda_max || delta_lambda <= 0.0f)) {
         return false;
     }
@@ -209,14 +209,14 @@ void Scene::PrintSummary() const {
 
     QL_LOG_INFO("Spectral:");
     if (!bands.empty()) {
-        QL_LOG_INFO("  Mode: MS-RT");
+        QL_LOG_INFO("  Mode: Band");
         QL_LOG_INFO("  Bands: {}", bands.size());
         for (const auto&[bandName, center_nm, fwhm_nm] : bands) {
             QL_LOG_INFO("    - {}: {:.1f} nm (FWHM: {:.1f} nm)",
                         bandName, center_nm, fwhm_nm);
         }
     } else {
-        QL_LOG_INFO("  Mode: HS-OFF");
+        QL_LOG_INFO("  Mode: Continuous");
         QL_LOG_INFO("  Range: {:.1f} - {:.1f} nm", lambda_min, lambda_max);
         QL_LOG_INFO("  Step: {:.1f} nm", delta_lambda);
         u32 numBands = static_cast<u32>((lambda_max - lambda_min) / delta_lambda) + 1;

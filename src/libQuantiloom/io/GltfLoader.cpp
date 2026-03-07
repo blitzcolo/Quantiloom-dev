@@ -399,7 +399,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         mat.metallicFactor = 0.0f;
         mat.roughnessFactor = 1.0f;
         mat.ComputeSpectralAlbedo();
-        // Mark as RGB-upsampled (not suitable for quantitative HS-OFF)
+        // Mark as RGB-upsampled (not suitable for quantitative spectral rendering)
         mat.spectralSource = Material::SpectralSource::RGBUpsampled;
         return mat;
     }
@@ -469,7 +469,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     // Compute spectral albedo for M1 compatibility
     mat.ComputeSpectralAlbedo();
 
-    // Mark as RGB-upsampled (not suitable for quantitative HS-OFF)
+    // Mark as RGB-upsampled (not suitable for quantitative spectral rendering)
     mat.spectralSource = Material::SpectralSource::RGBUpsampled;
 
     // ========================================================================

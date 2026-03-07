@@ -84,7 +84,7 @@ struct Image {
     std::vector<std::string> channelNames;
 
     // Generic metadata (key-value pairs)
-    // e.g., {"spp": "64", "mode": "MS-RT", "seconds_per_frame": "2.3"}
+    // e.g., {"spp": "64", "mode": "rgb", "seconds_per_frame": "2.3"}
     std::unordered_map<std::string, std::string> metadata;
 
     // ========================================================================

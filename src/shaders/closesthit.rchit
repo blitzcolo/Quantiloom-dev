@@ -936,7 +936,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //   3. Integrate via CIE XYZ color matching functions
         //   4. Convert XYZ → Linear RGB (sRGB D65)
         //
-        // This is the TRUE HS-OFF spectral rendering for visible light.
+        // This is the full spectral rendering path for visible light.
         // Performance: ~10-15x slower than RGB mode, but physically accurate.
         //
         // SPECTRAL REFLECTANCE SOURCE (priority order):
@@ -1156,7 +1156,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
         // ====================================================================
-        // Single Wavelength Mode: True Spectral Rendering (HS-OFF Quantitative)
+        // Single Wavelength Mode: True Spectral Rendering (Quantitative)
         // ====================================================================
         // For single wavelength, we:
         // 1. Query physical spectral reflectance curve if available
@@ -1196,7 +1196,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         if (material.spectralReflectanceCurveIndex >= 0) {
             // QUANTITATIVE PATH: Use physically-measured spectral reflectance curve
-            // This enables true HS-OFF mode with physical accuracy
+            // This enables physically-accurate spectral rendering
             spectralAlbedo = EvaluateSpectralCurve(
                 spectralCurves,
                 material.spectralReflectanceCurveIndex,

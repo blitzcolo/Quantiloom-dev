@@ -6,18 +6,18 @@ The project's methodology is "Validation-Gated", ensuring physical consistency b
 
 ## Key Features
 
-Quantiloom operates in two distinct modes from a single, configurable codebase:
+Quantiloom supports two spectral configurations from a single, unified codebase:
 
-### 1. Quantiloom MS-RT (Multispectral Fast Preview)
+### 1. Band Mode (Discrete Multispectral)
 
-* Provides interactive, multi-band previews intended for rapid visualization.
+* Defines discrete spectral bands for interactive, multi-band previews.
 * Performance is measured in seconds-per-frame.
 * Uses efficient band-pass integral estimation with Mixed Importance Sampling (MIS).
 * Employs a `LUT-fast` model for atmosphere (sky/sun lookup) without path-traced volumetric scattering.
 
-### 2. Quantiloom HS-OFF (Hyperspectral Offline)
+### 2. Continuous Mode (Full Spectral Range)
 
-* A high-fidelity, per-wavelength ("point-render") mode for generating high-spectral-resolution data cubes.
+* A high-fidelity, per-wavelength ("point-render") configuration for generating high-spectral-resolution data cubes.
 * Designed for quantitative comparison and validation against models like MODTRAN.
 * Features a full, physically-based volume rendering pipeline, including Rayleigh and Mie scattering.
 * Implements unbiased Delta-Tracking (Woodcock tracking) to support heterogeneous media like clouds or fog.

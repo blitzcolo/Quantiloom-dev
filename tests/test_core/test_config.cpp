@@ -160,13 +160,13 @@ TEST_F(ConfigTest, GetFloat) {
 TEST_F(ConfigTest, GetString) {
     auto filepath = CreateTOML("test.toml", R"(
         name = "Quantiloom"
-        mode = "HS-OFF"
+        mode = "continuous"
     )");
 
     auto config = Config::Load(filepath).value();
 
     EXPECT_EQ(config.Get<String>("name", ""), "Quantiloom");
-    EXPECT_EQ(config.Get<String>("mode", ""), "HS-OFF");
+    EXPECT_EQ(config.Get<String>("mode", ""), "continuous");
 }
 
 TEST_F(ConfigTest, GetBoolean) {
@@ -350,7 +350,7 @@ TEST_F(ConfigTest, ComplexNestedStructure) {
         [renderer]
         resolution = [1280, 720]
         spp = 4
-        preset = "MS-RT"
+        preset = "band"
         seconds_per_frame = true
 
         [spectral]
@@ -375,7 +375,7 @@ TEST_F(ConfigTest, ComplexNestedStructure) {
 
     // Test top-level access
     EXPECT_EQ(config.Get<i32>("renderer.spp", 0), 4);
-    EXPECT_EQ(config.Get<String>("renderer.preset", ""), "MS-RT");
+    EXPECT_EQ(config.Get<String>("renderer.preset", ""), "band");
     EXPECT_TRUE(config.Get<bool>("renderer.seconds_per_frame", false));
 
     // Test array access

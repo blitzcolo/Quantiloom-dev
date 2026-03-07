@@ -142,11 +142,11 @@ struct QL_API Material {
     // NEW (M2+): Index into Scene::spectralReflectanceCurves array
     // -1 = no spectral curve (fallback to spectralAlbedo scalar)
     // >=0 = index into spectral curve buffer for physically-based spectral rendering
-    // This enables full spectral fidelity for HS-OFF quantitative mode
+    // This enables full spectral fidelity for quantitative spectral rendering
     i32 spectralReflectanceCurveIndex = -1;
 
     // ========================================================================
-    // Spectral Data Source Tracking (for HS-OFF validation)
+    // Spectral Data Source Tracking (for quantitative validation)
     // ========================================================================
     // Tracks the origin of spectral data to enforce quality gates
     enum class SpectralSource : u32 {

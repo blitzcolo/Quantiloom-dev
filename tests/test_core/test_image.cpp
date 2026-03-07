@@ -203,11 +203,11 @@ TEST(ImageTest, MetadataStorage) {
     Image img(10, 10, 3);
 
     img.metadata["spp"] = "64";
-    img.metadata["mode"] = "MS-RT";
+    img.metadata["mode"] = "multispectral";
     img.metadata["seconds_per_frame"] = "2.5";
 
     EXPECT_EQ(img.metadata["spp"], "64");
-    EXPECT_EQ(img.metadata["mode"], "MS-RT");
+    EXPECT_EQ(img.metadata["mode"], "multispectral");
     EXPECT_EQ(img.metadata["seconds_per_frame"], "2.5");
     EXPECT_EQ(img.metadata.size(), 3);
 }

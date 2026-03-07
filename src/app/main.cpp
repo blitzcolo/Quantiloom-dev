@@ -776,7 +776,7 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  {} textures uploaded", textureManager.GetTextureCount());
 
         // ====================================================================
-        // Load Spectral Curves from CSV (for quantitative HS-OFF mode)
+        // Load Spectral Curves from CSV (for quantitative spectral rendering)
         // ====================================================================
         // Config format:
         //   [spectral_curves]

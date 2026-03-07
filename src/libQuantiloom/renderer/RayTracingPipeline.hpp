@@ -233,7 +233,7 @@ public:
     // ========================================================================
     // Spectral Curves Buffer (Binding 13)
     // ========================================================================
-    // Bind measured spectral reflectance curves for quantitative HS-OFF mode
+    // Bind measured spectral reflectance curves for quantitative spectral rendering
     // Each curve is a SpectralCurveGPU struct (272 bytes) with uniform sampling
     // ========================================================================
 
