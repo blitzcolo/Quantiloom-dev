@@ -410,6 +410,9 @@ add_subdirectory(src/shaders)
 # Core library
 add_subdirectory(src/libQuantiloom)
 
+# IR material generator (depends on libQuantiloom)
+add_subdirectory(src/libSpectraForge)
+
 # Main application
 add_subdirectory(src/app)
 

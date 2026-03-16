@@ -1,0 +1,21 @@
+#pragma once
+
+// ============================================================================
+// libSpectraForge Version Info (Auto-generated from CMake)
+// ============================================================================
+
+#define SPECTRAFORGE_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define SPECTRAFORGE_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define SPECTRAFORGE_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define SPECTRAFORGE_VERSION_STRING "@PROJECT_VERSION@"
+
+namespace spectraforge {
+namespace version {
+
+inline constexpr int Major = SPECTRAFORGE_VERSION_MAJOR;
+inline constexpr int Minor = SPECTRAFORGE_VERSION_MINOR;
+inline constexpr int Patch = SPECTRAFORGE_VERSION_PATCH;
+inline constexpr const char* String = SPECTRAFORGE_VERSION_STRING;
+
+} // namespace version
+} // namespace spectraforge

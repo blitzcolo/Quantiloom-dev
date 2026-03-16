@@ -28,10 +28,11 @@ target_include_directories(Quantiloom
         ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "Version.hpp"
 )
 
-# Link against the core library
+# Link against the core library and SpectraForge
 target_link_libraries(Quantiloom
     PRIVATE
         libQuantiloom
+        libSpectraForge
 )
 
 # C++20 standard and RPATH set to executable directory
@@ -52,6 +53,14 @@ if(WIN32)
             "$<TARGET_FILE:libQuantiloom>"
             "$<TARGET_FILE_DIR:Quantiloom>"
         COMMENT "Copying Quantiloom.dll to executable directory"
+    )
+
+    add_custom_command(
+        TARGET Quantiloom POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:libSpectraForge>"
+            "$<TARGET_FILE_DIR:Quantiloom>"
+        COMMENT "Copying SpectraForge.dll to executable directory"
     )
 
     # Copy OpenUSD DLLs if enabled
