@@ -40,7 +40,8 @@ class BandConfig:
 
     def get_wavelength_grid(self) -> np.ndarray:
         """Generate uniform wavelength grid in micrometers."""
-        wl_nm = np.arange(self.start_nm, self.end_nm + self.interval_nm, self.interval_nm)
+        num_samples = int(round((self.end_nm - self.start_nm) / self.interval_nm)) + 1
+        wl_nm = np.linspace(self.start_nm, self.end_nm, num_samples)
         return wl_nm / 1000.0  # Convert to micrometers
 
 
