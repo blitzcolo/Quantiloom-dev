@@ -26,7 +26,7 @@ constexpr double STEFAN_BOLTZMANN = 5.670374419e-8;  // W·m⁻²·K⁻⁴
 
 // Pre-computed constants (CORRECTED)
 constexpr double C1_NM = 1.191042972e20;  // 2 × h × c² × 1e36 (W·nm⁴·sr⁻¹·m⁻²)
-constexpr double C2 = 1.43877736e-2;      // h × c / k (m·K)
+constexpr double C2 = 1.438776877e-2;      // h × c / k (m·K)
 
 // Wien's displacement constant
 constexpr double WIEN_CONSTANT = 2.897771955e-3;  // m·K
@@ -116,7 +116,7 @@ TEST(BlackbodyPhysicsTest, RoomTemperature300K_WienPeak) {
     // For 300K: λ_peak = 2.8978×10⁻³ / 300 = 9.659 μm
     double peak_wavelength_nm = IRWienPeakWavelength(300.0);
 
-    EXPECT_NEAR(peak_wavelength_nm, 9659.0, 1.0);  // 9.659 μm (tolerance: 1 nm)
+    EXPECT_NEAR(peak_wavelength_nm, 9659.24, 1.0);  // 9.659 μm (tolerance: 1 nm)
 }
 
 TEST(BlackbodyPhysicsTest, RoomTemperature300K_RadianceAtPeak) {
