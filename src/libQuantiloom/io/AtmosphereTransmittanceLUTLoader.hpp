@@ -20,7 +20,7 @@ namespace fs = std::filesystem;
 //
 //   Structure:
 //   ┌─────────────────────────────────────┐
-//   │  TOML Header (1024 bytes, padded)   │  <- Human-readable metadata
+//   │  TOML Header (2048 bytes, padded)   │  <- Human-readable metadata
 //   ├─────────────────────────────────────┤
 //   │  Transmittance Data (float32[])     │  <- Binary, C-order
 //   ├─────────────────────────────────────┤

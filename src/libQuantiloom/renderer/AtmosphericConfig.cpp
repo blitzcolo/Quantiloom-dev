@@ -16,7 +16,7 @@ AtmosphericConfig::AtmosphericConfig() {
     rayleigh_scale_height = 8500.0f;
 
     mie_enabled = true;
-    mie_beta_550nm = 2.0e-6f;
+    mie_beta_550nm = 1.70e-4f;
     mie_scale_height = 1200.0f;
     mie_g = 0.76f;
     mie_alpha = 0.84f;
@@ -40,7 +40,7 @@ auto AtmosphericConfig::ClearDay() -> AtmosphericConfig {
     config.rayleigh_scale_height = 8500.0f;
 
     config.mie_enabled = true;
-    config.mie_beta_550nm = 2.0e-6f;    // Clear visibility (~23km)
+    config.mie_beta_550nm = 1.70e-4f;    // Clear visibility (~23km)
     config.mie_scale_height = 1200.0f;
     config.mie_g = 0.76f;
     config.mie_alpha = 0.84f;
@@ -57,14 +57,14 @@ auto AtmosphericConfig::ClearDay() -> AtmosphericConfig {
 
 auto AtmosphericConfig::Hazy() -> AtmosphericConfig {
     AtmosphericConfig config = ClearDay();
-    config.mie_beta_550nm = 10.0e-6f;   // Reduced visibility (~4.5km)
+    config.mie_beta_550nm = 8.69e-4f;   // Reduced visibility (~4.5km)
     config.mie_g = 0.80f;               // More forward scattering
     return config;
 }
 
 auto AtmosphericConfig::PollutedUrban() -> AtmosphericConfig {
     AtmosphericConfig config = ClearDay();
-    config.mie_beta_550nm = 20.0e-6f;   // Very low visibility (~2km)
+    config.mie_beta_550nm = 1.96e-3f;   // Very low visibility (~2km)
     config.mie_scale_height = 800.0f;   // Lower aerosol layer
     config.mie_g = 0.82f;
     return config;
@@ -72,7 +72,7 @@ auto AtmosphericConfig::PollutedUrban() -> AtmosphericConfig {
 
 auto AtmosphericConfig::MountainTop() -> AtmosphericConfig {
     AtmosphericConfig config = ClearDay();
-    config.mie_beta_550nm = 0.5e-6f;    // Extremely clear (~90km visibility)
+    config.mie_beta_550nm = 4.35e-5f;    // Extremely clear (~90km visibility)
     config.rayleigh_beta_550nm = 4.0e-6f; // Thinner atmosphere
     return config;
 }
