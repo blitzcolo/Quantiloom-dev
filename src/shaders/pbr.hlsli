@@ -171,6 +171,40 @@ float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness)
 }
 
 // ============================================================================
+// Helper: Compute F0 (normal incidence reflectance)
+// ============================================================================
+// Computes F0 for both RGB and spectral paths, with optional physical n,k data.
+//
+// PHYSICAL PATH (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0):
+//   - Query measured complex refractive index at current wavelength
+//   - Use exact Fresnel equation: F0 = [(n-1)^2 + k^2] / [(n+1)^2 + k^2]
+//
+// PBR PATH (index < 0 or wavelength invalid):
+//   - Standard approximation: F0 = lerp(0.04, albedo, metallic)
+// ============================================================================
+
+float3 ComputeF0(float3 albedo, float metallic,
+                 int complexRefractiveIndexIndex, float wavelength_nm) {
+    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float F0_physical = FresnelF0(nk.x, nk.y);
+        return float3(F0_physical, F0_physical, F0_physical);
+    }
+    return lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+}
+
+float ComputeF0_Scalar(float spectralAlbedo, float metallic,
+                       int complexRefractiveIndexIndex, float wavelength_nm) {
+    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        return FresnelF0(nk.x, nk.y);
+    }
+    return lerp(0.04, spectralAlbedo, metallic);
+}
+
+// ============================================================================
 // Cook-Torrance Microfacet BRDF
 // ============================================================================
 // Full PBR BRDF combining diffuse and specular terms
@@ -182,6 +216,8 @@ float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness)
 // - albedo: Base color (linear RGB, [0,1])
 // - metallic: Metalness [0,1] (0=dielectric, 1=metal)
 // - roughness: Roughness [0,1] (0=smooth, 1=rough)
+// - complexRefractiveIndexIndex: Index into gComplexRefractiveIndices (-1 = none)
+// - wavelength_nm: Current wavelength for spectral lookup (>0 = valid)
 //
 // Output:
 // - BRDF value (unitless, multiply by incident radiance and NdotL for final color)
@@ -206,7 +242,9 @@ float3 CookTorranceBRDF(
     float3 L,
     float3 albedo,
     float metallic,
-    float roughness
+    float roughness,
+    int complexRefractiveIndexIndex,
+    float wavelength_nm
 ) {
     // OPTIMIZATION: Clamp minimum roughness to prevent numerical instability
     // Perfectly smooth surfaces (roughness=0) lead to Dirac delta distribution
@@ -226,16 +264,24 @@ float3 CookTorranceBRDF(
     float VdotH = max(dot(V, H), 0.0);
 
     // Compute F0 (reflectance at normal incidence)
-    // For dielectrics: F0 = 0.04 (approximate for common materials)
-    // For metals: F0 = albedo (colored reflection)
-    float3 F0 = lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    // Uses physical n,k data when available for wavelength-accurate metals
+    float3 F0 = ComputeF0(albedo, metallic, complexRefractiveIndexIndex, wavelength_nm);
 
     // ========================================================================
     // Specular Term (Cook-Torrance microfacet BRDF) - OPTIMIZED
     // ========================================================================
 
-    // Fresnel term
-    float3 F = FresnelSchlick(F0, VdotH);
+    // Fresnel term: use exact conductor Fresnel when n,k data is available
+    float3 F;
+    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        F = float3(FresnelConductor(VdotH, nk.x, nk.y),
+                   FresnelConductor(VdotH, nk.x, nk.y),
+                   FresnelConductor(VdotH, nk.x, nk.y));
+    } else {
+        F = FresnelSchlick(F0, VdotH);
+    }
 
     // Normal distribution function (GGX)
     float alpha = roughness * roughness;  // Perceptually linear roughness
@@ -271,10 +317,10 @@ float3 CookTorranceBRDF(
 }
 
 // ============================================================================
-// Simplified PBR for Spectral Mode (M1 Compatibility)
+// Native Scalar Spectral Cook-Torrance BRDF
 // ============================================================================
-// Evaluates PBR using scalar spectralAlbedo instead of RGB
-// Useful for single-wavelength rendering
+// Computes the BRDF as a scalar directly without constructing float3 and
+// averaging channels. Uses exact conductor Fresnel when n,k data is available.
 // ============================================================================
 
 float CookTorranceBRDF_Spectral(
@@ -283,15 +329,43 @@ float CookTorranceBRDF_Spectral(
     float3 L,
     float spectralAlbedo,
     float metallic,
-    float roughness
+    float roughness,
+    int complexRefractiveIndexIndex,
+    float wavelength_nm
 ) {
-    // Use grayscale albedo for spectral mode
-    float3 albedo = float3(spectralAlbedo, spectralAlbedo, spectralAlbedo);
+    const float MIN_ROUGHNESS = 0.045;
+    roughness = max(roughness, MIN_ROUGHNESS);
 
-    float3 brdf = CookTorranceBRDF(N, V, L, albedo, metallic, roughness);
+    float3 H = SafeHalfVector(V, L, N);
 
-    // Return average of RGB channels (they should be identical for grayscale input)
-    return (brdf.r + brdf.g + brdf.b) / 3.0;
+    float NdotV = max(dot(N, V), EPSILON);
+    float NdotL = max(dot(N, L), EPSILON);
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
+
+    // Compute F0 and Fresnel term
+    float F0 = ComputeF0_Scalar(spectralAlbedo, metallic, complexRefractiveIndexIndex, wavelength_nm);
+
+    float F;
+    if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
+        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
+        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        F = FresnelConductor(VdotH, nk.x, nk.y);
+    } else {
+        F = FresnelSchlick(F0, VdotH);
+    }
+
+    float alpha = roughness * roughness;
+    float D = DistributionGGX(NdotH, alpha);
+    float Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
+
+    float specular = D * F * Vis;
+
+    // Diffuse term
+    float kD = (1.0 - F) * (1.0 - metallic);
+    float diffuse = kD * spectralAlbedo / PI;
+
+    return diffuse + specular;
 }
 
 // ============================================================================

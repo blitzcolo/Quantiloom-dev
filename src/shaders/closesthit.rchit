@@ -721,7 +721,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, camera.wavelength_nm);
 
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
     // L_out = BRDF * L_sun * τ(λ, d) * (N · L)
@@ -1034,7 +1034,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
-            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness);
+            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda);
 
             // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) × shadow + kD × ρ(λ)/π × L_sky(λ)
             // shadowFactor is computed in RGB mode block and reused here for consistency
@@ -1221,7 +1221,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             L,
             spectralAlbedo,
             metallic,
-            roughness
+            roughness,
+            material.complexRefractiveIndexIndex,
+            lambda
         );
 
         // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L) * shadow
