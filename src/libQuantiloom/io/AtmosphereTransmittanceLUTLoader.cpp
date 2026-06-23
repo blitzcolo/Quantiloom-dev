@@ -247,6 +247,8 @@ auto AtmosphereTransmittanceLUTLoader::ParseHeader(const String& header,
         lut.source = config["metadata"]["source"].value_or("Unknown");
         lut.created = config["metadata"]["created"].value_or("");
         lut.atmospheric_model = config["metadata"]["atmospheric_model"].value_or("Unknown");
+        lut.ihaze   = config["metadata"]["ihaze"].value_or(4);
+        lut.weather = config["metadata"]["weather"].value_or(0);
 
         // Parse wavelength axis (uniform)
         if (auto wave = config["grid"]["wavelength"].as_table()) {
@@ -322,6 +324,8 @@ auto AtmosphereTransmittanceLUTLoader::GenerateHeader(const AtmosphereTransmitta
     ss << "source = \"" << lut.source << "\"\n";
     ss << "created = \"" << lut.created << "\"\n";
     ss << "atmospheric_model = \"" << lut.atmospheric_model << "\"\n";
+    ss << "ihaze = " << lut.ihaze << "\n";
+    ss << "weather = " << lut.weather << "\n";
     ss << "format_version = " << FORMAT_VERSION << "\n";
     ss << "\n";
 

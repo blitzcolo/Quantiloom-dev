@@ -81,6 +81,7 @@ add_library(libQuantiloom SHARED
     scene/MeshOptimizer.hpp
     scene/NormalGenerator.cpp
     scene/NormalGenerator.hpp
+    scene/BRDFModels.hpp
     scene/Material.cpp
     scene/Material.hpp
     scene/Texture.hpp

@@ -455,6 +455,52 @@ float3 EvaluateIBLSpecular(
 // - Kulla & Conty, "Revisiting Physically Based Shading at Imageworks", SIGGRAPH 2017
 // - Turquin, "Practical multiple scattering compensation for microfacet models", 2019
 // - Fdez-Agüera, "A Multiple-Scattering Microfacet Model for Real-Time IBL", JCGT 2021
+
+// ============================================================================
+// PCG Random + Importance Sampling for IR Monte Carlo Reflection
+// ============================================================================
+
+uint pcg_hash(uint s) { s = s*747796405u + 2891336453u; s = ((s>>((s>>28)+4))^s)*277803737u; return (s>>22)^s; }
+float pcg_float(inout uint s) { s = pcg_hash(s); return float(s) * (1.0/4294967296.0); }
+
+// Build orthonormal basis around N
+void BuildBasis(float3 N, out float3 T, out float3 B) {
+    float3 up = abs(N.z) < 0.999 ? float3(0,0,1) : float3(1,0,0);
+    T = normalize(cross(up, N));
+    B = cross(N, T);
+}
+
+// GGX importance sample — returns world-space wi, outputs pdf
+float3 ImportanceSampleGGX_PCG(float3 N, float3 V, float alpha, inout uint rng, out float pdf) {
+    float u1 = pcg_float(rng), u2 = pcg_float(rng);
+    float a2 = alpha * alpha;
+    float cosTheta = sqrt((1.0 - u1) / max(1.0 + (a2 - 1.0)*u1, 1e-7));
+    float sinTheta = sqrt(max(1.0 - cosTheta*cosTheta, 0.0));
+    float phi = 2.0 * PI * u2;
+    float3 H_local = float3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);
+    float3 T, B;
+    BuildBasis(N, T, B);
+    float3 H = normalize(T*H_local.x + B*H_local.y + N*H_local.z);
+    float3 wi = reflect(-V, H);
+    float NdotH = max(dot(N, H), 0.0);
+    float VdotH = max(dot(V, H), 0.0);
+    float D = a2 / (PI * pow(NdotH*NdotH*(a2-1.0)+1.0, 2.0));
+    pdf = (D * NdotH) / max(4.0*VdotH, 1e-7);
+    return wi;
+}
+
+// Cosine-weighted hemisphere sample — for rough/Lambertian surfaces
+float3 CosineSampleHemisphere_PCG(float3 N, inout uint rng, out float pdf) {
+    float u1 = pcg_float(rng), u2 = pcg_float(rng);
+    float r = sqrt(u1);
+    float phi = 2.0 * PI * u2;
+    float3 wi_local = float3(r*cos(phi), r*sin(phi), sqrt(max(1.0-u1, 0.0)));
+    float3 T, B;
+    BuildBasis(N, T, B);
+    float3 wi = normalize(T*wi_local.x + B*wi_local.y + N*wi_local.z);
+    pdf = max(dot(N, wi), 0.0) / PI;
+    return wi;
+}
 // - Heitz et al., "Multiple-scattering microfacet BSDFs with the Smith model", SIGGRAPH 2016
 // ============================================================================
 

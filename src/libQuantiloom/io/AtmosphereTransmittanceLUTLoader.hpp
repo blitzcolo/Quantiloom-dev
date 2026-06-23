@@ -51,8 +51,8 @@ namespace fs = std::filesystem;
 //   values = [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 85.0]
 //
 //   [data]
-//   header_size = 1024
-//   transmittance_offset = 1024
+//   header_size = 2048
+//   transmittance_offset = 2048
 //   transmittance_count = 297501
 //   path_radiance_offset = 2191028
 //   path_radiance_count = 297501
@@ -107,7 +107,7 @@ public:
     // ========================================================================
     // File Format Constants
     // ========================================================================
-    static constexpr usize HEADER_SIZE = 1024;  // Fixed TOML header size (bytes)
+    static constexpr usize HEADER_SIZE = 2048;  // Fixed TOML header size (bytes)
     static constexpr const char* FILE_EXTENSION = ".qlut";
     static constexpr u32 FORMAT_VERSION = 1;
 

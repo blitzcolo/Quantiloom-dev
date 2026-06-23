@@ -22,7 +22,7 @@
  * - Custom LUT generation scripts (see scripts/atmosphere-qlut-gen/)
  *
  * File format (.qlut):
- * - TOML header (1024 bytes): Metadata (wavelength range, altitude, angles, etc.)
+ * - TOML header (2048 bytes): Metadata (wavelength range, altitude, angles, etc.)
  * - Binary data (float32 arrays): Transmittance and path radiance in C-order
  *
  * @note Use AtmosphereTransmittanceLUTLoader to load .qlut files
@@ -157,13 +157,15 @@ struct AtmosphereTransmittanceLUT {
     String source;         // Generation source (e.g., "libRadtran 2.0.4")
     String created;        // Creation date (ISO 8601)
     String atmospheric_model;  // Atmospheric model (e.g., "US_Standard_1976")
+    i32 ihaze   = 4;       // MODTRAN IHAZE aerosol model (0-6)
+    i32 weather = 0;       // Weather condition (0=clear)
 
     // ========================================================================
     // Axes
     // ========================================================================
     UniformAxis    wavelength;   // Wavelength in nm (uniform sampling)
     UniformAxis    altitude;     // Observer altitude in meters (uniform sampling)
-    NonUniformAxis zenith;       // Zenith angle in degrees (non-uniform)
+    NonUniformAxis zenith;       // Solar zenith angle in degrees (non-uniform)
 
     // ========================================================================
     // Data Arrays

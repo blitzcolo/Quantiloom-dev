@@ -59,4 +59,34 @@ else()
     target_compile_options(libSpectraForge PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
 
+# ============================================================================
+# Install Targets (included in SDK via cmake --install)
+# ============================================================================
+
+include(GNUInstallDirs)
+
+# Install library binary (.dll/.so + .lib import stub)
+install(TARGETS libSpectraForge
+    EXPORT QuantiloomTargets
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+# Install public headers (flat — no subdirectories in libSpectraForge)
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/spectraforge
+    FILES_MATCHING
+        PATTERN "*.hpp"
+        PATTERN "*.h"
+    PATTERN "*.cpp" EXCLUDE
+    PATTERN "*.rc" EXCLUDE
+    PATTERN "*.in" EXCLUDE
+)
+
+# Install generated version header
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/LibVersion.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/spectraforge
+)
+
 message(STATUS "libSpectraForge configured successfully")

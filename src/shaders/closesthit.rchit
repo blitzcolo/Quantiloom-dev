@@ -1560,9 +1560,36 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_emission = emissivity * L_blackbody;
             }
 
-            // 2. Reflected atmospheric downwelling radiation: ρ(λ) × L_atmosphere(T_atm, λ)
-            float L_downwelling = IRPlanckRadiance(T_atmosphere, lambda);
-            float L_reflected_atm = reflectance * L_downwelling;
+            // 2. Reflected environmental IR radiance via Monte Carlo hemisphere sampling
+            float L_reflected_atm = 0.0;
+            if (payload.depth < 2) {
+                float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+                float pdf_ir;
+                float3 wi_ir = (roughness > 0.5)
+                    ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_ir)
+                    : ImportanceSampleGGX_PCG(normal, -WorldRayDirection(), roughness*roughness, payload.rngState, pdf_ir);
+                float NdotWi = dot(normal, wi_ir);
+                if (NdotWi > 0.0 && pdf_ir > 1e-6) {
+                    RayDesc irRay;
+                    irRay.Origin    = irHitPos + normal * 1e-3;
+                    irRay.Direction = wi_ir;
+                    irRay.TMin      = 0.0;
+                    irRay.TMax      = 1e9;
+                    Payload irPayload;
+                    irPayload.radiance   = float3(0,0,0);
+                    irPayload.depth      = payload.depth + 1;
+                    irPayload.rngState   = payload.rngState;
+                    irPayload.isShadowed = 0;
+                    irPayload.dDdx       = float3(0,0,0);
+                    irPayload.dDdy       = float3(0,0,0);
+                    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
+                    // fr = reflectance/PI (Lambertian); importance sampling cancels PI for cosine path
+                    L_reflected_atm = irPayload.radiance.r * (reflectance / pdf_ir) * NdotWi;
+                }
+            } else {
+                // Fallback at max depth: fixed atmospheric Planck
+                L_reflected_atm = reflectance * IRPlanckRadiance(T_atmosphere, lambda);
+            }
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
             float L_reflected_sun = 0.0;

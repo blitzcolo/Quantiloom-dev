@@ -38,6 +38,7 @@
 
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
+#include "scene/BRDFModels.hpp"
 #include <glm/glm.hpp>
 #include <string>
 
@@ -265,6 +266,20 @@ struct QL_API Material {
     [[nodiscard]] bool HasQuantiloomRef() const {
         return !quantiloomMaterialType.empty() && !quantiloomMaterialRef.empty();
     }
+
+    // ========================================================================
+    // BRDF Model Selection (CPU-side analytical evaluation)
+    // ========================================================================
+    enum class BRDFModel : uint8_t {
+        CookTorrance = 0,  // default GPU path (GGX in pbr.hlsli)
+        Lambertian,        // brdf_lambertian
+        FiveParam,         // brdf_5p
+        KernelDriven,      // brdf_kernel_driven (RossThick-LiTransit)
+        Ocean,             // brdf_ocean (Cox-Munk)
+        StaylorSuttles,    // brdf_staylor_suttles
+        Otterman,          // brdf_otterman
+    };
+    BRDFModel brdfModel = BRDFModel::CookTorrance;
 
     // ========================================================================
     // Metadata
