@@ -18,6 +18,24 @@
 #ifndef QUANTILOOM_PBR_HLSLI
 #define QUANTILOOM_PBR_HLSLI
 
+#include "common.hlsli"
+
+// ============================================================================
+// Complex Refractive Index Buffer (binding 14)
+// ============================================================================
+// Complex refractive index (n, k) for physical conductor Fresnel, indexed by
+// MaterialData::complexRefractiveIndexIndex. Declared here because the BRDF
+// functions below read it directly; entry shaders must not redeclare it.
+// Data source: RefractiveIndex.INFO database (measured metal optical constants)
+//
+// When complexRefractiveIndexIndex >= 0, use physical Fresnel equation:
+//   F = FresnelConductor(cosθ, n(λ), k(λ))
+// Otherwise, use standard PBR approximation:
+//   F = F0 + (1-F0) * (1-cosθ)^5
+// ============================================================================
+
+[[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+
 static const float PI = 3.14159265358979323846;
 static const float EPSILON = 1e-6;
 

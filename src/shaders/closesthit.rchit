@@ -55,25 +55,8 @@
 
 [[vk::binding(13, 0)]] StructuredBuffer<SpectralCurveGPU> spectralCurves;
 
-// ============================================================================
-// NEW (M2+): Complex Refractive Index Buffer
-// ============================================================================
-// Buffer of complex refractive index (n, k) for physical Fresnel calculation
-// Indexed by MaterialData::complexRefractiveIndexIndex
-// Data source: RefractiveIndex.INFO database (measured metal optical constants)
-//
-// PHYSICS:
-// - Metal surfaces: Use measured n,k for accurate wavelength-dependent Fresnel
-// - Dielectrics: k ≈ 0 (transparent), n determines refraction
-// - Semiconductors: Wavelength-dependent n,k (silicon, germanium)
-//
-// When complexRefractiveIndexIndex >= 0, use physical Fresnel equation:
-//   F = FresnelConductor(cosθ, n(λ), k(λ))
-// Otherwise, use standard PBR approximation:
-//   F = F0 + (1-F0) * (1-cosθ)^5
-// ============================================================================
-
-[[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+// NOTE: Complex refractive index buffer (binding 14) is declared in pbr.hlsli
+// because the BRDF functions there read it directly.
 
 // ============================================================================
 // NEW (M2+): Solar Spectral LUT Buffer
