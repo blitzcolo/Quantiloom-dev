@@ -1,5 +1,21 @@
 name: Build Linux
 
+# ============================================================================
+# OpenUSD Support (Optional)
+# ============================================================================
+# This workflow builds WITHOUT OpenUSD by default. USD file loading will return
+# an error message indicating OpenUSD is not available.
+#
+# To enable OpenUSD support:
+# 1. Build OpenUSD using scripts/build_openusd.sh (takes 30-60 minutes)
+# 2. Cache the build result (see commented section below)
+# 3. Set -DUSD_ROOT=/opt/openusd in CMake configure step
+#
+# OpenUSD adds ~300-500MB to the build and enables:
+# - Full USD composition (sublayers, references, payloads, variants)
+# - Production-grade USD scene loading (NVIDIA Attic, etc.)
+# ============================================================================
+
 on:
   push:
     branches: [ main, develop, claude/* ]
