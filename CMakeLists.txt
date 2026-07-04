@@ -87,8 +87,13 @@ if(MSVC)
         /wd4251
         /permissive-
         /Zc:__cplusplus
-        #/source-charset:utf-8
-        #/execution-charset:gbk
+        # Sources are UTF-8 without BOM. Without this flag MSVC parses them in
+        # the system codepage (GBK), where multibyte comment characters can
+        # swallow the newline and eat the next line of code (C2065 errors).
+        # /utf-8 sets BOTH source and execution charset, so narrow string
+        # literals keep their UTF-8 bytes -- identical runtime behavior to the
+        # old GBK byte-passthrough parse.
+        /utf-8
     )
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()

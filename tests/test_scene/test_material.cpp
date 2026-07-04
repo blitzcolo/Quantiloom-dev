@@ -619,12 +619,14 @@ TEST(MaterialTest, GetIRReflectance_CurveQuery) {
     EXPECT_NEAR(mat.GetIRReflectance(4000.0f), 0.20f, 1e-6f);  // Interpolation
 }
 
-TEST(MaterialTest, GetIRReflectance_FallbackToSpectralAlbedo) {
-    // When reflectance curve is empty, fallback to spectralAlbedo
+TEST(MaterialTest, GetIRReflectance_FallbackToNeutralDefault) {
+    // When the reflectance curve is empty, fall back to the neutral IR
+    // reflectance 0.1 -- NOT spectralAlbedo, which is a visible-RGB average
+    // and not physically valid in MWIR/LWIR (see Material.hpp, commit a8509a3).
     Material mat;
-    mat.spectralAlbedo = 0.5f;
+    mat.spectralAlbedo = 0.5f;  // must be ignored by the fallback
     // irReflectanceCurve is empty
 
-    EXPECT_NEAR(mat.GetIRReflectance(5000.0f), 0.5f, 1e-6f);
+    EXPECT_NEAR(mat.GetIRReflectance(5000.0f), 0.1f, 1e-6f);
 }
 

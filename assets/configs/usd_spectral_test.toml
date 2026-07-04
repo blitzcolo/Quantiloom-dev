@@ -51,7 +51,7 @@ band = "VIS"
 #   }
 #
 # ============================================================================
-gltf = "D:/Quantiloom-Qt/assets/models/222.glb"
+usd = "D:/Quantiloom-Qt/assets/models/cube.usdc"
 world_units_to_meters = 1.0
 
 [camera]
@@ -88,10 +88,10 @@ dark_current_e_s = 50.0
 integration_time_s = 0.01
 bit_depth = 12
 gain = 5.0
-enable_poisson_noise = true
-enable_read_noise = true
-enable_dark_current = true
-enable_fpn = true
+enable_poisson_noise = false
+enable_read_noise = false
+enable_dark_current = false
+enable_fpn = false
 
 [sensor.fpn]
 prnu_sigma = 0.03
@@ -105,5 +105,5 @@ detector_temperature_k = 77.0
 # ============================================================================
 [atmospheric]
 preset = "disabled"
-rayleigh_enabled = true
-mie_enabled = true
+rayleigh_enabled = false
+mie_enabled = false

@@ -15,16 +15,26 @@ cd "$(dirname "$0")"
 cmd.exe /c "src\\shaders\\compile_shaders.bat" </dev/null
 
 cmake.exe -B build -G "Visual Studio 18 2026" -A x64 \
-    -DQUANTILOOM_BUILD_TESTS=OFF \
     -DQUANTILOOM_USE_BC7ENC=OFF \
     -DQUANTILOOM_USE_OPENUSD=ON \
     -DUSD_ROOT=C:/openusd
 
-cmake.exe --build build --config Release -j
+# MSBuild quiet verbosity: warnings and errors still print in full; per-file
+# compile lines and POST_BUILD copy chatter are suppressed.
+cmake.exe --build build --config Release -j -- /v:q /nologo
 
-# --- Install (only reached on successful build) ------------------------------
+# --- Test gate ---------------------------------------------------------------
+# No CI runs this suite; this is the only automated gate. A red suite must
+# never reach the install step, or broken code lands in the SDK consumed by
+# Quantiloom-Qt. (~2 s for the full suite, cheap insurance.)
+# --gtest_brief prints only failures and the final summary.
+
+./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1
+
+# --- Install (only reached on successful build + green tests) ----------------
 
 rm -rf /mnt/d/Quantiloom-SDK/windows_amd64
-cmake.exe --install build --prefix D:/Quantiloom-SDK/windows_amd64 --config Release
+# Per-file "Installing:" lines go to stdout (dropped); errors go to stderr (kept).
+cmake.exe --install build --prefix D:/Quantiloom-SDK/windows_amd64 --config Release >/dev/null
 
 echo "Build and install OK: D:\\Quantiloom-SDK\\windows_amd64"

@@ -49,7 +49,9 @@ TEST_F(AtmosphericConfigTest, ClearDayPresetHasReasonableValues) {
     EXPECT_TRUE(clearDay.rayleigh_enabled);
     EXPECT_TRUE(clearDay.mie_enabled);
     EXPECT_NEAR(clearDay.rayleigh_beta_550nm, 5.8e-6f, 1e-7f);
-    EXPECT_NEAR(clearDay.mie_beta_550nm, 2.0e-6f, 1e-7f);
+    // 1.70e-4 /m -> Koschmieder visibility ~23 km, a realistic clear day.
+    // (The old pinned value 2.0e-6 implied 1956 km visibility; see ATM-01/ATM-21.)
+    EXPECT_NEAR(clearDay.mie_beta_550nm, 1.70e-4f, 1e-6f);
     EXPECT_NEAR(clearDay.planet_radius, 6.371e6f, 1e3f);
 }
 
