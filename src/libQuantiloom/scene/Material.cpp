@@ -50,6 +50,11 @@ bool Material::ValidateIRKirchhoffLaw() const {
                         name, lambda, sum);
             return false;
         }
+        if (constexpr f32 TOLERANCE = 1e-3f; sum < -TOLERANCE) {
+            QL_LOG_WARN("Material '{}': Kirchhoff's law violated (negative sum) at {:.1f} nm: ε+ρ+τ = {:.3f} < 0.0",
+                        name, lambda, sum);
+            return false;
+        }
     }
 
     return true;

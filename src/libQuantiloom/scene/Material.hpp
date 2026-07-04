@@ -334,7 +334,8 @@ struct QL_API Material {
     [[nodiscard]] f32 GetIREmissivity(f32 lambda_nm) const;
 
     // Get IR reflectance at specific wavelength (linear interpolation)
-    // Returns spectralAlbedo fallback if curve is empty
+    // Returns a neutral dielectric default if curve is empty (spectralAlbedo is a visible-RGB average
+    // and is not physically valid in MWIR/LWIR).
     [[nodiscard]] f32 GetIRReflectance(f32 lambda_nm) const;
 
     // Get IR transmittance at specific wavelength (linear interpolation)
@@ -416,8 +417,10 @@ inline f32 Material::GetIREmissivity(f32 lambda_nm) const {
 }
 
 inline f32 Material::GetIRReflectance(f32 lambda_nm) const {
-    // Fallback to spectralAlbedo if no IR curve available
-    return detail::InterpolateSpectralCurve(irReflectanceCurve, lambda_nm, spectralAlbedo);
+    // Fallback to a neutral dielectric reflectance when no IR curve is available.
+    // spectralAlbedo is a visible-RGB average and is not physically valid in MWIR/LWIR.
+    const f32 DEFAULT_IR_REFLECTANCE = 0.1f;
+    return detail::InterpolateSpectralCurve(irReflectanceCurve, lambda_nm, DEFAULT_IR_REFLECTANCE);
 }
 
 inline f32 Material::GetIRTransmittance(f32 lambda_nm) const {

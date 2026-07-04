@@ -28,6 +28,7 @@
 #include "io/ImageIO.hpp"
 
 #include <glm/gtc/matrix_inverse.hpp>
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -1284,6 +1285,35 @@ const LightingParams& ExternalRenderContext::GetLightingParams() const {
 // Material CPU↔GPU conversion helper
 // ============================================================================
 
+// Compute a single representative scalar from a sparse (wavelength_nm, value) curve
+// by trapezoidal integration over the curve's wavelength domain.
+// Returns fallback if the curve has fewer than two samples.
+static f32 AverageSpectralCurve(
+    const Vector<std::pair<f32, f32>>& curve,
+    f32 fallback)
+{
+    if (curve.empty()) {
+        return fallback;
+    }
+    if (curve.size() == 1) {
+        return curve.front().second;
+    }
+
+    f32 area = 0.0f;
+    f32 width = curve.back().first - curve.front().first;
+    if (width <= 0.0f) {
+        return fallback;
+    }
+
+    for (usize i = 1; i < curve.size(); ++i) {
+        f32 dx = curve[i].first - curve[i - 1].first;
+        f32 avg = (curve[i].second + curve[i - 1].second) * 0.5f;
+        area += dx * avg;
+    }
+
+    return area / width;
+}
+
 static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
     MaterialDataCPU cpuMat{};
     cpuMat.baseColorFactor = mat.baseColorFactor;
@@ -1299,9 +1329,15 @@ static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
     cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
     cpuMat.alphaCutoff = mat.alphaCutoff;
     cpuMat.spectralAlbedo = mat.spectralAlbedo;
-    cpuMat.spectralReflectanceCurveIndex = -1;
-    cpuMat.irEmissivity = 0.0f;
-    cpuMat.irTransmittance = 0.0f;
+    cpuMat.spectralReflectanceCurveIndex = mat.spectralReflectanceCurveIndex;
+
+    // GPU MaterialData currently stores scalar IR fallbacks, not full curves.
+    // Derive a representative scalar from the CPU curves until per-wavelength
+    // IR curve indices are added to the GPU struct.
+    f32 avgEmissivity = AverageSpectralCurve(mat.irEmissivityCurve, 0.0f);
+    f32 avgTransmittance = AverageSpectralCurve(mat.irTransmittanceCurve, 0.0f);
+    cpuMat.irEmissivity = std::clamp(avgEmissivity, 0.0f, 1.0f);
+    cpuMat.irTransmittance = std::clamp(avgTransmittance, 0.0f, 1.0f);
     cpuMat.irTemperature_K = mat.irTemperature_K;
     cpuMat.complexRefractiveIndexIndex = mat.complexRefractiveIndexIndex;
 

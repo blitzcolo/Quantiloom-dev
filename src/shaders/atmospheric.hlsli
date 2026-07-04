@@ -255,11 +255,6 @@ bool DeltaTracking(
         float xi = RandomFloat01(random_state);
         float free_flight = -log(max(xi, 1e-6)) / sigma_maj;
 
-        // Clamp free-flight distance to prevent numerical overflow
-        // Max reasonable distance is 2x the path length through atmosphere
-        float max_free_flight = (t_max - t_min) * 2.0;
-        free_flight = min(free_flight, max_free_flight);
-
         float t_sample = t + free_flight;
 
         // Check if ray exited medium

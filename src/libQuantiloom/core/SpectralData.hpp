@@ -95,20 +95,25 @@ struct SpectralCurve {
         if (lambda_nm >= samples.back().first) return samples.back().second;
 
         // Binary search for surrounding samples
-        for (size_t i = 0; i < samples.size() - 1; ++i) {
-            const f32 lambda0 = samples[i].first;
-
-            if (const f32 lambda1 = samples[i + 1].first; lambda_nm >= lambda0 && lambda_nm <= lambda1) {
-                const f32 value0 = samples[i].second;
-                const f32 value1 = samples[i + 1].second;
-
-                // Linear interpolation
-                const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
-                return value0 * (1.0f - t) + value1 * t;
+        usize left = 0;
+        usize right = samples.size() - 1;
+        while (right - left > 1) {
+            usize mid = (left + right) / 2;
+            if (samples[mid].first < lambda_nm) {
+                left = mid;
+            } else {
+                right = mid;
             }
         }
 
-        return 0.0f;  // Should never reach here
+        const f32 lambda0 = samples[left].first;
+        const f32 lambda1 = samples[right].first;
+        const f32 value0 = samples[left].second;
+        const f32 value1 = samples[right].second;
+
+        // Linear interpolation
+        const f32 t = (lambda_nm - lambda0) / (lambda1 - lambda0);
+        return value0 * (1.0f - t) + value1 * t;
     }
 
     // Check if curve is valid (non-empty, monotonic wavelengths)

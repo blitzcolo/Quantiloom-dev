@@ -55,25 +55,8 @@
 
 [[vk::binding(13, 0)]] StructuredBuffer<SpectralCurveGPU> spectralCurves;
 
-// ============================================================================
-// NEW (M2+): Complex Refractive Index Buffer
-// ============================================================================
-// Buffer of complex refractive index (n, k) for physical Fresnel calculation
-// Indexed by MaterialData::complexRefractiveIndexIndex
-// Data source: RefractiveIndex.INFO database (measured metal optical constants)
-//
-// PHYSICS:
-// - Metal surfaces: Use measured n,k for accurate wavelength-dependent Fresnel
-// - Dielectrics: k ≈ 0 (transparent), n determines refraction
-// - Semiconductors: Wavelength-dependent n,k (silicon, germanium)
-//
-// When complexRefractiveIndexIndex >= 0, use physical Fresnel equation:
-//   F = FresnelConductor(cosθ, n(λ), k(λ))
-// Otherwise, use standard PBR approximation:
-//   F = F0 + (1-F0) * (1-cosθ)^5
-// ============================================================================
-
-[[vk::binding(14, 0)]] StructuredBuffer<ComplexRefractiveIndexGPU> complexRefractiveIndices;
+// NOTE: Complex refractive index buffer (binding 14) is declared in pbr.hlsli
+// because the BRDF functions there read it directly.
 
 // ============================================================================
 // NEW (M2+): Solar Spectral LUT Buffer
@@ -721,7 +704,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, camera.wavelength_nm);
 
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
     // L_out = BRDF * L_sun * τ(λ, d) * (N · L)
@@ -1034,7 +1017,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
-            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness);
+            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda);
 
             // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) × shadow + kD × ρ(λ)/π × L_sky(λ)
             // shadowFactor is computed in RGB mode block and reused here for consistency
@@ -1221,7 +1204,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             L,
             spectralAlbedo,
             metallic,
-            roughness
+            roughness,
+            material.complexRefractiveIndexIndex,
+            lambda
         );
 
         // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L) * shadow

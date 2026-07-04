@@ -30,7 +30,7 @@ inline double brdf_5p(double kb, double kr, double b, double a, double kd,
     if (kb == 0.0)
         return kd / BRDF_PI;
     return kb * kr*kr * cosa * std::exp(b * std::pow(ra, a))
-           / (1.0 + (kr*kr - 1.0) * cosa) / cos_s + kd;
+           / (1.0 + (kr*kr - 1.0) * cosa) / cos_s + kd / BRDF_PI;
 }
 
 // 3. Kernel-driven RossThick-LiTransit (BRDFKD)

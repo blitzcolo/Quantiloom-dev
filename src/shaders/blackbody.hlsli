@@ -49,7 +49,7 @@ static const float STEFAN_BOLTZMANN = 5.670374419e-8;  // Stefan-Boltzmann const
 // ============================================================================
 
 static const float C1_NM = 1.191042972e20;  // 2 × h × c² × 1e36 (W·nm⁴·sr⁻¹·m⁻²)
-static const float C2 = 1.43877736e-2;      // h × c / k (m·K)
+static const float C2 = 1.438776877e-2;      // h × c / k (m·K)
 
 // ============================================================================
 // Planck's Law: Spectral Radiance of Blackbody
