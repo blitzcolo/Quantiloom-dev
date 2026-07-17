@@ -24,7 +24,7 @@
 #include "renderer/BRDFLutGenerator.hpp"
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
-#include "renderer/AtmosphericConfig.hpp"
+#include "atmos/AtmosphereBaker.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
@@ -1048,7 +1048,8 @@ int main(int argc, char* argv[]) {
         std::unique_ptr<GpuBuffer> solarSpectralLUTBuffer;
         SolarSpectralLUT solarLUT{};  // Zero-initialized (numSamples=0 = fallback mode)
 
-        std::unique_ptr<GpuBuffer> atmosphericParamsBuffer;
+        std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
+        std::unique_ptr<GpuBuffer> atmosDataBuffer;
 
         if (config.Has("lighting.solar_lut")) {
             auto solarLutPath = config.Get<String>("lighting.solar_lut");
@@ -1088,104 +1089,152 @@ int main(int argc, char* argv[]) {
         solarSpectralLUTBuffer->Upload(&solarLUT, sizeof(SolarSpectralLUT));
 
         // ====================================================================
-        // Create Atmospheric Parameters Buffer (Binding 17)
+        // NN Atmosphere ([atmosphere] TOML -> baked spectral LUT, bindings 17+20)
         // ====================================================================
-        QL_LOG_INFO("Creating atmospheric parameters buffer...");
+        QL_LOG_INFO("Configuring NN atmosphere...");
 
-        // ====================================================================
-        // AUTOMATIC ATMOSPHERIC SCATTERING ENABLE/DISABLE
-        // ====================================================================
-        // For small scenes (<100m), atmospheric scattering causes artifacts:
-        // - Horizontal rays traverse thousands of km of atmosphere (Earth-scale)
-        // - Result: nearly all light scattered → black horizontal bands
-        // - Solution: Auto-disable for small indoor/object scenes
-        //
-        // Threshold: 100m diagonal bounding box
-        // - Larger: Outdoor scene → enable atmosphere
-        // - Smaller: Indoor/object → disable atmosphere
-        // ====================================================================
+        // Deprecation warnings for the removed analytic atmosphere keys
+        if (config.Has("atmospheric.preset") || config.Has("atmospheric.rayleigh_enabled") ||
+            config.Has("atmospheric.mie_enabled") || config.Has("atmospheric.rayleigh_beta_550nm") ||
+            config.Has("atmospheric.mie_beta_550nm")) {
+            QL_LOG_WARN("  [atmospheric] is DEPRECATED and ignored; the analytic "
+                        "Rayleigh/Mie atmosphere was replaced by the NN atmosphere. "
+                        "Use [atmosphere] with model_pack instead.");
+        }
+        if (config.Has("lighting.transmittance")) {
+            QL_LOG_WARN("  lighting.transmittance is DEPRECATED and no longer used; "
+                        "view-path transmittance comes from the NN atmosphere");
+        }
+        if (config.Has("lighting.atmosphere_temperature_k")) {
+            QL_LOG_WARN("  lighting.atmosphere_temperature_k is DEPRECATED; used only "
+                        "as thermal-sky fallback when the NN atmosphere is disabled");
+        }
 
-        f32 sceneBBoxSize = loadedScene.GetBoundingBoxSize() * worldUnitsToMeters;
-        bool autoEnableAtmosphere = (sceneBBoxSize > 100.0f);
+        AtmosphereNNConfig atmosphereConfig;
+        if (config.Has("atmosphere.model_pack")) {
+            atmosphereConfig.modelPackDir = config.Get<String>("atmosphere.model_pack");
+            atmosphereConfig.enabled = true;
 
-        QL_LOG_INFO("  Scene bounding box diagonal: {:.2f} m", sceneBBoxSize);
-        QL_LOG_INFO("  Atmospheric scattering: {} (scene size {})",
-                    autoEnableAtmosphere ? "AUTO-ENABLED" : "AUTO-DISABLED",
-                    autoEnableAtmosphere ? ">100m" : "<100m");
-
-        // Load atmospheric config from scene TOML or use auto-detection
-        AtmosphericConfig atmosphericConfig;
-        bool userDisabledAtmosphere = false;
-
-        // Check if user explicitly configured atmospheric settings in TOML
-        if (config.Has("atmospheric.preset")) {
-            auto preset = config.Get<String>("atmospheric.preset");
-            QL_LOG_INFO("  User-specified atmospheric preset: {}", preset);
-
-            if (preset == "disabled") {
-                atmosphericConfig = AtmosphericConfig::Disabled();
-                userDisabledAtmosphere = true;  // Mark as explicitly disabled
-                QL_LOG_INFO("  Atmospheric rendering DISABLED by user (preset=disabled)");
-            } else if (preset == "clear_day") {
-                atmosphericConfig = AtmosphericConfig::ClearDay();
-            } else if (preset == "hazy") {
-                atmosphericConfig = AtmosphericConfig::Hazy();
-            } else if (preset == "polluted_urban") {
-                atmosphericConfig = AtmosphericConfig::PollutedUrban();
-            } else if (preset == "mountain_top") {
-                atmosphericConfig = AtmosphericConfig::MountainTop();
-            } else if (preset == "mars") {
-                atmosphericConfig = AtmosphericConfig::Mars();
-            } else {
-                QL_LOG_WARN("  Unknown preset '{}', using clear_day", preset);
-                atmosphericConfig = AtmosphericConfig::ClearDay();
+            auto presetName = config.Get<String>("atmosphere.preset", "clear");
+            if (!atmosphereConfig.ApplyPreset(presetName)) {
+                QL_LOG_WARN("  Unknown atmosphere preset '{}', using 'clear'", presetName);
+                atmosphereConfig.ApplyPreset("clear");
             }
+
+            // Optional per-feature overrides (out-of-domain values are clamped
+            // by the network input spec with a warning)
+            auto overrideD = [&](const char* key, double& field) {
+                if (config.Has(key)) field = static_cast<double>(config.Get<f32>(key));
+            };
+            overrideD("atmosphere.atmos_model", atmosphereConfig.atmosModel);
+            overrideD("atmosphere.ihaze", atmosphereConfig.ihaze);
+            overrideD("atmosphere.icld", atmosphereConfig.icld);
+            overrideD("atmosphere.vis_km", atmosphereConfig.visKm);
+            overrideD("atmosphere.rainrt_mm_h", atmosphereConfig.rainrtMmH);
+            overrideD("atmosphere.t_ground_K", atmosphereConfig.tGroundK);
+            overrideD("atmosphere.rh", atmosphereConfig.rh);
+            overrideD("atmosphere.p_hPa", atmosphereConfig.pHPa);
+            overrideD("atmosphere.h2o_scale", atmosphereConfig.h2oScale);
+            if (config.Has("atmosphere.lut_a_samples"))
+                atmosphereConfig.lutASamples = config.Get<i32>("atmosphere.lut_a_samples");
+            if (config.Has("atmosphere.lut_az_samples"))
+                atmosphereConfig.lutAzSamples = config.Get<i32>("atmosphere.lut_az_samples");
+
+            // Sun geometry: default derives from lighting.sun_direction (Y-up);
+            // an explicit sun_zenith_deg wins with a mismatch warning
+            const double lightingZenith =
+                glm::degrees(std::acos(std::clamp(sunDirection.y, -1.0f, 1.0f)));
+            const double lightingAzimuth =
+                glm::degrees(std::atan2(sunDirection.x, sunDirection.z));
+            if (config.Has("atmosphere.sun_zenith_deg")) {
+                atmosphereConfig.sunFromLighting = false;
+                atmosphereConfig.sunZenithDeg =
+                    static_cast<double>(config.Get<f32>("atmosphere.sun_zenith_deg"));
+                atmosphereConfig.sunAzimuthDeg = static_cast<double>(
+                    config.Get<f32>("atmosphere.sun_azimuth_deg",
+                                    static_cast<f32>(lightingAzimuth)));
+                if (std::abs(atmosphereConfig.sunZenithDeg - lightingZenith) > 2.0) {
+                    QL_LOG_WARN("  atmosphere.sun_zenith_deg = {:.1f} differs from "
+                                "lighting.sun_direction zenith {:.1f} by > 2 deg; "
+                                "using the [atmosphere] value for the NN inputs",
+                                atmosphereConfig.sunZenithDeg, lightingZenith);
+                }
+            } else {
+                atmosphereConfig.sunFromLighting = false;  // Resolve here, once
+                atmosphereConfig.sunZenithDeg = lightingZenith;
+                atmosphereConfig.sunAzimuthDeg = lightingAzimuth;
+            }
+
+            // Observer altitude: default derives from camera height
+            if (config.Has("atmosphere.h1_km")) {
+                atmosphereConfig.h1FromCamera = false;
+                atmosphereConfig.h1Km =
+                    static_cast<double>(config.Get<f32>("atmosphere.h1_km"));
+            } else {
+                atmosphereConfig.h1FromCamera = false;  // Resolve here, once
+                atmosphereConfig.h1Km = std::max(
+                    static_cast<double>(camera.GetPosition().y * worldUnitsToMeters) / 1000.0,
+                    0.0);
+            }
+
+            QL_LOG_INFO("  NN atmosphere: preset '{}', model pack '{}'",
+                        atmosphereConfig.preset, atmosphereConfig.modelPackDir);
+            QL_LOG_INFO("  Sun zenith {:.1f} deg, h1 {:.3f} km",
+                        atmosphereConfig.sunZenithDeg, atmosphereConfig.h1Km);
         } else {
-            // Auto-detection based on scene size
-            if (autoEnableAtmosphere) {
-                atmosphericConfig = AtmosphericConfig::ClearDay();
-                QL_LOG_INFO("  Using preset: clear_day (auto-enabled, scene > 100m)");
-            } else {
-                atmosphericConfig = AtmosphericConfig::Disabled();
-                QL_LOG_INFO("  Using preset: disabled (auto-disabled, scene < 100m)");
+            QL_LOG_INFO("  No [atmosphere] model_pack configured - atmosphere disabled");
+        }
+        if (atmosphereConfig.preset == "disabled") atmosphereConfig.enabled = false;
+
+        // Bake the spectral LUT for the active render band. Missing network
+        // files or out-of-coverage wavelengths are hard errors -- no fallback.
+        AtmosNNHeaderGPU atmosHeader{};  // enabled = 0
+        std::vector<f32> atmosData(4, 0.0f);
+        if (atmosphereConfig.enabled) {
+            AtmosLambdaGrid grid = RenderBandLambdaGrid(
+                spectral_mode, static_cast<double>(wavelength_nm));
+            if (!grid.error.empty()) {
+                QL_LOG_ERROR("NN atmosphere: {}", grid.error);
+                return 1;
+            }
+            if (grid.band.empty()) {
+                QL_LOG_ERROR("NN atmosphere: spectral mode has no NN coverage");
+                return 1;
+            }
+            try {
+                AtmosModelPack pack(atmosphereConfig.modelPackDir);
+                AtmosphereBaker baker(pack);
+                AtmosBakeResult baked = baker.Bake(
+                    atmosphereConfig, grid.band, grid.lambdasNm, grid.windowHalfWidthNm);
+                baked.header.sunDirWorld[0] = sunDirection.x;
+                baked.header.sunDirWorld[1] = sunDirection.y;
+                baked.header.sunDirWorld[2] = sunDirection.z;
+                baked.header.worldUnitsToMeters = worldUnitsToMeters;
+                atmosHeader = baked.header;
+                atmosData = std::move(baked.data);
+            } catch (const std::exception& e) {
+                QL_LOG_ERROR("NN atmosphere setup failed: {}", e.what());
+                return 1;
             }
         }
 
-        // Apply optional parameter overrides from TOML (if specified)
-        // IMPORTANT: Do NOT apply overrides if user explicitly disabled atmosphere
-        if (!userDisabledAtmosphere) {
-            if (config.Has("atmospheric.rayleigh_enabled")) {
-                atmosphericConfig.rayleigh_enabled = config.Get<bool>("atmospheric.rayleigh_enabled");
-            }
-            if (config.Has("atmospheric.mie_enabled")) {
-                atmosphericConfig.mie_enabled = config.Get<bool>("atmospheric.mie_enabled");
-            }
-            if (config.Has("atmospheric.rayleigh_beta_550nm")) {
-                atmosphericConfig.rayleigh_beta_550nm = config.Get<f32>("atmospheric.rayleigh_beta_550nm");
-            }
-            if (config.Has("atmospheric.mie_beta_550nm")) {
-                atmosphericConfig.mie_beta_550nm = config.Get<f32>("atmospheric.mie_beta_550nm");
-            }
-        } else if (config.Has("atmospheric.rayleigh_enabled") || config.Has("atmospheric.mie_enabled")) {
-            QL_LOG_WARN("  Atmospheric preset='disabled' but override parameters found - ignoring overrides");
-        }
-
-        // Convert to GPU structure
-        AtmosphericParamsGPU atmosphericGPU = atmosphericConfig.ToGPU();
-
-        // Create buffer
-        atmosphericParamsBuffer = std::make_unique<GpuBuffer>(
+        atmosHeaderBuffer = std::make_unique<GpuBuffer>(
             context.GetAllocator(),
-            sizeof(AtmosphericParamsGPU),
+            sizeof(AtmosNNHeaderGPU),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
-        atmosphericParamsBuffer->Upload(&atmosphericGPU, sizeof(AtmosphericParamsGPU));
+        atmosHeaderBuffer->Upload(&atmosHeader, sizeof(AtmosNNHeaderGPU));
 
-        QL_LOG_INFO("  Atmospheric rendering: {} (Rayleigh={}, Mie={})",
-                    atmosphericConfig.IsEnabled() ? "ENABLED" : "DISABLED",
-                    atmosphericConfig.rayleigh_enabled,
-                    atmosphericConfig.mie_enabled);
+        atmosDataBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(),
+            atmosData.size() * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU
+        );
+        atmosDataBuffer->Upload(atmosData.data(), atmosData.size() * sizeof(f32));
+
+        QL_LOG_INFO("  NN atmosphere: {}", atmosphereConfig.enabled ? "ENABLED" : "DISABLED");
 
         // ====================================================================
         // Load CIE 1931 Color Matching Functions LUT (for VIS_FUSED mode)
@@ -1794,7 +1843,7 @@ int main(int argc, char* argv[]) {
         pipeline.BindSolarSpectralLUT(solarSpectralLUTBuffer.get());
 
         // Bind atmospheric parameters buffer (binding 17)
-        pipeline.BindAtmosphericParams(atmosphericParamsBuffer.get());
+        pipeline.BindAtmosphereNN(atmosHeaderBuffer.get(), atmosDataBuffer.get());
 
         // ====================================================================
         // Create and Bind Instance Geometry Info Buffer (Binding 18)

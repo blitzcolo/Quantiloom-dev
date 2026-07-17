@@ -41,6 +41,21 @@ add_library(libQuantiloom SHARED
     io/SpectralCubeIO.cpp
     io/SpectralCubeIO.hpp
 
+    # Atmosphere NN module (MODTRAN surrogate inference + LUT baking)
+    atmos/Safetensors.cpp
+    atmos/Safetensors.hpp
+    atmos/ResMLP.cpp
+    atmos/ResMLP.hpp
+    atmos/AtmosNet.cpp
+    atmos/AtmosNet.hpp
+    atmos/AtmosModelPack.cpp
+    atmos/AtmosModelPack.hpp
+    atmos/AtmosphereNNConfig.cpp
+    atmos/AtmosphereNNConfig.hpp
+    atmos/AtmosphereBaker.cpp
+    atmos/AtmosphereBaker.hpp
+    atmos/AtmosNNGpuTypes.hpp
+
     # Renderer module (Vulkan + VMA wrappers)
     renderer/VmaImpl.cpp
     renderer/VulkanContext.cpp
@@ -65,8 +80,6 @@ add_library(libQuantiloom SHARED
     renderer/PerformanceLogger.hpp
     renderer/TextureCompressor.cpp
     renderer/TextureCompressor.hpp
-    renderer/AtmosphericConfig.cpp
-    renderer/AtmosphericConfig.hpp
     renderer/LightingParams.hpp
     renderer/VulkanContextAdapter.cpp
     renderer/VulkanContextAdapter.hpp
@@ -169,6 +182,7 @@ target_link_libraries(libQuantiloom
     PRIVATE
         spdlog::spdlog
         tomlplusplus::tomlplusplus
+        nlohmann_json
         VMA
         OpenEXR::OpenEXR
         Imath::Imath
@@ -305,6 +319,14 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
     DESTINATION ${CMAKE_INSTALL_BINDIR}
     FILES_MATCHING PATTERN "*.spv"
+)
+
+# ============================================================================
+# Install NN atmosphere model pack (required at runtime when atmosphere enabled)
+# ============================================================================
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/atmos_models
+    DESTINATION assets
+    FILES_MATCHING PATTERN "*.safetensors"
 )
 
 # ============================================================================

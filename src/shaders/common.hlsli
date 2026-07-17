@@ -980,51 +980,6 @@ bool IsIRMaterialValid(MaterialData mat) {
 }
 
 // ============================================================================
-// Atmospheric Scattering Parameters
-// ============================================================================
-// Physical parameters for Delta-Tracking volumetric atmospheric rendering
-// Supports wavelength-dependent Rayleigh + Mie scattering
-//
-// PHYSICAL MODEL:
-// - Rayleigh scattering: Molecular scattering (O₂, N₂), λ⁻⁴ dependence
-// - Mie scattering: Aerosol scattering (dust, water droplets), λ⁻ᵅ dependence
-// - Density decay: Exponential with altitude (scale heights)
-//
-// REFERENCE VALUES (at sea level, 550nm):
-// - β_rayleigh(550nm) = 5.8e-6 m⁻¹ (typical clear day)
-// - β_mie(550nm) = 2.0e-6 m⁻¹ (visibility ~23km)
-// - H_rayleigh = 8.5 km (molecular scale height)
-// - H_mie = 1.2 km (aerosol scale height)
-//
-// SIZE: Must be 16-byte aligned for GPU uniform buffer
-// ============================================================================
-
-struct AtmosphericParams {
-    // Rayleigh scattering (molecular)
-    float3 beta_rayleigh_550nm;      // Scattering coefficient at 550nm (m⁻¹)
-    float  rayleigh_scale_height;    // Scale height H_r (meters, typical: 8500m)
-
-    // Mie scattering (aerosol)
-    float3 beta_mie_550nm;           // Scattering coefficient at 550nm (m⁻¹)
-    float  mie_scale_height;         // Scale height H_m (meters, typical: 1200m)
-
-    // Mie phase function (Henyey-Greenstein)
-    float  mie_g;                    // Asymmetry parameter (anisotropy, typical: 0.76)
-    float  mie_alpha;                // Angstrom exponent (wavelength dependence, typical: 0.84)
-
-    // Planet geometry
-    float  planet_radius;            // Planet radius (meters, Earth: 6.371e6)
-    float  atmosphere_height;        // Atmosphere top (meters, typical: 60000m)
-
-    // Delta-Tracking parameters
-    float  max_distance;             // Maximum ray march distance (meters)
-    uint   max_steps;                // Maximum Delta-Tracking steps (typical: 64)
-    float  extinction_threshold;     // Early termination threshold for transmittance
-
-    uint   _padding;                 // Padding for 16-byte alignment
-};
-
-// ============================================================================
 // Instance Geometry Info (Per-TLAS-Instance Offsets)
 // ============================================================================
 // Provides geometry buffer offsets for multi-BLAS support.

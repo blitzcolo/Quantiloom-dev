@@ -44,7 +44,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "renderer/LightingParams.hpp"
-#include "renderer/AtmosphericConfig.hpp"
+#include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
 #include "postprocess/SensorModel.hpp"
 
@@ -372,36 +372,37 @@ public:
     [[nodiscard]] const LightingParams& GetLightingParams() const;
 
     // ========================================================================
-    // Atmospheric Rendering
+    // Atmosphere (NN MODTRAN surrogate)
     // ========================================================================
 
     /**
-     * @brief Set atmospheric scattering configuration
-     * @param config Atmospheric configuration (use presets or custom)
+     * @brief Set the NN atmosphere configuration
+     * @param config Weather / geometry configuration; config.modelPackDir
+     *               must point at a directory of <band>_<geom>_<net>.safetensors
+     *               files when enabled.
+     *
+     * The spectral LUT is (re)baked lazily before the next frame whenever the
+     * bake key (band, weather, quantized h1 / sun geometry) changes. Missing
+     * network files are a hard error at bake time -- there is no fallback.
      *
      * Example:
      * @code
-     * context->SetAtmosphericConfig(AtmosphericConfig::ClearDay());
-     * context->SetAtmosphericConfig(AtmosphericConfig::Disabled());
+     * AtmosphereNNConfig cfg;
+     * cfg.modelPackDir = "assets/atmos_models";
+     * cfg.ApplyPreset("fog");
+     * cfg.enabled = true;
+     * context->SetAtmosphere(cfg);
      * @endcode
      *
      * @note Resets accumulation when config changes
+     * @throws std::runtime_error if the model pack directory does not exist
      */
-    void SetAtmosphericConfig(const AtmosphericConfig& config);
+    void SetAtmosphere(const AtmosphereNNConfig& config);
 
     /**
-     * @brief Set atmospheric configuration by preset name
-     * @param preset Preset name: "clear_day", "hazy", "polluted_urban",
-     *               "mountain_top", "mars", "disabled"
-     *
-     * Convenience method for setting atmospheric config from config files.
+     * @brief Get current NN atmosphere configuration
      */
-    void SetAtmosphericPreset(const String& preset);
-
-    /**
-     * @brief Get current atmospheric configuration
-     */
-    [[nodiscard]] const AtmosphericConfig& GetAtmosphericConfig() const;
+    [[nodiscard]] const AtmosphereNNConfig& GetAtmosphere() const;
 
     // ========================================================================
     // Environment Map (IBL)

@@ -82,12 +82,12 @@ using Wavelength = f32;
  */
 enum class SpectralMode : u32 {
     Single       = 0,  // Single wavelength (grayscale output, EXR only)
-    VIS_Fused    = 1,  // Visible spectral integration with CIE XYZ -> sRGB (outputs EXR + PNG)
+    VIS_Fused    = 1,  // Visible spectral integration 400-780nm, CIE XYZ -> sRGB (outputs EXR + PNG)
     Multispectral = 2,  // Multiple wavelengths (hyperspectral cube) - TBD
     MWIR_Fused   = 3,  // Mid-wave IR fusion 3000-5000nm (outputs EXR + PNG)
     LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
-    SWIR_Fused   = 5,  // Short-wave IR fusion 1000-2500nm (outputs EXR + PNG)
-    NIR_Fused    = 6,  // Near IR fusion 780-1400nm (outputs EXR + PNG) - reflected solar
+    SWIR_Fused   = 5,  // Short-wave IR fusion 1400-2400nm (outputs EXR + PNG)
+    NIR_Fused    = 6,  // Near IR fusion 930-1200nm (outputs EXR + PNG) - reflected solar
     RGB          = 7   // Fast RGB-only pipeline (no spectral integration, default)
 };
 

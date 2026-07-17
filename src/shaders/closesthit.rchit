@@ -14,7 +14,7 @@
 //ATMOSPHERIC MODEL (Enhanced with Delta-Tracking support):
 // - Beer-Lambert path attenuation: T(λ, d) = exp(-σ_t(λ) × d)
 // - MODTRAN LUT provides σ_t(λ) extinction coefficient (fallback)
-// - AtmosphericParams provides physical Rayleigh + Mie coefficients (enhanced)
+// - NN atmosphere LUT provides MODTRAN-surrogate tau / path radiance / L_down
 // - Hemispherical sky radiance integration for diffuse ambient
 // ============================================================================
 
@@ -23,7 +23,7 @@
 #include "SpectralConversion.hlsli"
 #include "blackbody.hlsli"
 #include "spectral_query.hlsli"
-#include "atmospheric.hlsli"
+#include "atmosphere_nn.hlsli"
 #include "volumetric.hlsli"
 
 // ============================================================================
@@ -79,14 +79,16 @@
 [[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
 
 // ============================================================================
-// Atmospheric Parameters Buffer (Binding 17)
+// NN Atmosphere LUT (Bindings 17 + 20)
 // ============================================================================
-// Physical parameters for enhanced atmospheric transmittance calculation
-// Provides Rayleigh + Mie coefficients for wavelength-dependent extinction
-// When beta_rayleigh_550nm.x > 0, use physical model; otherwise use LUT fallback
+// Baked from MODTRAN surrogate networks on the CPU (see atmosphere_nn.hlsli).
+// Header carries the axis parameterization and data offsets; the data blob
+// holds tau / lpath / ldown spectral grids indexed by the spectral loop
+// counter. When header.enabled == 0 the atmosphere contributes nothing.
 // ============================================================================
 
-[[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
+[[vk::binding(17, 0)]] StructuredBuffer<AtmosNNHeader> atmosNNHeader;
+[[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
 
 // ============================================================================
 // Transmission Ray Tracing Constants
@@ -618,73 +620,25 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // ========================================================================
-    // Enhanced Atmospheric Transmission Model
+    // NN Atmosphere (MODTRAN surrogate LUT)
     // ========================================================================
-    // Computes atmospheric transmittance along view path
-    //   T(λ, d) = exp(-σ_t(λ) × d)
-    //
-    // TWO MODES:
-    // 1. Physical mode (AtmosphericParams available):
-    //    - Uses Rayleigh + Mie scattering coefficients
-    //    - Wavelength-dependent extinction: σ_t(λ) = β_r(λ) + β_m(λ)
-    //    - Assumes constant density (simplified for closesthit performance)
-    //
-    // 2. LUT-fast mode (fallback):
-    //    - Uses MODTRAN LUT transmittance
-    //    - Converts vertical optical depth to extinction coefficient
+    // Composition contract applied per spectral sample at the end of each
+    // mode branch:
+    //   L_pixel(λ) = τ_view(λ) × L_surface(λ) + L_path(λ)
+    // Surface illumination (sun + sky) stays on the binding-15 solar LUT --
+    // the NN only supplies view-path transmittance, view-path radiance and
+    // thermal downwelling. Only primary rays (depth 0) composite; secondary
+    // rays return surface radiance for BRDF integration.
     // ========================================================================
 
-    // Compute path length from camera to hit point (convert to meters)
-    float pathLength_m = RayTCurrent() * lut.worldUnitsToMeters;
-
-    // Atmospheric transmittance: RGB for RGB mode, scalar for other modes
-    // RGB mode uses wavelength-dependent Rayleigh scattering for proper dispersion
-    // (blue light scatters ~4x more than red light, causing sunset colors and aerial perspective)
-    float3 atmosphericTransmittance_rgb = float3(1.0, 1.0, 1.0);
-    float atmosphericTransmittance_scalar = 1.0;  // For VIS_FUSED/Single modes
-    AtmosphericParams atmo = atmosphericParams[0];
-
-    // Check if physical atmospheric model is enabled
-    if (atmo.beta_rayleigh_550nm.x > 1e-9) {
-        // PHYSICAL MODE: Use Rayleigh + Mie coefficients
-
-        if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
-            // RGB MODE: Per-channel atmospheric scattering with wavelength dispersion
-            // This correctly models Rayleigh λ⁻⁴ dependence (blue scatters more than red)
-            float3 wavelengths_rgb = float3(WAVELENGTH_R_NM, WAVELENGTH_G_NM, WAVELENGTH_B_NM);
-            float3 beta_r_rgb = RayleighScatteringCoeff_RGB(wavelengths_rgb, atmo.beta_rayleigh_550nm.x);
-            float3 beta_m_rgb = MieScatteringCoeff_RGB(wavelengths_rgb, atmo.beta_mie_550nm.x, atmo.mie_alpha);
-            float3 extinction_rgb = beta_r_rgb + beta_m_rgb;
-            atmosphericTransmittance_rgb = exp(-extinction_rgb * pathLength_m);
-        } else {
-            // SPECTRAL MODE: Use scalar version for single-wavelength computation
-            float beta_r = RayleighScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_rayleigh_550nm.x);
-            float beta_m = MieScatteringCoeff_Scalar(camera.wavelength_nm, atmo.beta_mie_550nm.x, atmo.mie_alpha);
-            float extinction = beta_r + beta_m;
-            atmosphericTransmittance_scalar = exp(-extinction * pathLength_m);
-        }
-    } else {
-        // LUT-FAST MODE (fallback): Use MODTRAN LUT
-        // Scalar transmittance replicated to RGB (no dispersion modeling)
-        const float atmosphericScaleHeight_m = 8000.0;
-        float opticalDepth_vertical = -log(max(lut.transmittance, 1e-6));
-        float extinctionCoeff = opticalDepth_vertical / atmosphericScaleHeight_m;
-        float transmittance = exp(-extinctionCoeff * pathLength_m);
-        atmosphericTransmittance_rgb = float3(transmittance, transmittance, transmittance);
-        atmosphericTransmittance_scalar = transmittance;
+    AtmosNNHeader atmos = atmosNNHeader[0];
+    bool atmosEnabled = (atmos.enabled != 0) && (payload.depth == 0);
+    float atmosA = 0.0;
+    float atmosAz = 0.0;
+    if (atmosEnabled) {
+        atmosA = AtmosCoordA(atmos, WorldRayDirection(), RayTCurrent());
+        atmosAz = AtmosRelAz(atmos, WorldRayDirection());
     }
-
-    // Clamp to [0, 1] to prevent numerical issues
-    atmosphericTransmittance_rgb = clamp(atmosphericTransmittance_rgb, float3(0.0, 0.0, 0.0), float3(1.0, 1.0, 1.0));
-    atmosphericTransmittance_scalar = clamp(atmosphericTransmittance_scalar, 0.0, 1.0);
-
-    // Apply transmittance to sun radiance for RGB mode only
-    // VIS_FUSED mode computes wavelength-dependent transmittance inside the spectral loop
-    // Sky radiance is NOT attenuated (it's already the result of atmospheric scattering)
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
-        sunRadiance *= atmosphericTransmittance_rgb;  // Per-channel attenuation with dispersion
-    }
-    // Note: For VIS_FUSED, transmittance is applied per-wavelength in the loop below
 
     // ========================================================================
     // PBR Shading
@@ -709,7 +663,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
     // L_out = BRDF * L_sun * τ(λ, d) * (N · L)
     // where τ(λ, d) is atmospheric transmittance computed from Beer-Lambert law
-    // NOTE: sunRadiance already includes atmosphericTransmittance (applied above)
+    // NOTE: view-path atmosphere is composited per spectral sample at branch end
     float NdotL = max(dot(normal, L), 0.0);
 
     // ========================================================================
@@ -903,6 +857,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ====================================================================
         output_radiance = radiance;
 
+        // NN atmosphere composition per RGB channel (iLambda 0/1/2 = R/G/B,
+        // baked at 650/550/450 nm through the vis network)
+        if (atmosEnabled) {
+            [unroll]
+            for (uint ch = 0; ch < 3; ++ch) {
+                float tau_ch = SampleAtmosTau(atmos, atmosNNData, ch, atmosA);
+                float lpath_ch = SampleAtmosLpath(atmos, atmosNNData, ch, atmosA, atmosAz);
+                output_radiance[ch] = tau_ch * output_radiance[ch] + lpath_ch;
+            }
+        }
+
         // Validation: clamp and sanitize to prevent NaN/Inf
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
             output_radiance = float3(0.0, 0.0, 0.0);
@@ -932,8 +897,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ====================================================================
 
         // Spectral integration parameters
+        // NOTE: 400-780 nm (narrowed from 380 to match NN atmosphere coverage)
         const uint   NUM_WAVELENGTH_SAMPLES = 32;
-        const float  LAMBDA_MIN_VIS = 380.0;  // nm
+        const float  LAMBDA_MIN_VIS = 400.0;  // nm
         const float  LAMBDA_MAX_VIS = 780.0;  // nm
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
@@ -979,32 +945,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 sun_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.sunRadiance_rgb, lambda);
                 sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
             }
-
-            // ================================================================
-            // Wavelength-Dependent Atmospheric Transmittance (Fix 3)
-            // ================================================================
-            // Rayleigh scattering: β(λ) ∝ λ^-4 (strong wavelength dependence)
-            // Mie scattering: β(λ) ∝ λ^-α where α ≈ 0.84 (weaker dependence)
-            //
-            // This causes blue light (400nm) to be scattered ~9x more than red (700nm),
-            // producing the familiar reddening of distant objects and sunset colors.
-            // ================================================================
-            float transmittance_lambda = 1.0;
-            if (atmo.beta_rayleigh_550nm.x > 1e-9) {
-                // Physical mode: compute wavelength-dependent extinction
-                float beta_r = RayleighScatteringCoeff_Scalar(lambda, atmo.beta_rayleigh_550nm.x);
-                float beta_m = MieScatteringCoeff_Scalar(lambda, atmo.beta_mie_550nm.x, atmo.mie_alpha);
-                float extinction_lambda = beta_r + beta_m;
-                transmittance_lambda = exp(-extinction_lambda * pathLength_m);
-            } else {
-                // LUT fallback: use pre-computed scalar transmittance (wavelength-independent)
-                transmittance_lambda = atmosphericTransmittance_scalar;
-            }
-            transmittance_lambda = clamp(transmittance_lambda, 0.0, 1.0);
-
-            // Apply wavelength-dependent transmittance to direct sunlight
-            // Note: sky_radiance is already scattered light, don't attenuate twice
-            sun_radiance_lambda *= transmittance_lambda;
 
             // 1. Get spectral reflectance at this wavelength
             float rho_lambda;
@@ -1077,6 +1017,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
+
+            // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
+            if (atmosEnabled) {
+                float tau_l = SampleAtmosTau(atmos, atmosNNData, i, atmosA);
+                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, i, atmosA, atmosAz);
+                L_lambda = tau_l * L_lambda + lpath_l;
+            }
 
             // 6. Weight by CIE XYZ color matching functions (High-precision LUT version)
             // Using LUT instead of analytical approximation for <0.1% error (vs 10-20% at edges)
@@ -1224,6 +1171,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 5. Total spectral radiance (scalar)
         float radiance_spectral = directSun_scalar + skyAmbient_scalar + emissive.r;  // Assume emissive is grayscale in spectral mode
 
+        // NN atmosphere composition (single wavelength: LUT baked with one sample)
+        if (atmosEnabled) {
+            float tau_l = SampleAtmosTau(atmos, atmosNNData, 0, atmosA);
+            float lpath_l = SampleAtmosLpath(atmos, atmosNNData, 0, atmosA, atmosAz);
+            radiance_spectral = tau_l * radiance_spectral + lpath_l;
+        }
+
         // Validation
         if (!isfinite(radiance_spectral)) {
             radiance_spectral = 0.0;
@@ -1248,8 +1202,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // emission in SWIR is negligible (Planck peak at ~10μm, not 1-2.5μm).
         // ====================================================================
 
-        const float SWIR_LAMBDA_MIN = 1000.0;   // nm
-        const float SWIR_LAMBDA_MAX = 2500.0;   // nm
+        // NOTE: 1400-2400 nm (narrowed from 1000-2500 to match NN atmosphere coverage)
+        const float SWIR_LAMBDA_MIN = 1400.0;   // nm
+        const float SWIR_LAMBDA_MAX = 2400.0;   // nm
         const uint  NUM_SWIR_SAMPLES = 16;
         const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
 
@@ -1335,6 +1290,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 5. Total spectral radiance
             float L_lambda = L_reflected + L_emission;
 
+            // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
+            if (atmosEnabled) {
+                float tau_l = SampleAtmosTau(atmos, atmosNNData, i, atmosA);
+                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, i, atmosA, atmosAz);
+                L_lambda = tau_l * L_lambda + lpath_l;
+            }
+
             radiance_accum += L_lambda * lambda_step;
         }
 
@@ -1373,8 +1335,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Reference: ISO 20473 classifies NIR as IR-A (780nm - 1.4μm)
         // ====================================================================
 
-        const float NIR_LAMBDA_MIN = 780.0;    // nm (start of IR-A band)
-        const float NIR_LAMBDA_MAX = 1400.0;   // nm (end of IR-A band)
+        // NOTE: 930-1200 nm (narrowed from 780-1400 to match NN atmosphere coverage)
+        const float NIR_LAMBDA_MIN = 930.0;    // nm
+        const float NIR_LAMBDA_MAX = 1200.0;   // nm
         const uint  NUM_NIR_SAMPLES = 16;
         const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
 
@@ -1432,6 +1395,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Note: Thermal emission is negligible in NIR for T < 600K
             // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
             // Skip thermal calculation for performance
+
+            // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
+            if (atmosEnabled) {
+                float tau_l = SampleAtmosTau(atmos, atmosNNData, i, atmosA);
+                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, i, atmosA, atmosAz);
+                L_reflected = tau_l * L_reflected + lpath_l;
+            }
 
             radiance_accum += L_reflected * lambda_step;
         }
@@ -1572,8 +1542,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     L_reflected_atm = irPayload.radiance.r * (reflectance / pdf_ir) * NdotWi;
                 }
             } else {
-                // Fallback at max depth: fixed atmospheric Planck
-                L_reflected_atm = reflectance * IRPlanckRadiance(T_atmosphere, lambda);
+                // Fallback at max depth: NN downwelling spectrum when baked,
+                // otherwise fixed atmospheric Planck
+                float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
+                    ? SampleAtmosLdown(atmos, atmosNNData, i)
+                    : IRPlanckRadiance(T_atmosphere, lambda);
+                L_reflected_atm = reflectance * L_down;
             }
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
@@ -1599,36 +1573,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Convert irradiance to radiance and apply Lambertian BRDF
                 // L_reflected = ρ/π × E_sun × cos(θ) for diffuse surfaces
                 // For simplicity, using ρ × (E/π) × NdotL
+                // View-path attenuation comes from the NN composition below;
+                // sun-path attenuation is folded into the illumination source.
                 float sun_radiance_lambda = sun_irr_lambda / PI;
                 L_reflected_sun = reflectance * sun_radiance_lambda * NdotL;
-
-                // Apply wavelength-dependent atmospheric transmittance
-                // MWIR band (3000-5000nm) has significant H₂O and CO₂ absorption
-                //
-                // Approximate transmittance model based on typical clear-sky conditions:
-                // - 3000-3200nm: τ ≈ 0.65 (H₂O absorption edge)
-                // - 3200-4200nm: τ ≈ 0.85 (atmospheric window)
-                // - 4200-4500nm: τ ≈ 0.50 (strong CO₂ absorption at 4.3μm)
-                // - 4500-5000nm: τ ≈ 0.75 (partial window)
-                //
-                // For quantitative radiometry, use MODTRAN/HITRAN LUT instead
-                float tau_atm = 0.8;  // Default
-                if (lambda < 3200.0) {
-                    // H₂O absorption increasing toward 3μm
-                    tau_atm = lerp(0.50, 0.70, (lambda - 3000.0) / 200.0);
-                } else if (lambda < 4200.0) {
-                    // Main atmospheric window
-                    tau_atm = 0.85;
-                } else if (lambda < 4500.0) {
-                    // CO₂ absorption band at 4.3μm
-                    float t = (lambda - 4200.0) / 300.0;
-                    float co2_absorption = 0.35 * exp(-((lambda - 4300.0) * (lambda - 4300.0)) / (80.0 * 80.0));
-                    tau_atm = 0.85 - co2_absorption;
-                } else {
-                    // Recovery toward 5μm
-                    tau_atm = lerp(0.60, 0.75, (lambda - 4500.0) / 500.0);
-                }
-                L_reflected_sun *= tau_atm;
             }
 
             // 4. IR Transmittance: Background radiation through transparent materials
@@ -1646,7 +1594,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Trace transmission ray to get background radiance
                 // For IR, we approximate background as atmospheric thermal emission
                 // In a full implementation, would trace through and sample far surface
-                float L_background = IRPlanckRadiance(T_atmosphere, lambda);
+                float L_background = (atmos.enabled != 0 && atmos.hasLdown != 0)
+                    ? SampleAtmosLdown(atmos, atmosNNData, i)
+                    : IRPlanckRadiance(T_atmosphere, lambda);
                 L_transmitted = transmittance * L_background;
 
                 // Note: For accurate IR window simulation, should trace recursive ray
@@ -1656,6 +1606,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 5. Total spectral radiance at this wavelength (with transmittance)
             float L_lambda = L_emission + L_reflected_atm + L_reflected_sun + L_transmitted;
+
+            // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
+            // (MWIR L_path already merges PTH_THRML + night-gated SOL_SCAT at bake time)
+            if (atmosEnabled) {
+                float tau_l = SampleAtmosTau(atmos, atmosNNData, i, atmosA);
+                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, i, atmosA, atmosAz);
+                L_lambda = tau_l * L_lambda + lpath_l;
+            }
 
             // Accumulate (Riemann sum)
             radiance_accum += L_lambda * lambda_step;
@@ -1810,10 +1768,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 break;
 
             case DEBUG_MODE_ATMOSPHERIC_TRANS: {
-                // Atmospheric transmittance (grayscale average for RGB mode)
-                // RGB mode: average of RGB channels
-                // Spectral modes: use scalar transmittance
-                float avg_transmittance = (atmosphericTransmittance_rgb.r + atmosphericTransmittance_rgb.g + atmosphericTransmittance_rgb.b) / 3.0;
+                // NN atmosphere view-path transmittance (RGB average at 650/550/450)
+                float avg_transmittance = 1.0;
+                if (atmosEnabled) {
+                    avg_transmittance = (SampleAtmosTau(atmos, atmosNNData, 0, atmosA) +
+                                         SampleAtmosTau(atmos, atmosNNData, 1, atmosA) +
+                                         SampleAtmosTau(atmos, atmosNNData, 2, atmosA)) / 3.0;
+                }
                 debug_output = float3(avg_transmittance, avg_transmittance, avg_transmittance);
                 break;
             }

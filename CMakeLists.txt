@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.21)
 # Project Definition
 # ============================================================================
 project(Quantiloom
-    VERSION 0.0.3
+    VERSION 0.0.4
     DESCRIPTION "Unified Spectral Path Tracing System on Vulkan Ray Tracing"
     LANGUAGES CXX
 )
@@ -238,6 +238,22 @@ if(tinygltf_ADDED)
     #   - Embedded images (DataURI) will be decoded
     #   - Binary buffers will be loaded from .bin files
     message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
+endif()
+
+# nlohmann/json: JSON parser (header-only), used by the safetensors reader
+CPMAddPackage(
+    NAME nlohmann_json
+    VERSION 3.11.3
+    GITHUB_REPOSITORY nlohmann/json
+    DOWNLOAD_ONLY YES
+)
+
+if(nlohmann_json_ADDED)
+    add_library(nlohmann_json INTERFACE)
+    target_include_directories(nlohmann_json INTERFACE
+        ${nlohmann_json_SOURCE_DIR}/include
+    )
+    message(STATUS "nlohmann/json v3.11.3 added (header-only JSON parser)")
 endif()
 
 # ============================================================================

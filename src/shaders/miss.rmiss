@@ -3,12 +3,12 @@
 // ============================================================================
 // Returns sky background radiance when ray misses all geometry
 // Supports both RGB and spectral modes with SolarSpectralLUT integration
-// Now with Delta-Tracking volumetric atmospheric scattering
+// Thermal IR sky uses the NN atmosphere downwelling spectrum (L_down)
 // ============================================================================
 
 #include "common.hlsli"
 #include "pbr.hlsli"
-#include "atmospheric.hlsli"
+#include "atmosphere_nn.hlsli"
 #include "SpectralConversion.hlsli"
 #include "blackbody.hlsli"
 
@@ -29,14 +29,15 @@
 [[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
 
 // ============================================================================
-// Atmospheric Parameters Buffer (Binding 17)
+// NN Atmosphere LUT (Bindings 17 + 20)
 // ============================================================================
-// Physical parameters for Delta-Tracking volumetric atmospheric rendering
-// When beta_rayleigh_550nm.x > 0, Delta-Tracking is enabled
-// Otherwise, fall back to simple sky radiance
+// Baked MODTRAN-surrogate spectral LUT. The miss shader uses the thermal
+// downwelling spectrum (L_down) as the sky background for MWIR/LWIR; when
+// a sky-dome network is trained (hasSky), it will switch to SampleAtmosSky.
 // ============================================================================
 
-[[vk::binding(17, 0)]] StructuredBuffer<AtmosphericParams> atmosphericParams;
+[[vk::binding(17, 0)]] StructuredBuffer<AtmosNNHeader> atmosNNHeader;
+[[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
 
 // ============================================================================
 // CIE 1931 Color Matching Functions LUT (Binding 19)
@@ -62,102 +63,20 @@
 
 [shader("miss")]
 void main(inout Payload payload) {
-    // Fetch atmospheric and lighting parameters
+    // Fetch lighting parameters and NN atmosphere header
     LightingParams lut = lightingParams[0];
-    AtmosphericParams atmo = atmosphericParams[0];
-
-    // Check if Delta-Tracking is enabled (beta_rayleigh > 0 indicates enabled)
-    bool atmosphereEnabled = (atmo.beta_rayleigh_550nm.x > 1e-9);
+    AtmosNNHeader atmos = atmosNNHeader[0];
 
     // Check if spectral solar LUT is available
     bool hasSpectralSolarLUT = (solarSpectralLUT[0].skyIrradiance.numSamples > 0);
 
-    // Get ray information
-    float3 ray_origin = WorldRayOrigin();
-    float3 ray_dir = WorldRayDirection();
-
     // ========================================================================
-    // Atmospheric Scattering (Delta-Tracking)
+    // Sky Radiance
     // ========================================================================
-    // NOTE: Only use single-wavelength atmospheric scattering for modes where
-    // camera.wavelength_nm is meaningful (RGB and SINGLE).
-    // For fused modes (VIS_FUSED, NIR_FUSED, SWIR_FUSED, MWIR_FUSED, LWIR_FUSED),
-    // atmospheric scattering using 550nm wavelength produces physically incorrect
-    // results because the scattering coefficients are wavelength-dependent.
-    // Those modes should integrate atmospheric effects at each wavelength in their
-    // respective branches (TODO: per-wavelength atmospheric integration).
-    bool useAtmosphericScattering = atmosphereEnabled &&
-        (camera.spectral_mode == SPECTRAL_MODE_RGB ||
-         camera.spectral_mode == SPECTRAL_MODE_SINGLE);
-
-    if (useAtmosphericScattering) {
-        // Planet center: assume camera at surface, planet center below
-        // TODO: Make this configurable via uniform buffer
-        float3 planet_center = float3(0.0, -atmo.planet_radius, 0.0);
-
-        // Compute ray-atmosphere intersection
-        float t_atmo_near, t_atmo_far;
-        bool hits_atmosphere = RaySphereIntersection(
-            ray_origin, ray_dir, planet_center,
-            atmo.planet_radius + atmo.atmosphere_height,
-            t_atmo_near, t_atmo_far);
-
-        if (hits_atmosphere && t_atmo_far > 0.0) {
-            // Ray enters atmosphere
-            float t_min = max(t_atmo_near, 0.0);
-            float t_max = t_atmo_far;
-
-            // Initialize random state using ray coordinates
-            // Use a simple hash of ray origin + direction for seed
-            uint seed = uint(dot(ray_origin, float3(127.1, 311.7, 74.7))) +
-                        uint(dot(ray_dir, float3(269.5, 183.3, 246.1)) * 1000.0);
-            uint random_state = seed ^ 0xDEADBEEFu;
-
-            // Perform Delta-Tracking
-            float t_scatter;
-            float transmittance;
-            bool scattered = DeltaTracking(
-                ray_origin, ray_dir,
-                t_min, t_max,
-                camera.wavelength_nm,
-                atmo,
-                planet_center,
-                random_state,
-                t_scatter,
-                transmittance);
-
-            if (scattered) {
-                // Scattering event occurred
-                float3 scatter_pos = ray_origin + ray_dir * t_scatter;
-                float3 sun_dir = normalize(lut.sunDirection);
-
-                // Get sun radiance at current wavelength
-                float sun_radiance;
-                if (hasSpectralSolarLUT) {
-                    float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
-                    sun_radiance = SunIrradianceToRadiance(sun_irr);
-                } else {
-                    sun_radiance = lut.sunRadiance_spectral;
-                }
-
-                // Compute single scattering
-                float3 scattered_radiance = SingleScattering(
-                    scatter_pos, ray_dir, sun_dir,
-                    camera.wavelength_nm,
-                    atmo, planet_center,
-                    sun_radiance);
-
-                payload.radiance = scattered_radiance;
-                return;
-            }
-
-            // No scattering: ray escaped atmosphere without collision
-            // Fall through to simple sky radiance (attenuated by transmittance if needed)
-        }
-    }
-
-    // ========================================================================
-    // Fallback: Simple Sky Radiance (no atmosphere or ray missed atmosphere)
+    // Reflective bands (RGB / VIS / NIR / SWIR / reflective SINGLE) keep the
+    // SolarSpectralLUT-based sky. Thermal bands use the NN downwelling
+    // spectrum when baked (hasLdown), replacing the constant-temperature
+    // Planck sky. A trained sky-dome network (hasSky) will plug in here.
     // ========================================================================
 
     // Choose sky radiance based on spectral mode
@@ -180,8 +99,9 @@ void main(inout Payload payload) {
         // eliminating the "color discontinuity" issue.
         // ================================================================
 
+        // NOTE: 400-780 nm (narrowed from 380 to match NN atmosphere coverage)
         const uint   NUM_WAVELENGTH_SAMPLES = 32;
-        const float  LAMBDA_MIN_VIS = 380.0;
+        const float  LAMBDA_MIN_VIS = 400.0;
         const float  LAMBDA_MAX_VIS = 780.0;
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
@@ -232,7 +152,10 @@ void main(inout Payload payload) {
         // Single wavelength mode: Query spectral sky at current wavelength
         float radiance_spectral;
 
-        if (hasSpectralSolarLUT) {
+        if (atmos.enabled != 0 && atmos.thermalBand != 0 && atmos.hasLdown != 0) {
+            // Thermal single wavelength: NN downwelling spectrum (one sample)
+            radiance_spectral = SampleAtmosLdown(atmos, atmosNNData, 0);
+        } else if (hasSpectralSolarLUT) {
             float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
             radiance_spectral = sky_irr / PI;
         } else {
@@ -248,8 +171,9 @@ void main(inout Payload payload) {
         // SWIR is reflection-dominated; use solar/sky spectral radiance.
         // ================================================================
 
-        const float SWIR_LAMBDA_MIN = 1000.0;
-        const float SWIR_LAMBDA_MAX = 2500.0;
+        // NOTE: 1400-2400 nm (narrowed to match NN atmosphere coverage)
+        const float SWIR_LAMBDA_MIN = 1400.0;
+        const float SWIR_LAMBDA_MAX = 2400.0;
         const uint  NUM_SWIR_SAMPLES = 16;
         const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
 
@@ -295,8 +219,9 @@ void main(inout Payload payload) {
         // Uses same approach as SWIR with different wavelength range.
         // ================================================================
 
-        const float NIR_LAMBDA_MIN = 780.0;
-        const float NIR_LAMBDA_MAX = 1400.0;
+        // NOTE: 930-1200 nm (narrowed to match NN atmosphere coverage)
+        const float NIR_LAMBDA_MIN = 930.0;
+        const float NIR_LAMBDA_MAX = 1200.0;
         const uint  NUM_NIR_SAMPLES = 16;
         const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
 
@@ -364,11 +289,15 @@ void main(inout Payload payload) {
             T_atmosphere = 250.0;  // Typical cold sky effective temperature
         }
 
+        bool useNNLdown = (atmos.enabled != 0 && atmos.hasLdown != 0);
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
-            // Sky thermal radiation (Planck blackbody at atmosphere temperature)
-            float L_sky = IRPlanckRadiance(T_atmosphere, lambda);
+            // Sky thermal radiation: NN downwelling spectrum when baked
+            // (hasSky = 1 will switch this to a zenith-dependent sky network),
+            // otherwise Planck blackbody at atmosphere temperature
+            float L_sky = useNNLdown ? SampleAtmosLdown(atmos, atmosNNData, i)
+                                     : IRPlanckRadiance(T_atmosphere, lambda);
             radiance_accum += L_sky * lambda_step;
         }
 

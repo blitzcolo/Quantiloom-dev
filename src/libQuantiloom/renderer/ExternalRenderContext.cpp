@@ -18,7 +18,7 @@
 #include "CommandHelper.hpp"
 #include "BRDFLutGenerator.hpp"
 #include "LightingParams.hpp"
-#include "AtmosphericConfig.hpp"
+#include "atmos/AtmosphereBaker.hpp"
 
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
@@ -242,7 +242,8 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
     std::unique_ptr<GpuBuffer> criBuffer;
     std::unique_ptr<GpuBuffer> solarLutBuffer;
-    std::unique_ptr<GpuBuffer> atmosphericBuffer;
+    std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
+    std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
@@ -281,9 +282,13 @@ struct ExternalRenderContext::Impl {
     u32 spp = 1;
     LightingParams lightingParams;
 
-    // Atmospheric configuration
-    AtmosphericConfig atmosphericConfig;  // CPU-side config (default: disabled)
-    bool atmosphericDirty = true;         // Need upload to GPU
+    // NN atmosphere state (baked lazily before rendering when the key changes)
+    AtmosphereNNConfig atmosphereConfig;              // CPU-side config (default: disabled)
+    std::unique_ptr<AtmosModelPack> atmosModelPack;   // Loaded network packs
+    uint64_t atmosBakeKey = 0;                        // 0 = nothing baked yet
+
+    // Rebakes/uploads the NN atmosphere LUT when the bake key changed
+    void UpdateAtmosphereNN();
 
     // Environment map state
     bool hasCustomEnvMap = false;         // True if LoadEnvironmentMap succeeded
@@ -390,7 +395,8 @@ struct ExternalRenderContext::Impl {
         envMapImage.reset();
         brdfLutTexture.reset();
 
-        atmosphericBuffer.reset();
+        atmosHeaderBuffer.reset();
+        atmosDataBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -806,6 +812,86 @@ const Scene* ExternalRenderContext::GetScene() const {
 // Rendering
 // ============================================================================
 
+// Lazily (re)bakes the NN atmosphere LUT when the bake key changed and
+// uploads header + data. On bake failure (missing network files etc.) the
+// atmosphere is disabled with a critical log -- no analytic fallback exists.
+void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
+    constexpr uint64_t kDisabledKey = 1;  // 0 = dirty, 1 = disabled uploaded
+
+    auto uploadDisabled = [this]() {
+        AtmosNNHeaderGPU disabledHeader{};
+        atmosHeaderBuffer->Upload(&disabledHeader, sizeof(disabledHeader));
+        atmosBakeKey = kDisabledKey;
+    };
+
+    if (!atmosphereConfig.enabled || !atmosModelPack) {
+        if (atmosBakeKey != kDisabledKey) uploadDisabled();
+        return;
+    }
+
+    AtmosLambdaGrid grid = RenderBandLambdaGrid(
+        spectralMode, static_cast<double>(wavelength_nm));
+    if (grid.band.empty()) {
+        if (atmosBakeKey != kDisabledKey) {
+            if (!grid.error.empty())
+                QL_LOG_CRITICAL("NN atmosphere: {}", grid.error);
+            else
+                QL_LOG_WARN("NN atmosphere: spectral mode has no NN coverage, "
+                            "atmosphere disabled for this mode");
+            uploadDisabled();
+        }
+        return;
+    }
+
+    // Resolve geometry defaults from the live renderer state
+    AtmosphereNNConfig resolved = atmosphereConfig;
+    const glm::vec3 sunDir = lightingParams.sunDirection;
+    if (resolved.sunFromLighting && glm::length(sunDir) > 1e-6f) {
+        const glm::vec3 s = glm::normalize(sunDir);
+        resolved.sunZenithDeg = glm::degrees(std::acos(std::clamp(s.y, -1.0f, 1.0f)));
+        resolved.sunAzimuthDeg = glm::degrees(std::atan2(s.x, s.z));
+    }
+    if (resolved.h1FromCamera) {
+        const f32 wu = lightingParams.worldUnitsToMeters > 0.0f
+                           ? lightingParams.worldUnitsToMeters : 1.0f;
+        resolved.h1Km = std::max(
+            static_cast<double>(camera.GetPosition().y * wu) / 1000.0, 0.0);
+    }
+
+    const uint64_t key =
+        AtmosphereBaker::BakeKey(resolved, grid.band, grid.lambdasNm);
+    if (key == atmosBakeKey) return;
+
+    try {
+        AtmosphereBaker baker(*atmosModelPack);
+        AtmosBakeResult baked =
+            baker.Bake(resolved, grid.band, grid.lambdasNm, grid.windowHalfWidthNm);
+        if (baked.data.size() > kAtmosMaxDataFloats) {
+            QL_LOG_CRITICAL("NN atmosphere: baked LUT ({} floats) exceeds GPU "
+                            "buffer capacity ({})", baked.data.size(),
+                            kAtmosMaxDataFloats);
+            uploadDisabled();
+            return;
+        }
+        const glm::vec3 s = glm::length(sunDir) > 1e-6f
+                                ? glm::normalize(sunDir) : glm::vec3(0, 1, 0);
+        baked.header.sunDirWorld[0] = s.x;
+        baked.header.sunDirWorld[1] = s.y;
+        baked.header.sunDirWorld[2] = s.z;
+        baked.header.worldUnitsToMeters =
+            lightingParams.worldUnitsToMeters > 0.0f
+                ? lightingParams.worldUnitsToMeters : 1.0f;
+        atmosDataBuffer->Upload(baked.data.data(),
+                                baked.data.size() * sizeof(f32));
+        atmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
+        atmosBakeKey = key;
+    } catch (const std::exception& e) {
+        QL_LOG_CRITICAL("NN atmosphere bake failed, atmosphere disabled: {}",
+                        e.what());
+        uploadDisabled();
+    }
+}
+
 void ExternalRenderContext::RenderFrame(
     VkCommandBuffer cmd,
     VkImage targetImage,
@@ -841,6 +927,10 @@ void ExternalRenderContext::RenderFrame(
     if (width != m_impl->width || height != m_impl->height) {
         Resize(width, height);
     }
+
+    // Rebake the NN atmosphere LUT if the bake key changed (band, weather,
+    // quantized altitude / sun geometry)
+    m_impl->UpdateAtmosphereNN();
 
     // Update camera data with current state
     CameraData cameraData = m_impl->camera.GetCameraData();
@@ -2225,18 +2315,28 @@ void ExternalRenderContext::CreateDummyBuffers() {
     );
     m_impl->solarLutBuffer->Upload(&dummySolar, sizeof(DummySolarLUT));
 
-    // Create dummy atmospheric buffer
-    struct DummyAtmospheric {
-        f32 data[64 / sizeof(f32)];
-    } dummyAtmo{};
-
-    m_impl->atmosphericBuffer = std::make_unique<GpuBuffer>(
+    // Create NN atmosphere buffers. The header starts zeroed (enabled = 0,
+    // atmosphere off); the data blob is preallocated at its maximum size so
+    // rebakes are pure uploads with no descriptor rebinding.
+    AtmosNNHeaderGPU disabledHeader{};
+    m_impl->atmosHeaderBuffer = std::make_unique<GpuBuffer>(
         allocator,
-        sizeof(DummyAtmospheric),
+        sizeof(AtmosNNHeaderGPU),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->atmosphericBuffer->Upload(&dummyAtmo, sizeof(DummyAtmospheric));
+    m_impl->atmosHeaderBuffer->Upload(&disabledHeader, sizeof(AtmosNNHeaderGPU));
+
+    m_impl->atmosDataBuffer = std::make_unique<GpuBuffer>(
+        allocator,
+        kAtmosMaxDataFloats * sizeof(f32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU
+    );
+    {
+        std::vector<f32> zeroData(kAtmosMaxDataFloats, 0.0f);
+        m_impl->atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
+    }
 
     // Create CIE 1931 CMF LUT buffer (required for VIS_Fused mode)
     // Use hardcoded CIE data from CIE_CMF_Data.hpp (401 samples, 380-780nm at 1nm)
@@ -2517,7 +2617,8 @@ void ExternalRenderContext::CreatePipeline() {
     m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
     m_impl->pipeline->BindComplexRefractiveIndexBuffer(m_impl->criBuffer.get());
     m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
-    m_impl->pipeline->BindAtmosphericParams(m_impl->atmosphericBuffer.get());
+    m_impl->pipeline->BindAtmosphereNN(m_impl->atmosHeaderBuffer.get(),
+                                       m_impl->atmosDataBuffer.get());
 
     // Bind CIE CMF LUT (required for VIS_Fused spectral mode)
     if (m_impl->cieCmfBuffer) {
@@ -4248,48 +4349,27 @@ void ExternalRenderContext::TransitionImageLayoutImmediate(
 }
 
 // ============================================================================
-// Atmospheric Configuration
+// NN Atmosphere Configuration
 // ============================================================================
 
-void ExternalRenderContext::SetAtmosphericConfig(const AtmosphericConfig& config) {
-    m_impl->atmosphericConfig = config;
-    m_impl->atmosphericDirty = true;
+void ExternalRenderContext::SetAtmosphere(const AtmosphereNNConfig& config) {
+    m_impl->atmosphereConfig = config;
+    m_impl->atmosModelPack.reset();
+    m_impl->atmosBakeKey = 0;  // Force rebake (or disable-upload) next frame
 
-    // Upload to GPU immediately if buffer exists
-    if (m_impl->atmosphericBuffer) {
-        AtmosphericParamsGPU gpuParams = config.ToGPU();
-        m_impl->atmosphericBuffer->Upload(&gpuParams, sizeof(AtmosphericParamsGPU));
-        m_impl->atmosphericDirty = false;
+    if (config.enabled && !config.modelPackDir.empty()) {
+        // Throws if the directory does not exist -- hard error, no fallback
+        m_impl->atmosModelPack =
+            std::make_unique<AtmosModelPack>(config.modelPackDir);
     }
 
     ResetAccumulation();
-    QL_LOG_DEBUG("Atmospheric config updated: {}",
-                 config.IsEnabled() ? "enabled" : "disabled");
+    QL_LOG_INFO("NN atmosphere config updated: {} (preset '{}')",
+                config.enabled ? "enabled" : "disabled", config.preset);
 }
 
-void ExternalRenderContext::SetAtmosphericPreset(const String& preset) {
-    AtmosphericConfig config;
-
-    if (preset == "clear_day") {
-        config = AtmosphericConfig::ClearDay();
-    } else if (preset == "hazy") {
-        config = AtmosphericConfig::Hazy();
-    } else if (preset == "polluted_urban") {
-        config = AtmosphericConfig::PollutedUrban();
-    } else if (preset == "mountain_top") {
-        config = AtmosphericConfig::MountainTop();
-    } else if (preset == "mars") {
-        config = AtmosphericConfig::Mars();
-    } else {
-        config = AtmosphericConfig::Disabled();
-    }
-
-    SetAtmosphericConfig(config);
-    QL_LOG_INFO("Atmospheric preset set to: {}", preset);
-}
-
-const AtmosphericConfig& ExternalRenderContext::GetAtmosphericConfig() const {
-    return m_impl->atmosphericConfig;
+const AtmosphereNNConfig& ExternalRenderContext::GetAtmosphere() const {
+    return m_impl->atmosphereConfig;
 }
 
 // ============================================================================

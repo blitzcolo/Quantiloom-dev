@@ -260,7 +260,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(20);  // Added CIE CMF LUT (binding 19)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(21);  // Added NN atmosphere data (binding 20)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -427,12 +427,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // ========================================================================
     // Binding 17: Atmospheric Parameters (StructuredBuffer<AtmosphericParams>)
     // ========================================================================
-    // Physical parameters for Delta-Tracking volumetric atmospheric rendering
-    // Provides Rayleigh + Mie scattering coefficients
-    // Used in both miss shader (Delta-Tracking) and closest hit (transmittance)
+    // NN atmosphere LUT header (baked from MODTRAN surrogate networks)
+    // Used in both miss shader (sky) and closest hit (tau / path radiance)
     // ========================================================================
 
-    // Binding 17: Atmospheric params buffer (StructuredBuffer<AtmosphericParams>)
+    // Binding 17: NN atmosphere header (StructuredBuffer<AtmosNNHeader>)
     bindings[17].binding = 17;
     bindings[17].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[17].descriptorCount = 1;
@@ -469,9 +468,22 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[19].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;  // Allow both hit and miss shaders to access CIE LUT
     bindings[19].pImmutableSamplers = nullptr;
 
+    // ========================================================================
+    // Binding 20: NN atmosphere LUT data blob (StructuredBuffer<float>)
+    // ========================================================================
+    // Flat float array holding the baked tau / lpath / ldown spectral grids;
+    // indexed via offsets in the binding-17 header.
+    // ========================================================================
+
+    bindings[20].binding = 20;
+    bindings[20].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[20].descriptorCount = 1;
+    bindings[20].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[20].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(20, 0);  // Updated for CIE CMF LUT (binding 19)
+    std::vector<VkDescriptorBindingFlags> bindingFlags(21, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -1303,36 +1315,44 @@ void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
 }
 
 // ============================================================================
-// Bind Atmospheric Parameters Buffer (Binding 17)
+// Bind NN Atmosphere Buffers (Bindings 17 + 20)
 // ============================================================================
 
-void RayTracingPipeline::BindAtmosphericParams(const GpuBuffer* buffer) const {
+void RayTracingPipeline::BindAtmosphereNN(const GpuBuffer* header,
+                                          const GpuBuffer* data) const {
     VkDevice device = m_context.GetDevice();
 
-    if (buffer == nullptr) {
-        QL_LOG_INFO("Atmospheric params buffer is null - Delta-Tracking disabled, using LUT fallback");
-        // Note: Shader must check if atmospheric params are valid before use
+    if (header == nullptr || data == nullptr) {
+        QL_LOG_INFO("NN atmosphere buffers are null - atmosphere disabled");
         return;
     }
 
-    QL_LOG_INFO("Binding atmospheric params buffer to descriptor set (binding 17)");
-    QL_LOG_INFO("  Buffer size: {} bytes (expected: 64)", buffer->GetSize());
+    QL_LOG_INFO("Binding NN atmosphere buffers (binding 17 header {} B, "
+                "binding 20 data {} B)", header->GetSize(), data->GetSize());
 
-    VkDescriptorBufferInfo bufferInfo{};
-    bufferInfo.buffer = buffer->GetHandle();
-    bufferInfo.offset = 0;
-    bufferInfo.range = VK_WHOLE_SIZE;
+    VkDescriptorBufferInfo headerInfo{};
+    headerInfo.buffer = header->GetHandle();
+    headerInfo.offset = 0;
+    headerInfo.range = VK_WHOLE_SIZE;
 
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 17;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &bufferInfo;
+    VkDescriptorBufferInfo dataInfo{};
+    dataInfo.buffer = data->GetHandle();
+    dataInfo.offset = 0;
+    dataInfo.range = VK_WHOLE_SIZE;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    VkWriteDescriptorSet writes[2]{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_descriptorSet;
+    writes[0].dstBinding = 17;
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[0].descriptorCount = 1;
+    writes[0].pBufferInfo = &headerInfo;
+    writes[1] = writes[0];
+    writes[1].dstBinding = 20;
+    writes[1].pBufferInfo = &dataInfo;
+
+    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 }
 
 void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) const {

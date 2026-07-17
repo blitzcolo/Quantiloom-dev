@@ -27,7 +27,7 @@
  * @note Any layout change requires shader update
  *
  * @see SolarSpectralLUT for wavelength-dependent illumination curves
- * @see AtmosphericConfig for atmospheric scattering parameters
+ * @see AtmosphereNNConfig for the NN atmosphere configuration
  *
  * @author wtflmao
  */

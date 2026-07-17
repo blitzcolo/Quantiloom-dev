@@ -28,7 +28,10 @@
  * - Binding 14: Complex refractive index (n,k) data (storage buffer)
  * - Binding 15: Solar spectral LUT (storage buffer)
  * - Binding 16: Normal buffer (required)
- * - Binding 17: Atmospheric parameters (storage buffer)
+ * - Binding 17: NN atmosphere LUT header (storage buffer)
+ * - Binding 18: Instance geometry info (storage buffer)
+ * - Binding 19: CIE CMF LUT (storage buffer)
+ * - Binding 20: NN atmosphere LUT data blob (storage buffer)
  *
  * Usage example:
  * @code
@@ -267,16 +270,15 @@ public:
     void BindSolarSpectralLUT(const GpuBuffer* buffer) const;
 
     // ========================================================================
-    // Atmospheric Parameters (Binding 17)
+    // NN Atmosphere (Bindings 17 + 20)
     // ========================================================================
-    // Bind atmospheric parameters buffer for Delta-Tracking volumetric rendering
-    // Provides Rayleigh + Mie scattering coefficients for wavelength-dependent extinction
-    // Pass nullptr to disable atmospheric scattering (use LUT fallback)
+    // Bind the baked NN atmosphere LUT: header (AtmosNNHeaderGPU, binding 17)
+    // and the flat float data blob (binding 20). When the atmosphere is
+    // disabled, bind a header with enabled = 0 and a small dummy data buffer;
+    // shaders must not sample the LUT when header.enabled == 0.
     // ========================================================================
 
-    // Bind atmospheric parameters buffer (binding 17)
-    // Pass nullptr to disable Delta-Tracking
-    void BindAtmosphericParams(const GpuBuffer* buffer) const;
+    void BindAtmosphereNN(const GpuBuffer* header, const GpuBuffer* data) const;
 
     // ========================================================================
     // Instance Geometry Info Buffer (Binding 18)

@@ -17,7 +17,7 @@ This directory contains HLSL ray tracing shaders for Quantiloom.
 | `common.hlsli` | Shared types, spectral modes, payload structures |
 | `pbr.hlsli` | Cook-Torrance PBR functions (GGX, Fresnel) |
 | `blackbody.hlsli` | Planck blackbody radiation for thermal IR (C1_NM = 1.191×10²⁰) |
-| `atmospheric.hlsli` | Rayleigh+Mie scattering, Delta-Tracking volumetric rendering |
+| `atmosphere_nn.hlsli` | NN atmosphere LUT sampling (MODTRAN surrogate tau / L_path / L_down) |
 | `SpectralConversion.hlsli` | CIE XYZ color matching, spectral upsampling |
 | `spectral_query.hlsli` | Spectral curve sampling utilities |
 

@@ -37,7 +37,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
     # Define project only for standalone builds
     project(libQuantiloomTests
-        VERSION 0.0.3
+        VERSION 0.0.4
         DESCRIPTION "libQuantiloom Unit Tests"
         LANGUAGES CXX
     )
@@ -224,7 +224,6 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_brdf_lut.cpp
     test_renderer/test_lighting_params.cpp
     test_renderer/test_acceleration_structure.cpp
-    test_renderer/test_atmospheric_config.cpp
     test_renderer/test_texture_manager.cpp
 )
 
