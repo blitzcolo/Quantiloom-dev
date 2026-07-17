@@ -1504,7 +1504,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float SUN_SOLID_ANGLE_SR = 6.8e-5;
 
         // Loop over wavelengths in IR band
-        // NOTE: Removed [unroll] to reduce shader compilation time
+        // [loop] is REQUIRED: this loop contains a recursive TraceRay. If DXC
+        // unrolls it, the pipeline gets 16 static recursive trace call sites
+        // and the driver crashes (DEVICE_LOST) on the first nested
+        // closest-hit invocation.
+        [loop]
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
@@ -2331,6 +2335,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float wavelengths[3] = { 650.0, 550.0, 450.0 };  // nm
             float3 channelRadiance = float3(0.0, 0.0, 0.0);
 
+            // [loop] is REQUIRED: this loop contains a recursive TraceRay.
+            // Unrolling it creates multiple static recursive trace call sites,
+            // which crashes the device on nested closest-hit invocations
+            // (same failure mode as the thermal-IR wavelength loop).
+            [loop]
             for (int ch = 0; ch < 3; ch++) {
                 float lambda = wavelengths[ch];
                 float ior_lambda = CauchyIOR(material.ior, material.dispersion, lambda);
@@ -2406,17 +2415,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             recursivePayload.radiance = float3(0.0, 0.0, 0.0);
 
-            if (xi < F) {
-                // Reflection path
-                recursiveRay.Direction = reflectDir;
-                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+            // Single trace call site: pick the direction first, then trace.
+            // Duplicating TraceRay per branch multiplies the static recursive
+            // call sites for no benefit.
+            bool reflected = (xi < F);
+            recursiveRay.Direction = reflected ? reflectDir : refractDir;
+            TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+
+            if (reflected) {
                 transmissionRadiance = recursivePayload.radiance;
             } else {
-                // Refraction path
-                recursiveRay.Direction = refractDir;
-                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
-
-                // Apply Beer-Lambert absorption
+                // Apply Beer-Lambert absorption on the refraction path
                 float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
                 if (!entering && material.attenuationDistance > 0.0) {
                     float travelDistance = RayTCurrent();

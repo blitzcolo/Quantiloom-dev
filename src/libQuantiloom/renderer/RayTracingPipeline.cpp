@@ -1,5 +1,6 @@
 #include "RayTracingPipeline.hpp"
 #include "core/Log.hpp"
+#include <algorithm>
 #include <fstream>
 #include <stdexcept>
 #include <cstring>
@@ -270,10 +271,14 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[0].pImmutableSamplers = nullptr;
 
     // Binding 1: Acceleration structure (TLAS)
+    // CLOSEST_HIT visibility is required for the recursive rays traced from
+    // closesthit.rchit (thermal-IR hemisphere sampling, shadow rays);
+    // accessing the TLAS from a stage without visibility is undefined
+    // behavior and crashes the device the moment those rays are traced.
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[1].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[1].pImmutableSamplers = nullptr;
 
     // Binding 2: LUT buffer (StructuredBuffer)
@@ -1419,6 +1424,7 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
 
     // Bind pipeline and descriptor set
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
+
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,

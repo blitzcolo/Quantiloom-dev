@@ -1189,7 +1189,9 @@ int main(int argc, char* argv[]) {
         // Bake the spectral LUT for the active render band. Missing network
         // files or out-of-coverage wavelengths are hard errors -- no fallback.
         AtmosNNHeaderGPU atmosHeader{};  // enabled = 0
-        std::vector<f32> atmosData(4, 0.0f);
+        // Sized so that even unconditionally-evaluated LUT reads (HLSL ternary
+        // is a select) stay in bounds when the atmosphere is disabled
+        std::vector<f32> atmosData(2048, 0.0f);
         if (atmosphereConfig.enabled) {
             AtmosLambdaGrid grid = RenderBandLambdaGrid(
                 spectral_mode, static_cast<double>(wavelength_nm));

@@ -188,7 +188,7 @@ include_directories(SYSTEM "${openexr_BINARY_DIR}/src/lib/OpenEXRCore")
 # If needed in future, re-add with proper static linking configuration
 
 # ============================================================================
-# Vulkan SDK (required for M1+)
+# Vulkan SDK
 # ============================================================================
 find_package(Vulkan REQUIRED)
 
@@ -203,7 +203,7 @@ endif()
 # VMA (Vulkan Memory Allocator): Single-header memory management library
 CPMAddPackage(
     NAME VulkanMemoryAllocator
-    VERSION 3.3.0
+    VERSION 3.4.0
     GITHUB_REPOSITORY GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator
     DOWNLOAD_ONLY YES
 )
@@ -215,13 +215,13 @@ if(VulkanMemoryAllocator_ADDED)
         ${VulkanMemoryAllocator_SOURCE_DIR}/include
     )
     target_link_libraries(VMA INTERFACE Vulkan::Vulkan)
-    message(STATUS "VMA (Vulkan Memory Allocator) v3.3.0 added")
+    message(STATUS "VMA (Vulkan Memory Allocator) v3.4.0 added")
 endif()
 
 # tinygltf: glTF 2.0 loader (header-only)
 CPMAddPackage(
     NAME tinygltf
-    VERSION 2.9.7
+    VERSION 3.0.0
     GITHUB_REPOSITORY syoyo/tinygltf
     DOWNLOAD_ONLY YES
 )
@@ -237,7 +237,7 @@ if(tinygltf_ADDED)
     #   - External images (URI) will be loaded automatically
     #   - Embedded images (DataURI) will be decoded
     #   - Binary buffers will be loaded from .bin files
-    message(STATUS "tinygltf v2.9.7 added (header-only glTF 2.0 loader)")
+    message(STATUS "tinygltf v3.0.0 added (header-only glTF 2.0 loader)")
 endif()
 
 # nlohmann/json: JSON parser (header-only), used by the safetensors reader
