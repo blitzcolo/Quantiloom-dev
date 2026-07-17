@@ -322,3 +322,70 @@ TEST(TypesTest, NumericConcept) {
     static_assert(Numeric<f32>, "f32 should satisfy Numeric concept");
     static_assert(Numeric<f64>, "f64 should satisfy Numeric concept");
 }
+
+// ============================================================================
+// Fused Band Info Tests
+// ============================================================================
+// GetFusedBandInfo() is the single source of truth for fused-band wavelength
+// ranges on the CPU side. Values MUST match the shader constants in
+// closesthit.rchit / miss.rmiss exactly.
+// ============================================================================
+
+TEST(TypesTest, FusedBandInfoLWIR) {
+    auto band = GetFusedBandInfo(SpectralMode::LWIR_Fused);
+    ASSERT_TRUE(band.has_value());
+    EXPECT_FLOAT_EQ(band->lambdaMinNm, 8000.0f);
+    EXPECT_FLOAT_EQ(band->lambdaMaxNm, 12000.0f);
+    EXPECT_FLOAT_EQ(band->CenterNm(), 10000.0f);
+    EXPECT_FLOAT_EQ(band->WidthNm(), 4000.0f);
+}
+
+TEST(TypesTest, FusedBandInfoMWIR) {
+    auto band = GetFusedBandInfo(SpectralMode::MWIR_Fused);
+    ASSERT_TRUE(band.has_value());
+    EXPECT_FLOAT_EQ(band->lambdaMinNm, 3000.0f);
+    EXPECT_FLOAT_EQ(band->lambdaMaxNm, 5000.0f);
+    EXPECT_FLOAT_EQ(band->CenterNm(), 4000.0f);
+    EXPECT_FLOAT_EQ(band->WidthNm(), 2000.0f);
+}
+
+TEST(TypesTest, FusedBandInfoSWIR) {
+    auto band = GetFusedBandInfo(SpectralMode::SWIR_Fused);
+    ASSERT_TRUE(band.has_value());
+    EXPECT_FLOAT_EQ(band->lambdaMinNm, 1400.0f);
+    EXPECT_FLOAT_EQ(band->lambdaMaxNm, 2400.0f);
+    EXPECT_FLOAT_EQ(band->CenterNm(), 1900.0f);
+    EXPECT_FLOAT_EQ(band->WidthNm(), 1000.0f);
+}
+
+TEST(TypesTest, FusedBandInfoNIR) {
+    auto band = GetFusedBandInfo(SpectralMode::NIR_Fused);
+    ASSERT_TRUE(band.has_value());
+    EXPECT_FLOAT_EQ(band->lambdaMinNm, 930.0f);
+    EXPECT_FLOAT_EQ(band->lambdaMaxNm, 1200.0f);
+}
+
+TEST(TypesTest, FusedBandInfoVIS) {
+    auto band = GetFusedBandInfo(SpectralMode::VIS_Fused);
+    ASSERT_TRUE(band.has_value());
+    EXPECT_FLOAT_EQ(band->lambdaMinNm, 400.0f);
+    EXPECT_FLOAT_EQ(band->lambdaMaxNm, 780.0f);
+}
+
+TEST(TypesTest, FusedBandInfoNoneForNonFusedModes) {
+    EXPECT_FALSE(GetFusedBandInfo(SpectralMode::RGB).has_value());
+    EXPECT_FALSE(GetFusedBandInfo(SpectralMode::Single).has_value());
+    EXPECT_FALSE(GetFusedBandInfo(SpectralMode::Multispectral).has_value());
+}
+
+TEST(TypesTest, IsThermalIRFusedMode) {
+    // Thermal-capable fused bands: emission term matters, sensor needs
+    // band-integrated radiance and band-center photon wavelength.
+    EXPECT_TRUE(IsIRFusedMode(SpectralMode::SWIR_Fused));
+    EXPECT_TRUE(IsIRFusedMode(SpectralMode::MWIR_Fused));
+    EXPECT_TRUE(IsIRFusedMode(SpectralMode::LWIR_Fused));
+    EXPECT_TRUE(IsIRFusedMode(SpectralMode::NIR_Fused));
+    EXPECT_FALSE(IsIRFusedMode(SpectralMode::RGB));
+    EXPECT_FALSE(IsIRFusedMode(SpectralMode::VIS_Fused));
+    EXPECT_FALSE(IsIRFusedMode(SpectralMode::Single));
+}

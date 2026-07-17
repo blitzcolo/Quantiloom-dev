@@ -41,6 +41,7 @@
 #include <sstream>
 #include <filesystem>
 #include <stdexcept>
+#include <algorithm>  // For std::nth_element, std::clamp
 #include <cstddef>  // For offsetof
 #include <random>   // For C++11 random number generation
 
@@ -553,6 +554,26 @@ int main(int argc, char* argv[]) {
         QL_LOG_INFO("  Scene loaded: {} meshes, {} nodes, {} materials",
                     loadedScene.meshes.size(), loadedScene.nodes.size(),
                     loadedScene.materials.size());
+
+        // ====================================================================
+        // Default IR Surface Temperature (thermal emission source)
+        // ====================================================================
+        // Standard glTF/USD materials carry no temperature, which silences
+        // the Planck emission term entirely in MWIR/LWIR. Backfill a
+        // scene-wide ambient temperature for materials without their own
+        // temperature source. Configurable via scene.default_temperature_k.
+        if (IsIRFusedMode(spectral_mode) || spectral_mode == SpectralMode::Single) {
+            f32 defaultTemperature_K = config.Get<f32>("scene.default_temperature_k", 300.0f);
+            if (defaultTemperature_K < 150.0f || defaultTemperature_K > 1000.0f) {
+                QL_LOG_WARN("scene.default_temperature_k={:.1f}K is outside typical range [150, 1000], check config",
+                            defaultTemperature_K);
+            }
+            u32 modified = ApplyDefaultIRTemperature(loadedScene.materials, defaultTemperature_K);
+            if (modified > 0) {
+                QL_LOG_INFO("  Applied default surface temperature {:.1f} K to {} material(s) without temperature data",
+                            defaultTemperature_K, modified);
+            }
+        }
 
         // ====================================================================
         // Validate Material Spectral Sources (sRGB upsampling gate - R5)
@@ -2154,6 +2175,26 @@ int main(int argc, char* argv[]) {
             // Parse sensor parameters from config
             SensorParams sensorParams = PostprocessConfig::ParseSensorParams(config);
 
+            // ================================================================
+            // IR fused modes: unit fixup for the sensor photon budget
+            // ================================================================
+            // The renderer stores per-nm AVERAGE spectral radiance
+            // (band integral / band width, see closesthit.rchit) while the
+            // sensor chain expects band-INTEGRATED radiance (W/sr/m^2).
+            // Multiply by the band width here, and use the band center for
+            // photon energy instead of the 550 nm visible-light default.
+            f32 bandScale = 1.0f;
+            if (IsIRFusedMode(spectral_mode)) {
+                if (auto band = GetFusedBandInfo(spectral_mode)) {
+                    bandScale = band->WidthNm();
+                    if (!config.Has("spectral.wavelength_nm")) {
+                        sensorParams.wavelength_nm = band->CenterNm();
+                    }
+                    QL_LOG_INFO("  IR sensor units: radiance x{:.0f} nm bandwidth, photon wavelength {:.0f} nm",
+                                bandScale, sensorParams.wavelength_nm);
+                }
+            }
+
             // Create sensor model
             GenericSensor sensor;
 
@@ -2161,9 +2202,9 @@ int main(int argc, char* argv[]) {
             Image hdrInput(width, height, 3);
             for (u32 y = 0; y < height; ++y) {
                 for (u32 x = 0; x < width; ++x) {
-                    hdrInput(x, y, 0) = img(x, y, 0);  // R
-                    hdrInput(x, y, 1) = img(x, y, 1);  // G
-                    hdrInput(x, y, 2) = img(x, y, 2);  // B
+                    hdrInput(x, y, 0) = img(x, y, 0) * bandScale;  // R
+                    hdrInput(x, y, 1) = img(x, y, 1) * bandScale;  // G
+                    hdrInput(x, y, 2) = img(x, y, 2) * bandScale;  // B
                 }
             }
 
@@ -2176,13 +2217,16 @@ int main(int argc, char* argv[]) {
 
                 const SensorOutput& sensorOutput = sensorResult.value();
 
-                // Replace image with enhanced preview (noisy radiance, for PNG/visualization)
+                // Replace image with enhanced preview (noisy radiance, for PNG/visualization).
+                // Divide the band scale back out so the EXR keeps the same
+                // per-nm average radiance units as the sensor-off path.
                 const Image& enhancedPreview = sensorOutput.enhancedPreview;
+                const f32 invBandScale = 1.0f / bandScale;
                 for (u32 y = 0; y < height; ++y) {
                     for (u32 x = 0; x < width; ++x) {
-                        img(x, y, 0) = enhancedPreview(x, y, 0);  // R
-                        img(x, y, 1) = enhancedPreview(x, y, 1);  // G
-                        img(x, y, 2) = enhancedPreview(x, y, 2);  // B
+                        img(x, y, 0) = enhancedPreview(x, y, 0) * invBandScale;  // R
+                        img(x, y, 1) = enhancedPreview(x, y, 1) * invBandScale;  // G
+                        img(x, y, 2) = enhancedPreview(x, y, 2) * invBandScale;  // B
                         // Alpha unchanged
                     }
                 }
@@ -2235,6 +2279,35 @@ int main(int argc, char* argv[]) {
                     pngImg(x, y, 1) = img(x, y, 1);  // G
                     pngImg(x, y, 2) = img(x, y, 2);  // B
                 }
+            }
+
+            // IR fused modes: physical radiance values are far below 1.0
+            // (e.g. LWIR ~5e-3 W/sr/m^2/nm), so a raw [0,1] clamp yields a
+            // black PNG. Stretch the 1st..99th percentile range to [0,1]
+            // for the preview; the EXR keeps the physical values.
+            if (IsIRFusedMode(spectral_mode)) {
+                std::vector<f32> values(static_cast<size_t>(width) * height);
+                for (u32 y = 0; y < height; ++y) {
+                    for (u32 x = 0; x < width; ++x) {
+                        values[static_cast<size_t>(y) * width + x] = pngImg(x, y, 0);
+                    }
+                }
+                const size_t loIdx = values.size() / 100;
+                const size_t hiIdx = values.size() - 1 - loIdx;
+                std::nth_element(values.begin(), values.begin() + loIdx, values.end());
+                const f32 lo = values[loIdx];
+                std::nth_element(values.begin(), values.begin() + hiIdx, values.end());
+                const f32 hi = values[hiIdx];
+                const f32 range = std::max(hi - lo, 1e-12f);
+
+                for (u32 y = 0; y < height; ++y) {
+                    for (u32 x = 0; x < width; ++x) {
+                        for (u32 c = 0; c < 3; ++c) {
+                            pngImg(x, y, c) = (pngImg(x, y, c) - lo) / range;
+                        }
+                    }
+                }
+                QL_LOG_INFO("  IR PNG preview normalized: [{:.4e}, {:.4e}] -> [0, 1]", lo, hi);
             }
 
             if (ImageIO::WritePNG(pngPath.string(), pngImg)) {

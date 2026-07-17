@@ -374,6 +374,43 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
     }
 }
 
+// ============================================================================
+// Fused Band Info
+// ============================================================================
+// Single CPU-side source of truth for fused-band wavelength ranges.
+// CRITICAL: Must match the shader constants in closesthit.rchit / miss.rmiss
+// (VIS 400-780, NIR 930-1200, SWIR 1400-2400, MWIR 3000-5000, LWIR 8000-12000).
+// The renderer stores per-nm AVERAGE spectral radiance for fused modes
+// (band-integrated radiance divided by WidthNm); the sensor chain needs
+// WidthNm to recover band-integrated radiance and CenterNm for photon energy.
+// ============================================================================
+
+struct SpectralBandInfo {
+    f32 lambdaMinNm;
+    f32 lambdaMaxNm;
+
+    [[nodiscard]] constexpr f32 CenterNm() const { return 0.5f * (lambdaMinNm + lambdaMaxNm); }
+    [[nodiscard]] constexpr f32 WidthNm() const { return lambdaMaxNm - lambdaMinNm; }
+};
+
+inline std::optional<SpectralBandInfo> GetFusedBandInfo(SpectralMode mode) {
+    switch (mode) {
+        case SpectralMode::VIS_Fused:  return SpectralBandInfo{400.0f, 780.0f};
+        case SpectralMode::NIR_Fused:  return SpectralBandInfo{930.0f, 1200.0f};
+        case SpectralMode::SWIR_Fused: return SpectralBandInfo{1400.0f, 2400.0f};
+        case SpectralMode::MWIR_Fused: return SpectralBandInfo{3000.0f, 5000.0f};
+        case SpectralMode::LWIR_Fused: return SpectralBandInfo{8000.0f, 12000.0f};
+        default:                       return std::nullopt;
+    }
+}
+
+// IR fused modes render scalar band radiance (grayscale) and need the
+// IR-specific sensor unit handling; VIS_Fused outputs CIE-integrated RGB.
+inline bool IsIRFusedMode(SpectralMode mode) {
+    return mode == SpectralMode::NIR_Fused || mode == SpectralMode::SWIR_Fused ||
+           mode == SpectralMode::MWIR_Fused || mode == SpectralMode::LWIR_Fused;
+}
+
 /**
  * @enum ErrorCode
  * @brief Standardized error codes for all Quantiloom subsystems

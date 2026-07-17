@@ -427,4 +427,29 @@ inline f32 Material::GetIRTransmittance(f32 lambda_nm) const {
     return detail::InterpolateSpectralCurve(irTransmittanceCurve, lambda_nm, 0.0f);
 }
 
+// ============================================================================
+// Default IR Temperature Injection
+// ============================================================================
+// Standard glTF/USD assets carry no surface temperature, leaving
+// irTemperature_K at 0 and silencing thermal emission in MWIR/LWIR.
+// Backfills a scene-wide ambient temperature for materials that have no
+// temperature source of their own (neither an explicit scalar nor a
+// per-pixel temperature texture). Returns the number of materials modified.
+// ============================================================================
+
+inline u32 ApplyDefaultIRTemperature(Vector<Material>& materials, f32 defaultTemperature_K) {
+    if (defaultTemperature_K <= 0.0f) {
+        return 0;
+    }
+
+    u32 modified = 0;
+    for (auto& mat : materials) {
+        if (mat.irTemperature_K <= 0.0f && mat.temperatureTextureIndex < 0) {
+            mat.irTemperature_K = defaultTemperature_K;
+            ++modified;
+        }
+    }
+    return modified;
+}
+
 } // namespace quantiloom

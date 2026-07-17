@@ -630,3 +630,53 @@ TEST(MaterialTest, GetIRReflectance_FallbackToNeutralDefault) {
     EXPECT_NEAR(mat.GetIRReflectance(5000.0f), 0.1f, 1e-6f);
 }
 
+// ============================================================================
+// Default IR Temperature Injection Tests
+// ============================================================================
+// Standard glTF materials carry no temperature, so irTemperature_K stays 0
+// and the shader skips thermal emission entirely. ApplyDefaultIRTemperature()
+// backfills a scene-wide ambient temperature for materials that have no
+// temperature source of their own.
+// ============================================================================
+
+TEST(MaterialTest, ApplyDefaultIRTemperature_SetsUntexturedZeroTemp) {
+    Vector<Material> materials(2);
+    // Both default: irTemperature_K == 0, no temperature texture
+
+    u32 modified = ApplyDefaultIRTemperature(materials, 300.0f);
+
+    EXPECT_EQ(modified, 2u);
+    EXPECT_FLOAT_EQ(materials[0].irTemperature_K, 300.0f);
+    EXPECT_FLOAT_EQ(materials[1].irTemperature_K, 300.0f);
+}
+
+TEST(MaterialTest, ApplyDefaultIRTemperature_PreservesExplicitTemperature) {
+    Vector<Material> materials(2);
+    materials[0].irTemperature_K = 350.0f;  // Explicitly set (e.g. glTF IR extension)
+
+    u32 modified = ApplyDefaultIRTemperature(materials, 300.0f);
+
+    EXPECT_EQ(modified, 1u);
+    EXPECT_FLOAT_EQ(materials[0].irTemperature_K, 350.0f);
+    EXPECT_FLOAT_EQ(materials[1].irTemperature_K, 300.0f);
+}
+
+TEST(MaterialTest, ApplyDefaultIRTemperature_SkipsTemperatureTextured) {
+    Vector<Material> materials(1);
+    materials[0].temperatureTextureIndex = 3;  // Per-pixel temperature map wins
+
+    u32 modified = ApplyDefaultIRTemperature(materials, 300.0f);
+
+    EXPECT_EQ(modified, 0u);
+    EXPECT_FLOAT_EQ(materials[0].irTemperature_K, 0.0f);
+}
+
+TEST(MaterialTest, ApplyDefaultIRTemperature_NonPositiveDefaultIsNoop) {
+    Vector<Material> materials(1);
+
+    u32 modified = ApplyDefaultIRTemperature(materials, 0.0f);
+
+    EXPECT_EQ(modified, 0u);
+    EXPECT_FLOAT_EQ(materials[0].irTemperature_K, 0.0f);
+}
+
