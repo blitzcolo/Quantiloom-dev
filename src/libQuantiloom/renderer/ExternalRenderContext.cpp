@@ -877,6 +877,15 @@ void ExternalRenderContext::RenderFrame(
     cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
     m_impl->pipeline->SetCameraData(cameraData);
 
+    // The shader branches on the SPEC_SPECTRAL_MODE specialization constant,
+    // not the push-constant copy above. Sync the pipeline variant here at the
+    // point of use: setters may run before the pipeline exists (scene not yet
+    // loaded), and scene reload recreates the pipeline with the default
+    // variant. Cached variants make this a hash lookup.
+    m_impl->pipeline->SetSpecConstants(
+        static_cast<u32>(m_impl->spectralMode),
+        m_impl->debugMode != DebugVisualizationMode::None);
+
     // Set sampling parameters
     // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
     u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->frameIndex * 997 + m_impl->accumulatedSamples * 1009);
@@ -1233,6 +1242,11 @@ const Camera& ExternalRenderContext::GetCamera() const {
 void ExternalRenderContext::SetSpectralMode(SpectralMode mode) {
     if (m_impl->spectralMode != mode) {
         m_impl->spectralMode = mode;
+        if (m_impl->pipeline) {
+            m_impl->pipeline->SetSpecConstants(
+                static_cast<u32>(mode),
+                m_impl->debugMode != DebugVisualizationMode::None);
+        }
         ResetAccumulation();
     }
 }
@@ -1267,7 +1281,12 @@ u32 ExternalRenderContext::GetSPP() const {
 void ExternalRenderContext::SetDebugMode(DebugVisualizationMode mode) {
     if (m_impl->debugMode != mode) {
         m_impl->debugMode = mode;
-        ResetAccumulation();  // Reset accumulation when debug mode changes
+        if (m_impl->pipeline) {
+            m_impl->pipeline->SetSpecConstants(
+                static_cast<u32>(m_impl->spectralMode),
+                mode != DebugVisualizationMode::None);
+        }
+        ResetAccumulation();
     }
 }
 

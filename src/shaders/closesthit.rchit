@@ -609,7 +609,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 sunRadiance;
     float3 skyRadiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB || camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
         // RGB and VIS_FUSED modes: Use full RGB lighting
         sunRadiance = lut.sunRadiance_rgb;
         skyRadiance = lut.skyRadiance_rgb;
@@ -845,7 +845,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     float3 output_radiance;
 
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // ====================================================================
         // RGB Mode: Fast Pure-RGB Pipeline (No Spectral Integration)
         // ====================================================================
@@ -874,7 +874,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         output_radiance = clamp(output_radiance, 0.0, 1000.0);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
         // ====================================================================
         // VIS_Fused Mode: True 32-Wavelength Spectral Integration
         // ====================================================================
@@ -1084,7 +1084,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         output_radiance = clamp(output_radiance, 0.0, 1000.0);  // Reasonable HDR range
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
         // ====================================================================
         // Single Wavelength Mode: True Spectral Rendering (Quantitative)
         // ====================================================================
@@ -1187,7 +1187,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_SWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
         // ====================================================================
         // SWIR Fused Mode: Short-Wave IR Band Integration (1000-2500nm)
         // ====================================================================
@@ -1315,7 +1315,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_NIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ====================================================================
         // NIR Fused Mode: Near-Infrared Band Integration (780-1400nm)
         // ====================================================================
@@ -1421,7 +1421,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED || camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
         // ====================================================================
@@ -1451,7 +1451,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float lambda_min, lambda_max;
         bool includeSolarReflection = false;  // Only for MWIR during daytime
 
-        if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED) {
+        if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
             lambda_min = 3000.0;   // nm
             lambda_max = 5000.0;   // nm
             // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
@@ -1504,11 +1504,41 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Ω_sun ≈ 6.8e-5 sr (subtends ~0.53° angular diameter)
         const float SUN_SOLID_ANGLE_SR = 6.8e-5;
 
-        // Loop over wavelengths in IR band
-        // [loop] is REQUIRED: this loop contains a recursive TraceRay. If DXC
-        // unrolls it, the pipeline gets 16 static recursive trace call sites
-        // and the driver crashes (DEVICE_LOST) on the first nested
-        // closest-hit invocation.
+        // Reflected environmental IR radiance: ONE shared Monte Carlo
+        // hemisphere sample for the whole band. The recursive trace returns
+        // BAND-INTEGRATED radiance (secondary hits run this same branch), so
+        // per-wavelength rays carry no extra spectral information -- they only
+        // multiply the ray count 16x per bounce (16^depth ray explosion).
+        // Directional variance is covered by the SPP accumulation loop.
+        bool tracedEnvSample = (payload.depth < 2);
+        float L_env_shared = 0.0;
+        if (tracedEnvSample) {
+            float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+            float pdf_ir;
+            float3 wi_ir = (roughness > 0.5)
+                ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_ir)
+                : ImportanceSampleGGX_PCG(normal, -WorldRayDirection(), roughness*roughness, payload.rngState, pdf_ir);
+            float NdotWi = dot(normal, wi_ir);
+            if (NdotWi > 0.0 && pdf_ir > 1e-6) {
+                RayDesc irRay;
+                irRay.Origin    = irHitPos + normal * 1e-3;
+                irRay.Direction = wi_ir;
+                irRay.TMin      = 0.0;
+                irRay.TMax      = 1e9;
+                Payload irPayload;
+                irPayload.radiance   = float3(0,0,0);
+                irPayload.depth      = payload.depth + 1;
+                irPayload.rngState   = payload.rngState;
+                irPayload.isShadowed = 0;
+                irPayload.dDdx       = float3(0,0,0);
+                irPayload.dDdy       = float3(0,0,0);
+                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
+                // fr = reflectance/PI (Lambertian); importance sampling cancels PI for cosine path
+                L_env_shared = irPayload.radiance.r * (reflectance / pdf_ir) * NdotWi;
+            }
+        }
+
+        // Loop over wavelengths in IR band ([loop]: keep code size bounded)
         [loop]
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
@@ -1520,35 +1550,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_emission = emissivity * L_blackbody;
             }
 
-            // 2. Reflected environmental IR radiance via Monte Carlo hemisphere sampling
-            float L_reflected_atm = 0.0;
-            if (payload.depth < 2) {
-                float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-                float pdf_ir;
-                float3 wi_ir = (roughness > 0.5)
-                    ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_ir)
-                    : ImportanceSampleGGX_PCG(normal, -WorldRayDirection(), roughness*roughness, payload.rngState, pdf_ir);
-                float NdotWi = dot(normal, wi_ir);
-                if (NdotWi > 0.0 && pdf_ir > 1e-6) {
-                    RayDesc irRay;
-                    irRay.Origin    = irHitPos + normal * 1e-3;
-                    irRay.Direction = wi_ir;
-                    irRay.TMin      = 0.0;
-                    irRay.TMax      = 1e9;
-                    Payload irPayload;
-                    irPayload.radiance   = float3(0,0,0);
-                    irPayload.depth      = payload.depth + 1;
-                    irPayload.rngState   = payload.rngState;
-                    irPayload.isShadowed = 0;
-                    irPayload.dDdx       = float3(0,0,0);
-                    irPayload.dDdy       = float3(0,0,0);
-                    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
-                    // fr = reflectance/PI (Lambertian); importance sampling cancels PI for cosine path
-                    L_reflected_atm = irPayload.radiance.r * (reflectance / pdf_ir) * NdotWi;
-                }
+            // 2. Reflected environmental IR radiance
+            float L_reflected_atm;
+            if (tracedEnvSample) {
+                L_reflected_atm = L_env_shared;
             } else {
-                // Fallback at max depth: NN downwelling spectrum when baked,
-                // otherwise fixed atmospheric Planck
+                // Max depth: per-wavelength downwelling from NN LUT when
+                // baked, otherwise fixed atmospheric Planck
                 float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
                     ? SampleAtmosLdown(atmos, atmosNNData, i)
                     : IRPlanckRadiance(T_atmosphere, lambda);
@@ -1661,7 +1669,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // This allows inspecting intermediate rendering data for debugging pipeline issues
     // ========================================================================
 
-    if (camera.debug_mode != DEBUG_MODE_NONE) {
+    if (SPEC_DEBUG_ENABLED != 0 && camera.debug_mode != DEBUG_MODE_NONE) {
         float3 debug_output = float3(1.0, 0.0, 1.0);  // Magenta = unhandled mode
 
         switch (camera.debug_mode) {
@@ -2322,10 +2330,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Check if dispersion is enabled and significant
         bool hasDispersion = (material.dispersion > 0.001) &&
-                            (camera.spectral_mode == SPECTRAL_MODE_RGB ||
-                             camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED);
+                            (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
+                             SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
 
-        if (hasDispersion && camera.spectral_mode == SPECTRAL_MODE_RGB) {
+        if (hasDispersion && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
             // ================================================================
             // RGB Dispersion: Trace 3 separate rays for R, G, B wavelengths
             // ================================================================
@@ -2397,9 +2405,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // Compute IOR (wavelength-dependent if in spectral mode with dispersion)
             float effectiveIOR = material.ior;
-            if (material.dispersion > 0.001 && camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+            if (material.dispersion > 0.001 && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
                 effectiveIOR = CauchyIOR(material.ior, material.dispersion, camera.wavelength_nm);
-            } else if (material.dispersion > 0.001 && camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+            } else if (material.dispersion > 0.001 && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
                 // Use central visible wavelength for VIS_FUSED
                 effectiveIOR = CauchyIOR(material.ior, material.dispersion, 550.0);
             }

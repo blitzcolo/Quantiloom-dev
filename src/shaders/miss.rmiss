@@ -80,11 +80,11 @@ void main(inout Payload payload) {
     // ========================================================================
 
     // Choose sky radiance based on spectral mode
-    if (camera.spectral_mode == SPECTRAL_MODE_RGB) {
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
         payload.radiance = lut.skyRadiance_rgb;
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_VIS_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
         // ================================================================
         // VIS_FUSED mode: 32-wavelength spectral integration
         // ================================================================
@@ -148,7 +148,7 @@ void main(inout Payload payload) {
         }
         payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_SINGLE) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
         // Single wavelength mode: Query spectral sky at current wavelength
         float radiance_spectral;
 
@@ -163,7 +163,7 @@ void main(inout Payload payload) {
         }
 
         payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
-    } else if (camera.spectral_mode == SPECTRAL_MODE_SWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
         // ================================================================
         // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
         // ================================================================
@@ -211,7 +211,7 @@ void main(inout Payload payload) {
 
         payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_NIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ================================================================
         // NIR_FUSED mode: Sky radiance integration (780-1400nm)
         // ================================================================
@@ -259,8 +259,8 @@ void main(inout Payload payload) {
 
         payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
-    } else if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED ||
-               camera.spectral_mode == SPECTRAL_MODE_LWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
+               SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
         // ================================================================
         // MWIR/LWIR_FUSED mode: Atmospheric thermal background
         // ================================================================
@@ -270,7 +270,7 @@ void main(inout Payload payload) {
         // ================================================================
 
         float lambda_min, lambda_max;
-        if (camera.spectral_mode == SPECTRAL_MODE_MWIR_FUSED) {
+        if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
             lambda_min = 3000.0;
             lambda_max = 5000.0;
         } else {

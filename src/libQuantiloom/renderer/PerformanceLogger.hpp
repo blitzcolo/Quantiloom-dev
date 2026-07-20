@@ -85,6 +85,11 @@ public:
     // Get last frame rays per second
     [[nodiscard]] f64 GetLastFrameRaysPerSec() const { return m_lastFrameRaysPerSec; }
 
+    // Query the current timestamp pair, store result, advance query index.
+    // Call after GPU work has completed (fence wait / vkQueueWaitIdle).
+    // Unlike LogFrame(), does NOT write to the CSV.
+    f32 ResolveLastGpuMs();
+
 private:
     // ========================================================================
     // Internal state
@@ -93,9 +98,14 @@ private:
     VulkanContext& m_context;
     Config m_config;
 
-    // Vulkan query pool for timestamps
+    // Vulkan query pool for timestamps.
+    // Write cursor advances as frames are recorded (EndFrame);
+    // read cursor advances as results are resolved (ResolveLastGpuMs/LogFrame).
+    // Separate cursors allow multiple frames recorded per submit (batching).
     VkQueryPool m_queryPool = VK_NULL_HANDLE;
-    u32 m_currentQueryIndex = 0;
+    u32 m_writeQueryIndex = 0;
+    u32 m_readQueryIndex = 0;
+    u32 m_pendingFrames = 0;
 
     // Timestamp frequency (nanoseconds per tick)
     f64 m_timestampPeriod = 1.0;

@@ -114,6 +114,16 @@
 #define DEBUG_MODE_PHASE_G                 95  // Henyey-Greenstein g parameter
 
 // ============================================================================
+// Specialization Constants
+// ============================================================================
+// Baked at pipeline creation time to eliminate dead spectral/debug branches.
+// Defaults match SPECTRAL_MODE_RGB / debug off for safe fallback.
+// ============================================================================
+
+[[vk::constant_id(0)]] const uint SPEC_SPECTRAL_MODE = 7;   // SPECTRAL_MODE_RGB
+[[vk::constant_id(1)]] const uint SPEC_DEBUG_ENABLED = 0;   // 0 = off
+
+// ============================================================================
 // Ray Payload - OPTIMIZED FOR RT CORE PERFORMANCE
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline

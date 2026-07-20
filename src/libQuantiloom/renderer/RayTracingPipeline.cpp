@@ -189,25 +189,19 @@ RayTracingPipeline::RayTracingPipeline(
         CreateDescriptorSetLayout();
         CreatePipelineLayout();
         LoadShaders();
-        CreatePipeline();
-        CreateShaderBindingTable();
+        SetSpecConstants(7, false);  // default: RGB, debug off
 
         QL_LOG_INFO("Ray Tracing pipeline created successfully");
     }
     catch (const std::exception& e) {
-        // Clean up partially created resources before rethrowing
         VkDevice device = m_context.GetDevice();
 
-        // Destroy shader modules if they were created
-        for (const auto module : m_shaderModules) {
-            if (module != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, module, nullptr);
+        for (auto& [key, variant] : m_variantCache) {
+            if (variant.pipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, variant.pipeline, nullptr);
             }
         }
-
-        if (m_pipeline != VK_NULL_HANDLE) {
-            vkDestroyPipeline(device, m_pipeline, nullptr);
-        }
+        m_variantCache.clear();
 
         if (m_pipelineLayout != VK_NULL_HANDLE) {
             vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
@@ -229,21 +223,22 @@ RayTracingPipeline::RayTracingPipeline(
 RayTracingPipeline::~RayTracingPipeline() {
     VkDevice device = m_context.GetDevice();
 
-    // Destroy in reverse order
-    m_sbtBuffer.reset();
+    m_activeVariant = nullptr;
+    m_pipeline = VK_NULL_HANDLE;  // just a copied handle, owned by variant cache
+    for (auto& [key, variant] : m_variantCache) {
+        variant.sbtBuffer.reset();
+        if (variant.pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, variant.pipeline, nullptr);
+        }
+    }
+    m_variantCache.clear();
 
     if (m_descriptorPool != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device, m_descriptorPool, nullptr);
     }
-
-    if (m_pipeline != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device, m_pipeline, nullptr);
-    }
-
     if (m_pipelineLayout != VK_NULL_HANDLE) {
         vkDestroyPipelineLayout(device, m_pipelineLayout, nullptr);
     }
-
     if (m_descriptorSetLayout != VK_NULL_HANDLE) {
         vkDestroyDescriptorSetLayout(device, m_descriptorSetLayout, nullptr);
     }
@@ -585,29 +580,21 @@ void RayTracingPipeline::CreatePipelineLayout() {
 void RayTracingPipeline::LoadShaders() {
     QL_LOG_INFO("  [LoadShaders] Loading SPIR-V shaders...");
 
-    // Load all shaders
-    const auto raygenSpirv = LoadSPIRV(m_raygenPath);
-    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", raygenSpirv.size());
+    m_spirvData.resize(4);
+    m_spirvData[0] = LoadSPIRV(m_raygenPath);
+    QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", m_spirvData[0].size());
 
-    const auto chitSpirv = LoadSPIRV(m_closestHitPath);
-    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", chitSpirv.size());
+    m_spirvData[1] = LoadSPIRV(m_closestHitPath);
+    QL_LOG_INFO("  [LoadShaders] ClosestHit loaded: {} words", m_spirvData[1].size());
 
-    const auto missSpirv = LoadSPIRV(m_missPath);
-    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", missSpirv.size());
+    m_spirvData[2] = LoadSPIRV(m_missPath);
+    QL_LOG_INFO("  [LoadShaders] Miss loaded: {} words", m_spirvData[2].size());
 
-    const auto shadowMissSpirv = LoadSPIRV(m_shadowMissPath);
-    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", shadowMissSpirv.size());
-
-    // Create shader modules (will be destroyed after pipeline creation)
-    m_shaderModules.resize(4);
-    m_shaderModules[0] = CreateShaderModule(raygenSpirv);
-    m_shaderModules[1] = CreateShaderModule(chitSpirv);
-    m_shaderModules[2] = CreateShaderModule(missSpirv);
-    m_shaderModules[3] = CreateShaderModule(shadowMissSpirv);
+    m_spirvData[3] = LoadSPIRV(m_shadowMissPath);
+    QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", m_spirvData[3].size());
 
     QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath);
-    QL_LOG_INFO("  [LoadShaders] All shader modules created successfully");
-    Log::Flush();  // Ensure logs are visible before potential hang
+    Log::Flush();
 }
 
 std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
@@ -666,44 +653,54 @@ VkShaderModule RayTracingPipeline::CreateShaderModule(const std::vector<u32>& sp
 // Pipeline Creation
 // ============================================================================
 
-void RayTracingPipeline::CreatePipeline() {
-    QL_LOG_INFO("  [CreatePipeline] Starting...");
-    Log::Flush();
+RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(const SpecConstants& spec) {
     VkDevice device = m_context.GetDevice();
-    QL_LOG_INFO("  [CreatePipeline] Got VkDevice: {}", (void*)device);
-    Log::Flush();
 
-    // Define shader stages (4 stages: raygen, closesthit, miss, shadow_miss)
-    std::vector<VkPipelineShaderStageCreateInfo> stages(4);
+    // Create temporary shader modules from stored SPIR-V
+    std::vector<VkShaderModule> modules(4);
+    for (int i = 0; i < 4; ++i) {
+        modules[i] = CreateShaderModule(m_spirvData[i]);
+    }
 
-    // Stage 0: Raygen
+    // Specialization data: applied to closesthit (stage 1) and miss (stage 2)
+    VkSpecializationMapEntry specEntries[2] = {};
+    specEntries[0].constantID = 0;
+    specEntries[0].offset = offsetof(SpecConstants, spectralMode);
+    specEntries[0].size = sizeof(u32);
+    specEntries[1].constantID = 1;
+    specEntries[1].offset = offsetof(SpecConstants, debugEnabled);
+    specEntries[1].size = sizeof(u32);
+
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = 2;
+    specInfo.pMapEntries = specEntries;
+    specInfo.dataSize = sizeof(SpecConstants);
+    specInfo.pData = &spec;
+
+    std::vector<VkPipelineShaderStageCreateInfo> stages(4, VkPipelineShaderStageCreateInfo{});
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    stages[0].module = m_shaderModules[0];
+    stages[0].module = modules[0];
     stages[0].pName = "main";
 
-    // Stage 1: Closest Hit
     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    stages[1].module = m_shaderModules[1];
+    stages[1].module = modules[1];
     stages[1].pName = "main";
+    stages[1].pSpecializationInfo = &specInfo;
 
-    // Stage 2: Miss (primary rays - sky background)
     stages[2].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[2].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[2].module = m_shaderModules[2];
+    stages[2].module = modules[2];
     stages[2].pName = "main";
+    stages[2].pSpecializationInfo = &specInfo;
 
-    // Stage 3: Shadow Miss (shadow rays - not occluded)
     stages[3].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[3].stage = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[3].module = m_shaderModules[3];
+    stages[3].module = modules[3];
     stages[3].pName = "main";
 
-    // Define shader groups (4 groups: raygen, hit, miss, shadow_miss)
-    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(4);
-
-    // Group 0: Raygen
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(4, VkRayTracingShaderGroupCreateInfoKHR{});
     groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[0].generalShader = 0;
@@ -711,7 +708,6 @@ void RayTracingPipeline::CreatePipeline() {
     groups[0].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Group 1: Hit group (closest hit only)
     groups[1].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     groups[1].generalShader = VK_SHADER_UNUSED_KHR;
@@ -719,7 +715,6 @@ void RayTracingPipeline::CreatePipeline() {
     groups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Group 2: Miss (primary rays)
     groups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[2].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[2].generalShader = 2;
@@ -727,7 +722,6 @@ void RayTracingPipeline::CreatePipeline() {
     groups[2].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Group 3: Shadow Miss
     groups[3].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[3].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
     groups[3].generalShader = 3;
@@ -735,162 +729,116 @@ void RayTracingPipeline::CreatePipeline() {
     groups[3].anyHitShader = VK_SHADER_UNUSED_KHR;
     groups[3].intersectionShader = VK_SHADER_UNUSED_KHR;
 
-    // Create pipeline
     VkRayTracingPipelineCreateInfoKHR pipelineInfo{};
     pipelineInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
     pipelineInfo.stageCount = static_cast<u32>(stages.size());
     pipelineInfo.pStages = stages.data();
     pipelineInfo.groupCount = static_cast<u32>(groups.size());
     pipelineInfo.pGroups = groups.data();
-    // Recursion depth 10: supports 8 transmission bounces + shadow rays
-    // Required for glass/water refraction with multiple internal reflections
     pipelineInfo.maxPipelineRayRecursionDepth = 10;
     pipelineInfo.layout = m_pipelineLayout;
 
-    QL_LOG_INFO("  [CreatePipeline] Pipeline info prepared, getting function pointer...");
+    QL_LOG_INFO("  [CreatePipelineVariant] spectralMode={}, debugEnabled={}", spec.spectralMode, spec.debugEnabled);
     Log::Flush();
 
-    // Get function pointer for vkCreateRayTracingPipelinesKHR
     const auto vkCreateRayTracingPipelinesKHR = reinterpret_cast<PFN_vkCreateRayTracingPipelinesKHR>(
         vkGetDeviceProcAddr(device, "vkCreateRayTracingPipelinesKHR"));
-
-    QL_LOG_INFO("  [CreatePipeline] vkGetDeviceProcAddr returned: {}", (void*)vkCreateRayTracingPipelinesKHR);
-    Log::Flush();
-
     if (!vkCreateRayTracingPipelinesKHR) {
         throw std::runtime_error("Failed to load vkCreateRayTracingPipelinesKHR");
     }
 
     QL_LOG_INFO("  Calling vkCreateRayTracingPipelinesKHR...");
-    QL_LOG_INFO("  (If this is the last log you see, the driver is hanging in pipeline creation)");
     QL_LOG_INFO("  Using pipeline cache: {}", m_pipelineCache != VK_NULL_HANDLE ? "YES" : "NO");
-    Log::Flush();  // CRITICAL: Flush before potential driver hang
+    Log::Flush();
 
     auto startTime = std::chrono::high_resolution_clock::now();
 
+    PipelineVariant variant;
     const VkResult result = vkCreateRayTracingPipelinesKHR(
-        device,
-        VK_NULL_HANDLE,  // No deferred operation
-        m_pipelineCache,  // Pipeline cache for faster compilation
-        1,
-        &pipelineInfo,
-        nullptr,
-        &m_pipeline
-    );
+        device, VK_NULL_HANDLE, m_pipelineCache,
+        1, &pipelineInfo, nullptr, &variant.pipeline);
 
     auto endTime = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-
     QL_LOG_INFO("  vkCreateRayTracingPipelinesKHR returned: {} (took {} ms)", static_cast<int>(result), duration.count());
 
     if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create ray tracing pipeline");
+        for (auto m : modules) vkDestroyShaderModule(device, m, nullptr);
+        throw std::runtime_error("Failed to create ray tracing pipeline variant");
     }
 
-    // Destroy shader modules (no longer needed)
-    for (const auto module : m_shaderModules) {
-        vkDestroyShaderModule(device, module, nullptr);
-    }
-    m_shaderModules.clear();
+    for (auto m : modules) vkDestroyShaderModule(device, m, nullptr);
 
-    QL_LOG_INFO("  Ray Tracing pipeline created");
-}
-
-// ============================================================================
-// Shader Binding Table (SBT)
-// ============================================================================
-
-void RayTracingPipeline::CreateShaderBindingTable() {
-    VkDevice device = m_context.GetDevice();
-
-    // Get function pointer for vkGetRayTracingShaderGroupHandlesKHR
+    // Build SBT for this variant
     const auto vkGetRayTracingShaderGroupHandlesKHR = reinterpret_cast<PFN_vkGetRayTracingShaderGroupHandlesKHR>(
-        vkGetDeviceProcAddr(
-        device, "vkGetRayTracingShaderGroupHandlesKHR"));
-
+        vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupHandlesKHR"));
     if (!vkGetRayTracingShaderGroupHandlesKHR) {
         throw std::runtime_error("Failed to load vkGetRayTracingShaderGroupHandlesKHR");
     }
 
-    // Calculate sizes and offsets
     const u32 handleSize = m_rtProperties.shaderGroupHandleSize;
     const u32 handleAlignment = m_rtProperties.shaderGroupHandleAlignment;
     const u32 baseAlignment = m_rtProperties.shaderGroupBaseAlignment;
-
     const u32 handleSizeAligned = AlignedSize(handleSize, handleAlignment);
 
-    // SBT layout: [Raygen] [Miss (primary + shadow)] [Hit]
-    // Group order in pipeline: 0=Raygen, 1=Hit, 2=Miss(primary), 3=Miss(shadow)
-    // SBT order must be: Raygen, Miss, Hit (miss before hit)
     const u32 raygenSize = AlignedSize(handleSizeAligned, baseAlignment);
     const u32 missStride = AlignedSize(handleSizeAligned, baseAlignment);
-    const u32 missCount = 2;  // Primary miss + Shadow miss
+    const u32 missCount = 2;
     const u32 missSize = missCount * missStride;
     const u32 hitSize = AlignedSize(handleSizeAligned, baseAlignment);
     const u32 sbtSize = raygenSize + missSize + hitSize;
 
-    // Get shader group handles (4 groups now)
     constexpr u32 groupCount = 4;
     std::vector<u8> handleData(groupCount * handleSize);
+    vkGetRayTracingShaderGroupHandlesKHR(device, variant.pipeline, 0, groupCount, handleData.size(), handleData.data());
 
-    const VkResult result = vkGetRayTracingShaderGroupHandlesKHR(
-        device,
-        m_pipeline,
-        0,
-        groupCount,
-        handleData.size(),
-        handleData.data()
-    );
-
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to get shader group handles");
-    }
-
-    // Build SBT buffer data
     std::vector<u8> sbtData(sbtSize, 0);
-
-    // Copy handles with alignment
-    // Group indices: 0=Raygen, 1=Hit, 2=Miss(primary), 3=Miss(shadow)
-    // Raygen at offset 0
     std::memcpy(sbtData.data(), handleData.data() + handleSize * 0, handleSize);
-    // Miss (primary) at offset raygenSize
     std::memcpy(sbtData.data() + raygenSize, handleData.data() + handleSize * 2, handleSize);
-    // Miss (shadow) at offset raygenSize + missStride
     std::memcpy(sbtData.data() + raygenSize + missStride, handleData.data() + handleSize * 3, handleSize);
-    // Hit at offset raygenSize + missSize
     std::memcpy(sbtData.data() + raygenSize + missSize, handleData.data() + handleSize * 1, handleSize);
 
-    // Create SBT buffer
-    m_sbtBuffer = std::make_unique<GpuBuffer>(
-        m_context.GetAllocator(),
-        sbtSize,
+    variant.sbtBuffer = std::make_unique<GpuBuffer>(
+        m_context.GetAllocator(), sbtSize,
         VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    variant.sbtBuffer->Upload(sbtData.data(), sbtSize);
 
-    m_sbtBuffer->Upload(sbtData.data(), sbtSize);
+    const VkDeviceAddress sbtAddress = variant.sbtBuffer->GetDeviceAddress(device);
+    variant.raygenRegion.deviceAddress = sbtAddress;
+    variant.raygenRegion.stride = raygenSize;
+    variant.raygenRegion.size = raygenSize;
+    variant.missRegion.deviceAddress = sbtAddress + raygenSize;
+    variant.missRegion.stride = missStride;
+    variant.missRegion.size = missSize;
+    variant.hitRegion.deviceAddress = sbtAddress + raygenSize + missSize;
+    variant.hitRegion.stride = hitSize;
+    variant.hitRegion.size = hitSize;
+    variant.callableRegion = {};
 
-    // Define SBT regions
-    const VkDeviceAddress sbtAddress = m_sbtBuffer->GetDeviceAddress(device);
+    QL_LOG_INFO("  Pipeline variant created (SBT: {} bytes)", sbtSize);
+    return variant;
+}
 
-    m_raygenRegion.deviceAddress = sbtAddress;
-    m_raygenRegion.stride = raygenSize;
-    m_raygenRegion.size = raygenSize;
+void RayTracingPipeline::SetSpecConstants(u32 spectralMode, bool debugEnabled) {
+    const u32 dbg = debugEnabled ? 1u : 0u;
+    const u64 key = PackSpecKey(spectralMode, dbg);
 
-    // Miss region contains 2 miss shaders:
-    // - missIndex=0: Primary miss (sky background)
-    // - missIndex=1: Shadow miss (not occluded)
-    m_missRegion.deviceAddress = sbtAddress + raygenSize;
-    m_missRegion.stride = missStride;
-    m_missRegion.size = missSize;
+    auto it = m_variantCache.find(key);
+    if (it == m_variantCache.end()) {
+        SpecConstants spec{spectralMode, dbg};
+        auto [inserted, ok] = m_variantCache.emplace(key, CreatePipelineVariant(spec));
+        it = inserted;
+    }
 
-    m_hitRegion.deviceAddress = sbtAddress + raygenSize + missSize;
-    m_hitRegion.stride = hitSize;
-    m_hitRegion.size = hitSize;
+    m_activeVariant = &it->second;
 
-    m_callableRegion = {};  // No callable shaders
-
-    QL_LOG_INFO("  Shader Binding Table created (size: {} bytes, {} miss entries)", sbtSize, missCount);
+    // Keep legacy fields in sync for GetPipeline() backward compat
+    m_pipeline = m_activeVariant->pipeline;
+    m_raygenRegion = m_activeVariant->raygenRegion;
+    m_missRegion = m_activeVariant->missRegion;
+    m_hitRegion = m_activeVariant->hitRegion;
+    m_callableRegion = m_activeVariant->callableRegion;
 }
 
 u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {
@@ -1413,7 +1361,7 @@ void RayTracingPipeline::UpdateDescriptorSets() {
 // Rendering
 // ============================================================================
 
-void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height) const {
+void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height, const bool finalDispatch) const {
     // Get function pointer for vkCmdTraceRaysKHR
     const auto vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(
         m_context.GetDevice(), "vkCmdTraceRaysKHR"));
@@ -1459,22 +1407,23 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
         1  // depth
     );
 
-    // CRITICAL: Add memory barrier after ray tracing to ensure output image writes are visible
-    // Without this, subsequent readback may read stale/incomplete data, or GPU may hang
     VkMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        1, &barrier,
-        0, nullptr,
-        0, nullptr
-    );
+    if (finalDispatch) {
+        barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    } else {
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
 }
 
 void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {

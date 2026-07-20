@@ -71,6 +71,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
+#include <unordered_map>
 
 // ============================================================================
 // RayTracingPipeline - Manages Vulkan Ray Tracing pipeline and SBT
@@ -123,6 +124,15 @@ namespace quantiloom {
  */
 class QL_API RayTracingPipeline {
 public:
+    // ========================================================================
+    // Specialization constants
+    // ========================================================================
+
+    struct SpecConstants {
+        u32 spectralMode = 7;  // SPECTRAL_MODE_RGB
+        u32 debugEnabled = 0;
+    };
+
     // ========================================================================
     // Shader stage descriptors
     // ========================================================================
@@ -316,8 +326,14 @@ public:
     // Set accumulation sampling parameters (call before TraceRays)
     void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed);
 
-    // Record trace rays command into provided command buffer
-    void TraceRays(VkCommandBuffer cmd, u32 width, u32 height) const;
+    // Record trace rays command into provided command buffer.
+    // finalDispatch=true inserts a RT->TRANSFER barrier (for readback).
+    // finalDispatch=false inserts a RT->RT barrier (for next sample accumulation).
+    void TraceRays(VkCommandBuffer cmd, u32 width, u32 height, bool finalDispatch = true) const;
+
+    // Select pipeline variant for the given specialization constants.
+    // Lazily creates and caches the pipeline + SBT on first use per combination.
+    void SetSpecConstants(u32 spectralMode, bool debugEnabled);
 
     // ========================================================================
     // Accessors
@@ -334,8 +350,6 @@ private:
     void CreateDescriptorSetLayout();
     void CreatePipelineLayout();
     void LoadShaders();
-    void CreatePipeline();
-    void CreateShaderBindingTable();
 
     // ========================================================================
     // Helpers
@@ -379,11 +393,29 @@ private:
     VkStridedDeviceAddressRegionKHR m_hitRegion{};
     VkStridedDeviceAddressRegionKHR m_callableRegion{};
 
-    // Shader modules (temporary, destroyed after pipeline creation)
-    std::vector<VkShaderModule> m_shaderModules;
+    // SPIR-V bytecode (kept for lazy pipeline variant creation)
+    std::vector<std::vector<u32>> m_spirvData;  // [raygen, chit, miss, shadow_miss]
 
     // Ray Tracing properties (cached from context)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};
+
+    // Pipeline variant cache (keyed by packed spec constants)
+    struct PipelineVariant {
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        std::unique_ptr<GpuBuffer> sbtBuffer;
+        VkStridedDeviceAddressRegionKHR raygenRegion{};
+        VkStridedDeviceAddressRegionKHR missRegion{};
+        VkStridedDeviceAddressRegionKHR hitRegion{};
+        VkStridedDeviceAddressRegionKHR callableRegion{};
+    };
+
+    std::unordered_map<u64, PipelineVariant> m_variantCache;
+    PipelineVariant* m_activeVariant = nullptr;
+
+    PipelineVariant CreatePipelineVariant(const SpecConstants& spec);
+    static u64 PackSpecKey(u32 spectralMode, u32 debugEnabled) {
+        return (static_cast<u64>(debugEnabled) << 32) | spectralMode;
+    }
 
     // Dynamic texture limit (based on device capabilities)
     // 1024 if descriptor indexing available, 32 otherwise

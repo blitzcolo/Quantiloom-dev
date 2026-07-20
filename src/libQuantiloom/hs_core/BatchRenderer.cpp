@@ -129,15 +129,72 @@ struct BatchRenderer::Impl {
                 .time_since_epoch().count()
         );
 
-        for (u32 sample = 0; sample < params.spp; ++sample) {
-            pipeline.SetCameraData(cameraData);
-            pipeline.SetSamplingParams(0, sample, params.spp, randomSeed + sample);
+        pipeline.SetCameraData(cameraData);
 
-            // Execute ray tracing
-            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-                pipeline.TraceRays(cmd, imageWidth, imageHeight);
-            });
+        // The shader branches on the SPEC_SPECTRAL_MODE specialization
+        // constant, not the push-constant copy above -- select the SINGLE
+        // wavelength variant (cached after first creation)
+        pipeline.SetSpecConstants(0 /* SPECTRAL_MODE_SINGLE */, false);
+
+        // Keep each submit well under the ~2s Windows TDR limit
+        constexpr u32 BATCH_SIZE = 2;
+
+        VkCommandPoolCreateInfo cmdPoolInfo{};
+        cmdPoolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        cmdPoolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        cmdPoolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
+
+        VkCommandPool cmdPool = VK_NULL_HANDLE;
+        if (vkCreateCommandPool(context.GetDevice(), &cmdPoolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+            LOG_ERROR("BatchRenderer: Failed to create command pool");
+            return false;
         }
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = cmdPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd);
+
+        VkFenceCreateInfo fenceCreateInfo{};
+        fenceCreateInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkFence fence = VK_NULL_HANDLE;
+        vkCreateFence(context.GetDevice(), &fenceCreateInfo, nullptr, &fence);
+
+        for (u32 batchStart = 0; batchStart < params.spp; batchStart += BATCH_SIZE) {
+            u32 batchEnd = std::min(batchStart + BATCH_SIZE, params.spp);
+
+            VkCommandBufferBeginInfo beginInfo{};
+            beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            vkBeginCommandBuffer(cmd, &beginInfo);
+
+            for (u32 sample = batchStart; sample < batchEnd; ++sample) {
+                pipeline.SetSamplingParams(0, sample, params.spp, randomSeed + sample);
+                pipeline.TraceRays(cmd, imageWidth, imageHeight, sample == params.spp - 1);
+            }
+
+            vkEndCommandBuffer(cmd);
+
+            vkResetFences(context.GetDevice(), 1, &fence);
+            VkSubmitInfo submitInfo{};
+            submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            submitInfo.commandBufferCount = 1;
+            submitInfo.pCommandBuffers = &cmd;
+            if (vkQueueSubmit(context.GetGraphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS ||
+                vkWaitForFences(context.GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                LOG_ERROR("BatchRenderer: GPU submit/wait failed (possible device lost)");
+                vkDestroyFence(context.GetDevice(), fence, nullptr);
+                vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
+                return false;
+            }
+        }
+
+        vkDestroyFence(context.GetDevice(), fence, nullptr);
+        vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
 
         // Read back result to CPU
         VkDeviceSize bufferSize = imageWidth * imageHeight * 4 * sizeof(f32);

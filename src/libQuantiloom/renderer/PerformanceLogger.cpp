@@ -78,7 +78,7 @@ void PerformanceLogger::BeginFrame(VkCommandBuffer cmd) {
     }
 
     // Reset queries for this frame
-    u32 startQuery = m_currentQueryIndex * 2;
+    u32 startQuery = m_writeQueryIndex * 2;
     vkCmdResetQueryPool(cmd, m_queryPool, startQuery, 2);
 
     // Write start timestamp
@@ -90,9 +90,13 @@ void PerformanceLogger::EndFrame(VkCommandBuffer cmd) {
         return;
     }
 
-    // Write end timestamp
-    u32 endQuery = m_currentQueryIndex * 2 + 1;
+    // Write end timestamp, then advance the write cursor so the next
+    // recorded frame gets its own query pair (required for batched submits)
+    u32 endQuery = m_writeQueryIndex * 2 + 1;
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queryPool, endQuery);
+
+    m_writeQueryIndex = (m_writeQueryIndex + 1) % (m_config.queryPoolSize / 2);
+    m_pendingFrames++;
 }
 
 void PerformanceLogger::LogFrame(u32 frameIndex, u32 width, u32 height, u32 spp,
@@ -101,9 +105,8 @@ void PerformanceLogger::LogFrame(u32 frameIndex, u32 width, u32 height, u32 spp,
         return;
     }
 
-    // Query GPU time for this frame
-    f32 gpuMs = QueryGpuTimeMs(m_currentQueryIndex);
-    m_lastFrameGpuMs = gpuMs;
+    // Resolve GPU time for the oldest unread frame
+    f32 gpuMs = ResolveLastGpuMs();
 
     // Calculate rays per second
     // Total rays = width * height * spp
@@ -128,8 +131,23 @@ void PerformanceLogger::LogFrame(u32 frameIndex, u32 width, u32 height, u32 spp,
                 frameIndex, width, height, spp, wavelength_nm,
                 gpuMs, m_lastFrameRaysPerSec / 1e6);
 
-    // Advance query index (circular buffer)
-    m_currentQueryIndex = (m_currentQueryIndex + 1) % (m_config.queryPoolSize / 2);
+}
+
+f32 PerformanceLogger::ResolveLastGpuMs() {
+    if (!m_config.enableLogging || m_queryPool == VK_NULL_HANDLE) {
+        return 0.0f;
+    }
+
+    // Never query a pair that was not recorded: QueryGpuTimeMs uses
+    // VK_QUERY_RESULT_WAIT_BIT, which deadlocks on an unwritten query
+    if (m_pendingFrames == 0) {
+        return 0.0f;
+    }
+
+    m_lastFrameGpuMs = QueryGpuTimeMs(m_readQueryIndex);
+    m_readQueryIndex = (m_readQueryIndex + 1) % (m_config.queryPoolSize / 2);
+    m_pendingFrames--;
+    return m_lastFrameGpuMs;
 }
 
 void PerformanceLogger::Flush() {
@@ -166,9 +184,7 @@ void PerformanceLogger::WriteCSVHeader() {
 f32 PerformanceLogger::QueryGpuTimeMs(u32 queryIndex) {
     VkDevice device = m_context.GetDevice();
 
-    // Query both start and end timestamps
     u32 startQuery = queryIndex * 2;
-    u32 endQuery = queryIndex * 2 + 1;
 
     u64 timestamps[2] = {0, 0};
     VkResult result = vkGetQueryPoolResults(

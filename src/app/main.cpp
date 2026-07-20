@@ -405,7 +405,11 @@ int main(int argc, char* argv[]) {
             spectral_mode == SpectralMode::MWIR_Fused ||
             spectral_mode == SpectralMode::LWIR_Fused ||
             spectral_mode == SpectralMode::SWIR_Fused) {
-            wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
+            if (config.Has("spectral.wavelength_nm")) {
+                wavelength_nm = config.Get<f32>("spectral.wavelength_nm", 550.0f);
+            } else if (auto band = GetFusedBandInfo(spectral_mode)) {
+                wavelength_nm = band->CenterNm();
+            }
             QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
         }
 
@@ -1987,6 +1991,10 @@ int main(int argc, char* argv[]) {
         cameraData.debug_mode = static_cast<u32>(config.Get<i32>("renderer.debug_mode", 0));
         pipeline.SetCameraData(cameraData);
 
+        pipeline.SetSpecConstants(
+            static_cast<u32>(spectral_mode),
+            cameraData.debug_mode != 0);
+
         QL_LOG_INFO("  Pipeline created and resources bound");
 
         // ====================================================================
@@ -2094,78 +2102,96 @@ int main(int argc, char* argv[]) {
         }
 
         try {
-            // Frame index for temporal effects (set to 0 for single-frame renders)
             u32 frameIndex = 0;
-
-            // Total accumulated GPU time and rays for all samples
             f32 totalGpuMs = 0.0f;
-            f64 totalRays = 0.0;
 
-            // Initialize C++11 random number generator
-            // Use random_device for non-deterministic seeding
             std::random_device rd;
             std::mt19937 rng(rd());
             std::uniform_int_distribution<u32> dist(0, std::numeric_limits<u32>::max());
 
-            // ================================================================
-            // SPP Loop: Accumulative Sampling
-            // ================================================================
-            // Each iteration traces rays with a different random seed and
-            // subpixel jitter, accumulating results in the output image.
-            // This implements progressive refinement for anti-aliasing and
-            // Monte Carlo convergence.
-            // ================================================================
+            // Batch samples into groups. Each submit must stay WELL under the
+            // Windows TDR limit (~2s): heavy IR scenes run ~500ms/sample, so
+            // 2 per batch keeps a submit around 1s with safety margin.
+            constexpr u32 BATCH_SIZE = 2;
 
-            for (u32 sampleIndex = 0; sampleIndex < spp; ++sampleIndex) {
-                // Generate unique random seed for this sample
-                // Uses C++11 Mersenne Twister for high-quality randomness
-                u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
+            VkCommandPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+            poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
 
-                // Update sampling parameters in pipeline
-                pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
-
-                //QL_LOG_INFO("  [SPP {}/{}] Tracing rays (seed: {})...", sampleIndex + 1, spp, randomSeed);
-
-                // Execute ray tracing for this sample
-                CommandHelper::ExecuteImmediate(context, [&](const VkCommandBuffer cmd) {
-                    // Begin performance timing
-                    perfLogger.BeginFrame(cmd);
-
-                    // Execute ray tracing
-                    pipeline.TraceRays(cmd, width, height);
-
-                    // End performance timing
-                    perfLogger.EndFrame(cmd);
-                });
-
-                // Accumulate performance metrics
-                totalGpuMs += perfLogger.GetLastFrameGpuMs();
-                totalRays += perfLogger.GetLastFrameRaysPerSec();
-
-                /*QL_LOG_INFO("  [SPP {}/{}] Completed - GPU: {:.2f} ms, Progress: {:.1f}%",
-                            sampleIndex + 1, spp,
-                            perfLogger.GetLastFrameGpuMs(),
-                            100.0f * (sampleIndex + 1) / spp);*/
+            VkCommandPool cmdPool = VK_NULL_HANDLE;
+            if (vkCreateCommandPool(context.GetDevice(), &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to create command pool for batched rendering");
             }
 
-            // Log aggregated performance metrics
-            perfLogger.LogFrame(0, width, height, spp, wavelength_nm, spectralModeStr);
+            VkCommandBufferAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            allocInfo.commandPool = cmdPool;
+            allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            allocInfo.commandBufferCount = 1;
+
+            VkCommandBuffer cmd = VK_NULL_HANDLE;
+            vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd);
+
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            VkFence fence = VK_NULL_HANDLE;
+            vkCreateFence(context.GetDevice(), &fenceInfo, nullptr, &fence);
+
+            for (u32 batchStart = 0; batchStart < spp; batchStart += BATCH_SIZE) {
+                u32 batchEnd = std::min(batchStart + BATCH_SIZE, spp);
+
+                VkCommandBufferBeginInfo beginInfo{};
+                beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+                beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+                vkBeginCommandBuffer(cmd, &beginInfo);
+
+                for (u32 sampleIndex = batchStart; sampleIndex < batchEnd; ++sampleIndex) {
+                    u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
+                    pipeline.SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
+
+                    perfLogger.BeginFrame(cmd);
+                    bool isFinal = (sampleIndex == spp - 1);
+                    pipeline.TraceRays(cmd, width, height, isFinal);
+                    perfLogger.EndFrame(cmd);
+                }
+
+                vkEndCommandBuffer(cmd);
+
+                vkResetFences(context.GetDevice(), 1, &fence);
+                VkSubmitInfo submitInfo{};
+                submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+                submitInfo.commandBufferCount = 1;
+                submitInfo.pCommandBuffers = &cmd;
+                if (vkQueueSubmit(context.GetGraphicsQueue(), 1, &submitInfo, fence) != VK_SUCCESS) {
+                    throw std::runtime_error("Queue submit failed");
+                }
+                if (vkWaitForFences(context.GetDevice(), 1, &fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+                    throw std::runtime_error("Fence wait failed (possible GPU timeout / device lost)");
+                }
+
+                for (u32 i = batchStart; i < batchEnd; ++i) {
+                    totalGpuMs += perfLogger.ResolveLastGpuMs();
+                }
+            }
+
+            vkDestroyFence(context.GetDevice(), fence, nullptr);
+            vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
             perfLogger.Flush();
 
             QL_LOG_INFO("  All samples completed!");
             QL_LOG_INFO("  Total GPU time: {:.2f} ms ({:.2f} ms/sample)",
                         totalGpuMs, totalGpuMs / spp);
-            QL_LOG_INFO("  Average throughput: {:.2f} Mrays/s",
-                        (totalRays / spp) / 1e6);
+
+            f64 totalRayCount = static_cast<f64>(width) * height * spp;
+            f64 totalSeconds = static_cast<f64>(totalGpuMs) / 1000.0;
+            f64 mraysPerSec = totalSeconds > 0.0 ? totalRayCount / totalSeconds / 1e6 : 0.0;
+            QL_LOG_INFO("  Average throughput: {:.2f} Mrays/s", mraysPerSec);
 
         } catch (const std::exception& e) {
             QL_LOG_ERROR("  [DEBUG] GPU execution FAILED: {}", e.what());
             throw;
         }
-
-        QL_LOG_INFO("  Frame rendered ({}x{}) with {} spp - Total GPU: {:.2f} ms",
-                    width, height, spp,
-                    perfLogger.GetLastFrameGpuMs() * spp);
 
         // ====================================================================
         // Readback and Save
