@@ -1,0 +1,50 @@
+# ECOSTRESS spectral library bake configuration
+# 6143 materials from the ASTER/ECOSTRESS library (soil, vegetation, minerals,
+# man-made surfaces).  Primarily useful for MWIR/LWIR where USGS has no data.
+
+[input]
+source_type = "ecostress"
+ecostress_root = "../../assets/spectral/ecospeclib-all"
+
+[processing.bands.VIS]
+range_um = [0.350, 0.780]
+interval_nm = 2.0
+n_components = 16
+
+[processing.bands.NIR]
+range_um = [0.780, 1.100]
+interval_nm = 2.0
+n_components = 16
+
+[processing.bands.SWIR]
+range_um = [1.100, 2.500]
+interval_nm = 2.0
+n_components = 32
+
+[processing.bands.MWIR]
+range_um = [2.500, 6.500]
+interval_nm = 5.0
+n_components = 48
+
+[processing.bands.LWIR]
+range_um = [6.500, 15.000]
+interval_nm = 10.0
+n_components = 48
+
+[processing.nmf]
+init = "nndsvda"
+solver = "cd"
+max_iter = 2000
+tol = 1.0e-4
+random_state = 42
+
+[output]
+basis_file = "../../assets/spectral/quantiloom_basis_v3_ecostress.qlbin"
+material_json = "../../assets/spectral/quantiloom_materials_ecostress.json"
+summary_csv = "../../assets/spectral/material_summary_ecostress.csv"
+plots_dir = "./output/plots_ecostress"
+
+[validation]
+plot_worst_n_materials = 10
+plot_best_n_materials = 5
+export_error_histogram = true

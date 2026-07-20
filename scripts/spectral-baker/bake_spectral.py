@@ -50,6 +50,9 @@ from refractiveindex_loader import (
     load_all_refractiveindex_materials,
     discover_refractiveindex_materials
 )
+from ecostress_loader import (
+    discover_ecostress_materials
+)
 from spectral_processor import (
     BandConfig,
     NMFConfig,
@@ -158,8 +161,19 @@ def load_materials_from_config(config: dict, args, config_dir: Optional[Path] = 
         logger.info(f"Loading materials from RefractiveIndex.info: {refidx_root}")
         materials = load_all_refractiveindex_materials(refidx_root, refidx_pattern, max_materials=args.max_materials)
 
+    elif source_type == 'ecostress':
+        import pathlib
+        eco_root = input_cfg.get('ecostress_root', '../../assets/spectral/ecospeclib-all')
+        if config_dir:
+            eco_root = str(config_dir / eco_root)
+
+        logger.info(f"Loading materials from ECOSTRESS: {eco_root}")
+        materials = discover_ecostress_materials(pathlib.Path(eco_root))
+        if args.max_materials and len(materials) > args.max_materials:
+            materials = materials[:args.max_materials]
+
     else:
-        raise ValueError(f"Unknown source_type: {source_type}. Must be 'usgs' or 'refractiveindex'")
+        raise ValueError(f"Unknown source_type: {source_type}. Must be 'usgs', 'refractiveindex', or 'ecostress'")
 
     logger.info(f"Loaded {len(materials)} materials from {source_type}")
 
