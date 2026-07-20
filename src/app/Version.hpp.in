@@ -9,6 +9,14 @@
 #define QUANTILOOM_APP_VERSION_PATCH @PROJECT_VERSION_PATCH@
 #define QUANTILOOM_APP_VERSION_STRING "@PROJECT_VERSION@"
 
+#define QUANTILOOM_BUILD_TYPE      "@CMAKE_BUILD_TYPE@"
+#define QUANTILOOM_COMPILER_ID     "@CMAKE_CXX_COMPILER_ID@"
+#define QUANTILOOM_COMPILER_VER    "@CMAKE_CXX_COMPILER_VERSION@"
+#define QUANTILOOM_PLATFORM        "@CMAKE_SYSTEM_NAME@"
+#define QUANTILOOM_ARCH            "@CMAKE_SYSTEM_PROCESSOR@"
+#define QUANTILOOM_CXX_STANDARD    "@CMAKE_CXX_STANDARD@"
+#define QUANTILOOM_BUILD_TIMESTAMP "@QUANTILOOM_BUILD_TIMESTAMP_UTC@"
+
 namespace quantiloom {
 namespace version {
 
@@ -16,6 +24,14 @@ inline constexpr int AppVersionMajor = QUANTILOOM_APP_VERSION_MAJOR;
 inline constexpr int AppVersionMinor = QUANTILOOM_APP_VERSION_MINOR;
 inline constexpr int AppVersionPatch = QUANTILOOM_APP_VERSION_PATCH;
 inline constexpr const char* AppVersionString = QUANTILOOM_APP_VERSION_STRING;
+
+inline constexpr const char* BuildType     = QUANTILOOM_BUILD_TYPE;
+inline constexpr const char* CompilerId    = QUANTILOOM_COMPILER_ID;
+inline constexpr const char* CompilerVer   = QUANTILOOM_COMPILER_VER;
+inline constexpr const char* Platform      = QUANTILOOM_PLATFORM;
+inline constexpr const char* Arch          = QUANTILOOM_ARCH;
+inline constexpr const char* CxxStandard   = QUANTILOOM_CXX_STANDARD;
+inline constexpr const char* BuildTimestamp = QUANTILOOM_BUILD_TIMESTAMP;
 
 } // namespace version
 } // namespace quantiloom

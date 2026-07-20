@@ -2,6 +2,9 @@
 # Quantiloom Application (Main Executable)
 # ============================================================================
 
+# UTC build timestamp (set once at configure time)
+string(TIMESTAMP QUANTILOOM_BUILD_TIMESTAMP_UTC "%Y-%m-%d %H:%M:%S UTC" UTC)
+
 # Generate version header from template
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/Version.hpp.in"

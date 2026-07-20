@@ -36,6 +36,8 @@
 #include "io/SpectralCubeIO.hpp"
 #include "renderer/MaterialGpuData.hpp"
 
+#include "Version.hpp"
+
 #include <glm/glm.hpp>
 #include <iostream>
 #include <fstream>
@@ -45,6 +47,7 @@
 #include <algorithm>  // For std::nth_element, std::clamp
 #include <cstddef>  // For offsetof
 #include <random>   // For C++11 random number generation
+#include <cstring>
 
 using namespace quantiloom;
 
@@ -262,26 +265,91 @@ Result<Scene> LoadSceneFromConfig(const Config& config) {
 // Main Entry Point
 // ============================================================================
 
+static void PrintVersion() {
+    std::cout << "Quantiloom " << version::AppVersionString << "\n";
+}
+
+static void PrintBuildInfo() {
+    std::cout
+        << "Quantiloom - Spectral Path Tracer\n"
+        << "  Version:    " << version::AppVersionString << "\n"
+        << "  Built:      " << version::BuildTimestamp << "\n"
+        << "  Compiler:   " << version::CompilerId << " " << version::CompilerVer << "\n"
+        << "  Platform:   " << version::Platform << " (" << version::Arch << ")\n"
+        << "  C++:        C++" << version::CxxStandard << "\n"
+        << "  Build type: " << version::BuildType << "\n";
+}
+
+static void PrintHelp(const char* progname) {
+    PrintBuildInfo();
+    std::cout
+        << "\n"
+        << "Usage:\n"
+        << "  " << progname << " <config.toml> [options]\n"
+        << "  " << progname << " --help\n"
+        << "  " << progname << " --version\n"
+        << "\n"
+        << "Options:\n"
+        << "  <config.toml>          Scene configuration file (required)\n"
+        << "  -h, --help             Show this help message and exit\n"
+        << "  -v, --version          Show version number and exit\n"
+        << "  -V, --build-info       Show full build information and exit\n"
+        << "\n"
+        << "Spectral modes (set in config file [spectral] section):\n"
+        << "  rgb                    Standard RGB rendering\n"
+        << "  single                 Single-wavelength monochromatic rendering\n"
+        << "  vis_fused              Visible band spectral integration (380-780 nm)\n"
+        << "  swir_fused             Short-wave infrared (900-1700 nm)\n"
+        << "  mwir_fused             Mid-wave infrared (3000-5000 nm)\n"
+        << "  lwir_fused             Long-wave infrared (8000-14000 nm)\n"
+        << "  multispectral          Hyperspectral data cube output\n"
+        << "\n"
+        << "Examples:\n"
+        << "  " << progname << " assets/configs/cornell_box_vis.toml\n"
+        << "  " << progname << " assets/configs/cube_usdc.toml\n"
+        << "  " << progname << " assets/configs/cornell_box_lwir.toml\n"
+        << "\n"
+        << "Homepage: https://github.com/blitzcolo/Quantiloom-dev\n";
+}
+
 int main(int argc, char* argv[]) {
+    // ========================================================================
+    // Command-Line Flags (before logging init — pure stdout)
+    // ========================================================================
+    for (int i = 1; i < argc; ++i) {
+        if (std::strcmp(argv[i], "-h") == 0 || std::strcmp(argv[i], "--help") == 0) {
+            PrintHelp(argv[0]);
+            return 0;
+        }
+        if (std::strcmp(argv[i], "-v") == 0 || std::strcmp(argv[i], "--version") == 0) {
+            PrintVersion();
+            return 0;
+        }
+        if (std::strcmp(argv[i], "-V") == 0 || std::strcmp(argv[i], "--build-info") == 0) {
+            PrintBuildInfo();
+            return 0;
+        }
+    }
+
+    // ========================================================================
+    // No arguments → show help and exit (before logging init)
+    // ========================================================================
+    if (argc < 2) {
+        std::cerr << "Error: no configuration file provided.\n\n";
+        PrintHelp(argv[0]);
+        return 1;
+    }
+
     // ========================================================================
     // Initialize Logging
     // ========================================================================
     Log::Init("quantiloom.log", Log::Level::Info);
 
     QL_LOG_INFO("========================================");
-    QL_LOG_INFO("  Quantiloom Spectral Path Tracer");
+    QL_LOG_INFO("  Quantiloom Spectral Path Tracer v{}", version::AppVersionString);
+    QL_LOG_INFO("  {} {} | {} ({})", version::CompilerId, version::CompilerVer,
+                version::Platform, version::Arch);
     QL_LOG_INFO("========================================");
-
-    // ========================================================================
-    // Load Configuration
-    // ========================================================================
-    if (argc < 2) {
-        QL_LOG_ERROR("No configuration file provided");
-        QL_LOG_INFO("Usage: {} <config.toml>", argv[0]);
-        QL_LOG_INFO("Example: {} assets/configs/spectral_single.toml", argv[0]);
-        Log::Shutdown();
-        return 1;
-    }
 
     std::filesystem::path configPath(argv[1]);
     QL_LOG_INFO("Loading configuration: {}", configPath.string());
@@ -658,7 +726,7 @@ int main(int argc, char* argv[]) {
         // Read shadow ray enable flag from config (optional, defaults to DISABLED)
         // Known GPU crash issue on some drivers when shadow rays are enabled
         // Users can enable via config: renderer.enable_shadow_rays = true
-        bool enableShadowRays = config.Get<bool>("renderer.enable_shadow_rays", false);
+        bool enableShadowRays = config.Get<bool>("renderer.enable_shadow_rays", true);
         if (enableShadowRays) {
             QL_LOG_INFO("Shadow rays ENABLED via config");
         }
@@ -1743,16 +1811,92 @@ int main(int argc, char* argv[]) {
         pipeline.BindAccelerationStructure(tlas.GetHandle());           // Binding 1
         pipeline.BindLUTBuffer(lightingParamsBuffer);                   // Binding 2 (LightingParams)
 
-        // Use first BLAS for geometry buffers (all BLAS share same vertex/index binding)
+        // ====================================================================
+        // Merged Global Geometry Buffers (Bindings 3, 4, 8, 9, 16)
+        // ====================================================================
+        // The shader reads vertex/index/normal/uv/tangent data through
+        // InstanceGeometryInfo offsets that assume ONE merged buffer per
+        // attribute. Binding a single primitive's buffers while the offsets
+        // assume a merged layout makes every fetch beyond the first primitive
+        // read out of bounds: normals collapse to the (0,1,0) fallback and
+        // flip with the view ray, splitting the frame at the horizon.
+        // Mirrors ExternalRenderContext's merge.
+        // ====================================================================
+
+        struct PrimGeometryOffset {
+            u32 vertex, index, normal, uv, tangent;
+        };
+        std::vector<PrimGeometryOffset> primOffsets;
+        std::unique_ptr<GpuBuffer> mergedVertexBuffer, mergedIndexBuffer,
+                                   mergedNormalBuffer, mergedUVBuffer, mergedTangentBuffer;
+
         if (!blasList.empty()) {
-            const GpuBuffer* uvBuffer = blasList[0].HasUVs() ? &blasList[0].GetUVBuffer() : nullptr;
-            pipeline.BindGeometryBuffers(blasList[0].GetVertexBuffer(), blasList[0].GetIndexBuffer(), uvBuffer); // Binding 3, 4, 8
+            u32 nV = 0, nI = 0, nN = 0, nU = 0, nT = 0;
+            for (const auto& mesh : loadedScene.meshes) {
+                for (const auto& prim : mesh.primitives) {
+                    primOffsets.push_back({nV, nI, nN, nU, nT});
+                    const u32 vcount = static_cast<u32>(prim.positions.size());
+                    nV += vcount;
+                    nI += static_cast<u32>(prim.indices.size());
+                    nN += prim.normals.empty() ? vcount : static_cast<u32>(prim.normals.size());
+                    nU += prim.uvs.empty() ? vcount : static_cast<u32>(prim.uvs.size());
+                    nT += prim.tangents.empty() ? vcount : static_cast<u32>(prim.tangents.size());
+                }
+            }
 
-            // Bind tangent buffer (always present, uses fallback data if model has no tangents)
-            pipeline.BindTangentBuffer(blasList[0].GetTangentBuffer());  // Binding 9
+            std::vector<glm::vec3> mergedVertices(nV);
+            std::vector<u32> mergedIndices(nI);
+            std::vector<glm::vec3> mergedNormals(nN);
+            std::vector<glm::vec2> mergedUVs(nU, glm::vec2(0.0f));
+            std::vector<glm::vec4> mergedTangents(nT, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
 
-            // Bind normal buffer (always present, required for smooth shading)
-            pipeline.BindNormalBuffer(blasList[0].GetNormalBuffer());    // Binding 16
+            size_t primIdx = 0;
+            for (const auto& mesh : loadedScene.meshes) {
+                for (const auto& prim : mesh.primitives) {
+                    const PrimGeometryOffset& off = primOffsets[primIdx++];
+                    std::copy(prim.positions.begin(), prim.positions.end(),
+                              mergedVertices.begin() + off.vertex);
+                    std::copy(prim.indices.begin(), prim.indices.end(),
+                              mergedIndices.begin() + off.index);
+                    if (!prim.normals.empty()) {
+                        std::copy(prim.normals.begin(), prim.normals.end(),
+                                  mergedNormals.begin() + off.normal);
+                    } else {
+                        std::fill_n(mergedNormals.begin() + off.normal,
+                                    prim.positions.size(), glm::vec3(0.0f, 1.0f, 0.0f));
+                    }
+                    if (!prim.uvs.empty()) {
+                        std::copy(prim.uvs.begin(), prim.uvs.end(),
+                                  mergedUVs.begin() + off.uv);
+                    }
+                    if (!prim.tangents.empty()) {
+                        std::copy(prim.tangents.begin(), prim.tangents.end(),
+                                  mergedTangents.begin() + off.tangent);
+                    }
+                }
+            }
+
+            auto makeGeometryBuffer = [&](const void* data, size_t bytes) {
+                auto buf = std::make_unique<GpuBuffer>(
+                    context.GetAllocator(),
+                    bytes,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                    VMA_MEMORY_USAGE_CPU_TO_GPU);
+                buf->Upload(data, bytes);
+                return buf;
+            };
+            mergedVertexBuffer  = makeGeometryBuffer(mergedVertices.data(), nV * sizeof(glm::vec3));
+            mergedIndexBuffer   = makeGeometryBuffer(mergedIndices.data(),  nI * sizeof(u32));
+            mergedNormalBuffer  = makeGeometryBuffer(mergedNormals.data(),  nN * sizeof(glm::vec3));
+            mergedUVBuffer      = makeGeometryBuffer(mergedUVs.data(),      nU * sizeof(glm::vec2));
+            mergedTangentBuffer = makeGeometryBuffer(mergedTangents.data(), nT * sizeof(glm::vec4));
+
+            QL_LOG_INFO("  Merged geometry buffers: {} vertices, {} indices, {} primitives",
+                        nV, nI, primOffsets.size());
+
+            pipeline.BindGeometryBuffers(*mergedVertexBuffer, *mergedIndexBuffer, mergedUVBuffer.get()); // Binding 3, 4, 8
+            pipeline.BindTangentBuffer(*mergedTangentBuffer);  // Binding 9
+            pipeline.BindNormalBuffer(*mergedNormalBuffer);    // Binding 16
         }
 
         pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
@@ -1788,44 +1932,35 @@ int main(int argc, char* argv[]) {
         // in the global buffers. For single-BLAS scenes, all offsets are 0.
         // For multi-BLAS scenes, this would track cumulative offsets.
         // ====================================================================
+        // Offsets come from the merged-buffer layout (one entry per unique
+        // primitive, in blasList order). Instances referencing the same mesh
+        // share offsets, matching TLAS AddInstance order = InstanceIndex().
         std::vector<InstanceGeometryInfoCPU> instanceGeoInfo;
-        u32 currentVertexOffset = 0;
-        u32 currentIndexOffset = 0;
-        u32 currentNormalOffset = 0;
-        u32 currentUVOffset = 0;
-        u32 currentTangentOffset = 0;
+        {
+            std::vector<size_t> meshToPrimStart(loadedScene.meshes.size());
+            size_t primStart = 0;
+            for (size_t m = 0; m < loadedScene.meshes.size(); ++m) {
+                meshToPrimStart[m] = primStart;
+                primStart += loadedScene.meshes[m].primitives.size();
+            }
 
-        for (size_t nodeIdx = 0; nodeIdx < loadedScene.nodes.size(); ++nodeIdx) {
-            const auto& node = loadedScene.nodes[nodeIdx];
-            const Mesh& mesh = loadedScene.meshes[node.meshIndex];
+            for (const auto& node : loadedScene.nodes) {
+                const Mesh& mesh = loadedScene.meshes[node.meshIndex];
+                for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
+                    const PrimGeometryOffset& off =
+                        primOffsets[meshToPrimStart[node.meshIndex] + primIdx];
 
-            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
-                const auto& primitive = mesh.primitives[primIdx];
-
-                InstanceGeometryInfoCPU info{};
-                info.vertexOffset = currentVertexOffset;
-                info.indexOffset = currentIndexOffset;
-                info.normalOffset = currentNormalOffset;
-                info.uvOffset = currentUVOffset;
-                info.tangentOffset = currentTangentOffset;
-                info.materialId = primitive.materialId;
-                info.pad[0] = 0;
-                info.pad[1] = 0;
-
-                instanceGeoInfo.push_back(info);
-
-                // Accumulate offsets for next instance
-                // NOTE: Currently only first BLAS buffers are bound, so all instances
-                // use the same geometry. For proper multi-BLAS support, we would need
-                // to merge all BLAS data into global buffers like ExternalRenderContext.
-                currentVertexOffset += static_cast<u32>(primitive.positions.size());
-                currentIndexOffset += static_cast<u32>(primitive.indices.size());
-                currentNormalOffset += static_cast<u32>(primitive.normals.empty() ?
-                    primitive.positions.size() : primitive.normals.size());
-                currentUVOffset += static_cast<u32>(primitive.uvs.empty() ?
-                    primitive.positions.size() : primitive.uvs.size());
-                currentTangentOffset += static_cast<u32>(primitive.tangents.empty() ?
-                    primitive.positions.size() : primitive.tangents.size());
+                    InstanceGeometryInfoCPU info{};
+                    info.vertexOffset = off.vertex;
+                    info.indexOffset = off.index;
+                    info.normalOffset = off.normal;
+                    info.uvOffset = off.uv;
+                    info.tangentOffset = off.tangent;
+                    info.materialId = mesh.primitives[primIdx].materialId;
+                    info.pad[0] = 0;
+                    info.pad[1] = 0;
+                    instanceGeoInfo.push_back(info);
+                }
             }
         }
 
@@ -1849,6 +1984,7 @@ int main(int argc, char* argv[]) {
         CameraData cameraData = camera.GetCameraData();
         cameraData.wavelength_nm = wavelength_nm;  // Override with config wavelength
         cameraData.spectral_mode = static_cast<u32>(spectral_mode);  // Set rendering mode
+        cameraData.debug_mode = static_cast<u32>(config.Get<i32>("renderer.debug_mode", 0));
         pipeline.SetCameraData(cameraData);
 
         QL_LOG_INFO("  Pipeline created and resources bound");

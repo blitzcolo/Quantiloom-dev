@@ -1,0 +1,44 @@
+# Cornell Box — LWIR thermal rendering with real ECOSTRESS spectral materials
+#
+# Materials: Red Brick (left), Olive Green Paint (right), Construction Concrete
+# (floor/ceiling/back), White Marble (short block), Asphalt (tall block).
+# Spectral reflectance from ECOSTRESS library; emissivity derived on GPU via
+# Kirchhoff: ε(λ) = 1 − ρ(λ).
+#
+# Geometry in mm; world_units_to_meters = 0.001.
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+output = "cornell_box_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+world_units_to_meters = 0.001
+default_temperature_k = 300.0
+
+[camera]
+position = [278.0, 273.0, -800.0]
+look_at  = [278.0, 273.0, 280.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 39.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

@@ -1,0 +1,39 @@
+# Cornell Box — MWIR rendering (3000-5000nm)
+# Mix of reflected solar + thermal emission at 300K.
+# ECOSTRESS reflectance curves cover this band for all 5 materials.
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+output = "cornell_box_mwir.exr"
+
+[spectral]
+mode = "mwir_fused"
+band = "MWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+world_units_to_meters = 0.001
+default_temperature_k = 300.0
+
+[camera]
+position = [278.0, 273.0, -800.0]
+look_at  = [278.0, 273.0, 280.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 39.0
+
+[lighting]
+sun_direction = [0.0, 1.0, -0.3]
+sun_radiance  = [3.0, 3.0, 3.0]
+sky_radiance  = [0.5, 0.5, 0.5]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false
