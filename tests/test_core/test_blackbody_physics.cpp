@@ -93,10 +93,10 @@ TEST(BlackbodyPhysicsTest, PlanckConstantC1Verification) {
 }
 
 TEST(BlackbodyPhysicsTest, PlanckConstantC2Verification) {
-    // Verify C2 = hc/k
+    // Verify C2 = hc/k — tightened to 1e-9 relative error to catch constant drift
     double expected_C2 = (PLANCK_H * SPEED_OF_LIGHT_C) / BOLTZMANN_K;
 
-    EXPECT_NEAR(C2, expected_C2, expected_C2 * 1e-6);
+    EXPECT_NEAR(C2, expected_C2, expected_C2 * 1e-9);
 }
 
 TEST(BlackbodyPhysicsTest, WienConstantVerification) {

@@ -781,7 +781,7 @@ struct MaterialData {
     int    temperatureTextureIndex;      // Index into texture array (-1 = use scalar irTemperature_K) // Offset: 96-100
     float  temperatureScale;             // T(K) = tex.r * scale + offset                             // Offset: 100-104
     float  temperatureOffset;            // Kelvin offset                                              // Offset: 104-108
-    float  _padding3;                    // Alignment padding                                          // Offset: 108-112
+    int    irEmissivityCurveIndex;       // Index into spectralCurves (-1 = use scalar/heuristic)      // Offset: 108-112
 
     // ========================================================================
     // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
@@ -801,7 +801,7 @@ struct MaterialData {
     float  ior;                          // Index of refraction (1.0=air, 1.33=water, 1.5=glass)    // Offset: 112-116
     float  transmission;                 // Transmission strength [0,1]                              // Offset: 116-120
     int    transmissionTextureIndex;     // Transmission texture (-1 = no texture)                  // Offset: 120-124
-    float  _padding1;                    // Padding for alignment                                    // Offset: 124-128
+    int    irTransmittanceCurveIndex;    // Index into spectralCurves (-1 = use scalar)              // Offset: 124-128
 
     // Volume attenuation (Beer-Lambert absorption)
     float3 attenuationColor;             // Color at attenuation distance                           // Offset: 128-140

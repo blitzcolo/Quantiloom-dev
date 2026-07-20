@@ -1,0 +1,38 @@
+# Furnace cavity test: ε=0 / ρ=1 (white furnace), MWIR 3-5µm, T=300K
+# Pure reflection. In isothermal cavity, reflected L_down still = B(T).
+# Needs high spp; error < 2%.
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+output = "furnace_mwir_rho1_output.exr"
+
+[spectral]
+mode = "mwir_fused"
+band = "MWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_rho1.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.0, 0.0]
+look_at  = [0.0, 0.0, -1.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 90.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

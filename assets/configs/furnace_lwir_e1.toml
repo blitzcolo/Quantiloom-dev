@@ -1,0 +1,37 @@
+# Furnace cavity test: ε=1 (perfect blackbody), LWIR 8-12µm, T=300K
+# Expected: every pixel ≈ (1/Δλ)∫₈₋₁₂µm B(300,λ)dλ,  error < 0.2%
+
+[renderer]
+resolution = [128, 128]
+spp = 1          # ε=1 ⇒ pure emission, zero MC noise
+output = "furnace_lwir_e1_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_e1.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.0, 0.0]
+look_at  = [0.0, 0.0, -1.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 90.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

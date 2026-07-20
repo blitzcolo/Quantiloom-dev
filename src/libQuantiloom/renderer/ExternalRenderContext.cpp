@@ -18,6 +18,7 @@
 #include "CommandHelper.hpp"
 #include "BRDFLutGenerator.hpp"
 #include "LightingParams.hpp"
+#include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 
 #include "core/Log.hpp"
@@ -118,69 +119,6 @@ static std::string GetDefaultCacheDirectory() {
 
     return cacheDir.string();
 }
-
-// ============================================================================
-// MaterialDataCPU - GPU upload structure (must match shader)
-// ============================================================================
-
-struct MaterialDataCPU {
-    glm::vec4 baseColorFactor;           // offset 0, size 16
-    i32 baseColorTextureIndex;           // offset 16, size 4
-    f32 metallicFactor;                  // offset 20, size 4
-    f32 roughnessFactor;                 // offset 24, size 4
-    i32 metallicRoughnessTextureIndex;   // offset 28, size 4
-
-    i32 normalTextureIndex;              // offset 32, size 4
-    f32 normalScale;                     // offset 36, size 4
-    u32 doubleSided;                     // offset 40, size 4
-    f32 _padding0;                       // offset 44, size 4
-
-    glm::vec3 emissiveFactor;            // offset 48, size 12
-    i32 emissiveTextureIndex;            // offset 60, size 4
-
-    u32 alphaMode;                       // offset 64, size 4
-    f32 alphaCutoff;                     // offset 68, size 4
-    f32 spectralAlbedo;                  // offset 72, size 4
-    i32 spectralReflectanceCurveIndex;   // offset 76, size 4
-
-    f32 irEmissivity;                    // offset 80, size 4
-    f32 irTransmittance;                 // offset 84, size 4
-    f32 irTemperature_K;                 // offset 88, size 4
-    i32 complexRefractiveIndexIndex;     // offset 92, size 4
-
-    // Temperature texture fields (per-pixel temperature map)
-    i32 temperatureTextureIndex;         // offset 96, size 4 (-1 = use scalar irTemperature_K)
-    f32 temperatureScale;                // offset 100, size 4 (T = tex.r * scale + offset)
-    f32 temperatureOffset;               // offset 104, size 4 (Kelvin)
-    f32 _padding3;                       // offset 108, size 4 (16-byte alignment)
-
-    // ========================================================================
-    // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
-    // ========================================================================
-    f32 ior;                             // offset 112, size 4 (Index of refraction)
-    f32 transmission;                    // offset 116, size 4 (Transmission strength [0,1])
-    i32 transmissionTextureIndex;        // offset 120, size 4 (Transmission texture, -1 = none)
-    f32 _padding1;                       // offset 124, size 4 (alignment)
-
-    // Volume attenuation (Beer-Lambert absorption)
-    glm::vec3 attenuationColor;          // offset 128, size 12 (Color at attenuation distance)
-    f32 attenuationDistance;             // offset 140, size 4 (Distance for attenuation, mm)
-
-    f32 thicknessFactor;                 // offset 144, size 4 (Thickness for thin-walled approx)
-    i32 thicknessTextureIndex;           // offset 148, size 4 (Thickness texture, -1 = none)
-    f32 dispersion;                      // offset 152, size 4 (Abbe number reciprocal)
-    f32 _padding2;                       // offset 156, size 4 (alignment)
-
-    // ========================================================================
-    // Participating Media Properties (fog, smoke, SSS)
-    // ========================================================================
-    f32 volumeDensity;                   // offset 160, size 4 (Medium density multiplier)
-    f32 scatteringCoeff;                 // offset 164, size 4 (Scattering coefficient, m^-1)
-    f32 absorptionCoeff;                 // offset 168, size 4 (Absorption coefficient, m^-1)
-    f32 phaseG;                          // offset 172, size 4 (Henyey-Greenstein g parameter)
-};  // Total: 176 bytes (must match GPU MaterialData in common.hlsli)
-
-static_assert(sizeof(MaterialDataCPU) == 176, "MaterialDataCPU size mismatch! Expected 176 bytes to match GPU MaterialData struct");
 
 // ============================================================================
 // InstanceGeometryInfo - Per-instance geometry offset info (must match shader)
@@ -1421,13 +1359,12 @@ static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
     cpuMat.spectralAlbedo = mat.spectralAlbedo;
     cpuMat.spectralReflectanceCurveIndex = mat.spectralReflectanceCurveIndex;
 
-    // GPU MaterialData currently stores scalar IR fallbacks, not full curves.
-    // Derive a representative scalar from the CPU curves until per-wavelength
-    // IR curve indices are added to the GPU struct.
-    f32 avgEmissivity = AverageSpectralCurve(mat.irEmissivityCurve, 0.0f);
-    f32 avgTransmittance = AverageSpectralCurve(mat.irTransmittanceCurve, 0.0f);
-    cpuMat.irEmissivity = std::clamp(avgEmissivity, 0.0f, 1.0f);
-    cpuMat.irTransmittance = std::clamp(avgTransmittance, 0.0f, 1.0f);
+    // Sentinel: -1.0f when no IR data → shader derives ε from metallic/roughness
+    cpuMat.irEmissivity = mat.irEmissivityCurve.empty()
+        ? -1.0f
+        : std::clamp(AverageSpectralCurve(mat.irEmissivityCurve, 0.0f), 0.0f, 1.0f);
+    cpuMat.irTransmittance = std::clamp(
+        AverageSpectralCurve(mat.irTransmittanceCurve, 0.0f), 0.0f, 1.0f);
     cpuMat.irTemperature_K = mat.irTemperature_K;
     cpuMat.complexRefractiveIndexIndex = mat.complexRefractiveIndexIndex;
 
@@ -1435,13 +1372,13 @@ static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
     cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
     cpuMat.temperatureScale = mat.temperatureScale;
     cpuMat.temperatureOffset = mat.temperatureOffset;
-    cpuMat._padding3 = 0.0f;
+    cpuMat.irEmissivityCurveIndex = -1;    // SDK has no curve buffer yet
 
     // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
     cpuMat.ior = mat.ior;
     cpuMat.transmission = mat.transmission;
     cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
-    cpuMat._padding1 = 0.0f;
+    cpuMat.irTransmittanceCurveIndex = -1; // SDK has no curve buffer yet
     cpuMat.attenuationColor = mat.attenuationColor;
     cpuMat.attenuationDistance = mat.attenuationDistance;
     cpuMat.thicknessFactor = mat.thicknessFactor;

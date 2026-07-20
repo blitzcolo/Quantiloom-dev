@@ -1206,6 +1206,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float SWIR_LAMBDA_MIN = 1400.0;   // nm
         const float SWIR_LAMBDA_MAX = 2400.0;   // nm
         const uint  NUM_SWIR_SAMPLES = 16;
+        // At 500K, Planck tail at 2.4µm ≈ 3.5e-3 W/sr/m²/nm — comparable to
+        // reflected solar; below this, SWIR thermal emission is negligible.
+        const float SWIR_EMISSION_MIN_TEMP_K = 500.0;
         const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
 
         float radiance_accum = 0.0;
@@ -1278,11 +1281,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL + L_sky(λ))
             float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL + sky_radiance_lambda);
 
-            // 4. Thermal emission (minor in SWIR for T < 500K)
+            // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
-            if (T_surface_swir > 500.0) {
-                // Only compute if object is hot enough for significant SWIR emission
-                // At 500K, Wien peak is at 5.8μm, but emission tail reaches SWIR band
+            if (T_surface_swir > SWIR_EMISSION_MIN_TEMP_K) {
                 float L_blackbody = IRPlanckRadiance(T_surface_swir, lambda);
                 L_emission = emissivity * L_blackbody;
             }

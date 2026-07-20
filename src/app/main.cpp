@@ -34,6 +34,7 @@
 #include "hs_core/HyperspectralRenderer.hpp"
 #include "hs_core/HyperspectralConfig.hpp"
 #include "io/SpectralCubeIO.hpp"
+#include "renderer/MaterialGpuData.hpp"
 
 #include <glm/glm.hpp>
 #include <iostream>
@@ -46,106 +47,6 @@
 #include <random>   // For C++11 random number generation
 
 using namespace quantiloom;
-
-// ============================================================================
-// Material Data Structure (matches shader MaterialData structure)
-// ============================================================================
-// Must match the layout in common.hlsli exactly for GPU upload
-// ============================================================================
-
-struct MaterialDataCPU {
-    glm::vec4 baseColorFactor;           // offset 0, size 16
-    i32 baseColorTextureIndex;           // offset 16, size 4
-    f32 metallicFactor;                  // offset 20, size 4
-    f32 roughnessFactor;                 // offset 24, size 4
-    i32 metallicRoughnessTextureIndex;   // offset 28, size 4
-
-    i32 normalTextureIndex;              // offset 32, size 4
-    f32 normalScale;                     // offset 36, size 4
-    u32 doubleSided;                     // offset 40, size 4 (0=single-sided, 1=double-sided)
-    f32 _padding0;                       // offset 44, size 4 (align emissiveFactor to 16-byte)
-
-    glm::vec3 emissiveFactor;            // offset 48, size 12
-    i32 emissiveTextureIndex;            // offset 60, size 4
-
-    u32 alphaMode;                       // offset 64, size 4
-    f32 alphaCutoff;                     // offset 68, size 4
-
-    f32 spectralAlbedo;                  // offset 72, size 4 (LEGACY M1)
-    i32 spectralReflectanceCurveIndex;   // offset 76, size 4 (Spectral curves index)
-
-    f32 irEmissivity;                    // offset 80, size 4
-    f32 irTransmittance;                 // offset 84, size 4
-    f32 irTemperature_K;                 // offset 88, size 4
-
-    i32 complexRefractiveIndexIndex;     // offset 92, size 4 (n,k curve index for Fresnel)
-
-    // Temperature texture fields (per-pixel temperature map)
-    i32 temperatureTextureIndex;         // offset 96, size 4 (-1 = use scalar irTemperature_K)
-    f32 temperatureScale;                // offset 100, size 4 (T = tex.r * scale + offset)
-    f32 temperatureOffset;               // offset 104, size 4 (Kelvin)
-    f32 _padding3;                       // offset 108, size 4 (16-byte alignment)
-
-    // ========================================================================
-    // Transmission Properties (KHR_materials_transmission + KHR_materials_volume)
-    // ========================================================================
-    f32 ior;                             // offset 112, size 4 (Index of refraction)
-    f32 transmission;                    // offset 116, size 4 (Transmission strength [0,1])
-    i32 transmissionTextureIndex;        // offset 120, size 4 (Transmission texture, -1 = none)
-    f32 _padding1;                       // offset 124, size 4 (alignment)
-
-    // Volume attenuation (Beer-Lambert absorption)
-    glm::vec3 attenuationColor;          // offset 128, size 12 (Color at attenuation distance)
-    f32 attenuationDistance;             // offset 140, size 4 (Distance for attenuation, mm)
-
-    f32 thicknessFactor;                 // offset 144, size 4 (Thickness for thin-walled approx)
-    i32 thicknessTextureIndex;           // offset 148, size 4 (Thickness texture, -1 = none)
-    f32 dispersion;                      // offset 152, size 4 (Abbe number reciprocal)
-    f32 _padding2;                       // offset 156, size 4 (alignment)
-
-    // ========================================================================
-    // Participating Media Properties (fog, smoke, SSS)
-    // ========================================================================
-    f32 volumeDensity;                   // offset 160, size 4 (Medium density multiplier)
-    f32 scatteringCoeff;                 // offset 164, size 4 (Scattering coefficient, m^-1)
-    f32 absorptionCoeff;                 // offset 168, size 4 (Absorption coefficient, m^-1)
-    f32 phaseG;                          // offset 172, size 4 (Henyey-Greenstein g parameter)
-};  // Total: 176 bytes (must match GPU MaterialData in common.hlsli)
-
-// Verify struct layout matches shader expectations
-// If this fails, the CPU/GPU struct layouts are mismatched, which WILL cause GPU crashes
-static_assert(sizeof(MaterialDataCPU) == 176, "MaterialDataCPU size mismatch! Expected 176 bytes to match GPU MaterialData struct");
-static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex) == 16, "baseColorTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, normalTextureIndex) == 32, "normalTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, doubleSided) == 40, "doubleSided offset mismatch");
-static_assert(offsetof(MaterialDataCPU, _padding0) == 44, "_padding0 offset mismatch");
-static_assert(offsetof(MaterialDataCPU, emissiveFactor) == 48, "emissiveFactor offset mismatch");
-static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex) == 60, "emissiveTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, alphaMode) == 64, "alphaMode offset mismatch");
-static_assert(offsetof(MaterialDataCPU, spectralAlbedo) == 72, "spectralAlbedo offset mismatch");
-static_assert(offsetof(MaterialDataCPU, spectralReflectanceCurveIndex) == 76, "spectralReflectanceCurveIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irEmissivity) == 80, "irEmissivity offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTransmittance) == 84, "irTransmittance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, irTemperature_K) == 88, "irTemperature_K offset mismatch");
-static_assert(offsetof(MaterialDataCPU, complexRefractiveIndexIndex) == 92, "complexRefractiveIndexIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, temperatureTextureIndex) == 96, "temperatureTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, temperatureScale) == 100, "temperatureScale offset mismatch");
-static_assert(offsetof(MaterialDataCPU, temperatureOffset) == 104, "temperatureOffset offset mismatch");
-// Transmission properties (offset 112-127)
-static_assert(offsetof(MaterialDataCPU, ior) == 112, "ior offset mismatch");
-static_assert(offsetof(MaterialDataCPU, transmission) == 116, "transmission offset mismatch");
-static_assert(offsetof(MaterialDataCPU, transmissionTextureIndex) == 120, "transmissionTextureIndex offset mismatch");
-// Volume attenuation (offset 128-159)
-static_assert(offsetof(MaterialDataCPU, attenuationColor) == 128, "attenuationColor offset mismatch");
-static_assert(offsetof(MaterialDataCPU, attenuationDistance) == 140, "attenuationDistance offset mismatch");
-static_assert(offsetof(MaterialDataCPU, thicknessFactor) == 144, "thicknessFactor offset mismatch");
-static_assert(offsetof(MaterialDataCPU, thicknessTextureIndex) == 148, "thicknessTextureIndex offset mismatch");
-static_assert(offsetof(MaterialDataCPU, dispersion) == 152, "dispersion offset mismatch");
-// Participating media (offset 160-175)
-static_assert(offsetof(MaterialDataCPU, volumeDensity) == 160, "volumeDensity offset mismatch");
-static_assert(offsetof(MaterialDataCPU, scatteringCoeff) == 164, "scatteringCoeff offset mismatch");
-static_assert(offsetof(MaterialDataCPU, absorptionCoeff) == 168, "absorptionCoeff offset mismatch");
-static_assert(offsetof(MaterialDataCPU, phaseG) == 172, "phaseG offset mismatch");
 
 // ============================================================================
 // InstanceGeometryInfo - Per-instance geometry offset info (must match shader)
@@ -1393,9 +1294,12 @@ int main(int argc, char* argv[]) {
                 cpuMat.spectralReflectanceCurveIndex = -1;  // No curve, use RGB fallback
             }
 
-            // Infrared material properties (evaluate curves at current wavelength)
-            // NOTE: irReflectance is computed on GPU from energy conservation (ρ = 1 - ε - τ)
-            cpuMat.irEmissivity = mat.GetIREmissivity(wavelength_nm);
+            // Infrared material properties
+            // Sentinel: write -1.0f when no explicit IR data → shader derives ε
+            // from metallic/roughness via GetEffectiveIREmissivity heuristic.
+            cpuMat.irEmissivity = mat.irEmissivityCurve.empty()
+                ? -1.0f
+                : mat.GetIREmissivity(wavelength_nm);
             cpuMat.irTransmittance = mat.GetIRTransmittance(wavelength_nm);
             cpuMat.irTemperature_K = mat.irTemperature_K;
 
@@ -1413,13 +1317,13 @@ int main(int argc, char* argv[]) {
             cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
             cpuMat.temperatureScale = mat.temperatureScale;
             cpuMat.temperatureOffset = mat.temperatureOffset;
-            cpuMat._padding3 = 0.0f;
+            cpuMat.irEmissivityCurveIndex = -1;   // TODO: Phase C4 uploads per-λ curves
 
             // Transmission properties (KHR_materials_transmission)
             cpuMat.ior = mat.ior;
             cpuMat.transmission = mat.transmission;
             cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
-            cpuMat._padding1 = 0.0f;
+            cpuMat.irTransmittanceCurveIndex = -1; // TODO: Phase C4 uploads per-λ curves
 
             // Volume attenuation (KHR_materials_volume)
             cpuMat.attenuationColor = mat.attenuationColor;
