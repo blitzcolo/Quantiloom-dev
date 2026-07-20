@@ -24,6 +24,8 @@
 #ifndef QUANTILOOM_ATMOSPHERE_NN_HLSLI
 #define QUANTILOOM_ATMOSPHERE_NN_HLSLI
 
+#include "blackbody.hlsli"
+
 // Mirror of quantiloom::AtmosNNHeaderGPU (80 bytes)
 struct AtmosNNHeader {
     uint  enabled;
@@ -130,6 +132,32 @@ float SampleAtmosLdown(AtmosNNHeader h, StructuredBuffer<float> data,
                        uint iLambda)
 {
     return data[h.ldownOffset + iLambda];
+}
+
+// Zenith-angle-dependent sky radiance for thermal IR bands.
+// Flat-slab atmosphere model: path length scales as sec(zenith).
+//   eps0(lambda) = L_down_NN(lambda) / B(lambda, T_air)   -- zenith emissivity
+//   L_sky(theta, lambda) = B(T_air) * [1 - (1 - eps0)^min(sec(theta), SEC_MAX)]
+// At zenith (sec=1) this recovers the NN value exactly.
+// At the horizon it tends toward B(T_air) (optically thick limit).
+float AtmosSkyRadianceIR(AtmosNNHeader h, StructuredBuffer<float> data,
+                         uint iLambda, float lambda_nm,
+                         float cosZenith, float T_air)
+{
+    const float SEC_MAX = 5.0;
+
+    float B_air = IRPlanckRadiance(T_air, lambda_nm);
+    if (B_air < 1e-30) return 0.0;
+
+    float L_down_zenith = data[h.ldownOffset + iLambda];
+    float eps0 = clamp(L_down_zenith / B_air, 0.0, 1.0);
+
+    float abscos = max(abs(cosZenith), 0.01);
+    float sec_theta = min(1.0 / abscos, SEC_MAX);
+
+    // (1 - eps0)^sec models accumulated absorption along the slant path
+    float transparency = pow(max(1.0 - eps0, 0.0), sec_theta);
+    return B_air * (1.0 - transparency);
 }
 
 #endif // QUANTILOOM_ATMOSPHERE_NN_HLSLI

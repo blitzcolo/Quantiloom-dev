@@ -290,14 +290,18 @@ void main(inout Payload payload) {
         }
 
         bool useNNLdown = (atmos.enabled != 0 && atmos.hasLdown != 0);
+        float cosZenith = WorldRayDirection().y;  // Y-up: +1 = zenith, 0 = horizon
+
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
-            // Sky thermal radiation: NN downwelling spectrum when baked
-            // (hasSky = 1 will switch this to a zenith-dependent sky network),
-            // otherwise Planck blackbody at atmosphere temperature
-            float L_sky = useNNLdown ? SampleAtmosLdown(atmos, atmosNNData, i)
-                                     : IRPlanckRadiance(T_atmosphere, lambda);
+            float L_sky;
+            if (useNNLdown) {
+                L_sky = AtmosSkyRadianceIR(atmos, atmosNNData, i, lambda,
+                                           cosZenith, T_atmosphere);
+            } else {
+                L_sky = IRPlanckRadiance(T_atmosphere, lambda);
+            }
             radiance_accum += L_sky * lambda_step;
         }
 

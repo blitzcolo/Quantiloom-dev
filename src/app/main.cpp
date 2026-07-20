@@ -781,9 +781,9 @@ int main(int argc, char* argv[]) {
                 for (const auto& mat : loadedScene.materials) {
                     if (!mat.HasQuantiloomRef()) continue;
 
-                    // Currently only support quantiloom_usgs type
-                    if (mat.quantiloomMaterialType != "quantiloom_usgs") {
-                        QL_LOG_WARN("  Unsupported spectral material type: '{}' (only 'quantiloom_usgs' supported)",
+                    // Accept any quantiloom_* type (usgs, ecostress, rii, etc.)
+                    if (mat.quantiloomMaterialType.find("quantiloom_") != 0) {
+                        QL_LOG_WARN("  Unsupported spectral material type: '{}' (expected 'quantiloom_*')",
                                     mat.quantiloomMaterialType);
                         continue;
                     }
@@ -1140,6 +1140,15 @@ int main(int argc, char* argv[]) {
                 QL_LOG_ERROR("NN atmosphere setup failed: {}", e.what());
                 return 1;
             }
+        }
+
+        // When NN atmosphere is active, use its ground temperature for the
+        // thermal-sky fallback (depth-limited reflections, non-NN code paths).
+        if (atmosphereConfig.enabled) {
+            lightingParams.atmosphereTemperature_K = static_cast<f32>(atmosphereConfig.tGroundK);
+            lightingParamsBuffer.Upload(&lightingParams, sizeof(LightingParams));
+            QL_LOG_INFO("  Updated atmosphere temperature from NN config: {:.1f} K",
+                        lightingParams.atmosphereTemperature_K);
         }
 
         atmosHeaderBuffer = std::make_unique<GpuBuffer>(
