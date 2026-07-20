@@ -723,12 +723,12 @@ int main(int argc, char* argv[]) {
         f32 chromaR_correction = config.Get<f32>("quality.chroma_r_correction", LightingDefaults::CHROMA_R_CORRECTION);
         f32 chromaB_correction = config.Get<f32>("quality.chroma_b_correction", LightingDefaults::CHROMA_B_CORRECTION);
 
-        // Read shadow ray enable flag from config (optional, defaults to DISABLED)
+        // Read shadow ray enable flag from config (optional, defaults to ENABLED)
         // Known GPU crash issue on some drivers when shadow rays are enabled
-        // Users can enable via config: renderer.enable_shadow_rays = true
+        // Users can disable via config: renderer.enable_shadow_rays = false
         bool enableShadowRays = config.Get<bool>("renderer.enable_shadow_rays", true);
-        if (enableShadowRays) {
-            QL_LOG_INFO("Shadow rays ENABLED via config");
+        if (!enableShadowRays) {
+            QL_LOG_INFO("Shadow rays DISABLED via config");
         }
 
         LightingParams lightingParams{};
