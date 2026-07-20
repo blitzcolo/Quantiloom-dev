@@ -33,7 +33,7 @@
  * @see GetCIE_XYZ() for integer wavelength query
  * @see GetCIE_XYZ_Interpolated() for fractional wavelength query
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

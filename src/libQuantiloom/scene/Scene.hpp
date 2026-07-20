@@ -19,7 +19,7 @@
  * - glTF 2.0 models (GltfLoader::LoadFromFile)
  * - Procedural generation (SceneBuilder test scenes)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

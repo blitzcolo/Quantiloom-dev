@@ -42,7 +42,7 @@
  * @note Scene graph flattened to world space (no hierarchy preserved)
  * @note Polygons are triangulated during loading
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

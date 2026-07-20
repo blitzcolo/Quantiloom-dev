@@ -2,7 +2,7 @@
  * @file SpectralAnalyzer.cpp
  * @brief Implementation of spectral curve analysis for adaptive sampling
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/SpectralAnalyzer.hpp"

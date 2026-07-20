@@ -19,7 +19,7 @@
  * All pixel data is stored as f32, even if source is f16/u8 (converted during load).
  * Supports optional channel naming and key-value metadata for multi-spectral output.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

@@ -39,7 +39,7 @@
  * @note Timestamp query requires VK_QUERY_TYPE_TIMESTAMP support
  * @note Results available after GPU execution completes (vkQueueWaitIdle)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // ============================================================================

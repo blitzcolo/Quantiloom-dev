@@ -13,7 +13,7 @@
  * Platform macros are defined by CMake at configure time based on target system.
  * This header ensures Quantiloom compiles correctly on Windows/Linux with MSVC/GCC/Clang.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

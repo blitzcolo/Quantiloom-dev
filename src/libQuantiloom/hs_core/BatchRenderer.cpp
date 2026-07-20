@@ -2,7 +2,7 @@
  * @file BatchRenderer.cpp
  * @brief Implementation of batch wavelength rendering
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/BatchRenderer.hpp"

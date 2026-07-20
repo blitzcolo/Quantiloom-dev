@@ -25,7 +25,7 @@
  * @see AtmosphereTransmittanceLUT for 3D (λ,h,θ) lookup tables
  * @see LUTLoader for TOML file I/O
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

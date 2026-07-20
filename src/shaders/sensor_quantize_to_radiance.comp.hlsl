@@ -11,7 +11,7 @@
  * This simulates the full sensor readout chain while preserving
  * the radiance units needed for display.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // ============================================================================

@@ -2,7 +2,7 @@
  * @file MeshOptimizer.cpp
  * @brief Implementation of mesh optimization utilities
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "MeshOptimizer.hpp"

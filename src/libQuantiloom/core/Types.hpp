@@ -13,7 +13,7 @@
  *
  * All Quantiloom code uses these types for consistency and portability across Windows/Linux.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

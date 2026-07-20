@@ -30,7 +30,7 @@
  * @note Indices use u32 type (supports up to 4B vertices per primitive)
  * @note Memory layout: Structure-of-Arrays (separate vectors per attribute)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

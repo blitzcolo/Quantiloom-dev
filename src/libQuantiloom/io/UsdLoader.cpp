@@ -13,7 +13,7 @@
  * - GeomSubsets for multi-material meshes
  * - PointInstancer expansion
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "UsdLoader.hpp"

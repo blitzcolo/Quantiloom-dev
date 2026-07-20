@@ -24,7 +24,7 @@
  * @note Requires Vulkan 1.3 or higher with ray tracing extensions
  * @note Uses VMA (Vulkan Memory Allocator) for automatic memory management
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

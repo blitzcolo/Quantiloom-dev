@@ -2,7 +2,7 @@
  * @file SpectralCubeIO.cpp
  * @brief Implementation of SpectralCube I/O utilities
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "io/SpectralCubeIO.hpp"

@@ -36,7 +36,7 @@
  * @note Always uses f32 storage (physical radiance units)
  * @note Wavelength array auto-generated from lambda_min/max/nbands
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

@@ -11,7 +11,7 @@
  * - Within criticalRadius of feature: use baseStep (user's original interval)
  * - In flat regions: use baseStep * coarseMultiplier (2x-4x original)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

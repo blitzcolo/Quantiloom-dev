@@ -5,7 +5,7 @@
  * This header exposes only standard C++ types. The underlying toml++
  * implementation is hidden using PIMPL pattern.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

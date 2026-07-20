@@ -25,7 +25,7 @@
  * @note Map/Upload only work on HOST_VISIBLE buffers
  * @note GetDeviceAddress requires VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

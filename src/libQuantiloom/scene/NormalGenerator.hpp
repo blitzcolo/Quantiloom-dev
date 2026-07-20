@@ -17,7 +17,7 @@
  * @note Default threshold: 60° (industry standard)
  * @note Area weighting: cross product magnitude = 2 * triangle area
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

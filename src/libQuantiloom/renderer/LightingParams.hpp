@@ -29,7 +29,7 @@
  * @see SolarSpectralLUT for wavelength-dependent illumination curves
  * @see AtmosphereNNConfig for the NN atmosphere configuration
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

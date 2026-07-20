@@ -12,7 +12,7 @@
  * - Material ID preservation
  * - Triangle winding order preservation
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include <gtest/gtest.h>

@@ -31,7 +31,7 @@
  * @note Uploaded to GPU via MaterialData buffer (see main.cpp MaterialDataCPU)
  * @note Shader access via bindless descriptor arrays
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

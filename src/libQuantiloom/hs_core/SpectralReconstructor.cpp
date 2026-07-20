@@ -2,7 +2,7 @@
  * @file SpectralReconstructor.cpp
  * @brief Implementation of spectral cube reconstruction from adaptive samples
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/SpectralReconstructor.hpp"

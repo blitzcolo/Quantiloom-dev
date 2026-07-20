@@ -2,7 +2,7 @@
  * @file GpuSpectralReconstructor.cpp
  * @brief Implementation of GPU-accelerated spectral cube reconstruction
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/GpuSpectralReconstructor.hpp"

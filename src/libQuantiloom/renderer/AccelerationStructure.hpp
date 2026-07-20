@@ -25,7 +25,7 @@
  * @note Build operations must be recorded into command buffers and submitted to GPU
  * @note BLAS must outlive TLAS (TLAS references BLAS device addresses)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

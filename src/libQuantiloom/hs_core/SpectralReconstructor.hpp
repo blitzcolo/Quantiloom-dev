@@ -15,7 +15,7 @@
  * - Critical regions (peaks, valleys, edges) are rendered at full resolution
  * - Reconstruction error is bounded by the spectral analysis thresholds
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

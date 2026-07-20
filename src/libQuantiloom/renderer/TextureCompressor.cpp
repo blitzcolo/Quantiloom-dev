@@ -10,7 +10,7 @@
  * 2. Add to vendor/bc7enc_rdo/
  * 3. Build with -DQUANTILOOM_USE_BC7ENC=ON
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "TextureCompressor.hpp"

@@ -10,7 +10,7 @@
  * PSF sigma is calculated from f-number and wavelength:
  *   σ_psf ≈ 1.22 × λ × f# / pixel_pitch
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // Define which pass to compile

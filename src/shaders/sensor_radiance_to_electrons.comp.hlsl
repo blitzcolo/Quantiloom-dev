@@ -15,7 +15,7 @@
  *   3. Photons: N_photons = E_total / E_photon
  *   4. Electrons: N_e = N_photons × QE
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // ============================================================================

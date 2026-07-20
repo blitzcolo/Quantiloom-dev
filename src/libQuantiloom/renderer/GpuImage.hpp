@@ -28,7 +28,7 @@
  * @note Image layout transitions managed externally via pipeline barriers
  * @note View is created automatically (can't be changed after construction)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

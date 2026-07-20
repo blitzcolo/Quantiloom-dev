@@ -31,7 +31,7 @@
  * @note BC7 requires 4x4 block alignment (width/height must be multiple of 4)
  * @note Textures smaller than 4x4 cannot be compressed
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

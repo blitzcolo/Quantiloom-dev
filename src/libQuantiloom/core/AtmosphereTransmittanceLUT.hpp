@@ -31,7 +31,7 @@
  *
  * @see AtmosphereTransmittanceLUTLoader for .qlut file I/O
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

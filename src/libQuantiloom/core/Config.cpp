@@ -4,7 +4,7 @@
  *
  * toml++ is only included here, not in the public header (PIMPL pattern).
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "Config.hpp"

@@ -20,7 +20,7 @@
  * @note Not suitable for per-frame operations (use persistent command buffers instead)
  * @note Designed for initialization and cleanup only
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

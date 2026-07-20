@@ -2,7 +2,7 @@
  * @file AdaptiveGridGenerator.cpp
  * @brief Implementation of adaptive wavelength grid generation
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/AdaptiveGridGenerator.hpp"

@@ -15,7 +15,7 @@
  * Camera rays are generated in raygen.rgen shader using CameraData parameters.
  * The camera uses a standard right-handed coordinate system (OpenGL convention).
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

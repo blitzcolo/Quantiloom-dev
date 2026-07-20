@@ -30,7 +30,7 @@
  * @note Scene graph flattened to world space (no hierarchy preserved)
  * @note All mesh primitives become separate GeometryPrimitive instances
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

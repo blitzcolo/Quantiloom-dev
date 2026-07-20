@@ -10,7 +10,7 @@
  *
  * Designed for HDR images - handles floating point input with auto-normalization.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // Define which pass to compile (set via specialization constant or #define)

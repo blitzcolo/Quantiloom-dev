@@ -30,7 +30,7 @@
  * @note Vertices with different normals/UVs at same position are NOT merged (hard edge/UV seam)
  * @note Material ID is preserved
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

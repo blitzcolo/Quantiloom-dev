@@ -48,7 +48,7 @@
  * @see FusionMethod for algorithm selection
  * @see FusionParams for configuration parameters
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

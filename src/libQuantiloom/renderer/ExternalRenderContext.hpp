@@ -33,7 +33,7 @@
  * @note Requires Vulkan 1.3 or VK_KHR_dynamic_rendering extension
  * @note Thread-safe for parameter updates, but not for rendering
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

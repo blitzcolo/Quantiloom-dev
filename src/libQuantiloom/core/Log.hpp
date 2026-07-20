@@ -5,7 +5,7 @@
  * This header exposes only standard C++ types. The underlying spdlog
  * implementation is hidden in Log.cpp.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

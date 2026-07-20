@@ -2,7 +2,7 @@
  * @file ExternalRenderContext.cpp
  * @brief Implementation of external Vulkan context injection API
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition

@@ -17,7 +17,7 @@
  * - Missing these features would compromise quantitative spectral analysis
  * - Flat regions contain redundant information that can be reconstructed
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

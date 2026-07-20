@@ -17,11 +17,11 @@ BEGIN
     BEGIN
         BLOCK "040904b0" // 0409: en-US, 04b0: Unicode
         BEGIN
-            VALUE "CompanyName",      "wtflmao\0"
+            VALUE "CompanyName",      "blitzcolo\0"
             VALUE "FileDescription",  "Quantiloom Main Program\0"
             VALUE "FileVersion",      "0.0.5.0\0"
             VALUE "InternalName",     "Quantiloom\0"
-            VALUE "LegalCopyright",   "Copyright (C) 2025-2026 wtflmao. All rights reserved.\0"
+            VALUE "LegalCopyright",   "Copyright (C) 2025-2026 blitzcolo. All rights reserved.\0"
             VALUE "OriginalFilename", "Quantiloom.exe\0"
             VALUE "ProductName",      "Quantiloom Application\0"
             VALUE "ProductVersion",   "0.0.5.0\0"

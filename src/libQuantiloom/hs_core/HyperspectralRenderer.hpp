@@ -11,7 +11,7 @@
  * Phase 1: Basic batch rendering (no adaptive sampling)
  * Phase 2+: Adaptive spectral sampling based on material features
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

@@ -10,7 +10,7 @@
  * - Reduce VRAM from 8.4GB to ~1GB (with BC7)
  * - Reduce load time from 56s to ~15-20s (parallel loading)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include <gtest/gtest.h>

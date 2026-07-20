@@ -13,7 +13,7 @@
  * - Interleave options: BSQ, BIL, BIP
  * - Data types: float32 (type=4), float64 (type=5)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

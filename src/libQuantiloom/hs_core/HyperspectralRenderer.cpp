@@ -23,7 +23,7 @@
  * - GpuSpectralReconstructor for parallel Catmull-Rom interpolation
  * - 10-40x speedup over CPU reconstruction
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "hs_core/HyperspectralRenderer.hpp"

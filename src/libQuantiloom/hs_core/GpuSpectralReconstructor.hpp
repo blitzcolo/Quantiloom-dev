@@ -15,7 +15,7 @@
  * - Catmull-Rom: Smooth, preserves curvature, recommended
  * - Akima: Robust to outliers, more computation
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

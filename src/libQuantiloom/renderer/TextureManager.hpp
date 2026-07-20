@@ -26,7 +26,7 @@
  * @note Samplers destroyed manually in destructor (GpuImage handles images via RAII)
  * @note Texture indices are immutable after upload
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

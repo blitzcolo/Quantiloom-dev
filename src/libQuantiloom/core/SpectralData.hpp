@@ -18,7 +18,7 @@
  * GPU structs MUST match shader definitions in common.hlsli exactly (verified by static_assert).
  * All GPU structs use std430 layout for efficient SSBO binding.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

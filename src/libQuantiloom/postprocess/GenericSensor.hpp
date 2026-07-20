@@ -39,7 +39,7 @@
  * @see SensorParams for configuration parameters
  * @see SensorOutput for output data structure
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

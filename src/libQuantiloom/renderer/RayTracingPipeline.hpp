@@ -58,7 +58,7 @@
  * @note All shaders must be compiled to SPIR-V before loading
  * @note Descriptor binding indices MUST match shader layout qualifiers
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

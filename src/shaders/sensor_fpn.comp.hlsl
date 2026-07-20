@@ -9,7 +9,7 @@
  * DSNU: additive dark signal non-uniformity  signal += dsnu
  * NUC:  reduces FPN residual by nucEfficiency factor
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // ============================================================================

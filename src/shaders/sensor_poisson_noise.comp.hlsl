@@ -8,7 +8,7 @@
  *
  * Uses PCG random number generator for GPU-friendly noise generation.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 // ============================================================================

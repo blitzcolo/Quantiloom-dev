@@ -2,7 +2,7 @@
  * @file VulkanContextAdapter.cpp
  * @brief Implementation of VulkanContextAdapter for external Vulkan handle injection
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "VulkanContextAdapter.hpp"

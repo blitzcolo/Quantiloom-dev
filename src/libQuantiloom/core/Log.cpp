@@ -4,7 +4,7 @@
  *
  * spdlog is only included here, not in the public header.
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #include "Log.hpp"

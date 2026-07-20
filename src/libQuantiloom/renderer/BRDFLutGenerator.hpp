@@ -33,7 +33,7 @@
  * @note Use disk caching for production (LoadFromBinary)
  * @note GGX microfacet distribution only (no Beckmann/Phong)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

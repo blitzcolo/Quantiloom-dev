@@ -12,7 +12,7 @@
  * - Validation methods to catch configuration errors early
  * - Factory methods for common use cases (MWIR, LWIR, SWIR, etc.)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

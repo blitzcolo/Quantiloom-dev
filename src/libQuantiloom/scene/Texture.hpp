@@ -30,7 +30,7 @@
  * @note TextureManager handles GPU resource creation
  * @note Material texture indices must reference valid Scene::textures entries
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

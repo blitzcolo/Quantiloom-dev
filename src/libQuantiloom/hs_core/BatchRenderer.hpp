@@ -17,7 +17,7 @@
  * 2. BatchRenderer renders those wavelengths -> sparse_cube
  * 3. SpectralReconstructor interpolates sparse_cube -> full_cube
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

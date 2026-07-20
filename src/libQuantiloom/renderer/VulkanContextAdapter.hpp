@@ -35,7 +35,7 @@
  * @note External handles MUST remain valid for lifetime of adapter
  * @note Thread safety: same as external context (typically not thread-safe)
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once

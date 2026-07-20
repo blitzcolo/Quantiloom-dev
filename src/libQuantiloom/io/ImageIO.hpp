@@ -28,7 +28,7 @@
  * @note PNG output applies sRGB gamma encoding (not linear RGB)
  * @note EXR supports unlimited channels, PNG limited to 1-4 channels
  *
- * @author wtflmao
+ * @author blitzcolo
  */
 
 #pragma once
