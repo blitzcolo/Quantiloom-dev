@@ -12,8 +12,8 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TOOLS_DIR="$PROJECT_ROOT/tools"
 DXC_DIR="$TOOLS_DIR/dxc"
 
-DXC_VERSION="v1.8.2505.1"  # Latest stable release as of Nov. 2025
-DXC_ARCHIVE_NAME="2025_07_14"
+DXC_VERSION="v1.9.2602.24"  # Latest stable release as of Feb. 2026
+DXC_ARCHIVE_NAME="2026_05_27"
 PLATFORM="$(uname -s)"
 
 echo "[DXC Setup] Detecting platform: $PLATFORM"

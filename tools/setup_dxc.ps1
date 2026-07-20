@@ -11,8 +11,8 @@ $ProjectRoot = Split-Path -Parent $ScriptDir
 $ToolsDir = Join-Path $ProjectRoot "tools"
 $DxcDir = Join-Path $ToolsDir "dxc"
 
-$DxcVersion = "v1.8.2505.1"  # Latest stable release as of 2024
-$DxcArchive = "dxc_2025_07_14.zip"
+$DxcVersion = "v1.9.2602.24"  # Latest stable release as of 2026
+$DxcArchive = "dxc_2026_05_27.zip"
 $DxcUrl = "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$DxcVersion/$DxcArchive"
 $DxcBinPath = Join-Path $DxcDir "bin\x64\dxc.exe"
 
