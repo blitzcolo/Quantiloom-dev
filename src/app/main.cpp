@@ -2113,8 +2113,20 @@ int RunApp(int argc, char* argv[]) {
             u32 frameIndex = 0;
             f32 totalGpuMs = 0.0f;
 
-            std::random_device rd;
-            std::mt19937 rng(rd());
+            // Per-sample seeds for the path tracer. Deterministic by default so
+            // two runs of one scene produce the same image -- the sensor seed
+            // alone cannot deliver that, because this stage runs before it and
+            // used to draw from random_device. Set renderer.seed = 0 for
+            // nondeterministic sampling. The sequence still varies per sample
+            // either way, so accumulation quality is unchanged.
+            const u32 configuredSeed = config.Get<u32>("renderer.seed", 0x51EDU);
+            const u32 renderSeed =
+                (configuredSeed != 0U) ? configuredSeed : std::random_device{}();
+            if (configuredSeed == 0U) {
+                QL_LOG_INFO("  Sampling seed: {} (nondeterministic, renderer.seed = 0)",
+                            renderSeed);
+            }
+            std::mt19937 rng(renderSeed);
             std::uniform_int_distribution<u32> dist(0, std::numeric_limits<u32>::max());
 
             // Batch samples into groups. Each submit must stay WELL under the

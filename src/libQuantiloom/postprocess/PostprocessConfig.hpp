@@ -37,6 +37,10 @@ public:
         p.enableDarkCurrent = config.Get<bool>("sensor.enable_dark_current", true);
         p.enableFPN = config.Get<bool>("sensor.enable_fpn", false);
 
+        // Noise RNG seed. Defaults to the fixed value in SensorParams, so a
+        // scene renders the same raw DN every time; set 0 for varying noise.
+        p.noiseSeed = config.Get<u32>("sensor.noise_seed", SensorParams{}.noiseSeed);
+
         // FPN parameters (from sensor.fpn subtable, only used if enableFPN = true)
         p.prnuSigma = config.Get<f32>("sensor.fpn.prnu_sigma", 0.01f);
         p.dsnuSigma_e = config.Get<f32>("sensor.fpn.dsnu_sigma_e", 5.0f);

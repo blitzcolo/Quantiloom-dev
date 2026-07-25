@@ -1193,3 +1193,90 @@ TEST_F(GenericSensorTest, VignettingSymmetric) {
     EXPECT_NEAR(dnUp, avg, tolerance);
     EXPECT_NEAR(dnDown, avg, tolerance);
 }
+
+// ============================================================================
+// Noise Reproducibility
+// ============================================================================
+// GenericSensor used to seed itself from std::random_device with no way to
+// override it, so every noise-enabled render differed and the FPN tests were
+// nondeterministic -- PRNUAffectsSignalMultiplicatively failed roughly 1 run in
+// 12, taking build_wsl.sh's gate red with it. These pin the guarantee that
+// replaced it, since without them the seed could be ignored again silently.
+
+TEST_F(GenericSensorTest, SameSeedGivesIdenticalOutput) {
+    Image hdr(32, 32, 1);
+    for (auto& v : hdr.data) { v = 0.5f; }
+
+    params.enableFPN = true;
+    params.enablePoissonNoise = true;
+    params.enableReadNoise = true;
+    params.noiseSeed = 12345U;
+
+    GenericSensor a;
+    GenericSensor b;
+    auto ra = a.Apply(hdr, params);
+    auto rb = b.Apply(hdr, params);
+    ASSERT_TRUE(ra.has_value());
+    ASSERT_TRUE(rb.has_value());
+
+    // Bit-identical, not merely close: this is what lets two renders of one
+    // scene be compared directly.
+    EXPECT_EQ(ra.value().rawDN.data, rb.value().rawDN.data);
+}
+
+TEST_F(GenericSensorTest, DifferentSeedGivesDifferentNoise) {
+    Image hdr(32, 32, 1);
+    for (auto& v : hdr.data) { v = 0.5f; }
+
+    params.enableFPN = true;
+    params.enablePoissonNoise = true;
+    params.enableReadNoise = true;
+
+    params.noiseSeed = 1U;
+    GenericSensor a;
+    auto ra = a.Apply(hdr, params);
+
+    params.noiseSeed = 2U;
+    GenericSensor b;
+    auto rb = b.Apply(hdr, params);
+
+    ASSERT_TRUE(ra.has_value());
+    ASSERT_TRUE(rb.has_value());
+    EXPECT_NE(ra.value().rawDN.data, rb.value().rawDN.data);
+}
+
+TEST_F(GenericSensorTest, ZeroSeedRequestsNondeterministicNoise) {
+    Image hdr(32, 32, 1);
+    for (auto& v : hdr.data) { v = 0.5f; }
+
+    params.enableFPN = true;
+    params.enablePoissonNoise = true;
+    params.enableReadNoise = true;
+    params.noiseSeed = 0U;  // documented opt-out from reproducibility
+
+    GenericSensor a;
+    GenericSensor b;
+    auto ra = a.Apply(hdr, params);
+    auto rb = b.Apply(hdr, params);
+    ASSERT_TRUE(ra.has_value());
+    ASSERT_TRUE(rb.has_value());
+    EXPECT_NE(ra.value().rawDN.data, rb.value().rawDN.data);
+}
+
+TEST_F(GenericSensorTest, DefaultSeedIsReproducible) {
+    Image hdr(16, 16, 1);
+    for (auto& v : hdr.data) { v = 0.5f; }
+
+    params.enableFPN = true;
+    params.enableReadNoise = true;
+    // params.noiseSeed left at its default
+
+    GenericSensor a;
+    GenericSensor b;
+    auto ra = a.Apply(hdr, params);
+    auto rb = b.Apply(hdr, params);
+    ASSERT_TRUE(ra.has_value());
+    ASSERT_TRUE(rb.has_value());
+    EXPECT_EQ(ra.value().rawDN.data, rb.value().rawDN.data)
+        << "the default must be deterministic, or renders are not comparable";
+}

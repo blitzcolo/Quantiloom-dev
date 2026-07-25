@@ -41,6 +41,13 @@ struct SensorParams {
     f32 prnuSigma = 0.01f;              // PRNU standard deviation (typical: 0.005-0.02, i.e., 0.5-2%)
     f32 dsnuSigma_e = 5.0f;             // DSNU standard deviation (electrons, typical: 5-20)
 
+    // Noise RNG seed. Fixed by default, so two renders of the same scene with
+    // the same parameters produce bit-identical raw DN -- which a renderer
+    // aimed at quantitative validation needs, and which was impossible while
+    // the sensor seeded itself from std::random_device with no way to override.
+    // Set 0 to draw a nondeterministic seed instead (frame-varying noise).
+    u32 noiseSeed = 0x5EEDU;
+
     // NUC parameters (Non-Uniformity Correction)
     bool enableNUC = false;             // Apply NUC correction (leaves residual noise)
     f32 nucEfficiency = 0.98f;          // NUC efficiency (typical: 0.95-0.99, i.e., 95-99%)

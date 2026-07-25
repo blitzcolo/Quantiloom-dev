@@ -62,6 +62,10 @@ public:
         -> Result<SensorOutput, String> override;
 
 private:
+    // Seed the RNG from SensorParams on first use, or when the requested seed
+    // changes. Invalidates the FPN maps, which belong to the previous stream.
+    auto EnsureSeeded(u32 requestedSeed) -> void;
+
     // Step 1: Apply optical PSF (Gaussian approximation)
     static auto ApplyPSF(const Image& img, f32 sigma_pixels) -> Image;
 
@@ -89,8 +93,13 @@ private:
     static auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image;
     static auto ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image;
 
-    // RNG for noise
+    // RNG for noise. Seeded from SensorParams::noiseSeed on first use rather
+    // than at construction, so the seed travels with the parameters (and thus
+    // with the scene TOML) instead of being fixed before they are known.
+    // Re-seeded if a later Apply asks for a different seed.
     std::mt19937 m_Rng;
+    bool m_Seeded = false;
+    u32 m_SeededWith = 0;
 
     // FPN maps (generated once, reused for all frames)
     Image m_PRNUMap;  // Photo Response Non-Uniformity (multiplicative gain map)

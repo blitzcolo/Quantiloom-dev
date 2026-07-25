@@ -21,8 +21,32 @@ constexpr f64 kSpeedOfLight = 299792458.0;
 // Constructor
 // ============================================================================
 
-GenericSensor::GenericSensor()
-    : m_Rng(std::random_device{}()) {}
+// The RNG is seeded in Apply from SensorParams, not here -- see EnsureSeeded.
+GenericSensor::GenericSensor() = default;
+
+auto GenericSensor::EnsureSeeded(const u32 requestedSeed) -> void {
+    // Seed 0 means "give me nondeterministic noise". Anything else is honoured
+    // exactly, so the same seed and parameters reproduce the same raw DN.
+    // Re-seeding only when the request changes keeps successive frames from one
+    // sensor advancing the stream, which is what makes per-frame noise differ
+    // while the FPN maps stay fixed.
+    if (m_Seeded && m_SeededWith == requestedSeed) {
+        return;
+    }
+
+    const u32 effective = (requestedSeed != 0U) ? requestedSeed
+                                                : std::random_device{}();
+    m_Rng.seed(effective);
+    m_Seeded = true;
+    m_SeededWith = requestedSeed;
+
+    // Maps were drawn from the previous stream; they must not outlive it.
+    m_FPNMapsGenerated = false;
+
+    if (requestedSeed == 0U) {
+        Log::Debug("Sensor noise: nondeterministic seed {}", effective);
+    }
+}
 
 // ============================================================================
 // Main Interface
@@ -37,6 +61,8 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
 
     Log::Debug("Sensor chain: Input {}x{} ({} channels)",
                hdr.width, hdr.height, hdr.channels);
+
+    EnsureSeeded(params.noiseSeed);
 
     // Generate FPN maps if needed (lazy initialization)
     if (params.enableFPN && !m_FPNMapsGenerated) {
