@@ -1,0 +1,114 @@
+{
+  "module": "brdf",
+  "summary": "BRDF/PBR formulas are mostly correct but have 3 real issues: exact conductor Fresnel unused, brdf_5p diffuse normalization inconsistent, and Schlick error up to 2.4% for conductors.",
+  "findings": [
+    {
+      "id": "BRDF-01",
+      "severity": "High",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 203,
+      "description": "CookTorranceBRDF always uses Schlick Fresnel approximation even when exact conductor Fresnel data (complexRefractiveIndexIndex >= 0) is available in MaterialData. The exact FresnelConductor() function exists in common.hlsli but is never invoked. For spectral/physical rendering this is a significant accuracy gap.",
+      "evidence": "Schlick error for Al (n=0.27,k=3.29) at cos=0.3: exact=0.9062 vs schlick=0.9278, relative error 2.37%. For high-k metals the error can exceed 5% at intermediate angles.",
+      "recommendation": "Add a branch in CookTorranceBRDF: when complexRefractiveIndexIndex >= 0, sample n,k at current wavelength and call FresnelConductor() instead of FresnelSchlick()."
+    },
+    {
+      "id": "BRDF-02",
+      "severity": "Medium",
+      "file": "src/libQuantiloom/scene/BRDFModels.hpp",
+      "line": 32,
+      "description": "brdf_5p diffuse term normalization is inconsistent. When kb==0 it returns kd/PI (correct Lambertian). When kb!=0 it returns specular + kd (kd NOT divided by PI). This means the diffuse hemispherical reflectance jumps from kd to kd*PI depending on whether a specular lobe is present.",
+      "evidence": "At theta_i=0, theta_s=0, phi_s=phi_i: kb=0 gives kd/PI = 0.159; kb!=0 gives kb + kd. For kd=0.5, diffuse reflectance is 0.5 (not 0.5/PI) when kb!=0, which is PI times too large for a BRDF value in sr^-1.",
+      "recommendation": "Change the return statement to: kb * kr*kr * cosa * exp(b * pow(ra, a)) / (1.0 + (kr*kr - 1.0) * cosa) / cos_s + kd / BRDF_PI"
+    },
+    {
+      "id": "BRDF-03",
+      "severity": "Medium",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 280,
+      "description": "CookTorranceBRDF_Spectral creates a grayscale float3 albedo, calls the RGB CookTorranceBRDF, then averages the three identical channels. This is redundant and wastes GPU instructions. More importantly, it suggests the spectral path is bolted onto an RGB pipeline instead of having a native scalar implementation.",
+      "evidence": "For grayscale albedo, CookTorranceBRDF produces identical R/G/B channels because F0, F, D, Vis are all scalar-derived. Averaging three equal values is mathematically correct but 3x more ALU work than necessary.",
+      "recommendation": "Implement a native scalar CookTorranceBRDF_Spectral that computes specular and diffuse directly as scalars, avoiding the float3 construction and channel average."
+    },
+    {
+      "id": "BRDF-04",
+      "severity": "Info",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 56,
+      "description": "DistributionGGX normalization is correct. The GGX distribution integrates to 1 over the hemisphere when multiplied by cos(theta).",
+      "evidence": "Monte Carlo integral of D * cos(theta) over hemisphere for roughness=0.5: 1.004 (within 0.4% of expected 1.0).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-05",
+      "severity": "Info",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 126,
+      "description": "VisibilitySmithGGXCorrelated is mathematically equivalent to the Epic formulation G/(4*NdotV*NdotL) with k=(roughness+1)^2/8. The optimized 1/(4*denomL*denomV) form is algebraically identical and numerically stable.",
+      "evidence": "Spot checks for roughness in [0.1, 0.5, 1.0], NdotV/NdotL in [0.1, 0.5, 1.0] show exact agreement (diff < 1e-15) between Epic G/(4*NdotV*NdotL) and the code's 1/(4*denomL*denomV).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-06",
+      "severity": "Info",
+      "file": "src/shaders/common.hlsli",
+      "line": 393,
+      "description": "FresnelConductor() implements the exact unpolarized Fresnel reflectance for complex refractive index. The formulation matches the standard PBRT-v4 conductor Fresnel.",
+      "evidence": "For Al (n=0.27, k=3.29) at cos=0.7071: code=0.910521, harness reference=0.910521. F0 from FresnelF0() also matches: code=0.913162, harness=0.913162.",
+      "recommendation": "No change needed. Ensure this function is actually used in the BRDF when complexRefractiveIndexIndex >= 0 (see BRDF-01)."
+    },
+    {
+      "id": "BRDF-07",
+      "severity": "Info",
+      "file": "src/shaders/common.hlsli",
+      "line": 494,
+      "description": "FresnelDielectric() implements the exact Fresnel equations for dielectric-dielectric interfaces, including total internal reflection (TIR) handling.",
+      "evidence": "Air-to-glass (n1=1.0, n2=1.5) at 45 deg: code=0.050241, harness=0.050241. Glass-to-air at cos=0.5 correctly triggers TIR (sin2T=1.6875 > 1.0, returns 1.0).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-08",
+      "severity": "Low",
+      "file": "src/libQuantiloom/renderer/BRDFLutGenerator.cpp",
+      "line": 239,
+      "description": "BRDF LUT integration uses single-scattering GGX, which loses energy at high roughness. At NdotV=1.0, roughness=0.5, the specular scale is ~0.895 (10.5% energy loss). This is a known limitation of the standard Epic split-sum approximation.",
+      "evidence": "Simulated LUT integration: NdotV=1.0, roughness=0.5 -> scale=0.8951. NdotV=1.0, roughness=1.0 -> scale=0.3068. The code already documents this as a future enhancement (Kulla-Conty multi-scattering).",
+      "recommendation": "Consider implementing Kulla-Conty or Turquin multi-scattering energy compensation for physically accurate rough metals. Documented as future work in pbr.hlsli lines 397-457."
+    },
+    {
+      "id": "BRDF-09",
+      "severity": "Info",
+      "file": "src/libQuantiloom/renderer/BRDFLutGenerator.cpp",
+      "line": 310,
+      "description": "GeometrySmith_GGX_IBL uses k = roughness^2 / 2, which is the correct IBL remapping per Epic's formulation. This matches VisibilitySmithGGXCorrelatedIBL in pbr.hlsli.",
+      "evidence": "The code uses k = (a*a)/2.0 where a=roughness. This is the standard IBL geometry remapping (different from direct lighting k=(r+1)^2/8).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-10",
+      "severity": "Info",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 321,
+      "description": "FresnelSchlickRoughness implements the Epic IBL roughness-modified Fresnel correctly: maxReflection = max(1.0 - roughness, F0), then F = F0 + (maxReflection - F0) * (1 - cosTheta)^5.",
+      "evidence": "At roughness=0, maxReflection=1.0, giving full Fresnel at grazing. At roughness=1, maxReflection=max(0.0, F0)=F0, giving no angular Fresnel variation. This matches the standard Epic formulation.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-11",
+      "severity": "Info",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 474,
+      "description": "ImportanceSampleGGX_PCG computes the correct GGX importance sampling PDF: pdf = D * NdotH / (4 * VdotH). The half-vector sampling uses the standard GGX spherical mapping.",
+      "evidence": "cosTheta = sqrt((1-u1)/(1+(a2-1)*u1)) is the standard GGX importance sample. The PDF derivation D*NdotH/(4*VdotH) matches the Jacobian of the reflection mapping L = reflect(-V, H).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "BRDF-12",
+      "severity": "Low",
+      "file": "src/shaders/pbr.hlsli",
+      "line": 34,
+      "description": "FresnelSchlick in pbr.hlsli uses a 4-multiplication chain for (1-cos)^5, which is correct and faster than pow(). However, the same function exists in common.hlsli (FresnelSchlickRGB) with a 5-multiplication chain. The two implementations are slightly different in instruction count but mathematically identical.",
+      "evidence": "pbr.hlsli: oneMinusCos2 = oneMinusCos*oneMinusCos; oneMinusCos5 = oneMinusCos2*oneMinusCos2*oneMinusCos (4 multiplies). common.hlsli: oneMinusCos*oneMinusCos*oneMinusCos*oneMinusCos*oneMinusCos (5 multiplies). Both produce identical results.",
+      "recommendation": "Unify on the 4-multiply version for consistency and marginal performance gain."
+    }
+  ]
+}

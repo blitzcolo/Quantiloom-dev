@@ -1,0 +1,195 @@
+{
+  "module": "atmosphere",
+  "summary": "Found 8 issues: severe visibility comment errors, non-conservative delta-tracking majorant, crude sun transmittance approximation, unused GPU parameter, LUT format/header mismatches, and altitude sampling gap.",
+  "findings": [
+    {
+      "id": "ATM-01",
+      "severity": "High",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.cpp",
+      "line": 43,
+      "description": "ClearDay preset comment claims mie_beta_550nm=2.0e-6 gives '~23km' visibility, but Koschmieder formula yields 1956 km — off by ~85x.",
+      "evidence": "koschmieder_visibility(2.0e-6) = 1956.0 km vs comment ~23 km",
+      "recommendation": "Fix comments to match actual Koschmieder visibility, or adjust beta values to match the stated visibilities."
+    },
+    {
+      "id": "ATM-02",
+      "severity": "High",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.cpp",
+      "line": 60,
+      "description": "Hazy preset comment claims mie_beta_550nm=10.0e-6 gives '~4.5km' visibility, but actual visibility is 391 km.",
+      "evidence": "koschmieder_visibility(10.0e-6) = 391.2 km vs comment ~4.5 km",
+      "recommendation": "Fix comment or adjust beta to beta=8.69e-4 for true ~4.5km visibility."
+    },
+    {
+      "id": "ATM-03",
+      "severity": "High",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.cpp",
+      "line": 67,
+      "description": "PollutedUrban preset comment claims mie_beta_550nm=20.0e-6 gives '~2km' visibility, but actual visibility is 196 km.",
+      "evidence": "koschmieder_visibility(20.0e-6) = 195.6 km vs comment ~2 km",
+      "recommendation": "Fix comment or adjust beta to beta=1.96e-3 for true ~2km visibility."
+    },
+    {
+      "id": "ATM-04",
+      "severity": "High",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.cpp",
+      "line": 75,
+      "description": "MountainTop preset comment claims mie_beta_550nm=0.5e-6 gives '~90km' visibility, but actual visibility is 7824 km.",
+      "evidence": "koschmieder_visibility(0.5e-6) = 7824.0 km vs comment ~90 km",
+      "recommendation": "Fix comment or adjust beta to beta=4.35e-5 for true ~90km visibility."
+    },
+    {
+      "id": "ATM-05",
+      "severity": "Medium",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 236,
+      "description": "Delta-tracking majorant sigma_maj = sigma_t_entry is only conservative for rays where density never exceeds the entry point. For downward rays, density increases (especially Mie with scale_height=1200m, ratio up to ~4160x), making the majorant a severe underestimate and biasing the free-flight sampling.",
+      "evidence": "At 10km altitude downward to 0km, Mie density ratio = exp(10000/1200) ≈ 4160. sigma_maj is 4160x too low.",
+      "recommendation": "Compute majorant as maximum sigma_t along the entire ray segment (entry and exit), or use a global maximum (sea-level) for conservativeness."
+    },
+    {
+      "id": "ATM-06",
+      "severity": "Medium",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 382,
+      "description": "SingleScattering sun transmittance uses avg_altitude = altitude + 0.5 * atmosphere_height, which is independent of the actual sun-ray geometry. For horizontal rays from sea level, true average altitude is ~20037m but code uses 30000m (+50% error), leading to overestimated transmittance for oblique sun rays.",
+      "evidence": "For altitude=0, cos_phi=0: true_avg_altitude=20037.5m, code_avg_altitude=30000.0m, relative error=+49.7%.",
+      "recommendation": "Use the actual path midpoint altitude (computed from ray-sphere geometry) or perform a short numerical integration along the sun ray."
+    },
+    {
+      "id": "ATM-07",
+      "severity": "Medium",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.hpp",
+      "line": 160,
+      "description": "extinction_threshold is defined and passed to GPU but never referenced in the shader (atmospheric.hlsli). It is dead weight in the GPU struct.",
+      "evidence": "Grep of atmospheric.hlsli shows zero references to 'extinction_threshold'.",
+      "recommendation": "Either implement early termination using extinction_threshold in the shader, or remove it from the GPU struct to save bandwidth."
+    },
+    {
+      "id": "ATM-08",
+      "severity": "Medium",
+      "file": "scripts/atmosphere-qlut-gen/modtran_to_qlut.py",
+      "line": 25,
+      "description": "modtran_to_qlut.py uses HEADER_SIZE=2048, but README.md example and QLUTGenerator class use HEADER_SIZE=1024. The C++ loader also uses 2048. This inconsistency means README-generated files would be incompatible with the loader.",
+      "evidence": "README.md line 109: HEADER_SIZE = 1024; modtran_to_qlut.py line 25: HEADER_SIZE = 2048; loader.hpp line 110: HEADER_SIZE = 2048.",
+      "recommendation": "Update README.md and QLUTGenerator to use HEADER_SIZE=2048 to match the actual C++ loader and modtran_to_qlut.py."
+    },
+    {
+      "id": "ATM-09",
+      "severity": "Medium",
+      "file": "scripts/atmosphere-qlut-gen/modtran_to_qlut.py",
+      "line": 68,
+      "description": "modtran_to_qlut.py generates LUTs with altitude.count=1 (only sea level), but the README documents multi-altitude LUTs (e.g., 31 samples for 0-30km). The script cannot produce altitude-varying transmittance.",
+      "evidence": "make_header() sets altitude start=0.0, stop=0.0, step=1.0, count=1. README example shows altitude.count=31.",
+      "recommendation": "Extend modtran_to_qlut.py to accept altitude ranges and generate multi-altitude LUTs, or document that the script only produces sea-level LUTs."
+    },
+    {
+      "id": "ATM-10",
+      "severity": "Low",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 260,
+      "description": "free_flight is clamped to (t_max - t_min) * 2.0, which is an arbitrary bound. If the sampled free-flight distance exceeds the medium, clamping it and then continuing delta-tracking can introduce bias because the probability of exiting the medium is not handled correctly.",
+      "evidence": "Code: free_flight = min(free_flight, (t_max - t_min) * 2.0). For a path length of 100km, clamp is 200km. If true free flight is >200km, the clamp artificially forces a null collision inside the medium.",
+      "recommendation": "Remove the clamp and handle medium exit naturally: if t_sample > t_max, return no collision. The -log(xi)/sigma_maj formula already correctly samples the exponential distribution."
+    },
+    {
+      "id": "ATM-11",
+      "severity": "Low",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 395,
+      "description": "SingleScattering returns a float3 with all three components set to the same scalar value (L_scattered_r + L_scattered_m). This is correct for monochrome/spectral rendering but wastes bandwidth if the renderer expects RGB. The comment does not clarify this design choice.",
+      "evidence": "return float3(L_scattered_r + L_scattered_m, L_scattered_r + L_scattered_m, L_scattered_r + L_scattered_m);",
+      "recommendation": "Add a comment explaining that this is a scalar spectral result replicated to RGB for compatibility."
+    },
+    {
+      "id": "ATM-12",
+      "severity": "Low",
+      "file": "src/libQuantiloom/io/AtmosphereTransmittanceLUTLoader.hpp",
+      "line": 24,
+      "description": "Loader header comments claim TOML header is 1024 bytes, but the actual constant is 2048. Documentation is stale.",
+      "evidence": "Comment line 24: 'TOML Header (1024 bytes, padded)'. Constant line 110: HEADER_SIZE = 2048.",
+      "recommendation": "Update the ASCII diagram and comment in the header to say 2048 bytes."
+    },
+    {
+      "id": "ATM-13",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 121,
+      "description": "Rayleigh phase function formula matches the normalized analytic form. Integrates to 1.0 over the sphere.",
+      "evidence": "sphere_angle_integrate(rayleigh_phase) = 1.0006 ± 0.02 (within Monte Carlo tolerance). Shader: (3.0/(16.0*PI))*(1.0+cos2).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-14",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 132,
+      "description": "Henyey-Greenstein phase function formula matches the normalized analytic form. Integrates to 1.0 over the sphere for typical g values.",
+      "evidence": "sphere_angle_integrate(HG g=0.76) = 0.9974 ± 0.02. Shader: (1.0-g2)/(4.0*PI*pow(denom,1.5)).",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-15",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 50,
+      "description": "Rayleigh scattering wavelength dependence β_r(λ) = β_r(550) * (550/λ)^4 is physically correct.",
+      "evidence": "At 450nm: beta = 5.8e-6 * (550/450)^4 = 1.294e-5. Matches theoretical Rayleigh λ^-4 law.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-16",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 72,
+      "description": "Mie scattering wavelength dependence β_m(λ) = β_m(550) * (550/λ)^α is physically correct for aerosol scattering (Angstrom exponent).",
+      "evidence": "At 450nm with alpha=0.84: beta = 2.0e-6 * (550/450)^0.84 = 2.367e-6. Matches Angstrom law.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-17",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 98,
+      "description": "Atmospheric density model ρ(h) = exp(-h/H) is the standard exponential atmosphere model.",
+      "evidence": "Matches barometric formula for isothermal atmosphere. Used in Bruneton & Neyret 2008.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-18",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 108,
+      "description": "Altitude computation from spherical planet geometry is correct: altitude = |pos - center| - R_planet.",
+      "evidence": "Direct Euclidean distance minus planet radius. Correct for spherical approximation.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-19",
+      "severity": "Info",
+      "file": "src/shaders/atmospheric.hlsli",
+      "line": 324,
+      "description": "Simpson's rule for optical depth fallback integration is mathematically correct for smooth functions.",
+      "evidence": "sigma_avg = (sigma_entry + 4*sigma_mid + sigma_exit) / 6 is the standard Simpson's 1/3 rule.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-20",
+      "severity": "Info",
+      "file": "src/libQuantiloom/renderer/AtmosphericConfig.hpp",
+      "line": 101,
+      "description": "Static assert verifies AtmosphericParamsGPU is exactly 64 bytes, matching shader expectations.",
+      "evidence": "static_assert(sizeof(AtmosphericParamsGPU) == 64, ...). Confirmed by struct layout.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "ATM-21",
+      "severity": "Low",
+      "file": "tests/test_renderer/test_atmospheric_config.cpp",
+      "line": 52,
+      "description": "Stale unit test: pins pre-ATM-01-fix value mie_beta_550nm=2.0e-6 (Koschmieder visibility 1956 km, absurd). Implementation was corrected to 1.70e-4 (~23 km) per ATM-01; test was not updated and fails.",
+      "evidence": "koschmieder_visibility(2.0e-6)=1956.0 km vs koschmieder_visibility(1.7e-4)=23.0 km; AtmosphericConfig.cpp:43 uses 1.70e-4",
+      "recommendation": "Update test expectation to 1.70e-4 (tolerance scaled accordingly)."
+    }
+  ]
+}

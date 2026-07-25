@@ -1,0 +1,258 @@
+{
+  "module": "spectral",
+  "summary": "Spectral module audit: 1 inconsistency (CODATA constant mismatch), 1 documentation issue, 1 potential robustness concern; all core physics formulas are correct.",
+  "findings": [
+    {
+      "id": "SPEC-01",
+      "severity": "Medium",
+      "file": "src/shaders/blackbody.hlsli",
+      "line": 52,
+      "description": "C2 constant uses CODATA 2014 value (1.43877736e-2) while other constants in the same file use CODATA 2018 exact values. This introduces a ~3.4e-7 relative inconsistency in Planck radiance.",
+      "evidence": "reference C2 (CODATA 2018) = 0.014387768775039337 vs code C2 = 0.0143877736, diff = 4.82e-9; Planck(300K, 9659nm) relative error = 1.68e-6",
+      "recommendation": "Update C2 to CODATA 2018 exact value: 1.438776877e-2 (or compute from PLANCK_H * SPEED_OF_LIGHT_C / BOLTZMANN_K at compile time)."
+    },
+    {
+      "id": "SPEC-02",
+      "severity": "Medium",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 29,
+      "description": "Same C2 constant mismatch as SPEC-01. Test file duplicates the CODATA 2014 C2 value, making the test self-consistent but inconsistent with the harness and modern physics constants.",
+      "evidence": "test C2 = 1.43877736e-2 vs harness C2_M = 1.438776877e-2 (CODATA 2018)",
+      "recommendation": "Synchronize test constants with harness CODATA 2018 values."
+    },
+    {
+      "id": "SPEC-03",
+      "severity": "Info",
+      "file": "src/shaders/blackbody.hlsli",
+      "line": 84,
+      "description": "IRPlanckRadiance formula matches Planck's law for spectral radiance per unit wavelength. Numerator uses precomputed C1_NM, denominator uses exp(C2/(lambda_m*T))-1. Units are W·sr^-1·m^-2·nm^-1.",
+      "evidence": "Planck(300K, 9659nm) code = 0.00995247 vs harness = 0.00995249, relative error < 2e-6 (within float32 precision)",
+      "recommendation": "No change needed. Formula is correct."
+    },
+    {
+      "id": "SPEC-04",
+      "severity": "Info",
+      "file": "src/shaders/blackbody.hlsli",
+      "line": 138,
+      "description": "IRWienPeakWavelength uses Wien's displacement law with constant b = 2.897771955e-3 m·K. This is the correct CODATA 2018 value.",
+      "evidence": "Wien peak at 300K: code = 9659.24 nm vs harness = 9659.24 nm, exact match",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-05",
+      "severity": "Info",
+      "file": "src/shaders/blackbody.hlsli",
+      "line": 176,
+      "description": "IRStefanBoltzmannPower uses M = sigma * T^4 with sigma = 5.670374419e-8 (CODATA 2018 exact).",
+      "evidence": "SB at 300K: code = 459.3003 W/m^2 vs harness = 459.3003 W/m^2, exact match",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-06",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 87,
+      "description": "PlanckConstantC1Verification test checks C1_NM = 2*h*c^2*1e36. C1_NM value 1.191042972e20 matches computed value within 1e-6 relative tolerance.",
+      "evidence": "expected_C1 = 1.1910429723971884e+20 vs C1_NM = 1.191042972e+20, diff = 3.97e+10 (relative 3.3e-11)",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-07",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 95,
+      "description": "PlanckConstantC2Verification test checks C2 = h*c/k. However, the test uses the same CODATA 2014 value as the code, so it tests self-consistency rather than correctness against the modern constant.",
+      "evidence": "Test passes because both test and code use 1.43877736e-2, but true CODATA 2018 value is 1.438776877e-2",
+      "recommendation": "Update test to use CODATA 2018 value and verify against that."
+    },
+    {
+      "id": "SPEC-08",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 114,
+      "description": "RoomTemperature300K_WienPeak test verifies Wien peak at 300K is approximately 9659 nm. Expected value 9659.0 with 1nm tolerance is slightly off from true 9659.24 nm but within tolerance.",
+      "evidence": "true peak = 9659.24 nm, test expects 9659.0 +/- 1.0 nm, difference = 0.24 nm (within tolerance)",
+      "recommendation": "Update expected value to 9659.24 for tighter verification."
+    },
+    {
+      "id": "SPEC-09",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 122,
+      "description": "RoomTemperature300K_RadianceAtPeak test checks Planck radiance at Wien peak for 300K is in [0.008, 0.012]. True value ~0.00995 falls in range.",
+      "evidence": "Planck(300K, 9659nm) = 0.009952 W·sr^-1·m^-2·nm^-1, within [0.008, 0.012]",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-10",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 134,
+      "description": "RoomTemperature300K_StefanBoltzmannTotal test checks SB total at 300K = 459.3 +/- 0.1. True value 459.3003 passes.",
+      "evidence": "SB(300K) = 459.3003 W/m^2 vs expected 459.3 +/- 0.1",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-11",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 300,
+      "description": "RayleighScattering_Lambda4Dependence test verifies beta(450)/beta(650) = (650/450)^4 ≈ 4.35. The formula and expected value are correct.",
+      "evidence": "(650/450)^4 = 4.3531 vs test expected 4.35 +/- 0.01",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-12",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 323,
+      "description": "MieScattering_WeakerWavelengthDependence test verifies Mie ratio (650/450)^0.84 ≈ 1.36. Formula and expected value are correct.",
+      "evidence": "(650/450)^0.84 = 1.3619 vs test expected 1.36 +/- 0.05",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-13",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 279,
+      "description": "VeryLongWavelength test verifies Rayleigh-Jeans limit at 1m wavelength matches Planck law. The RJ formula and conversion to per-nm are correct.",
+      "evidence": "Planck(300K, 1e9nm) = 2.483389e-21 vs RJ = 2.483449e-21, ratio = 0.999976 (within 1% tolerance)",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-14",
+      "severity": "Info",
+      "file": "src/libQuantiloom/core/CIE_CMF_Data.hpp",
+      "line": 88,
+      "description": "CIE 1931 2-degree CMF data matches official CIE 015:2018 values. Checked at 380nm, 555nm (y=1.0), and 780nm. Peak y_bar at 555nm is exactly 1.0.",
+      "evidence": "555nm: x=0.512050, y=1.000000, z=0.005750 matches official CIE data",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-15",
+      "severity": "Info",
+      "file": "src/libQuantiloom/core/SpectralData.hpp",
+      "line": 347,
+      "description": "ComplexRefractiveIndex::FresnelR0 computes normal-incidence reflectance R = ((n-1)^2 + k^2) / ((n+1)^2 + k^2). This matches the exact Fresnel formula for conductors and dielectrics at normal incidence.",
+      "evidence": "Glass (n=1.5, k=0): R0 = 0.04; Aluminum (n=0.27, k=3.29): R0 = 0.9132; both match harness fresnel_f0 exactly",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-16",
+      "severity": "Info",
+      "file": "src/libQuantiloom/core/SpectralData.hpp",
+      "line": 170,
+      "description": "SpectralCurveGPU size is 272 bytes (64*4 + 4 + 4 + 4 + 4). ComplexRefractiveIndexGPU is 528 bytes (64*4*2 + 4 + 4 + 4 + 4). SolarSpectralLUT is 544 bytes (272+272). All static_asserts verify these sizes.",
+      "evidence": "sizeof(SpectralCurveGPU) == 272, sizeof(ComplexRefractiveIndexGPU) == 528, sizeof(SolarSpectralLUT) == 544",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-17",
+      "severity": "Low",
+      "file": "src/libQuantiloom/core/SpectralData.hpp",
+      "line": 98,
+      "description": "SpectralCurve::Evaluate comment claims 'Binary search for surrounding samples' but the implementation uses a linear scan (O(N)). For small curves this is fine, but the comment is misleading.",
+      "evidence": "Code uses 'for (size_t i = 0; i < samples.size() - 1; ++i)' linear loop instead of binary search",
+      "recommendation": "Update comment to 'Linear search for surrounding samples' or implement actual binary search for large curves."
+    },
+    {
+      "id": "SPEC-18",
+      "severity": "Info",
+      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
+      "line": 186,
+      "description": "Photon energy calculation E = h*c/λ uses correct constants and conversion. At 550nm, E = 3.612e-19 J = 2.254 eV.",
+      "evidence": "h=6.62607015e-34, c=299792458, lambda=550e-9 gives E=3.6117e-19 J = 2.254 eV",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-19",
+      "severity": "Info",
+      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
+      "line": 189,
+      "description": "Solid angle formula Ω = π / (4 * f#^2) is the correct approximation for a thin lens aperture as seen from the sensor plane.",
+      "evidence": "For f/2.8: Ω = 0.1002 sr, matches theoretical π/(4*2.8^2) = 0.1002 sr",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-20",
+      "severity": "Info",
+      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
+      "line": 50,
+      "description": "Airy disk radius formula r = 1.22 * λ * f# is the Rayleigh criterion for a circular aperture. The factor 1.22 comes from the first zero of J1(x)/x.",
+      "evidence": "At 550nm, f/2.8: r = 1.22 * 0.55e-6 * 2.8 * 1e6 = 1.878 μm, formula is standard optics",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-21",
+      "severity": "Info",
+      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
+      "line": 239,
+      "description": "Vignetting uses cos^4(θ) law, which is the correct classical model for natural vignetting in photographic lenses. Components: cos(θ) for Lambert, cos(θ) for exit pupil, cos^2(θ) for inverse square.",
+      "evidence": "cos^4 law is standard in optics and computer vision literature",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-22",
+      "severity": "Info",
+      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
+      "line": 254,
+      "description": "Radiance-to-electrons conversion chain (radiance -> irradiance -> energy -> photons -> electrons) is physically correct. Each step uses proper units and conversions.",
+      "evidence": "L [W/m^2/sr] * Ω [sr] = E [W/m^2]; E * A * t = Energy [J]; Energy / (hc/λ) = photons; photons * QE = electrons",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-23",
+      "severity": "Info",
+      "file": "scripts/spectral-baker/refractiveindex_loader.py",
+      "line": 33,
+      "description": "nk_to_reflectance uses R = ((n-1)^2 + k^2) / ((n+1)^2 + k^2), which is the exact normal-incidence Fresnel reflectance. Matches C++ and harness implementations.",
+      "evidence": "Glass (n=1.5): R=0.04; Aluminum (n=0.27, k=3.29): R=0.9132; matches harness exactly",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-24",
+      "severity": "Info",
+      "file": "scripts/spectral-baker/spectral_processor.py",
+      "line": 90,
+      "description": "resample_uniform uses scipy.interpolate.interp1d with linear interpolation and edge clamping (fill_value=(reflectance[0], reflectance[-1])). This is the correct approach for spectral resampling.",
+      "evidence": "Test: resample at midpoint of [0.5, 1.0] with values [0.2, 0.5] gives 0.35 as expected",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-25",
+      "severity": "Low",
+      "file": "scripts/spectral-baker/spectral_processor.py",
+      "line": 43,
+      "description": "BandConfig.get_wavelength_grid uses np.arange(start_nm, end_nm + interval_nm, interval_nm). If end_nm is not exactly on the grid, the last point may exceed the band range. Current default bands all have exact grid alignment, but this is fragile.",
+      "evidence": "VIS: np.arange(350, 782, 2) gives exactly [350, ..., 780]; all default bands are aligned. But if a user sets end_nm=781, interval=2, the last point would be 782 > 781.",
+      "recommendation": "Use np.linspace(start_nm, end_nm, num_samples) instead of np.arange to guarantee exact endpoint inclusion."
+    },
+    {
+      "id": "SPEC-26",
+      "severity": "Info",
+      "file": "scripts/spectral-baker/spectral_processor.py",
+      "line": 257,
+      "description": "NMF explained variance formula explained_variance = 1.0 - (residual_variance / total_variance) is a standard measure of reconstruction quality. The code also handles flat-spectrum edge cases (variance < 1e-6) by falling back to RMSE-based assessment.",
+      "evidence": "Perfect reconstruction gives EV=1.0; flat spectrum fallback uses RMSE < 0.001 threshold",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-27",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 469,
+      "description": "GetAngleDependentIREmissivity_CPU for metals uses Hagen-Rubens-like linear grazing factor: epsilon = base * (1 + alpha*(1-cosTheta)). For dielectrics: epsilon = base * cosTheta^beta. Both models are phenomenological approximations suitable for real-time rendering.",
+      "evidence": "Metal grazing increases emissivity (e_0.1 > e_1.0); dielectric grazing decreases (e_0.1 < e_1.0); energy conservation e+r=1 holds for opaque materials",
+      "recommendation": "No change needed. These are reasonable approximations for rendering."
+    },
+    {
+      "id": "SPEC-28",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 414,
+      "description": "NIR_ReflectedVsThermal_Comparison test verifies solar NIR (5800K) dominates thermal NIR (300K) by >1e19. True ratio is ~6.15e19, well above threshold.",
+      "evidence": "sun_nir(1um, 5800K) = 10878 W/sr/m^2/nm vs thermal_nir(1um, 300K) = 1.77e-16 W/sr/m^2/nm, ratio = 6.15e19",
+      "recommendation": "No change needed."
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "module": "ir",
+  "summary": "6 findings: 2 High (missing lower-bound Kirchhoff check, hardcoded zero IR in GPU upload), 2 Medium (spectralAlbedo IR fallback mismatch, unimplemented IR curve loading), 2 Info (angle-dependent energy conservation confirmed, Planck constants correct within tolerance).",
+  "findings": [
+    {
+      "id": "IR-01",
+      "severity": "High",
+      "file": "src/libQuantiloom/scene/Material.cpp",
+      "line": 48,
+      "description": "ValidateIRKirchhoffLaw only checks sum <= 1 + TOLERANCE but never checks sum >= 0. Negative emissivity, reflectance, or transmittance values would pass validation, violating physical bounds.",
+      "evidence": "Code: 'if (constexpr f32 TOLERANCE = 1e-3f; sum > 1.0f + TOLERANCE) { return false; }' — no corresponding 'sum < 0.0f - TOLERANCE' check.",
+      "recommendation": "Add a lower-bound check: if (sum < -TOLERANCE) return false; and log the violation."
+    },
+    {
+      "id": "IR-02",
+      "severity": "High",
+      "file": "src/libQuantiloom/renderer/ExternalRenderContext.cpp",
+      "line": 1302,
+      "description": "ConvertMaterialToCPU hardcodes spectralReflectanceCurveIndex = -1 and irEmissivity = 0, irTransmittance = 0, discarding any IR curve data that may have been loaded on the CPU-side Material.",
+      "evidence": "Code: 'cpuMat.spectralReflectanceCurveIndex = -1; cpuMat.irEmissivity = 0.0f; cpuMat.irTransmittance = 0.0f;' — even if Material::irEmissivityCurve is non-empty, it is ignored.",
+      "recommendation": "If the material has IR curve data, sample it at the current wavelength (or integrate) and populate irEmissivity / irTransmittance. Do not hardcode -1 and 0."
+    },
+    {
+      "id": "IR-03",
+      "severity": "Medium",
+      "file": "src/libQuantiloom/scene/Material.hpp",
+      "line": 420,
+      "description": "GetIRReflectance falls back to spectralAlbedo (visible RGB average) when no IR reflectance curve is present. spectralAlbedo is a scalar computed from baseColorFactor RGB in the visible range (380-780 nm) and is not physically valid in the MWIR/LWIR (3000-12000 nm).",
+      "evidence": "Code: 'return detail::InterpolateSpectralCurve(irReflectanceCurve, lambda_nm, spectralAlbedo);' — fallback is spectralAlbedo, which for default white material is 1.0. Real dielectrics in IR have reflectance ~0.05-0.3, not 1.0.",
+      "recommendation": "Change fallback to a physically reasonable default (e.g., 0.1 for dielectrics, or derive from metallicFactor) and document the approximation."
+    },
+    {
+      "id": "IR-04",
+      "severity": "Medium",
+      "file": "assets/materials/ir_materials/README.md",
+      "line": 87,
+      "description": "README explicitly states IR curve loading is not implemented. This means all IR rendering currently relies on hardcoded or heuristic values, making quantitative IR results unreliable.",
+      "evidence": "Text: 'Currently, IR curve loading is not implemented. This is a placeholder for future development (P1.2+).'",
+      "recommendation": "Implement IR curve loading via SpectralIO::LoadSpectralCurveCSV() and bind to GPU, or remove the IR debug modes until the feature is functional."
+    },
+    {
+      "id": "IR-05",
+      "severity": "Info",
+      "file": "src/shaders/common.hlsli",
+      "line": 937,
+      "description": "GetAngleDependentIREmissivity and GetAngleDependentIRReflectance correctly enforce energy conservation for opaque materials: e(theta) + r(theta) = 1 at all angles, with metals increasing toward grazing and dielectrics decreasing.",
+      "evidence": "Reference check: for baseEmissivity=0.9, transmittance=0, NdotV=0.5, metallic=0.0 -> e=0.5540, r=0.4460, sum=1.0000. For metallic=1.0 -> e=1.0 (clamped), r=0.0. Verified against CPU mirror in test_blackbody_physics.cpp lines 469-490.",
+      "recommendation": "No change needed. Keep the CPU mirror test to guard against regressions."
+    },
+    {
+      "id": "IR-06",
+      "severity": "Info",
+      "file": "tests/test_core/test_blackbody_physics.cpp",
+      "line": 28,
+      "description": "Planck constant C1_NM and Wien constant are correct within floating-point tolerance. C2 in test file (1.43877736e-2) deviates from exact CODATA hc/k (1.4387768775e-2) by ~3.4e-7 relative, which is negligible for rendering but should be noted.",
+      "evidence": "Reference C2 = 0.014387768775039337 m*K. Test C2 = 0.0143877736. Relative error = 3.35e-7. Planck(300,9659) difference between test and harness = 1.67e-8 (~1.7e-6 relative).",
+      "recommendation": "Align test C2 with harness C2_M (1.438776877e-2) for consistency, or document the intentional approximation."
+    },
+    {
+      "id": "IR-07",
+      "severity": "Info",
+      "file": "src/shaders/common.hlsli",
+      "line": 393,
+      "description": "FresnelConductor exact formula matches the physics harness fresnel_exact_conductor. Verified with aluminum (n=0.27, k=3.29) at 45 degrees: shader formula yields same result as harness.",
+      "evidence": "Reference f45 = 0.9105212534771988 (harness). Shader formula: Rs = (t1-t2)/(t1+t2), Rp = Rs*(t3-t4)/(t3+t4), R=0.5*(Rs+Rp). Matches PBRT-v4 and standard optics texts.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "IR-08",
+      "severity": "Info",
+      "file": "src/shaders/common.hlsli",
+      "line": 494,
+      "description": "FresnelDielectric correctly implements total internal reflection (TIR) and exact s/p polarization averaging. Verified against harness: glass (n1=1.0, n2=1.5) at normal incidence gives 0.04, at 45 degrees gives ~0.0502.",
+      "evidence": "Reference: normal = 0.04, 45deg = 0.05024054188593238. Shader includes sin2T > 1.0 check returning 1.0 for TIR, and exact Rs/Rp formulas.",
+      "recommendation": "No change needed."
+    },
+    {
+      "id": "IR-STALE-01",
+      "severity": "Low",
+      "file": "tests/test_scene/test_material.cpp",
+      "line": 623,
+      "description": "Stale unit test: GetIRReflectance_FallbackToSpectralAlbedo expects fallback to spectralAlbedo, but commit a8509a3 deliberately changed the fallback to a neutral IR reflectance of 0.1 (visible-RGB albedo is not physically valid in MWIR/LWIR). Test fails.",
+      "evidence": "Material.hpp:419-424 returns DEFAULT_IR_REFLECTANCE=0.1 when irReflectanceCurve is empty",
+      "recommendation": "Rewrite test to pin the neutral 0.1 fallback and rename it accordingly."
+    }
+  ]
+}
