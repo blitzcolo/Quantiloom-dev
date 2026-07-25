@@ -25,7 +25,12 @@ out-test/
 .vs/
 *.swp
 *.swo
-.claude/
+
+# Claude Code: share settings.json / rules/ / skills/ with the team,
+# ignore only per-developer state.
+.claude/settings.local.json
+.claude/worktrees/
+.claude/SURVEY.md
 
 # ============================================================================
 # OS-specific files
@@ -89,3 +94,23 @@ scripts/spectral-baker/output/
 docs/html/
 assets/models/Samples/
 assets/spectral/ecospeclib-all/
+
+# ============================================================================
+# Render outputs written to the repo root by the CLI
+# ============================================================================
+# Leading "/" anchors these to the root so tracked assets (e.g.
+# assets/maps/blue_photo_studio_4k.exr) are unaffected.
+/*.exr
+/*.png
+/hyperspectral_output.*
+/hyperspectral_output_bands/
+/pipeline_cache.bin
+/quantiloom_performance.csv
+
+# ============================================================================
+# Manually-fetched third-party source
+# ============================================================================
+# bc7enc_rdo is an optional dependency (QUANTILOOM_USE_BC7ENC, default OFF).
+# src/libQuantiloom/CMakeLists.txt looks for it here and prints download
+# instructions when absent; it is fetched by hand, not committed.
+vendor/bc7enc_rdo/
