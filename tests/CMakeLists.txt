@@ -11,18 +11,32 @@
 # - test_hs_core/   : Tests for HS-core algorithms (MIS, delta-tracking, etc.)
 # - test_postprocess/: Tests for sensor chain and noise models
 #
-# RECOMMENDED: Build from project root (tests will be built automatically)
-#   cd /path/to/Quantiloom-dev
-#   mkdir build && cd build
-#   cmake ..
-#   cmake --build . --target libquantiloom_tests
-#   ctest --output-on-failure
+# Adding a test file:
+#   Sources below are listed explicitly -- there is no glob. A .cpp that is not
+#   in the matching set(TEST_<MODULE>_SOURCES ...) block is never compiled and
+#   never runs, and the suite still reports green.
 #
-# ALTERNATIVE: Standalone build (if libQuantiloom is already built)
-#   cd tests
-#   mkdir build && cd build
-#   cmake ..
-#   cmake --build .
+# Building: from the repo root, never from tests/.
+#   ./build_wsl.sh                                         # full: configure, build, test, install SDK
+#   cmake.exe --build build --config Release -j            # incremental, ~76 s
+#
+#   The tree is configured by build_wsl.sh as
+#     cmake.exe -B build -G "Visual Studio 18 2026" -A x64 ...
+#   That is a multi-config generator, so --config is required on every build and
+#   the binary lands in build/tests/Release/. A plain `mkdir build && cmake ..`
+#   does not reproduce this configuration.
+#
+# Running:
+#   ./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1
+#   ./build/tests/Release/libquantiloom_tests.exe --gtest_filter='MaterialTest.*'
+#
+#   The binary reruns in ~3 s without rebuilding. Use --gtest_filter to select
+#   cases: add_test below registers the whole suite as ONE aggregate test
+#   (libQuantiloomAllTests), so `ctest -R <case>` cannot pick out an individual
+#   test. `ctest` runs everything or nothing.
+#
+#   24 SKIPPED is the expected baseline here (BC7 is off and the glTF sample
+#   assets are unavailable in build/).
 # ============================================================================
 
 cmake_minimum_required(VERSION 3.20)

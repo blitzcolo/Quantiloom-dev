@@ -6,7 +6,7 @@ GoogleTest, compiled into one binary `libquantiloom_tests.exe`. Directories mirr
 ## Adding a test file
 
 Sources are listed explicitly — there is no glob. Add the `.cpp` to the matching
-`set(TEST_<MODULE>_SOURCES ...)` block in `CMakeLists.txt` (lines 193-249). A file
+`set(TEST_<MODULE>_SOURCES ...)` block in `CMakeLists.txt` (lines 207-263). A file
 that is not in that list is never compiled and never runs, with no warning.
 
 ## Running
@@ -19,12 +19,6 @@ that is not in that list is never compiled and never runs, with no warning.
 The binary reruns in ~3 s with no rebuild. Only rebuild after changing C++ under
 `src/`: `cmake.exe --build build --target libquantiloom_tests --config Release -j`
 (~76 s).
-
-## The header comment in CMakeLists.txt is stale
-
-It recommends `mkdir build && cd build && cmake ..` and `ctest --output-on-failure`.
-Neither applies: the real configure uses the Visual Studio generator via
-`build_wsl.sh`, and `ctest` registers only one aggregate test.
 
 ## Interpreting failures
 
