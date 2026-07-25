@@ -38,10 +38,9 @@ protected:
             std::filesystem::current_path() / ".." / "assets" / "models" / "usd_test",
             // Running from project root
             std::filesystem::current_path() / "assets" / "models" / "usd_test",
-            // Absolute path on Windows
-            std::filesystem::path("D:/Quantiloom-dev/assets/models/usd_test"),
-            // Absolute path on WSL
-            std::filesystem::path("/mnt/d/Quantiloom-dev/assets/models/usd_test"),
+            // Repo root baked in at configure time -- the only candidate that
+            // does not depend on the caller's cwd or on this one machine.
+            std::filesystem::path(QUANTILOOM_SOURCE_ROOT) / "assets" / "models" / "usd_test",
         };
 
         hasTestAssets = false;

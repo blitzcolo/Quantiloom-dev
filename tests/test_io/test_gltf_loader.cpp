@@ -27,16 +27,14 @@ using namespace quantiloom;
 class GltfLoaderTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Path to glTF sample assets
-        // Adjust path based on project structure
-        assetsPath = std::filesystem::path(std::filesystem::current_path())
-                    / ".." / "assets" / "models" / "glTF-Sample-Assets" / "Models";
-
-        // Alternative paths if running from different locations
-        if (!std::filesystem::exists(assetsPath)) {
-            assetsPath = std::filesystem::path("/mnt/d/Quantiloom-dev")
-                        / "assets" / "models" / "glTF-Sample-Assets" / "Models";
-        }
+        // Resolved from the repo root baked in at configure time. The previous
+        // two candidates could never match: current_path()/".." resolves to the
+        // parent of the repo when run from the root as documented, and the
+        // /mnt/d fallback is a WSL path that this Windows .exe cannot see. Both
+        // failing meant the whole suite reported "assets not found" and skipped,
+        // although the submodule was checked out the entire time.
+        assetsPath = std::filesystem::path(QUANTILOOM_SOURCE_ROOT)
+                    / "assets" / "models" / "glTF-Sample-Assets" / "Models";
 
         hasTestAssets = std::filesystem::exists(assetsPath);
     }

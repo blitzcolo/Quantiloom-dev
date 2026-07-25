@@ -22,7 +22,7 @@ never interrupt it mid-install.
 
 ## Tests
 
-863 tests run in ~3 s, and the binary reruns without rebuilding.
+870 tests run in ~3 s, and the binary reruns without rebuilding.
 
 ```bash
 ./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1          # all (122 lines, not 2086)
@@ -30,8 +30,11 @@ never interrupt it mid-install.
 ```
 
 `ctest` registers a single aggregate test here, so `ctest -R` cannot select a case —
-always use `--gtest_filter`. 24 SKIPPED is the normal baseline (BC7 and glTF sample
-assets disabled in `build/`).
+always use `--gtest_filter`. 10 SKIPPED is the normal baseline: 8 BC7 (deliberately
+off, see `build_wsl.sh`) and 2 EXR multipart (unimplemented). A test needing an asset
+must build its path from `QUANTILOOM_SOURCE_ROOT`, never a relative or absolute one —
+those resolve against the caller's cwd and skip on miss, so a wrong path reads as
+"no test data" rather than as a failure.
 
 ## Repo map
 

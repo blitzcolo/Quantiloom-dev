@@ -14,6 +14,10 @@ cd "$(dirname "$0")"
 # the exit code still propagates through cmd.exe.
 cmd.exe /c "src\\shaders\\compile_shaders.bat" </dev/null
 
+# BC7 stays OFF deliberately, not for lack of trying: it measurably slowed
+# rendering and saved little VRAM, so it is a net loss here. vendor/bc7enc_rdo/
+# is also gitignored, so ON would not build from a fresh clone anyway. This
+# leaves the 8 BC7CompressionActualTest cases skipped, which is expected.
 cmake.exe -B build -G "Visual Studio 18 2026" -A x64 \
     -DQUANTILOOM_USE_BC7ENC=OFF \
     -DQUANTILOOM_USE_OPENUSD=ON \

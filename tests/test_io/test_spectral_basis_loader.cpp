@@ -664,35 +664,61 @@ TEST_F(SpectralBasisLoaderTest, GetBasisByEnum) {
 // Integration with Real Files (if available)
 // ============================================================================
 
-TEST_F(SpectralBasisLoaderTest, LoadRealFilesIfAvailable) {
-    // Try to load actual SpectralBaker output files if they exist
-    std::filesystem::path basisPath = "../../assets/spectral/quantiloom_basis_v1.bin";
-    std::filesystem::path jsonPath = "../../assets/spectral/quantiloom_materials.json";
+// These load the artefacts the scene configs actually reference. The paths used
+// to be "../../assets/spectral/quantiloom_basis_v1.bin", a name no config has
+// produced since the v3 format; the file never existed, so the test skipped
+// itself and read as "no data available" rather than as a broken path.
 
-    if (!std::filesystem::exists(basisPath) || !std::filesystem::exists(jsonPath)) {
-        GTEST_SKIP() << "Real SpectralBaker files not found, skipping integration test";
-    }
+TEST_F(SpectralBasisLoaderTest, LoadRealUsgsBasis) {
+    const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+    const auto basisPath = root / "assets" / "spectral" / "quantiloom_basis_v3_usgs.qlbin";
+    const auto jsonPath = root / "assets" / "spectral" / "quantiloom_materials_usgs.json";
+
+    ASSERT_TRUE(std::filesystem::exists(basisPath)) << basisPath.string();
+    ASSERT_TRUE(std::filesystem::exists(jsonPath)) << jsonPath.string();
 
     SpectralBasisLoader loader;
-    bool success = loader.Load(basisPath, jsonPath);
-
-    ASSERT_TRUE(success);
+    ASSERT_TRUE(loader.Load(basisPath, jsonPath));
     EXPECT_TRUE(loader.HasBasis());
     EXPECT_TRUE(loader.HasMaterials());
 
-    // Should have significant number of materials (SpectralBaker produces ~1374)
-    EXPECT_GT(loader.GetMaterialCount(), 100);
+    // Full ASD library. Every spectrum must be reachable: name collisions used
+    // to silently drop entries from the database.
+    EXPECT_EQ(loader.GetMaterialCount(), 1374u);
 
-    // Should have 5 bands
-    EXPECT_EQ(loader.GetNumBands(), 5);
+    // USGS reaches 2.5 um, so MWIR and LWIR are deliberately absent rather than
+    // filled with extrapolation. Three bands is correct here, not a shortfall.
+    EXPECT_EQ(loader.GetNumBands(), 3u);
+    EXPECT_NE(loader.GetBasis("VIS"), nullptr);
+    EXPECT_NE(loader.GetBasis("NIR"), nullptr);
+    EXPECT_NE(loader.GetBasis("SWIR"), nullptr);
+    EXPECT_EQ(loader.GetBasis("MWIR"), nullptr);
+    EXPECT_EQ(loader.GetBasis("LWIR"), nullptr);
 
-    // Try to reconstruct a known material
     auto names = loader.GetMaterialNames();
-    if (!names.empty()) {
-        SpectralCurve curve = loader.ReconstructCurve(names[0], "VIS");
-        EXPECT_FALSE(curve.samples.empty());
-        EXPECT_TRUE(curve.IsValid());
-    }
+    ASSERT_FALSE(names.empty());
+    SpectralCurve curve = loader.ReconstructCurve(names[0], "VIS");
+    EXPECT_FALSE(curve.samples.empty());
+    EXPECT_TRUE(curve.IsValid());
+}
+
+TEST_F(SpectralBasisLoaderTest, LoadRealRiiBasisHasAllFiveBands) {
+    const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+    const auto basisPath = root / "assets" / "spectral" / "quantiloom_basis_v3_rii.qlbin";
+    const auto jsonPath = root / "assets" / "spectral" / "quantiloom_materials_rii.json";
+
+    ASSERT_TRUE(std::filesystem::exists(basisPath)) << basisPath.string();
+    ASSERT_TRUE(std::filesystem::exists(jsonPath)) << jsonPath.string();
+
+    SpectralBasisLoader loader;
+    ASSERT_TRUE(loader.Load(basisPath, jsonPath));
+
+    // RefractiveIndex spans 0.2-15 um, so no band is dropped. This is the only
+    // shipped basis that can render MWIR or LWIR.
+    EXPECT_EQ(loader.GetNumBands(), 5u);
+    EXPECT_EQ(loader.GetMaterialCount(), 585u);
+    EXPECT_NE(loader.GetBasis("MWIR"), nullptr);
+    EXPECT_NE(loader.GetBasis("LWIR"), nullptr);
 }
 
 // ============================================================================
