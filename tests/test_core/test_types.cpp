@@ -11,6 +11,12 @@
 #include <gtest/gtest.h>
 #include "core/Types.hpp"
 
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
+#include <utility>
+
 using namespace quantiloom;
 
 // ============================================================================
@@ -376,6 +382,48 @@ TEST(TypesTest, FusedBandInfoNoneForNonFusedModes) {
     EXPECT_FALSE(GetFusedBandInfo(SpectralMode::RGB).has_value());
     EXPECT_FALSE(GetFusedBandInfo(SpectralMode::Single).has_value());
     EXPECT_FALSE(GetFusedBandInfo(SpectralMode::Multispectral).has_value());
+}
+
+// The tests above pin the C++ values. This one pins the HLSL side to them by
+// reading common.hlsli, which is the only way to catch the two drifting apart:
+// the shaders cannot include Types.hpp, and a mismatch changes rendered output
+// without failing to compile. The SWIR and NIR ranges were documented wrong for
+// exactly this reason.
+TEST(TypesTest, ShaderBandConstantsMatchGetFusedBandInfo) {
+    const std::filesystem::path hlsl =
+        std::filesystem::path(QUANTILOOM_SOURCE_ROOT) / "src" / "shaders" / "common.hlsli";
+    std::ifstream in(hlsl);
+    ASSERT_TRUE(in.is_open()) << "cannot open " << hlsl.string();
+
+    std::unordered_map<std::string, float> defines;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string hash, name, value;
+        if (!(ls >> hash >> name >> value)) continue;
+        if (hash != "#define") continue;
+        if (name.rfind("SPECTRAL_", 0) != 0 || name.find("_LAMBDA_") == std::string::npos) continue;
+        defines[name] = std::stof(value);
+    }
+    ASSERT_EQ(defines.size(), 10u) << "expected 10 SPECTRAL_*_LAMBDA_* defines in common.hlsli";
+
+    const std::pair<SpectralMode, const char*> bands[] = {
+        {SpectralMode::VIS_Fused,  "VIS"},
+        {SpectralMode::NIR_Fused,  "NIR"},
+        {SpectralMode::SWIR_Fused, "SWIR"},
+        {SpectralMode::MWIR_Fused, "MWIR"},
+        {SpectralMode::LWIR_Fused, "LWIR"},
+    };
+    for (const auto& [mode, name] : bands) {
+        auto band = GetFusedBandInfo(mode);
+        ASSERT_TRUE(band.has_value()) << name;
+        const std::string lo = std::string("SPECTRAL_") + name + "_LAMBDA_MIN";
+        const std::string hi = std::string("SPECTRAL_") + name + "_LAMBDA_MAX";
+        ASSERT_TRUE(defines.count(lo)) << "missing " << lo;
+        ASSERT_TRUE(defines.count(hi)) << "missing " << hi;
+        EXPECT_FLOAT_EQ(defines[lo], band->lambdaMinNm) << name << " min";
+        EXPECT_FLOAT_EQ(defines[hi], band->lambdaMaxNm) << name << " max";
+    }
 }
 
 TEST(TypesTest, IsThermalIRFusedMode) {

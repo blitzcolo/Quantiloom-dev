@@ -286,6 +286,19 @@ add_executable(libquantiloom_tests
     ${ALL_TEST_SOURCES}
 )
 
+# Absolute path to the repository, baked in at configure time. Tests that need
+# to reach a source file or an asset must use this rather than a relative path:
+# a relative path silently resolves against the caller's working directory, and
+# the usual fallback is to skip the test, so a wrong path looks like "no test
+# data available" instead of a broken test.
+if(QUANTILOOM_STANDALONE_TESTS)
+    set(_ql_source_root "${CMAKE_CURRENT_SOURCE_DIR}/..")
+else()
+    set(_ql_source_root "${CMAKE_SOURCE_DIR}")
+endif()
+target_compile_definitions(libquantiloom_tests
+    PRIVATE QUANTILOOM_SOURCE_ROOT="${_ql_source_root}")
+
 # ============================================================================
 # Link Libraries
 # ============================================================================

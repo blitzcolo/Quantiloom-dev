@@ -101,8 +101,8 @@ void main(inout Payload payload) {
 
         // NOTE: 400-780 nm (narrowed from 380 to match NN atmosphere coverage)
         const uint   NUM_WAVELENGTH_SAMPLES = 32;
-        const float  LAMBDA_MIN_VIS = 400.0;
-        const float  LAMBDA_MAX_VIS = 780.0;
+        const float  LAMBDA_MIN_VIS = SPECTRAL_VIS_LAMBDA_MIN;
+        const float  LAMBDA_MAX_VIS = SPECTRAL_VIS_LAMBDA_MAX;
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
@@ -172,8 +172,8 @@ void main(inout Payload payload) {
         // ================================================================
 
         // NOTE: 1400-2400 nm (narrowed to match NN atmosphere coverage)
-        const float SWIR_LAMBDA_MIN = 1400.0;
-        const float SWIR_LAMBDA_MAX = 2400.0;
+        const float SWIR_LAMBDA_MIN = SPECTRAL_SWIR_LAMBDA_MIN;
+        const float SWIR_LAMBDA_MAX = SPECTRAL_SWIR_LAMBDA_MAX;
         const uint  NUM_SWIR_SAMPLES = 16;
         const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
 
@@ -220,8 +220,8 @@ void main(inout Payload payload) {
         // ================================================================
 
         // NOTE: 930-1200 nm (narrowed to match NN atmosphere coverage)
-        const float NIR_LAMBDA_MIN = 930.0;
-        const float NIR_LAMBDA_MAX = 1200.0;
+        const float NIR_LAMBDA_MIN = SPECTRAL_NIR_LAMBDA_MIN;
+        const float NIR_LAMBDA_MAX = SPECTRAL_NIR_LAMBDA_MAX;
         const uint  NUM_NIR_SAMPLES = 16;
         const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
 
@@ -271,11 +271,11 @@ void main(inout Payload payload) {
 
         float lambda_min, lambda_max;
         if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
-            lambda_min = 3000.0;
-            lambda_max = 5000.0;
+            lambda_min = SPECTRAL_MWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_MWIR_LAMBDA_MAX;
         } else {
-            lambda_min = 8000.0;
-            lambda_max = 12000.0;
+            lambda_min = SPECTRAL_LWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_LWIR_LAMBDA_MAX;
         }
 
         const uint NUM_IR_SAMPLES = 16;

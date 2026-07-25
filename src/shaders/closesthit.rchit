@@ -899,8 +899,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Spectral integration parameters
         // NOTE: 400-780 nm (narrowed from 380 to match NN atmosphere coverage)
         const uint   NUM_WAVELENGTH_SAMPLES = 32;
-        const float  LAMBDA_MIN_VIS = 400.0;  // nm
-        const float  LAMBDA_MAX_VIS = 780.0;  // nm
+        const float  LAMBDA_MIN_VIS = SPECTRAL_VIS_LAMBDA_MIN;
+        const float  LAMBDA_MAX_VIS = SPECTRAL_VIS_LAMBDA_MAX;
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
         // Accumulate XYZ tristimulus values
@@ -1203,8 +1203,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ====================================================================
 
         // NOTE: 1400-2400 nm (narrowed from 1000-2500 to match NN atmosphere coverage)
-        const float SWIR_LAMBDA_MIN = 1400.0;   // nm
-        const float SWIR_LAMBDA_MAX = 2400.0;   // nm
+        const float SWIR_LAMBDA_MIN = SPECTRAL_SWIR_LAMBDA_MIN;
+        const float SWIR_LAMBDA_MAX = SPECTRAL_SWIR_LAMBDA_MAX;
         const uint  NUM_SWIR_SAMPLES = 16;
         // At 500K, Planck tail at 2.4µm ≈ 3.5e-3 W/sr/m²/nm — comparable to
         // reflected solar; below this, SWIR thermal emission is negligible.
@@ -1337,8 +1337,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ====================================================================
 
         // NOTE: 930-1200 nm (narrowed from 780-1400 to match NN atmosphere coverage)
-        const float NIR_LAMBDA_MIN = 930.0;    // nm
-        const float NIR_LAMBDA_MAX = 1200.0;   // nm
+        const float NIR_LAMBDA_MIN = SPECTRAL_NIR_LAMBDA_MIN;
+        const float NIR_LAMBDA_MAX = SPECTRAL_NIR_LAMBDA_MAX;
         const uint  NUM_NIR_SAMPLES = 16;
         const float lambda_step = (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN) / float(NUM_NIR_SAMPLES - 1);
 
@@ -1452,14 +1452,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         bool includeSolarReflection = false;  // Only for MWIR during daytime
 
         if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
-            lambda_min = 3000.0;   // nm
-            lambda_max = 5000.0;   // nm
+            lambda_min = SPECTRAL_MWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_MWIR_LAMBDA_MAX;
             // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
             // Only include if surface is facing sun and sun is above horizon
             includeSolarReflection = (NdotL > 0.0);
         } else {  // LWIR
-            lambda_min = 8000.0;   // nm
-            lambda_max = 12000.0;  // nm
+            lambda_min = SPECTRAL_LWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_LWIR_LAMBDA_MAX;
             // LWIR: solar contribution < 0.1%, skip for performance
             includeSolarReflection = false;
         }

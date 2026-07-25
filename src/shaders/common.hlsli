@@ -22,11 +22,39 @@
 #define SPECTRAL_MODE_SINGLE       0  // Single wavelength (grayscale output)
 #define SPECTRAL_MODE_VIS_FUSED    1  // Visible spectral integration (32-wavelength CIE XYZ)
 #define SPECTRAL_MODE_MULTISPECTRAL 2  // Multiple wavelengths (hyperspectral cube) - TBD
-#define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion (3000-5000nm)
-#define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion (8000-12000nm)
-#define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion (1000-2500nm)
-#define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion (780-1400nm) - reflected solar
+#define SPECTRAL_MODE_MWIR_FUSED   3  // Mid-wave IR fusion
+#define SPECTRAL_MODE_LWIR_FUSED   4  // Long-wave IR fusion
+#define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion
+#define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion - reflected solar
 #define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
+
+// ============================================================================
+// Fused-Mode Integration Bands
+// ============================================================================
+// The wavelength range each *_FUSED mode integrates over. These are the single
+// definition for HLSL -- closesthit.rchit and miss.rmiss use them rather than
+// repeating literals, which is how the ranges drifted out of sync before.
+//
+// MUST match GetFusedBandInfo() in core/Types.hpp, which is the authority.
+// TypesTest.ShaderBandConstantsMatchGetFusedBandInfo reads this file and
+// asserts the two agree, so drift fails the suite rather than the render.
+//
+// Do NOT confuse these with the WAVELENGTH_{MIN,MAX}_* constants in Types.hpp:
+// those are the ISO band taxonomy (e.g. NIR = 780-1400nm) and are not what the
+// renderer integrates. NIR_FUSED in particular is narrowed to 930-1200nm to
+// stay inside the NN atmosphere's trained coverage.
+// ============================================================================
+
+#define SPECTRAL_VIS_LAMBDA_MIN     400.0
+#define SPECTRAL_VIS_LAMBDA_MAX     780.0
+#define SPECTRAL_NIR_LAMBDA_MIN     930.0
+#define SPECTRAL_NIR_LAMBDA_MAX    1200.0
+#define SPECTRAL_SWIR_LAMBDA_MIN   1400.0
+#define SPECTRAL_SWIR_LAMBDA_MAX   2400.0
+#define SPECTRAL_MWIR_LAMBDA_MIN   3000.0
+#define SPECTRAL_MWIR_LAMBDA_MAX   5000.0
+#define SPECTRAL_LWIR_LAMBDA_MIN   8000.0
+#define SPECTRAL_LWIR_LAMBDA_MAX  12000.0
 
 // ============================================================================
 // Debug Visualization Modes

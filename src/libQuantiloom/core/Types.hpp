@@ -512,6 +512,20 @@ namespace constants {
     inline constexpr f64 INV_PI = 1.0 / PI;
 
     // Spectral range (nanometers)
+    //
+    // NOTE: these are the ISO 20473 band *taxonomy* -- what "NIR" means as a
+    // term. They are NOT the ranges the renderer integrates. Those come from
+    // GetFusedBandInfo() above and differ on purpose:
+    //
+    //   band   taxonomy (here)   rendered (GetFusedBandInfo)
+    //   NIR     780 - 1400        930 - 1200   narrowed to the NN atmosphere's coverage
+    //   SWIR   1000 - 2500       1400 - 2400   avoids the NIR overlap below 1400
+    //   VIS     380 -  780        400 -  780   CIE tail below 400 contributes ~nothing
+    //
+    // Quoting these constants to describe a render mode is the mistake that put
+    // the wrong ranges into common.hlsli and the shader README. If you want the
+    // range a *_Fused mode covers, call GetFusedBandInfo().
+
     // Visible spectrum
     inline constexpr Wavelength WAVELENGTH_MIN_VISIBLE = 380.0f;
     inline constexpr Wavelength WAVELENGTH_MAX_VISIBLE = 780.0f;  // Standard CIE visible range ends at 780nm

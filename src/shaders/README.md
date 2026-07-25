@@ -103,16 +103,23 @@ struct Payload {
 
 Defined in `common.hlsli`:
 
-| Mode | Value | Description |
-|------|-------|-------------|
-| `SPECTRAL_MODE_SINGLE` | 0 | Single wavelength (grayscale) |
-| `SPECTRAL_MODE_VIS_FUSED` | 1 | 32-wavelength visible spectral integration |
-| `SPECTRAL_MODE_MULTISPECTRAL` | 2 | Hyperspectral cube (TBD) |
-| `SPECTRAL_MODE_MWIR_FUSED` | 3 | Mid-wave IR (3000-5000nm) |
-| `SPECTRAL_MODE_LWIR_FUSED` | 4 | Long-wave IR (8000-12000nm) |
-| `SPECTRAL_MODE_SWIR_FUSED` | 5 | Short-wave IR (1000-2500nm) |
-| `SPECTRAL_MODE_NIR_FUSED` | 6 | Near-IR (780-1400nm) |
-| `SPECTRAL_MODE_RGB` | 7 | Fast RGB-only pipeline (default, no spectral integration) |
+| Mode | Value | Integration range | Samples |
+|------|-------|-------------------|---------|
+| `SPECTRAL_MODE_SINGLE` | 0 | one wavelength | 1 |
+| `SPECTRAL_MODE_VIS_FUSED` | 1 | 400-780 nm | 32 |
+| `SPECTRAL_MODE_MULTISPECTRAL` | 2 | Hyperspectral cube (TBD) | — |
+| `SPECTRAL_MODE_MWIR_FUSED` | 3 | 3000-5000 nm | 16 |
+| `SPECTRAL_MODE_LWIR_FUSED` | 4 | 8000-12000 nm | 16 |
+| `SPECTRAL_MODE_SWIR_FUSED` | 5 | 1400-2400 nm | 16 |
+| `SPECTRAL_MODE_NIR_FUSED` | 6 | 930-1200 nm | 16 |
+| `SPECTRAL_MODE_RGB` | 7 | 650/550/450 nm | 3 |
+
+Ranges are defined once, as `SPECTRAL_<BAND>_LAMBDA_{MIN,MAX}` in `common.hlsli`,
+and must match `GetFusedBandInfo()` in `core/Types.hpp` — `test_types.cpp` asserts
+the C++ side. Do not take these from the `WAVELENGTH_*` constants in `Types.hpp`:
+those are the ISO band taxonomy (NIR 780-1400 nm, SWIR 1000-2500 nm) rather than
+what the renderer integrates, and copying them here is exactly how the SWIR and
+NIR rows were wrong before.
 
 ## Current Features
 

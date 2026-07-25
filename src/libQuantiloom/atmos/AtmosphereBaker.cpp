@@ -86,7 +86,7 @@ void BoxAverage(const std::vector<double>& src, const std::vector<int>& binOf,
 }  // namespace
 
 AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
-    // Loop constants below MUST stay in sync with closesthit.rchit / miss.rmiss.
+    // Sample counts below MUST stay in sync with closesthit.rchit / miss.rmiss.
     auto uniformGrid = [](const char* band, double lo, double hi, int n) {
         AtmosLambdaGrid g;
         g.band = band;
@@ -95,17 +95,25 @@ AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
             g.lambdasNm[i] = lo + (hi - lo) * i / (n - 1);
         return g;
     };
+    // Band edges come from GetFusedBandInfo rather than being repeated here.
+    // They used to be literals in this switch as well as in Types.hpp and both
+    // shaders -- four copies of the same ten numbers, which is how the NIR and
+    // SWIR ranges ended up documented wrong elsewhere.
+    auto fusedGrid = [&](const char* band, int n) {
+        const auto info = GetFusedBandInfo(mode);
+        return uniformGrid(band, info->lambdaMinNm, info->lambdaMaxNm, n);
+    };
     switch (mode) {
         case SpectralMode::VIS_Fused:
-            return uniformGrid("vis", 400.0, 780.0, 32);
+            return fusedGrid("vis", 32);
         case SpectralMode::NIR_Fused:
-            return uniformGrid("nir", 930.0, 1200.0, 16);
+            return fusedGrid("nir", 16);
         case SpectralMode::SWIR_Fused:
-            return uniformGrid("swir", 1400.0, 2400.0, 16);
+            return fusedGrid("swir", 16);
         case SpectralMode::MWIR_Fused:
-            return uniformGrid("mwir", 3000.0, 5000.0, 16);
+            return fusedGrid("mwir", 16);
         case SpectralMode::LWIR_Fused:
-            return uniformGrid("lwir", 8000.0, 12000.0, 16);
+            return fusedGrid("lwir", 16);
         case SpectralMode::RGB: {
             AtmosLambdaGrid g;
             g.band = "vis";
@@ -114,6 +122,12 @@ AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
             return g;
         }
         case SpectralMode::Single: {
+            // These are the NN atmosphere's *trained coverage* per band, not the
+            // fused-mode integration ranges above, and deliberately differ: vis
+            // reaches 800 nm here versus 780 for VIS_Fused. Do not "unify" them
+            // with GetFusedBandInfo -- a single wavelength is admissible anywhere
+            // the network was trained, which is a wider question than which band
+            // a fused render integrates.
             AtmosLambdaGrid g;
             struct Range { const char* band; double lo, hi; };
             static const Range kRanges[] = {{"vis", 400.0, 800.0},
