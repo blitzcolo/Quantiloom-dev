@@ -137,7 +137,14 @@ TEST(IREnergyConservation, PlanckCrossCheckHarness) {
 }
 
 // ---- Sentinel behavior: irEmissivity = -1 → metallic heuristic ----
-// Phase C sentinel fix must make this work; DISABLED_ until then.
+// The sentinel is implemented; these run and pass. (They previously carried a
+// note saying they were DISABLED_ pending a "Phase C" fix, which had long since
+// landed -- the tests were never disabled.)
+//
+// Note what these can and cannot catch: GetEffectiveIREmissivity above is a CPU
+// transcription of the HLSL in common.hlsli:927, so they pin the formula as
+// written here. Editing the shader without editing the mirror leaves both green
+// and the two silently different. Change them together.
 
 TEST(IREnergyConservation, SentinelDerivedEmissivity_Dielectric) {
     double e = GetEffectiveIREmissivity(-1.0, 0.0, 0.5);
