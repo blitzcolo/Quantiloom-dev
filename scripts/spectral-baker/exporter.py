@@ -191,7 +191,6 @@ def write_material_json(filepath: str,
         'source_library': 'USGS splib07a',
         'date_generated': datetime.utcnow().isoformat() + 'Z',
         'algorithm': 'NMF',
-        'num_materials': len(material_weights)
     }
 
     # Infer num_basis from first material
@@ -203,13 +202,22 @@ def write_material_json(filepath: str,
 
     # Build materials dict
     materials_dict = {}
+    renamed = 0
 
     for mat in material_weights:
-        # Create unique key (handle duplicates)
+        # Keys must be unique: this dict is the material database, and a repeated
+        # key silently discards the earlier entry. name+record_id is not enough --
+        # ECOSTRESS builds its name from the sample number that record_id also
+        # holds, so a third spectrum sharing both used to overwrite the second.
+        # 1007 of 3450 ECOSTRESS materials were being lost that way.
         key = mat.name
         if key in materials_dict:
-            # Append record_id for uniqueness
             key = f"{mat.name}_{mat.record_id}"
+            suffix = 2
+            while key in materials_dict:
+                key = f"{mat.name}_{mat.record_id}_{suffix}"
+                suffix += 1
+            renamed += 1
 
         bands_data = {}
         for band_name, weights in mat.band_weights.items():
@@ -233,6 +241,10 @@ def write_material_json(filepath: str,
             'bands': bands_data
         }
 
+    # Count what was actually written, not what came in: the two differ if any
+    # key collided, and the old metadata reported the input count regardless.
+    default_meta.setdefault('num_materials', len(materials_dict))
+
     output = {
         'metadata': default_meta,
         'materials': materials_dict
@@ -241,6 +253,10 @@ def write_material_json(filepath: str,
     # Write with pretty printing
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
+
+    if renamed:
+        logger.info(f"  {renamed} material(s) shared a name and were suffixed to "
+                    f"keep every spectrum reachable")
 
     file_size = Path(filepath).stat().st_size
     logger.info(f"Wrote materials JSON: {filepath} ({file_size:,} bytes)")
