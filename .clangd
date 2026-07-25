@@ -14,6 +14,11 @@
 # Without it clangd.exe rejects every LSP URI ("Failed to resolve path /mnt/d/...").
 # See docs/CLAUDE_CODE_SETUP.md.
 #
+# Known wart: findReferences lists each file twice, once as src/... and once as
+# D:/Quantiloom-dev/src/.... The mapping is not symmetric on the way back because
+# compile_commands.json stores native Windows paths. The references themselves are
+# correct -- just deduplicate by basename when reading them.
+#
 # The MSVC system include paths below come from vcvars64.bat's INCLUDE variable.
 # cl.exe reads them from the environment rather than the command line, so they never
 # appear in compile_commands.json and clangd cannot infer them. Each must be a single
