@@ -33,7 +33,6 @@
 #include "postprocess/PostprocessConfig.hpp"
 #include "hs_core/HyperspectralRenderer.hpp"
 #include "hs_core/HyperspectralConfig.hpp"
-#include "io/SpectralCubeIO.hpp"
 #include "renderer/MaterialGpuData.hpp"
 
 #include "Version.hpp"
