@@ -203,19 +203,33 @@ f32 SpectralReconstructor::EstimateMaxError(
     const AdaptiveGridInfo& gridInfo,
     const HyperspectralConfig& targetConfig
 ) {
-    // Maximum error occurs in coarsely-sampled regions
-    // For smooth functions, cubic interpolation error is O(h^4)
-    // where h is the sample spacing
+    // Maximum error occurs in the most coarsely-sampled region, so the estimate
+    // is driven by the widest gap in the grid. Measure that gap from gridInfo
+    // rather than assuming the grid was built with this config's coarse step:
+    // the two disagree whenever the grid came from GenerateUniform, from a
+    // different config, or was assembled by hand.
+    //
+    // targetConfig only supplies the fallback, for a grid not yet generated.
+    f32 coarseStep = targetConfig.wavelengthStep_nm * targetConfig.adaptiveCoarseMultiplier;
 
-    f32 baseStep = targetConfig.wavelengthStep_nm;
-    f32 coarseStep = baseStep * targetConfig.adaptiveCoarseMultiplier;
+    if (gridInfo.wavelengths.size() >= 2) {
+        f32 widestGap = 0.0f;
+        for (usize i = 1; i < gridInfo.wavelengths.size(); ++i) {
+            widestGap = std::max(widestGap,
+                                 gridInfo.wavelengths[i] - gridInfo.wavelengths[i - 1]);
+        }
+        if (widestGap > 0.0f) {
+            coarseStep = widestGap;
+        }
+    }
 
-    // Estimate based on typical spectral curvature in flat regions
-    // Assuming flat regions have |d²R/dλ²| < 1e-6 per nm²
-    f32 maxCurvature = 1e-6f;
-    f32 errorBound = maxCurvature * coarseStep * coarseStep / 8.0f;
-
-    return errorBound;
+    // Linear-interpolation bound |f - p| <= M2 * h^2 / 8, with M2 the assumed
+    // curvature of a flat spectral region, |d^2R/dlambda^2| < 1e-6 per nm^2.
+    // Deliberately the linear bound and not a cubic one: the default method is
+    // Catmull-Rom, so this over-estimates, which is the safe direction for a
+    // figure named "max error".
+    const f32 maxCurvature = 1e-6f;
+    return maxCurvature * coarseStep * coarseStep / 8.0f;
 }
 
 // ============================================================================

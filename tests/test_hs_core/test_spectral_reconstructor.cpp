@@ -468,6 +468,45 @@ TEST(SpectralReconstructorTest, EstimateMaxErrorScalesWithStep) {
     EXPECT_GT(error2, error1);
 }
 
+// The estimate is driven by the widest gap actually present in the grid, not by
+// the config's nominal coarse step. These two cases pin that down; without them
+// gridInfo could go unread again and nothing would fail.
+
+TEST(SpectralReconstructorTest, EstimateMaxErrorUsesWidestGridGap) {
+    HyperspectralConfig config;
+    config.wavelengthStep_nm = 10.0f;
+    config.adaptiveCoarseMultiplier = 2.0f;  // nominal coarse step = 20 nm
+
+    // A grid whose real gaps (10, 10, 80) exceed the nominal coarse step.
+    AdaptiveGridInfo grid;
+    grid.wavelengths = {1000.0f, 1010.0f, 1020.0f, 1100.0f};
+
+    AdaptiveGridInfo empty;
+
+    f32 measured = SpectralReconstructor::EstimateMaxError(grid, config);
+    f32 nominal = SpectralReconstructor::EstimateMaxError(empty, config);
+
+    // 80 nm gap vs a 20 nm assumption: 16x in a quadratic bound.
+    EXPECT_GT(measured, nominal);
+    EXPECT_NEAR(measured / nominal, 16.0f, 0.1f);
+}
+
+TEST(SpectralReconstructorTest, EstimateMaxErrorUniformGridMatchesItsOwnSpacing) {
+    HyperspectralConfig config;
+    config.wavelengthStep_nm = 10.0f;
+    config.adaptiveCoarseMultiplier = 1.0f;
+
+    // Uniform 10 nm grid: measured spacing and nominal step agree, so the
+    // estimate must be the same either way.
+    AdaptiveGridInfo grid;
+    grid.wavelengths = {500.0f, 510.0f, 520.0f, 530.0f};
+
+    AdaptiveGridInfo empty;
+
+    EXPECT_NEAR(SpectralReconstructor::EstimateMaxError(grid, config),
+                SpectralReconstructor::EstimateMaxError(empty, config), 1e-12f);
+}
+
 // ============================================================================
 // Edge Cases and Robustness Tests
 // ============================================================================
