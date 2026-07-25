@@ -12,12 +12,12 @@ Every command and number below was produced by running it, not by reading docs â
 | `tests/CLAUDE.md` | 33 lines. Loads when working under `tests/`. |
 | `src/shaders/CLAUDE.md` | 25 lines. Loads when working under `src/shaders/`. |
 | `src/libQuantiloom/CLAUDE.md` | 29 lines. Loads when working under `src/libQuantiloom/`. |
-| `.claude/settings.json` | Read-deny rules, `clangd-lsp` plugin, two `PostToolUse` hooks. |
+| `.claude/settings.json` | Read-deny rules, `clangd-lsp` plugin, three `PostToolUse` hooks. |
 | `.claude/skills/` | 6 skills (4 pre-existing, 2 added). |
 | `.clangd` | Points clangd at `build-cdb` and restores the MSVC system include paths. |
 | `.clang-tidy` | Curated lint checks. clangd reads it automatically â€” no lint command, no CI step. |
-| `scripts/gen_compile_commands.sh` | Regenerates the compilation database. |
-| `scripts/hooks/` | The two hook scripts. |
+| `scripts/gen_compile_commands.sh` | Regenerates the compilation database; `--check` reports staleness. |
+| `scripts/hooks/` | The three hook scripts. |
 
 `.gitignore` was narrowed so this configuration is shareable: it used to ignore
 all of `.claude/`, which is why the four original skills survived only as
@@ -59,11 +59,17 @@ reports 31.
 **2. The compilation database.**
 
 ```sh
-./scripts/gen_compile_commands.sh   # ~13 s
+./scripts/gen_compile_commands.sh           # ~13 s
+./scripts/gen_compile_commands.sh --check   # is it stale? exits 1 if so
 ```
 
-Re-run it after adding source files or changing CMake, otherwise clangd falls
-back to heuristics for the new files and nothing warns you.
+Re-run it after adding source files or changing CMake. clangd falls back to
+heuristic flags for a file it cannot find in the database and reports nothing,
+so staleness has to be asked for. `--check` compares the database against
+`git ls-files` and against every CMake file's mtime.
+
+Inside Claude Code the `post-write-cdb-staleness.sh` hook asks automatically,
+on exactly the edits that can invalidate the database.
 
 Nothing else needs installing. The `OpenEXR` Python package and numpy/scipy/
 scikit-learn (for the spectral baker) are already present.

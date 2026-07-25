@@ -33,6 +33,11 @@
             "type": "command",
             "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/scripts/hooks/post-write-test-registration.sh",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/scripts/hooks/post-write-cdb-staleness.sh",
+            "timeout": 30
           }
         ]
       }

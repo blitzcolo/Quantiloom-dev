@@ -8,8 +8,54 @@
 #
 # cl.exe needs the MSVC developer environment (INCLUDE/LIB/PATH), so the whole
 # configure runs inside vcvars64.bat.
+#
+# `--check` reports whether the existing database is stale and exits non-zero if
+# it is, without regenerating. Nothing else notices: clangd silently falls back
+# to heuristic flags for a file it cannot find, so staleness has to be asked for.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+if [ "${1:-}" = "--check" ]; then
+    CDB=build-cdb/compile_commands.json
+    if [ ! -f "$CDB" ]; then
+        echo "STALE: $CDB does not exist. clangd is guessing flags for the whole repo."
+        exit 1
+    fi
+    python3 - "$CDB" <<'PY'
+import json, os, subprocess, sys
+
+cdb = sys.argv[1]
+cdb_mtime = os.path.getmtime(cdb)
+stale = False
+
+newer = [f for f in subprocess.run(
+    ["git", "ls-files", "*CMakeLists.txt", "*.cmake"],
+    capture_output=True, text=True).stdout.split()
+    if os.path.exists(f) and os.path.getmtime(f) > cdb_mtime]
+if newer:
+    stale = True
+    print(f"STALE: {len(newer)} CMake file(s) modified after the database was generated:")
+    for f in newer[:10]:
+        print(f"    {f}")
+
+repo = os.path.basename(os.getcwd())
+known = {e.get("file", "").replace("\\", "/").rsplit(repo + "/", 1)[-1]
+         for e in json.load(open(cdb, encoding="utf-8"))}
+tracked = [f for f in subprocess.run(
+    ["git", "ls-files", "src/*.cpp", "tests/*.cpp"],
+    capture_output=True, text=True).stdout.split() if f not in known]
+if tracked:
+    stale = True
+    print(f"STALE: {len(tracked)} tracked source file(s) absent from the database:")
+    for f in tracked[:10]:
+        print(f"    {f}")
+
+if not stale:
+    print(f"OK: {cdb} covers every tracked source and postdates every CMake file.")
+sys.exit(1 if stale else 0)
+PY
+    exit $?
+fi
 
 VCVARS="C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"
 NINJA="C:/Program Files/Microsoft Visual Studio/18/Enterprise/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
