@@ -75,8 +75,7 @@ Quantiloom/
 ├── build-cdb/              # (In .gitignore) Ninja tree, exists only to emit compile_commands.json
 │
 ├── docs/                   # Documentation
-│   ├── CLAUDE_CODE_SETUP.md
-│   └── TODO.md
+│   └── CLAUDE_CODE_SETUP.md
 │
 ├── examples/               # (Placeholder) API usage examples
 │
