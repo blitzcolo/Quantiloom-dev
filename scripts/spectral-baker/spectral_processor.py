@@ -9,7 +9,7 @@ Author: Quantiloom Team
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional
 import numpy as np
 from scipy import interpolate
@@ -73,6 +73,7 @@ class BandBasis:
     wavelengths: np.ndarray       # [num_samples] in micrometers
     basis_functions: np.ndarray   # [n_components x num_samples]
     explained_variance: float     # Total variance explained
+    coverage: float = 1.0         # Mean fraction of the band actually measured
 
 
 @dataclass
@@ -86,6 +87,29 @@ class MaterialWeights:
     band_weights: Dict[str, np.ndarray]  # band_name -> [n_components]
     band_rmse: Dict[str, float]          # band_name -> reconstruction RMSE
     band_variance: Dict[str, float]      # band_name -> explained variance ratio
+    band_coverage: Dict[str, float] = field(default_factory=dict)  # band_name -> [0,1]
+
+
+# A band whose mean coverage falls below this is mostly edge-clamp extrapolation
+# rather than measurement; metrics computed on it are not evidence of fit quality.
+LOW_COVERAGE_WARN = 0.5
+
+
+def compute_coverage(source_min_um: float,
+                     source_max_um: float,
+                     band_config: BandConfig) -> float:
+    """
+    Fraction of a band's wavelength range that the source data actually spans.
+
+    resample_uniform() extrapolates by clamping to the first/last sample, so a
+    band outside the source range comes back as a horizontal line rather than an
+    error. Such a band then factorises perfectly (rank 1), reporting RMSE 0 and
+    100% explained variance -- numbers that look better than the bands backed by
+    real measurements. Coverage is what distinguishes the two.
+    """
+    lo, hi = band_config.range_um
+    overlap = min(hi, source_max_um) - max(lo, source_min_um)
+    return float(np.clip(overlap / (hi - lo), 0.0, 1.0))
 
 
 def resample_uniform(wavelengths: np.ndarray,
@@ -169,14 +193,16 @@ def build_reflectance_matrix(materials: List,
         band_config: Band configuration for resampling
 
     Returns:
-        Tuple of (wavelengths, reflectance_matrix, valid_materials)
+        Tuple of (wavelengths, reflectance_matrix, valid_materials, coverage)
         reflectance_matrix: [n_materials x n_wavelengths]
+        coverage: [n_materials] fraction of the band each material actually measured
     """
     target_wl = band_config.get_wavelength_grid()
     n_samples = len(target_wl)
 
     rows = []
     valid_materials = []
+    coverage = []
 
     for mat in materials:
         try:
@@ -190,6 +216,9 @@ def build_reflectance_matrix(materials: List,
 
             rows.append(resampled)
             valid_materials.append(mat)
+            coverage.append(compute_coverage(mat.wavelength_range[0],
+                                             mat.wavelength_range[1],
+                                             band_config))
 
         except Exception as e:
             logger.warning(f"Skipping {mat.name}: {e}")
@@ -202,7 +231,7 @@ def build_reflectance_matrix(materials: List,
 
     logger.info(f"Built reflectance matrix: {matrix.shape[0]} materials × {matrix.shape[1]} wavelengths")
 
-    return target_wl, matrix, valid_materials
+    return target_wl, matrix, valid_materials, np.array(coverage)
 
 
 def compute_nmf_basis(reflectance_matrix: np.ndarray,
@@ -350,7 +379,28 @@ def process_all_bands(materials: List,
         logger.info(f"Basis functions: {band_config.n_components}")
 
         # Build matrix
-        wavelengths, matrix, valid_mats = build_reflectance_matrix(materials, band_config)
+        wavelengths, matrix, valid_mats, coverage = build_reflectance_matrix(materials, band_config)
+
+        # A band no material reaches contains only edge-clamp extrapolation. NMF
+        # would factorise those flat rows exactly and report RMSE 0 / 100% EV, so
+        # emit nothing rather than a basis that renders as if it were measured.
+        if coverage.max() <= 0.0:
+            src_lo = min(m.wavelength_range[0] for m in materials)
+            src_hi = max(m.wavelength_range[1] for m in materials)
+            logger.warning(
+                f"  SKIPPING {band_name}: no source data in "
+                f"{band_config.range_um[0]:.3f}-{band_config.range_um[1]:.3f} µm "
+                f"(library spans {src_lo:.3f}-{src_hi:.3f} µm). "
+                f"No basis will be written for this band."
+            )
+            continue
+
+        mean_coverage = float(coverage.mean())
+        if mean_coverage < LOW_COVERAGE_WARN:
+            logger.warning(
+                f"  {band_name} is only {mean_coverage*100:.1f}% covered by the source; "
+                f"the remainder is extrapolated and its metrics are optimistic."
+            )
 
         # Create per-band NMF config with overridden n_components
         band_nmf_config = NMFConfig(
@@ -373,28 +423,38 @@ def process_all_bands(materials: List,
             name=band_name,
             wavelengths=wavelengths,
             basis_functions=basis,
-            explained_variance=explained_var
+            explained_variance=explained_var,
+            coverage=mean_coverage
         )
 
-        all_band_data[band_name] = (wavelengths, matrix, valid_mats, basis, weights, rmse, variance, band_config.n_components)
+        all_band_data[band_name] = (wavelengths, matrix, valid_mats, basis, weights,
+                                    rmse, variance, band_config.n_components, coverage)
 
+        logger.info(f"  Coverage: {mean_coverage*100:.1f}% of band measured")
         logger.info(f"  Mean RMSE: {np.mean(rmse):.6f}")
         logger.info(f"  Max RMSE: {np.max(rmse):.6f}")
         logger.info(f"  Min explained variance: {np.min(variance):.4f}")
 
-    # Build material weights list
-    # Use the first band's valid materials as reference
-    first_band = list(bands.keys())[0]
-    reference_mats = all_band_data[first_band][2]
+    if not band_bases:
+        raise ValueError(
+            "No band survived: the source library does not overlap any configured "
+            "band range. Check [input].source_type and the [processing.bands] ranges."
+        )
+
+    # Build material weights list, using the first surviving band's valid
+    # materials as reference (bands skipped for lack of coverage are absent).
+    kept_bands = list(band_bases.keys())
+    reference_mats = all_band_data[kept_bands[0]][2]
 
     material_weights = []
     for i, mat in enumerate(reference_mats):
         band_weights = {}
         band_rmse = {}
         band_variance = {}
+        band_coverage = {}
 
-        for band_name in bands.keys():
-            _, _, valid_mats, _, weights, rmse, variance, n_comp = all_band_data[band_name]
+        for band_name in kept_bands:
+            _, _, valid_mats, _, weights, rmse, variance, n_comp, cov = all_band_data[band_name]
 
             # Find this material's index in this band's valid list
             try:
@@ -403,11 +463,13 @@ def process_all_bands(materials: List,
                 band_weights[band_name] = weights[idx]
                 band_rmse[band_name] = float(rmse[idx])
                 band_variance[band_name] = float(variance[idx])
+                band_coverage[band_name] = float(cov[idx])
             except StopIteration:
                 # Material not valid for this band - use correct n_components for zeros
                 band_weights[band_name] = np.zeros(n_comp)
                 band_rmse[band_name] = 1.0
                 band_variance[band_name] = 0.0
+                band_coverage[band_name] = 0.0
 
         material_weights.append(MaterialWeights(
             name=mat.name,
@@ -417,7 +479,8 @@ def process_all_bands(materials: List,
             filename=mat.filename,
             band_weights=band_weights,
             band_rmse=band_rmse,
-            band_variance=band_variance
+            band_variance=band_variance,
+            band_coverage=band_coverage
         ))
 
     return band_bases, material_weights
@@ -440,7 +503,12 @@ def run_basis_experiment(materials: List,
     logger.info(f"\n=== Basis Count Experiment ({band_config.name}) ===")
 
     # Build matrix once
-    wavelengths, matrix, valid_mats = build_reflectance_matrix(materials, band_config)
+    wavelengths, matrix, valid_mats, coverage = build_reflectance_matrix(materials, band_config)
+
+    if coverage.max() <= 0.0:
+        logger.warning(f"  {band_config.name} has no source coverage; "
+                       f"experiment results would be meaningless. Skipping.")
+        return {}
 
     results = {}
 

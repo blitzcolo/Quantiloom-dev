@@ -63,11 +63,18 @@ random_state = 42           # For reproducibility
 # Output Paths
 # =============================================================================
 [output]
+# These are the exact paths the scene TOMLs load (see assets/configs/*.toml),
+# so a full bake replaces the live assets. Trial runs (--max-materials) refuse
+# to overwrite them unless --force is given.
+
 # Global basis functions (binary, for C++ loader)
-basis_file = "../../assets/spectral/quantiloom_basis_v1.bin"
+basis_file = "../../assets/spectral/quantiloom_basis_v3_usgs.qlbin"
 
 # Material weights database (JSON, for glTF integration)
-material_json = "../../assets/spectral/quantiloom_materials.json"
+material_json = "../../assets/spectral/quantiloom_materials_usgs.json"
+
+# Per-material statistics (CSV, for analysis)
+summary_csv = "../../assets/spectral/material_summary_usgs.csv"
 
 # Validation plots directory
 plots_dir = "./output/plots"

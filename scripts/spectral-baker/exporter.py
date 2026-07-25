@@ -213,10 +213,14 @@ def write_material_json(filepath: str,
 
         bands_data = {}
         for band_name, weights in mat.band_weights.items():
+            # 'coverage' is the fraction of the band the source actually measured.
+            # Below 1.0 the remainder is extrapolated, and rmse/explained_variance
+            # are correspondingly optimistic -- consumers must read the two together.
             bands_data[band_name] = {
                 'basis_weights': [float(w) for w in weights],
                 'rmse': mat.band_rmse.get(band_name, 0.0),
-                'explained_variance': mat.band_variance.get(band_name, 0.0)
+                'explained_variance': mat.band_variance.get(band_name, 0.0),
+                'coverage': mat.band_coverage.get(band_name, 1.0)
             }
 
         materials_dict[key] = {
@@ -304,7 +308,7 @@ def write_summary_csv(filepath: str,
         # Header
         headers = ['name', 'record_id', 'instrument', 'chapter', 'filename']
         for band in bands:
-            headers.extend([f'{band}_rmse', f'{band}_variance'])
+            headers.extend([f'{band}_rmse', f'{band}_variance', f'{band}_coverage'])
         f.write(','.join(headers) + '\n')
 
         # Data rows
@@ -319,7 +323,8 @@ def write_summary_csv(filepath: str,
             for band in bands:
                 row.extend([
                     f"{mat.band_rmse.get(band, 0.0):.6f}",
-                    f"{mat.band_variance.get(band, 0.0):.6f}"
+                    f"{mat.band_variance.get(band, 0.0):.6f}",
+                    f"{mat.band_coverage.get(band, 1.0):.6f}"
                 ])
             f.write(','.join(row) + '\n')
 

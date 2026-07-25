@@ -257,11 +257,42 @@ def cmd_scan(args, config: dict):
         for material, count in sorted(material_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
             print(f"  {material}: {count} datasets")
 
+    elif source_type == 'ecostress':
+        import pathlib
+        eco_root = input_cfg.get('ecostress_root', '../../assets/spectral/ecospeclib-all')
+
+        if config_dir:
+            eco_root = str(config_dir / eco_root)
+
+        logger.info(f"Scanning ECOSTRESS library: {eco_root}")
+
+        materials = discover_ecostress_materials(pathlib.Path(eco_root))
+
+        # Count by chapter (filename prefix: manmade / mineral / vegetation / ...)
+        chapter_counts = {}
+        for mat in materials:
+            chapter_counts[mat.chapter] = chapter_counts.get(mat.chapter, 0) + 1
+
+        print(f"\nUsable spectra: {len(materials)}")
+        print(f"\nBy Category:")
+        for chapter in sorted(chapter_counts.keys()):
+            print(f"  {chapter or '(none)'}: {chapter_counts[chapter]}")
+
+        # Wavelength coverage is the thing worth knowing before a bake: a band
+        # the library does not reach is extrapolated, not measured (see
+        # process_all_bands, which refuses to emit such bands).
+        if materials:
+            lo = min(m.wavelength_range[0] for m in materials)
+            hi = max(m.wavelength_range[1] for m in materials)
+            print(f"\nWavelength coverage (union): {lo:.3f} - {hi:.3f} µm")
+
     else:
-        logger.error(f"Unknown source_type: {source_type}")
+        logger.error(f"Unknown source_type: {source_type}. "
+                     f"Must be 'usgs', 'refractiveindex', or 'ecostress'")
         return 1
 
     print("=" * 60 + "\n")
+    return 0
 
 
 def cmd_single_material(args, config: dict):
@@ -304,11 +335,19 @@ def cmd_single_material(args, config: dict):
 
     if target_weights:
         print(f"\n=== {target.name} ===")
-        for band_name in bands.keys():
+        # Iterate band_bases, not bands: uncovered bands are dropped by
+        # process_all_bands and have no metrics to show.
+        for band_name in band_bases.keys():
+            cov = target_weights.band_coverage.get(band_name, 1.0)
             print(f"\n{band_name} Band:")
+            print(f"  Coverage: {cov*100:.1f}%")
             print(f"  RMSE: {target_weights.band_rmse[band_name]:.6f}")
             print(f"  Explained Variance: {target_weights.band_variance[band_name]:.4f}")
             print(f"  Weights: {target_weights.band_weights[band_name][:5]}...")
+
+        for band_name in bands.keys():
+            if band_name not in band_bases:
+                print(f"\n{band_name} Band: NO DATA (not covered by this source)")
 
         # Generate plot if requested
         if args.plot:
@@ -356,6 +395,10 @@ def cmd_experiment(args, config: dict):
         results = run_basis_experiment(materials, n_components_list, band_config)
         all_results[band_name] = results
 
+        # An uncovered band yields no results; there is nothing to plot.
+        if not results:
+            continue
+
         # Generate plot
         plot_path = output_dir / f'experiment_{band_name.lower()}.png'
         plot_explained_variance_comparison(results, band_name, str(plot_path))
@@ -367,6 +410,9 @@ def cmd_experiment(args, config: dict):
 
     for band_name, results in all_results.items():
         print(f"\n{band_name} Band:")
+        if not results:
+            print("  NO DATA (band not covered by this source)")
+            continue
         print(f"{'N_Basis':<10} {'Exp.Var':<12} {'Mean RMSE':<12} {'Max RMSE':<12}")
         print("-" * 50)
         for n_comp in sorted(results.keys()):
@@ -390,19 +436,41 @@ def cmd_full_bake(args, config: dict):
     # Resolve paths relative to config file
     config_dir = Path(args.config).parent if args.config else None
 
+    basis_file = output_cfg.get('basis_file', './output/quantiloom_basis_v3.qlbin')
+    material_json = output_cfg.get('material_json', './output/quantiloom_materials.json')
+    summary_csv = output_cfg.get('summary_csv', './output/material_summary.csv')
+    plots_dir = output_cfg.get('plots_dir', './output/plots')
+
     if config_dir:
-        # Resolve output paths
-        basis_file = str(config_dir / output_cfg.get('basis_file', './output/quantiloom_basis_v1.bin'))
-        material_json = str(config_dir / output_cfg.get('material_json', './output/quantiloom_materials.json'))
-        plots_dir = str(config_dir / output_cfg.get('plots_dir', './output/plots'))
-    else:
-        basis_file = output_cfg.get('basis_file', './output/quantiloom_basis_v1.bin')
-        material_json = output_cfg.get('material_json', './output/quantiloom_materials.json')
-        plots_dir = output_cfg.get('plots_dir', './output/plots')
+        basis_file = str(config_dir / basis_file)
+        material_json = str(config_dir / material_json)
+        summary_csv = str(config_dir / summary_csv)
+        plots_dir = str(config_dir / plots_dir)
+
+    # The configured paths are the ones the scene TOMLs load, so a full bake
+    # overwrites production assets by design. A --max-materials run is a trial
+    # over a fraction of the library; letting it land on those same paths would
+    # silently replace a good basis with a 25-material one.
+    if args.max_materials and not args.force:
+        existing = [p for p in (basis_file, material_json, summary_csv) if Path(p).exists()]
+        if existing:
+            logger.error(
+                f"--max-materials {args.max_materials} is a trial bake, but these "
+                f"configured outputs already exist:"
+            )
+            for p in existing:
+                logger.error(f"    {p}")
+            logger.error(
+                "Refusing to overwrite production assets with a partial bake. "
+                "Re-run without --max-materials for a real bake, or pass --force "
+                "if replacing them is what you want."
+            )
+            return 1
 
     # Create output directories
     Path(basis_file).parent.mkdir(parents=True, exist_ok=True)
     Path(material_json).parent.mkdir(parents=True, exist_ok=True)
+    Path(summary_csv).parent.mkdir(parents=True, exist_ok=True)
     Path(plots_dir).mkdir(parents=True, exist_ok=True)
 
     # Load materials
@@ -440,8 +508,7 @@ def cmd_full_bake(args, config: dict):
     })
 
     # Export CSV summary
-    csv_path = str(Path(material_json).parent / 'material_summary.csv')
-    write_summary_csv(csv_path, material_weights)
+    write_summary_csv(summary_csv, material_weights)
 
     # Validation plots
     logger.info("\n" + "=" * 60)
@@ -469,15 +536,28 @@ def cmd_full_bake(args, config: dict):
     print(f"Materials processed: {len(material_weights)}")
 
     for band_name, s in stats.items():
+        cov = band_bases[band_name].coverage
         print(f"\n{band_name} Band:")
+        print(f"  Source coverage: {cov*100:.1f}% of band measured")
         print(f"  Mean RMSE: {s['mean_rmse']:.6f}")
         print(f"  Mean Explained Variance: {s['mean_variance']*100:.2f}%")
         print(f"  Good materials (RMSE < 0.03): {s['percent_good']:.1f}%")
+        if cov < 1.0:
+            print(f"  NOTE: {(1-cov)*100:.1f}% of this band is extrapolated, not measured.")
+            print(f"        The metrics above are optimistic by that much.")
+
+    # Bands the source cannot reach are dropped rather than baked, because a
+    # basis fitted to edge-clamp extrapolation reports a perfect fit.
+    dropped = [b for b in bands.keys() if b not in band_bases]
+    if dropped:
+        print(f"\nNOT BAKED (no source data): {', '.join(dropped)}")
+        print(f"  These bands are absent from the basis file and the materials JSON.")
+        print(f"  Use a source that covers them (RefractiveIndex.info or ECOSTRESS).")
 
     print(f"\nOutput files:")
     print(f"  Basis: {basis_file}")
     print(f"  Materials: {material_json}")
-    print(f"  Summary: {csv_path}")
+    print(f"  Summary: {summary_csv}")
     print(f"  Plots: {plots_dir}")
     print("=" * 60 + "\n")
 
@@ -516,6 +596,8 @@ Examples:
                        help='Run experiment with comma-separated basis counts (e.g., 4,8,16,32)')
     parser.add_argument('--max-materials', type=int, default=None,
                        help='Limit number of materials for testing')
+    parser.add_argument('--force', action='store_true',
+                       help='Allow a --max-materials trial bake to overwrite existing outputs')
     parser.add_argument('--verbose', '-v', action='store_true',
                        help='Enable debug logging')
     parser.add_argument('--log-file', type=str,
@@ -557,8 +639,9 @@ Examples:
                 }
             },
             'output': {
-                'basis_file': './output/quantiloom_basis_v1.bin',
-                'material_json': './output/quantiloom_materials.json',
+                'basis_file': './output/quantiloom_basis_v3_usgs.qlbin',
+                'material_json': './output/quantiloom_materials_usgs.json',
+                'summary_csv': './output/material_summary_usgs.csv',
                 'plots_dir': './output/plots'
             },
             'validation': {
