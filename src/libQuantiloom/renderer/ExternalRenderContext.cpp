@@ -237,8 +237,21 @@ struct ExternalRenderContext::Impl {
 
     // Random number generator for better sample distribution
     // Uses Mersenne Twister for high-quality randomness (matches CLI app)
-    std::mt19937 rng{std::random_device{}()};
+    //
+    // Seeded deterministically by default, and re-seeded whenever accumulation
+    // restarts. It used to be seeded once from std::random_device, which made
+    // every interactive render unreproducible: the same scene and camera drew
+    // from wherever the generator had got to, so the image depended on session
+    // history and could never be compared against the CLI's output.
+    u32 samplingSeed = constants::DEFAULT_SAMPLING_SEED;  // 0 = nondeterministic
+    std::mt19937 rng{constants::DEFAULT_SAMPLING_SEED};
     std::uniform_int_distribution<u32> randDist{0, std::numeric_limits<u32>::max()};
+
+    // Restart the sampling sequence. Called from ResetAccumulation() so the
+    // sequence and the accumulation it feeds always begin together.
+    void ReseedRng() {
+        rng.seed(samplingSeed != 0U ? samplingSeed : std::random_device{}());
+    }
 
     // Statistics
     f32 lastFrameTimeMs = 0.0f;
@@ -693,7 +706,9 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
     CreatePipeline();
 
     m_impl->isReady = true;
-    m_impl->accumulatedSamples = 0;
+    // Via ResetAccumulation() rather than clearing the counter directly, so the
+    // sampling sequence restarts with it.
+    ResetAccumulation();
 
     QL_LOG_INFO("Scene loaded: {} meshes, {} materials, {} textures",
                 m_impl->scene->meshes.size(),
@@ -728,7 +743,9 @@ Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPa
     CreatePipeline();
 
     m_impl->isReady = true;
-    m_impl->accumulatedSamples = 0;
+    // Via ResetAccumulation() rather than clearing the counter directly, so the
+    // sampling sequence restarts with it.
+    ResetAccumulation();
 
     QL_LOG_INFO("USD scene loaded: {} meshes, {} materials, {} textures",
                 m_impl->scene->meshes.size(),
@@ -888,9 +905,25 @@ void ExternalRenderContext::RenderFrame(
 
     // Set sampling parameters
     // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
-    u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->frameIndex * 997 + m_impl->accumulatedSamples * 1009);
+    //
+    // Mixed with accumulatedSamples only. frameIndex used to be part of this,
+    // but it counts every frame ever drawn and is never reset, so it made the
+    // seed depend on session history rather than on the accumulation -- the one
+    // thing that had to be reproducible. Dropping it makes this identical to
+    // the CLI's `dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009)`, where
+    // frameIndex is fixed at 0 and sampleIndex is the accumulation index.
+    u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->accumulatedSamples * 1009);
+
+    // frameIndex is passed as 0, exactly as the CLI passes it. raygen.rgen
+    // folds this push constant into the per-pixel seed
+    // (`seed ^= pushConsts.frameIndex * 26699`) and uses it for nothing else,
+    // so feeding it the free-running frame counter made the image depend on how
+    // many frames the session had drawn before this accumulation began. The
+    // sample-to-sample variation it was there to provide already comes from
+    // sampleIndex below.
+    constexpr u32 kShaderFrameIndex = 0;
     m_impl->pipeline->SetSamplingParams(
-        m_impl->frameIndex,
+        kShaderFrameIndex,
         m_impl->accumulatedSamples,
         m_impl->spp,
         randomSeed
@@ -1200,6 +1233,24 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
 
 void ExternalRenderContext::ResetAccumulation() {
     m_impl->accumulatedSamples = 0;
+    // Restart the sampling sequence with the accumulation it feeds, so an
+    // accumulation pass always draws the same samples for the same seed
+    // regardless of what was rendered before it.
+    m_impl->ReseedRng();
+}
+
+void ExternalRenderContext::SetSamplingSeed(u32 seed) {
+    m_impl->samplingSeed = seed;
+    if (seed == 0U) {
+        QL_LOG_INFO("Sampling seed: nondeterministic (seed = 0)");
+    } else {
+        QL_LOG_INFO("Sampling seed: {}", seed);
+    }
+    ResetAccumulation();
+}
+
+u32 ExternalRenderContext::GetSamplingSeed() const {
+    return m_impl->samplingSeed;
 }
 
 // ============================================================================
@@ -1475,7 +1526,7 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     m_impl->materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
 
     // 4. Reset accumulation (visual feedback)
-    m_impl->accumulatedSamples = 0;
+    ResetAccumulation();
 
     QL_LOG_DEBUG("UpdateMaterial: Updated material {} ('{}')", materialIndex, material.name);
 }

@@ -298,6 +298,31 @@ public:
     void SetSPP(u32 spp);
 
     /**
+     * @brief Set the seed for the path tracer's per-sample sampling sequence.
+     *
+     * Same convention as the CLI's `renderer.seed`, and the same default
+     * (constants::DEFAULT_SAMPLING_SEED), so an interactive render and a CLI
+     * render of the same scene draw the same sequence. Pass 0 to seed from
+     * std::random_device instead, giving frame-varying noise.
+     *
+     * The sequence restarts whenever accumulation restarts, which is what makes
+     * a result reproducible: before this existed the context seeded itself from
+     * std::random_device once and kept advancing, so the same scene and camera
+     * produced a different image depending on how many frames had been drawn
+     * beforehand.
+     *
+     * Resets accumulation.
+     *
+     * @param seed Nonzero for a reproducible sequence, 0 for a random one
+     */
+    void SetSamplingSeed(u32 seed);
+
+    /**
+     * @brief Get the configured sampling seed (0 means nondeterministic)
+     */
+    [[nodiscard]] u32 GetSamplingSeed() const;
+
+    /**
      * @brief Get current spectral mode
      */
     [[nodiscard]] SpectralMode GetSpectralMode() const;

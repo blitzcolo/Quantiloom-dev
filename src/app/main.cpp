@@ -2119,7 +2119,8 @@ int RunApp(int argc, char* argv[]) {
             // used to draw from random_device. Set renderer.seed = 0 for
             // nondeterministic sampling. The sequence still varies per sample
             // either way, so accumulation quality is unchanged.
-            const u32 configuredSeed = config.Get<u32>("renderer.seed", 0x51EDU);
+            const u32 configuredSeed =
+                config.Get<u32>("renderer.seed", constants::DEFAULT_SAMPLING_SEED);
             const u32 renderSeed =
                 (configuredSeed != 0U) ? configuredSeed : std::random_device{}();
             if (configuredSeed == 0U) {

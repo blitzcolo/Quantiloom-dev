@@ -547,6 +547,14 @@ namespace constants {
     inline constexpr Wavelength WAVELENGTH_MIN_LWIR = 8000.0f;
     inline constexpr Wavelength WAVELENGTH_MAX_LWIR = 12000.0f;
 
+    // Seed for the path tracer's per-sample sampling sequence, shared by both
+    // front ends so they mean the same thing by "the default seed": the CLI
+    // reads it as renderer.seed, ExternalRenderContext takes it through
+    // SetSamplingSeed(). Nonzero makes a render reproducible; 0 asks for a
+    // nondeterministic seed instead. Kept here rather than duplicated at each
+    // call site so the two paths cannot drift to different defaults.
+    inline constexpr u32 DEFAULT_SAMPLING_SEED = 0x51EDU;
+
     // Speed of light (m/s)
     inline constexpr f64 SPEED_OF_LIGHT = 299792458.0;
 
