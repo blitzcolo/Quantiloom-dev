@@ -18,6 +18,26 @@
   "enabledPlugins": {
     "clangd-lsp@claude-plugins-official": true
   },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/scripts/hooks/post-edit-shader.sh",
+            "timeout": 120,
+            "statusMessage": "Recompiling shaders..."
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PROJECT_DIR:-.}\"/scripts/hooks/post-write-test-registration.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
   "autoMode": {
     "allow": [
       "$defaults",
