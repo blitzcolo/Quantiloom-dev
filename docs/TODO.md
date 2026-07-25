@@ -221,11 +221,17 @@ MWIR/LWIR 在末尾,缩短文件仍正确);部分覆盖的会在控制台、json
 
 **问题** 以下文件长期未跟踪,既没入库也没进 `.gitignore`:
 `assets/maps/{milkyway_2020_4k,moonless_golf_4k,qwantani_noon_puresky_4k}.exr`、
-`assets/models/usd_test/*.usdz`、`assets/spectral/material_summary_{rii,usgs}.csv`、
-根目录的 `中期报告.md`。
+`assets/models/usd_test/*.usdz`、`assets/spectral/material_summary_{rii,usgs}.csv`。
 
-**现状** `material_summary_*.csv` 是查材质的入口(`spectral-bake` skill 引导用它),
-但换台机器就没有。环境贴图和 usdz 模型体积大,是否该入库需要判断。
+**现状** 部分解决:两个 `material_summary_*.csv` 已入库 —— 它们是查材质的入口
+(`spectral-bake` skill 引导用它),此前换台机器就没有。
+
+⚠ 两个 csv 的表头不一致:`_usgs` 是覆盖度规则之后重新烘焙的(3 波段,带
+`<band>_coverage` 列),`_rii` 还是 2025-12-25 的旧产物(5 波段,无 coverage 列)。
+重新烘焙 rii 可对齐,但那会一并改动已入库的 `quantiloom_basis_v3_rii.qlbin` 和
+`quantiloom_materials_rii.json`。
+
+仍未定:环境贴图 3 个 `.exr`、`usd_test/*.usdz`(体积大)。
 
 **期待目标** 每个文件有明确归属:入库、gitignore、或删除。
 
