@@ -8,6 +8,12 @@
 # Regenerate the compilation database after adding files or changing CMake:
 #   ./scripts/gen_compile_commands.sh
 #
+# Per-developer setup: the clangd-lsp plugin invokes a bare `clangd`, so ~/.local/bin
+# must hold a shim that execs clangd.exe with
+#   --path-mappings=/mnt/c=C:/,/mnt/d=D:/
+# Without it clangd.exe rejects every LSP URI ("Failed to resolve path /mnt/d/...").
+# See docs/CLAUDE_CODE_SETUP.md.
+#
 # The MSVC system include paths below come from vcvars64.bat's INCLUDE variable.
 # cl.exe reads them from the environment rather than the command line, so they never
 # appear in compile_commands.json and clangd cannot infer them. Each must be a single

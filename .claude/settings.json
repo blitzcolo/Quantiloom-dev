@@ -15,6 +15,9 @@
       "/mnt/d/ql-atmoforge-emu"
     ]
   },
+  "enabledPlugins": {
+    "clangd-lsp@claude-plugins-official": true
+  },
   "autoMode": {
     "allow": [
       "$defaults",
