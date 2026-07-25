@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__search__tavily_search"
+    ],
+    "deny": [
+      "Read(./assets/refractiveindex/**)",
+      "Read(./assets/models/glTF-Sample-Assets/**)",
+      "Read(./docs/doxygen-awesome-css/**)",
+      "Read(./src/tools/QLTrans/MOD4v1r1.EXE)"
+    ],
+    "additionalDirectories": [
+      "/mnt/d/Quantiloom-SDK",
+      "/mnt/d/Quantiloom-Qt",
+      "/mnt/d/ql-atmoforge-emu"
+    ]
+  },
+  "autoMode": {
+    "allow": [
+      "$defaults",
+      "Building this project with cmake/cmake.exe (configure, build, install) and compiling HLSL shaders with dxc/dxc.exe or compile_shaders.bat",
+      "Running the Quantiloom CLI or test binaries from the build tree (./build/**/*.exe) with any TOML config or arguments",
+      "Running ctest or the GoogleTest suite (libquantiloom_tests)",
+      "Running python3 scripts located in this repository (scripts/, tools/)",
+      "Reading, listing, and inspecting files anywhere under /mnt/d/Quantiloom-dev, /mnt/d/Quantiloom-SDK, /mnt/d/Quantiloom-Qt, and /mnt/d/ql-atmoforge-emu",
+      "Read-only git operations (status, log, diff, show, branch, blame)",
+      "Creating or overwriting render output files (exr/png/dat/hdr/csv) and temporary TOML configs in the repository root or scratch directories"
+    ]
+  }
+}
