@@ -1,0 +1,25 @@
+# clangd configuration for Quantiloom.
+#
+# This repo is developed from WSL2 but built with the Windows MSVC toolchain, so
+# code intelligence must run the WINDOWS clangd.exe, not a Linux clangd -- there is
+# no Linux C++ toolchain installed here, and a Linux clangd cannot resolve the MSVC
+# STL or the Windows SDK.
+#
+# Regenerate the compilation database after adding files or changing CMake:
+#   ./scripts/gen_compile_commands.sh
+#
+# The MSVC system include paths below come from vcvars64.bat's INCLUDE variable.
+# cl.exe reads them from the environment rather than the command line, so they never
+# appear in compile_commands.json and clangd cannot infer them. Each must be a single
+# argument token (-imsvc<path>); a separate "-imsvc" entry followed by the path is
+# parsed as an extra source file instead.
+
+CompileFlags:
+  CompilationDatabase: build-cdb
+  Add:
+    - -imsvcC:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Tools/MSVC/14.50.35717/include
+    - -imsvcC:/Program Files/Microsoft Visual Studio/18/Enterprise/VC/Auxiliary/VS/include
+    - -imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/ucrt
+    - -imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/um
+    - -imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/shared
+    - -imsvcC:/Program Files (x86)/Windows Kits/10/include/10.0.26100.0/winrt
