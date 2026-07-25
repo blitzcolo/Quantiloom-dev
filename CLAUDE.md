@@ -51,5 +51,3 @@ assets disabled in `build/`).
 - Commits: Conventional Commits — `feat:`, `fix(shaders):`, `chore:`.
 - clang-tidy runs through clangd via `.clang-tidy` — warnings surface as you edit,
   there is no separate lint command. No formatter is configured; match nearby style.
-- `README.md` is outdated (names removed dependencies and files that do not exist).
-  Verify against CMake and disk before relying on it.
