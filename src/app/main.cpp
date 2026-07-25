@@ -47,6 +47,7 @@
 #include <algorithm>  // For std::nth_element, std::clamp
 #include <cstddef>  // For offsetof
 #include <random>   // For C++11 random number generation
+#include <cstdio>
 #include <cstring>
 
 using namespace quantiloom;
@@ -63,6 +64,12 @@ using namespace quantiloom;
 //   uint globalIdx = geo.indexOffset + PrimitiveIndex() * 3 + localVertexIdx;
 //   float3 v = vertexBuffer[geo.vertexOffset + indexBuffer[globalIdx]];
 // ============================================================================
+
+// Everything from here to main() is private to this translation unit. The
+// anonymous namespace gives it internal linkage without repeating `static`,
+// and keeps these names out of the link with libQuantiloom -- note that the
+// library already has an unrelated ExternalRenderContext::LoadSceneFromConfig.
+namespace {
 
 struct InstanceGeometryInfoCPU {
     u32 vertexOffset;   // Offset into global vertex buffer (in vertex count)
@@ -131,9 +138,7 @@ inline glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
     f32 wx = fx - std::floor(fx);
     f32 wy = fy - std::floor(fy);
 
-    // Bilinear interpolation (assume RGB channels = 3)
-    auto lerp = [](f32 a, f32 b, f32 t) { return a * (1.0f - t) + b * t; };
-
+    // Bilinear interpolation (assume RGB channels = 3), done inline below.
     glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
     glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
     glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
@@ -265,11 +270,11 @@ Result<Scene> LoadSceneFromConfig(const Config& config) {
 // Main Entry Point
 // ============================================================================
 
-static void PrintVersion() {
+void PrintVersion() {
     std::cout << "Quantiloom " << version::AppVersionString << "\n";
 }
 
-static void PrintBuildInfo() {
+void PrintBuildInfo() {
     std::cout
         << "Quantiloom - Spectral Path Tracer\n"
         << "  Version:    " << version::AppVersionString << "\n"
@@ -280,7 +285,7 @@ static void PrintBuildInfo() {
         << "  Build type: " << version::BuildType << "\n";
 }
 
-static void PrintHelp(const char* progname) {
+void PrintHelp(const char* progname) {
     PrintBuildInfo();
     std::cout
         << "\n"
@@ -312,7 +317,9 @@ static void PrintHelp(const char* progname) {
         << "Homepage: https://github.com/blitzcolo/Quantiloom-dev\n";
 }
 
-int main(int argc, char* argv[]) {
+// The real entry point. main() below is only the last-resort exception barrier;
+// everything that needs the logger lives here, behind its own handler.
+int RunApp(int argc, char* argv[]) {
     // ========================================================================
     // Command-Line Flags (before logging init — pure stdout)
     // ========================================================================
@@ -1497,7 +1504,7 @@ int main(int argc, char* argv[]) {
         // Upload LUT data
         {
             // Convert Image to raw buffer (RG32F format)
-            std::vector<f32> lutDataMatrix(512 * 512 * 2);
+            std::vector<f32> lutDataMatrix(static_cast<size_t>(512) * 512 * 2);
             for (u32 y = 0; y < 512; ++y) {
                 for (u32 x = 0; x < 512; ++x) {
                     u32 idx = (y * 512 + x) * 2;
@@ -1517,7 +1524,7 @@ int main(int argc, char* argv[]) {
             stagingBuffer.Upload(lutDataMatrix.data(), bufferSize);
 
             // Copy buffer to image
-            CommandHelper::ExecuteImmediate(context, [&](const VkCommandBuffer cmd) {
+            CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
                 VkBufferImageCopy region{};
                 region.bufferOffset = 0;
                 region.bufferRowLength = 0;  // Tightly packed
@@ -1658,7 +1665,9 @@ int main(int argc, char* argv[]) {
                 const Image& faceImage = cubemapFaces[face];
 
                 // Convert RGB to RGBA (add alpha = 1.0)
-                std::vector<f32> pixelData(envMapSize * envMapSize * 4);
+                // Widen before multiplying: envMapSize comes from the scene config,
+                // and u32 arithmetic wraps to 0 at 32768x32768x4.
+                std::vector<f32> pixelData(static_cast<size_t>(envMapSize) * envMapSize * 4);
                 for (u32 y = 0; y < envMapSize; ++y) {
                     for (u32 x = 0; x < envMapSize; ++x) {
                         u32 idx = (y * envMapSize + x) * 4;
@@ -1714,7 +1723,7 @@ int main(int argc, char* argv[]) {
                 // TODO: Implement proper mipmap generation with GGX kernel
                 for (u32 face = 0; face < 6; ++face) {
                     // Create downsampled data (simple box filter)
-                    std::vector<f32> mipData(mipSize * mipSize * 4);
+                    std::vector<f32> mipData(static_cast<size_t>(mipSize) * mipSize * 4);
                     u32 prevMipSize = envMapSize >> (mip - 1);
 
                     for (u32 y = 0; y < mipSize; ++y) {
@@ -2369,9 +2378,13 @@ int main(int argc, char* argv[]) {
                 }
                 const size_t loIdx = values.size() / 100;
                 const size_t hiIdx = values.size() - 1 - loIdx;
-                std::nth_element(values.begin(), values.begin() + loIdx, values.end());
+                std::nth_element(values.begin(),
+                                 values.begin() + static_cast<std::ptrdiff_t>(loIdx),
+                                 values.end());
                 const f32 lo = values[loIdx];
-                std::nth_element(values.begin(), values.begin() + hiIdx, values.end());
+                std::nth_element(values.begin(),
+                                 values.begin() + static_cast<std::ptrdiff_t>(hiIdx),
+                                 values.end());
                 const f32 hi = values[hiIdx];
                 const f32 range = std::max(hi - lo, 1e-12f);
 
@@ -2434,8 +2447,38 @@ int main(int argc, char* argv[]) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());
         Log::Shutdown();
         return 1;
+    } catch (...) {
+        // Without this, a throw that does not derive from std::exception reaches
+        // the runtime as an unhandled exception: std::terminate, no message, and
+        // the log left unflushed.
+        QL_LOG_ERROR("FATAL ERROR: unknown exception");
+        Log::Shutdown();
+        return 1;
     }
 
     Log::Shutdown();
     return 0;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    // RunApp handles its own errors once logging is up. This barrier exists for
+    // the window before that -- Log::Init throws if the log file cannot be
+    // created -- and for anything escaping RunApp's own handlers.
+    //
+    // Reporting goes through std::fputs, not the logger (which may not exist
+    // yet) and not std::cerr (whose operator<< can itself throw
+    // std::ios_base::failure). A last-resort handler that can throw is not one.
+    try {
+        return RunApp(argc, argv);
+    } catch (const std::exception& e) {
+        std::fputs("FATAL ERROR: ", stderr);
+        std::fputs(e.what(), stderr);
+        std::fputs("\n", stderr);
+        return 1;
+    } catch (...) {
+        std::fputs("FATAL ERROR: unknown exception\n", stderr);
+        return 1;
+    }
 }
