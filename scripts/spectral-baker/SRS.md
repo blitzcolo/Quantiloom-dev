@@ -545,6 +545,19 @@ covered band beats every target by construction — the extrapolated portion is 
 straight line and fits perfectly — so its numbers are not evidence. Report
 coverage alongside any metric quoted from this tool.
 
+**"Explained variance" means the basis figure**, one variance ratio over the
+whole reflectance matrix — `1 - var(residual) / var(matrix)` in
+`compute_nmf_basis`. That is what `--experiment-basis` reports and what these
+targets were set against.
+
+The bake also prints a *mean over materials*, which is a different quantity and
+always lower: a material with a near-flat spectrum has an ill-conditioned ratio
+no matter how good its fit is, and the mean carries those down. For the full
+USGS library at the shipped basis counts the two read 99.91% and 97.46% in VIS.
+Both are correct; only the first is comparable to the 98% target. The bake
+labels them, since printing only the second made the tool look like it was
+missing a target it was not.
+
 ### 9.2 Qualitative Validation
 
 - [ ] Basis functions are interpretable (smooth, non-oscillatory)

@@ -540,7 +540,16 @@ def cmd_full_bake(args, config: dict):
         print(f"\n{band_name} Band:")
         print(f"  Source coverage: {cov*100:.1f}% of band measured")
         print(f"  Mean RMSE: {s['mean_rmse']:.6f}")
-        print(f"  Mean Explained Variance: {s['mean_variance']*100:.2f}%")
+        # Two different quantities, previously easy to confuse because only the
+        # second was printed. The project's >98% target is the basis figure:
+        # one variance ratio over the whole matrix, which is what the basis-count
+        # experiment reports and what the historical baselines were measured as.
+        # The per-material mean is always lower -- materials with near-flat
+        # spectra have an ill-conditioned ratio however good the fit is -- so
+        # comparing it to that target reads as a shortfall that is not there.
+        print(f"  Explained variance (basis, vs >98% target): "
+              f"{band_bases[band_name].explained_variance*100:.2f}%")
+        print(f"  Explained variance (mean over materials): {s['mean_variance']*100:.2f}%")
         print(f"  Good materials (RMSE < 0.03): {s['percent_good']:.1f}%")
         if cov < 1.0:
             print(f"  NOTE: {(1-cov)*100:.1f}% of this band is extrapolated, not measured.")
