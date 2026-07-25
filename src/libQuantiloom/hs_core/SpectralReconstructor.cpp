@@ -73,7 +73,14 @@ SpectralCube SpectralReconstructor::ReconstructWithMapping(
 
             // Reconstruct target spectrum
             for (const auto& map : mapping) {
-                f32 value;
+                // Every InterpolationMethod enumerator is handled by the switch
+                // below, but the compiler cannot prove `method` holds a valid
+                // enumerator, so it reports C4701 on the unwritten path. The
+                // initialiser makes that path defined (zero radiance) instead of
+                // writing stack garbage into the cube. Deliberately no `default:`
+                // label, so adding an enumerator is still a compile-time warning
+                // rather than a silent zero.
+                f32 value = 0.0F;
 
                 if (map.wasRendered) {
                     // Direct copy
