@@ -1,0 +1,36 @@
+# clang-tidy for Quantiloom.
+#
+# clangd reads this automatically, so warnings appear as LSP diagnostics while
+# editing -- no extra build step and no CI needed. The VS-bundled clang-tidy.exe
+# can also run it in batch (see docs/CLAUDE_CODE_SETUP.md).
+#
+# Curated for signal. Checks are enabled only where a hit is nearly always a real
+# defect in this codebase; anything that fires broadly on correct existing code is
+# excluded by name below, with the reason.
+Checks: >
+  -*,
+  bugprone-*,
+  performance-*,
+  misc-*,
+  -bugprone-easily-swappable-parameters,
+  -misc-const-correctness,
+  -misc-non-private-member-variables-in-classes,
+  -misc-no-recursion,
+  -misc-include-cleaner
+
+# -bugprone-easily-swappable-parameters
+#     Flags every 2-parameter function of similar types. 6 of 8 hits on
+#     core/Config.cpp alone, all of them correct code (GetInt(key, default)).
+# -misc-const-correctness
+#     A style preference, not a defect, and it drowned everything else: 86 of
+#     the 119 warnings across a six-file sample (66 of 94 in app/main.cpp).
+# -misc-non-private-member-variables-in-classes
+#     The GPU-facing structs in renderer/ are deliberately plain data.
+# -misc-no-recursion
+#     Scene graph and spectral tree traversal are recursive by design.
+# -misc-include-cleaner
+#     Duplicates clangd's own unused-include diagnostic.
+
+HeaderFilterRegex: '(src/libQuantiloom|src/libSpectraForge|src/app)/.*\.hpp$'
+WarningsAsErrors: ''
+FormatStyle: none
