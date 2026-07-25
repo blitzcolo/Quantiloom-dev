@@ -226,10 +226,10 @@ MWIR/LWIR 在末尾,缩短文件仍正确);部分覆盖的会在控制台、json
 **现状** 部分解决:两个 `material_summary_*.csv` 已入库 —— 它们是查材质的入口
 (`spectral-bake` skill 引导用它),此前换台机器就没有。
 
-⚠ 两个 csv 的表头不一致:`_usgs` 是覆盖度规则之后重新烘焙的(3 波段,带
-`<band>_coverage` 列),`_rii` 还是 2025-12-25 的旧产物(5 波段,无 coverage 列)。
-重新烘焙 rii 可对齐,但那会一并改动已入库的 `quantiloom_basis_v3_rii.qlbin` 和
-`quantiloom_materials_rii.json`。
+两个 csv 现已同为覆盖度规则之后的产物,表头一致(各波段都带 `<band>_coverage` 列)。
+
+⚠ rii 重烘暴露出:MWIR 覆盖度仅 **32.4%**、LWIR 仅 **27.9%**,其余是边缘钳位外推。
+这是目前唯一能渲 MWIR/LWIR 的 basis。质量本来就是这样,重烘只是把它写进了文件。
 
 仍未定:环境贴图 3 个 `.exr`、`usd_test/*.usdz`(体积大)。
 
