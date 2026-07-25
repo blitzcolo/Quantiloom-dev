@@ -1,6 +1,7 @@
 #include "Camera.hpp"
 #include "core/Log.hpp"
 #include <glm/gtc/matrix_transform.hpp>
+#include <cmath>
 
 namespace quantiloom {
 
@@ -51,11 +52,30 @@ CameraData Camera::GetCameraData() const {
 }
 
 void Camera::UpdateVectors() {
-    // Compute forward (view direction)
-    m_forward = glm::normalize(m_lookAt - m_position);
+    // Both normalize() calls below have a degenerate input that glm answers
+    // with NaN rather than an error. A NaN basis is not a crash: it propagates
+    // into every primary ray and renders a black or garbage image with nothing
+    // in the log, so each case gets an explicit, defined result instead.
+    constexpr f32 kDegenerate = 1e-6f;
+
+    // 1. position == lookAt -> zero view vector. Fall back to the conventional
+    //    -Z forward, so a camera with no direction still has a valid basis.
+    const glm::vec3 view = m_lookAt - m_position;
+    m_forward = (glm::dot(view, view) < kDegenerate * kDegenerate)
+                    ? glm::vec3(0.0f, 0.0f, -1.0f)
+                    : glm::normalize(view);
+
+    // 2. forward parallel to up -> zero cross product. Happens for an ordinary
+    //    straight-down or straight-up camera with the default up of +Y. Swing
+    //    to an axis that is not parallel; the orthogonal up is rebuilt below.
+    glm::vec3 up = m_up;
+    if (std::abs(glm::dot(m_forward, up)) > 1.0f - kDegenerate) {
+        up = (std::abs(m_forward.y) > 0.9f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                            : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
 
     // Compute right vector (perpendicular to forward and up)
-    m_right = glm::normalize(glm::cross(m_forward, m_up));
+    m_right = glm::normalize(glm::cross(m_forward, up));
 
     // Recompute orthogonal up vector
     m_up = glm::normalize(glm::cross(m_right, m_forward));

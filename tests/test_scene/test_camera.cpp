@@ -350,20 +350,47 @@ TEST(CameraTest, PortraitAspectRatio) {
 // Edge Cases
 // ============================================================================
 
-// Note: Camera does not currently validate position != lookAt
-// This edge case results in undefined behavior (zero forward vector)
-// TODO: Add validation in Camera constructor or handle this case explicitly
-TEST(CameraTest, DISABLED_PositionSameAsLookAt) {
-    glm::vec3 position(0, 0, 0);
-    glm::vec3 lookAt(0, 0, 0);  // Same as position
+// A degenerate basis is not a crash -- glm::normalize returns NaN, which
+// propagates into every primary ray and renders garbage with nothing logged.
+// UpdateVectors gives both degenerate inputs a defined result instead.
 
-    // This should still construct without crashing
-    // Implementation may choose a default forward direction
+TEST(CameraTest, PositionSameAsLookAt) {
+    glm::vec3 position(0, 0, 0);
+    glm::vec3 lookAt(0, 0, 0);  // Same as position -> zero view vector
+
     Camera cam(position, lookAt);
 
-    // Just verify it doesn't crash and produces some forward vector
+    // Defined fallback direction, and a usable orthonormal basis around it.
     glm::vec3 forward = cam.GetForward();
     EXPECT_TRUE(IsNormalized(forward));
+    EXPECT_FALSE(std::isnan(forward.x));
+    EXPECT_TRUE(IsNormalized(cam.GetRight()));
+    EXPECT_TRUE(IsNormalized(cam.GetUp()));
+    EXPECT_NEAR(glm::dot(cam.GetForward(), cam.GetRight()), 0.0f, 1e-5f);
+    EXPECT_NEAR(glm::dot(cam.GetForward(), cam.GetUp()), 0.0f, 1e-5f);
+}
+
+TEST(CameraTest, LookStraightDownWithDefaultUp) {
+    // forward parallel to up: an ordinary top-down camera, not an exotic case.
+    Camera cam(glm::vec3(0, 10, 0), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+
+    EXPECT_TRUE(IsNormalized(cam.GetForward()));
+    EXPECT_TRUE(IsNormalized(cam.GetRight()));
+    EXPECT_TRUE(IsNormalized(cam.GetUp()));
+    EXPECT_FALSE(std::isnan(cam.GetRight().x));
+    EXPECT_NEAR(cam.GetForward().y, -1.0f, 1e-5f);
+    EXPECT_NEAR(glm::dot(cam.GetForward(), cam.GetRight()), 0.0f, 1e-5f);
+    EXPECT_NEAR(glm::dot(cam.GetRight(), cam.GetUp()), 0.0f, 1e-5f);
+}
+
+TEST(CameraTest, LookStraightUpWithDefaultUp) {
+    Camera cam(glm::vec3(0, 0, 0), glm::vec3(0, 10, 0), glm::vec3(0, 1, 0));
+
+    EXPECT_TRUE(IsNormalized(cam.GetForward()));
+    EXPECT_TRUE(IsNormalized(cam.GetRight()));
+    EXPECT_FALSE(std::isnan(cam.GetRight().x));
+    EXPECT_NEAR(cam.GetForward().y, 1.0f, 1e-5f);
+    EXPECT_NEAR(glm::dot(cam.GetForward(), cam.GetRight()), 0.0f, 1e-5f);
 }
 
 TEST(CameraTest, VerySmallFOV) {
