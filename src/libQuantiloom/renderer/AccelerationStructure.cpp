@@ -8,6 +8,38 @@
 
 namespace quantiloom {
 
+namespace {
+
+// VUID-VkAccelerationStructureBuildGeometryInfoKHR-scratchData-03710: the
+// scratch device address must be a multiple of
+// minAccelerationStructureScratchOffsetAlignment (128 on NVIDIA). Nothing in
+// the scratch buffer's usage flags implies that, so VMA is free to suballocate
+// at a 16-byte boundary and the build reads and writes off its own scratch --
+// which surfaces as a GPU hang and VK_ERROR_DEVICE_LOST, not as an error.
+VkDeviceSize ScratchAlignment(const VulkanContext& context) {
+    const VkDeviceSize reported =
+        context.GetAccelerationStructureProperties().minAccelerationStructureScratchOffsetAlignment;
+    // A zero here would mean the property was never queried; 128 covers every
+    // desktop driver we target and costs nothing when the real value is lower.
+    return reported > 0 ? reported : 128;
+}
+
+// VUID-VkAccelerationStructureGeometryInstancesDataKHR-arrayOfPointers-03779.
+constexpr VkDeviceSize kInstanceDataAlignment = 16;
+
+// The failure mode this guards against has no error code -- an unaligned build
+// input hangs the GPU and the device-lost surfaces later, at whatever the next
+// queue wait happens to be. Say it out loud here instead.
+void WarnIfMisaligned(const char* what, VkDeviceAddress address, VkDeviceSize alignment) {
+    if (alignment > 0 && (address % alignment) != 0) {
+        QL_LOG_ERROR("  {} device address 0x{:x} is not {}-byte aligned -- "
+                     "the acceleration structure build will corrupt memory",
+                     what, address, alignment);
+    }
+}
+
+}  // namespace
+
 // ============================================================================
 // BLAS Implementation
 // ============================================================================
@@ -421,12 +453,14 @@ void BLAS::Build(VkCommandBuffer cmd) {
         allocator,
         sizeInfo.buildScratchSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        ScratchAlignment(m_context)
     );
 
     // Build acceleration structure
     buildInfo.dstAccelerationStructure = m_as;
     buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
+    WarnIfMisaligned("BLAS scratch", buildInfo.scratchData.deviceAddress, ScratchAlignment(m_context));
 
     VkAccelerationStructureBuildRangeInfoKHR buildRange{};
     buildRange.primitiveCount = primitiveCount;
@@ -586,7 +620,8 @@ void TLAS::Build(VkCommandBuffer cmd) {
         instanceBufferSize,
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
+        VMA_MEMORY_USAGE_CPU_TO_GPU,
+        kInstanceDataAlignment
     );
 
     m_instanceBuffer->Upload(m_instances.data(), instanceBufferSize);
@@ -600,6 +635,8 @@ void TLAS::Build(VkCommandBuffer cmd) {
     geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     geometry.geometry.instances.arrayOfPointers = VK_FALSE;
     geometry.geometry.instances.data.deviceAddress = m_instanceBuffer->GetDeviceAddress(device);
+    WarnIfMisaligned("TLAS instance data", geometry.geometry.instances.data.deviceAddress,
+                     kInstanceDataAlignment);
 
     // Build info
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -650,12 +687,14 @@ void TLAS::Build(VkCommandBuffer cmd) {
         allocator,
         sizeInfo.buildScratchSize,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        ScratchAlignment(m_context)
     );
 
     // Build acceleration structure
     buildInfo.dstAccelerationStructure = m_as;
     buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
+    WarnIfMisaligned("TLAS scratch", buildInfo.scratchData.deviceAddress, ScratchAlignment(m_context));
 
     VkAccelerationStructureBuildRangeInfoKHR buildRange{};
     buildRange.primitiveCount = instanceCount;

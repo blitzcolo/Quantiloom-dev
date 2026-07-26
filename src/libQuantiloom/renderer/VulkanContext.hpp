@@ -175,6 +175,12 @@ public:
         return m_rtPipelineProperties;
     }
 
+    // Get acceleration structure properties (only valid if IsRayTracingSupported()).
+    // Queried on both the owned-device and the external-handle path.
+    [[nodiscard]] const VkPhysicalDeviceAccelerationStructurePropertiesKHR& GetAccelerationStructureProperties() const {
+        return m_asProperties;
+    }
+
     // Device capability flags (runtime feature detection)
     struct DeviceCapabilities {
         bool hasVulkan13 = false;                // VK 1.3 API support

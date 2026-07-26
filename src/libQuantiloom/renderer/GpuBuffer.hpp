@@ -123,9 +123,18 @@ public:
     // Construction / Destruction
     // ========================================================================
 
-    // Create buffer with VMA
+    // Create buffer with VMA.
+    //
+    // minAlignment is the alignment the *caller* needs from the buffer's device
+    // address, over and above whatever the driver reports for the usage flags.
+    // Leave it 0 unless a spec rule demands more: acceleration-structure scratch
+    // buffers must meet minAccelerationStructureScratchOffsetAlignment (128 on
+    // NVIDIA) and TLAS instance data must be 16-byte aligned, neither of which
+    // is implied by the usage bits, so VMA would otherwise be free to hand back
+    // a 16-byte-aligned suballocation and the build would silently corrupt.
     GpuBuffer(VmaAllocator allocator, VkDeviceSize size,
-              VkBufferUsageFlags usage, VmaMemoryUsage memUsage);
+              VkBufferUsageFlags usage, VmaMemoryUsage memUsage,
+              VkDeviceSize minAlignment = 0);
 
     // Destructor: automatically destroys VkBuffer and VmaAllocation
     ~GpuBuffer();

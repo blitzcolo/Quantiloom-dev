@@ -13,7 +13,8 @@ namespace quantiloom {
 // ============================================================================
 
 GpuBuffer::GpuBuffer(VmaAllocator allocator, const VkDeviceSize size,
-                     const VkBufferUsageFlags usage, const VmaMemoryUsage memUsage)
+                     const VkBufferUsageFlags usage, const VmaMemoryUsage memUsage,
+                     const VkDeviceSize minAlignment)
     : m_allocator(allocator), m_size(size) {
 
     VkBufferCreateInfo bufferInfo{};
@@ -25,8 +26,13 @@ GpuBuffer::GpuBuffer(VmaAllocator allocator, const VkDeviceSize size,
     VmaAllocationCreateInfo allocInfo{};
     allocInfo.usage = memUsage;
 
-    const VkResult result = vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo,
-                                      &m_buffer, &m_allocation, nullptr);
+    // vmaCreateBufferWithAlignment takes the max of minAlignment and the
+    // driver's own requirement, so the two never fight.
+    const VkResult result = minAlignment > 1
+        ? vmaCreateBufferWithAlignment(m_allocator, &bufferInfo, &allocInfo, minAlignment,
+                                       &m_buffer, &m_allocation, nullptr)
+        : vmaCreateBuffer(m_allocator, &bufferInfo, &allocInfo,
+                          &m_buffer, &m_allocation, nullptr);
 
     if (result != VK_SUCCESS) {
         QL_LOG_ERROR("Failed to create VkBuffer via VMA: error code {}", static_cast<int>(result));

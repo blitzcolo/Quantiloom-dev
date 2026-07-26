@@ -681,6 +681,26 @@ Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
     return Result<void, String>::Err("No scene.gltf or scene.usd specified in config");
 }
 
+// Everything here frees GPU memory the previous scene owned before allocating
+// the replacement: UploadTextures destroys the old images and samplers,
+// BuildAccelerationStructures resets the BLAS list, the TLAS and every global
+// geometry buffer, and CreatePipeline destroys the old pipeline, descriptor
+// pool and SBT. A frame submitted by the host and still executing holds
+// references to all of it, and freeing underneath it faults the GPU.
+//
+// Resize() and RebuildAccelerationStructure() already wait for exactly this
+// reason; the full scene swap, which frees the most, was the one path that did
+// not. Loading a scene is not a hot path, so a full device wait is the right
+// instrument -- there is no per-frame cost to protect here.
+void ExternalRenderContext::RebuildSceneGpuResources() {
+    vkDeviceWaitIdle(m_impl->device);
+
+    m_impl->textureManager->UploadTextures(m_impl->scene->textures);
+    BuildAccelerationStructures();
+    UpdateGpuResources();
+    CreatePipeline();
+}
+
 Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltfPath) {
     QL_LOG_INFO("Loading glTF scene: {}", gltfPath);
 
@@ -695,15 +715,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
     m_impl->camera = m_impl->scene->camera;
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
 
-    // Upload textures
-    m_impl->textureManager->UploadTextures(m_impl->scene->textures);
-
-    // Build acceleration structures and GPU resources
-    BuildAccelerationStructures();
-    UpdateGpuResources();
-
-    // Create ray tracing pipeline
-    CreatePipeline();
+    RebuildSceneGpuResources();
 
     m_impl->isReady = true;
     // Via ResetAccumulation() rather than clearing the counter directly, so the
@@ -732,15 +744,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPa
     m_impl->camera = m_impl->scene->camera;
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
 
-    // Upload textures
-    m_impl->textureManager->UploadTextures(m_impl->scene->textures);
-
-    // Build acceleration structures and GPU resources
-    BuildAccelerationStructures();
-    UpdateGpuResources();
-
-    // Create ray tracing pipeline
-    CreatePipeline();
+    RebuildSceneGpuResources();
 
     m_impl->isReady = true;
     // Via ResetAccumulation() rather than clearing the counter directly, so the
@@ -1643,6 +1647,10 @@ f32 ExternalRenderContext::GetLastFrameTimeMs() const {
 
 bool ExternalRenderContext::IsReady() const {
     return m_impl->isReady;
+}
+
+const String& ExternalRenderContext::GetPipelineCachePath() const {
+    return m_impl->pipelineCachePath;
 }
 
 Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {

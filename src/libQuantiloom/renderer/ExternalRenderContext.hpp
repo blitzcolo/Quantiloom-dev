@@ -614,6 +614,16 @@ public:
      */
     [[nodiscard]] bool IsReady() const;
 
+    /**
+     * @brief Absolute path of the pipeline cache file this context reads and writes
+     *
+     * Resolved once at Create() from InitParams::pipelineCacheDir or the
+     * platform default. Hosts that want to know whether shader compilation will
+     * be slow should test this path rather than reconstructing the policy --
+     * a host-side copy of it silently rots when the default moves.
+     */
+    [[nodiscard]] const String& GetPipelineCachePath() const;
+
     // ========================================================================
     // Debug Pixel Reading
     // ========================================================================
@@ -657,6 +667,12 @@ private:
 
     // Initialize internal resources
     Result<void, String> Initialize(const InitParams& params);
+
+    // Replace every GPU resource derived from the scene: textures, acceleration
+    // structures, geometry buffers, materials, pipeline. Waits for the device
+    // first -- see the comment on the definition. Both scene loaders go through
+    // this rather than repeating the sequence.
+    void RebuildSceneGpuResources();
 
     // Build acceleration structures from current scene
     void BuildAccelerationStructures();
