@@ -25,3 +25,9 @@ The binary reruns in ~3 s with no rebuild. Only rebuild after changing C++ under
 A red test is not automatically a code bug. No CI runs this suite, so tests can be
 stale relative to deliberate physics corrections — check `git log` on both the test
 and the implementation before "fixing" code. See the `run-tests` skill.
+
+## Commits
+
+**No Claude Code session link in a commit message.** No `Claude-Session:` trailer,
+no `https://claude.ai/code/...` URL, in the subject, the body or a trailer. Same for
+PR descriptions.

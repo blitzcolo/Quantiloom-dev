@@ -23,3 +23,9 @@ renumbered) or it is silently never compiled.
 
 `.rgen` / `.rchit` / `.rmiss` ray tracing stages, `.comp` and `.comp.hlsl` compute,
 `.hlsli` shared headers (included, never compiled standalone).
+
+## Commits
+
+**No Claude Code session link in a commit message.** No `Claude-Session:` trailer,
+no `https://claude.ai/code/...` URL, in the subject, the body or a trailer. Same for
+PR descriptions.

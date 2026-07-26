@@ -27,3 +27,9 @@ appears to have no effect in the GUI.
 Windows is the primary target, but this code must stay buildable with MSVC, GCC, and
 Clang (`std::filesystem` over `\\` paths, exact `#include` casing, no MSVC-only
 constructs). The `build-and-install` skill has the full rules.
+
+## Commits
+
+**No Claude Code session link in a commit message.** No `Claude-Session:` trailer,
+no `https://claude.ai/code/...` URL, in the subject, the body or a trailer. Same for
+PR descriptions.

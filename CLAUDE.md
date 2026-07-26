@@ -52,5 +52,8 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 ## Conventions
 
 - Commits: Conventional Commits — `feat:`, `fix(shaders):`, `chore:`.
+- **No Claude Code session link in a commit message.** No `Claude-Session:` trailer,
+  no `https://claude.ai/code/...` URL, in the subject, the body or a trailer. Same for
+  PR descriptions.
 - clang-tidy runs through clangd via `.clang-tidy` — warnings surface as you edit,
   there is no separate lint command. No formatter is configured; match nearby style.
