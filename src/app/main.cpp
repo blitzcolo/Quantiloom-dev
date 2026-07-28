@@ -431,24 +431,8 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         // Create Output Image
         // ====================================================================
-        QL_LOG_INFO("Creating output image ({}x{})...", width, height);
-
-        GpuImage outputImage(
-            context.GetAllocator(),
-            context.GetDevice(),
-            width, height,
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-
-        CommandHelper::TransitionImageLayoutImmediate(
-            context,
-            outputImage.GetImage(),
-            outputImage.GetFormat(),
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
+        auto outputImagePtr = rendercore::CreateRenderTarget(context, width, height);
+        GpuImage& outputImage = *outputImagePtr;
 
         // ====================================================================
         // Create LUT Buffer (Dual Mode: RGB + Spectral)

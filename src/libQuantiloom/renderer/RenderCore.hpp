@@ -326,4 +326,16 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
                                                f32 wavelengthNm,
                                                const Vector<MaterialGpuIndices>& indices = {});
 
+/**
+ * @brief Create the ray tracing target: an RGBA32F storage image in GENERAL layout
+ *
+ * Recreated rather than resized, since a Vulkan image's extent is fixed at creation.
+ * The caller rebinds it — the descriptor still points at the old view.
+ *
+ * @note One shape, three call sites: the context creates it at start-up and again on
+ *       every Resize(), and the CLI creates one per run. All three specified the same
+ *       format, usage and initial transition; only the surrounding code differed.
+ */
+std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 height);
+
 } // namespace quantiloom::rendercore

@@ -892,4 +892,28 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
     return buffer;
 }
 
+// ============================================================================
+// Render target
+// ============================================================================
+
+std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width,
+                                             const u32 height) {
+    QL_LOG_INFO("Creating output image ({}x{})...", width, height);
+
+    auto image = std::make_unique<GpuImage>(
+        ctx.GetAllocator(), ctx.GetDevice(),
+        width, height,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    // GENERAL because the ray generation shader writes it as a storage image; it is
+    // never sampled, only blitted or copied out.
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, image->GetImage(), image->GetFormat(),
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+
+    return image;
+}
+
 }  // namespace quantiloom::rendercore

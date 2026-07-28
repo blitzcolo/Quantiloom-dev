@@ -624,23 +624,7 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     // Initialize default lighting params
     lightingParams = CreateDefaultLightingParams();
 
-    // Create output image
-    outputImage = std::make_unique<GpuImage>(
-        contextAdapter->GetAllocator(),
-        contextAdapter->GetDevice(),
-        params.width, params.height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Transition output image to GENERAL layout
-    TransitionImageLayoutImmediate(
-        outputImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
+    outputImage = rendercore::CreateRenderTarget(*contextAdapter, params.width, params.height);
 
     // Create lighting params buffer
     lightingParamsBuffer = std::make_unique<GpuBuffer>(
@@ -1099,22 +1083,8 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
     // Wait for GPU
     vkDeviceWaitIdle(m_impl->device);
 
-    // Recreate output image
-    m_impl->outputImage = std::make_unique<GpuImage>(
-        m_impl->contextAdapter->GetAllocator(),
-        m_impl->contextAdapter->GetDevice(),
-        width, height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    m_impl->TransitionImageLayoutImmediate(
-        m_impl->outputImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
+    m_impl->outputImage =
+        rendercore::CreateRenderTarget(*m_impl->contextAdapter, width, height);
 
     // Re-bind output image
     if (m_impl->pipeline) {

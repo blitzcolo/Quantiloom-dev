@@ -12,6 +12,7 @@
 
 #include "support/VulkanTestDevice.hpp"
 
+#include "renderer/GpuImage.hpp"
 #include "renderer/RenderCore.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "scene/Scene.hpp"
@@ -151,4 +152,33 @@ TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
     auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
 
     EXPECT_FALSE(geometry.IsValid()) << "nothing to trace is not an empty TLAS";
+}
+
+// ============================================================================
+// CreateRenderTarget
+// ============================================================================
+// Three call sites specified this image independently -- the context at start-up and
+// again on every Resize, the CLI once per run -- so the format and usage are worth
+// stating once where a change to them fails loudly.
+
+TEST_F(VulkanDeviceTest, RenderTargetIsAStorageImageAtTheRequestedExtent) {
+    auto target = rendercore::CreateRenderTarget(Device(), 64, 32);
+
+    ASSERT_NE(target, nullptr);
+    EXPECT_EQ(target->GetExtent().width, 64u);
+    EXPECT_EQ(target->GetExtent().height, 32u);
+    EXPECT_EQ(target->GetFormat(), VK_FORMAT_R32G32B32A32_SFLOAT)
+        << "the accumulation target has to hold HDR radiance";
+    EXPECT_NE(target->GetView(), VK_NULL_HANDLE);
+}
+
+// Resize recreates rather than resizes, because a Vulkan image's extent is fixed.
+TEST_F(VulkanDeviceTest, RenderTargetsAtDifferentExtentsAreDistinctImages) {
+    auto first = rendercore::CreateRenderTarget(Device(), 32, 32);
+    auto second = rendercore::CreateRenderTarget(Device(), 64, 64);
+
+    ASSERT_NE(first, nullptr);
+    ASSERT_NE(second, nullptr);
+    EXPECT_NE(first->GetImage(), second->GetImage());
+    EXPECT_EQ(second->GetExtent().width, 64u);
 }
