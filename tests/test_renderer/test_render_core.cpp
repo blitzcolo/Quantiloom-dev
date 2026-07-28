@@ -16,6 +16,8 @@
 #include "renderer/RenderCore.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 
 using namespace quantiloom;
 
@@ -108,4 +110,78 @@ TEST(RenderCoreEquirectToCubemap, BrightMeridianLandsOnPlusXFace) {
     EXPECT_GT(FaceMean(faces[0]), FaceMean(faces[1])) << "+X brighter than -X";
     EXPECT_GT(FaceMean(faces[0]), FaceMean(faces[4])) << "+X brighter than +Z";
     EXPECT_GT(FaceMean(faces[0]), FaceMean(faces[5])) << "+X brighter than -Z";
+}
+
+// ============================================================================
+// LoadSceneFromConfig
+// ============================================================================
+// The two implementations this merged had diverged in three ways, and each one
+// below pins the resolution. Only the file-less paths are covered here: loading a
+// glTF or USD is the loaders' own contract, tested in test_io.
+
+namespace {
+
+Config ConfigFrom(const std::string& toml) {
+    const auto path = std::filesystem::temp_directory_path() /
+                      "quantiloom_rendercore_scene_test.toml";
+    std::ofstream(path) << toml;
+    auto cfg = Config::Load(path);
+    EXPECT_TRUE(cfg.has_value()) << (cfg.has_value() ? "" : cfg.error());
+    return std::move(cfg.value());
+}
+
+}  // namespace
+
+// ExternalRenderContext::LoadScene used to reject anything without scene.gltf or
+// scene.usd, so a procedural TOML rendered from the CLI but could not open in the
+// GUI. The merged loader keeps the CLI's superset.
+TEST(RenderCoreLoadSceneFromConfig, BuildsTheNamedPreset) {
+    for (const char* preset : {"cornell_box", "multi_object", "lighting_test"}) {
+        const auto cfg = ConfigFrom(std::string("[scene]\npreset = \"") + preset + "\"\n");
+        auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+        ASSERT_TRUE(scene.has_value()) << preset;
+        EXPECT_EQ(scene.value().name, preset);
+        ASSERT_EQ(scene.value().meshes.size(), 1u);
+        EXPECT_GT(scene.value().GetTotalTriangleCount(), 0u) << preset;
+        ASSERT_EQ(scene.value().nodes.size(), 1u);
+        EXPECT_EQ(scene.value().nodes[0].meshIndex, 0u);
+    }
+}
+
+TEST(RenderCoreLoadSceneFromConfig, UnknownPresetFallsBackToCornellBox) {
+    const auto cfg = ConfigFrom("[scene]\npreset = \"no_such_preset\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_TRUE(scene.has_value());
+    EXPECT_EQ(scene.value().name, "cornell_box");
+    EXPECT_GT(scene.value().GetTotalTriangleCount(), 0u);
+}
+
+TEST(RenderCoreLoadSceneFromConfig, NoSceneKeyFallsBackToCornellBox) {
+    const auto cfg = ConfigFrom("[render]\nwidth = 64\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_TRUE(scene.has_value());
+    EXPECT_EQ(scene.value().name, "cornell_box");
+}
+
+// Precedence: the CLI took the USD when a config named both, the render context took
+// the glTF. The CLI's order survived, so a config naming both reports a USD failure
+// rather than silently rendering the glTF.
+TEST(RenderCoreLoadSceneFromConfig, UsdTakesPrecedenceOverGltf) {
+    const auto cfg = ConfigFrom(
+        "[scene]\nusd = \"no_such_file.usdc\"\ngltf = \"no_such_file.gltf\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_FALSE(scene.has_value());
+    EXPECT_NE(scene.error().find("USD"), std::string::npos) << scene.error();
+}
+
+TEST(RenderCoreLoadSceneFromConfig, ReportsAMissingSceneFile) {
+    const auto cfg = ConfigFrom("[scene]\ngltf = \"no_such_file.gltf\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_FALSE(scene.has_value());
+    EXPECT_NE(scene.error().find("glTF"), std::string::npos) << scene.error();
 }

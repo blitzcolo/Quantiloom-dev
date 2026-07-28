@@ -28,7 +28,6 @@
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
 #include "scene/Camera.hpp"
-#include "SceneBuilder.hpp"
 #include "postprocess/GenericSensor.hpp"
 #include "renderer/RenderCore.hpp"
 #include "postprocess/PostprocessConfig.hpp"
@@ -66,9 +65,7 @@ using namespace quantiloom;
 // ============================================================================
 
 // Everything from here to main() is private to this translation unit. The
-// anonymous namespace gives it internal linkage without repeating `static`,
-// and keeps these names out of the link with libQuantiloom -- note that the
-// library already has an unrelated ExternalRenderContext::LoadSceneFromConfig.
+// anonymous namespace gives it internal linkage without repeating `static`.
 namespace {
 
 struct InstanceGeometryInfoCPU {
@@ -82,88 +79,6 @@ struct InstanceGeometryInfoCPU {
 };
 
 static_assert(sizeof(InstanceGeometryInfoCPU) == 32, "InstanceGeometryInfoCPU size mismatch");
-
-// ============================================================================
-// Scene Loading Helper
-// ============================================================================
-
-// Load scene from config file
-// Returns either procedural scene or glTF-loaded scene
-// For glTF scenes, also populates materials and textures
-Result<Scene> LoadSceneFromConfig(const Config& config) {
-    Scene scene;
-
-    // Check for USD file (OpenUSD: .usd, .usda, .usdc, .usdz)
-    if (config.Has("scene.usd")) {
-        auto usdPath = config.Get<String>("scene.usd");
-        QL_LOG_INFO("Loading USD scene: {}", usdPath);
-
-        auto result = UsdLoader::LoadFromFile(usdPath);
-        if (!result.has_value()) {
-            return Result<Scene>(Result<Scene>::Err("Failed to load USD: " + result.error()));
-        }
-
-        return Result(std::move(result.value()));
-    }
-
-    // Check for glTF file
-    if (config.Has("scene.gltf")) {
-        auto gltfPath = config.Get<String>("scene.gltf");
-        QL_LOG_INFO("Loading glTF model: {}", gltfPath);
-
-        auto result = GltfLoader::LoadFromFile(gltfPath);
-        if (!result.has_value()) {
-            return Result<Scene>(Result<Scene>::Err("Failed to load glTF: " + result.error()));
-        }
-
-        return Result(std::move(result.value()));
-    }
-
-    // Check for procedural preset
-    if (config.Has("scene.preset")) {
-        auto preset = config.Get<String>("scene.preset", "cornell_box");
-        QL_LOG_INFO("Loading built-in scene preset: {}", preset);
-
-        Mesh mesh;
-        if (preset == "cornell_box") {
-            mesh = TestScenes::CreateCornellBoxScene();
-        } else if (preset == "multi_object") {
-            mesh = TestScenes::CreateMultiObjectScene();
-        } else if (preset == "lighting_test") {
-            mesh = TestScenes::CreateLightingTestScene();
-        } else {
-            QL_LOG_WARN("Unknown scene preset '{}', defaulting to cornell_box", preset);
-            mesh = TestScenes::CreateCornellBoxScene();
-        }
-
-        // Wrap in Scene
-        scene.name = preset;
-        scene.meshes.push_back(std::move(mesh));
-
-        // Create single node with identity transform
-        SceneNode node;
-        node.meshIndex = 0;
-        node.transform = glm::mat4(1.0f);
-        node.name = "SceneRoot";
-        scene.nodes.push_back(node);
-
-        return Result(std::move(scene));
-    }
-
-    // Default: Cornell box
-    QL_LOG_WARN("No scene specified in config, using cornell_box preset");
-    Mesh mesh = TestScenes::CreateCornellBoxScene();
-    scene.name = "cornell_box";
-    scene.meshes.push_back(std::move(mesh));
-
-    SceneNode node;
-    node.meshIndex = 0;
-    node.transform = glm::mat4(1.0f);
-    node.name = "SceneRoot";
-    scene.nodes.push_back(node);
-
-    return Result(std::move(scene));
-}
 
 // ============================================================================
 // Main Entry Point
@@ -414,7 +329,7 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Loading scene...");
 
-        auto sceneResult = LoadSceneFromConfig(config);
+        auto sceneResult = rendercore::LoadSceneFromConfig(config);
         if (!sceneResult.has_value()) {
             QL_LOG_ERROR("Failed to load scene: {}", sceneResult.error());
             return 1;

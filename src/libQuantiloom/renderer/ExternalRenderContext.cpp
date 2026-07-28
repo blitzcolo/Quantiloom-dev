@@ -519,6 +519,8 @@ struct ExternalRenderContext::Impl {
     // structures, geometry buffers, materials, pipeline. Waits for the device
     // first -- see the comment on the definition. Both scene loaders go through
     // this rather than repeating the sequence.
+    void AdoptScene(Scene&& loaded);
+
     void RebuildSceneGpuResources();
 
     void BuildAccelerationStructures();
@@ -706,19 +708,13 @@ Result<void, String> ExternalRenderContext::LoadSceneFromConfig(const String& co
 }
 
 Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
-    // Check for glTF file
-    if (config.Has("scene.gltf")) {
-        auto gltfPath = config.Get<String>("scene.gltf");
-        return LoadSceneFromGltf(gltfPath);
+    auto scene = rendercore::LoadSceneFromConfig(config);
+    if (!scene.has_value()) {
+        return Result<void, String>::Err(scene.error());
     }
-
-    // Check for USD file
-    if (config.Has("scene.usd")) {
-        auto usdPath = config.Get<String>("scene.usd");
-        return LoadSceneFromUsd(usdPath);
-    }
-
-    return Result<void, String>::Err("No scene.gltf or scene.usd specified in config");
+    m_impl->AdoptScene(std::move(scene.value()));
+    ResetAccumulation();
+    return Result<void, String>::Ok();
 }
 
 // Everything here frees GPU memory the previous scene owned before allocating
@@ -732,6 +728,23 @@ Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
 // reason; the full scene swap, which frees the most, was the one path that did
 // not. Loading a scene is not a hot path, so a full device wait is the right
 // instrument -- there is no per-frame cost to protect here.
+// Take ownership of a freshly loaded scene and rebuild everything derived from it.
+// Shared by the three loaders, which had identical tails.
+void ExternalRenderContext::Impl::AdoptScene(Scene&& loaded) {
+    scene = std::make_unique<Scene>(std::move(loaded));
+
+    // Setup camera from scene
+    camera = scene->camera;
+    camera.SetAspectRatio(static_cast<f32>(width) / static_cast<f32>(height));
+
+    RebuildSceneGpuResources();
+
+    isReady = true;
+
+    QL_LOG_INFO("Scene loaded: {} meshes, {} materials, {} textures",
+                scene->meshes.size(), scene->materials.size(), scene->textures.size());
+}
+
 void ExternalRenderContext::Impl::RebuildSceneGpuResources() {
     vkDeviceWaitIdle(device);
 
@@ -749,15 +762,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
         return Result<void, String>::Err("Failed to load glTF: " + result.error());
     }
 
-    m_impl->scene = std::make_unique<Scene>(std::move(result.value()));
-
-    // Setup camera from scene
-    m_impl->camera = m_impl->scene->camera;
-    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
-
-    m_impl->RebuildSceneGpuResources();
-
-    m_impl->isReady = true;
+    m_impl->AdoptScene(std::move(result.value()));
     // Via ResetAccumulation() rather than clearing the counter directly, so the
     // sampling sequence restarts with it.
     ResetAccumulation();
@@ -778,15 +783,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPa
         return Result<void, String>::Err("Failed to load USD: " + result.error());
     }
 
-    m_impl->scene = std::make_unique<Scene>(std::move(result.value()));
-
-    // Setup camera from scene
-    m_impl->camera = m_impl->scene->camera;
-    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
-
-    m_impl->RebuildSceneGpuResources();
-
-    m_impl->isReady = true;
+    m_impl->AdoptScene(std::move(result.value()));
     // Via ResetAccumulation() rather than clearing the counter directly, so the
     // sampling sequence restarts with it.
     ResetAccumulation();

@@ -27,10 +27,32 @@
 
 #pragma once
 
+#include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "scene/Scene.hpp"
 
 namespace quantiloom::rendercore {
+
+/**
+ * @brief Build a Scene from a parsed TOML scene configuration
+ *
+ * Resolves, in order: `scene.usd`, `scene.gltf`, `scene.preset`, then a Cornell box
+ * with a warning. Loading files is all this does -- no GPU resources are touched, so
+ * both the offline path and the interactive context can call it before they have a
+ * device.
+ *
+ * @note Merged from two implementations that had drifted. The CLI's supported
+ *       presets and fell back to a Cornell box; ExternalRenderContext::LoadScene
+ *       supported neither and rejected any config without scene.gltf or scene.usd,
+ *       which is why a procedural TOML renders from the CLI but would not open in
+ *       the GUI. The CLI's superset is what survived.
+ * @note The two also disagreed on precedence when a config names both a USD and a
+ *       glTF file: the CLI took the USD, the context took the glTF. No config in
+ *       assets/configs does both, so the case was unreachable either way; the CLI's
+ *       order is kept because it is the one covered by a render test.
+ */
+Result<Scene, String> LoadSceneFromConfig(const Config& config);
 
 /**
  * @brief Convert an equirectangular (latitude-longitude) environment map to cubemap faces
