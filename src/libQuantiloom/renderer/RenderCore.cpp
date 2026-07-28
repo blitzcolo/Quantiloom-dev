@@ -2,6 +2,7 @@
 
 #include "core/Log.hpp"
 #include "io/GltfLoader.hpp"
+#include "io/ImageIO.hpp"
 #include "io/UsdLoader.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
@@ -255,6 +256,231 @@ BrdfLut BrdfLut::Create(VulkanContext& ctx,
         QL_LOG_ERROR("Failed to create BRDF LUT sampler");
         result.m_sampler = VK_NULL_HANDLE;
     }
+
+    return result;
+}
+
+// ============================================================================
+// EnvironmentCubemap
+// ============================================================================
+
+namespace {
+
+// Upload one face of one mip level. Each call stages and submits on its own; the
+// cubemap is built once per scene load, so the simplicity is worth more than the
+// batching.
+void UploadCubemapLevel(VulkanContext& ctx, GpuImage& target, u32 face, u32 mip,
+                        u32 size, const std::vector<f32>& rgba) {
+    const VkDeviceSize bytes = rgba.size() * sizeof(f32);
+    GpuBuffer staging(ctx.GetAllocator(), bytes,
+                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    staging.Upload(rgba.data(), bytes);
+
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = mip;
+        region.imageSubresource.baseArrayLayer = face;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {size, size, 1};
+
+        vkCmdCopyBufferToImage(cmd, staging.GetHandle(), target.GetImage(),
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    });
+}
+
+// A face of N texels supports floor(log2(N)) + 1 levels. Asking for more is invalid
+// Vulkan, and the downsample below would divide by a zero-width previous level --
+// the shipped 512 with 8 levels stays clear of both, which is why neither
+// implementation this replaced ever tripped over it.
+EnvironmentCubemap::Params ClampToFaceSize(EnvironmentCubemap::Params p) {
+    u32 maxLevels = 1;
+    for (u32 size = p.faceSize; size > 1; size >>= 1) {
+        ++maxLevels;
+    }
+    if (p.mipLevels > maxLevels) {
+        QL_LOG_WARN("Environment cubemap: {} mip levels requested for a {}x{} face, "
+                    "clamping to {}", p.mipLevels, p.faceSize, p.faceSize, maxLevels);
+        p.mipLevels = maxLevels;
+    }
+    if (p.mipLevels == 0) {
+        p.mipLevels = 1;
+    }
+    return p;
+}
+
+std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx,
+                                             const EnvironmentCubemap::Params& p) {
+    auto image = std::make_unique<GpuImage>(
+        ctx.GetAllocator(), ctx.GetDevice(),
+        p.faceSize, p.faceSize,
+        VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY,
+        p.mipLevels,
+        6,
+        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
+        VK_IMAGE_VIEW_TYPE_CUBE);
+
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        p.mipLevels, 6);
+
+    return image;
+}
+
+// Box-filter one mip level out of the base face.
+//
+// Sampling the base rather than the previous level is an approximation both
+// implementations made, and it is kept: the whole chain is a placeholder for GGX
+// prefiltering. What is not kept is how the CLI addressed it -- it indexed the base
+// face's buffer with the *previous mip's* width as the row stride, so from mip 2
+// onwards it read a skewed slice of the base face's top-left corner rather than the
+// whole face. Stepping in face coordinates is what the context did, and it is right.
+std::vector<f32> DownsampleFace(const Image& baseFace, u32 baseSize, u32 mip) {
+    u32 mipSize = baseSize >> mip;
+    if (mipSize == 0) mipSize = 1;
+    const u32 prevMipSize = baseSize >> (mip - 1);
+    const u32 stride = baseSize / prevMipSize;
+
+    std::vector<f32> out(static_cast<size_t>(mipSize) * mipSize * 4);
+    for (u32 y = 0; y < mipSize; ++y) {
+        for (u32 x = 0; x < mipSize; ++x) {
+            glm::vec3 sum(0.0f);
+            u32 count = 0;
+            for (u32 dy = 0; dy < 2 && (y * 2 + dy) < prevMipSize; ++dy) {
+                for (u32 dx = 0; dx < 2 && (x * 2 + dx) < prevMipSize; ++dx) {
+                    const u32 sx = std::min((x * 2 + dx) * stride, baseSize - 1);
+                    const u32 sy = std::min((y * 2 + dy) * stride, baseSize - 1);
+                    sum += glm::vec3(baseFace(sx, sy, 0), baseFace(sx, sy, 1),
+                                     baseFace(sx, sy, 2));
+                    ++count;
+                }
+            }
+            if (count > 0) {
+                sum /= static_cast<f32>(count);
+            }
+
+            const size_t idx = (static_cast<size_t>(y) * mipSize + x) * 4;
+            out[idx + 0] = sum.r;
+            out[idx + 1] = sum.g;
+            out[idx + 2] = sum.b;
+            out[idx + 3] = 1.0f;
+        }
+    }
+    return out;
+}
+
+std::vector<f32> FaceToRgba(const Image& face, u32 size) {
+    std::vector<f32> out(static_cast<size_t>(size) * size * 4);
+    for (u32 y = 0; y < size; ++y) {
+        for (u32 x = 0; x < size; ++x) {
+            const size_t idx = (static_cast<size_t>(y) * size + x) * 4;
+            out[idx + 0] = face(x, y, 0);
+            out[idx + 1] = face(x, y, 1);
+            out[idx + 2] = face(x, y, 2);
+            out[idx + 3] = 1.0f;
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+EnvironmentCubemap::~EnvironmentCubemap() = default;
+EnvironmentCubemap::EnvironmentCubemap(EnvironmentCubemap&&) noexcept = default;
+EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&&) noexcept = default;
+
+VkImageView EnvironmentCubemap::View() const {
+    return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+}
+
+Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
+                                                            const String& path,
+                                                            const Params& requested) {
+    QL_LOG_INFO("Loading environment map: {}", path);
+    const Params params = ClampToFaceSize(requested);
+
+    if (!ImageIO::FileExists(path)) {
+        return Result<EnvironmentCubemap, String>::Err(
+            "Environment map file not found: " + path);
+    }
+
+    auto equirect = ImageIO::ReadImage(path);
+    if (!equirect.has_value()) {
+        return Result<EnvironmentCubemap, String>::Err(
+            "Failed to load environment map: " + path);
+    }
+    QL_LOG_INFO("  HDR image loaded: {}x{}, {} channels",
+                equirect->width, equirect->height, equirect->channels);
+
+    const Vector<Image> faces = EquirectToCubemap(equirect.value(), params.faceSize);
+
+    EnvironmentCubemap result;
+    result.m_faceSize = params.faceSize;
+    result.m_mipLevels = params.mipLevels;
+    result.m_image = CreateCubemapImage(ctx, params);
+
+    QL_LOG_INFO("  Uploading cubemap to GPU...");
+    for (u32 face = 0; face < 6; ++face) {
+        UploadCubemapLevel(ctx, *result.m_image, face, 0, params.faceSize,
+                           FaceToRgba(faces[face], params.faceSize));
+    }
+
+    QL_LOG_INFO("  Generating mipmap chain...");
+    for (u32 mip = 1; mip < params.mipLevels; ++mip) {
+        u32 mipSize = params.faceSize >> mip;
+        if (mipSize == 0) mipSize = 1;
+        for (u32 face = 0; face < 6; ++face) {
+            UploadCubemapLevel(ctx, *result.m_image, face, mip, mipSize,
+                               DownsampleFace(faces[face], params.faceSize, mip));
+        }
+    }
+
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, result.m_image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        params.mipLevels, 6);
+
+    QL_LOG_INFO("Environment map loaded successfully: {}", path);
+    return Result<EnvironmentCubemap, String>(std::move(result));
+}
+
+EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params& requested) {
+    const Params params = ClampToFaceSize(requested);
+    QL_LOG_INFO("Creating fallback sky-blue environment map ({}x{} per face)...",
+                params.faceSize, params.faceSize);
+
+    constexpr f32 kSky[4] = {0.5f, 0.7f, 1.0f, 1.0f};
+
+    EnvironmentCubemap result;
+    result.m_faceSize = params.faceSize;
+    result.m_mipLevels = params.mipLevels;
+    result.m_image = CreateCubemapImage(ctx, params);
+
+    // Uniform colour, so every level is filled directly rather than downsampled.
+    for (u32 mip = 0; mip < params.mipLevels; ++mip) {
+        u32 mipSize = params.faceSize >> mip;
+        if (mipSize == 0) mipSize = 1;
+
+        std::vector<f32> level(static_cast<size_t>(mipSize) * mipSize * 4);
+        for (size_t i = 0; i < static_cast<size_t>(mipSize) * mipSize; ++i) {
+            level[i * 4 + 0] = kSky[0];
+            level[i * 4 + 1] = kSky[1];
+            level[i * 4 + 2] = kSky[2];
+            level[i * 4 + 3] = kSky[3];
+        }
+
+        for (u32 face = 0; face < 6; ++face) {
+            UploadCubemapLevel(ctx, *result.m_image, face, mip, mipSize, level);
+        }
+    }
+
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, result.m_image->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        params.mipLevels, 6);
 
     return result;
 }

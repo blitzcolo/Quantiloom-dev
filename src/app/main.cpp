@@ -1281,222 +1281,27 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Creating prefiltered environment map for IBL...");
 
-        // Load environment map (equirectangular EXR)
-        auto envMapPath = config.Get<String>("renderer.environment_map", "");
-        std::vector<Image> cubemapFaces;
-        u32 envMapSize = 256;  // Default cubemap face size
-        constexpr u32 envMapMips = 5;  // Mip chain for roughness levels (roughness 0.0 to 1.0)
-
-        if (!envMapPath.empty() && ImageIO::FileExists(envMapPath)) {
-            QL_LOG_INFO("  Loading environment map from: {}", envMapPath);
-
-            auto equirectOpt = ImageIO::ReadEXR(envMapPath);
-            if (equirectOpt.has_value()) {
-                Image& equirect = equirectOpt.value();
-                QL_LOG_INFO("  Environment map loaded: {}x{}, {} channels",
-                           equirect.width, equirect.height, equirect.channels);
-
-                // Convert to cubemap (use 512x512 per face for EXR input)
-                envMapSize = 512;
-                cubemapFaces = rendercore::EquirectToCubemap(equirect, envMapSize);
-            } else {
-                QL_LOG_WARN("  Failed to load environment map from {}, using fallback", envMapPath);
-                envMapPath = "";  // Trigger fallback
-            }
-        } else {
-            if (!envMapPath.empty()) {
-                QL_LOG_WARN("  Environment map not found: {}, using fallback", envMapPath);
-            } else {
-                QL_LOG_INFO("  No environment map specified in config, using fallback");
-            }
-        }
-
-        // Fallback: sky-blue cubemap if no EXR loaded
+        // Falls back to sky blue when the config names no map, or names one that
+        // will not load. Load() reads through ImageIO::ReadImage, so .hdr and the
+        // LDR formats work as well as .exr -- this used to call ReadEXR directly
+        // and take the fallback for anything else.
+        const auto envMapPath = config.Get<String>("renderer.environment_map", "");
+        rendercore::EnvironmentCubemap envMap;
         if (envMapPath.empty()) {
-            QL_LOG_INFO("  Creating fallback sky-blue cubemap ({}x{} per face)...", envMapSize, envMapSize);
-            cubemapFaces.resize(6);
-            for (u32 face = 0; face < 6; ++face) {
-                cubemapFaces[face] = Image(envMapSize, envMapSize, 3);
-                // Sky-blue color: soft blue gradient
-                constexpr f32 skyColor[3] = {0.5f, 0.7f, 1.0f};
-                for (u32 y = 0; y < envMapSize; ++y) {
-                    for (u32 x = 0; x < envMapSize; ++x) {
-                        cubemapFaces[face](x, y, 0) = skyColor[0];
-                        cubemapFaces[face](x, y, 1) = skyColor[1];
-                        cubemapFaces[face](x, y, 2) = skyColor[2];
-                    }
-                }
+            QL_LOG_INFO("  No environment map specified in config, using fallback");
+            envMap = rendercore::EnvironmentCubemap::Fallback(context);
+        } else {
+            auto loaded = rendercore::EnvironmentCubemap::Load(context, envMapPath);
+            if (loaded.has_value()) {
+                envMap = std::move(loaded.value());
+            } else {
+                QL_LOG_WARN("  {}, using fallback", loaded.error());
+                envMap = rendercore::EnvironmentCubemap::Fallback(context);
             }
         }
 
-        // Create cubemap image using GpuImage wrapper
-        GpuImage envMapImage(
-            context.GetAllocator(),
-            context.GetDevice(),
-            envMapSize, envMapSize,
-            VK_FORMAT_R32G32B32A32_SFLOAT,  // RGBA32F (HDR)
-            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY,
-            envMapMips,
-            6,                                      // 6 faces for cubemap
-            VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,   // Cubemap flag
-            VK_IMAGE_VIEW_TYPE_CUBE                // Cubemap view type
-        );
-
-        // Transition image to TRANSFER_DST for upload
-        CommandHelper::TransitionImageLayoutImmediate(
-            context,
-            envMapImage.GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            envMapMips,
-            6  // All 6 cubemap faces
-        );
-
-        // Upload cubemap faces to GPU (mip level 0 only; TODO: generate mipchain for roughness)
-        QL_LOG_INFO("  Uploading cubemap to GPU ({} faces, {}x{} per face)...", cubemapFaces.size(), envMapSize, envMapSize);
-        {
-            for (u32 face = 0; face < 6; ++face) {
-                const Image& faceImage = cubemapFaces[face];
-
-                // Convert RGB to RGBA (add alpha = 1.0)
-                // Widen before multiplying: envMapSize comes from the scene config,
-                // and u32 arithmetic wraps to 0 at 32768x32768x4.
-                std::vector<f32> pixelData(static_cast<size_t>(envMapSize) * envMapSize * 4);
-                for (u32 y = 0; y < envMapSize; ++y) {
-                    for (u32 x = 0; x < envMapSize; ++x) {
-                        u32 idx = (y * envMapSize + x) * 4;
-                        pixelData[idx + 0] = faceImage(x, y, 0);  // R
-                        pixelData[idx + 1] = faceImage(x, y, 1);  // G
-                        pixelData[idx + 2] = faceImage(x, y, 2);  // B
-                        pixelData[idx + 3] = 1.0f;                // A
-                    }
-                }
-
-                // Create staging buffer for this face
-                VkDeviceSize bufferSize = pixelData.size() * sizeof(f32);
-                GpuBuffer stagingBuffer(
-                    context.GetAllocator(),
-                    bufferSize,
-                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                    VMA_MEMORY_USAGE_CPU_TO_GPU
-                );
-                stagingBuffer.Upload(pixelData.data(), bufferSize);
-
-                // Upload to mip level 0
-                CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-                    VkBufferImageCopy region{};
-                    region.bufferOffset = 0;
-                    region.bufferRowLength = 0;  // Tightly packed
-                    region.bufferImageHeight = 0;
-                    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                    region.imageSubresource.mipLevel = 0;  // Base mip level
-                    region.imageSubresource.baseArrayLayer = face;
-                    region.imageSubresource.layerCount = 1;
-                    region.imageOffset = {0, 0, 0};
-                    region.imageExtent = {envMapSize, envMapSize, 1};
-
-                    vkCmdCopyBufferToImage(
-                        cmd,
-                        stagingBuffer.GetHandle(),
-                        envMapImage.GetImage(),
-                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                        1,
-                        &region
-                    );
-                });
-            }
-
-            // Generate mipmaps for remaining levels (simple box filter)
-            // TODO (M2): Replace with proper GGX prefiltering for PBR
-            QL_LOG_INFO("  Generating mipmap chain (simple downsampling)...");
-            for (u32 mip = 1; mip < envMapMips; ++mip) {
-                u32 mipSize = envMapSize >> mip;  // Divide by 2^mip
-                if (mipSize == 0) mipSize = 1;
-
-                // For now, just copy the base level (no actual filtering)
-                // TODO: Implement proper mipmap generation with GGX kernel
-                for (u32 face = 0; face < 6; ++face) {
-                    // Create downsampled data (simple box filter)
-                    std::vector<f32> mipData(static_cast<size_t>(mipSize) * mipSize * 4);
-                    u32 prevMipSize = envMapSize >> (mip - 1);
-
-                    for (u32 y = 0; y < mipSize; ++y) {
-                        for (u32 x = 0; x < mipSize; ++x) {
-                            // Sample 2x2 region from previous mip level
-                            u32 srcX = x * 2;
-                            u32 srcY = y * 2;
-                            glm::vec4 sum(0.0f);
-                            for (u32 dy = 0; dy < 2 && (srcY + dy) < prevMipSize; ++dy) {
-                                for (u32 dx = 0; dx < 2 && (srcX + dx) < prevMipSize; ++dx) {
-                                    u32 srcIdx = ((srcY + dy) * prevMipSize + (srcX + dx));
-                                    if (srcIdx < cubemapFaces[face].PixelCount()) {
-                                        sum.r += cubemapFaces[face].data[srcIdx * 3 + 0];
-                                        sum.g += cubemapFaces[face].data[srcIdx * 3 + 1];
-                                        sum.b += cubemapFaces[face].data[srcIdx * 3 + 2];
-                                        sum.a += 1.0f;
-                                    }
-                                }
-                            }
-                            sum /= 4.0f;
-
-                            u32 dstIdx = (y * mipSize + x) * 4;
-                            mipData[dstIdx + 0] = sum.r;
-                            mipData[dstIdx + 1] = sum.g;
-                            mipData[dstIdx + 2] = sum.b;
-                            mipData[dstIdx + 3] = 1.0f;
-                        }
-                    }
-
-                    // Upload this mip level
-                    VkDeviceSize bufferSize = mipData.size() * sizeof(f32);
-                    GpuBuffer stagingBuffer(
-                        context.GetAllocator(),
-                        bufferSize,
-                        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                        VMA_MEMORY_USAGE_CPU_TO_GPU
-                    );
-                    stagingBuffer.Upload(mipData.data(), bufferSize);
-
-                    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-                        VkBufferImageCopy region{};
-                        region.bufferOffset = 0;
-                        region.bufferRowLength = 0;
-                        region.bufferImageHeight = 0;
-                        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                        region.imageSubresource.mipLevel = mip;
-                        region.imageSubresource.baseArrayLayer = face;
-                        region.imageSubresource.layerCount = 1;
-                        region.imageOffset = {0, 0, 0};
-                        region.imageExtent = {mipSize, mipSize, 1};
-
-                        vkCmdCopyBufferToImage(
-                            cmd,
-                            stagingBuffer.GetHandle(),
-                            envMapImage.GetImage(),
-                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                            1,
-                            &region
-                        );
-                    });
-                }
-            }
-        }
-
-        // Transition image to SHADER_READ_ONLY for sampling
-        CommandHelper::TransitionImageLayoutImmediate(
-            context,
-            envMapImage.GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            envMapMips,
-            6  // All 6 cubemap faces
-        );
-
-        QL_LOG_INFO("  Prefiltered environment map created ({}x{} per face, {} mip levels)",
-                    envMapSize, envMapSize, envMapMips);
+        QL_LOG_INFO("  Prefiltered environment map ready ({}x{} per face, {} mip levels)",
+                    envMap.FaceSize(), envMap.FaceSize(), envMap.MipLevels());
 
         // ====================================================================
         // Create Ray Tracing Pipeline
@@ -1619,7 +1424,7 @@ int RunApp(int argc, char* argv[]) {
         // Binding 10: Prefiltered environment cubemap (with mip chain for roughness)
         // Binding 11: BRDF integration LUT (2D texture)
         // Binding 12: IBL sampler (shared by both textures)
-        pipeline.BindPrefilteredEnvMap(envMapImage.GetView());               // Binding 10
+        pipeline.BindPrefilteredEnvMap(envMap.View());                       // Binding 10
         pipeline.BindBRDFLut(brdfLut.View(), brdfLut.Sampler());  // Binding 11, 12
 
         // Bind spectral curves buffer (binding 13)
@@ -2146,7 +1951,7 @@ int RunApp(int argc, char* argv[]) {
             RayTracingPipeline::DestroyPipelineCache(context, pipelineCache);
         }
 
-        // Note: envMapImage (GpuImage) will be automatically destroyed by RAII
+        // Note: envMap (EnvironmentCubemap) will be automatically destroyed by RAII
 
     } catch (const std::exception& e) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());

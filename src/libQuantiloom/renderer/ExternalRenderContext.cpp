@@ -200,7 +200,7 @@ struct ExternalRenderContext::Impl {
 
     // IBL resources
     rendercore::BrdfLut brdfLut;
-    std::unique_ptr<GpuImage> envMapImage;
+    rendercore::EnvironmentCubemap envMap;
 
     // Texture manager
     std::unique_ptr<TextureManager> textureManager;
@@ -342,7 +342,7 @@ struct ExternalRenderContext::Impl {
         // with the rest of the GPU resources rather than deferring to Impl's own.
         brdfLut = {};
 
-        envMapImage.reset();
+        envMap = {};
 
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
@@ -2416,96 +2416,7 @@ void ExternalRenderContext::Impl::CreateBRDFLut() {
 }
 
 void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
-    QL_LOG_INFO("Creating fallback environment map...");
-
-    auto allocator = contextAdapter->GetAllocator();
-    auto device = contextAdapter->GetDevice();
-
-    constexpr u32 envMapSize = 256;
-    constexpr u32 envMapMips = 5;
-
-    envMapImage = std::make_unique<GpuImage>(
-        allocator,
-        device,
-        envMapSize, envMapSize,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        envMapMips,
-        6,
-        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
-        VK_IMAGE_VIEW_TYPE_CUBE
-    );
-
-    // Transition to TRANSFER_DST
-    CommandHelper::TransitionImageLayoutImmediate(
-        *contextAdapter,
-        envMapImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        envMapMips,
-        6
-    );
-
-    // Create sky-blue fallback data and upload for all faces/mips
-    constexpr f32 skyColor[4] = {0.5f, 0.7f, 1.0f, 1.0f};
-
-    for (u32 mip = 0; mip < envMapMips; ++mip) {
-        u32 mipSize = envMapSize >> mip;
-        if (mipSize == 0) mipSize = 1;
-
-        std::vector<f32> pixelData(mipSize * mipSize * 4);
-        for (u32 i = 0; i < mipSize * mipSize; ++i) {
-            pixelData[i * 4 + 0] = skyColor[0];
-            pixelData[i * 4 + 1] = skyColor[1];
-            pixelData[i * 4 + 2] = skyColor[2];
-            pixelData[i * 4 + 3] = skyColor[3];
-        }
-
-        GpuBuffer stagingBuffer(
-            allocator,
-            pixelData.size() * sizeof(f32),
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-        stagingBuffer.Upload(pixelData.data(), pixelData.size() * sizeof(f32));
-
-        for (u32 face = 0; face < 6; ++face) {
-            CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-                VkBufferImageCopy region{};
-                region.bufferOffset = 0;
-                region.bufferRowLength = 0;
-                region.bufferImageHeight = 0;
-                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                region.imageSubresource.mipLevel = mip;
-                region.imageSubresource.baseArrayLayer = face;
-                region.imageSubresource.layerCount = 1;
-                region.imageOffset = {0, 0, 0};
-                region.imageExtent = {mipSize, mipSize, 1};
-
-                vkCmdCopyBufferToImage(
-                    cmd,
-                    stagingBuffer.GetHandle(),
-                    envMapImage->GetImage(),
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    1,
-                    &region
-                );
-            });
-        }
-    }
-
-    // Transition to SHADER_READ_ONLY
-    CommandHelper::TransitionImageLayoutImmediate(
-        *contextAdapter,
-        envMapImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        envMapMips,
-        6
-    );
+    envMap = rendercore::EnvironmentCubemap::Fallback(*contextAdapter);
 }
 
 void ExternalRenderContext::Impl::CreatePipeline() {
@@ -2563,7 +2474,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     );
 
     // Bind IBL
-    pipeline->BindPrefilteredEnvMap(envMapImage->GetView());
+    pipeline->BindPrefilteredEnvMap(envMap.View());
     pipeline->BindBRDFLut(brdfLut.View(), brdfLut.Sampler());
 
     // Bind optional buffers
@@ -4330,201 +4241,21 @@ const AtmosphereNNConfig& ExternalRenderContext::GetAtmosphere() const {
 // ============================================================================
 
 Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdrPath) {
-    QL_LOG_INFO("Loading environment map: {}", hdrPath);
-
-    // Check if file exists
-    if (!ImageIO::FileExists(hdrPath)) {
-        return Result<void, String>::Err("Environment map file not found: " + hdrPath);
-    }
-
-    // Load HDR image
-    auto equirectOpt = ImageIO::ReadImage(hdrPath);
-    if (!equirectOpt.has_value()) {
-        return Result<void, String>::Err("Failed to load HDR image: " + hdrPath);
-    }
-
-    Image& equirect = equirectOpt.value();
-    QL_LOG_INFO("  HDR image loaded: {}x{}, {} channels",
-                equirect.width, equirect.height, equirect.channels);
-
-    // Convert equirectangular to cubemap. Shared with the CLI -- this used to be a
-    // pair of lambdas here whose vertical mapping was the mirror of the CLI's, so the
-    // GUI rendered every environment map upside down. See rendercore::EquirectToCubemap.
-    constexpr u32 envMapSize = 512;
-    constexpr u32 envMapMips = 8;
-
-    const Vector<Image> cubemapFaces = rendercore::EquirectToCubemap(equirect, envMapSize);
-
-    // Wait for GPU
+    // The previous scene's cubemap is freed below; a frame the host submitted may
+    // still be reading it.
     vkDeviceWaitIdle(m_impl->device);
 
-    auto allocator = m_impl->contextAdapter->GetAllocator();
-
-    // Recreate GPU environment map
-    m_impl->envMapImage.reset();
-    m_impl->envMapImage = std::make_unique<GpuImage>(
-        allocator,
-        m_impl->device,
-        envMapSize, envMapSize,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY,
-        envMapMips,
-        6,
-        VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT,
-        VK_IMAGE_VIEW_TYPE_CUBE
-    );
-
-    // Transition to TRANSFER_DST
-    CommandHelper::TransitionImageLayoutImmediate(
-        *m_impl->contextAdapter,
-        m_impl->envMapImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        envMapMips,
-        6
-    );
-
-    // Upload base mip level (mip 0)
-    QL_LOG_INFO("  Uploading cubemap to GPU...");
-    for (u32 face = 0; face < 6; ++face) {
-        const Image& faceImage = cubemapFaces[face];
-
-        std::vector<f32> pixelData(envMapSize * envMapSize * 4);
-        for (u32 y = 0; y < envMapSize; ++y) {
-            for (u32 x = 0; x < envMapSize; ++x) {
-                u32 idx = (y * envMapSize + x) * 4;
-                pixelData[idx + 0] = faceImage(x, y, 0);
-                pixelData[idx + 1] = faceImage(x, y, 1);
-                pixelData[idx + 2] = faceImage(x, y, 2);
-                pixelData[idx + 3] = 1.0f;
-            }
-        }
-
-        GpuBuffer stagingBuffer(
-            allocator,
-            pixelData.size() * sizeof(f32),
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-        stagingBuffer.Upload(pixelData.data(), pixelData.size() * sizeof(f32));
-
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = 0;
-            region.bufferRowLength = 0;
-            region.bufferImageHeight = 0;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = face;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = {0, 0, 0};
-            region.imageExtent = {envMapSize, envMapSize, 1};
-
-            vkCmdCopyBufferToImage(
-                cmd,
-                stagingBuffer.GetHandle(),
-                m_impl->envMapImage->GetImage(),
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1,
-                &region
-            );
-        });
+    auto loaded = rendercore::EnvironmentCubemap::Load(*m_impl->contextAdapter, hdrPath);
+    if (!loaded.has_value()) {
+        return Result<void, String>::Err(loaded.error());
     }
+    m_impl->envMap = std::move(loaded.value());
 
-    // Generate simple mipmaps (box filter)
-    QL_LOG_INFO("  Generating mipmap chain...");
-    for (u32 mip = 1; mip < envMapMips; ++mip) {
-        u32 mipSize = envMapSize >> mip;
-        if (mipSize == 0) mipSize = 1;
-        u32 prevMipSize = envMapSize >> (mip - 1);
-
-        for (u32 face = 0; face < 6; ++face) {
-            std::vector<f32> mipData(mipSize * mipSize * 4);
-            const Image& baseFace = cubemapFaces[face];
-
-            for (u32 y = 0; y < mipSize; ++y) {
-                for (u32 x = 0; x < mipSize; ++x) {
-                    glm::vec4 sum(0.0f);
-                    u32 srcX = x * 2;
-                    u32 srcY = y * 2;
-                    u32 count = 0;
-                    for (u32 dy = 0; dy < 2 && (srcY + dy) < prevMipSize; ++dy) {
-                        for (u32 dx = 0; dx < 2 && (srcX + dx) < prevMipSize; ++dx) {
-                            // Sample from base face (approximation)
-                            u32 sx = std::min((srcX + dx) * (envMapSize / prevMipSize), envMapSize - 1);
-                            u32 sy = std::min((srcY + dy) * (envMapSize / prevMipSize), envMapSize - 1);
-                            sum.r += baseFace(sx, sy, 0);
-                            sum.g += baseFace(sx, sy, 1);
-                            sum.b += baseFace(sx, sy, 2);
-                            sum.a += 1.0f;
-                            count++;
-                        }
-                    }
-                    if (count > 0) {
-                        sum /= static_cast<f32>(count);
-                    }
-                    u32 idx = (y * mipSize + x) * 4;
-                    mipData[idx + 0] = sum.r;
-                    mipData[idx + 1] = sum.g;
-                    mipData[idx + 2] = sum.b;
-                    mipData[idx + 3] = 1.0f;
-                }
-            }
-
-            GpuBuffer stagingBuffer(
-                allocator,
-                mipData.size() * sizeof(f32),
-                VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU
-            );
-            stagingBuffer.Upload(mipData.data(), mipData.size() * sizeof(f32));
-
-            CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-                VkBufferImageCopy region{};
-                region.bufferOffset = 0;
-                region.bufferRowLength = 0;
-                region.bufferImageHeight = 0;
-                region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-                region.imageSubresource.mipLevel = mip;
-                region.imageSubresource.baseArrayLayer = face;
-                region.imageSubresource.layerCount = 1;
-                region.imageOffset = {0, 0, 0};
-                region.imageExtent = {mipSize, mipSize, 1};
-
-                vkCmdCopyBufferToImage(
-                    cmd,
-                    stagingBuffer.GetHandle(),
-                    m_impl->envMapImage->GetImage(),
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                    1,
-                    &region
-                );
-            });
-        }
-    }
-
-    // Transition to SHADER_READ_ONLY
-    CommandHelper::TransitionImageLayoutImmediate(
-        *m_impl->contextAdapter,
-        m_impl->envMapImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-        envMapMips,
-        6
-    );
-
-    // Re-bind to pipeline if exists
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMapImage->GetView());
+        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View());
     }
-
     m_impl->hasCustomEnvMap = true;
     ResetAccumulation();
-
-    QL_LOG_INFO("Environment map loaded successfully: {}", hdrPath);
     return Result<void, String>::Ok();
 }
 

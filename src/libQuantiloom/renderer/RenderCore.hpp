@@ -133,4 +133,59 @@ private:
     u32 m_resolution = 0;
 };
 
+/**
+ * @brief The IBL environment cubemap: six faces with a mip chain, ready to bind
+ *
+ * The mip chain stands in for GGX prefiltering, which neither implementation this
+ * replaced actually did -- both carried a TODO. The shader reads the level count at
+ * runtime (`GetDimensions`) and maps `lod = roughness * (numMips - 1)`, so the level
+ * count is a quality knob rather than a contract: more levels means a rougher
+ * surface reaches a blurrier level.
+ */
+class EnvironmentCubemap {
+public:
+    struct Params {
+        u32 faceSize = 512;
+        /// Clamped to what faceSize supports -- see MipLevels() for what was used.
+        u32 mipLevels = 8;
+    };
+
+    /// What a scene with no environment map configured gets: uniform sky blue.
+    static constexpr Params kFallbackParams{256, 5};
+
+    EnvironmentCubemap() = default;
+    // Out of line: GpuImage is only forward declared here, so the destructor cannot
+    // be implicit -- it would need the complete type at every use site.
+    ~EnvironmentCubemap();
+    EnvironmentCubemap(EnvironmentCubemap&&) noexcept;
+    EnvironmentCubemap& operator=(EnvironmentCubemap&&) noexcept;
+    EnvironmentCubemap(const EnvironmentCubemap&) = delete;
+    EnvironmentCubemap& operator=(const EnvironmentCubemap&) = delete;
+
+    /**
+     * @brief Load an equirectangular HDR image and convert it to a cubemap
+     *
+     * @note Reads through ImageIO::ReadImage, so .exr, .hdr and the LDR formats all
+     *       work. The CLI used to call ReadEXR directly and silently fall back to
+     *       sky blue for anything else.
+     */
+    static Result<EnvironmentCubemap, String> Load(VulkanContext& ctx,
+                                                   const String& path,
+                                                   const Params& requested = {});
+
+    /// Uniform sky blue, for a scene that configures no environment map.
+    static EnvironmentCubemap Fallback(VulkanContext& ctx,
+                                       const Params& requested = kFallbackParams);
+
+    [[nodiscard]] bool IsValid() const { return m_image != nullptr; }
+    [[nodiscard]] VkImageView View() const;
+    [[nodiscard]] u32 FaceSize() const { return m_faceSize; }
+    [[nodiscard]] u32 MipLevels() const { return m_mipLevels; }
+
+private:
+    std::unique_ptr<GpuImage> m_image;
+    u32 m_faceSize = 0;
+    u32 m_mipLevels = 0;
+};
+
 } // namespace quantiloom::rendercore
