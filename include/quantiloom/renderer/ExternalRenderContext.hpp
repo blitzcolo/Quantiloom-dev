@@ -46,6 +46,7 @@
 #include "renderer/LightingParams.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
+#include "core/SpectralData.hpp"
 #include "postprocess/SensorModel.hpp"
 
 #include <vulkan/vulkan.h>
@@ -587,6 +588,37 @@ public:
      * assigned to Material::complexRefractiveIndexIndex before calling UpdateMaterial().
      */
     i32 AddComplexRefractiveIndex(const ComplexRefractiveIndex& cri);
+
+    /**
+     * @brief Add a measured spectral reflectance curve for quantitative rendering
+     * @param curve CPU-side wavelength/value pairs; resampled to a uniform grid
+     * @return Index into the spectral curve buffer, or -1 if the curve is unusable
+     *
+     * Assign the result to Material::spectralReflectanceCurveIndex and call
+     * UpdateMaterial() to make a material use it. A material left at -1 keeps the
+     * RGB-upsampled fallback, which is what every material gets by default -- no
+     * scene loader sets this index.
+     *
+     * Same shape as AddComplexRefractiveIndex: appends, reuploads and rebinds.
+     */
+    i32 AddSpectralCurve(const SpectralCurve& curve);
+
+    /**
+     * @brief Set the solar and sky irradiance spectra used for quantitative lighting
+     * @param sunIrradiance Direct solar spectral irradiance (W/m^2/nm)
+     * @param skyIrradiance Diffuse sky spectral irradiance (W/m^2/nm)
+     *
+     * One LUT for the scene rather than an indexed set, so this replaces rather than
+     * appends.
+     *
+     * @warning Until this is called the LUT is **zero**, and a quantitative spectral
+     *          mode will render black for want of an illuminant. That is deliberate:
+     *          silently substituting a standard spectrum would make an unconfigured
+     *          scene look plausible while reporting radiance nobody asked for.
+     *          assets/luts/astmg173.csv holds AM1.5 if a caller wants that default.
+     */
+    void SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
+                             const SpectralCurve& skyIrradiance);
 
     /**
      * @brief Rebuild acceleration structure after scene changes

@@ -174,6 +174,7 @@ struct ExternalRenderContext::Impl {
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
+    std::vector<SpectralCurveGPU> spectralCurveEntries;
 
     // Merged global geometry buffers (for multi-BLAS support)
     // All BLAS geometry data is merged into single global buffers
@@ -1489,6 +1490,53 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
                 cri.wavelengths_nm.size());
 
     return index;
+}
+
+i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
+    if (!curve.IsValid()) {
+        QL_LOG_WARN("AddSpectralCurve: Invalid curve data");
+        return -1;
+    }
+
+    const i32 index = static_cast<i32>(m_impl->spectralCurveEntries.size());
+    m_impl->spectralCurveEntries.push_back(SpectralCurveGPU::FromCPU(curve));
+
+    const size_t bytes =
+        m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
+    m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+        m_impl->contextAdapter->GetAllocator(), bytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
+
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
+    }
+
+    QL_LOG_INFO("AddSpectralCurve: Added curve at index {} ({} curves total)",
+                index, m_impl->spectralCurveEntries.size());
+    return index;
+}
+
+void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
+                                                const SpectralCurve& skyIrradiance) {
+    if (!sunIrradiance.IsValid() && !skyIrradiance.IsValid()) {
+        QL_LOG_WARN("SetSolarSpectralLUT: Neither curve is usable, leaving the LUT as it was");
+        return;
+    }
+
+    const SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunIrradiance, skyIrradiance);
+
+    m_impl->solarLutBuffer = std::make_unique<GpuBuffer>(
+        m_impl->contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    m_impl->solarLutBuffer->Upload(&lut, sizeof(SolarSpectralLUT));
+
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
+    }
+
+    QL_LOG_INFO("SetSolarSpectralLUT: sun {} samples, sky {} samples",
+                lut.sunIrradiance.numSamples, lut.skyIrradiance.numSamples);
 }
 
 void ExternalRenderContext::RebuildAccelerationStructure() {

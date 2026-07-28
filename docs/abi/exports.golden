@@ -86,6 +86,7 @@ public: float quantiloom::Scene::GetBoundingBoxSize(void)const
 public: int quantiloom::Config::Get<int>(class std::basic_string_view<char,struct std::char_traits<char> >,int const &)const
 public: int quantiloom::Config::GetInt(class std::basic_string_view<char,struct std::char_traits<char> >,int)const
 public: int quantiloom::ExternalRenderContext::AddComplexRefractiveIndex(struct quantiloom::ComplexRefractiveIndex const &)
+public: int quantiloom::ExternalRenderContext::AddSpectralCurve(struct quantiloom::SpectralCurve const &)
 public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(struct quantiloom::AtmosphereNNConfig &&)
 public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(struct quantiloom::AtmosphereNNConfig const &)
 public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(void)
@@ -174,6 +175,7 @@ public: void quantiloom::ExternalRenderContext::SetNodeTransform(unsigned int,st
 public: void quantiloom::ExternalRenderContext::SetSPP(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetSamplingSeed(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetSkyRadiance(struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetSolarSpectralLUT(struct quantiloom::SpectralCurve const &,struct quantiloom::SpectralCurve const &)
 public: void quantiloom::ExternalRenderContext::SetSpectralMode(enum quantiloom::SpectralMode)
 public: void quantiloom::ExternalRenderContext::SetSunDirection(struct glm::vec<3,float,0> const &)
 public: void quantiloom::ExternalRenderContext::SetSunRadiance(struct glm::vec<3,float,0> const &)
