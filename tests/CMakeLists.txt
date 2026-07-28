@@ -158,6 +158,7 @@ if(QUANTILOOM_STANDALONE_TESTS)
     message(STATUS "Quantiloom root directory: ${QUANTILOOM_ROOT_DIR}")
 
     include_directories(
+        ${CMAKE_CURRENT_SOURCE_DIR}   # so tests can include "support/..."
         ${QUANTILOOM_ROOT_DIR}/src/libQuantiloom
         ${QUANTILOOM_ROOT_DIR}/vendor
     )
@@ -180,6 +181,7 @@ if(QUANTILOOM_STANDALONE_TESTS)
 else()
     # Subproject mode: use main project's include directories
     include_directories(
+        ${CMAKE_CURRENT_SOURCE_DIR}   # so tests can include "support/..."
         ${CMAKE_SOURCE_DIR}/src/libQuantiloom
         ${CMAKE_SOURCE_DIR}/vendor
     )
@@ -241,6 +243,12 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_acceleration_structure.cpp
     test_renderer/test_texture_manager.cpp
     test_renderer/test_render_core.cpp
+    test_renderer/test_vulkan_device.cpp
+)
+
+# Shared test infrastructure (headless Vulkan device, created on first use)
+set(TEST_SUPPORT_SOURCES
+    support/VulkanTestDevice.cpp
 )
 
 # Postprocess tests (sensor simulation, multiband fusion)
@@ -271,6 +279,7 @@ set(TEST_MAIN_SOURCE
 # Combine all test sources
 set(ALL_TEST_SOURCES
     ${TEST_MAIN_SOURCE}
+    ${TEST_SUPPORT_SOURCES}
     ${TEST_CORE_SOURCES}
     ${TEST_SCENE_SOURCES}
     ${TEST_IO_SOURCES}
