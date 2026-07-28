@@ -48,6 +48,8 @@
 #include <random>   // For C++11 random number generation
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>  // For std::getenv
+#include <vector>
 
 using namespace quantiloom;
 
@@ -75,6 +77,37 @@ namespace {
 
 void PrintVersion() {
     std::cout << "Quantiloom " << version::AppVersionString << "\n";
+}
+
+// Locates the atmosphere network weights when a scene names a preset but no
+// atmosphere.model_pack. The pack is a deployment artifact -- it is installed
+// with the library, ships in the SDK, and is copied next to Studio's
+// executable -- so requiring every scene to spell out a path to it made the
+// CLI refuse atmospheres that Studio rendered happily.
+//
+// Quantiloom-Qt has its own equivalent in QuantiloomVulkanRenderer, reading
+// the same environment variable; the two are deliberately host-side, since
+// where a host finds its assets is not the library's business.
+std::string ResolveDefaultAtmosModelPack(const char* argv0) {
+    namespace fs = std::filesystem;
+
+    std::vector<fs::path> candidates;
+    if (const char* env = std::getenv("QUANTILOOM_ATMOS_MODELS");
+        env && *env) {
+        candidates.emplace_back(env);
+    }
+    candidates.emplace_back("assets/atmos_models");  // Run from the repo root
+    if (argv0 && *argv0) {
+        std::error_code ec;
+        const fs::path exeDir = fs::absolute(fs::path(argv0), ec).parent_path();
+        if (!ec) candidates.push_back(exeDir / "assets" / "atmos_models");
+    }
+
+    for (const fs::path& dir : candidates) {
+        std::error_code ec;
+        if (fs::is_directory(dir, ec)) return dir.string();
+    }
+    return {};
 }
 
 void PrintBuildInfo() {
@@ -841,8 +874,20 @@ int RunApp(int argc, char* argv[]) {
         }
 
         AtmosphereNNConfig atmosphereConfig;
-        if (config.Has("atmosphere.model_pack")) {
-            atmosphereConfig.modelPackDir = config.Get<String>("atmosphere.model_pack");
+        // A scene opts in by naming either key. model_pack wins when both are
+        // present; naming only a preset falls back to the shipped weights, so
+        // that a config renders the same atmosphere here as it does in Studio.
+        if (config.Has("atmosphere.model_pack") || config.Has("atmosphere.preset")) {
+            atmosphereConfig.modelPackDir =
+                config.Has("atmosphere.model_pack")
+                    ? config.Get<String>("atmosphere.model_pack")
+                    : ResolveDefaultAtmosModelPack(argv[0]);
+            if (atmosphereConfig.modelPackDir.empty()) {
+                QL_LOG_ERROR("[atmosphere] names a preset but no model pack was found. "
+                             "Set atmosphere.model_pack, or point "
+                             "QUANTILOOM_ATMOS_MODELS at the weights.");
+                return 1;
+            }
             atmosphereConfig.enabled = true;
 
             auto presetName = config.Get<String>("atmosphere.preset", "clear");
@@ -907,12 +952,13 @@ int RunApp(int argc, char* argv[]) {
                     0.0);
             }
 
-            QL_LOG_INFO("  NN atmosphere: preset '{}', model pack '{}'",
-                        atmosphereConfig.preset, atmosphereConfig.modelPackDir);
+            QL_LOG_INFO("  NN atmosphere: preset '{}', model pack '{}'{}",
+                        atmosphereConfig.preset, atmosphereConfig.modelPackDir,
+                        config.Has("atmosphere.model_pack") ? "" : " (resolved)");
             QL_LOG_INFO("  Sun zenith {:.1f} deg, h1 {:.3f} km",
                         atmosphereConfig.sunZenithDeg, atmosphereConfig.h1Km);
         } else {
-            QL_LOG_INFO("  No [atmosphere] model_pack configured - atmosphere disabled");
+            QL_LOG_INFO("  No [atmosphere] section - atmosphere disabled");
         }
         if (atmosphereConfig.preset == "disabled") atmosphereConfig.enabled = false;
 

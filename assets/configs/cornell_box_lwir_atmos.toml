@@ -1,0 +1,57 @@
+# Cornell Box — LWIR with the NN atmosphere switched on
+#
+# Same scene as cornell_box_lwir.toml; the only addition is [atmosphere].
+# It exists because nothing else in either repository enables the NN
+# atmosphere, which left that whole path unrendered by both front ends.
+#
+# Two things it is meant to show:
+#
+#   * naming a preset is enough — the model pack is resolved from the shipped
+#     weights, so the CLI and Studio agree on when an atmosphere is on;
+#   * the sky's air temperature follows the preset (clear = 293.15 K), not
+#     lighting.atmosphere_temperature_k below, which survives only as the
+#     fallback for when the network is off. Open this in Studio and it should
+#     match the render this config produces.
+#
+# Geometry in mm; world_units_to_meters = 0.001.
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+output = "cornell_box_lwir_atmos.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+world_units_to_meters = 0.001
+default_temperature_k = 300.0
+
+[camera]
+position = [278.0, 273.0, -800.0]
+look_at  = [278.0, 273.0, 280.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 39.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+# Deliberately far from the preset's 293.15 K ground temperature, so that a
+# render using this value instead of the preset's is obvious rather than subtle.
+atmosphere_temperature_k = 200.0
+
+[atmosphere]
+preset = "clear"
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false
