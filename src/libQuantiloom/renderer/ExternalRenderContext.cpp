@@ -268,6 +268,7 @@ struct ExternalRenderContext::Impl {
     // GPU Sensor simulation resources
     bool gpuSensorEnabled = false;
     SensorParams gpuSensorParams;
+    bool gpuSensorWavelengthFromHost = false;
     std::unique_ptr<GpuImage> sensorImage;              // Sensor-processed output (noisy radiance)
     std::unique_ptr<GpuImage> sensorTempImage;          // Temporary image for multi-pass processing
     VkDescriptorSetLayout sensorDescriptorSetLayout = VK_NULL_HANDLE;
@@ -1722,6 +1723,13 @@ void ExternalRenderContext::SetGPUSensorEnabled(bool enabled) {
 void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
     m_impl->gpuSensorParams = params;
 
+    // A fused IR band supplies its own photon-energy wavelength unless the host
+    // asked for one. There is no "was it set" bit on SensorParams, so anything
+    // other than the default counts as deliberate -- which is the same reading the
+    // CLI takes from the config naming spectral.wavelength_nm or not.
+    m_impl->gpuSensorWavelengthFromHost =
+        params.wavelength_nm != SensorParams{}.wavelength_nm;
+
     // Initialize GPU sensor resources if not already done
     if (m_impl->gpuSensorEnabled && !m_impl->sensorInitialized) {
         m_impl->CreateGPUSensorPipeline();
@@ -2933,7 +2941,16 @@ void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32
         GenerateAndUploadFPNMaps();
     }
 
-    const auto& params = gpuSensorParams;
+    // A fused IR band renders per-nm average radiance and carries its own photon
+    // energy; recover both before the chain runs. Shared with the CLI, which applies
+    // the same adjustment to its CPU chain.
+    const rendercore::SensorBandAdjustment band =
+        rendercore::SensorAdjustmentForMode(spectralMode, gpuSensorWavelengthFromHost);
+
+    SensorParams params = gpuSensorParams;
+    if (band.wavelengthNm > 0.0f) {
+        params.wavelength_nm = band.wavelengthNm;
+    }
 
     // Helper: Insert pipeline barrier between compute passes
     auto insertBarrier = [cmd]() {
@@ -3090,7 +3107,8 @@ void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32
             u32 isTelecentric;
             u32 imageWidth;
             u32 imageHeight;
-            u32 padding[2];
+            f32 radianceScale;
+            u32 padding;
         } pushConstants;
 
         pushConstants.quantumEfficiency = params.quantumEfficiency;
@@ -3100,6 +3118,7 @@ void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32
         pushConstants.integrationTime_s = params.integrationTime_s;
         pushConstants.wellCapacity_e = params.wellCapacity_e;
         pushConstants.wavelength_nm = params.wavelength_nm;
+        pushConstants.radianceScale = band.radianceScale;
         pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
         pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
         pushConstants.enableVignetting = params.enableVignetting ? 1u : 0u;
@@ -3264,6 +3283,9 @@ void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32
         pushConstants.fNumber = params.fNumber;
         pushConstants.integrationTime_s = params.integrationTime_s;
         pushConstants.wavelength_nm = params.wavelength_nm;
+        // No radianceScale here: this pass inverts the electron conversion, and the
+        // CPU chain leaves its preview in band-integrated units too. Scaling at
+        // both ends would square it.
         pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
         pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
         pushConstants.imageWidth = width;

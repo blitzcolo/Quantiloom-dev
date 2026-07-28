@@ -40,7 +40,12 @@ struct SensorRadianceParams {
 
     uint imageWidth;              // Image width
     uint imageHeight;             // Image height
-    uint padding[2];
+
+    // Band-integrated radiance is what this pass wants; a fused-band render writes
+    // per-nm average radiance instead, so the host passes the band width here.
+    // 1.0 for modes that already write integrated radiance.
+    float radianceScale;
+    uint padding;
 };
 
 [[vk::push_constant]] SensorRadianceParams params;
@@ -76,8 +81,8 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
         return;
     }
 
-    // Sample input radiance (W·sr⁻¹·m⁻²)
-    float3 radiance = inputRadiance[coord].rgb;
+    // Sample input radiance and recover band-integrated units (W·sr⁻¹·m⁻²)
+    float3 radiance = inputRadiance[coord].rgb * params.radianceScale;
 
     // 1. Calculate pixel area (m²)
     float pixelArea_m2 = pow(params.pixelPitch_um * 1e-6, 2.0);

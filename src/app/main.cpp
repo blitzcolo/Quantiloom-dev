@@ -1451,16 +1451,18 @@ int RunApp(int argc, char* argv[]) {
             // sensor chain expects band-INTEGRATED radiance (W/sr/m^2).
             // Multiply by the band width here, and use the band center for
             // photon energy instead of the 550 nm visible-light default.
-            f32 bandScale = 1.0f;
-            if (IsIRFusedMode(spectral_mode)) {
-                if (auto band = GetFusedBandInfo(spectral_mode)) {
-                    bandScale = band->WidthNm();
-                    if (!config.Has("spectral.wavelength_nm")) {
-                        sensorParams.wavelength_nm = band->CenterNm();
-                    }
-                    QL_LOG_INFO("  IR sensor units: radiance x{:.0f} nm bandwidth, photon wavelength {:.0f} nm",
-                                bandScale, sensorParams.wavelength_nm);
-                }
+            // Shared with the interactive context, which did not do this at all --
+            // its IR sensor output was low by the band width times the photon-energy
+            // ratio, ~7e4 for LWIR.
+            const auto band = rendercore::SensorAdjustmentForMode(
+                spectral_mode, config.Has("spectral.wavelength_nm"));
+            const f32 bandScale = band.radianceScale;
+            if (band.wavelengthNm > 0.0f) {
+                sensorParams.wavelength_nm = band.wavelengthNm;
+            }
+            if (bandScale != 1.0f) {
+                QL_LOG_INFO("  IR sensor units: radiance x{:.0f} nm bandwidth, photon wavelength {:.0f} nm",
+                            bandScale, sensorParams.wavelength_nm);
             }
 
             // Create sensor model

@@ -102,3 +102,41 @@ TEST(RenderCoreConvertMaterial, CarriesThePbrFactorsThrough) {
     EXPECT_EQ(gpu.doubleSided, 1u);
     EXPECT_FLOAT_EQ(gpu.alphaCutoff, 0.3f);
 }
+
+// ============================================================================
+// SensorAdjustmentForMode
+// ============================================================================
+// A fused band renders per-nm average radiance and carries its own photon energy.
+// The CLI applied both corrections inline; ExternalRenderContext applied neither, so
+// the same scene through the same SensorParams was ~7e4 too dark in the GUI for LWIR.
+
+TEST(RenderCoreSensorAdjustment, RecoversBandIntegratedRadianceForIrBands) {
+    const auto lwir = rendercore::SensorAdjustmentForMode(SpectralMode::LWIR_Fused, false);
+    EXPECT_FLOAT_EQ(lwir.radianceScale, 4000.0f) << "LWIR spans 8000-12000 nm";
+    EXPECT_FLOAT_EQ(lwir.wavelengthNm, 10000.0f) << "photon energy at the band centre";
+
+    const auto mwir = rendercore::SensorAdjustmentForMode(SpectralMode::MWIR_Fused, false);
+    EXPECT_FLOAT_EQ(mwir.radianceScale, 2000.0f);
+    EXPECT_FLOAT_EQ(mwir.wavelengthNm, 4000.0f);
+}
+
+// VIS_Fused outputs CIE-integrated RGB rather than scalar band radiance, so neither
+// correction applies to it however fused it is.
+TEST(RenderCoreSensorAdjustment, LeavesNonIrModesAlone) {
+    for (const auto mode : {SpectralMode::RGB, SpectralMode::Single,
+                            SpectralMode::VIS_Fused}) {
+        const auto adjustment = rendercore::SensorAdjustmentForMode(mode, false);
+        EXPECT_FLOAT_EQ(adjustment.radianceScale, 1.0f);
+        EXPECT_FLOAT_EQ(adjustment.wavelengthNm, 0.0f) << "0 means leave it alone";
+    }
+}
+
+// The radiance scale is a property of how the renderer writes the band; a host
+// choosing its own photon wavelength does not change it.
+TEST(RenderCoreSensorAdjustment, KeepsAHostChosenWavelength) {
+    const auto adjustment =
+        rendercore::SensorAdjustmentForMode(SpectralMode::LWIR_Fused, true);
+
+    EXPECT_FLOAT_EQ(adjustment.wavelengthNm, 0.0f) << "0 leaves the caller's value";
+    EXPECT_FLOAT_EQ(adjustment.radianceScale, 4000.0f) << "the scale still applies";
+}

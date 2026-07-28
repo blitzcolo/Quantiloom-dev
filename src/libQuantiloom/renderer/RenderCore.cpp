@@ -977,4 +977,30 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     return pipeline;
 }
 
+// ============================================================================
+// Sensor band conditioning
+// ============================================================================
+
+SensorBandAdjustment SensorAdjustmentForMode(const SpectralMode mode,
+                                             const bool hostSetWavelength) {
+    SensorBandAdjustment adjustment;
+
+    // VIS_Fused is excluded on purpose: it outputs CIE-integrated RGB rather than
+    // scalar band radiance, so neither the scale nor the band centre applies.
+    if (!IsIRFusedMode(mode)) {
+        return adjustment;
+    }
+
+    const auto band = GetFusedBandInfo(mode);
+    if (!band.has_value()) {
+        return adjustment;
+    }
+
+    adjustment.radianceScale = band->WidthNm();
+    if (!hostSetWavelength) {
+        adjustment.wavelengthNm = band->CenterNm();
+    }
+    return adjustment;
+}
+
 }  // namespace quantiloom::rendercore

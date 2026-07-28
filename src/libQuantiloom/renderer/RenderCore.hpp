@@ -381,4 +381,34 @@ struct PipelineBindings {
 std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings);
 
+/**
+ * @brief How a fused-band render has to be conditioned before the sensor chain
+ *
+ * `core/Types.hpp` states the contract next to the band table: a fused-band render
+ * writes per-nm **average** spectral radiance, while the sensor chain wants
+ * band-**integrated** radiance and the band's own photon energy. Getting either
+ * wrong is not subtle -- for LWIR the two together are a factor of ~7e4.
+ *
+ * The CLI applied this inline and ExternalRenderContext did not apply it at all, so
+ * the same scene through the same SensorParams produced a black frame in the GUI and
+ * a correct one from the CLI.
+ */
+struct SensorBandAdjustment {
+    /// Multiply radiance by this before the chain. 1.0 outside the fused IR modes.
+    f32 radianceScale = 1.0f;
+    /// Wavelength for photon energy, or 0 to leave the caller's value alone.
+    f32 wavelengthNm = 0.0f;
+};
+
+/**
+ * @brief Derive the sensor conditioning for a spectral mode
+ *
+ * @param hostSetWavelength True when the caller supplied a wavelength on purpose, in
+ *                          which case it is left alone. The CLI reads this as "the
+ *                          config named spectral.wavelength_nm"; the interactive
+ *                          context as "the host passed something other than the
+ *                          SensorParams default".
+ */
+SensorBandAdjustment SensorAdjustmentForMode(SpectralMode mode, bool hostSetWavelength);
+
 } // namespace quantiloom::rendercore
