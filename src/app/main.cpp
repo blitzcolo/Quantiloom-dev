@@ -1142,81 +1142,29 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         // Create Ray Tracing Pipeline
         // ====================================================================
-        QL_LOG_INFO("Creating ray tracing pipeline...");
-
-        // Load pipeline cache for faster shader compilation on subsequent runs
         const std::string pipelineCachePath = "pipeline_cache.bin";
-        VkPipelineCache pipelineCache = RayTracingPipeline::LoadPipelineCache(context, pipelineCachePath);
+        VkPipelineCache pipelineCache =
+            RayTracingPipeline::LoadPipelineCache(context, pipelineCachePath);
 
-        RayTracingPipeline pipeline(
-            context,
-            "raygen.spv",
-            "closesthit.spv",
-            "miss.spv",
-            pipelineCache
-        );
+        rendercore::PipelineBindings bindings;
+        bindings.outputImage = &outputImage;
+        bindings.geometry = &geometry;
+        bindings.lightingParams = &lightingParamsBuffer;
+        bindings.materials = &materialBuffer;
+        bindings.textures = &textureManager;
+        bindings.environment = &envMap;
+        bindings.brdfLut = &brdfLut;
+        bindings.spectralCurves = spectralCurvesBuffer.get();
+        bindings.complexRefractiveIndex = criBuffer.get();
+        bindings.solarLut = solarSpectralLUTBuffer.get();
+        bindings.atmosphereHeader = atmosHeaderBuffer.get();
+        bindings.atmosphereData = atmosDataBuffer.get();
+        bindings.cieColourMatching = cieCMF_LUTBuffer.get();
 
-        // Bind resources in correct order (bindings 0-7)
-        pipeline.BindOutputImage(outputImage);                          // Binding 0
-        pipeline.BindAccelerationStructure(geometry.Tlas().GetHandle()); // Binding 1
-        pipeline.BindLUTBuffer(lightingParamsBuffer);                   // Binding 2 (LightingParams)
+        auto pipelinePtr =
+            rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
+        RayTracingPipeline& pipeline = *pipelinePtr;
 
-        // ====================================================================
-        // Merged Global Geometry Buffers (Bindings 3, 4, 8, 9, 16)
-        // ====================================================================
-        // The shader reads vertex/index/normal/uv/tangent data through
-        // InstanceGeometryInfo offsets that assume ONE merged buffer per
-        // attribute. Binding a single primitive's buffers while the offsets
-        // assume a merged layout makes every fetch beyond the first primitive
-        // read out of bounds: normals collapse to the (0,1,0) fallback and
-        // flip with the view ray, splitting the frame at the horizon.
-        // ====================================================================
-        pipeline.BindGeometryBuffers(geometry.Vertices(), geometry.Indices(),
-                                     &geometry.UVs());              // Bindings 3, 4, 8
-        pipeline.BindTangentBuffer(geometry.Tangents());            // Binding 9
-        pipeline.BindNormalBuffer(geometry.Normals());              // Binding 16
-
-        pipeline.BindMaterialBuffer(materialBuffer);                    // Binding 5
-        pipeline.BindTextures(textureManager.GetImageViews(),
-                              textureManager.GetSamplers());            // Bindings 6, 7
-
-        // ====================================================================
-        // Bind IBL (Image-Based Lighting) resources
-        // ====================================================================
-        // Binding 10: Prefiltered environment cubemap (with mip chain for roughness)
-        // Binding 11: BRDF integration LUT (2D texture)
-        // Binding 12: IBL sampler (shared by both textures)
-        pipeline.BindPrefilteredEnvMap(envMap.View(), envMap.Sampler());                       // Binding 10
-        pipeline.BindBRDFLut(brdfLut.View(), brdfLut.Sampler());  // Binding 11, 12
-
-        // Bind spectral curves buffer (binding 13)
-        pipeline.BindSpectralCurvesBuffer(spectralCurvesBuffer.get());
-
-        // Bind complex refractive index buffer (binding 14)
-        pipeline.BindComplexRefractiveIndexBuffer(criBuffer.get());
-
-        // Bind solar spectral LUT buffer (binding 15)
-        pipeline.BindSolarSpectralLUT(solarSpectralLUTBuffer.get());
-
-        // Bind atmospheric parameters buffer (binding 17)
-        pipeline.BindAtmosphereNN(atmosHeaderBuffer.get(), atmosDataBuffer.get());
-
-        // ====================================================================
-        // Create and Bind Instance Geometry Info Buffer (Binding 18)
-        // ====================================================================
-        // Each TLAS instance needs to know where its geometry data starts
-        // in the global buffers. For single-BLAS scenes, all offsets are 0.
-        // For multi-BLAS scenes, this would track cumulative offsets.
-        // ====================================================================
-        // Offsets come from the merged-buffer layout (one entry per unique
-        // primitive, in blasList order). Instances referencing the same mesh
-        // share offsets, matching TLAS AddInstance order = InstanceIndex().
-        pipeline.BindInstanceGeometryBuffer(geometry.InstanceInfo());  // Binding 18
-        QL_LOG_INFO("  Instance geometry buffer bound: {} instances", geometry.InstanceCount());
-
-        pipeline.BindCIE_CMF_LUT(*cieCMF_LUTBuffer);  // Binding 19
-
-        // Set camera parameters (with spectral wavelength and rendering mode)
         CameraData cameraData = camera.GetCameraData();
         cameraData.wavelength_nm = wavelength_nm;  // Override with config wavelength
         cameraData.spectral_mode = static_cast<u32>(spectral_mode);  // Set rendering mode

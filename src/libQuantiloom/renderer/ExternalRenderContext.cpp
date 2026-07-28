@@ -1914,69 +1914,28 @@ void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
 }
 
 void ExternalRenderContext::Impl::CreatePipeline() {
-    QL_LOG_INFO("Creating ray tracing pipeline...");
-
-    // Load or create pipeline cache for faster shader compilation
     if (pipelineCache == VK_NULL_HANDLE) {
-        pipelineCache = RayTracingPipeline::LoadPipelineCache(
-            *contextAdapter,
-            pipelineCachePath
-        );
+        pipelineCache = RayTracingPipeline::LoadPipelineCache(*contextAdapter,
+                                                              pipelineCachePath);
     }
 
-    // Create pipeline using context adapter with cache
-    pipeline = std::make_unique<RayTracingPipeline>(
-        *contextAdapter,
-        "raygen.spv",
-        "closesthit.spv",
-        "miss.spv",
-        pipelineCache
-    );
+    rendercore::PipelineBindings bindings;
+    bindings.outputImage = outputImage.get();
+    bindings.geometry = &geometry;
+    bindings.lightingParams = lightingParamsBuffer.get();
+    bindings.materials = materialBuffer.get();
+    bindings.textures = textureManager.get();
+    bindings.environment = &envMap;
+    bindings.brdfLut = &brdfLut;
+    bindings.spectralCurves = spectralCurvesBuffer.get();
+    bindings.complexRefractiveIndex = criBuffer.get();
+    bindings.solarLut = solarLutBuffer.get();
+    bindings.atmosphereHeader = atmosHeaderBuffer.get();
+    bindings.atmosphereData = atmosDataBuffer.get();
+    bindings.cieColourMatching = cieCmfBuffer.get();
 
-    // Bind resources
-    pipeline->BindOutputImage(*outputImage);
-    pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
-    pipeline->BindLUTBuffer(*lightingParamsBuffer);
-
-    // Bind merged global geometry buffers (instead of per-BLAS buffers)
-    if (geometry.IsValid()) {
-        pipeline->BindGeometryBuffers(geometry.Vertices(), geometry.Indices(),
-                                      &geometry.UVs());
-        pipeline->BindTangentBuffer(geometry.Tangents());
-        pipeline->BindNormalBuffer(geometry.Normals());
-        if (geometry.InstanceCount() > 0) {
-            pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
-        }
-    }
-
-    // Bind materials
-    if (materialBuffer) {
-        pipeline->BindMaterialBuffer(*materialBuffer);
-    }
-
-    // Bind textures
-    pipeline->BindTextures(
-        textureManager->GetImageViews(),
-        textureManager->GetSamplers()
-    );
-
-    // Bind IBL
-    pipeline->BindPrefilteredEnvMap(envMap.View(), envMap.Sampler());
-    pipeline->BindBRDFLut(brdfLut.View(), brdfLut.Sampler());
-
-    // Bind optional buffers
-    pipeline->BindSpectralCurvesBuffer(spectralCurvesBuffer.get());
-    pipeline->BindComplexRefractiveIndexBuffer(criBuffer.get());
-    pipeline->BindSolarSpectralLUT(solarLutBuffer.get());
-    pipeline->BindAtmosphereNN(atmosHeaderBuffer.get(),
-                                       atmosDataBuffer.get());
-
-    // Bind CIE CMF LUT (required for VIS_Fused spectral mode)
-    if (cieCmfBuffer) {
-        pipeline->BindCIE_CMF_LUT(*cieCmfBuffer);
-    }
-
-    QL_LOG_INFO("  Ray tracing pipeline created and bound");
+    pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
+                                                    bindings);
 }
 
 // ============================================================================

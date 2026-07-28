@@ -7,6 +7,8 @@
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuImage.hpp"
+#include "renderer/RayTracingPipeline.hpp"
+#include "renderer/TextureManager.hpp"
 #include "renderer/VulkanContext.hpp"
 
 #include <glm/glm.hpp>
@@ -914,6 +916,65 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width
         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
 
     return image;
+}
+
+// ============================================================================
+// Ray tracing pipeline
+// ============================================================================
+
+std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
+    VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings) {
+    QL_LOG_INFO("Creating ray tracing pipeline...");
+
+    auto pipeline = std::make_unique<RayTracingPipeline>(
+        ctx, "raygen.spv", "closesthit.spv", "miss.spv", cache);
+
+    if (bindings.outputImage) {
+        pipeline->BindOutputImage(*bindings.outputImage);            // 0
+    }
+    if (bindings.geometry && bindings.geometry->IsValid()) {
+        const SceneGeometry& geometry = *bindings.geometry;
+        pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());  // 1
+        pipeline->BindGeometryBuffers(geometry.Vertices(), geometry.Indices(),
+                                      &geometry.UVs());              // 3, 4, 8
+        pipeline->BindTangentBuffer(geometry.Tangents());            // 9
+        pipeline->BindNormalBuffer(geometry.Normals());              // 16
+        if (geometry.InstanceCount() > 0) {
+            pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());  // 18
+        }
+    }
+    if (bindings.lightingParams) {
+        pipeline->BindLUTBuffer(*bindings.lightingParams);           // 2
+    }
+    if (bindings.materials) {
+        pipeline->BindMaterialBuffer(*bindings.materials);           // 5
+    }
+    if (bindings.textures) {
+        pipeline->BindTextures(bindings.textures->GetImageViews(),
+                               bindings.textures->GetSamplers());    // 6, 7
+    }
+    if (bindings.environment) {
+        pipeline->BindPrefilteredEnvMap(bindings.environment->View(),
+                                        bindings.environment->Sampler());  // 10, 21
+    }
+    if (bindings.brdfLut) {
+        pipeline->BindBRDFLut(bindings.brdfLut->View(),
+                              bindings.brdfLut->Sampler());          // 11, 12
+    }
+
+    // These binders take a pointer and handle null themselves.
+    pipeline->BindSpectralCurvesBuffer(bindings.spectralCurves);     // 13
+    pipeline->BindComplexRefractiveIndexBuffer(bindings.complexRefractiveIndex);  // 14
+    pipeline->BindSolarSpectralLUT(bindings.solarLut);               // 15
+    pipeline->BindAtmosphereNN(bindings.atmosphereHeader,
+                               bindings.atmosphereData);             // 17, 20
+
+    if (bindings.cieColourMatching) {
+        pipeline->BindCIE_CMF_LUT(*bindings.cieColourMatching);      // 19
+    }
+
+    QL_LOG_INFO("  Ray tracing pipeline created and bound");
+    return pipeline;
 }
 
 }  // namespace quantiloom::rendercore

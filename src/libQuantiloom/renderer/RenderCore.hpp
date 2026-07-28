@@ -43,6 +43,8 @@
 
 namespace quantiloom {
 class GpuImage;
+class RayTracingPipeline;
+class TextureManager;
 class VulkanContext;
 }
 
@@ -337,5 +339,46 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
  *       format, usage and initial transition; only the surrounding code differed.
  */
 std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 height);
+
+/**
+ * @brief Everything the ray tracing pipeline binds, in one place
+ *
+ * The two front ends bound the same sixteen resources in two hand-written
+ * sequences. Naming the set once means a new binding is added where it is declared
+ * rather than in whichever sequence the author happened to be reading.
+ *
+ * Null members are skipped. `RayTracingPipeline`'s buffer binders already accept a
+ * null pointer for the optional spectral resources; the rest are simply not written.
+ */
+struct PipelineBindings {
+    const GpuImage* outputImage = nullptr;
+    const SceneGeometry* geometry = nullptr;
+    const GpuBuffer* lightingParams = nullptr;
+    const GpuBuffer* materials = nullptr;
+    const TextureManager* textures = nullptr;
+    const EnvironmentCubemap* environment = nullptr;
+    const BrdfLut* brdfLut = nullptr;
+
+    // Optional quantitative-spectral resources. The CLI loads these from the scene
+    // config; the interactive context binds zero-filled placeholders (see
+    // CreateDummyBuffers) except for the refractive index, which Qt fills through
+    // ExternalRenderContext::AddComplexRefractiveIndex.
+    const GpuBuffer* spectralCurves = nullptr;
+    const GpuBuffer* complexRefractiveIndex = nullptr;
+    const GpuBuffer* solarLut = nullptr;
+    const GpuBuffer* atmosphereHeader = nullptr;
+    const GpuBuffer* atmosphereData = nullptr;
+    const GpuBuffer* cieColourMatching = nullptr;
+};
+
+/**
+ * @brief Build the ray tracing pipeline and bind its resources
+ *
+ * @param cache Pipeline cache to build against; may be VK_NULL_HANDLE. The caller
+ *              owns it, because the two front ends keep it for different spans --
+ *              the context across scene reloads, the CLI for one run.
+ */
+std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
+    VulkanContext& ctx, VkPipelineCache cache, const PipelineBindings& bindings);
 
 } // namespace quantiloom::rendercore
