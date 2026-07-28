@@ -106,6 +106,8 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/renderer/LightingParams.hpp
     renderer/VulkanContextAdapter.cpp
     renderer/VulkanContextAdapter.hpp
+    renderer/RenderCore.cpp
+    renderer/RenderCore.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
 

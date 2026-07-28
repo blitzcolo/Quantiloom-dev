@@ -30,6 +30,7 @@
 #include "scene/Camera.hpp"
 #include "SceneBuilder.hpp"
 #include "postprocess/GenericSensor.hpp"
+#include "renderer/RenderCore.hpp"
 #include "postprocess/PostprocessConfig.hpp"
 #include "hs_core/HyperspectralRenderer.hpp"
 #include "hs_core/HyperspectralConfig.hpp"
@@ -81,107 +82,6 @@ struct InstanceGeometryInfoCPU {
 };
 
 static_assert(sizeof(InstanceGeometryInfoCPU) == 32, "InstanceGeometryInfoCPU size mismatch");
-
-// ============================================================================
-// Environment Map Helpers
-// ============================================================================
-
-// Convert equirectangular (latitude-longitude) to cubemap face direction
-// face: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
-// u, v: normalized coordinates [0, 1] within the face
-// Returns: 3D direction vector (unnormalized)
-inline glm::vec3 CubemapFaceDirection(u32 face, f32 u, f32 v) {
-    // Convert UV to [-1, +1] range
-    f32 x = 2.0f * u - 1.0f;
-    f32 y = 2.0f * v - 1.0f;
-
-    glm::vec3 dir;
-    switch (face) {
-        case 0: dir = glm::vec3( 1.0f,    -y,    -x); break;  // +X
-        case 1: dir = glm::vec3(-1.0f,    -y,     x); break;  // -X
-        case 2: dir = glm::vec3(    x,  1.0f,     y); break;  // +Y
-        case 3: dir = glm::vec3(    x, -1.0f,    -y); break;  // -Y
-        case 4: dir = glm::vec3(    x,    -y,  1.0f); break;  // +Z
-        case 5: dir = glm::vec3(   -x,    -y, -1.0f); break;  // -Z
-        default: dir = glm::vec3(0.0f, 0.0f, 0.0f); break;
-    }
-    return dir;
-}
-
-// Sample equirectangular map using direction vector
-// Returns RGB color from the equirect map
-inline glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
-    glm::vec3 normalized = glm::normalize(dir);
-
-    // Convert Cartesian direction to spherical coordinates (θ, φ)
-    // θ (theta): polar angle [0, π], φ (phi): azimuthal angle [0, 2π]
-    f32 theta = std::acos(normalized.y);         // [0, π]
-    f32 phi = std::atan2(normalized.z, normalized.x);  // [-π, π]
-
-    // Convert to UV coordinates [0, 1]
-    f32 u = (phi + glm::pi<f32>()) / (2.0f * glm::pi<f32>());  // [0, 1]
-    f32 v = theta / glm::pi<f32>();                             // [0, 1]
-
-    // Sample equirect with bilinear filtering
-    u32 width = equirect.width;
-    u32 height = equirect.height;
-
-    f32 fx = u * static_cast<f32>(width - 1);
-    f32 fy = v * static_cast<f32>(height - 1);
-
-    u32 x0 = static_cast<u32>(fx) % width;
-    u32 y0 = static_cast<u32>(fy) % height;
-    u32 x1 = (x0 + 1) % width;
-    u32 y1 = std::min(y0 + 1, height - 1);
-
-    f32 wx = fx - std::floor(fx);
-    f32 wy = fy - std::floor(fy);
-
-    // Bilinear interpolation (assume RGB channels = 3), done inline below.
-    glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
-    glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
-    glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
-    glm::vec3 c11(equirect(x1, y1, 0), equirect(x1, y1, 1), equirect(x1, y1, 2));
-
-    glm::vec3 c0 = c00 * (1.0f - wx) + c10 * wx;
-    glm::vec3 c1 = c01 * (1.0f - wx) + c11 * wx;
-
-    return c0 * (1.0f - wy) + c1 * wy;
-}
-
-// Convert equirectangular image to cubemap faces
-// Returns vector of 6 images (one per face), each with faceSize×faceSize resolution
-std::vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize) {
-    QL_LOG_INFO("Converting equirectangular map to cubemap ({}x{} per face)...", faceSize, faceSize);
-
-    std::vector<Image> faces(6);
-
-    for (u32 face = 0; face < 6; ++face) {
-        faces[face] = Image(faceSize, faceSize, 3);  // RGB
-
-        for (u32 y = 0; y < faceSize; ++y) {
-            for (u32 x = 0; x < faceSize; ++x) {
-                // Convert pixel to UV [0, 1]
-                f32 u = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(faceSize);
-                f32 v = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(faceSize);
-
-                // Get 3D direction for this pixel
-                glm::vec3 dir = CubemapFaceDirection(face, u, v);
-
-                // Sample equirect map
-                glm::vec3 color = SampleEquirect(equirect, dir);
-
-                // Store in face
-                faces[face](x, y, 0) = color.r;
-                faces[face](x, y, 1) = color.g;
-                faces[face](x, y, 2) = color.b;
-            }
-        }
-    }
-
-    QL_LOG_INFO("  Cubemap conversion complete");
-    return faces;
-}
 
 // ============================================================================
 // Scene Loading Helper
@@ -1601,7 +1501,7 @@ int RunApp(int argc, char* argv[]) {
 
                 // Convert to cubemap (use 512x512 per face for EXR input)
                 envMapSize = 512;
-                cubemapFaces = EquirectToCubemap(equirect, envMapSize);
+                cubemapFaces = rendercore::EquirectToCubemap(equirect, envMapSize);
             } else {
                 QL_LOG_WARN("  Failed to load environment map from {}, using fallback", envMapPath);
                 envMapPath = "";  // Trigger fallback

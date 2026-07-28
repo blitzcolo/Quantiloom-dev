@@ -9,6 +9,7 @@
 #include <vk_mem_alloc.h>
 
 #include "renderer/ExternalRenderContext.hpp"
+#include "renderer/RenderCore.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
@@ -4448,76 +4449,13 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     QL_LOG_INFO("  HDR image loaded: {}x{}, {} channels",
                 equirect.width, equirect.height, equirect.channels);
 
-    // Convert equirectangular to cubemap using CPU-based conversion
+    // Convert equirectangular to cubemap. Shared with the CLI -- this used to be a
+    // pair of lambdas here whose vertical mapping was the mirror of the CLI's, so the
+    // GUI rendered every environment map upside down. See rendercore::EquirectToCubemap.
     constexpr u32 envMapSize = 512;
     constexpr u32 envMapMips = 8;
 
-    // Helper: Get cubemap face direction
-    auto cubemapFaceDirection = [](u32 face, f32 u, f32 v) -> glm::vec3 {
-        f32 uc = 2.0f * u - 1.0f;
-        f32 vc = 2.0f * v - 1.0f;
-
-        switch (face) {
-            case 0: return glm::normalize(glm::vec3( 1.0f,   -vc,   -uc));  // +X
-            case 1: return glm::normalize(glm::vec3(-1.0f,   -vc,    uc));  // -X
-            case 2: return glm::normalize(glm::vec3(   uc,  1.0f,    vc));  // +Y
-            case 3: return glm::normalize(glm::vec3(   uc, -1.0f,   -vc));  // -Y
-            case 4: return glm::normalize(glm::vec3(   uc,   -vc,  1.0f));  // +Z
-            case 5: return glm::normalize(glm::vec3(  -uc,   -vc, -1.0f));  // -Z
-            default: return glm::vec3(0.0f);
-        }
-    };
-
-    // Helper: Sample equirectangular map
-    auto sampleEquirect = [&equirect](const glm::vec3& dir) -> glm::vec3 {
-        f32 theta = std::atan2(dir.z, dir.x);
-        f32 phi = std::asin(glm::clamp(dir.y, -1.0f, 1.0f));
-
-        f32 u = (theta + glm::pi<f32>()) / (2.0f * glm::pi<f32>());
-        f32 v = (phi + glm::pi<f32>() / 2.0f) / glm::pi<f32>();
-
-        u32 width = equirect.width;
-        u32 height = equirect.height;
-
-        f32 fx = u * static_cast<f32>(width - 1);
-        f32 fy = v * static_cast<f32>(height - 1);
-
-        u32 x0 = static_cast<u32>(fx) % width;
-        u32 y0 = static_cast<u32>(fy) % height;
-        u32 x1 = (x0 + 1) % width;
-        u32 y1 = std::min(y0 + 1, height - 1);
-
-        f32 wx = fx - std::floor(fx);
-        f32 wy = fy - std::floor(fy);
-
-        glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
-        glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
-        glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
-        glm::vec3 c11(equirect(x1, y1, 0), equirect(x1, y1, 1), equirect(x1, y1, 2));
-
-        glm::vec3 c0 = c00 * (1.0f - wx) + c10 * wx;
-        glm::vec3 c1 = c01 * (1.0f - wx) + c11 * wx;
-
-        return c0 * (1.0f - wy) + c1 * wy;
-    };
-
-    // Convert equirectangular to cubemap faces
-    QL_LOG_INFO("  Converting equirectangular to cubemap ({}x{} per face)...", envMapSize, envMapSize);
-    std::vector<Image> cubemapFaces(6);
-    for (u32 face = 0; face < 6; ++face) {
-        cubemapFaces[face] = Image(envMapSize, envMapSize, 3);
-        for (u32 y = 0; y < envMapSize; ++y) {
-            for (u32 x = 0; x < envMapSize; ++x) {
-                f32 u = (static_cast<f32>(x) + 0.5f) / static_cast<f32>(envMapSize);
-                f32 v = (static_cast<f32>(y) + 0.5f) / static_cast<f32>(envMapSize);
-                glm::vec3 dir = cubemapFaceDirection(face, u, v);
-                glm::vec3 color = sampleEquirect(dir);
-                cubemapFaces[face](x, y, 0) = color.r;
-                cubemapFaces[face](x, y, 1) = color.g;
-                cubemapFaces[face](x, y, 2) = color.b;
-            }
-        }
-    }
+    const Vector<Image> cubemapFaces = rendercore::EquirectToCubemap(equirect, envMapSize);
 
     // Wait for GPU
     vkDeviceWaitIdle(m_impl->device);

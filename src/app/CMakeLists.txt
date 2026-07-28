@@ -30,24 +30,33 @@ target_include_directories(Quantiloom
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "Version.hpp"
 
-        # TRANSITIONAL. main.cpp drives the Vulkan layer directly -- GpuBuffer,
-        # CommandHelper, BLAS/TLAS, RayTracingPipeline -- which is a second
-        # renderer running in parallel with ExternalRenderContext's private
-        # methods. Those headers are internal, so linking libQuantiloom is not
-        # enough to see them; this line is what keeps the CLI compiling, and it
-        # is the reason ~274 symbols are still exported for its benefit alone.
+        # TRANSITIONAL, paired with the object-library link below. main.cpp
+        # drives the Vulkan layer directly -- GpuBuffer, CommandHelper,
+        # BLAS/TLAS, RayTracingPipeline -- a second renderer running in
+        # parallel with ExternalRenderContext's private steps.
         #
-        # Delete this line once the CLI drives a core-owned render facade. It is
-        # the single marker of that debt: nothing else in the build can reach
-        # library internals through the DLL.
+        # Delete both once the CLI drives a core-owned render facade. Together
+        # they are the marker for that debt.
         ${CMAKE_SOURCE_DIR}/src/libQuantiloom
 )
 
-# Link against the core library and SpectraForge
+# The objects, not the DLL -- TRANSITIONAL, see the include note above.
+#
+# Render stages are moving into the core's internal RenderCore one at a time, and
+# internal means not exported: the CLI can compile against those headers but cannot
+# link the symbols through Quantiloom.dll. Linking the objects is what lets the
+# migration proceed a stage at a time without exporting each stage on the way past.
+# Switch back to libQuantiloom once the offline facade is complete and the CLI needs
+# nothing but its public API -- that is also what restores the CLI to being the
+# working proof that the public API is sufficient.
+#
+# libSpectraForge is deliberately absent, and now load-bearing rather than tidiness:
+# it is a DLL that links Quantiloom.dll, so linking it here while the core is linked
+# statically would put two copies of the library's global state in one process. The
+# CLI imported nothing from it anyway -- verified against the import table.
 target_link_libraries(Quantiloom
     PRIVATE
-        libQuantiloom
-        libSpectraForge
+        quantiloom_core
 )
 
 # C++20 standard and RPATH set to executable directory
@@ -68,14 +77,6 @@ if(WIN32)
             "$<TARGET_FILE:libQuantiloom>"
             "$<TARGET_FILE_DIR:Quantiloom>"
         COMMENT "Copying Quantiloom.dll to executable directory"
-    )
-
-    add_custom_command(
-        TARGET Quantiloom POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:libSpectraForge>"
-            "$<TARGET_FILE_DIR:Quantiloom>"
-        COMMENT "Copying SpectraForge.dll to executable directory"
     )
 
     # Copy OpenUSD DLLs if enabled
