@@ -30,7 +30,17 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "renderer/BRDFLutGenerator.hpp"
 #include "scene/Scene.hpp"
+
+#include <vulkan/vulkan.h>
+
+#include <memory>
+
+namespace quantiloom {
+class GpuImage;
+class VulkanContext;
+}
 
 namespace quantiloom::rendercore {
 
@@ -73,5 +83,54 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config);
  *       environment map upside down. The CLI's mapping is the one kept.
  */
 Vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize);
+
+/**
+ * @brief The split-sum BRDF integration LUT for image-based lighting, on the GPU
+ *
+ * Owns the image and its sampler together, because they are bound together and
+ * because both call sites previously tracked the sampler by hand -- one of them
+ * checking the create result, the other dropping it.
+ *
+ * Generation is Monte Carlo on the CPU and costs seconds at the default 512x1024,
+ * so Create() reads a cached binary when one is present and writes one when it is
+ * not. The cache is keyed on the config, so a changed resolution or sample count
+ * regenerates rather than loading a mismatched LUT.
+ */
+class BrdfLut {
+public:
+    BrdfLut() = default;
+    ~BrdfLut();
+
+    BrdfLut(BrdfLut&&) noexcept;
+    BrdfLut& operator=(BrdfLut&&) noexcept;
+    BrdfLut(const BrdfLut&) = delete;
+    BrdfLut& operator=(const BrdfLut&) = delete;
+
+    /**
+     * @brief Load or generate the LUT, upload it, and create its sampler
+     *
+     * @param ctx       Device to allocate on
+     * @param cachePath Binary cache, read when present and written when not
+     * @param config    Resolution and sample count; the image follows
+     *                  config.resolution rather than a hardcoded 512, which is what
+     *                  both call sites did -- a changed resolution would have
+     *                  uploaded into a mismatched image
+     * @return An invalid BrdfLut if the sampler could not be created
+     */
+    static BrdfLut Create(VulkanContext& ctx,
+                          const String& cachePath = "assets/luts/brdf_lut_512_ggx.bin",
+                          const BRDFLutGenerator::Config& config = {});
+
+    [[nodiscard]] bool IsValid() const { return m_sampler != VK_NULL_HANDLE; }
+    [[nodiscard]] VkImageView View() const;
+    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
+    [[nodiscard]] u32 Resolution() const { return m_resolution; }
+
+private:
+    VkDevice m_device = VK_NULL_HANDLE;
+    std::unique_ptr<GpuImage> m_image;
+    VkSampler m_sampler = VK_NULL_HANDLE;
+    u32 m_resolution = 0;
+};
 
 } // namespace quantiloom::rendercore

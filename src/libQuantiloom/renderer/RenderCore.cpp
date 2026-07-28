@@ -3,6 +3,10 @@
 #include "core/Log.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/UsdLoader.hpp"
+#include "renderer/CommandHelper.hpp"
+#include "renderer/GpuBuffer.hpp"
+#include "renderer/GpuImage.hpp"
+#include "renderer/VulkanContext.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -121,6 +125,138 @@ Vector<Image> EquirectToCubemap(const Image& equirect, const u32 faceSize) {
     }
 
     return faces;
+}
+
+// ============================================================================
+// BrdfLut
+// ============================================================================
+
+BrdfLut::~BrdfLut() {
+    if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_sampler, nullptr);
+    }
+}
+
+BrdfLut::BrdfLut(BrdfLut&& other) noexcept
+    : m_device(other.m_device),
+      m_image(std::move(other.m_image)),
+      m_sampler(other.m_sampler),
+      m_resolution(other.m_resolution) {
+    other.m_sampler = VK_NULL_HANDLE;
+    other.m_device = VK_NULL_HANDLE;
+    other.m_resolution = 0;
+}
+
+BrdfLut& BrdfLut::operator=(BrdfLut&& other) noexcept {
+    if (this != &other) {
+        if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+            vkDestroySampler(m_device, m_sampler, nullptr);
+        }
+        m_device = other.m_device;
+        m_image = std::move(other.m_image);
+        m_sampler = other.m_sampler;
+        m_resolution = other.m_resolution;
+        other.m_sampler = VK_NULL_HANDLE;
+        other.m_device = VK_NULL_HANDLE;
+        other.m_resolution = 0;
+    }
+    return *this;
+}
+
+VkImageView BrdfLut::View() const {
+    return m_image ? m_image->GetView() : VK_NULL_HANDLE;
+}
+
+BrdfLut BrdfLut::Create(VulkanContext& ctx,
+                        const String& cachePath,
+                        const BRDFLutGenerator::Config& config) {
+    QL_LOG_INFO("Creating BRDF LUT...");
+
+    BRDFLutGenerator::Config effective = config;
+    Image lut;
+    if (auto cached = BRDFLutGenerator::LoadFromBinary(cachePath, &effective)) {
+        QL_LOG_INFO("  Loaded from cache: {}", cachePath);
+        lut = std::move(cached.value());
+    } else {
+        QL_LOG_INFO("  Generating {}x{} at {} samples (seconds, then cached)...",
+                    effective.resolution, effective.resolution, effective.sampleCount);
+        lut = BRDFLutGenerator::Generate(effective);
+        if (BRDFLutGenerator::SaveToBinary(cachePath, lut, effective)) {
+            QL_LOG_INFO("  Cached to {} for future runs", cachePath);
+        }
+    }
+
+    const u32 size = effective.resolution;
+
+    BrdfLut result;
+    result.m_device = ctx.GetDevice();
+    result.m_resolution = size;
+    result.m_image = std::make_unique<GpuImage>(
+        ctx.GetAllocator(),
+        ctx.GetDevice(),
+        size, size,
+        VK_FORMAT_R32G32_SFLOAT,  // R = scale, G = bias
+        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, result.m_image->GetImage(), result.m_image->GetFormat(),
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+    {
+        std::vector<f32> interleaved(static_cast<size_t>(size) * size * 2);
+        for (u32 y = 0; y < size; ++y) {
+            for (u32 x = 0; x < size; ++x) {
+                const size_t idx = (static_cast<size_t>(y) * size + x) * 2;
+                interleaved[idx + 0] = lut(x, y, 0);
+                interleaved[idx + 1] = lut(x, y, 1);
+            }
+        }
+
+        const VkDeviceSize bytes = interleaved.size() * sizeof(f32);
+        GpuBuffer staging(ctx.GetAllocator(), bytes,
+                          VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        staging.Upload(interleaved.data(), bytes);
+
+        CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = {size, size, 1};
+
+            vkCmdCopyBufferToImage(cmd, staging.GetHandle(), result.m_image->GetImage(),
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+        });
+    }
+
+    CommandHelper::TransitionImageLayoutImmediate(
+        ctx, result.m_image->GetImage(), result.m_image->GetFormat(),
+        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // CLAMP_TO_EDGE on every axis, so the border colour is never sampled -- the two
+    // implementations disagreed on it (opaque white against the zero-initialised
+    // transparent black) with no observable difference.
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;  // no mip chain
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.anisotropyEnable = VK_FALSE;
+    samplerInfo.compareEnable = VK_FALSE;
+    samplerInfo.minLod = 0.0f;
+    samplerInfo.maxLod = 0.0f;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+
+    if (vkCreateSampler(ctx.GetDevice(), &samplerInfo, nullptr, &result.m_sampler)
+        != VK_SUCCESS) {
+        QL_LOG_ERROR("Failed to create BRDF LUT sampler");
+        result.m_sampler = VK_NULL_HANDLE;
+    }
+
+    return result;
 }
 
 }  // namespace quantiloom::rendercore

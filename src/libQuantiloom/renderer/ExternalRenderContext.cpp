@@ -199,9 +199,8 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> instanceGeometryBuffer;  // Per-instance geometry offsets
 
     // IBL resources
-    std::unique_ptr<GpuImage> brdfLutTexture;
+    rendercore::BrdfLut brdfLut;
     std::unique_ptr<GpuImage> envMapImage;
-    VkSampler brdfLutSampler = VK_NULL_HANDLE;
 
     // Texture manager
     std::unique_ptr<TextureManager> textureManager;
@@ -339,13 +338,11 @@ struct ExternalRenderContext::Impl {
 
         textureManager.reset();
 
-        if (brdfLutSampler != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
-            vkDestroySampler(device, brdfLutSampler, nullptr);
-            brdfLutSampler = VK_NULL_HANDLE;
-        }
+        // BrdfLut owns its sampler; releasing it here keeps the destruction order
+        // with the rest of the GPU resources rather than deferring to Impl's own.
+        brdfLut = {};
 
         envMapImage.reset();
-        brdfLutTexture.reset();
 
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
@@ -2415,103 +2412,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {
-    QL_LOG_INFO("Creating BRDF LUT...");
-
-    auto allocator = contextAdapter->GetAllocator();
-    auto device = contextAdapter->GetDevice();
-
-    // Try to load from cache first
-    const String brdfCachePath = "assets/luts/brdf_lut_512_ggx.bin";
-    BRDFLutGenerator::Config brdfConfig;
-    brdfConfig.resolution = 512;
-    brdfConfig.sampleCount = 1024;
-
-    Image brdfLutImage;
-    auto cachedLut = BRDFLutGenerator::LoadFromBinary(brdfCachePath, &brdfConfig);
-    if (cachedLut.has_value()) {
-        brdfLutImage = std::move(cachedLut.value());
-    } else {
-        brdfLutImage = BRDFLutGenerator::Generate(brdfConfig);
-        BRDFLutGenerator::SaveToBinary(brdfCachePath, brdfLutImage, brdfConfig);
-    }
-
-    // Create GPU texture
-    brdfLutTexture = std::make_unique<GpuImage>(
-        allocator,
-        device,
-        512, 512,
-        VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Transition to TRANSFER_DST
-    TransitionImageLayoutImmediate(
-        brdfLutTexture->GetImage(),
-        VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-    );
-
-    // Upload BRDF LUT data
-    std::vector<f32> lutData(512 * 512 * 2);
-    for (u32 y = 0; y < 512; ++y) {
-        for (u32 x = 0; x < 512; ++x) {
-            u32 idx = (y * 512 + x) * 2;
-            lutData[idx + 0] = brdfLutImage(x, y, 0);
-            lutData[idx + 1] = brdfLutImage(x, y, 1);
-        }
-    }
-
-    GpuBuffer stagingBuffer(
-        allocator,
-        lutData.size() * sizeof(f32),
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    stagingBuffer.Upload(lutData.data(), lutData.size() * sizeof(f32));
-
-    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-        VkBufferImageCopy region{};
-        region.bufferOffset = 0;
-        region.bufferRowLength = 0;
-        region.bufferImageHeight = 0;
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = 0;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = {0, 0, 0};
-        region.imageExtent = {512, 512, 1};
-
-        vkCmdCopyBufferToImage(
-            cmd,
-            stagingBuffer.GetHandle(),
-            brdfLutTexture->GetImage(),
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1,
-            &region
-        );
-    });
-
-    // Transition to SHADER_READ_ONLY
-    TransitionImageLayoutImmediate(
-        brdfLutTexture->GetImage(),
-        VK_FORMAT_R32G32_SFLOAT,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-    );
-
-    // Create sampler
-    VkSamplerCreateInfo samplerInfo{};
-    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    samplerInfo.magFilter = VK_FILTER_LINEAR;
-    samplerInfo.minFilter = VK_FILTER_LINEAR;
-    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-
-    vkCreateSampler(device, &samplerInfo, nullptr, &brdfLutSampler);
+    brdfLut = rendercore::BrdfLut::Create(*contextAdapter);
 }
 
 void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
@@ -2663,7 +2564,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     // Bind IBL
     pipeline->BindPrefilteredEnvMap(envMapImage->GetView());
-    pipeline->BindBRDFLut(brdfLutTexture->GetView(), brdfLutSampler);
+    pipeline->BindBRDFLut(brdfLut.View(), brdfLut.Sampler());
 
     // Bind optional buffers
     pipeline->BindSpectralCurvesBuffer(spectralCurvesBuffer.get());
