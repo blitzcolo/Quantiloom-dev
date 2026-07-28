@@ -141,6 +141,10 @@ private:
  * runtime (`GetDimensions`) and maps `lod = roughness * (numMips - 1)`, so the level
  * count is a quality knob rather than a contract: more levels means a rougher
  * surface reaches a blurrier level.
+ *
+ * Carries its own sampler. It used to share the one bound for the BRDF LUT, whose
+ * maxLod is 0 -- right for a single-level LUT, and enough to pin every environment
+ * lookup to mip 0, so the chain above was built and never read.
  */
 class EnvironmentCubemap {
 public:
@@ -177,13 +181,17 @@ public:
     static EnvironmentCubemap Fallback(VulkanContext& ctx,
                                        const Params& requested = kFallbackParams);
 
-    [[nodiscard]] bool IsValid() const { return m_image != nullptr; }
+    [[nodiscard]] bool IsValid() const { return m_image != nullptr && m_sampler != VK_NULL_HANDLE; }
     [[nodiscard]] VkImageView View() const;
+    /// Trilinear and unclamped, so `lod` from the shader actually selects a level.
+    [[nodiscard]] VkSampler Sampler() const { return m_sampler; }
     [[nodiscard]] u32 FaceSize() const { return m_faceSize; }
     [[nodiscard]] u32 MipLevels() const { return m_mipLevels; }
 
 private:
+    VkDevice m_device = VK_NULL_HANDLE;
     std::unique_ptr<GpuImage> m_image;
+    VkSampler m_sampler = VK_NULL_HANDLE;
     u32 m_faceSize = 0;
     u32 m_mipLevels = 0;
 };

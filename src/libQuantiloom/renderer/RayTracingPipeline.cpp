@@ -256,7 +256,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(21);  // Added NN atmosphere data (binding 20)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(22);  // Added environment sampler (binding 21)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -481,9 +481,21 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[20].stageFlags = VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[20].pImmutableSamplers = nullptr;
 
+    // ========================================================================
+    // Environment Map Sampler (Binding 21)
+    // ========================================================================
+    // Separate from the IBL sampler at binding 12, which clamps maxLod to 0. That
+    // is right for the single-level BRDF LUT and wrong for the environment map: it
+    // pinned every lookup to mip 0, so the prefiltered chain was never sampled.
+    bindings[21].binding = 21;
+    bindings[21].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    bindings[21].descriptorCount = 1;
+    bindings[21].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[21].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(21, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(22, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -514,7 +526,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[4].descriptorCount = m_maxTextures + 1;  // Sampler array + IBL sampler
+    poolSizes[4].descriptorCount = m_maxTextures + 2;  // Sampler array + IBL sampler + environment sampler
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1101,28 +1113,43 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
-void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView) const {
+void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const {
     VkDevice device = m_context.GetDevice();
 
-    QL_LOG_INFO("Binding prefiltered environment map to descriptor set (binding 10)");
+    QL_LOG_INFO("Binding prefiltered environment map to descriptor set (bindings 10, 21)");
 
-    // Build descriptor info for prefiltered environment cubemap
     VkDescriptorImageInfo imageInfo{};
     imageInfo.imageView = imageView;
     imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    imageInfo.sampler = VK_NULL_HANDLE;  // Sampler is separate (binding 12)
+    imageInfo.sampler = VK_NULL_HANDLE;  // Sampler is separate (binding 21)
 
-    // Update descriptor set
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = m_descriptorSet;
-    write.dstBinding = 10;  // Binding 10: prefilteredEnvMap (TextureCube)
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    write.descriptorCount = 1;
-    write.pImageInfo = &imageInfo;
+    // Its own sampler rather than the one at binding 12: that one clamps maxLod to
+    // 0, which pinned every environment lookup to mip 0 and left the prefiltered
+    // chain unreachable.
+    VkDescriptorImageInfo samplerInfo{};
+    samplerInfo.sampler = sampler;
+    samplerInfo.imageView = VK_NULL_HANDLE;
+    samplerInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    std::array<VkWriteDescriptorSet, 2> writes{};
+
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].dstSet = m_descriptorSet;
+    writes[0].dstBinding = 10;  // prefilteredEnvMap (TextureCube)
+    writes[0].dstArrayElement = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    writes[0].descriptorCount = 1;
+    writes[0].pImageInfo = &imageInfo;
+
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_descriptorSet;
+    writes[1].dstBinding = 21;  // envSampler
+    writes[1].dstArrayElement = 0;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+    writes[1].descriptorCount = 1;
+    writes[1].pImageInfo = &samplerInfo;
+
+    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) const {

@@ -238,7 +238,7 @@ public:
     // ========================================================================
 
     // Bind prefiltered environment cubemap (binding 10)
-    void BindPrefilteredEnvMap(VkImageView imageView) const;
+    void BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const;
 
     // Bind BRDF integration LUT for IBL (binding 11: texture, binding 12: sampler)
     void BindBRDFLut(VkImageView imageView, VkSampler sampler) const;

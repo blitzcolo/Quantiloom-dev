@@ -1424,7 +1424,7 @@ int RunApp(int argc, char* argv[]) {
         // Binding 10: Prefiltered environment cubemap (with mip chain for roughness)
         // Binding 11: BRDF integration LUT (2D texture)
         // Binding 12: IBL sampler (shared by both textures)
-        pipeline.BindPrefilteredEnvMap(envMap.View());                       // Binding 10
+        pipeline.BindPrefilteredEnvMap(envMap.View(), envMap.Sampler());                       // Binding 10
         pipeline.BindBRDFLut(brdfLut.View(), brdfLut.Sampler());  // Binding 11, 12
 
         // Bind spectral curves buffer (binding 13)

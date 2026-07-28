@@ -2474,7 +2474,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     );
 
     // Bind IBL
-    pipeline->BindPrefilteredEnvMap(envMap.View());
+    pipeline->BindPrefilteredEnvMap(envMap.View(), envMap.Sampler());
     pipeline->BindBRDFLut(brdfLut.View(), brdfLut.Sampler());
 
     // Bind optional buffers
@@ -4252,7 +4252,7 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     m_impl->envMap = std::move(loaded.value());
 
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View());
+        m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View(), m_impl->envMap.Sampler());
     }
     m_impl->hasCustomEnvMap = true;
     ResetAccumulation();

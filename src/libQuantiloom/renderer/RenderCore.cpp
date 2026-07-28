@@ -309,6 +309,31 @@ EnvironmentCubemap::Params ClampToFaceSize(EnvironmentCubemap::Params p) {
     return p;
 }
 
+// Trilinear across the chain and unclamped, so the shader's roughness-derived lod
+// picks a level instead of being pinned to mip 0 by a maxLod of zero.
+VkSampler CreateEnvironmentSampler(VkDevice device) {
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = VK_FILTER_LINEAR;
+    info.minFilter = VK_FILTER_LINEAR;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.anisotropyEnable = VK_FALSE;
+    info.compareEnable = VK_FALSE;
+    info.minLod = 0.0f;
+    info.maxLod = VK_LOD_CLAMP_NONE;
+    info.unnormalizedCoordinates = VK_FALSE;
+
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (vkCreateSampler(device, &info, nullptr, &sampler) != VK_SUCCESS) {
+        QL_LOG_ERROR("Failed to create environment map sampler");
+        return VK_NULL_HANDLE;
+    }
+    return sampler;
+}
+
 std::unique_ptr<GpuImage> CreateCubemapImage(VulkanContext& ctx,
                                              const EnvironmentCubemap::Params& p) {
     auto image = std::make_unique<GpuImage>(
@@ -388,9 +413,41 @@ std::vector<f32> FaceToRgba(const Image& face, u32 size) {
 
 }  // namespace
 
-EnvironmentCubemap::~EnvironmentCubemap() = default;
-EnvironmentCubemap::EnvironmentCubemap(EnvironmentCubemap&&) noexcept = default;
-EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&&) noexcept = default;
+EnvironmentCubemap::~EnvironmentCubemap() {
+    if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device, m_sampler, nullptr);
+    }
+}
+
+EnvironmentCubemap::EnvironmentCubemap(EnvironmentCubemap&& other) noexcept
+    : m_device(other.m_device),
+      m_image(std::move(other.m_image)),
+      m_sampler(other.m_sampler),
+      m_faceSize(other.m_faceSize),
+      m_mipLevels(other.m_mipLevels) {
+    other.m_device = VK_NULL_HANDLE;
+    other.m_sampler = VK_NULL_HANDLE;
+    other.m_faceSize = 0;
+    other.m_mipLevels = 0;
+}
+
+EnvironmentCubemap& EnvironmentCubemap::operator=(EnvironmentCubemap&& other) noexcept {
+    if (this != &other) {
+        if (m_sampler != VK_NULL_HANDLE && m_device != VK_NULL_HANDLE) {
+            vkDestroySampler(m_device, m_sampler, nullptr);
+        }
+        m_device = other.m_device;
+        m_image = std::move(other.m_image);
+        m_sampler = other.m_sampler;
+        m_faceSize = other.m_faceSize;
+        m_mipLevels = other.m_mipLevels;
+        other.m_device = VK_NULL_HANDLE;
+        other.m_sampler = VK_NULL_HANDLE;
+        other.m_faceSize = 0;
+        other.m_mipLevels = 0;
+    }
+    return *this;
+}
 
 VkImageView EnvironmentCubemap::View() const {
     return m_image ? m_image->GetView() : VK_NULL_HANDLE;
@@ -418,9 +475,11 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
     const Vector<Image> faces = EquirectToCubemap(equirect.value(), params.faceSize);
 
     EnvironmentCubemap result;
+    result.m_device = ctx.GetDevice();
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
     result.m_image = CreateCubemapImage(ctx, params);
+    result.m_sampler = CreateEnvironmentSampler(ctx.GetDevice());
 
     QL_LOG_INFO("  Uploading cubemap to GPU...");
     for (u32 face = 0; face < 6; ++face) {
@@ -455,9 +514,11 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
     constexpr f32 kSky[4] = {0.5f, 0.7f, 1.0f, 1.0f};
 
     EnvironmentCubemap result;
+    result.m_device = ctx.GetDevice();
     result.m_faceSize = params.faceSize;
     result.m_mipLevels = params.mipLevels;
     result.m_image = CreateCubemapImage(ctx, params);
+    result.m_sampler = CreateEnvironmentSampler(ctx.GetDevice());
 
     // Uniform colour, so every level is filled directly rather than downsampled.
     for (u32 mip = 0; mip < params.mipLevels; ++mip) {

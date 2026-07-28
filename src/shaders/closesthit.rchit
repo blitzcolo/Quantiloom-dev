@@ -154,7 +154,12 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 
 [[vk::binding(10, 0)]] TextureCube<float4> prefilteredEnvMap;  // Prefiltered environment cubemap (with mipmaps)
 [[vk::binding(11, 0)]] Texture2D<float2> brdfLUT;              // BRDF integration lookup table
-[[vk::binding(12, 0)]] SamplerState iblSampler;                // Linear sampler for IBL textures
+[[vk::binding(12, 0)]] SamplerState iblSampler;                // Linear sampler for the BRDF LUT (single level)
+// Separate from iblSampler because that one clamps maxLod to 0 -- correct for the
+// single-level BRDF LUT, but it silently pinned every environment lookup to mip 0,
+// so the prefiltered chain below was never reached and rough metals reflected
+// mirror-sharp. This one is unclamped and filters between levels.
+[[vk::binding(21, 0)]] SamplerState envSampler;                // Trilinear sampler for the prefiltered environment
 
 // ============================================================================
 // Push Constants
@@ -814,7 +819,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // 3. Sample prefiltered environment map
         //    SampleLevel = explicit LOD (required in ray tracing shaders)
-        prefilteredColor = prefilteredEnvMap.SampleLevel(iblSampler, R, lod).rgb;
+        prefilteredColor = prefilteredEnvMap.SampleLevel(envSampler, R, lod).rgb;
 
         // 4. Sample BRDF integration LUT
         //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
