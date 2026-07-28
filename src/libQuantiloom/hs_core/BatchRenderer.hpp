@@ -59,7 +59,7 @@ enum class BatchRenderStatus : u32 {
 /**
  * @brief Convert status to human-readable string
  */
-QL_API const char* BatchRenderStatusToString(BatchRenderStatus status);
+const char* BatchRenderStatusToString(BatchRenderStatus status);
 
 // ============================================================================
 // Batch Rendering Progress
@@ -160,7 +160,7 @@ struct BatchRenderParams {
  * }
  * @endcode
  */
-class QL_API BatchRenderer {
+class BatchRenderer {
 public:
     // ========================================================================
     // Construction / Destruction
@@ -304,13 +304,13 @@ private:
  * @param wavelengths List of wavelengths to validate
  * @return true if valid (non-empty, positive values, sorted)
  */
-QL_API bool ValidateWavelengthList(const Vector<f32>& wavelengths);
+bool ValidateWavelengthList(const Vector<f32>& wavelengths);
 
 /**
  * @brief Sort wavelength list (in-place)
  * @param wavelengths List to sort
  */
-QL_API void SortWavelengths(Vector<f32>& wavelengths);
+void SortWavelengths(Vector<f32>& wavelengths);
 
 /**
  * @brief Estimate batch rendering time
@@ -318,6 +318,6 @@ QL_API void SortWavelengths(Vector<f32>& wavelengths);
  * @param singleBandTime Average time per band (seconds)
  * @return Estimated total time in seconds
  */
-QL_API f64 EstimateBatchTime(u32 numBands, f64 singleBandTime);
+f64 EstimateBatchTime(u32 numBands, f64 singleBandTime);
 
 } // namespace quantiloom

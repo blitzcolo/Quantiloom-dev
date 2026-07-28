@@ -82,7 +82,7 @@ struct MeshOptimizationStats {
  * - All static methods are thread-safe (no shared state)
  * - Can be called concurrently on different primitives
  */
-class QL_API MeshOptimizer {
+class MeshOptimizer {
 public:
     // ========================================================================
     // Vertex Deduplication

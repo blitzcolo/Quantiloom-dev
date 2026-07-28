@@ -11,9 +11,11 @@ add_executable(fusion_tool
     fusion_tool.cpp
 )
 
+# Links the objects rather than the DLL: fusion_tool drives MultibandFusion,
+# which is library-internal and no longer exported. See src/libQuantiloom/CMakeLists.txt.
 target_link_libraries(fusion_tool
     PRIVATE
-        libQuantiloom
+        quantiloom_core
 )
 
 set_target_properties(fusion_tool PROPERTIES

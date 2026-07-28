@@ -58,7 +58,7 @@ enum class GpuReconstructorStatus : u32 {
 /**
  * @brief Convert status to human-readable string
  */
-QL_API const char* GpuReconstructorStatusToString(GpuReconstructorStatus status);
+const char* GpuReconstructorStatusToString(GpuReconstructorStatus status);
 
 // ============================================================================
 // GpuReconstructorConfig
@@ -109,7 +109,7 @@ struct GpuReconstructorConfig {
  * }
  * @endcode
  */
-class QL_API GpuSpectralReconstructor {
+class GpuSpectralReconstructor {
 public:
     // ========================================================================
     // Construction / Destruction
@@ -228,7 +228,7 @@ private:
  * @param context VulkanContext to check
  * @return true if GPU reconstruction is supported
  */
-QL_API bool IsGpuReconstructionSupported(VulkanContext& context);
+bool IsGpuReconstructionSupported(VulkanContext& context);
 
 /**
  * @brief Estimate GPU memory required for reconstruction
@@ -237,7 +237,7 @@ QL_API bool IsGpuReconstructionSupported(VulkanContext& context);
  * @param targetBands Number of target bands
  * @return Estimated memory usage in bytes
  */
-QL_API u64 EstimateReconstructionMemory(
+u64 EstimateReconstructionMemory(
     const SpectralCube& sparseCube,
     u32 targetBands
 );

@@ -24,7 +24,7 @@ namespace quantiloom {
 // File extension: .lut.toml (recommended) or .toml
 // ============================================================================
 
-class QL_API LUTLoader {
+class LUTLoader {
 public:
     // Load LUT from TOML file
     static std::optional<AtmosphereLUT> LoadTOML(const std::string& filepath);

@@ -68,7 +68,7 @@ enum class InterpolationMethod : u32 {
  * // fullCube now has all wavelengths, interpolated where needed
  * @endcode
  */
-class QL_API SpectralReconstructor {
+class SpectralReconstructor {
 public:
     SpectralReconstructor() = default;
     ~SpectralReconstructor() = default;

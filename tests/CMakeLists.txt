@@ -326,29 +326,31 @@ if(QUANTILOOM_STANDALONE_TESTS)
         "===========================================================================\n"
     )
 else()
-    # Subproject mode: link against the main library
+    # Subproject mode: link the OBJECT library, not the DLL.
+    #
+    # Static linkage ignores __declspec(dllexport), so every symbol in the
+    # library is reachable here -- including the parts that are deliberately
+    # NOT part of the SDK's public contract (NormalGenerator, Upload, the
+    # Vulkan wrappers). Testing something is no longer a reason to export it.
+    #
+    # Do not add libQuantiloom alongside this: linking both would put two
+    # copies of the library's global state (spdlog logger, static caches) in
+    # one process.
     target_link_libraries(libquantiloom_tests
         PRIVATE
             GTest::GTest
             # Note: Using custom main in test_main.cpp instead of GTest::Main
-            libQuantiloom  # Link against the main Quantiloom library
+            quantiloom_core  # Objects, not the DLL -- see above
     )
 endif()
 
 # ============================================================================
-# Copy DLL to Test Directory (Windows shared library)
+# Runtime DLLs (Windows)
 # ============================================================================
+# Quantiloom.dll is deliberately absent: the core is linked statically above,
+# so the test binary is self-contained apart from third-party runtimes.
 
 if(WIN32 AND NOT QUANTILOOM_STANDALONE_TESTS)
-    # Copy libQuantiloom.dll to test directory for runtime loading
-    add_custom_command(
-        TARGET libquantiloom_tests POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "$<TARGET_FILE:libQuantiloom>"
-            "$<TARGET_FILE_DIR:libquantiloom_tests>"
-        COMMENT "Copying Quantiloom.dll to test directory"
-    )
-
     # Copy OpenUSD DLLs if enabled
     if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
         copy_usd_dlls(libquantiloom_tests)

@@ -70,7 +70,7 @@ namespace fs = std::filesystem;
 //   See scripts/atmosphere-qlut-gen/README.md for Python generation tools.
 // ============================================================================
 
-class QL_API AtmosphereTransmittanceLUTLoader {
+class AtmosphereTransmittanceLUTLoader {
 public:
     // ========================================================================
     // Load from .qlut file

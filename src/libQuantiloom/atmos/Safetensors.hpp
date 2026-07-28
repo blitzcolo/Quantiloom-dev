@@ -41,7 +41,7 @@ struct TensorView {
     const uint8_t* U8Data() const { return data; }
 };
 
-class QL_API SafetensorsFile {
+class SafetensorsFile {
 public:
     // Reads the whole file into memory and parses/validates the header.
     // Throws std::runtime_error on any malformed content.

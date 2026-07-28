@@ -52,7 +52,7 @@ enum class SpectralFeatureType : u32 {
 /**
  * @brief Convert feature type to string
  */
-QL_API const char* SpectralFeatureTypeToString(SpectralFeatureType type);
+const char* SpectralFeatureTypeToString(SpectralFeatureType type);
 
 /**
  * @struct SpectralFeature
@@ -185,7 +185,7 @@ struct SpectralAnalysisResult {
  * }
  * @endcode
  */
-class QL_API SpectralAnalyzer {
+class SpectralAnalyzer {
 public:
     SpectralAnalyzer() = default;
     ~SpectralAnalyzer() = default;

@@ -53,7 +53,7 @@ enum class ENVIInterleave : u32 {
 /**
  * @brief Convert ENVIInterleave to string for header
  */
-QL_API const char* ENVIInterleaveToString(ENVIInterleave interleave);
+const char* ENVIInterleaveToString(ENVIInterleave interleave);
 
 // ============================================================================
 // SpectralCubeIO - Static I/O Utilities
@@ -85,7 +85,7 @@ QL_API const char* ENVIInterleaveToString(ENVIInterleave interleave);
  * }
  * @endcode
  */
-class QL_API SpectralCubeIO {
+class SpectralCubeIO {
 public:
     // ========================================================================
     // ENVI Format

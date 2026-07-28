@@ -55,6 +55,22 @@
 #endif
 
 // DLL export/import macros (for shared library support)
+//
+// QL_API is the SDK's public contract, not a convenience marker. A symbol that
+// carries it is exported from Quantiloom.dll, visible to Quantiloom-Qt, and
+// covered by SemVer -- removing it later is a breaking change.
+//
+// New code defaults to NOT having it. Two rules keep it that way:
+//
+//   * Needing a unit test is not a reason to export. The tests link
+//     quantiloom_core (the OBJECT library) and see every symbol regardless.
+//   * A new GUI capability extends the ExternalRenderContext facade with a
+//     method plus a POD parameter struct. It does not export the class that
+//     implements the capability -- the frontend needs to set a parameter, not
+//     to own an object.
+//
+// Adding QL_API is a deliberate act: it also means moving the header into the
+// public set and updating docs/abi/exports.golden, which is reviewed.
 #if defined(QL_WINDOWS)
     #if defined(QL_BUILD_SHARED)
         #define QL_API __declspec(dllexport)

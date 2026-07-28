@@ -259,7 +259,7 @@ private:
  * @param config Hyperspectral configuration
  * @return Vector of wavelengths in nm
  */
-QL_API Vector<f32> GenerateWavelengthList(const HyperspectralConfig& config);
+Vector<f32> GenerateWavelengthList(const HyperspectralConfig& config);
 
 /**
  * @brief Estimate rendering time based on single-band benchmark
@@ -267,6 +267,6 @@ QL_API Vector<f32> GenerateWavelengthList(const HyperspectralConfig& config);
  * @param singleBandTime Time to render one band (seconds)
  * @return Estimated total time in seconds
  */
-QL_API f64 EstimateRenderTime(const HyperspectralConfig& config, f64 singleBandTime);
+f64 EstimateRenderTime(const HyperspectralConfig& config, f64 singleBandTime);
 
 } // namespace quantiloom

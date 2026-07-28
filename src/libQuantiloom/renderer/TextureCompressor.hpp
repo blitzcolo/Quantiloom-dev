@@ -48,7 +48,7 @@ namespace quantiloom {
  * @struct BC7CompressedData
  * @brief Container for BC7 compressed texture data
  */
-struct QL_API BC7CompressedData {
+struct BC7CompressedData {
     std::vector<u8> data;       ///< Compressed block data
     u32 width;                  ///< Original width (for mipmap generation)
     u32 height;                 ///< Original height
@@ -101,7 +101,7 @@ struct QL_API BC7CompressedData {
  * }
  * @endcode
  */
-class QL_API TextureCompressor {
+class TextureCompressor {
 public:
     // ========================================================================
     // Availability Check

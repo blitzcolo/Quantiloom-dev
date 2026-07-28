@@ -22,7 +22,7 @@ class SafetensorsFile;
 // Weights are loaded from a safetensors file using the torch state-dict
 // names. Batch rows are processed in parallel with std::thread.
 
-class QL_API ResMLP {
+class ResMLP {
 public:
     // Loads and shape-checks all weights. Throws std::runtime_error naming
     // the file and tensor on any mismatch.

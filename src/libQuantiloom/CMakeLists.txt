@@ -1,6 +1,23 @@
 # ============================================================================
 # libQuantiloom - Core Library
 # ============================================================================
+# Two targets, one compilation:
+#
+#   quantiloom_core (OBJECT)  -- every source, compiled once. In-repo consumers
+#                                that legitimately need library internals (the
+#                                unit tests, fusion_tool) link THIS. Static
+#                                linkage ignores __declspec(dllexport)
+#                                entirely, so they see every symbol without
+#                                anything having to be marked QL_API.
+#   libQuantiloom (SHARED)    -- the SDK artifact. Exports only what is marked
+#                                QL_API. Quantiloom-Qt and the CLI link this.
+#
+# The split exists because export visibility and in-repo linkability used to be
+# the same switch, which meant "cover it with a test" implied "write it into the
+# SDK's public contract". Keep them separate: a target links EITHER the objects
+# OR the DLL, never both -- two copies of the library's global state (the spdlog
+# logger, static caches) in one process is a correctness bug, not a wart.
+# ============================================================================
 
 # Generate version header from template
 configure_file(
@@ -9,7 +26,7 @@ configure_file(
     @ONLY
 )
 
-add_library(libQuantiloom SHARED
+add_library(quantiloom_core OBJECT
     # Core module
     core/Log.cpp
     core/Log.hpp
@@ -21,7 +38,6 @@ add_library(libQuantiloom SHARED
     core/SpectralCube.hpp
     core/LUT.hpp
     core/AtmosphereTransmittanceLUT.hpp
-    libQuantiloom.rc
 
     # IO module
     io/ImageIO.cpp
@@ -128,34 +144,34 @@ add_library(libQuantiloom SHARED
     ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
 )
 
-target_compile_definitions(libQuantiloom
-    PRIVATE
+target_compile_definitions(quantiloom_core
+    PUBLIC
+        # PUBLIC, not PRIVATE: targets that link the objects statically compile
+        # the same headers, and their declarations must carry the same
+        # dllexport the definitions in those objects do. Consumers of the DLL
+        # never see this -- libQuantiloom links quantiloom_core PRIVATE and
+        # hands them QL_USE_SHARED (dllimport) instead.
         QL_BUILD_SHARED
+    PRIVATE
         QUANTILOOM_LIB_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
         QUANTILOOM_LIB_VERSION_MINOR=${PROJECT_VERSION_MINOR}
         QUANTILOOM_LIB_VERSION_PATCH=${PROJECT_VERSION_PATCH}
         QUANTILOOM_LIB_VERSION_STRING=${PROJECT_VERSION}
-    INTERFACE
-        QL_USE_SHARED  # Consumers linking against this library will define QL_USE_SHARED
 )
 
 # Enable validation layers in Debug mode
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_ENABLE_VALIDATION)
+    target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_ENABLE_VALIDATION)
 endif()
 
-# Set library output name (remove "lib" prefix for cleaner names)
-set_target_properties(libQuantiloom PROPERTIES
-    OUTPUT_NAME "Quantiloom"
+set_target_properties(quantiloom_core PROPERTIES
     CXX_STANDARD 20
     CXX_STANDARD_REQUIRED ON
-
-    VERSION ${PROJECT_VERSION}
-    SOVERSION ${PROJECT_VERSION_MAJOR}
+    POSITION_INDEPENDENT_CODE ON
 )
 
 # Include directories (use generator expressions for proper install/export)
-target_include_directories(libQuantiloom
+target_include_directories(quantiloom_core
     PUBLIC
         # Build tree: use source and binary dirs
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -166,7 +182,7 @@ target_include_directories(libQuantiloom
 
 # GLM headers are needed by consumers (public API uses glm types)
 # Consumers must find_package(glm) to get these directories
-target_include_directories(libQuantiloom
+target_include_directories(quantiloom_core
     PUBLIC
         $<BUILD_INTERFACE:${glm_SOURCE_DIR}>
 )
@@ -176,7 +192,10 @@ target_include_directories(libQuantiloom
 # PRIVATE: Implementation details hidden via PIMPL (spdlog, toml++, VMA)
 # Note: GLM is header-only - exposed via include directories, not link
 #       Consumers must find_package(glm) - see QuantiloomConfig.cmake.in
-target_link_libraries(libQuantiloom
+# PRIVATE deps still reach targets that link quantiloom_core: CMake records them
+# in INTERFACE_LINK_LIBRARIES wrapped in $<LINK_ONLY:>, so the tests link spdlog
+# and friends without inheriting their include directories.
+target_link_libraries(quantiloom_core
     PUBLIC
         Vulkan::Vulkan
     PRIVATE
@@ -192,20 +211,20 @@ target_link_libraries(libQuantiloom
 
 # OpenUSD linking (conditional)
 if(QUANTILOOM_USE_OPENUSD)
-    target_link_libraries(libQuantiloom
+    target_link_libraries(quantiloom_core
         PRIVATE
             ${USD_LIBRARIES}
             TBB::tbb
     )
-    target_include_directories(libQuantiloom
+    target_include_directories(quantiloom_core
         PRIVATE
             ${USD_ROOT}/include
     )
-    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_OPENUSD=1)
+    target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_USE_OPENUSD=1)
     message(STATUS "libQuantiloom: OpenUSD support enabled")
 else()
     message(WARNING "libQuantiloom: OpenUSD support disabled (USD_ROOT not set)")
-    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_OPENUSD=0)
+    target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_USE_OPENUSD=0)
 endif()
 
 # BC7 texture compression (optional, requires bc7enc_rdo)
@@ -214,11 +233,11 @@ if(QUANTILOOM_USE_BC7ENC)
     # Look for bc7enc_rdo in vendor directory
     set(BC7ENC_DIR "${CMAKE_SOURCE_DIR}/vendor/bc7enc_rdo")
     if(EXISTS "${BC7ENC_DIR}/bc7enc.h")
-        target_include_directories(libQuantiloom PRIVATE ${BC7ENC_DIR})
-        target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=1)
+        target_include_directories(quantiloom_core PRIVATE ${BC7ENC_DIR})
+        target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_USE_BC7ENC=1)
 
         # Add bc7enc_rdo source files (not header-only!)
-        target_sources(libQuantiloom PRIVATE
+        target_sources(quantiloom_core PRIVATE
             ${BC7ENC_DIR}/bc7enc.cpp
             ${BC7ENC_DIR}/rgbcx.cpp
         )
@@ -228,20 +247,65 @@ if(QUANTILOOM_USE_BC7ENC)
         message(WARNING "libQuantiloom: BC7 compression requested but bc7enc_rdo not found at ${BC7ENC_DIR}")
         message(WARNING "  Download from: https://github.com/richgel999/bc7enc_rdo")
         message(WARNING "  Place files in: vendor/bc7enc_rdo/")
-        target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=0)
+        target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_USE_BC7ENC=0)
     endif()
 else()
-    target_compile_definitions(libQuantiloom PRIVATE QUANTILOOM_USE_BC7ENC=0)
+    target_compile_definitions(quantiloom_core PRIVATE QUANTILOOM_USE_BC7ENC=0)
     message(STATUS "libQuantiloom: BC7 compression disabled (use -DQUANTILOOM_USE_BC7ENC=ON to enable)")
 endif()
 
 # Compiler-specific flags
+# /wd4275: a QL_API class whose base is deliberately NOT exported. That is the
+#          intended shape now -- e.g. GenericSensor stays public while its
+#          SensorModel base is internal -- so the warning reports the design,
+#          not a defect.
 if(MSVC)
-    target_compile_options(libQuantiloom PRIVATE /W4 /EHsc /wd4251 /wd4819)
+    target_compile_options(quantiloom_core PRIVATE /W4 /EHsc /wd4251 /wd4275 /wd4819)
 else()
-    # -fvisibility=hidden: Only export symbols explicitly marked with QL_API
-    target_compile_options(libQuantiloom PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
+    # -fvisibility=hidden: Only export symbols explicitly marked with QL_API.
+    # Static consumers are unaffected: visibility governs the dynamic symbol
+    # table, not link-time resolution against the object files.
+    target_compile_options(quantiloom_core PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
+
+# ============================================================================
+# libQuantiloom -- the SDK artifact
+# ============================================================================
+# Carries only the .rc (version resource); all code comes from quantiloom_core.
+# The link is PRIVATE so the object library's include directories and its
+# QL_BUILD_SHARED define stop here: consumers get QL_USE_SHARED (dllimport) and
+# only the headers this target declares PUBLIC.
+# ============================================================================
+
+add_library(libQuantiloom SHARED libQuantiloom.rc)
+
+target_link_libraries(libQuantiloom PRIVATE quantiloom_core)
+
+target_compile_definitions(libQuantiloom
+    INTERFACE
+        QL_USE_SHARED  # Consumers linking against this library will define QL_USE_SHARED
+)
+
+target_include_directories(libQuantiloom
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+        $<BUILD_INTERFACE:${glm_SOURCE_DIR}>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/quantiloom>
+)
+
+target_link_libraries(libQuantiloom PUBLIC Vulkan::Vulkan)
+
+# Set library output name (remove "lib" prefix for cleaner names)
+set_target_properties(libQuantiloom PROPERTIES
+    OUTPUT_NAME "Quantiloom"
+    LINKER_LANGUAGE CXX  # the only listed source is a .rc
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+)
 
 message(STATUS "libQuantiloom configured successfully")
 

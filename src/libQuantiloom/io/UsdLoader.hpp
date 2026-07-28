@@ -69,7 +69,7 @@ namespace quantiloom {
  * Allows customization of USD loading behavior including variant selection,
  * payload loading, and feature toggles.
  */
-struct QL_API UsdLoadOptions {
+struct UsdLoadOptions {
     // ========================================================================
     // Variant Selection
     // ========================================================================

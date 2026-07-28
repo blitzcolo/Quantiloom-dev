@@ -71,7 +71,7 @@ struct SensorOutput {
 };
 
 /// Abstract sensor model interface
-class QL_API SensorModel {
+class SensorModel {
 public:
     virtual ~SensorModel() = default;
 

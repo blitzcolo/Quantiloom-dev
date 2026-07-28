@@ -54,7 +54,7 @@ namespace quantiloom {
  * @note This is an internal implementation detail - external users should
  *       interact through ExternalRenderContext API
  */
-class QL_API VulkanContextAdapter : public VulkanContext {
+class VulkanContextAdapter : public VulkanContext {
 public:
     /**
      * @brief Construct adapter from external Vulkan handles

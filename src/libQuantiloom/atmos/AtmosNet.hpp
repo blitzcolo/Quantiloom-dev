@@ -51,7 +51,7 @@ struct AtmosTargetRow {
     std::string kind;    // delta / radiance
 };
 
-class QL_API AtmosNet {
+class AtmosNet {
 public:
     explicit AtmosNet(const std::filesystem::path& file);
     ~AtmosNet();

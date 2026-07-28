@@ -94,7 +94,7 @@ struct FusionParams {
 };
 
 /// Multiband fusion - combine VIS/SWIR/MWIR into enhanced output
-class QL_API MultibandFusion {
+class MultibandFusion {
 public:
     /// Fuse three bands into a single image
     /// @param vis VIS band image (visible)

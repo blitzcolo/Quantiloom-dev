@@ -91,7 +91,7 @@ struct AdaptiveGridInfo {
  *           << std::endl;
  * @endcode
  */
-class QL_API AdaptiveGridGenerator {
+class AdaptiveGridGenerator {
 public:
     AdaptiveGridGenerator() = default;
     ~AdaptiveGridGenerator() = default;
@@ -210,7 +210,7 @@ struct ReconstructionMapping {
  * @param config Target full-resolution configuration
  * @return Vector of reconstruction mappings
  */
-QL_API Vector<ReconstructionMapping> GenerateReconstructionMapping(
+Vector<ReconstructionMapping> GenerateReconstructionMapping(
     const AdaptiveGridInfo& adaptiveGrid,
     const HyperspectralConfig& config
 );
