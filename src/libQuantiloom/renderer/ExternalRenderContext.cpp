@@ -1937,28 +1937,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
     }
 
-    // Create CIE 1931 CMF LUT buffer (required for VIS_Fused mode)
-    // Use hardcoded CIE data from CIE_CMF_Data.hpp (401 samples, 380-780nm at 1nm)
-    std::vector<glm::vec4> cieCmfData;
-    cieCmfData.reserve(CIE_CMF_LUT_SIZE);
-    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
-        cieCmfData.emplace_back(
-            CIE_1931_2DEG[i][0],  // x_bar
-            CIE_1931_2DEG[i][1],  // y_bar
-            CIE_1931_2DEG[i][2],  // z_bar
-            0.0f                   // padding for 16-byte alignment
-        );
-    }
-
-    cieCmfBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        cieCmfData.size() * sizeof(glm::vec4),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    cieCmfBuffer->Upload(cieCmfData.data(), cieCmfData.size() * sizeof(glm::vec4));
-
-    QL_LOG_DEBUG("  CIE CMF LUT created ({} samples)", CIE_CMF_LUT_SIZE);
+    cieCmfBuffer = rendercore::CreateCieColourMatchingBuffer(*contextAdapter);
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {

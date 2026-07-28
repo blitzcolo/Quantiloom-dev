@@ -1,6 +1,7 @@
 #include "renderer/RenderCore.hpp"
 
 #include "core/Log.hpp"
+#include "core/CIE_CMF_Data.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/ImageIO.hpp"
 #include "io/UsdLoader.hpp"
@@ -1001,6 +1002,29 @@ SensorBandAdjustment SensorAdjustmentForMode(const SpectralMode mode,
         adjustment.wavelengthNm = band->CenterNm();
     }
     return adjustment;
+}
+
+// ============================================================================
+// CIE colour matching functions
+// ============================================================================
+
+std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
+    Vector<glm::vec4> table;
+    table.reserve(CIE_CMF_LUT_SIZE);
+    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
+        // w is padding: the shader reads this as a structured buffer of float4.
+        table.emplace_back(CIE_1931_2DEG[i][0], CIE_1931_2DEG[i][1],
+                           CIE_1931_2DEG[i][2], 0.0f);
+    }
+
+    const size_t bytes = table.size() * sizeof(glm::vec4);
+    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    buffer->Upload(table.data(), bytes);
+
+    QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm)", CIE_CMF_LUT_SIZE);
+    return buffer;
 }
 
 }  // namespace quantiloom::rendercore

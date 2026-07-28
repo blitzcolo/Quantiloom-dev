@@ -411,4 +411,19 @@ struct SensorBandAdjustment {
  */
 SensorBandAdjustment SensorAdjustmentForMode(SpectralMode mode, bool hostSetWavelength);
 
+/**
+ * @brief Upload the CIE 1931 2-degree colour matching functions
+ *
+ * `x̄, ȳ, z̄` at 1 nm over 380-780 nm, padded to vec4 for the shader's structured
+ * buffer stride. Needed by the VIS_Fused mode to integrate a spectrum to XYZ.
+ *
+ * @note The table is compiled in (`core/CIE_CMF_Data.hpp`) rather than read from
+ *       assets/luts/CIE_xyz_1931_2deg.csv, which is what the CLI used to parse with
+ *       a hand-rolled reader. The two agree to 2e-5 across all 401 shared samples --
+ *       the CSV merely also covers 360-380 and 780-830, which the renderer clips
+ *       away. A published constant does not need a load path or a file that can go
+ *       missing.
+ */
+std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx);
+
 } // namespace quantiloom::rendercore

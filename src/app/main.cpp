@@ -980,87 +980,9 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         // Load CIE 1931 Color Matching Functions LUT (for VIS_FUSED mode)
         // ====================================================================
-        QL_LOG_INFO("Loading CIE 1931 CMF LUT...");
-
-        std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
-        std::vector<glm::vec4> cieCMF_data;  // vec4 for 16-byte alignment matching GPU StructuredBuffer stride
-
-        // CIE CMF LUT is always used in VIS_FUSED mode for high accuracy
-        // Covers 380-780nm at 1nm resolution (401 samples)
-        std::filesystem::path cieLUTPath = "assets/luts/CIE_xyz_1931_2deg.csv";
-
-        if (std::filesystem::exists(cieLUTPath)) {
-            QL_LOG_INFO("  Loading CIE CMF from: {}", cieLUTPath.string());
-
-            std::ifstream file(cieLUTPath);
-            if (file.is_open()) {
-                std::string line;
-                while (std::getline(file, line)) {
-                    // Parse CSV: wavelength,x_bar,y_bar,z_bar
-                    std::istringstream ss(line);
-                    std::string token;
-                    std::vector<f32> values;
-
-                    while (std::getline(ss, token, ',')) {
-                        values.push_back(std::stof(token));
-                    }
-
-                    if (values.size() >= 4) {
-                        f32 wavelength = values[0];
-                        // Only include 380-780nm range (401 samples)
-                        if (wavelength >= 380.0f && wavelength <= 780.0f) {
-                            cieCMF_data.push_back(glm::vec4(values[1], values[2], values[3], 0.0f));
-                        }
-                    }
-                }
-                file.close();
-
-                QL_LOG_INFO("  Loaded {} CIE CMF samples (380-780nm)", cieCMF_data.size());
-
-                // Validate data completeness
-                if (cieCMF_data.size() != 401) {
-                    QL_LOG_WARN("  WARNING: Expected 401 samples, got {}. VIS_FUSED accuracy may be reduced.", cieCMF_data.size());
-                }
-
-                // Debug: Print sample values for validation
-                if (!cieCMF_data.empty() && cieCMF_data.size() >= 171) {
-                    auto& s380 = cieCMF_data[0];    // 380nm
-                    auto& s550 = cieCMF_data[170];  // 550nm (170 = 550-380)
-                    QL_LOG_DEBUG("  Sample 380nm: X={:.6f}, Y={:.6f}, Z={:.6f}", s380.x, s380.y, s380.z);
-                    QL_LOG_DEBUG("  Sample 550nm: X={:.6f}, Y={:.6f}, Z={:.6f}", s550.x, s550.y, s550.z);
-                }
-
-                // Create GPU buffer
-                cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
-                    context.GetAllocator(),
-                    cieCMF_data.size() * sizeof(glm::vec4),
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                    VMA_MEMORY_USAGE_CPU_TO_GPU
-                );
-                cieCMF_LUTBuffer->Upload(cieCMF_data.data(), cieCMF_data.size() * sizeof(glm::vec4));
-
-                QL_LOG_INFO("  CIE CMF LUT uploaded to GPU (binding 19)");
-            } else {
-                QL_LOG_ERROR("  Failed to open CIE LUT file: {}", cieLUTPath.string());
-            }
-        } else {
-            QL_LOG_WARN("  CIE LUT not found at: {}", cieLUTPath.string());
-            QL_LOG_WARN("  VIS_FUSED mode will use analytical approximation (lower accuracy at edges)");
-        }
-
-        // If CIE LUT not loaded, create dummy buffer to avoid binding errors
-        if (!cieCMF_LUTBuffer) {
-            QL_LOG_WARN("  FALLBACK: Creating dummy CIE CMF buffer (1 sample)");
-            QL_LOG_WARN("  VIS_FUSED mode will produce INCORRECT colors! Check CIE LUT path.");
-            cieCMF_data.push_back(glm::vec4(0.0f, 0.0f, 0.0f, 0.0f));
-            cieCMF_LUTBuffer = std::make_unique<GpuBuffer>(
-                context.GetAllocator(),
-                sizeof(glm::vec4),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                VMA_MEMORY_USAGE_CPU_TO_GPU
-            );
-            cieCMF_LUTBuffer->Upload(cieCMF_data.data(), sizeof(glm::vec4));
-        }
+        // Compiled in rather than parsed from assets/luts/, so there is no path to
+        // get wrong and no "VIS_FUSED will produce INCORRECT colors" fallback to hit.
+        auto cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(context);
 
         // ====================================================================
         // Create Material Buffer (PBR)

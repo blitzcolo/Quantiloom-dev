@@ -306,7 +306,7 @@ public:
     // ========================================================================
     // High-precision CIE XYZ CMFs for VIS_FUSED mode spectral integration
     // 401 samples covering 380-780nm at 1nm resolution
-    // Loaded from assets/luts/CIE_xyz_1931_2deg.csv
+    // Compiled in from core/CIE_CMF_Data.hpp, not read from assets/luts/
     // Each sample is float3(x_bar, y_bar, z_bar)
     // ========================================================================
 
