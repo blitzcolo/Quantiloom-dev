@@ -1079,116 +1079,37 @@ int RunApp(int argc, char* argv[]) {
         // ====================================================================
         QL_LOG_INFO("Creating PBR material buffer...");
 
-        // Upload all materials with full PBR parameters
-        std::vector<MaterialDataCPU> materialData;
-        materialData.reserve(loadedScene.materials.size());
-
+        // The curve and refractive-index slots are resolved here rather than inside
+        // the conversion: the CLI matches material names against what the config
+        // loaded, while the interactive context reads the indices off the Material.
+        Vector<rendercore::MaterialGpuIndices> materialIndices;
+        materialIndices.reserve(loadedScene.materials.size());
         for (const auto& mat : loadedScene.materials) {
-            MaterialDataCPU cpuMat{};
+            rendercore::MaterialGpuIndices slots;
 
-            // Base color
-            cpuMat.baseColorFactor = mat.baseColorFactor;
-            cpuMat.baseColorTextureIndex = mat.baseColorTextureIndex;
-
-            // Metallic-Roughness
-            cpuMat.metallicFactor = mat.metallicFactor;
-            cpuMat.roughnessFactor = mat.roughnessFactor;
-            cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
-
-            // Normal mapping
-            cpuMat.normalTextureIndex = mat.normalTextureIndex;
-            cpuMat.normalScale = mat.normalScale;
-
-            // Double-sided rendering
-            cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
-
-            // Emissive
-            cpuMat.emissiveFactor = mat.emissiveFactor;
-            cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
-
-            // Alpha mode
-            cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
-            cpuMat.alphaCutoff = mat.alphaCutoff;
-
-            // Spectral (M1 compatibility)
-            cpuMat.spectralAlbedo = mat.spectralAlbedo;
-
-            // Spectral reflectance curve index (M2+ quantitative mode)
-            // Look up by material name, default to -1 (no curve = use RGB fallback)
-            auto spectralIt = materialNameToSpectralIndex.find(mat.name);
-            if (spectralIt != materialNameToSpectralIndex.end()) {
-                cpuMat.spectralReflectanceCurveIndex = spectralIt->second;
-                QL_LOG_INFO("  Material '{}': using spectral curve index {}", mat.name, spectralIt->second);
-            } else {
-                cpuMat.spectralReflectanceCurveIndex = -1;  // No curve, use RGB fallback
+            if (auto it = materialNameToSpectralIndex.find(mat.name);
+                it != materialNameToSpectralIndex.end()) {
+                slots.spectralReflectanceCurve = it->second;
+                QL_LOG_INFO("  Material '{}': using spectral curve index {}", mat.name,
+                            it->second);
+            }
+            if (auto it = materialNameToCRIIndex.find(mat.name);
+                it != materialNameToCRIIndex.end()) {
+                slots.complexRefractiveIndex = it->second;
+                QL_LOG_INFO("  Material '{}': using physical Fresnel (CRI index {})",
+                            mat.name, it->second);
             }
 
-            // Infrared material properties
-            // Sentinel: write -1.0f when no explicit IR data → shader derives ε
-            // from metallic/roughness via GetEffectiveIREmissivity heuristic.
-            cpuMat.irEmissivity = mat.irEmissivityCurve.empty()
-                ? -1.0f
-                : mat.GetIREmissivity(wavelength_nm);
-            cpuMat.irTransmittance = mat.GetIRTransmittance(wavelength_nm);
-            cpuMat.irTemperature_K = mat.irTemperature_K;
-
-            // Complex refractive index for physical Fresnel
-            // Look up by material name, default to -1 (no data = use PBR approximation)
-            auto criIt = materialNameToCRIIndex.find(mat.name);
-            if (criIt != materialNameToCRIIndex.end()) {
-                cpuMat.complexRefractiveIndexIndex = criIt->second;
-                QL_LOG_INFO("  Material '{}': using physical Fresnel (CRI index {})", mat.name, criIt->second);
-            } else {
-                cpuMat.complexRefractiveIndexIndex = -1;  // Use standard PBR F0 approximation
-            }
-
-            // Temperature texture fields
-            cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
-            cpuMat.temperatureScale = mat.temperatureScale;
-            cpuMat.temperatureOffset = mat.temperatureOffset;
-            cpuMat.irEmissivityCurveIndex = -1;   // TODO: Phase C4 uploads per-λ curves
-
-            // Transmission properties (KHR_materials_transmission)
-            cpuMat.ior = mat.ior;
-            cpuMat.transmission = mat.transmission;
-            cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
-            cpuMat.irTransmittanceCurveIndex = -1; // TODO: Phase C4 uploads per-λ curves
-
-            // Volume attenuation (KHR_materials_volume)
-            cpuMat.attenuationColor = mat.attenuationColor;
-            cpuMat.attenuationDistance = mat.attenuationDistance;
-            cpuMat.thicknessFactor = mat.thicknessFactor;
-            cpuMat.thicknessTextureIndex = mat.thicknessTextureIndex;
-            cpuMat.dispersion = mat.dispersion;
-            cpuMat._padding2 = 0.0f;
-
-            // Participating media properties
-            cpuMat.volumeDensity = mat.volumeDensity;
-            cpuMat.scatteringCoeff = mat.scatteringCoeff;
-            cpuMat.absorptionCoeff = mat.absorptionCoeff;
-            cpuMat.phaseG = mat.phaseG;
-
-            materialData.push_back(cpuMat);
-
-            QL_LOG_DEBUG("  Material '{}': base=[{:.2f},{:.2f},{:.2f},{:.2f}] metal={:.2f} rough={:.2f}",
-                        mat.name,
-                        mat.baseColorFactor.r, mat.baseColorFactor.g, mat.baseColorFactor.b, mat.baseColorFactor.a,
-                        mat.metallicFactor, mat.roughnessFactor);
-            QL_LOG_DEBUG("    [DEBUG] emissive=[{:.3f},{:.3f},{:.3f}]",
-                        mat.emissiveFactor.r, mat.emissiveFactor.g, mat.emissiveFactor.b);
-            QL_LOG_DEBUG("    [DEBUG] Texture indices: baseColor={} metallicRough={} normal={} emissive={}",
-                        mat.baseColorTextureIndex, mat.metallicRoughnessTextureIndex,
-                        mat.normalTextureIndex, mat.emissiveTextureIndex);
+            materialIndices.push_back(slots);
         }
 
-        GpuBuffer materialBuffer(
-            context.GetAllocator(),
-            materialData.size() * sizeof(MaterialDataCPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-
-        materialBuffer.Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
+        auto materialBufferPtr = rendercore::BuildMaterialBuffer(
+            context, loadedScene, wavelength_nm, materialIndices);
+        if (!materialBufferPtr) {
+            QL_LOG_ERROR("Scene has no materials");
+            return 1;
+        }
+        GpuBuffer& materialBuffer = *materialBufferPtr;
 
         // ====================================================================
         // Load or Generate BRDF Integration LUT for IBL (with Disk Caching)

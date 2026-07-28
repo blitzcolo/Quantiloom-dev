@@ -1316,10 +1316,23 @@ void ExternalRenderContext::SetSpectralMode(SpectralMode mode) {
 }
 
 void ExternalRenderContext::SetWavelength(f32 wavelength_nm) {
-    if (m_impl->wavelength_nm != wavelength_nm) {
-        m_impl->wavelength_nm = wavelength_nm;
-        ResetAccumulation();
+    if (m_impl->wavelength_nm == wavelength_nm) {
+        return;
     }
+    m_impl->wavelength_nm = wavelength_nm;
+
+    // The material buffer holds IR emissivity and transmittance sampled at the old
+    // wavelength, so it is now stale. Re-uploading in place keeps the descriptor
+    // binding valid -- the material count has not changed -- and follows what
+    // UpdateMaterial already does for a single entry.
+    if (m_impl->scene && m_impl->materialBuffer) {
+        m_impl->UpdateGpuResources();
+        if (m_impl->pipeline && m_impl->materialBuffer) {
+            m_impl->pipeline->BindMaterialBuffer(*m_impl->materialBuffer);
+        }
+    }
+
+    ResetAccumulation();
 }
 
 void ExternalRenderContext::SetSPP(u32 spp) {
@@ -1399,84 +1412,6 @@ const LightingParams& ExternalRenderContext::GetLightingParams() const {
 // Compute a single representative scalar from a sparse (wavelength_nm, value) curve
 // by trapezoidal integration over the curve's wavelength domain.
 // Returns fallback if the curve has fewer than two samples.
-static f32 AverageSpectralCurve(
-    const Vector<std::pair<f32, f32>>& curve,
-    f32 fallback)
-{
-    if (curve.empty()) {
-        return fallback;
-    }
-    if (curve.size() == 1) {
-        return curve.front().second;
-    }
-
-    f32 area = 0.0f;
-    f32 width = curve.back().first - curve.front().first;
-    if (width <= 0.0f) {
-        return fallback;
-    }
-
-    for (usize i = 1; i < curve.size(); ++i) {
-        f32 dx = curve[i].first - curve[i - 1].first;
-        f32 avg = (curve[i].second + curve[i - 1].second) * 0.5f;
-        area += dx * avg;
-    }
-
-    return area / width;
-}
-
-static MaterialDataCPU ConvertMaterialToCPU(const Material& mat) {
-    MaterialDataCPU cpuMat{};
-    cpuMat.baseColorFactor = mat.baseColorFactor;
-    cpuMat.baseColorTextureIndex = mat.baseColorTextureIndex;
-    cpuMat.metallicFactor = mat.metallicFactor;
-    cpuMat.roughnessFactor = mat.roughnessFactor;
-    cpuMat.metallicRoughnessTextureIndex = mat.metallicRoughnessTextureIndex;
-    cpuMat.normalTextureIndex = mat.normalTextureIndex;
-    cpuMat.normalScale = mat.normalScale;
-    cpuMat.doubleSided = mat.doubleSided ? 1u : 0u;
-    cpuMat.emissiveFactor = mat.emissiveFactor;
-    cpuMat.emissiveTextureIndex = mat.emissiveTextureIndex;
-    cpuMat.alphaMode = static_cast<u32>(mat.alphaMode);
-    cpuMat.alphaCutoff = mat.alphaCutoff;
-    cpuMat.spectralAlbedo = mat.spectralAlbedo;
-    cpuMat.spectralReflectanceCurveIndex = mat.spectralReflectanceCurveIndex;
-
-    // Sentinel: -1.0f when no IR data → shader derives ε from metallic/roughness
-    cpuMat.irEmissivity = mat.irEmissivityCurve.empty()
-        ? -1.0f
-        : std::clamp(AverageSpectralCurve(mat.irEmissivityCurve, 0.0f), 0.0f, 1.0f);
-    cpuMat.irTransmittance = std::clamp(
-        AverageSpectralCurve(mat.irTransmittanceCurve, 0.0f), 0.0f, 1.0f);
-    cpuMat.irTemperature_K = mat.irTemperature_K;
-    cpuMat.complexRefractiveIndexIndex = mat.complexRefractiveIndexIndex;
-
-    // Temperature texture fields (per-pixel temperature map)
-    cpuMat.temperatureTextureIndex = mat.temperatureTextureIndex;
-    cpuMat.temperatureScale = mat.temperatureScale;
-    cpuMat.temperatureOffset = mat.temperatureOffset;
-    cpuMat.irEmissivityCurveIndex = -1;    // SDK has no curve buffer yet
-
-    // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
-    cpuMat.ior = mat.ior;
-    cpuMat.transmission = mat.transmission;
-    cpuMat.transmissionTextureIndex = mat.transmissionTextureIndex;
-    cpuMat.irTransmittanceCurveIndex = -1; // SDK has no curve buffer yet
-    cpuMat.attenuationColor = mat.attenuationColor;
-    cpuMat.attenuationDistance = mat.attenuationDistance;
-    cpuMat.thicknessFactor = mat.thicknessFactor;
-    cpuMat.thicknessTextureIndex = mat.thicknessTextureIndex;
-    cpuMat.dispersion = mat.dispersion;
-    cpuMat._padding2 = 0.0f;
-
-    // Volume properties (fog, smoke, SSS)
-    cpuMat.volumeDensity = mat.volumeDensity;
-    cpuMat.scatteringCoeff = mat.scatteringCoeff;
-    cpuMat.absorptionCoeff = mat.absorptionCoeff;
-    cpuMat.phaseG = mat.phaseG;
-
-    return cpuMat;
-}
 
 // ============================================================================
 // Scene Editing (Stubs for Phase 2)
@@ -1532,7 +1467,10 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     m_impl->scene->materials[materialIndex] = material;
 
     // 2. Convert to GPU format
-    MaterialDataCPU cpuMat = ConvertMaterialToCPU(material);
+    const rendercore::MaterialGpuIndices indices{material.spectralReflectanceCurveIndex,
+                                                 material.complexRefractiveIndexIndex};
+    MaterialDataCPU cpuMat =
+        rendercore::ConvertMaterial(material, m_impl->wavelength_nm, indices);
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
@@ -1904,25 +1842,7 @@ void ExternalRenderContext::Impl::UpdateGpuResources() {
     if (!scene) return;
 
     QL_LOG_INFO("Updating GPU resources...");
-
-    // Upload materials
-    std::vector<MaterialDataCPU> materialData;
-    materialData.reserve(scene->materials.size());
-
-    for (const auto& mat : scene->materials) {
-        materialData.push_back(ConvertMaterialToCPU(mat));
-    }
-
-    if (!materialData.empty()) {
-        materialBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(),
-            materialData.size() * sizeof(MaterialDataCPU),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-        materialBuffer->Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
-    }
-
+    materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm);
     QL_LOG_INFO("  GPU resources updated");
 }
 

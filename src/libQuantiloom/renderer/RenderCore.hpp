@@ -33,6 +33,7 @@
 #include "renderer/AccelerationStructure.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
 #include "renderer/GpuBuffer.hpp"
+#include "renderer/MaterialGpuData.hpp"
 #include "scene/Scene.hpp"
 
 #include <vulkan/vulkan.h>
@@ -284,5 +285,45 @@ private:
     u32 m_vertexCount = 0;
     u32 m_indexCount = 0;
 };
+
+/**
+ * @brief Where a material's spectral curve and refractive index live in their buffers
+ *
+ * Resolved by the caller because the two front ends know different things: the
+ * interactive context reads the indices a Material already carries, while the CLI
+ * resolves material names against the curves it loaded from the scene config.
+ */
+struct MaterialGpuIndices {
+    i32 spectralReflectanceCurve = -1;  // -1: no curve, shader falls back to RGB
+    i32 complexRefractiveIndex = -1;    // -1: no CRI, shader uses the F0 approximation
+};
+
+/**
+ * @brief Convert a Material into the layout the closest-hit shader reads
+ *
+ * @param wavelengthNm Wavelength the IR curves are evaluated at
+ *
+ * @note The IR emissivity and transmittance are interpolated at `wavelengthNm`.
+ *       ExternalRenderContext used to average each curve over its whole range
+ *       instead, because the conversion was a file-static function with no way to
+ *       reach the current wavelength -- which made the GUI's thermal response
+ *       wavelength-independent, in a renderer whose reason to exist is that it is
+ *       not. The two agree only for a flat curve.
+ * @note Both are clamped to [0, 1]. Emissivity above 1 is unphysical, and the clamp
+ *       was already on the context's side.
+ */
+MaterialDataCPU ConvertMaterial(const Material& material, f32 wavelengthNm,
+                                const MaterialGpuIndices& indices = {});
+
+/**
+ * @brief Convert and upload every material in the scene
+ *
+ * @param indices One entry per scene material. Empty means read each Material's own
+ *                spectralReflectanceCurveIndex and complexRefractiveIndexIndex.
+ * @return null when the scene has no materials -- there is nothing to bind
+ */
+std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
+                                               f32 wavelengthNm,
+                                               const Vector<MaterialGpuIndices>& indices = {});
 
 } // namespace quantiloom::rendercore

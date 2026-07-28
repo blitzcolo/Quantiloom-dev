@@ -807,4 +807,89 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
     });
 }
 
+// ============================================================================
+// Materials
+// ============================================================================
+
+MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm,
+                                const MaterialGpuIndices& indices) {
+    MaterialDataCPU cpuMat{};
+    cpuMat.baseColorFactor = material.baseColorFactor;
+    cpuMat.baseColorTextureIndex = material.baseColorTextureIndex;
+    cpuMat.metallicFactor = material.metallicFactor;
+    cpuMat.roughnessFactor = material.roughnessFactor;
+    cpuMat.metallicRoughnessTextureIndex = material.metallicRoughnessTextureIndex;
+    cpuMat.normalTextureIndex = material.normalTextureIndex;
+    cpuMat.normalScale = material.normalScale;
+    cpuMat.doubleSided = material.doubleSided ? 1u : 0u;
+    cpuMat.emissiveFactor = material.emissiveFactor;
+    cpuMat.emissiveTextureIndex = material.emissiveTextureIndex;
+    cpuMat.alphaMode = static_cast<u32>(material.alphaMode);
+    cpuMat.alphaCutoff = material.alphaCutoff;
+    cpuMat.spectralAlbedo = material.spectralAlbedo;
+    cpuMat.spectralReflectanceCurveIndex = indices.spectralReflectanceCurve;
+
+    // Sentinel: -1.0f when no IR data -> shader derives epsilon from metallic/roughness
+    cpuMat.irEmissivity = material.irEmissivityCurve.empty()
+        ? -1.0f
+        : std::clamp(material.GetIREmissivity(wavelengthNm), 0.0f, 1.0f);
+    cpuMat.irTransmittance = std::clamp(material.GetIRTransmittance(wavelengthNm), 0.0f, 1.0f);
+    cpuMat.irTemperature_K = material.irTemperature_K;
+    cpuMat.complexRefractiveIndexIndex = indices.complexRefractiveIndex;
+
+    // Temperature texture fields (per-pixel temperature map)
+    cpuMat.temperatureTextureIndex = material.temperatureTextureIndex;
+    cpuMat.temperatureScale = material.temperatureScale;
+    cpuMat.temperatureOffset = material.temperatureOffset;
+    cpuMat.irEmissivityCurveIndex = -1;    // no per-wavelength curve buffer yet
+
+    // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
+    cpuMat.ior = material.ior;
+    cpuMat.transmission = material.transmission;
+    cpuMat.transmissionTextureIndex = material.transmissionTextureIndex;
+    cpuMat.irTransmittanceCurveIndex = -1; // no per-wavelength curve buffer yet
+    cpuMat.attenuationColor = material.attenuationColor;
+    cpuMat.attenuationDistance = material.attenuationDistance;
+    cpuMat.thicknessFactor = material.thicknessFactor;
+    cpuMat.thicknessTextureIndex = material.thicknessTextureIndex;
+    cpuMat.dispersion = material.dispersion;
+    cpuMat._padding2 = 0.0f;
+
+    // Volume properties (fog, smoke, SSS)
+    cpuMat.volumeDensity = material.volumeDensity;
+    cpuMat.scatteringCoeff = material.scatteringCoeff;
+    cpuMat.absorptionCoeff = material.absorptionCoeff;
+    cpuMat.phaseG = material.phaseG;
+
+    return cpuMat;
+}
+
+std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
+                                               const f32 wavelengthNm,
+                                               const Vector<MaterialGpuIndices>& indices) {
+    if (scene.materials.empty()) {
+        return nullptr;
+    }
+
+    Vector<MaterialDataCPU> gpuMaterials;
+    gpuMaterials.reserve(scene.materials.size());
+
+    for (size_t i = 0; i < scene.materials.size(); ++i) {
+        const Material& material = scene.materials[i];
+        const MaterialGpuIndices resolved =
+            i < indices.size()
+                ? indices[i]
+                : MaterialGpuIndices{material.spectralReflectanceCurveIndex,
+                                     material.complexRefractiveIndexIndex};
+        gpuMaterials.push_back(ConvertMaterial(material, wavelengthNm, resolved));
+    }
+
+    const size_t bytes = gpuMaterials.size() * sizeof(MaterialDataCPU);
+    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    buffer->Upload(gpuMaterials.data(), bytes);
+    return buffer;
+}
+
 }  // namespace quantiloom::rendercore
