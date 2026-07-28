@@ -73,4 +73,3 @@ enabled = false
 
 # Disable atmospheric scattering for cleaner spectral data
 [atmospheric]
-preset = "disabled"

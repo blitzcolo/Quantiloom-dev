@@ -262,7 +262,6 @@ png = "fused_vis_swir_mwir.png"   # LDR preview
 # All parameters are optional; unspecified values use the preset defaults.
 # ============================================================================
 [atmospheric]
-preset = "disabled"            # Use preset as base configuration
 
 # Rayleigh scattering (molecular) - Optional overrides
 rayleigh_enabled = true         # Enable Rayleigh scattering (O2, N2 molecules)

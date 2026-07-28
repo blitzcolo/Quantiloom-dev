@@ -104,6 +104,5 @@ detector_temperature_k = 77.0
 # Atmospheric Scattering
 # ============================================================================
 [atmospheric]
-preset = "disabled"
 rayleigh_enabled = false
 mie_enabled = false

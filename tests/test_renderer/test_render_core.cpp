@@ -115,9 +115,9 @@ TEST(RenderCoreEquirectToCubemap, BrightMeridianLandsOnPlusXFace) {
 // ============================================================================
 // LoadSceneFromConfig
 // ============================================================================
-// The two implementations this merged had diverged in three ways, and each one
-// below pins the resolution. Only the file-less paths are covered here: loading a
-// glTF or USD is the loaders' own contract, tested in test_io.
+// The two implementations this merged had diverged, and the cases below pin how each
+// difference was resolved. Only the file-less paths are covered here: loading a glTF
+// or USD is the loaders' own contract, tested in test_io.
 
 namespace {
 
@@ -132,38 +132,25 @@ Config ConfigFrom(const std::string& toml) {
 
 }  // namespace
 
-// ExternalRenderContext::LoadScene used to reject anything without scene.gltf or
-// scene.usd, so a procedural TOML rendered from the CLI but could not open in the
-// GUI. The merged loader keeps the CLI's superset.
-TEST(RenderCoreLoadSceneFromConfig, BuildsTheNamedPreset) {
-    for (const char* preset : {"cornell_box", "multi_object", "lighting_test"}) {
-        const auto cfg = ConfigFrom(std::string("[scene]\npreset = \"") + preset + "\"\n");
-        auto scene = rendercore::LoadSceneFromConfig(cfg);
-
-        ASSERT_TRUE(scene.has_value()) << preset;
-        EXPECT_EQ(scene.value().name, preset);
-        ASSERT_EQ(scene.value().meshes.size(), 1u);
-        EXPECT_GT(scene.value().GetTotalTriangleCount(), 0u) << preset;
-        ASSERT_EQ(scene.value().nodes.size(), 1u);
-        EXPECT_EQ(scene.value().nodes[0].meshIndex, 0u);
-    }
-}
-
-TEST(RenderCoreLoadSceneFromConfig, UnknownPresetFallsBackToCornellBox) {
-    const auto cfg = ConfigFrom("[scene]\npreset = \"no_such_preset\"\n");
-    auto scene = rendercore::LoadSceneFromConfig(cfg);
-
-    ASSERT_TRUE(scene.has_value());
-    EXPECT_EQ(scene.value().name, "cornell_box");
-    EXPECT_GT(scene.value().GetTotalTriangleCount(), 0u);
-}
-
-TEST(RenderCoreLoadSceneFromConfig, NoSceneKeyFallsBackToCornellBox) {
+// A config that names no scene is an error, not a scene. Both implementations this
+// merged had a way of carrying on -- the CLI built a procedural Cornell box and
+// warned -- which turned a misspelt key into a wrong picture instead of a message.
+TEST(RenderCoreLoadSceneFromConfig, RejectsAConfigThatNamesNoScene) {
     const auto cfg = ConfigFrom("[render]\nwidth = 64\n");
     auto scene = rendercore::LoadSceneFromConfig(cfg);
 
-    ASSERT_TRUE(scene.has_value());
-    EXPECT_EQ(scene.value().name, "cornell_box");
+    ASSERT_FALSE(scene.has_value());
+    EXPECT_NE(scene.error().find("scene.usd"), std::string::npos) << scene.error();
+    EXPECT_NE(scene.error().find("scene.gltf"), std::string::npos) << scene.error();
+}
+
+// scene.preset used to select one of three meshes built in code. It is gone, so a
+// config carrying one is a config naming no scene.
+TEST(RenderCoreLoadSceneFromConfig, DoesNotResurrectScenePreset) {
+    const auto cfg = ConfigFrom("[scene]\npreset = \"cornell_box\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    EXPECT_FALSE(scene.has_value());
 }
 
 // Precedence: the CLI took the USD when a config named both, the render context took

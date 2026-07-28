@@ -115,7 +115,6 @@ add_library(quantiloom_core OBJECT
     scene/Camera.cpp
     ${QL_PUBLIC_INC}/scene/Camera.hpp
     ${QL_PUBLIC_INC}/scene/Mesh.hpp
-    scene/SceneBuilder.hpp
     scene/MeshOptimizer.cpp
     scene/MeshOptimizer.hpp
     scene/NormalGenerator.cpp

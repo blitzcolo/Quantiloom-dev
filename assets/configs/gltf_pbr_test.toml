@@ -57,6 +57,12 @@ band = "VIS"  # or "NIR", "SWIR", "MWIR", "LWIR"
 gltf = "assets/models/glTF-Sample-Assets/Models/DamagedHelmet/glTF/DamagedHelmet.gltf"
 world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 
+# Default surface temperature (K) for IR modes (single/swir/mwir/lwir_fused).
+# Standard glTF materials carry no temperature; without this, thermal
+# emission is zero and LWIR/MWIR images are pure noise. Materials with an
+# explicit IR extension temperature or a temperature texture keep their own.
+default_temperature_k = 300.0
+
 # ============================================================================
 # Alternative: Use procedural preset (comment out 'gltf' above to use preset)
 # ============================================================================
@@ -200,6 +206,27 @@ nuc_efficiency = 0.95           # NUC efficiency (95-99%, only used if enable_nu
 detector_temperature_k = 77.0   # Detector temperature (K) for IR
 
 # ============================================================================
+# LWIR sensor parameter set (use with spectral.mode = "lwir_fused")
+# ============================================================================
+# The visible-band parameters above (f/11, 5um pitch, 10ms) saturate or
+# starve an LWIR photon budget. Uncomment this block (and comment out the
+# conflicting keys above) for a physically sane LWIR camera:
+#   Band radiance ~28 W/sr/m^2 (300K, emissivity 0.9, 8-12um)
+#   -> ~2.6e11 e-/s at f/1.0, 17um pitch, QE 0.8
+#   -> 30us integration fills ~77% of a 1e7 e- well
+# ============================================================================
+# focal_length_mm = 50.0
+# f_number = 1.0                 # LWIR optics are fast (f/1.0-f/1.4)
+# pixel_pitch_um = 17.0          # Typical LWIR FPA pitch (12-25 um)
+# quantum_efficiency = 0.8
+# well_capacity_e = 1.0e7        # Large wells for high thermal background
+# read_noise_e_rms = 300.0       # IR FPA readout noise
+# dark_current_e_s = 1.0e5
+# integration_time_s = 3.0e-5
+# bit_depth = 14
+# gain = 610.0                   # 1e7 e- / 2^14 DN
+
+# ============================================================================
 # Multiband Fusion (Post-processing)
 # ============================================================================
 # Fuse VIS/SWIR/MWIR bands into a single enhanced grayscale/pseudocolor image.
@@ -262,7 +289,6 @@ png = "fused_vis_swir_mwir.png"   # LDR preview
 # All parameters are optional; unspecified values use the preset defaults.
 # ============================================================================
 [atmospheric]
-preset = "disabled"            # Use preset as base configuration
 
 # Rayleigh scattering (molecular) - Optional overrides
 rayleigh_enabled = true         # Enable Rayleigh scattering (O2, N2 molecules)

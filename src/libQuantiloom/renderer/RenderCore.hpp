@@ -37,20 +37,24 @@ namespace quantiloom::rendercore {
 /**
  * @brief Build a Scene from a parsed TOML scene configuration
  *
- * Resolves, in order: `scene.usd`, `scene.gltf`, `scene.preset`, then a Cornell box
- * with a warning. Loading files is all this does -- no GPU resources are touched, so
+ * Resolves `scene.usd`, then `scene.gltf`. A config naming neither is an error:
+ * quietly rendering something else turns a misspelt key into a wrong picture rather
+ * than a message. Loading files is all this does -- no GPU resources are touched, so
  * both the offline path and the interactive context can call it before they have a
  * device.
  *
- * @note Merged from two implementations that had drifted. The CLI's supported
- *       presets and fell back to a Cornell box; ExternalRenderContext::LoadScene
- *       supported neither and rejected any config without scene.gltf or scene.usd,
- *       which is why a procedural TOML renders from the CLI but would not open in
- *       the GUI. The CLI's superset is what survived.
- * @note The two also disagreed on precedence when a config names both a USD and a
- *       glTF file: the CLI took the USD, the context took the glTF. No config in
- *       assets/configs does both, so the case was unreachable either way; the CLI's
- *       order is kept because it is the one covered by a render test.
+ * @note Merged from two implementations that had drifted. The CLI also accepted a
+ *       `scene.preset` naming one of three meshes built in code, and fell back to a
+ *       procedural Cornell box when a config named no scene at all;
+ *       ExternalRenderContext::LoadScene did neither. Both went away rather than
+ *       being adopted: assets/models/cornell_box/ holds a committed Cornell box
+ *       built to the original specification with ECOSTRESS spectral reflectances,
+ *       which the cornell_box_{vis,swir,mwir,lwir} configs use, and a scene whose
+ *       materials carry no spectral data is of little use to a spectral renderer.
+ * @note The two disagreed on precedence when a config names both a USD and a glTF:
+ *       the CLI took the USD, the context the glTF. No config in assets/configs does
+ *       both, so the case was unreachable either way; the CLI's order is kept
+ *       because it is the one covered by a render test.
  */
 Result<Scene, String> LoadSceneFromConfig(const Config& config);
 

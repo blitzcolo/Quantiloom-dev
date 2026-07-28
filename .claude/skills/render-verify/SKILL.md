@@ -22,9 +22,9 @@ materials, and the sensor chain, and emits all three inspectable outputs —
 model with metallic highlights and emissive details; horizontal banding is the
 configured sensor FPN/row-noise simulation, not an artifact. Renders in seconds.
 
-Use `cornell_box_procedural.toml` instead when external assets are unavailable
-(it needs none), or a config from the table below when your change targets a
-specific subsystem.
+Use `cornell_box_vis.toml` instead when the glTF-Sample-Assets submodule is
+missing -- its geometry and spectral data are all committed in-repo -- or a
+config from the table below when your change targets a specific subsystem.
 
 Prerequisites: a current build (see build-and-install skill). **If HLSL changed, recompile shaders first** — running the old `.spv` silently "verifies" nothing:
 
@@ -42,7 +42,7 @@ Configs in `assets/configs/`, ordered by cost and coverage:
 | Config | Exercises | Notes |
 |---|---|---|
 | `gltf_pbr_test.toml` | glTF + textured PBR + sensor chain, RGB mode | **Default** — EXR/PNG/rawdn outputs |
-| `cornell_box_procedural.toml` | Basic path tracing, single wavelength | No external assets — fallback smoke test |
+| `cornell_box_vis.toml` | Spectral path tracing, VIS band, ECOSTRESS materials | No submodule needed — fallback smoke test, ~1 s |
 | `cube_gltf.toml` / `cube_usdc.toml` | glTF / USD loading | USD needs USD-enabled build |
 | `metal_spheres_test.toml` | Conductor Fresnel (n,k) | Use for Fresnel/BRDF changes |
 | `multispectral_test.toml` | Hyperspectral cube, multi-pass | Slow; ENVI output |
@@ -54,7 +54,7 @@ Pick the cheapest config that exercises the changed code path; add `multispectra
 ## Checking the result
 
 1. **Exit code non-zero = failure.** Read the log; the renderer uses spdlog and prints Vulkan/asset diagnostics.
-2. **Output freshness:** `ls -l --time-style=full-iso <output>` — the `output` path from the config's `[renderer]` section (e.g. `cornell_box_output.exr`). Stale timestamp means the render silently didn't write.
+2. **Output freshness:** `ls -l --time-style=full-iso <output>` — the `output` path from the config's `[renderer]` section (e.g. `cornell_box_vis.exr`). Stale timestamp means the render silently didn't write.
 3. **Visual check:** configs that emit `.png` previews can be inspected directly with the Read tool. All-black, all-white, or NaN-speckled output is a failure even with exit code 0.
 4. **Numeric check (EXR/ENVI):** compare against the previous output — render once on the base commit, once with the change, and diff statistics. Expected-unchanged code paths must produce statistically identical images (rendering is currently seeded from `std::random_device`, so bit-exact repeats are NOT possible — compare means/histograms, not bytes; see SRS NFR-REPRO-01).
 5. Side outputs matter: `_rawdn.exr` (sensor DN), `_bands/` per-band dumps, `.hdr/.dat` ENVI pairs — check the ones your change touches.

@@ -3,7 +3,6 @@
 #include "core/Log.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/UsdLoader.hpp"
-#include "scene/SceneBuilder.hpp"
 
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
@@ -12,25 +11,6 @@
 #include <cmath>
 
 namespace quantiloom::rendercore {
-
-namespace {
-
-// Wrap a single procedural mesh as a one-node scene.
-Scene MakeProceduralScene(String name, Mesh mesh) {
-    Scene scene;
-    scene.name = std::move(name);
-    scene.meshes.push_back(std::move(mesh));
-
-    SceneNode node;
-    node.meshIndex = 0;
-    node.transform = glm::mat4(1.0f);
-    node.name = "SceneRoot";
-    scene.nodes.push_back(node);
-
-    return scene;
-}
-
-}  // namespace
 
 Result<Scene, String> LoadSceneFromConfig(const Config& config) {
     if (config.Has("scene.usd")) {
@@ -55,31 +35,8 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
         return Result<Scene, String>(std::move(result.value()));
     }
 
-    if (config.Has("scene.preset")) {
-        const auto preset = config.Get<String>("scene.preset", "cornell_box");
-        QL_LOG_INFO("Loading built-in scene preset: {}", preset);
-
-        if (preset == "cornell_box") {
-            return Result<Scene, String>(
-                MakeProceduralScene(preset, TestScenes::CreateCornellBoxScene()));
-        }
-        if (preset == "multi_object") {
-            return Result<Scene, String>(
-                MakeProceduralScene(preset, TestScenes::CreateMultiObjectScene()));
-        }
-        if (preset == "lighting_test") {
-            return Result<Scene, String>(
-                MakeProceduralScene(preset, TestScenes::CreateLightingTestScene()));
-        }
-
-        QL_LOG_WARN("Unknown scene preset '{}', defaulting to cornell_box", preset);
-        return Result<Scene, String>(
-            MakeProceduralScene("cornell_box", TestScenes::CreateCornellBoxScene()));
-    }
-
-    QL_LOG_WARN("No scene specified in config, using cornell_box preset");
-    return Result<Scene, String>(
-        MakeProceduralScene("cornell_box", TestScenes::CreateCornellBoxScene()));
+    return Result<Scene, String>::Err(
+        "No scene.usd or scene.gltf in config -- nothing to render");
 }
 
 namespace {
