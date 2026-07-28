@@ -47,6 +47,31 @@ Quantiloom-Qt links `D:/Quantiloom-SDK/windows_amd64`. After changing public hea
 or exported symbols, run `./build_wsl.sh` to reinstall — otherwise a correct core fix
 appears to have no effect in the GUI.
 
+## Five headers are a layout contract, not just declarations
+
+```
+include/quantiloom/scene/{Scene,Mesh,Material,Texture,BRDFModels}.hpp
+```
+
+Quantiloom-Qt does not call these types so much as **read their fields**:
+`scene->nodes`, `meshes`, `materials`, `node.transform`, the `Material` members. The
+export audit found two imported symbols on `Scene` against dozens of member accesses.
+
+So **adding, reordering or resizing a field in any of them breaks ABI**, even though
+`QL_API` did not move and `docs/abi/exports.golden` does not change. A frontend built
+against the previous SDK reads the new layout at the old offsets, and nothing says so.
+
+What follows for releases: **the SDK and Studio ship together**, and a change here is
+a major version. `Quantiloom-Qt/src/SdkGuard.cpp` catches a mismatched pairing at
+start-up by comparing a SHA-256 recorded at configure time against the DLL actually
+loaded — that is detection, not compatibility, and it is the backstop rather than the
+plan.
+
+This is a deliberate trade rather than an oversight. Accessors would remove the
+coupling, but the frontend walks these structures constantly and the indirection
+would buy little for one core repo and one frontend released in step. Worth revisiting
+if a second consumer appears.
+
 ## Portability
 
 Windows is the primary target, but this code must stay buildable with MSVC, GCC, and

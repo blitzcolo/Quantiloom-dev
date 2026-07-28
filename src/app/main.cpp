@@ -583,9 +583,13 @@ int RunApp(int argc, char* argv[]) {
         SpectralBasisLoader basisLoader;
         String activeBand = "VIS";  // Default to visible band
 
-        if (config.Has("spectral.basis_file") && config.Has("spectral.materials_json")) {
-            auto basisFilePath = config.Get<String>("spectral.basis_file");
-            auto materialsJsonPath = config.Get<String>("spectral.materials_json");
+        // Present but empty means "not configured": several shipped configs carry the
+        // keys with "" as a placeholder, and passing that through logged a loader
+        // error on every render, which teaches people that error lines are noise.
+        const auto basisFilePath = config.Get<String>("spectral.basis_file", "");
+        const auto materialsJsonPath = config.Get<String>("spectral.materials_json", "");
+
+        if (!basisFilePath.empty() && !materialsJsonPath.empty()) {
             activeBand = config.Get<String>("spectral.band", "VIS");
 
             QL_LOG_INFO("Loading SpectralBaker NMF basis data...");
