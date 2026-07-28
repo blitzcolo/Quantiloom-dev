@@ -35,7 +35,15 @@ cmake.exe --build build --config Release -j -- /v:q /nologo
 
 ./build/tests/Release/libquantiloom_tests.exe --gtest_brief=1
 
-# --- Install (only reached on successful build + green tests) ----------------
+# --- ABI gate ---------------------------------------------------------------
+# The export table is the SDK's contract with Quantiloom-Qt, and it drifts
+# quietly: a new class picks up QL_API by habit and is public forever. Compare
+# against docs/abi/*.golden and stop before the install if it moved. Intended
+# changes are accepted with ./scripts/check_exports.sh --update.
+
+./scripts/check_exports.sh
+
+# --- Install (only reached on successful build + green tests + stable ABI) ---
 
 rm -rf /mnt/d/Quantiloom-SDK/windows_amd64
 # Per-file "Installing:" lines go to stdout (dropped); errors go to stderr (kept).

@@ -1,0 +1,485 @@
+char const * quantiloom::HyperspectralStatusToString(enum quantiloom::HyperspectralStatus)
+const quantiloom::GenericSensor::`vftable'
+const quantiloom::VulkanContext::`vftable'
+private: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Initialize(struct quantiloom::ExternalRenderContext::InitParams const &)
+private: class std::unique_ptr<class quantiloom::GpuImage,struct std::default_delete<class quantiloom::GpuImage> > quantiloom::TextureManager::UploadBC7Texture(struct quantiloom::Texture const &,struct quantiloom::BC7CompressedData const &)const
+private: class std::unique_ptr<class quantiloom::GpuImage,struct std::default_delete<class quantiloom::GpuImage> > quantiloom::TextureManager::UploadTexture(struct quantiloom::Texture const &)const
+private: float quantiloom::PerformanceLogger::QueryGpuTimeMs(unsigned int)
+private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
+private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
+private: static bool quantiloom::VulkanContext::IsDeviceSuitable(struct VkPhysicalDevice_T *)
+private: static class std::optional<unsigned int> quantiloom::VulkanContext::FindGraphicsQueueFamily(struct VkPhysicalDevice_T *)
+private: static class std::vector<char const *,class std::allocator<char const *> > quantiloom::VulkanContext::GetRequiredInstanceExtensions(void)
+private: static class std::vector<char const *,class std::allocator<char const *> > quantiloom::VulkanContext::GetRequiredValidationLayers(void)
+private: static class std::vector<float,class std::allocator<float> > quantiloom::GenericSensor::MakeGaussianKernel(float)
+private: static class std::vector<struct quantiloom::SceneNode,class std::allocator<struct quantiloom::SceneNode> > quantiloom::GltfLoader::FlattenSceneGraph(void const *)
+private: static class std::vector<struct quantiloom::SceneNode,class std::allocator<struct quantiloom::SceneNode> > quantiloom::UsdLoader::FlattenXformHierarchy(void const *)
+private: static class std::vector<unsigned int,class std::allocator<unsigned int> > quantiloom::GltfLoader::ReadIndices(void const *,int)
+private: static class std::vector<unsigned int,class std::allocator<unsigned int> > quantiloom::RayTracingPipeline::LoadSPIRV(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+private: static class std::vector<unsigned int,class std::allocator<unsigned int> > quantiloom::UsdLoader::TriangulatePolygons(class std::vector<int,class std::allocator<int> > const &,class std::vector<int,class std::allocator<int> > const &)
+private: static class std::vector<unsigned int,class std::allocator<unsigned int> > quantiloom::UsdLoader::TriangulatePolygonsWithFaceMap(class std::vector<int,class std::allocator<int> > const &,class std::vector<int,class std::allocator<int> > const &,class std::vector<unsigned int,class std::allocator<unsigned int> > &)
+private: static enum VkFilter quantiloom::TextureManager::ToVkFilter(enum quantiloom::TextureSampler::Filter)
+private: static enum VkSamplerAddressMode quantiloom::TextureManager::ToVkAddressMode(enum quantiloom::TextureSampler::WrapMode)
+private: static enum quantiloom::Log::Level quantiloom::Log::s_CurrentLevel
+private: static float quantiloom::BRDFLutGenerator::GeometrySmith_GGX_IBL(float,float,float)
+private: static float quantiloom::BRDFLutGenerator::RadicalInverse_VdC(unsigned int)
+private: static struct glm::vec<2,float,0> quantiloom::BRDFLutGenerator::Hammersley(unsigned int,unsigned int)
+private: static struct glm::vec<2,float,0> quantiloom::BRDFLutGenerator::IntegrateBRDF(float,float,unsigned int)
+private: static struct glm::vec<3,float,0> quantiloom::BRDFLutGenerator::ImportanceSampleGGX(struct glm::vec<2,float,0>,struct glm::vec<3,float,0>,float)
+private: static struct quantiloom::Image quantiloom::GenericSensor::ApplyPSF(struct quantiloom::Image const &,float)
+private: static struct quantiloom::Image quantiloom::GenericSensor::ConvolveX(struct quantiloom::Image const &,class std::vector<float,class std::allocator<float> > const &)
+private: static struct quantiloom::Image quantiloom::GenericSensor::ConvolveY(struct quantiloom::Image const &,class std::vector<float,class std::allocator<float> > const &)
+private: static struct quantiloom::Image quantiloom::GenericSensor::ElectronsToRadiance(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
+private: static struct quantiloom::Image quantiloom::GenericSensor::QuantizeToDN(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
+private: static struct quantiloom::Image quantiloom::GenericSensor::RadianceToElectrons(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
+private: static struct quantiloom::Material quantiloom::GltfLoader::ParseMaterial(void const *,int,class std::vector<struct quantiloom::Texture,class std::allocator<struct quantiloom::Texture> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+private: static struct quantiloom::Material quantiloom::UsdLoader::ParseMaterial(void const *,void const *,class std::vector<struct quantiloom::Texture,class std::allocator<struct quantiloom::Texture> > &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+private: static struct quantiloom::Mesh quantiloom::GltfLoader::ParseMesh(void const *,int,class std::vector<struct quantiloom::Material,class std::allocator<struct quantiloom::Material> > const &)
+private: static struct quantiloom::Mesh quantiloom::UsdLoader::ParseMesh(void const *,void const *,class std::unordered_map<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,int,struct std::hash<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,struct std::equal_to<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,class std::allocator<struct std::pair<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const ,int> > > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+private: static struct quantiloom::Texture quantiloom::GltfLoader::ParseTexture(void const *,int)
+private: static struct quantiloom::Texture quantiloom::TextureManager::CreateDummyTexture(void)
+private: static unsigned __int64 quantiloom::RayTracingPipeline::PackSpecKey(unsigned int,unsigned int)
+private: static unsigned int const quantiloom::BRDFLutGenerator::CACHE_MAGIC
+private: static unsigned int const quantiloom::BRDFLutGenerator::CACHE_VERSION
+private: static unsigned int quantiloom::RayTracingPipeline::AlignedSize(unsigned int,unsigned int)
+private: static void quantiloom::UsdLoader::ParseMaterialXSurface(struct quantiloom::Material &,void const *,class std::vector<struct quantiloom::Texture,class std::allocator<struct quantiloom::Texture> > &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+private: static void quantiloom::UsdLoader::ParsePointInstancer(void const *,void const *,class quantiloom::Scene &,class std::unordered_map<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,int,struct std::hash<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,struct std::equal_to<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,class std::allocator<struct std::pair<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const ,int> > > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+private: static void quantiloom::UsdLoader::ParseSpectralExtensions(struct quantiloom::Material &,void const *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+private: static void quantiloom::UsdLoader::ParseUsdPreviewSurface(struct quantiloom::Material &,void const *,class std::vector<struct quantiloom::Texture,class std::allocator<struct quantiloom::Texture> > &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+private: struct VkSampler_T * quantiloom::TextureManager::CreateSampler(struct quantiloom::TextureSampler const &)const
+private: struct VkShaderModule_T * quantiloom::RayTracingPipeline::CreateShaderModule(class std::vector<unsigned int,class std::allocator<unsigned int> > const &)const
+private: struct quantiloom::RayTracingPipeline::PipelineVariant quantiloom::RayTracingPipeline::CreatePipelineVariant(struct quantiloom::RayTracingPipeline::SpecConstants const &)
+private: void quantiloom::BLAS::UploadGeometryBuffers(void)
+private: void quantiloom::Camera::UpdateVectors(void)
+private: void quantiloom::ExternalRenderContext::BuildAccelerationStructures(void)
+private: void quantiloom::ExternalRenderContext::ComputeImageMinMax(float &,float &)
+private: void quantiloom::ExternalRenderContext::CreateBRDFLut(void)
+private: void quantiloom::ExternalRenderContext::CreateCLAHEPipeline(void)
+private: void quantiloom::ExternalRenderContext::CreateDummyBuffers(void)
+private: void quantiloom::ExternalRenderContext::CreateFallbackEnvMap(void)
+private: void quantiloom::ExternalRenderContext::CreateGPUSensorPipeline(void)
+private: void quantiloom::ExternalRenderContext::CreatePipeline(void)
+private: void quantiloom::ExternalRenderContext::ExecuteCLAHE(struct VkCommandBuffer_T *,unsigned int,unsigned int)
+private: void quantiloom::ExternalRenderContext::ExecuteGPUSensorChain(struct VkCommandBuffer_T *,unsigned int,unsigned int)
+private: void quantiloom::ExternalRenderContext::GenerateAndUploadFPNMaps(void)
+private: void quantiloom::ExternalRenderContext::RebuildSceneGpuResources(void)
+private: void quantiloom::ExternalRenderContext::TransitionImageLayoutImmediate(struct VkImage_T *,enum VkFormat,enum VkImageLayout,enum VkImageLayout)
+private: void quantiloom::ExternalRenderContext::UpdateGpuResources(void)
+private: void quantiloom::GenericSensor::AddNoise(struct quantiloom::Image &,struct quantiloom::SensorParams const &)
+private: void quantiloom::GenericSensor::ApplyFPN(struct quantiloom::Image &,struct quantiloom::SensorParams const &)
+private: void quantiloom::GenericSensor::EnsureSeeded(unsigned int)
+private: void quantiloom::GenericSensor::GenerateFPNMaps(unsigned int,unsigned int,struct quantiloom::SensorParams const &)
+private: void quantiloom::PerformanceLogger::CreateQueryPool(void)
+private: void quantiloom::PerformanceLogger::WriteCSVHeader(void)
+private: void quantiloom::RayTracingPipeline::CreateDescriptorSetLayout(void)
+private: void quantiloom::RayTracingPipeline::CreatePipelineLayout(void)
+private: void quantiloom::RayTracingPipeline::LoadShaders(void)
+private: void quantiloom::TextureManager::GenerateMipmaps(struct VkCommandBuffer_T *,class quantiloom::GpuImage *,enum VkFormat,unsigned int,unsigned int,unsigned int)const
+private: void quantiloom::VulkanContext::CreateAllocator(void)
+private: void quantiloom::VulkanContext::CreateDevice(void)
+private: void quantiloom::VulkanContext::CreateInstance(void)
+private: void quantiloom::VulkanContext::SelectPhysicalDevice(void)
+private: void quantiloom::VulkanContext::SetupDebugMessenger(void)
+protected: quantiloom::VulkanContext::VulkanContext(struct quantiloom::VulkanContext::ExternalHandles const &,bool)
+public: __int64 quantiloom::Config::Get<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >,__int64 const &)const
+public: __int64 quantiloom::Config::GetInt64(class std::basic_string_view<char,struct std::char_traits<char> >,__int64)const
+public: bool quantiloom::AtmosModelPack::Has(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: bool quantiloom::AtmosphereNNConfig::ApplyPreset(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: bool quantiloom::BLAS::HasNormals(void)const
+public: bool quantiloom::BLAS::HasTangents(void)const
+public: bool quantiloom::BLAS::HasUVs(void)const
+public: bool quantiloom::BLAS::IsBuilt(void)const
+public: bool quantiloom::Config::Get<bool>(class std::basic_string_view<char,struct std::char_traits<char> >,bool const &)const
+public: bool quantiloom::Config::GetBool(class std::basic_string_view<char,struct std::char_traits<char> >,bool)const
+public: bool quantiloom::Config::Has(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: bool quantiloom::Config::HasSection(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: bool quantiloom::ExternalRenderContext::HasEnvironmentMap(void)const
+public: bool quantiloom::ExternalRenderContext::HasScene(void)const
+public: bool quantiloom::ExternalRenderContext::IsGPUSensorEnabled(void)const
+public: bool quantiloom::ExternalRenderContext::IsReady(void)const
+public: bool quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
+public: bool quantiloom::GpuBuffer::IsValid(void)const
+public: bool quantiloom::GpuImage::IsValid(void)const
+public: bool quantiloom::HyperspectralConfig::IsValid(void)const
+public: bool quantiloom::HyperspectralRenderer::HasResult(void)const
+public: bool quantiloom::HyperspectralRenderer::IsCancelled(void)const
+public: bool quantiloom::HyperspectralRenderer::RenderSingleWavelength(float,unsigned int,struct quantiloom::Image &)
+public: bool quantiloom::HyperspectralRenderer::WriteENVI(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,enum quantiloom::HyperspectralOutputFormat)const
+public: bool quantiloom::HyperspectralRenderer::WriteEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: bool quantiloom::HyperspectralRenderer::WriteGeoTIFF(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: bool quantiloom::Material::HasIRData(void)const
+public: bool quantiloom::Material::HasQuantiloomRef(void)const
+public: bool quantiloom::Material::HasTextures(void)const
+public: bool quantiloom::Material::IsValid(void)const
+public: bool quantiloom::Material::ValidateIRKirchhoffLaw(void)const
+public: bool quantiloom::Scene::IsValid(void)const
+public: bool quantiloom::SpectralBasisLoader::HasBasis(void)const
+public: bool quantiloom::SpectralBasisLoader::HasMaterials(void)const
+public: bool quantiloom::SpectralBasisLoader::Load(class std::filesystem::path const &,class std::filesystem::path const &)
+public: bool quantiloom::SpectralBasisLoader::LoadBasis(class std::filesystem::path const &)
+public: bool quantiloom::SpectralBasisLoader::LoadMaterials(class std::filesystem::path const &)
+public: bool quantiloom::TLAS::IsBuilt(void)const
+public: bool quantiloom::TextureManager::IsEmpty(void)const
+public: bool quantiloom::VulkanContext::IsRayTracingSupported(void)const
+public: class quantiloom::AtmosModelPack & quantiloom::AtmosModelPack::operator=(class quantiloom::AtmosModelPack &&)
+public: class quantiloom::AtmosNet const & quantiloom::AtmosModelPack::Get(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::BLAS & quantiloom::BLAS::operator=(class quantiloom::BLAS &&)
+public: class quantiloom::BRDFLutGenerator & quantiloom::BRDFLutGenerator::operator=(class quantiloom::BRDFLutGenerator &&)
+public: class quantiloom::BRDFLutGenerator & quantiloom::BRDFLutGenerator::operator=(class quantiloom::BRDFLutGenerator const &)
+public: class quantiloom::Camera & quantiloom::Camera::operator=(class quantiloom::Camera &&)
+public: class quantiloom::Camera & quantiloom::Camera::operator=(class quantiloom::Camera const &)
+public: class quantiloom::Camera const & quantiloom::ExternalRenderContext::GetCamera(void)const
+public: class quantiloom::CommandHelper & quantiloom::CommandHelper::operator=(class quantiloom::CommandHelper &&)
+public: class quantiloom::CommandHelper & quantiloom::CommandHelper::operator=(class quantiloom::CommandHelper const &)
+public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config &&)
+public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config const &)
+public: class quantiloom::ExternalRenderContext & quantiloom::ExternalRenderContext::operator=(class quantiloom::ExternalRenderContext &&)
+public: class quantiloom::GenericSensor & quantiloom::GenericSensor::operator=(class quantiloom::GenericSensor const &)
+public: class quantiloom::GltfLoader & quantiloom::GltfLoader::operator=(class quantiloom::GltfLoader &&)
+public: class quantiloom::GltfLoader & quantiloom::GltfLoader::operator=(class quantiloom::GltfLoader const &)
+public: class quantiloom::GpuBuffer & quantiloom::GpuBuffer::operator=(class quantiloom::GpuBuffer &&)
+public: class quantiloom::GpuBuffer const & quantiloom::BLAS::GetIndexBuffer(void)const
+public: class quantiloom::GpuBuffer const & quantiloom::BLAS::GetNormalBuffer(void)const
+public: class quantiloom::GpuBuffer const & quantiloom::BLAS::GetTangentBuffer(void)const
+public: class quantiloom::GpuBuffer const & quantiloom::BLAS::GetUVBuffer(void)const
+public: class quantiloom::GpuBuffer const & quantiloom::BLAS::GetVertexBuffer(void)const
+public: class quantiloom::GpuImage & quantiloom::GpuImage::operator=(class quantiloom::GpuImage &&)
+public: class quantiloom::HyperspectralRenderer & quantiloom::HyperspectralRenderer::operator=(class quantiloom::HyperspectralRenderer &&)
+public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO &&)
+public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO const &)
+public: class quantiloom::Log & quantiloom::Log::operator=(class quantiloom::Log &&)
+public: class quantiloom::Log & quantiloom::Log::operator=(class quantiloom::Log const &)
+public: class quantiloom::Result<__int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<bool,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<bool>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<bool,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredBool(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<class quantiloom::Config,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetTable(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredString(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<double,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<double>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<float>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredFloat(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredInt(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<struct glm::vec<4,float,0>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::ReadPixelValue(unsigned int,unsigned int)
+public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureDisplayImage(void)
+public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureScreenshot(void)
+public: class quantiloom::Result<unsigned __int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadEnvironmentMap(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadScene(class quantiloom::Config const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromConfig(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromGltf(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
+public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
+public: class quantiloom::Scene const * quantiloom::ExternalRenderContext::GetScene(void)const
+public: class quantiloom::SpectralBasisLoader & quantiloom::SpectralBasisLoader::operator=(class quantiloom::SpectralBasisLoader &&)
+public: class quantiloom::SpectralBasisLoader & quantiloom::SpectralBasisLoader::operator=(class quantiloom::SpectralBasisLoader const &)
+public: class quantiloom::SpectralIO & quantiloom::SpectralIO::operator=(class quantiloom::SpectralIO &&)
+public: class quantiloom::SpectralIO & quantiloom::SpectralIO::operator=(class quantiloom::SpectralIO const &)
+public: class quantiloom::TLAS & quantiloom::TLAS::operator=(class quantiloom::TLAS &&)
+public: class quantiloom::UsdLoader & quantiloom::UsdLoader::operator=(class quantiloom::UsdLoader &&)
+public: class quantiloom::UsdLoader & quantiloom::UsdLoader::operator=(class quantiloom::UsdLoader const &)
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::ExternalRenderContext::GetPipelineCachePath(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::SpectralBasisLoader::GetDateGenerated(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::SpectralBasisLoader::GetGenerator(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::SpectralBasisLoader::GetSourceLibrary(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::Get<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::GetString(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::HyperspectralConfig::GetValidationError(void)const
+public: class std::filesystem::path const & quantiloom::AtmosModelPack::Dir(void)const
+public: class std::unordered_map<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,struct std::hash<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,struct std::equal_to<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,class std::allocator<struct std::pair<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const ,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > > quantiloom::Config::GetSection(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<__int64,class std::allocator<__int64> > quantiloom::Config::GetArray<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<bool,class std::allocator<bool> > quantiloom::Config::GetArray<bool>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<class quantiloom::Config,class std::allocator<class quantiloom::Config> > quantiloom::Config::GetTableArray(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > quantiloom::Config::GetArray<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > quantiloom::Config::GetStringArray(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > quantiloom::SpectralBasisLoader::GetMaterialNames(void)const
+public: class std::vector<double,class std::allocator<double> > quantiloom::Config::GetArray<double>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<double,class std::allocator<double> > quantiloom::Config::GetDoubleArray(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<float,class std::allocator<float> > quantiloom::Config::GetArray<float>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<float,class std::allocator<float> > quantiloom::Config::GetFloatArray(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<int,class std::allocator<int> > quantiloom::Config::GetArray<int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<int,class std::allocator<int> > quantiloom::Config::GetIntArray(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<struct VkImageView_T *,class std::allocator<struct VkImageView_T *> > const & quantiloom::TextureManager::GetImageViews(void)const
+public: class std::vector<struct VkSampler_T *,class std::allocator<struct VkSampler_T *> > const & quantiloom::TextureManager::GetSamplers(void)const
+public: class std::vector<unsigned __int64,class std::allocator<unsigned __int64> > quantiloom::Config::GetArray<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::vector<unsigned int,class std::allocator<unsigned int> > quantiloom::Config::GetArray<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: double quantiloom::Config::Get<double>(class std::basic_string_view<char,struct std::char_traits<char> >,double const &)const
+public: double quantiloom::Config::GetDouble(class std::basic_string_view<char,struct std::char_traits<char> >,double)const
+public: double quantiloom::HyperspectralRenderer::GetAverageTimePerBand(void)const
+public: double quantiloom::HyperspectralRenderer::GetLastRenderTime(void)const
+public: double quantiloom::PerformanceLogger::GetLastFrameRaysPerSec(void)const
+public: enum VkFormat quantiloom::GpuImage::GetFormat(void)const
+public: enum quantiloom::DebugVisualizationMode quantiloom::ExternalRenderContext::GetDebugMode(void)const
+public: enum quantiloom::HyperspectralStatus quantiloom::HyperspectralRenderer::Render(struct quantiloom::HyperspectralConfig const &,void (__cdecl*)(struct quantiloom::HyperspectralProgress const &,void *),void *)
+public: enum quantiloom::SpectralMode quantiloom::ExternalRenderContext::GetSpectralMode(void)const
+public: float quantiloom::Camera::GetAspectRatio(void)const
+public: float quantiloom::Camera::GetFovY(void)const
+public: float quantiloom::Config::Get<float>(class std::basic_string_view<char,struct std::char_traits<char> >,float const &)const
+public: float quantiloom::Config::GetFloat(class std::basic_string_view<char,struct std::char_traits<char> >,float)const
+public: float quantiloom::ExternalRenderContext::GetLastFrameTimeMs(void)const
+public: float quantiloom::ExternalRenderContext::GetWavelength(void)const
+public: float quantiloom::HyperspectralConfig::GetWavelength(unsigned int)const
+public: float quantiloom::Material::GetIREmissivity(float)const
+public: float quantiloom::Material::GetIRReflectance(float)const
+public: float quantiloom::Material::GetIRTransmittance(float)const
+public: float quantiloom::PerformanceLogger::GetLastFrameGpuMs(void)const
+public: float quantiloom::PerformanceLogger::ResolveLastGpuMs(void)
+public: float quantiloom::Scene::GetBoundingBoxSize(void)const
+public: int quantiloom::Config::Get<int>(class std::basic_string_view<char,struct std::char_traits<char> >,int const &)const
+public: int quantiloom::Config::GetInt(class std::basic_string_view<char,struct std::char_traits<char> >,int)const
+public: int quantiloom::ExternalRenderContext::AddComplexRefractiveIndex(struct quantiloom::ComplexRefractiveIndex const &)
+public: quantiloom::AtmosModelPack::AtmosModelPack(class quantiloom::AtmosModelPack &&)
+public: quantiloom::AtmosModelPack::AtmosModelPack(class std::filesystem::path const &)
+public: quantiloom::AtmosModelPack::~AtmosModelPack(void)
+public: quantiloom::AtmosphereBaker::AtmosphereBaker(class quantiloom::AtmosModelPack &)
+public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(struct quantiloom::AtmosphereNNConfig &&)
+public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(struct quantiloom::AtmosphereNNConfig const &)
+public: quantiloom::AtmosphereNNConfig::AtmosphereNNConfig(void)
+public: quantiloom::AtmosphereNNConfig::~AtmosphereNNConfig(void)
+public: quantiloom::BLAS::BLAS(class quantiloom::BLAS &&)
+public: quantiloom::BLAS::BLAS(class quantiloom::VulkanContext &,struct quantiloom::GeometryPrimitive const &)
+public: quantiloom::BLAS::~BLAS(void)
+public: quantiloom::Camera::Camera(struct glm::vec<3,float,0> const &,struct glm::vec<3,float,0> const &,struct glm::vec<3,float,0> const &,float,float)
+public: quantiloom::Camera::Camera(void)
+public: quantiloom::Config::Config(class quantiloom::Config &&)
+public: quantiloom::Config::Config(class quantiloom::Config const &)
+public: quantiloom::Config::Config(void)
+public: quantiloom::Config::~Config(void)
+public: quantiloom::ExternalRenderContext::ExternalRenderContext(class quantiloom::ExternalRenderContext &&)
+public: quantiloom::ExternalRenderContext::~ExternalRenderContext(void)
+public: quantiloom::GenericSensor::GenericSensor(class quantiloom::GenericSensor const &)
+public: quantiloom::GenericSensor::GenericSensor(void)
+public: quantiloom::GpuBuffer::GpuBuffer(class quantiloom::GpuBuffer &&)
+public: quantiloom::GpuBuffer::GpuBuffer(struct VmaAllocator_T *,unsigned __int64,unsigned int,enum VmaMemoryUsage,unsigned __int64)
+public: quantiloom::GpuBuffer::~GpuBuffer(void)
+public: quantiloom::GpuImage::GpuImage(class quantiloom::GpuImage &&)
+public: quantiloom::GpuImage::GpuImage(struct VmaAllocator_T *,struct VkDevice_T *,unsigned int,unsigned int,enum VkFormat,unsigned int,enum VmaMemoryUsage,unsigned int)
+public: quantiloom::GpuImage::GpuImage(struct VmaAllocator_T *,struct VkDevice_T *,unsigned int,unsigned int,enum VkFormat,unsigned int,enum VmaMemoryUsage,unsigned int,unsigned int,unsigned int,enum VkImageViewType)
+public: quantiloom::GpuImage::~GpuImage(void)
+public: quantiloom::HyperspectralConfig::HyperspectralConfig(struct quantiloom::HyperspectralConfig &&)
+public: quantiloom::HyperspectralConfig::HyperspectralConfig(struct quantiloom::HyperspectralConfig const &)
+public: quantiloom::HyperspectralConfig::HyperspectralConfig(void)
+public: quantiloom::HyperspectralConfig::~HyperspectralConfig(void)
+public: quantiloom::HyperspectralRenderer::HyperspectralRenderer(class quantiloom::HyperspectralRenderer &&)
+public: quantiloom::HyperspectralRenderer::HyperspectralRenderer(class quantiloom::VulkanContext &,class quantiloom::RayTracingPipeline &,class quantiloom::Scene &)
+public: quantiloom::HyperspectralRenderer::~HyperspectralRenderer(void)
+public: quantiloom::Material::Material(struct quantiloom::Material &&)
+public: quantiloom::Material::Material(struct quantiloom::Material const &)
+public: quantiloom::Material::Material(void)
+public: quantiloom::Material::~Material(void)
+public: quantiloom::PerformanceLogger::PerformanceLogger(class quantiloom::VulkanContext &)
+public: quantiloom::PerformanceLogger::PerformanceLogger(class quantiloom::VulkanContext &,struct quantiloom::PerformanceLogger::Config const &)
+public: quantiloom::PerformanceLogger::~PerformanceLogger(void)
+public: quantiloom::RayTracingPipeline::RayTracingPipeline(class quantiloom::VulkanContext &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct VkPipelineCache_T *)
+public: quantiloom::RayTracingPipeline::~RayTracingPipeline(void)
+public: quantiloom::Scene::Scene(class quantiloom::Scene &&)
+public: quantiloom::Scene::Scene(class quantiloom::Scene const &)
+public: quantiloom::Scene::Scene(void)
+public: quantiloom::Scene::~Scene(void)
+public: quantiloom::SpectralBasisLoader::SpectralBasisLoader(class quantiloom::SpectralBasisLoader &&)
+public: quantiloom::SpectralBasisLoader::SpectralBasisLoader(class quantiloom::SpectralBasisLoader const &)
+public: quantiloom::SpectralBasisLoader::SpectralBasisLoader(void)
+public: quantiloom::SpectralBasisLoader::~SpectralBasisLoader(void)
+public: quantiloom::TLAS::TLAS(class quantiloom::TLAS &&)
+public: quantiloom::TLAS::TLAS(class quantiloom::VulkanContext &)
+public: quantiloom::TLAS::~TLAS(void)
+public: quantiloom::TextureManager::TextureManager(class quantiloom::TextureManager &&)
+public: quantiloom::TextureManager::TextureManager(class quantiloom::VulkanContext &)
+public: quantiloom::TextureManager::~TextureManager(void)
+public: quantiloom::VulkanContext::VulkanContext(void)
+public: static bool quantiloom::BRDFLutGenerator::GenerateAndSave(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static bool quantiloom::BRDFLutGenerator::GenerateAndSave(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::BRDFLutGenerator::Config const &)
+public: static bool quantiloom::BRDFLutGenerator::IsCacheValid(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::BRDFLutGenerator::Config const &)
+public: static bool quantiloom::BRDFLutGenerator::SaveToBinary(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &,struct quantiloom::BRDFLutGenerator::Config const &)
+public: static bool quantiloom::ImageIO::FileExists(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static bool quantiloom::ImageIO::WriteEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &)
+public: static bool quantiloom::ImageIO::WritePNG(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &)
+public: static bool quantiloom::RayTracingPipeline::SavePipelineCache(class quantiloom::VulkanContext &,struct VkPipelineCache_T *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static bool quantiloom::UsdLoader::IsAvailable(void)
+public: static class quantiloom::Result<class quantiloom::Camera,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Camera::FromConfig(class quantiloom::Config const &,float)
+public: static class quantiloom::Result<class quantiloom::Config,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::Load(class std::filesystem::path const &)
+public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::GltfLoader::LoadFromFile(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Scene::FromConfig(class quantiloom::Config const &)
+public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::UsdLoader::LoadFromFile(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::UsdLoader::LoadFromFile(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdLoadOptions const &)
+public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::ExternalRenderContext,struct std::default_delete<class quantiloom::ExternalRenderContext> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Create(struct quantiloom::ExternalRenderContext::InitParams const &)
+public: static class quantiloom::Result<class std::unordered_map<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > >,struct std::hash<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,struct std::equal_to<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,class std::allocator<struct std::pair<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const ,class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > > > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::UsdLoader::ListVariants(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::UsdLoader::ListPrimsWithVariants(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
+public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)
+public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173(class std::filesystem::path const &,unsigned int)
+public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadLibRadtranUvspec(class std::filesystem::path const &,unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGS(class std::filesystem::path const &,class std::filesystem::path const &)
+public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGSAuto(class std::filesystem::path const &)
+public: static class quantiloom::Result<struct std::pair<struct quantiloom::SpectralCurve,struct quantiloom::SpectralCurve>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173SunAndSky(class std::filesystem::path const &)
+public: static class quantiloom::Result<struct std::pair<struct quantiloom::SpectralCurve,struct quantiloom::SpectralCurve>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadLibRadtranSunAndSky(class std::filesystem::path const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::AtmosModelPack::FileName(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::UsdLoader::GetTextureAssetPath(void const *)
+public: static class std::optional<class std::tuple<unsigned int,unsigned int,unsigned int> > quantiloom::ImageIO::GetDimensions(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::optional<struct quantiloom::Image> quantiloom::BRDFLutGenerator::LoadFromBinary(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::BRDFLutGenerator::Config const *)
+public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadImage(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::vector<float,class std::allocator<float> > quantiloom::CommandHelper::ReadbackImage(class quantiloom::VulkanContext const &,struct VkImage_T *,enum VkFormat,unsigned int,unsigned int)
+public: static double quantiloom::AtmosphereBaker::SlantRangeKm(double,double)
+public: static enum quantiloom::Log::Level quantiloom::Log::GetLevel(void)
+public: static struct VkPipelineCache_T * quantiloom::RayTracingPipeline::LoadPipelineCache(class quantiloom::VulkanContext &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::LWIR(float)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::MWIR(float)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::NIR(float)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::SWIR(float)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::VIS(float)
+public: static struct quantiloom::HyperspectralConfig quantiloom::HyperspectralConfig::VNIR(float)
+public: static struct quantiloom::Image quantiloom::BRDFLutGenerator::Generate(struct quantiloom::BRDFLutGenerator::Config const &)
+public: static struct quantiloom::Image quantiloom::BRDFLutGenerator::Generate(void)
+public: static struct quantiloom::Material quantiloom::Material::CreateLambertian(struct glm::vec<3,float,0> const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static struct quantiloom::Texture quantiloom::UsdLoader::ParseTexture(void const *,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static unsigned __int64 quantiloom::AtmosphereBaker::BakeKey(struct quantiloom::AtmosphereNNConfig const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::vector<double,class std::allocator<double> > const &)
+public: static void quantiloom::CommandHelper::ExecuteImmediate(class quantiloom::VulkanContext const &,class std::function<void __cdecl(struct VkCommandBuffer_T *)> const &)
+public: static void quantiloom::CommandHelper::TransitionImageLayout(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkFormat,enum VkImageLayout,enum VkImageLayout,unsigned int,unsigned int)
+public: static void quantiloom::CommandHelper::TransitionImageLayoutImmediate(class quantiloom::VulkanContext const &,struct VkImage_T *,enum VkFormat,enum VkImageLayout,enum VkImageLayout,unsigned int,unsigned int)
+public: static void quantiloom::Log::Critical(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::Debug(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::Error(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::Flush(void)
+public: static void quantiloom::Log::Info(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::Init(char const *,enum quantiloom::Log::Level)
+public: static void quantiloom::Log::LogMessage(enum quantiloom::Log::Level,class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::SetLevel(enum quantiloom::Log::Level)
+public: static void quantiloom::Log::Shutdown(void)
+public: static void quantiloom::Log::Trace(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::Log::Warn(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: static void quantiloom::RayTracingPipeline::DestroyPipelineCache(class quantiloom::VulkanContext &,struct VkPipelineCache_T *)
+public: static void quantiloom::RayTracingPipeline::UpdateDescriptorSets(void)
+public: struct VkAccelerationStructureKHR_T * quantiloom::BLAS::GetHandle(void)const
+public: struct VkAccelerationStructureKHR_T * quantiloom::TLAS::GetHandle(void)const
+public: struct VkBuffer_T * quantiloom::GpuBuffer::GetHandle(void)const
+public: struct VkDevice_T * quantiloom::VulkanContext::GetDevice(void)const
+public: struct VkExtent2D quantiloom::GpuImage::GetExtent(void)const
+public: struct VkImageView_T * quantiloom::GpuImage::GetView(void)const
+public: struct VkImage_T * quantiloom::GpuImage::GetImage(void)const
+public: struct VkInstance_T * quantiloom::VulkanContext::GetInstance(void)const
+public: struct VkPhysicalDeviceAccelerationStructurePropertiesKHR const & quantiloom::VulkanContext::GetAccelerationStructureProperties(void)const
+public: struct VkPhysicalDeviceProperties const & quantiloom::VulkanContext::GetDeviceProperties(void)const
+public: struct VkPhysicalDeviceRayTracingPipelinePropertiesKHR const & quantiloom::VulkanContext::GetRayTracingProperties(void)const
+public: struct VkPhysicalDevice_T * quantiloom::VulkanContext::GetPhysicalDevice(void)const
+public: struct VkPipelineLayout_T * quantiloom::RayTracingPipeline::GetPipelineLayout(void)const
+public: struct VkPipeline_T * quantiloom::RayTracingPipeline::GetPipeline(void)const
+public: struct VkQueue_T * quantiloom::VulkanContext::GetGraphicsQueue(void)const
+public: struct VmaAllocator_T * quantiloom::VulkanContext::GetAllocator(void)const
+public: struct glm::vec<3,float,0> quantiloom::Camera::GetForward(void)const
+public: struct glm::vec<3,float,0> quantiloom::Camera::GetLookAt(void)const
+public: struct glm::vec<3,float,0> quantiloom::Camera::GetPosition(void)const
+public: struct glm::vec<3,float,0> quantiloom::Camera::GetRight(void)const
+public: struct glm::vec<3,float,0> quantiloom::Camera::GetUp(void)const
+public: struct quantiloom::AtmosBakeResult quantiloom::AtmosphereBaker::Bake(struct quantiloom::AtmosphereNNConfig const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::vector<double,class std::allocator<double> > const &,double)
+public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig &&)
+public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig const &)
+public: struct quantiloom::AtmosphereNNConfig const & quantiloom::ExternalRenderContext::GetAtmosphere(void)const
+public: struct quantiloom::BasisFunctions const * quantiloom::SpectralBasisLoader::GetBasis(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::BasisFunctions const * quantiloom::SpectralBasisLoader::GetBasis(enum quantiloom::NMFBandType)const
+public: struct quantiloom::CameraData quantiloom::Camera::GetCameraData(void)const
+public: struct quantiloom::ExternalRenderContext::CLAHEParams const & quantiloom::ExternalRenderContext::GetCLAHEParams(void)const
+public: struct quantiloom::HyperspectralConfig & quantiloom::HyperspectralConfig::operator=(struct quantiloom::HyperspectralConfig &&)
+public: struct quantiloom::HyperspectralConfig & quantiloom::HyperspectralConfig::operator=(struct quantiloom::HyperspectralConfig const &)
+public: struct quantiloom::LightingParams const & quantiloom::ExternalRenderContext::GetLightingParams(void)const
+public: struct quantiloom::Material & quantiloom::Material::operator=(struct quantiloom::Material &&)
+public: struct quantiloom::Material & quantiloom::Material::operator=(struct quantiloom::Material const &)
+public: struct quantiloom::MaterialSpectralData const * quantiloom::SpectralBasisLoader::FindMaterial(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::MaterialSpectralData const * quantiloom::SpectralBasisLoader::FindMaterialPartial(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::SensorParams const & quantiloom::ExternalRenderContext::GetGPUSensorParams(void)const
+public: struct quantiloom::SpectralCube const & quantiloom::HyperspectralRenderer::GetResult(void)const
+public: struct quantiloom::SpectralCube quantiloom::HyperspectralRenderer::TakeResult(void)
+public: struct quantiloom::SpectralCurve quantiloom::SpectralBasisLoader::ReconstructCurve(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::SpectralCurve quantiloom::SpectralBasisLoader::ReconstructFullSpectrum(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::SpectralCurveGPU quantiloom::SpectralBasisLoader::ReconstructCurveGPU(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: struct quantiloom::VulkanContext::DeviceCapabilities const & quantiloom::VulkanContext::GetCapabilities(void)const
+public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
+public: unsigned __int64 quantiloom::BLAS::GetDeviceAddress(void)const
+public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const
+public: unsigned __int64 quantiloom::Config::GetUInt64(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64)const
+public: unsigned __int64 quantiloom::GpuBuffer::GetDeviceAddress(struct VkDevice_T *)const
+public: unsigned __int64 quantiloom::GpuBuffer::GetSize(void)const
+public: unsigned __int64 quantiloom::SpectralBasisLoader::GetMaterialCount(void)const
+public: unsigned int quantiloom::Config::Get<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned int const &)const
+public: unsigned int quantiloom::Config::GetUInt(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned int)const
+public: unsigned int quantiloom::ExternalRenderContext::AddMesh(struct quantiloom::Mesh const &,struct glm::mat<4,4,float,0> const &)
+public: unsigned int quantiloom::ExternalRenderContext::GetAccumulatedSamples(void)const
+public: unsigned int quantiloom::ExternalRenderContext::GetSPP(void)const
+public: unsigned int quantiloom::ExternalRenderContext::GetSamplingSeed(void)const
+public: unsigned int quantiloom::GpuImage::GetMipLevels(void)const
+public: unsigned int quantiloom::HyperspectralConfig::GetNumBands(void)const
+public: unsigned int quantiloom::Scene::GetTotalTriangleCount(void)const
+public: unsigned int quantiloom::Scene::GetTotalVertexCount(void)const
+public: unsigned int quantiloom::SpectralBasisLoader::GetBasisVersion(void)const
+public: unsigned int quantiloom::SpectralBasisLoader::GetNumBands(void)const
+public: unsigned int quantiloom::TextureManager::GetTextureCount(void)const
+public: unsigned int quantiloom::VulkanContext::GetGraphicsQueueFamily(void)const
+public: virtual class quantiloom::Result<struct quantiloom::SensorOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::GenericSensor::Apply(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
+public: virtual quantiloom::GenericSensor::~GenericSensor(void)
+public: virtual quantiloom::VulkanContext::~VulkanContext(void)
+public: void * quantiloom::GpuBuffer::Map(void)
+public: void quantiloom::AtmosModelPack::RequireNets(class std::vector<class std::array<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,3>,class std::allocator<class std::array<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,3> > > const &)const
+public: void quantiloom::BLAS::Build(struct VkCommandBuffer_T *)
+public: void quantiloom::Camera::SetAspectRatio(float)
+public: void quantiloom::Camera::SetFovY(float)
+public: void quantiloom::Camera::SetLookAt(struct glm::vec<3,float,0> const &)
+public: void quantiloom::Camera::SetPosition(struct glm::vec<3,float,0> const &)
+public: void quantiloom::Camera::SetUp(struct glm::vec<3,float,0> const &)
+public: void quantiloom::Config::Print(void)const
+public: void quantiloom::ExternalRenderContext::RebuildAccelerationStructure(void)
+public: void quantiloom::ExternalRenderContext::RenderFrame(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
+public: void quantiloom::ExternalRenderContext::ResetAccumulation(void)
+public: void quantiloom::ExternalRenderContext::Resize(unsigned int,unsigned int)
+public: void quantiloom::ExternalRenderContext::SetAtmosphere(struct quantiloom::AtmosphereNNConfig const &)
+public: void quantiloom::ExternalRenderContext::SetCLAHEParams(struct quantiloom::ExternalRenderContext::CLAHEParams const &)
+public: void quantiloom::ExternalRenderContext::SetCameraFOV(float)
+public: void quantiloom::ExternalRenderContext::SetCameraLookAt(struct glm::vec<3,float,0> const &,struct glm::vec<3,float,0> const &,struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetCameraViewMatrix(struct glm::mat<4,4,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetDebugMode(enum quantiloom::DebugVisualizationMode)
+public: void quantiloom::ExternalRenderContext::SetGPUSensorEnabled(bool)
+public: void quantiloom::ExternalRenderContext::SetGPUSensorParams(struct quantiloom::SensorParams const &)
+public: void quantiloom::ExternalRenderContext::SetLightingParams(struct quantiloom::LightingParams const &)
+public: void quantiloom::ExternalRenderContext::SetNodeTransform(unsigned int,struct glm::mat<4,4,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetSPP(unsigned int)
+public: void quantiloom::ExternalRenderContext::SetSamplingSeed(unsigned int)
+public: void quantiloom::ExternalRenderContext::SetSkyRadiance(struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetSpectralMode(enum quantiloom::SpectralMode)
+public: void quantiloom::ExternalRenderContext::SetSunDirection(struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetSunRadiance(struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetWavelength(float)
+public: void quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int,struct quantiloom::Material const &)
+public: void quantiloom::GpuBuffer::Unmap(void)
+public: void quantiloom::GpuBuffer::Upload(void const *,unsigned __int64,unsigned __int64)
+public: void quantiloom::HyperspectralRenderer::Cancel(void)
+public: void quantiloom::Material::ComputeSpectralAlbedo(void)
+public: void quantiloom::PerformanceLogger::BeginFrame(struct VkCommandBuffer_T *)
+public: void quantiloom::PerformanceLogger::EndFrame(struct VkCommandBuffer_T *)
+public: void quantiloom::PerformanceLogger::Flush(void)
+public: void quantiloom::PerformanceLogger::LogFrame(unsigned int,unsigned int,unsigned int,unsigned int,float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: void quantiloom::RayTracingPipeline::BindAccelerationStructure(struct VkAccelerationStructureKHR_T *)const
+public: void quantiloom::RayTracingPipeline::BindAtmosphereNN(class quantiloom::GpuBuffer const *,class quantiloom::GpuBuffer const *)const
+public: void quantiloom::RayTracingPipeline::BindBRDFLut(struct VkImageView_T *,struct VkSampler_T *)const
+public: void quantiloom::RayTracingPipeline::BindCIE_CMF_LUT(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindComplexRefractiveIndexBuffer(class quantiloom::GpuBuffer const *)const
+public: void quantiloom::RayTracingPipeline::BindGeometryBuffers(class quantiloom::GpuBuffer const &,class quantiloom::GpuBuffer const &,class quantiloom::GpuBuffer const *)const
+public: void quantiloom::RayTracingPipeline::BindInstanceGeometryBuffer(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindLUTBuffer(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindMaterialBuffer(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindNormalBuffer(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindOutputImage(class quantiloom::GpuImage const &)const
+public: void quantiloom::RayTracingPipeline::BindPrefilteredEnvMap(struct VkImageView_T *)const
+public: void quantiloom::RayTracingPipeline::BindSolarSpectralLUT(class quantiloom::GpuBuffer const *)const
+public: void quantiloom::RayTracingPipeline::BindSpectralCurvesBuffer(class quantiloom::GpuBuffer const *)const
+public: void quantiloom::RayTracingPipeline::BindTangentBuffer(class quantiloom::GpuBuffer const &)const
+public: void quantiloom::RayTracingPipeline::BindTextures(class std::vector<struct VkImageView_T *,class std::allocator<struct VkImageView_T *> > const &,class std::vector<struct VkSampler_T *,class std::allocator<struct VkSampler_T *> > const &)const
+public: void quantiloom::RayTracingPipeline::SetCameraData(struct quantiloom::CameraData const &)
+public: void quantiloom::RayTracingPipeline::SetSamplingParams(unsigned int,unsigned int,unsigned int,unsigned int)
+public: void quantiloom::RayTracingPipeline::SetSpecConstants(unsigned int,bool)
+public: void quantiloom::RayTracingPipeline::TraceRays(struct VkCommandBuffer_T *,unsigned int,unsigned int,bool)const
+public: void quantiloom::Scene::PrintSummary(void)const
+public: void quantiloom::TLAS::AddInstance(class quantiloom::BLAS const &,unsigned int,struct glm::mat<4,4,float,0> const &,bool)
+public: void quantiloom::TLAS::Build(struct VkCommandBuffer_T *)
+public: void quantiloom::TextureManager::UploadTextures(class std::vector<struct quantiloom::Texture,class std::allocator<struct quantiloom::Texture> > &)
+struct quantiloom::AtmosLambdaGrid quantiloom::RenderBandLambdaGrid(enum quantiloom::SpectralMode,double)
