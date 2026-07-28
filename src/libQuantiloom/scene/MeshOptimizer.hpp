@@ -37,7 +37,7 @@
 
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
-#include "Mesh.hpp"
+#include "scene/Mesh.hpp"
 #include <vector>
 
 namespace quantiloom {

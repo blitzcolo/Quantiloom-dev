@@ -29,6 +29,18 @@ add_executable(Quantiloom
 target_include_directories(Quantiloom
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "Version.hpp"
+
+        # TRANSITIONAL. main.cpp drives the Vulkan layer directly -- GpuBuffer,
+        # CommandHelper, BLAS/TLAS, RayTracingPipeline -- which is a second
+        # renderer running in parallel with ExternalRenderContext's private
+        # methods. Those headers are internal, so linking libQuantiloom is not
+        # enough to see them; this line is what keeps the CLI compiling, and it
+        # is the reason ~274 symbols are still exported for its benefit alone.
+        #
+        # Delete this line once the CLI drives a core-owned render facade. It is
+        # the single marker of that debt: nothing else in the build can reach
+        # library internals through the DLL.
+        ${CMAKE_SOURCE_DIR}/src/libQuantiloom
 )
 
 # Link against the core library and SpectraForge

@@ -7,7 +7,7 @@
  * @author blitzcolo
  */
 
-#include "Log.hpp"
+#include "core/Log.hpp"
 
 QL_DISABLE_WARNINGS_PUSH
 #include <spdlog/spdlog.h>

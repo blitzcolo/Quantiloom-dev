@@ -8,7 +8,7 @@
 // VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition
 #include <vk_mem_alloc.h>
 
-#include "ExternalRenderContext.hpp"
+#include "renderer/ExternalRenderContext.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
@@ -17,7 +17,7 @@
 #include "TextureManager.hpp"
 #include "CommandHelper.hpp"
 #include "BRDFLutGenerator.hpp"
-#include "LightingParams.hpp"
+#include "renderer/LightingParams.hpp"
 #include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 

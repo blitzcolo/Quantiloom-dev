@@ -1,5 +1,5 @@
-#include "GenericSensor.hpp"
-#include "../core/Log.hpp"
+#include "postprocess/GenericSensor.hpp"
+#include "core/Log.hpp"
 
 #include <algorithm>
 #include <cmath>

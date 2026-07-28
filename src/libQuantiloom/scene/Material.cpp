@@ -1,4 +1,4 @@
-#include "Material.hpp"
+#include "scene/Material.hpp"
 #include "core/Log.hpp"
 #include <algorithm>
 #include <cmath>

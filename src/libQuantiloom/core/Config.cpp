@@ -7,8 +7,8 @@
  * @author blitzcolo
  */
 
-#include "Config.hpp"
-#include "Log.hpp"
+#include "core/Config.hpp"
+#include "core/Log.hpp"
 
 QL_DISABLE_WARNINGS_PUSH
 #include <toml++/toml.h>

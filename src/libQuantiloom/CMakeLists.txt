@@ -19,6 +19,13 @@
 # logger, static caches) in one process is a correctness bug, not a wart.
 # ============================================================================
 
+# Public headers live in include/quantiloom/, internal ones stay beside their
+# .cpp here. That is the whole boundary: the install rule ships include/ and
+# nothing else, and libQuantiloom puts only include/ on its consumers' search
+# path, so a frontend physically cannot reach RayTracingPipeline.hpp. It is a
+# compile error rather than a missing symbol at link time.
+set(QL_PUBLIC_INC "${CMAKE_SOURCE_DIR}/include/quantiloom")
+
 # Generate version header from template
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/core/LibVersion.hpp.in"
@@ -29,21 +36,21 @@ configure_file(
 add_library(quantiloom_core OBJECT
     # Core module
     core/Log.cpp
-    core/Log.hpp
+    ${QL_PUBLIC_INC}/core/Log.hpp
     core/Config.cpp
-    core/Config.hpp
-    core/Platform.hpp
-    core/Types.hpp
-    core/Image.hpp
-    core/SpectralCube.hpp
-    core/LUT.hpp
+    ${QL_PUBLIC_INC}/core/Config.hpp
+    ${QL_PUBLIC_INC}/core/Platform.hpp
+    ${QL_PUBLIC_INC}/core/Types.hpp
+    ${QL_PUBLIC_INC}/core/Image.hpp
+    ${QL_PUBLIC_INC}/core/SpectralCube.hpp
+    ${QL_PUBLIC_INC}/core/LUT.hpp
     core/AtmosphereTransmittanceLUT.hpp
 
     # IO module
     io/ImageIO.cpp
-    io/ImageIO.hpp
+    ${QL_PUBLIC_INC}/io/ImageIO.hpp
     io/SpectralIO.cpp
-    io/SpectralIO.hpp
+    ${QL_PUBLIC_INC}/io/SpectralIO.hpp
     io/SpectralBasisLoader.cpp
     io/SpectralBasisLoader.hpp
     io/LUTLoader.cpp
@@ -67,7 +74,7 @@ add_library(quantiloom_core OBJECT
     atmos/AtmosModelPack.cpp
     atmos/AtmosModelPack.hpp
     atmos/AtmosphereNNConfig.cpp
-    atmos/AtmosphereNNConfig.hpp
+    ${QL_PUBLIC_INC}/atmos/AtmosphereNNConfig.hpp
     atmos/AtmosphereBaker.cpp
     atmos/AtmosphereBaker.hpp
     atmos/AtmosNNGpuTypes.hpp
@@ -96,34 +103,34 @@ add_library(quantiloom_core OBJECT
     renderer/PerformanceLogger.hpp
     renderer/TextureCompressor.cpp
     renderer/TextureCompressor.hpp
-    renderer/LightingParams.hpp
+    ${QL_PUBLIC_INC}/renderer/LightingParams.hpp
     renderer/VulkanContextAdapter.cpp
     renderer/VulkanContextAdapter.hpp
     renderer/ExternalRenderContext.cpp
-    renderer/ExternalRenderContext.hpp
+    ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
 
     # Scene module
     scene/Camera.cpp
-    scene/Camera.hpp
-    scene/Mesh.hpp
+    ${QL_PUBLIC_INC}/scene/Camera.hpp
+    ${QL_PUBLIC_INC}/scene/Mesh.hpp
     scene/MeshOptimizer.cpp
     scene/MeshOptimizer.hpp
     scene/NormalGenerator.cpp
     scene/NormalGenerator.hpp
-    scene/BRDFModels.hpp
+    ${QL_PUBLIC_INC}/scene/BRDFModels.hpp
     scene/Material.cpp
-    scene/Material.hpp
-    scene/Texture.hpp
+    ${QL_PUBLIC_INC}/scene/Material.hpp
+    ${QL_PUBLIC_INC}/scene/Texture.hpp
     scene/Scene.cpp
-    scene/Scene.hpp
+    ${QL_PUBLIC_INC}/scene/Scene.hpp
 
     # Postprocess module
-    postprocess/SensorModel.hpp
+    ${QL_PUBLIC_INC}/postprocess/SensorModel.hpp
     postprocess/GenericSensor.cpp
-    postprocess/GenericSensor.hpp
+    ${QL_PUBLIC_INC}/postprocess/GenericSensor.hpp
     postprocess/MultibandFusion.cpp
-    postprocess/MultibandFusion.hpp
-    postprocess/PostprocessConfig.hpp
+    ${QL_PUBLIC_INC}/postprocess/MultibandFusion.hpp
+    ${QL_PUBLIC_INC}/postprocess/PostprocessConfig.hpp
 
     # Hyperspectral core module
     hs_core/HyperspectralConfig.hpp
@@ -170,13 +177,14 @@ set_target_properties(quantiloom_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
-# Include directories (use generator expressions for proper install/export)
+# Both roots, because the library's own sources include from either. Targets
+# that link the objects (the tests, fusion_tool) inherit both by design -- they
+# are entitled to internals. Targets that link the DLL get only the public root.
 target_include_directories(quantiloom_core
     PUBLIC
-        # Build tree: use source and binary dirs
+        $<BUILD_INTERFACE:${QL_PUBLIC_INC}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
-        # Install tree: use installed include dir
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/quantiloom>
 )
 
@@ -286,9 +294,12 @@ target_compile_definitions(libQuantiloom
         QL_USE_SHARED  # Consumers linking against this library will define QL_USE_SHARED
 )
 
+# The public root only -- src/libQuantiloom is deliberately absent, so nothing
+# that links this target can include an internal header. The binary dir is here
+# for the generated core/LibVersion.hpp, which is public.
 target_include_directories(libQuantiloom
     PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+        $<BUILD_INTERFACE:${QL_PUBLIC_INC}>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
         $<BUILD_INTERFACE:${glm_SOURCE_DIR}>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/quantiloom>
@@ -338,13 +349,15 @@ if(MSVC)
 endif()
 
 # Install public headers (preserve directory structure)
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
+#
+# include/quantiloom/ only. This used to glob src/libQuantiloom/, which shipped
+# all 61 headers regardless of whether anything outside the library could use
+# them -- including EnvironmentPrefilter.hpp, which has no .cpp anywhere.
+install(DIRECTORY ${QL_PUBLIC_INC}/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/quantiloom
     FILES_MATCHING
         PATTERN "*.hpp"
         PATTERN "*.h"
-    PATTERN "*.cpp" EXCLUDE
-    PATTERN "*.rc" EXCLUDE
 )
 
 # Install generated headers

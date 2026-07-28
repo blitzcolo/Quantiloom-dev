@@ -36,8 +36,8 @@
 
 #pragma once
 
-#include "Types.hpp"
-#include "Log.hpp"
+#include "core/Types.hpp"
+#include "core/Log.hpp"
 #include <vector>
 #include <string>
 #include <cmath>

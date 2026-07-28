@@ -1,4 +1,4 @@
-#include "ImageIO.hpp"
+#include "io/ImageIO.hpp"
 
 // stb_image for PNG/JPEG/BMP/TGA/HDR reading
 // Note: STB_IMAGE_IMPLEMENTATION is defined in GltfLoader.cpp via tinygltf

@@ -22,7 +22,7 @@
 
 #pragma once
 
-#include "Mesh.hpp"
+#include "scene/Mesh.hpp"
 #include <unordered_map>
 #include <unordered_set>
 

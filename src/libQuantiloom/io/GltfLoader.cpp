@@ -1,5 +1,5 @@
 #include "GltfLoader.hpp"
-#include "SpectralIO.hpp"
+#include "io/SpectralIO.hpp"
 #include "scene/MeshOptimizer.hpp"
 #include "scene/NormalGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"

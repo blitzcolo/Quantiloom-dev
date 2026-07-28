@@ -17,8 +17,8 @@
  */
 
 #include "UsdLoader.hpp"
-#include "SpectralIO.hpp"
-#include "ImageIO.hpp"
+#include "io/SpectralIO.hpp"
+#include "io/ImageIO.hpp"
 #include "scene/MeshOptimizer.hpp"
 #include "scene/NormalGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"

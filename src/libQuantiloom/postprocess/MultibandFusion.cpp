@@ -1,5 +1,5 @@
-#include "MultibandFusion.hpp"
-#include "../core/Log.hpp"
+#include "postprocess/MultibandFusion.hpp"
+#include "core/Log.hpp"
 
 #include <algorithm>
 #include <cmath>

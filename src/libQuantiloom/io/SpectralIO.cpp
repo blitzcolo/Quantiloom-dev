@@ -1,4 +1,4 @@
-#include "SpectralIO.hpp"
+#include "io/SpectralIO.hpp"
 
 #include <filesystem>
 #include <fstream>

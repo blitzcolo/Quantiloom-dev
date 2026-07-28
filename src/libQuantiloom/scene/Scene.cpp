@@ -1,4 +1,4 @@
-#include "Scene.hpp"
+#include "scene/Scene.hpp"
 #include "core/Log.hpp"
 #include "io/LUTLoader.hpp"
 #include <filesystem>
