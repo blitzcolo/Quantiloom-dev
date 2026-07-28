@@ -16,10 +16,14 @@ This is the canonical path. It runs, in order:
 2. Configure: `cmake.exe -B build -G "Visual Studio 18 2026" -A x64` with `QUANTILOOM_USE_OPENUSD=ON -DUSD_ROOT=C:/openusd`
 3. Build: `cmake.exe --build build --config Release -j` (includes the test suite)
 4. **Test gate**: runs `libquantiloom_tests.exe` — a red suite aborts the script
-   before install, so broken code never lands in the SDK. There is no CI; this
-   is the only automated gate. Don't "fix" a red gate by skipping it — fix the
-   tests (see run-tests skill for adjudicating stale vs real failures).
-5. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
+   before install, so broken code never lands in the SDK. Don't "fix" a red gate
+   by skipping it — fix the tests (see run-tests skill for adjudicating stale vs
+   real failures).
+5. **ABI gate**: `scripts/check_exports.sh` diffs the built DLLs' export tables
+   against `docs/abi/*.golden` — see "Common failures" below.
+6. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
+
+There is no CI; these two gates are the only automated ones.
 
 `set -euo pipefail` guarantees install never runs on a failed build or red tests. A full run takes minutes; use a generous Bash timeout (600000 ms) and never kill it mid-install — a half-written SDK breaks the Qt frontend.
 
@@ -52,6 +56,10 @@ Key outputs:
 - **Install step "device or resource busy" / access denied** — a running `QuantiloomQt.exe` or `Quantiloom.exe` holds the DLLs. Close them first.
 - **C2065 "undeclared identifier" for a variable declared on the PREVIOUS line, often with garbled line numbers** — MSVC is parsing a UTF-8-no-BOM source file in the system codepage (GBK): multibyte characters in a comment (`²`, `×`, `λ`, Chinese text) swallow the newline and eat the next code line. The root CMakeLists sets `/utf-8` to prevent this (fixed 2026-07-04; do not remove it). If it reappears, check that new targets inherit the flag rather than "fixing" the source lines.
 - **Script fails after "Build" with GoogleTest output** — that's the test gate doing its job, not a build error. Read the `[  FAILED  ]` lines and follow the run-tests skill.
+- **`libQuantiloom export surface changed`** — the ABI gate. It prints the added (`+`) and removed (`-`) symbols; decide which case you are in before touching anything:
+  - **Intended** (you deliberately promoted something to public API): `./scripts/check_exports.sh --update`, then commit `docs/abi/exports.golden` **with** the change. The baseline diff is what gets reviewed, and it doubles as the SemVer trigger — a removed line is a major, an added line a minor.
+  - **Unintended** (`+` lines you did not mean to publish): almost always a new class that picked up `QL_API` out of habit. New code in `src/libQuantiloom/` is internal by default; the tests link the objects and see it without any export. See `src/libQuantiloom/CLAUDE.md`.
+  - Never silence the gate by editing `build_wsl.sh`. An unreviewed export is a promise to Quantiloom-Qt that nobody made on purpose.
 
 ## Linux portability rules (apply to every code change)
 

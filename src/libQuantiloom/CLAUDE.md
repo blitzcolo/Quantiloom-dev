@@ -1,20 +1,45 @@
 # src/libQuantiloom/
 
-Built as a SHARED library (`Quantiloom.dll`). Modules: `core/` (config, log, types,
-spectral data), `scene/`, `renderer/` (Vulkan), `io/` (glTF/USD/EXR/LUT loaders),
-`hs_core/` (hyperspectral), `atmos/` (NN atmosphere), `postprocess/` (sensor chain).
+Modules: `core/` (config, log, types, spectral data), `scene/`, `renderer/` (Vulkan),
+`io/` (glTF/USD/EXR/LUT loaders), `hs_core/` (hyperspectral), `atmos/` (NN
+atmosphere), `postprocess/` (sensor chain).
 
-## Exporting public API
+Sources and internal headers live here; the public headers are in
+`include/quantiloom/<module>/`, mirroring the same layout. Compiled once into
+`quantiloom_core` (OBJECT) and linked two ways — see the root `CLAUDE.md` for which
+targets take which.
 
-Every publicly consumed class, struct, or free function needs `QL_API` (defined in
-`core/Platform.hpp`):
+## New code is internal by default
 
-```cpp
-class QL_API Config { ... };
-```
+`QL_API` (defined in `core/Platform.hpp`) is the SDK's contract, not a convenience
+marker. A symbol carrying it is exported from `Quantiloom.dll`, visible to
+Quantiloom-Qt, and covered by SemVer — removing it later is a breaking change. 47
+declarations have it; that number should grow only deliberately.
 
-Omitting it compiles cleanly here but fails to link in the tests and in
-Quantiloom-Qt. ~83 declarations across the library already use it.
+Write a new class here, in `src/libQuantiloom/`, with no `QL_API`. Two rules keep
+that the default:
+
+- **Needing a unit test is not a reason to export.** The tests link `quantiloom_core`
+  and see every symbol regardless. This used to be the main way the export surface
+  grew: 682 symbols, of which 411 had no consumer at all.
+- **A new GUI capability extends the `ExternalRenderContext` facade** with a method
+  plus a POD parameter struct. It does not export the class implementing the
+  capability — the frontend needs to set a parameter, not to own an object.
+
+Promoting something to public is three coupled steps, and the third is reviewed:
+
+1. move the header to `include/quantiloom/<module>/` (`git mv`; the include strings
+   do not change, only the search root),
+2. add `QL_API`,
+3. `./scripts/check_exports.sh --update` and commit `docs/abi/exports.golden`.
+
+Skip step 1 and Quantiloom-Qt cannot include it. Skip step 3 and `./build_wsl.sh`
+stops at the ABI gate before installing.
+
+Prefer a free function over a class where it fits: `QL_API` on a class exports every
+member, private ones included. Anything with private state belongs behind a pimpl —
+private data in a public header puts `sizeof` into the ABI, which has silently broken
+a Quantiloom-Qt build before (see `GenericSensor`).
 
 ## The consumer is the installed SDK, not this build tree
 
