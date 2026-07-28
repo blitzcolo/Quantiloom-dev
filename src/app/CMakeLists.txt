@@ -95,4 +95,17 @@ install(TARGETS Quantiloom
     RUNTIME DESTINATION bin
 )
 
+# PDB alongside the executable — see the note in src/libQuantiloom/CMakeLists.txt.
+# Renamed because this target and libQuantiloom both output the base name
+# "Quantiloom", so both PDBs default to Quantiloom.pdb and the second one
+# installed silently overwrites the first in bin/. The linker records this name
+# in the executable, so the debugger still finds it.
+if(MSVC)
+    set_target_properties(Quantiloom PROPERTIES PDB_NAME "QuantiloomCLI")
+    install(FILES $<TARGET_PDB_FILE:Quantiloom>
+        DESTINATION bin
+        OPTIONAL
+    )
+endif()
+
 message(STATUS "Quantiloom executables configured successfully")

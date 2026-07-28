@@ -327,6 +327,16 @@ install(TARGETS libQuantiloom
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+# Ship the PDB next to the DLL. Without it a crash in Quantiloom-Qt yields a
+# stack that stops at the DLL boundary; with it the frame resolves to a core
+# function and line. OPTIONAL because non-MSVC toolchains produce no PDB.
+if(MSVC)
+    install(FILES $<TARGET_PDB_FILE:libQuantiloom>
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        OPTIONAL
+    )
+endif()
+
 # Install public headers (preserve directory structure)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/quantiloom

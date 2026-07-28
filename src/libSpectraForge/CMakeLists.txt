@@ -73,6 +73,14 @@ install(TARGETS libSpectraForge
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+# PDB alongside the DLL — see the note in src/libQuantiloom/CMakeLists.txt.
+if(MSVC)
+    install(FILES $<TARGET_PDB_FILE:libSpectraForge>
+        DESTINATION ${CMAKE_INSTALL_BINDIR}
+        OPTIONAL
+    )
+endif()
+
 # Install public headers (flat — no subdirectories in libSpectraForge)
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/spectraforge

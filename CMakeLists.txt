@@ -96,6 +96,18 @@ if(MSVC)
         /utf-8
     )
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+
+    # Debug symbols in Release. The SDK ships the PDBs, so a crash in
+    # Quantiloom-Qt resolves to a core function and line instead of stopping at
+    # the DLL boundary. /Zi does not change code generation -- optimisation is
+    # unaffected -- but /DEBUG turns OFF the linker's default folding, so
+    # /OPT:REF,ICF have to be asked for back or the binaries grow.
+    add_compile_options($<$<CONFIG:Release>:/Zi>)
+    add_link_options(
+        $<$<CONFIG:Release>:/DEBUG>
+        $<$<CONFIG:Release>:/OPT:REF>
+        $<$<CONFIG:Release>:/OPT:ICF>
+    )
 else()
     # GCC/Clang: Enable comprehensive warnings
     add_compile_options(
