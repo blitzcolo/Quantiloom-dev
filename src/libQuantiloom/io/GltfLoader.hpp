@@ -101,7 +101,7 @@ namespace quantiloom {
  * @see Material for PBR material mapping
  * @see Texture for texture data format
  */
-class QL_API GltfLoader {
+class GltfLoader {
 public:
     // ========================================================================
     // Loading Functions

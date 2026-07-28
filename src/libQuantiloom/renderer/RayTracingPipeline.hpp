@@ -122,7 +122,7 @@ namespace quantiloom {
  * @see GpuImage for image resource management
  * @see CommandHelper for command buffer utilities
  */
-class QL_API RayTracingPipeline {
+class RayTracingPipeline {
 public:
     // ========================================================================
     // Specialization constants

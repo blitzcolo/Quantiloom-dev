@@ -206,7 +206,7 @@ struct UsdLoadOptions {
  * @see Texture for texture data format
  * @see GltfLoader for similar glTF 2.0 loading functionality
  */
-class QL_API UsdLoader {
+class UsdLoader {
 public:
     // ========================================================================
     // Loading Functions

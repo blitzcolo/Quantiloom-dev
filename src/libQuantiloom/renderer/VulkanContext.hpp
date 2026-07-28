@@ -93,7 +93,7 @@ namespace quantiloom {
  * @see GpuImage for texture and render target management
  * @see AccelerationStructure for BLAS/TLAS ray tracing structures
  */
-class QL_API VulkanContext {
+class VulkanContext {
 public:
     // ========================================================================
     // Lifecycle

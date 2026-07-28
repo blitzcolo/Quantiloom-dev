@@ -115,7 +115,7 @@ struct PushConstantsRayGen {
  * @see CameraData for GPU-compatible data structure
  * @see raygen.rgen for ray generation shader implementation
  */
-class QL_API Camera {
+class Camera {
 public:
     Camera() = default;
 

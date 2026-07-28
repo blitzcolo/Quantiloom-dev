@@ -141,7 +141,7 @@ struct MaterialSpectralData {
 // ============================================================================
 // SpectralBasisLoader - Main loader class
 // ============================================================================
-class QL_API SpectralBasisLoader {
+class SpectralBasisLoader {
 public:
     SpectralBasisLoader() = default;
 

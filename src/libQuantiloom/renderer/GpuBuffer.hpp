@@ -117,7 +117,7 @@ namespace quantiloom {
  * @see GpuImage for image resource management
  * @see VulkanContext for VmaAllocator access
  */
-class QL_API GpuBuffer {
+class GpuBuffer {
 public:
     // ========================================================================
     // Construction / Destruction

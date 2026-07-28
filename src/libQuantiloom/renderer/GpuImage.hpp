@@ -127,7 +127,7 @@ namespace quantiloom {
  * @see CommandHelper::TransitionImageLayout for layout transitions
  * @see TextureManager for texture upload from CPU Image data
  */
-class QL_API GpuImage {
+class GpuImage {
 public:
     // ========================================================================
     // Construction / Destruction

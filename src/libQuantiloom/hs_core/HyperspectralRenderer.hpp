@@ -54,7 +54,7 @@ enum class HyperspectralStatus : u32 {
 /**
  * @brief Convert status to human-readable string
  */
-QL_API const char* HyperspectralStatusToString(HyperspectralStatus status);
+const char* HyperspectralStatusToString(HyperspectralStatus status);
 
 // ============================================================================
 // HyperspectralRenderer - Core Rendering Engine
@@ -89,7 +89,7 @@ QL_API const char* HyperspectralStatusToString(HyperspectralStatus status);
  * }
  * @endcode
  */
-class QL_API HyperspectralRenderer {
+class HyperspectralRenderer {
 public:
     // ========================================================================
     // Construction / Destruction

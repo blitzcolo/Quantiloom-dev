@@ -48,13 +48,13 @@ struct AtmosLambdaGrid {
     std::string error;             // Set when a SINGLE lambda is out of coverage
 };
 
-QL_API AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm);
+AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm);
 
 // Upper bound on the binding-20 blob so GPU buffers can be allocated once:
 // 32 lambda x 256 a x (1 + 64 az) + ldown.
 constexpr size_t kAtmosMaxDataFloats = 32u * 256u * 65u + 32u;
 
-class QL_API AtmosphereBaker {
+class AtmosphereBaker {
 public:
     explicit AtmosphereBaker(AtmosModelPack& pack) : pack_(pack) {}
 

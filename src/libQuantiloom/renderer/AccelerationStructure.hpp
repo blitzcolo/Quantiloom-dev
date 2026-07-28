@@ -94,7 +94,7 @@ namespace quantiloom {
  * @see GeometryPrimitive for input geometry data
  * @see GpuBuffer for buffer management
  */
-class QL_API BLAS {
+class BLAS {
 public:
     BLAS(VulkanContext& context, const GeometryPrimitive& primitive);
     ~BLAS();
@@ -155,7 +155,7 @@ private:
 // TLAS (Top-Level Acceleration Structure)
 // ============================================================================
 
-class QL_API TLAS {
+class TLAS {
 public:
     explicit TLAS(VulkanContext& context);
     ~TLAS();

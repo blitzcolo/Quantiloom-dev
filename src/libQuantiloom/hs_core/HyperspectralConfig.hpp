@@ -79,7 +79,7 @@ enum class AdaptiveSamplingMode : u32 {
  * custom.wavelengthStep_nm = 10.0f;
  * @endcode
  */
-struct QL_API HyperspectralConfig {
+struct HyperspectralConfig {
     // ========================================================================
     // Wavelength Range Parameters
     // ========================================================================

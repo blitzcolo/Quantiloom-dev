@@ -53,7 +53,7 @@ namespace quantiloom {
 
 // TODO: Refactor into RayTracingPipeline - BRDF LUT should be managed internally
 // Current DLL export is temporary for backward compatibility
-class QL_API BRDFLutGenerator {
+class BRDFLutGenerator {
 public:
     // ========================================================================
     // Configuration

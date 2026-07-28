@@ -83,7 +83,7 @@ namespace quantiloom {
  * @see VulkanContext for queue access
  * @see GpuImage for image resource management
  */
-class QL_API CommandHelper {
+class CommandHelper {
 public:
     // ========================================================================
     // One-Time Command Execution

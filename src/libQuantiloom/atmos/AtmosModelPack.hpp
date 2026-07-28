@@ -20,7 +20,7 @@ namespace quantiloom {
 // cached. Missing required files are a hard error naming the exact file --
 // no silent fallback.
 
-class QL_API AtmosModelPack {
+class AtmosModelPack {
 public:
     explicit AtmosModelPack(const std::filesystem::path& dir);
 

@@ -33,7 +33,7 @@ namespace quantiloom {
 
 // TODO: Consider if this should be public API or internal tool
 // Currently exported for backward compatibility with existing main.cpp
-class QL_API PerformanceLogger {
+class PerformanceLogger {
 public:
     // ========================================================================
     // Configuration

@@ -92,7 +92,7 @@ namespace quantiloom {
  * @see GpuImage for GPU image resource management
  * @see Material for texture index references
  */
-class QL_API TextureManager {
+class TextureManager {
 public:
     // ========================================================================
     // Construction / Destruction
