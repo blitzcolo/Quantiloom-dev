@@ -15,6 +15,7 @@
 #include "postprocess/SensorModel.hpp"
 #include "postprocess/GenericSensor.hpp"
 #include "core/Image.hpp"
+#include <algorithm>  // std::clamp -- used to arrive via GenericSensor.hpp
 #include <cmath>
 #include <numbers>
 

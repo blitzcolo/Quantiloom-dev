@@ -662,61 +662,8 @@ public:
     [[nodiscard]] Result<Image, String> CaptureScreenshot();
 
 private:
-    // Private constructor - use Create() factory method
+    // Use the Create() factory.
     ExternalRenderContext();
-
-    // Initialize internal resources
-    Result<void, String> Initialize(const InitParams& params);
-
-    // Replace every GPU resource derived from the scene: textures, acceleration
-    // structures, geometry buffers, materials, pipeline. Waits for the device
-    // first -- see the comment on the definition. Both scene loaders go through
-    // this rather than repeating the sequence.
-    void RebuildSceneGpuResources();
-
-    // Build acceleration structures from current scene
-    void BuildAccelerationStructures();
-
-    // Update GPU buffers with current state
-    void UpdateGpuResources();
-
-    // Create dummy buffers for optional shader bindings
-    void CreateDummyBuffers();
-
-    // Create BRDF LUT for IBL
-    void CreateBRDFLut();
-
-    // Create fallback environment map
-    void CreateFallbackEnvMap();
-
-    // Create ray tracing pipeline and bind resources
-    void CreatePipeline();
-
-    // Create CLAHE compute pipeline resources
-    void CreateCLAHEPipeline();
-
-    // Execute CLAHE compute passes on the display image
-    void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
-
-    // Compute min/max of output image for CLAHE normalization
-    void ComputeImageMinMax(f32& outMin, f32& outMax);
-
-    // Create GPU sensor compute pipeline resources
-    void CreateGPUSensorPipeline();
-
-    // Generate and upload FPN (Fixed Pattern Noise) maps to GPU
-    void GenerateAndUploadFPNMaps();
-
-    // Execute GPU sensor chain (6 compute passes)
-    void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
-
-    // Transition image layout (internal helper)
-    void TransitionImageLayoutImmediate(
-        VkImage image,
-        VkFormat format,
-        VkImageLayout oldLayout,
-        VkImageLayout newLayout
-    );
 
     // Implementation details (PIMPL)
     struct Impl;

@@ -503,6 +503,45 @@ struct ExternalRenderContext::Impl {
 
         isReady = false;
     }
+
+    // ------------------------------------------------------------------
+    // Pipeline steps
+    // ------------------------------------------------------------------
+    // These were private members of ExternalRenderContext. They are internal
+    // build/record steps, and declaring them in the public header both exported
+    // them from the DLL and advertised the render pipeline's structure to
+    // anyone reading it. They belong to the state they operate on.
+
+    Result<void, String> Initialize(const InitParams& params);
+
+    // Replace every GPU resource derived from the scene: textures, acceleration
+    // structures, geometry buffers, materials, pipeline. Waits for the device
+    // first -- see the comment on the definition. Both scene loaders go through
+    // this rather than repeating the sequence.
+    void RebuildSceneGpuResources();
+
+    void BuildAccelerationStructures();
+    void UpdateGpuResources();
+    void CreateDummyBuffers();
+    void CreateBRDFLut();
+    void CreateFallbackEnvMap();
+    void CreatePipeline();
+
+    void CreateCLAHEPipeline();
+    void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
+    void ComputeImageMinMax(f32& outMin, f32& outMax);
+
+    void CreateGPUSensorPipeline();
+    void GenerateAndUploadFPNMaps();
+    void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
+
+    void TransitionImageLayoutImmediate(
+        VkImage image,
+        VkFormat format,
+        VkImageLayout oldLayout,
+        VkImageLayout newLayout
+    );
+
 };
 
 // ============================================================================
@@ -542,7 +581,7 @@ Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Cr
 
     // Use new directly since constructor is private (make_unique can't access it)
     std::unique_ptr<ExternalRenderContext> context(new ExternalRenderContext());
-    auto initResult = context->Initialize(params);
+    auto initResult = context->m_impl->Initialize(params);
     if (!initResult.has_value()) {
         return Result<std::unique_ptr<ExternalRenderContext>, String>::Err(initResult.error());
     }
@@ -554,22 +593,22 @@ Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Cr
 // Initialization
 // ============================================================================
 
-Result<void, String> ExternalRenderContext::Initialize(const InitParams& params) {
+Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& params) {
     QL_LOG_INFO("Initializing ExternalRenderContext...");
 
     // Store external handles
-    m_impl->instance = params.instance;
-    m_impl->physicalDevice = params.physicalDevice;
-    m_impl->device = params.device;
-    m_impl->graphicsQueue = params.graphicsQueue;
-    m_impl->graphicsQueueFamily = params.graphicsQueueFamily;
-    m_impl->targetColorFormat = params.targetColorFormat;
-    m_impl->width = params.width;
-    m_impl->height = params.height;
+    instance = params.instance;
+    physicalDevice = params.physicalDevice;
+    device = params.device;
+    graphicsQueue = params.graphicsQueue;
+    graphicsQueueFamily = params.graphicsQueueFamily;
+    targetColorFormat = params.targetColorFormat;
+    width = params.width;
+    height = params.height;
 
     // Set pipeline cache path (use provided path or platform-specific default)
     if (!params.pipelineCacheDir.empty()) {
-        m_impl->pipelineCachePath = (std::filesystem::path(params.pipelineCacheDir) / "pipeline_cache.bin").string();
+        pipelineCachePath = (std::filesystem::path(params.pipelineCacheDir) / "pipeline_cache.bin").string();
         // Ensure directory exists
         std::error_code ec;
         std::filesystem::create_directories(params.pipelineCacheDir, ec);
@@ -577,9 +616,9 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
             QL_LOG_WARN("Failed to create cache directory {}: {}", params.pipelineCacheDir, ec.message());
         }
     } else {
-        m_impl->pipelineCachePath = (std::filesystem::path(GetDefaultCacheDirectory()) / "pipeline_cache.bin").string();
+        pipelineCachePath = (std::filesystem::path(GetDefaultCacheDirectory()) / "pipeline_cache.bin").string();
     }
-    QL_LOG_INFO("Pipeline cache path: {}", m_impl->pipelineCachePath);
+    QL_LOG_INFO("Pipeline cache path: {}", pipelineCachePath);
 
     // Create VulkanContextAdapter from external handles
     VulkanContext::ExternalHandles adapterHandles{};
@@ -591,7 +630,7 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
     adapterHandles.allocator = params.externalAllocator;
 
     try {
-        m_impl->contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
+        contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
     } catch (const std::exception& e) {
         return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") + e.what());
     }
@@ -602,18 +641,18 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = params.graphicsQueueFamily;
 
-    VkResult result = vkCreateCommandPool(params.device, &poolInfo, nullptr, &m_impl->commandPool);
+    VkResult result = vkCreateCommandPool(params.device, &poolInfo, nullptr, &commandPool);
     if (result != VK_SUCCESS) {
         return Result<void, String>::Err("Failed to create command pool");
     }
 
     // Initialize default lighting params
-    m_impl->lightingParams = CreateDefaultLightingParams();
+    lightingParams = CreateDefaultLightingParams();
 
     // Create output image
-    m_impl->outputImage = std::make_unique<GpuImage>(
-        m_impl->contextAdapter->GetAllocator(),
-        m_impl->contextAdapter->GetDevice(),
+    outputImage = std::make_unique<GpuImage>(
+        contextAdapter->GetAllocator(),
+        contextAdapter->GetDevice(),
         params.width, params.height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
@@ -622,20 +661,20 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
 
     // Transition output image to GENERAL layout
     TransitionImageLayoutImmediate(
-        m_impl->outputImage->GetImage(),
+        outputImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
 
     // Create lighting params buffer
-    m_impl->lightingParamsBuffer = std::make_unique<GpuBuffer>(
-        m_impl->contextAdapter->GetAllocator(),
+    lightingParamsBuffer = std::make_unique<GpuBuffer>(
+        contextAdapter->GetAllocator(),
         sizeof(LightingParams),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->lightingParamsBuffer->Upload(&m_impl->lightingParams, sizeof(LightingParams));
+    lightingParamsBuffer->Upload(&lightingParams, sizeof(LightingParams));
 
     // Create dummy buffers for optional bindings
     CreateDummyBuffers();
@@ -647,7 +686,7 @@ Result<void, String> ExternalRenderContext::Initialize(const InitParams& params)
     CreateFallbackEnvMap();
 
     // Create texture manager
-    m_impl->textureManager = std::make_unique<TextureManager>(*m_impl->contextAdapter);
+    textureManager = std::make_unique<TextureManager>(*contextAdapter);
 
     QL_LOG_INFO("ExternalRenderContext initialized ({}x{})", params.width, params.height);
     return Result<void, String>::Ok();
@@ -692,10 +731,10 @@ Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
 // reason; the full scene swap, which frees the most, was the one path that did
 // not. Loading a scene is not a hot path, so a full device wait is the right
 // instrument -- there is no per-frame cost to protect here.
-void ExternalRenderContext::RebuildSceneGpuResources() {
-    vkDeviceWaitIdle(m_impl->device);
+void ExternalRenderContext::Impl::RebuildSceneGpuResources() {
+    vkDeviceWaitIdle(device);
 
-    m_impl->textureManager->UploadTextures(m_impl->scene->textures);
+    textureManager->UploadTextures(scene->textures);
     BuildAccelerationStructures();
     UpdateGpuResources();
     CreatePipeline();
@@ -715,7 +754,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
     m_impl->camera = m_impl->scene->camera;
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
 
-    RebuildSceneGpuResources();
+    m_impl->RebuildSceneGpuResources();
 
     m_impl->isReady = true;
     // Via ResetAccumulation() rather than clearing the counter directly, so the
@@ -744,7 +783,7 @@ Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPa
     m_impl->camera = m_impl->scene->camera;
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) / static_cast<f32>(m_impl->height));
 
-    RebuildSceneGpuResources();
+    m_impl->RebuildSceneGpuResources();
 
     m_impl->isReady = true;
     // Via ResetAccumulation() rather than clearing the counter directly, so the
@@ -876,7 +915,7 @@ void ExternalRenderContext::RenderFrame(
         (!m_impl->hasCachedMinMax ||
          m_impl->accumulatedSamples == 1 ||  // Always update after first frame
          m_impl->frameIndex % minMaxUpdateInterval == 0)) {
-        ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
+        m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
         //QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
         //             m_impl->cachedImageMin, m_impl->cachedImageMax);
@@ -943,7 +982,7 @@ void ExternalRenderContext::RenderFrame(
     // Apply GPU sensor simulation if enabled
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
         // Execute GPU sensor chain: outputImage -> sensorImage
-        ExecuteGPUSensorChain(cmd, width, height);
+        m_impl->ExecuteGPUSensorChain(cmd, width, height);
         blitSourceImage = m_impl->sensorImage->GetImage();
     }
 
@@ -953,7 +992,7 @@ void ExternalRenderContext::RenderFrame(
         // If sensor is disabled, CLAHE processes outputImage
         // Note: ExecuteCLAHE reads from outputImage by default, need to update descriptor
         // For now, CLAHE always reads from outputImage (TODO: make it read from current source)
-        ExecuteCLAHE(cmd, width, height);
+        m_impl->ExecuteCLAHE(cmd, width, height);
         blitSourceImage = m_impl->displayImage->GetImage();
     }
 
@@ -1100,7 +1139,7 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
-    TransitionImageLayoutImmediate(
+    m_impl->TransitionImageLayoutImmediate(
         m_impl->outputImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1123,7 +1162,7 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
             VMA_MEMORY_USAGE_GPU_ONLY
         );
 
-        TransitionImageLayoutImmediate(
+        m_impl->TransitionImageLayoutImmediate(
             m_impl->displayImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1179,14 +1218,14 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
             VMA_MEMORY_USAGE_GPU_ONLY
         );
 
-        TransitionImageLayoutImmediate(
+        m_impl->TransitionImageLayoutImmediate(
             m_impl->sensorImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL
         );
 
-        TransitionImageLayoutImmediate(
+        m_impl->TransitionImageLayoutImmediate(
             m_impl->sensorTempImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1210,13 +1249,13 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
                 VMA_MEMORY_USAGE_GPU_ONLY
             );
 
-            TransitionImageLayoutImmediate(
+            m_impl->TransitionImageLayoutImmediate(
                 m_impl->fpnPrnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL
             );
-            TransitionImageLayoutImmediate(
+            m_impl->TransitionImageLayoutImmediate(
                 m_impl->fpnDsnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1819,7 +1858,7 @@ void ExternalRenderContext::SetCLAHEParams(const CLAHEParams& params) {
 
     // Initialize CLAHE resources if enabling for the first time
     if (params.enabled && !wasEnabled && !m_impl->claheInitialized) {
-        CreateCLAHEPipeline();
+        m_impl->CreateCLAHEPipeline();
     }
 
     QL_LOG_DEBUG("CLAHE params: enabled={}, clipLimit={}, tileSize={}, luminanceOnly={}",
@@ -1840,7 +1879,7 @@ void ExternalRenderContext::SetGPUSensorEnabled(bool enabled) {
 
     // Initialize GPU sensor resources if enabling for the first time
     if (enabled && !wasEnabled && !m_impl->sensorInitialized) {
-        CreateGPUSensorPipeline();
+        m_impl->CreateGPUSensorPipeline();
     }
 
     QL_LOG_DEBUG("GPU Sensor: enabled={}", enabled);
@@ -1851,7 +1890,7 @@ void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
 
     // Initialize GPU sensor resources if not already done
     if (m_impl->gpuSensorEnabled && !m_impl->sensorInitialized) {
-        CreateGPUSensorPipeline();
+        m_impl->CreateGPUSensorPipeline();
     }
 
     QL_LOG_DEBUG("GPU Sensor params updated: QE={}, f#={}, gain={}, bitDepth={}",
@@ -1930,20 +1969,20 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
 // Private Helper Methods
 // ============================================================================
 
-void ExternalRenderContext::BuildAccelerationStructures() {
-    if (!m_impl->scene) return;
+void ExternalRenderContext::Impl::BuildAccelerationStructures() {
+    if (!scene) return;
 
     QL_LOG_INFO("Building acceleration structures...");
 
     // Clear existing
-    m_impl->blasList.clear();
-    m_impl->tlas.reset();
-    m_impl->globalVertexBuffer.reset();
-    m_impl->globalIndexBuffer.reset();
-    m_impl->globalNormalBuffer.reset();
-    m_impl->globalUVBuffer.reset();
-    m_impl->globalTangentBuffer.reset();
-    m_impl->instanceGeometryBuffer.reset();
+    blasList.clear();
+    tlas.reset();
+    globalVertexBuffer.reset();
+    globalIndexBuffer.reset();
+    globalNormalBuffer.reset();
+    globalUVBuffer.reset();
+    globalTangentBuffer.reset();
+    instanceGeometryBuffer.reset();
 
     // ========================================================================
     // Phase 1: Calculate total sizes and offsets for merged geometry buffers
@@ -1966,7 +2005,7 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     u32 totalTangents = 0;
 
     // First pass: calculate offsets for each primitive
-    for (const auto& mesh : m_impl->scene->meshes) {
+    for (const auto& mesh : scene->meshes) {
         for (const auto& primitive : mesh.primitives) {
             BlasGeometryOffset offset;
             offset.vertexOffset = totalVertices;
@@ -2002,7 +2041,7 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     std::vector<glm::vec4> mergedTangents(totalTangents);
 
     size_t blasIdx = 0;
-    for (const auto& mesh : m_impl->scene->meshes) {
+    for (const auto& mesh : scene->meshes) {
         for (const auto& primitive : mesh.primitives) {
             const BlasGeometryOffset& offset = blasOffsets[blasIdx];
 
@@ -2112,47 +2151,47 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     // Phase 3: Create merged GPU buffers and upload data
     // ========================================================================
 
-    VmaAllocator allocator = m_impl->contextAdapter->GetAllocator();
+    VmaAllocator allocator = contextAdapter->GetAllocator();
 
-    m_impl->globalVertexBuffer = std::make_unique<GpuBuffer>(
+    globalVertexBuffer = std::make_unique<GpuBuffer>(
         allocator,
         totalVertices * sizeof(glm::vec3),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->globalVertexBuffer->Upload(mergedVertices.data(), mergedVertices.size() * sizeof(glm::vec3));
+    globalVertexBuffer->Upload(mergedVertices.data(), mergedVertices.size() * sizeof(glm::vec3));
 
-    m_impl->globalIndexBuffer = std::make_unique<GpuBuffer>(
+    globalIndexBuffer = std::make_unique<GpuBuffer>(
         allocator,
         totalIndices * sizeof(u32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->globalIndexBuffer->Upload(mergedIndices.data(), mergedIndices.size() * sizeof(u32));
+    globalIndexBuffer->Upload(mergedIndices.data(), mergedIndices.size() * sizeof(u32));
 
-    m_impl->globalNormalBuffer = std::make_unique<GpuBuffer>(
+    globalNormalBuffer = std::make_unique<GpuBuffer>(
         allocator,
         totalNormals * sizeof(glm::vec3),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->globalNormalBuffer->Upload(mergedNormals.data(), mergedNormals.size() * sizeof(glm::vec3));
+    globalNormalBuffer->Upload(mergedNormals.data(), mergedNormals.size() * sizeof(glm::vec3));
 
-    m_impl->globalUVBuffer = std::make_unique<GpuBuffer>(
+    globalUVBuffer = std::make_unique<GpuBuffer>(
         allocator,
         totalUVs * sizeof(glm::vec2),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->globalUVBuffer->Upload(mergedUVs.data(), mergedUVs.size() * sizeof(glm::vec2));
+    globalUVBuffer->Upload(mergedUVs.data(), mergedUVs.size() * sizeof(glm::vec2));
 
-    m_impl->globalTangentBuffer = std::make_unique<GpuBuffer>(
+    globalTangentBuffer = std::make_unique<GpuBuffer>(
         allocator,
         totalTangents * sizeof(glm::vec4),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->globalTangentBuffer->Upload(mergedTangents.data(), mergedTangents.size() * sizeof(glm::vec4));
+    globalTangentBuffer->Upload(mergedTangents.data(), mergedTangents.size() * sizeof(glm::vec4));
 
     QL_LOG_INFO("  Created merged geometry buffers");
 
@@ -2160,16 +2199,16 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     // Phase 4: Build BLAS for each primitive (using original per-BLAS buffers)
     // ========================================================================
 
-    for (const auto& mesh : m_impl->scene->meshes) {
+    for (const auto& mesh : scene->meshes) {
         for (const auto& primitive : mesh.primitives) {
-            m_impl->blasList.emplace_back(
-                std::make_unique<BLAS>(*m_impl->contextAdapter, primitive)
+            blasList.emplace_back(
+                std::make_unique<BLAS>(*contextAdapter, primitive)
             );
         }
     }
 
     // Build TLAS
-    m_impl->tlas = std::make_unique<TLAS>(*m_impl->contextAdapter);
+    tlas = std::make_unique<TLAS>(*contextAdapter);
 
     // ========================================================================
     // Phase 5: Build instance geometry info and add TLAS instances
@@ -2177,9 +2216,9 @@ void ExternalRenderContext::BuildAccelerationStructures() {
 
     // Build mapping from mesh index to BLAS starting index
     std::vector<size_t> meshToBlasStart;
-    meshToBlasStart.reserve(m_impl->scene->meshes.size());
+    meshToBlasStart.reserve(scene->meshes.size());
     size_t blasStart = 0;
-    for (const auto& mesh : m_impl->scene->meshes) {
+    for (const auto& mesh : scene->meshes) {
         meshToBlasStart.push_back(blasStart);
         blasStart += mesh.primitives.size();
     }
@@ -2188,15 +2227,15 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     std::vector<InstanceGeometryInfo> instanceInfos;
 
     // Execute builds on GPU and add TLAS instances
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
         // Build all BLAS
-        for (auto& blas : m_impl->blasList) {
+        for (auto& blas : blasList) {
             blas->Build(cmd);
         }
 
         // Add instances to TLAS and record geometry info
-        for (const auto& node : m_impl->scene->nodes) {
-            const Mesh& mesh = m_impl->scene->meshes[node.meshIndex];
+        for (const auto& node : scene->nodes) {
+            const Mesh& mesh = scene->meshes[node.meshIndex];
             size_t blasBase = meshToBlasStart[node.meshIndex];
 
             for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
@@ -2223,15 +2262,15 @@ void ExternalRenderContext::BuildAccelerationStructures() {
 
                 // Get material's doubleSided property for hardware backface culling control
                 bool doubleSided = true;  // Default: disable culling (backward compatible)
-                if (static_cast<size_t>(geoOffset.materialId) < m_impl->scene->materials.size()) {
-                    doubleSided = m_impl->scene->materials[geoOffset.materialId].doubleSided;
+                if (static_cast<size_t>(geoOffset.materialId) < scene->materials.size()) {
+                    doubleSided = scene->materials[geoOffset.materialId].doubleSided;
                 }
 
                 // Add TLAS instance
                 // Note: instanceCustomIndex is now the TLAS instance index (for InstanceGeometryInfo lookup)
                 // Material ID is stored in InstanceGeometryInfo instead
-                m_impl->tlas->AddInstance(
-                    *m_impl->blasList[globalBlasIdx],
+                tlas->AddInstance(
+                    *blasList[globalBlasIdx],
                     static_cast<u32>(instanceInfos.size() - 1),  // Instance index for geometry info lookup
                     node.transform,
                     doubleSided
@@ -2239,7 +2278,7 @@ void ExternalRenderContext::BuildAccelerationStructures() {
             }
         }
 
-        m_impl->tlas->Build(cmd);
+        tlas->Build(cmd);
     });
 
     // ========================================================================
@@ -2247,102 +2286,102 @@ void ExternalRenderContext::BuildAccelerationStructures() {
     // ========================================================================
 
     if (!instanceInfos.empty()) {
-        m_impl->instanceGeometryBuffer = std::make_unique<GpuBuffer>(
+        instanceGeometryBuffer = std::make_unique<GpuBuffer>(
             allocator,
             instanceInfos.size() * sizeof(InstanceGeometryInfo),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
-        m_impl->instanceGeometryBuffer->Upload(instanceInfos.data(),
+        instanceGeometryBuffer->Upload(instanceInfos.data(),
             instanceInfos.size() * sizeof(InstanceGeometryInfo));
 
         QL_LOG_INFO("  Created instance geometry info buffer ({} instances)", instanceInfos.size());
     }
 
-    QL_LOG_INFO("  Built {} BLAS, 1 TLAS", m_impl->blasList.size());
+    QL_LOG_INFO("  Built {} BLAS, 1 TLAS", blasList.size());
 }
 
-void ExternalRenderContext::UpdateGpuResources() {
-    if (!m_impl->scene) return;
+void ExternalRenderContext::Impl::UpdateGpuResources() {
+    if (!scene) return;
 
     QL_LOG_INFO("Updating GPU resources...");
 
     // Upload materials
     std::vector<MaterialDataCPU> materialData;
-    materialData.reserve(m_impl->scene->materials.size());
+    materialData.reserve(scene->materials.size());
 
-    for (const auto& mat : m_impl->scene->materials) {
+    for (const auto& mat : scene->materials) {
         materialData.push_back(ConvertMaterialToCPU(mat));
     }
 
     if (!materialData.empty()) {
-        m_impl->materialBuffer = std::make_unique<GpuBuffer>(
-            m_impl->contextAdapter->GetAllocator(),
+        materialBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(),
             materialData.size() * sizeof(MaterialDataCPU),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU
         );
-        m_impl->materialBuffer->Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
+        materialBuffer->Upload(materialData.data(), materialData.size() * sizeof(MaterialDataCPU));
     }
 
     QL_LOG_INFO("  GPU resources updated");
 }
 
-void ExternalRenderContext::CreateDummyBuffers() {
-    auto allocator = m_impl->contextAdapter->GetAllocator();
+void ExternalRenderContext::Impl::CreateDummyBuffers() {
+    auto allocator = contextAdapter->GetAllocator();
 
     // Create dummy spectral curves buffer
     struct DummySpectralCurve {
         f32 data[272 / sizeof(f32)];
     } dummyCurve{};
 
-    m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+    spectralCurvesBuffer = std::make_unique<GpuBuffer>(
         allocator,
         sizeof(DummySpectralCurve),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->spectralCurvesBuffer->Upload(&dummyCurve, sizeof(DummySpectralCurve));
+    spectralCurvesBuffer->Upload(&dummyCurve, sizeof(DummySpectralCurve));
 
     // Create dummy CRI buffer
     struct DummyCRI {
         f32 data[528 / sizeof(f32)];
     } dummyCri{};
 
-    m_impl->criBuffer = std::make_unique<GpuBuffer>(
+    criBuffer = std::make_unique<GpuBuffer>(
         allocator,
         sizeof(DummyCRI),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->criBuffer->Upload(&dummyCri, sizeof(DummyCRI));
+    criBuffer->Upload(&dummyCri, sizeof(DummyCRI));
 
     // Create dummy solar LUT buffer
     struct DummySolarLUT {
         f32 data[544 / sizeof(f32)];
     } dummySolar{};
 
-    m_impl->solarLutBuffer = std::make_unique<GpuBuffer>(
+    solarLutBuffer = std::make_unique<GpuBuffer>(
         allocator,
         sizeof(DummySolarLUT),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->solarLutBuffer->Upload(&dummySolar, sizeof(DummySolarLUT));
+    solarLutBuffer->Upload(&dummySolar, sizeof(DummySolarLUT));
 
     // Create NN atmosphere buffers. The header starts zeroed (enabled = 0,
     // atmosphere off); the data blob is preallocated at its maximum size so
     // rebakes are pure uploads with no descriptor rebinding.
     AtmosNNHeaderGPU disabledHeader{};
-    m_impl->atmosHeaderBuffer = std::make_unique<GpuBuffer>(
+    atmosHeaderBuffer = std::make_unique<GpuBuffer>(
         allocator,
         sizeof(AtmosNNHeaderGPU),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->atmosHeaderBuffer->Upload(&disabledHeader, sizeof(AtmosNNHeaderGPU));
+    atmosHeaderBuffer->Upload(&disabledHeader, sizeof(AtmosNNHeaderGPU));
 
-    m_impl->atmosDataBuffer = std::make_unique<GpuBuffer>(
+    atmosDataBuffer = std::make_unique<GpuBuffer>(
         allocator,
         kAtmosMaxDataFloats * sizeof(f32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -2350,7 +2389,7 @@ void ExternalRenderContext::CreateDummyBuffers() {
     );
     {
         std::vector<f32> zeroData(kAtmosMaxDataFloats, 0.0f);
-        m_impl->atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
+        atmosDataBuffer->Upload(zeroData.data(), zeroData.size() * sizeof(f32));
     }
 
     // Create CIE 1931 CMF LUT buffer (required for VIS_Fused mode)
@@ -2366,22 +2405,22 @@ void ExternalRenderContext::CreateDummyBuffers() {
         );
     }
 
-    m_impl->cieCmfBuffer = std::make_unique<GpuBuffer>(
+    cieCmfBuffer = std::make_unique<GpuBuffer>(
         allocator,
         cieCmfData.size() * sizeof(glm::vec4),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    m_impl->cieCmfBuffer->Upload(cieCmfData.data(), cieCmfData.size() * sizeof(glm::vec4));
+    cieCmfBuffer->Upload(cieCmfData.data(), cieCmfData.size() * sizeof(glm::vec4));
 
     QL_LOG_DEBUG("  CIE CMF LUT created ({} samples)", CIE_CMF_LUT_SIZE);
 }
 
-void ExternalRenderContext::CreateBRDFLut() {
+void ExternalRenderContext::Impl::CreateBRDFLut() {
     QL_LOG_INFO("Creating BRDF LUT...");
 
-    auto allocator = m_impl->contextAdapter->GetAllocator();
-    auto device = m_impl->contextAdapter->GetDevice();
+    auto allocator = contextAdapter->GetAllocator();
+    auto device = contextAdapter->GetDevice();
 
     // Try to load from cache first
     const String brdfCachePath = "assets/luts/brdf_lut_512_ggx.bin";
@@ -2399,7 +2438,7 @@ void ExternalRenderContext::CreateBRDFLut() {
     }
 
     // Create GPU texture
-    m_impl->brdfLutTexture = std::make_unique<GpuImage>(
+    brdfLutTexture = std::make_unique<GpuImage>(
         allocator,
         device,
         512, 512,
@@ -2410,7 +2449,7 @@ void ExternalRenderContext::CreateBRDFLut() {
 
     // Transition to TRANSFER_DST
     TransitionImageLayoutImmediate(
-        m_impl->brdfLutTexture->GetImage(),
+        brdfLutTexture->GetImage(),
         VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
@@ -2434,7 +2473,7 @@ void ExternalRenderContext::CreateBRDFLut() {
     );
     stagingBuffer.Upload(lutData.data(), lutData.size() * sizeof(f32));
 
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
         region.bufferRowLength = 0;
@@ -2449,7 +2488,7 @@ void ExternalRenderContext::CreateBRDFLut() {
         vkCmdCopyBufferToImage(
             cmd,
             stagingBuffer.GetHandle(),
-            m_impl->brdfLutTexture->GetImage(),
+            brdfLutTexture->GetImage(),
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             1,
             &region
@@ -2458,7 +2497,7 @@ void ExternalRenderContext::CreateBRDFLut() {
 
     // Transition to SHADER_READ_ONLY
     TransitionImageLayoutImmediate(
-        m_impl->brdfLutTexture->GetImage(),
+        brdfLutTexture->GetImage(),
         VK_FORMAT_R32G32_SFLOAT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -2474,19 +2513,19 @@ void ExternalRenderContext::CreateBRDFLut() {
     samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
 
-    vkCreateSampler(device, &samplerInfo, nullptr, &m_impl->brdfLutSampler);
+    vkCreateSampler(device, &samplerInfo, nullptr, &brdfLutSampler);
 }
 
-void ExternalRenderContext::CreateFallbackEnvMap() {
+void ExternalRenderContext::Impl::CreateFallbackEnvMap() {
     QL_LOG_INFO("Creating fallback environment map...");
 
-    auto allocator = m_impl->contextAdapter->GetAllocator();
-    auto device = m_impl->contextAdapter->GetDevice();
+    auto allocator = contextAdapter->GetAllocator();
+    auto device = contextAdapter->GetDevice();
 
     constexpr u32 envMapSize = 256;
     constexpr u32 envMapMips = 5;
 
-    m_impl->envMapImage = std::make_unique<GpuImage>(
+    envMapImage = std::make_unique<GpuImage>(
         allocator,
         device,
         envMapSize, envMapSize,
@@ -2501,8 +2540,8 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
 
     // Transition to TRANSFER_DST
     CommandHelper::TransitionImageLayoutImmediate(
-        *m_impl->contextAdapter,
-        m_impl->envMapImage->GetImage(),
+        *contextAdapter,
+        envMapImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -2534,7 +2573,7 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
         stagingBuffer.Upload(pixelData.data(), pixelData.size() * sizeof(f32));
 
         for (u32 face = 0; face < 6; ++face) {
-            CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
                 VkBufferImageCopy region{};
                 region.bufferOffset = 0;
                 region.bufferRowLength = 0;
@@ -2549,7 +2588,7 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
                 vkCmdCopyBufferToImage(
                     cmd,
                     stagingBuffer.GetHandle(),
-                    m_impl->envMapImage->GetImage(),
+                    envMapImage->GetImage(),
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     1,
                     &region
@@ -2560,8 +2599,8 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
 
     // Transition to SHADER_READ_ONLY
     CommandHelper::TransitionImageLayoutImmediate(
-        *m_impl->contextAdapter,
-        m_impl->envMapImage->GetImage(),
+        *contextAdapter,
+        envMapImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -2570,74 +2609,74 @@ void ExternalRenderContext::CreateFallbackEnvMap() {
     );
 }
 
-void ExternalRenderContext::CreatePipeline() {
+void ExternalRenderContext::Impl::CreatePipeline() {
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
     // Load or create pipeline cache for faster shader compilation
-    if (m_impl->pipelineCache == VK_NULL_HANDLE) {
-        m_impl->pipelineCache = RayTracingPipeline::LoadPipelineCache(
-            *m_impl->contextAdapter,
-            m_impl->pipelineCachePath
+    if (pipelineCache == VK_NULL_HANDLE) {
+        pipelineCache = RayTracingPipeline::LoadPipelineCache(
+            *contextAdapter,
+            pipelineCachePath
         );
     }
 
     // Create pipeline using context adapter with cache
-    m_impl->pipeline = std::make_unique<RayTracingPipeline>(
-        *m_impl->contextAdapter,
+    pipeline = std::make_unique<RayTracingPipeline>(
+        *contextAdapter,
         "raygen.spv",
         "closesthit.spv",
         "miss.spv",
-        m_impl->pipelineCache
+        pipelineCache
     );
 
     // Bind resources
-    m_impl->pipeline->BindOutputImage(*m_impl->outputImage);
-    m_impl->pipeline->BindAccelerationStructure(m_impl->tlas->GetHandle());
-    m_impl->pipeline->BindLUTBuffer(*m_impl->lightingParamsBuffer);
+    pipeline->BindOutputImage(*outputImage);
+    pipeline->BindAccelerationStructure(tlas->GetHandle());
+    pipeline->BindLUTBuffer(*lightingParamsBuffer);
 
     // Bind merged global geometry buffers (instead of per-BLAS buffers)
-    if (m_impl->globalVertexBuffer && m_impl->globalIndexBuffer) {
-        m_impl->pipeline->BindGeometryBuffers(
-            *m_impl->globalVertexBuffer,
-            *m_impl->globalIndexBuffer,
-            m_impl->globalUVBuffer.get()
+    if (globalVertexBuffer && globalIndexBuffer) {
+        pipeline->BindGeometryBuffers(
+            *globalVertexBuffer,
+            *globalIndexBuffer,
+            globalUVBuffer.get()
         );
-        if (m_impl->globalTangentBuffer) {
-            m_impl->pipeline->BindTangentBuffer(*m_impl->globalTangentBuffer);
+        if (globalTangentBuffer) {
+            pipeline->BindTangentBuffer(*globalTangentBuffer);
         }
-        if (m_impl->globalNormalBuffer) {
-            m_impl->pipeline->BindNormalBuffer(*m_impl->globalNormalBuffer);
+        if (globalNormalBuffer) {
+            pipeline->BindNormalBuffer(*globalNormalBuffer);
         }
-        if (m_impl->instanceGeometryBuffer) {
-            m_impl->pipeline->BindInstanceGeometryBuffer(*m_impl->instanceGeometryBuffer);
+        if (instanceGeometryBuffer) {
+            pipeline->BindInstanceGeometryBuffer(*instanceGeometryBuffer);
         }
     }
 
     // Bind materials
-    if (m_impl->materialBuffer) {
-        m_impl->pipeline->BindMaterialBuffer(*m_impl->materialBuffer);
+    if (materialBuffer) {
+        pipeline->BindMaterialBuffer(*materialBuffer);
     }
 
     // Bind textures
-    m_impl->pipeline->BindTextures(
-        m_impl->textureManager->GetImageViews(),
-        m_impl->textureManager->GetSamplers()
+    pipeline->BindTextures(
+        textureManager->GetImageViews(),
+        textureManager->GetSamplers()
     );
 
     // Bind IBL
-    m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMapImage->GetView());
-    m_impl->pipeline->BindBRDFLut(m_impl->brdfLutTexture->GetView(), m_impl->brdfLutSampler);
+    pipeline->BindPrefilteredEnvMap(envMapImage->GetView());
+    pipeline->BindBRDFLut(brdfLutTexture->GetView(), brdfLutSampler);
 
     // Bind optional buffers
-    m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
-    m_impl->pipeline->BindComplexRefractiveIndexBuffer(m_impl->criBuffer.get());
-    m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
-    m_impl->pipeline->BindAtmosphereNN(m_impl->atmosHeaderBuffer.get(),
-                                       m_impl->atmosDataBuffer.get());
+    pipeline->BindSpectralCurvesBuffer(spectralCurvesBuffer.get());
+    pipeline->BindComplexRefractiveIndexBuffer(criBuffer.get());
+    pipeline->BindSolarSpectralLUT(solarLutBuffer.get());
+    pipeline->BindAtmosphereNN(atmosHeaderBuffer.get(),
+                                       atmosDataBuffer.get());
 
     // Bind CIE CMF LUT (required for VIS_Fused spectral mode)
-    if (m_impl->cieCmfBuffer) {
-        m_impl->pipeline->BindCIE_CMF_LUT(*m_impl->cieCmfBuffer);
+    if (cieCmfBuffer) {
+        pipeline->BindCIE_CMF_LUT(*cieCmfBuffer);
     }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
@@ -2673,13 +2712,13 @@ static std::filesystem::path GetExecutableDirectory() {
 #endif
 }
 
-void ExternalRenderContext::CreateCLAHEPipeline() {
-    if (m_impl->claheInitialized) return;
+void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
+    if (claheInitialized) return;
 
     QL_LOG_INFO("Creating CLAHE compute pipeline...");
 
-    auto device = m_impl->device;
-    auto allocator = m_impl->contextAdapter->GetAllocator();
+    auto device = this->device;
+    auto allocator = contextAdapter->GetAllocator();
 
     // Helper function to load shader file
     auto loadShaderFile = [](const String& path) -> std::vector<u32> {
@@ -2750,13 +2789,13 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
         return module;
     };
 
-    m_impl->claheHistogramShader = createShaderModule(histogramCode);
-    m_impl->claheCdfShader = createShaderModule(cdfCode);
-    m_impl->claheApplyShader = createShaderModule(applyCode);
+    claheHistogramShader = createShaderModule(histogramCode);
+    claheCdfShader = createShaderModule(cdfCode);
+    claheApplyShader = createShaderModule(applyCode);
 
-    if (m_impl->claheHistogramShader == VK_NULL_HANDLE ||
-        m_impl->claheCdfShader == VK_NULL_HANDLE ||
-        m_impl->claheApplyShader == VK_NULL_HANDLE) {
+    if (claheHistogramShader == VK_NULL_HANDLE ||
+        claheCdfShader == VK_NULL_HANDLE ||
+        claheApplyShader == VK_NULL_HANDLE) {
         QL_LOG_WARN("CLAHE: Failed to create shader modules");
         return;
     }
@@ -2799,7 +2838,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     layoutInfo.bindingCount = static_cast<u32>(bindings.size());
     layoutInfo.pBindings = bindings.data();
 
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_impl->claheDescriptorSetLayout) != VK_SUCCESS) {
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &claheDescriptorSetLayout) != VK_SUCCESS) {
         QL_LOG_WARN("CLAHE: Failed to create descriptor set layout");
         return;
     }
@@ -2827,11 +2866,11 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &m_impl->claheDescriptorSetLayout;
+    pipelineLayoutInfo.pSetLayouts = &claheDescriptorSetLayout;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_impl->clahePipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &clahePipelineLayout) != VK_SUCCESS) {
         QL_LOG_WARN("CLAHE: Failed to create pipeline layout");
         return;
     }
@@ -2847,7 +2886,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
         pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = m_impl->clahePipelineLayout;
+        pipelineInfo.layout = clahePipelineLayout;
 
         VkPipeline pipeline;
         if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -2856,13 +2895,13 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
         return pipeline;
     };
 
-    m_impl->claheHistogramPipeline = createComputePipeline(m_impl->claheHistogramShader);
-    m_impl->claheCdfPipeline = createComputePipeline(m_impl->claheCdfShader);
-    m_impl->claheApplyPipeline = createComputePipeline(m_impl->claheApplyShader);
+    claheHistogramPipeline = createComputePipeline(claheHistogramShader);
+    claheCdfPipeline = createComputePipeline(claheCdfShader);
+    claheApplyPipeline = createComputePipeline(claheApplyShader);
 
-    if (m_impl->claheHistogramPipeline == VK_NULL_HANDLE ||
-        m_impl->claheCdfPipeline == VK_NULL_HANDLE ||
-        m_impl->claheApplyPipeline == VK_NULL_HANDLE) {
+    if (claheHistogramPipeline == VK_NULL_HANDLE ||
+        claheCdfPipeline == VK_NULL_HANDLE ||
+        claheApplyPipeline == VK_NULL_HANDLE) {
         QL_LOG_WARN("CLAHE: Failed to create compute pipelines");
         return;
     }
@@ -2879,16 +2918,16 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = 1;
 
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_impl->claheDescriptorPool) != VK_SUCCESS) {
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &claheDescriptorPool) != VK_SUCCESS) {
         QL_LOG_WARN("CLAHE: Failed to create descriptor pool");
         return;
     }
 
     // Create display image (same format as outputImage)
-    m_impl->displayImage = std::make_unique<GpuImage>(
+    displayImage = std::make_unique<GpuImage>(
         allocator,
         device,
-        m_impl->width, m_impl->height,
+        width, height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
@@ -2896,7 +2935,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
 
     // Transition display image to GENERAL layout
     TransitionImageLayoutImmediate(
-        m_impl->displayImage->GetImage(),
+        displayImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
@@ -2907,21 +2946,21 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     constexpr u32 maxTiles = 64 * 64;
     constexpr u32 histogramBins = 256;
 
-    m_impl->claheHistogramBuffer = std::make_unique<GpuBuffer>(
+    claheHistogramBuffer = std::make_unique<GpuBuffer>(
         allocator,
         maxTiles * histogramBins * sizeof(u32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
-    m_impl->claheCdfBuffer = std::make_unique<GpuBuffer>(
+    claheCdfBuffer = std::make_unique<GpuBuffer>(
         allocator,
         maxTiles * histogramBins * sizeof(f32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
-    m_impl->claheMinMaxBuffer = std::make_unique<GpuBuffer>(
+    claheMinMaxBuffer = std::make_unique<GpuBuffer>(
         allocator,
         maxTiles * 2 * sizeof(f32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -2931,71 +2970,71 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_impl->claheDescriptorPool;
+    allocInfo.descriptorPool = claheDescriptorPool;
     allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_impl->claheDescriptorSetLayout;
+    allocInfo.pSetLayouts = &claheDescriptorSetLayout;
 
-    if (vkAllocateDescriptorSets(device, &allocInfo, &m_impl->claheDescriptorSet) != VK_SUCCESS) {
+    if (vkAllocateDescriptorSets(device, &allocInfo, &claheDescriptorSet) != VK_SUCCESS) {
         QL_LOG_WARN("CLAHE: Failed to allocate descriptor set");
         return;
     }
 
     // Update descriptor set
     VkDescriptorImageInfo inputImageInfo{};
-    inputImageInfo.imageView = m_impl->outputImage->GetView();
+    inputImageInfo.imageView = outputImage->GetView();
     inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkDescriptorImageInfo outputImageInfo{};
-    outputImageInfo.imageView = m_impl->displayImage->GetView();
+    outputImageInfo.imageView = displayImage->GetView();
     outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkDescriptorBufferInfo histogramBufferInfo{};
-    histogramBufferInfo.buffer = m_impl->claheHistogramBuffer->GetHandle();
+    histogramBufferInfo.buffer = claheHistogramBuffer->GetHandle();
     histogramBufferInfo.offset = 0;
     histogramBufferInfo.range = VK_WHOLE_SIZE;
 
     VkDescriptorBufferInfo cdfBufferInfo{};
-    cdfBufferInfo.buffer = m_impl->claheCdfBuffer->GetHandle();
+    cdfBufferInfo.buffer = claheCdfBuffer->GetHandle();
     cdfBufferInfo.offset = 0;
     cdfBufferInfo.range = VK_WHOLE_SIZE;
 
     VkDescriptorBufferInfo minMaxBufferInfo{};
-    minMaxBufferInfo.buffer = m_impl->claheMinMaxBuffer->GetHandle();
+    minMaxBufferInfo.buffer = claheMinMaxBuffer->GetHandle();
     minMaxBufferInfo.offset = 0;
     minMaxBufferInfo.range = VK_WHOLE_SIZE;
 
     std::vector<VkWriteDescriptorSet> writes(5);
 
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_impl->claheDescriptorSet;
+    writes[0].dstSet = claheDescriptorSet;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[0].pImageInfo = &inputImageInfo;
 
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = m_impl->claheDescriptorSet;
+    writes[1].dstSet = claheDescriptorSet;
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     writes[1].pImageInfo = &outputImageInfo;
 
     writes[2].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[2].dstSet = m_impl->claheDescriptorSet;
+    writes[2].dstSet = claheDescriptorSet;
     writes[2].dstBinding = 2;
     writes[2].descriptorCount = 1;
     writes[2].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[2].pBufferInfo = &histogramBufferInfo;
 
     writes[3].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[3].dstSet = m_impl->claheDescriptorSet;
+    writes[3].dstSet = claheDescriptorSet;
     writes[3].dstBinding = 3;
     writes[3].descriptorCount = 1;
     writes[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[3].pBufferInfo = &cdfBufferInfo;
 
     writes[4].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[4].dstSet = m_impl->claheDescriptorSet;
+    writes[4].dstSet = claheDescriptorSet;
     writes[4].dstBinding = 4;
     writes[4].descriptorCount = 1;
     writes[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -3003,7 +3042,7 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
 
     vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 
-    m_impl->claheInitialized = true;
+    claheInitialized = true;
     QL_LOG_INFO("CLAHE: Compute pipeline created successfully");
 }
 
@@ -3011,13 +3050,13 @@ void ExternalRenderContext::CreateCLAHEPipeline() {
 // GPU Sensor Pipeline Creation
 // ============================================================================
 
-void ExternalRenderContext::CreateGPUSensorPipeline() {
-    if (m_impl->sensorInitialized) return;
+void ExternalRenderContext::Impl::CreateGPUSensorPipeline() {
+    if (sensorInitialized) return;
 
     QL_LOG_INFO("Creating GPU sensor compute pipeline...");
 
-    auto device = m_impl->device;
-    auto allocator = m_impl->contextAdapter->GetAllocator();
+    auto device = this->device;
+    auto allocator = contextAdapter->GetAllocator();
 
     // Helper function to load shader file
     auto loadShaderFile = [](const String& path) -> std::vector<u32> {
@@ -3104,20 +3143,20 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         return module;
     };
 
-    m_impl->sensorRadianceToElectronsShader = createShaderModule(radianceToElectronsCode);
-    m_impl->sensorPoissonNoiseShader = createShaderModule(poissonNoiseCode);
-    m_impl->sensorPsfBlurHorizontalShader = createShaderModule(psfBlurHorizontalCode);
-    m_impl->sensorPsfBlurVerticalShader = createShaderModule(psfBlurVerticalCode);
-    m_impl->sensorQuantizeToRadianceShader = createShaderModule(quantizeToRadianceCode);
+    sensorRadianceToElectronsShader = createShaderModule(radianceToElectronsCode);
+    sensorPoissonNoiseShader = createShaderModule(poissonNoiseCode);
+    sensorPsfBlurHorizontalShader = createShaderModule(psfBlurHorizontalCode);
+    sensorPsfBlurVerticalShader = createShaderModule(psfBlurVerticalCode);
+    sensorQuantizeToRadianceShader = createShaderModule(quantizeToRadianceCode);
     if (!fpnCode.empty()) {
-        m_impl->sensorFpnShader = createShaderModule(fpnCode);
+        sensorFpnShader = createShaderModule(fpnCode);
     }
 
-    if (m_impl->sensorRadianceToElectronsShader == VK_NULL_HANDLE ||
-        m_impl->sensorPoissonNoiseShader == VK_NULL_HANDLE ||
-        m_impl->sensorPsfBlurHorizontalShader == VK_NULL_HANDLE ||
-        m_impl->sensorPsfBlurVerticalShader == VK_NULL_HANDLE ||
-        m_impl->sensorQuantizeToRadianceShader == VK_NULL_HANDLE) {
+    if (sensorRadianceToElectronsShader == VK_NULL_HANDLE ||
+        sensorPoissonNoiseShader == VK_NULL_HANDLE ||
+        sensorPsfBlurHorizontalShader == VK_NULL_HANDLE ||
+        sensorPsfBlurVerticalShader == VK_NULL_HANDLE ||
+        sensorQuantizeToRadianceShader == VK_NULL_HANDLE) {
         QL_LOG_WARN("GPU Sensor: Failed to create shader modules");
         return;
     }
@@ -3142,7 +3181,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     layoutInfo.bindingCount = static_cast<u32>(bindings.size());
     layoutInfo.pBindings = bindings.data();
 
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &m_impl->sensorDescriptorSetLayout) != VK_SUCCESS) {
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &sensorDescriptorSetLayout) != VK_SUCCESS) {
         QL_LOG_WARN("GPU Sensor: Failed to create descriptor set layout");
         return;
     }
@@ -3156,11 +3195,11 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &m_impl->sensorDescriptorSetLayout;
+    pipelineLayoutInfo.pSetLayouts = &sensorDescriptorSetLayout;
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
 
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &m_impl->sensorPipelineLayout) != VK_SUCCESS) {
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &sensorPipelineLayout) != VK_SUCCESS) {
         QL_LOG_WARN("GPU Sensor: Failed to create pipeline layout");
         return;
     }
@@ -3176,7 +3215,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         VkComputePipelineCreateInfo pipelineInfo{};
         pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
         pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = m_impl->sensorPipelineLayout;
+        pipelineInfo.layout = sensorPipelineLayout;
 
         VkPipeline pipeline;
         if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
@@ -3185,17 +3224,17 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         return pipeline;
     };
 
-    m_impl->sensorRadianceToElectronsPipeline = createComputePipeline(m_impl->sensorRadianceToElectronsShader);
-    m_impl->sensorPoissonNoisePipeline = createComputePipeline(m_impl->sensorPoissonNoiseShader);
-    m_impl->sensorPsfBlurHorizontalPipeline = createComputePipeline(m_impl->sensorPsfBlurHorizontalShader);
-    m_impl->sensorPsfBlurVerticalPipeline = createComputePipeline(m_impl->sensorPsfBlurVerticalShader);
-    m_impl->sensorQuantizeToRadiancePipeline = createComputePipeline(m_impl->sensorQuantizeToRadianceShader);
+    sensorRadianceToElectronsPipeline = createComputePipeline(sensorRadianceToElectronsShader);
+    sensorPoissonNoisePipeline = createComputePipeline(sensorPoissonNoiseShader);
+    sensorPsfBlurHorizontalPipeline = createComputePipeline(sensorPsfBlurHorizontalShader);
+    sensorPsfBlurVerticalPipeline = createComputePipeline(sensorPsfBlurVerticalShader);
+    sensorQuantizeToRadiancePipeline = createComputePipeline(sensorQuantizeToRadianceShader);
 
-    if (m_impl->sensorRadianceToElectronsPipeline == VK_NULL_HANDLE ||
-        m_impl->sensorPoissonNoisePipeline == VK_NULL_HANDLE ||
-        m_impl->sensorPsfBlurHorizontalPipeline == VK_NULL_HANDLE ||
-        m_impl->sensorPsfBlurVerticalPipeline == VK_NULL_HANDLE ||
-        m_impl->sensorQuantizeToRadiancePipeline == VK_NULL_HANDLE) {
+    if (sensorRadianceToElectronsPipeline == VK_NULL_HANDLE ||
+        sensorPoissonNoisePipeline == VK_NULL_HANDLE ||
+        sensorPsfBlurHorizontalPipeline == VK_NULL_HANDLE ||
+        sensorPsfBlurVerticalPipeline == VK_NULL_HANDLE ||
+        sensorQuantizeToRadiancePipeline == VK_NULL_HANDLE) {
         QL_LOG_WARN("GPU Sensor: Failed to create compute pipelines");
         return;
     }
@@ -3212,25 +3251,25 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     poolInfo.pPoolSizes = poolSizes.data();
     poolInfo.maxSets = 6;  // 5 existing + 1 FPN
 
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &m_impl->sensorDescriptorPool) != VK_SUCCESS) {
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sensorDescriptorPool) != VK_SUCCESS) {
         QL_LOG_WARN("GPU Sensor: Failed to create descriptor pool");
         return;
     }
 
     // Create sensor images (same format as outputImage)
-    m_impl->sensorImage = std::make_unique<GpuImage>(
+    sensorImage = std::make_unique<GpuImage>(
         allocator,
         device,
-        m_impl->width, m_impl->height,
+        width, height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
     );
 
-    m_impl->sensorTempImage = std::make_unique<GpuImage>(
+    sensorTempImage = std::make_unique<GpuImage>(
         allocator,
         device,
-        m_impl->width, m_impl->height,
+        width, height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
@@ -3238,14 +3277,14 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
 
     // Transition sensor images to GENERAL layout
     TransitionImageLayoutImmediate(
-        m_impl->sensorImage->GetImage(),
+        sensorImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
 
     TransitionImageLayoutImmediate(
-        m_impl->sensorTempImage->GetImage(),
+        sensorTempImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
@@ -3254,11 +3293,11 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     // Allocate descriptor set
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = m_impl->sensorDescriptorPool;
+    allocInfo.descriptorPool = sensorDescriptorPool;
     allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_impl->sensorDescriptorSetLayout;
+    allocInfo.pSetLayouts = &sensorDescriptorSetLayout;
 
-    if (vkAllocateDescriptorSets(device, &allocInfo, &m_impl->sensorDescriptorSet) != VK_SUCCESS) {
+    if (vkAllocateDescriptorSets(device, &allocInfo, &sensorDescriptorSet) != VK_SUCCESS) {
         QL_LOG_WARN("GPU Sensor: Failed to allocate descriptor set");
         return;
     }
@@ -3266,7 +3305,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
     // ========================================================================
     // FPN: Create descriptor set layout (4 bindings), pipeline, and FPN maps
     // ========================================================================
-    if (m_impl->sensorFpnShader != VK_NULL_HANDLE) {
+    if (sensorFpnShader != VK_NULL_HANDLE) {
         // FPN descriptor set layout: 4 storage images
         // binding 0: inputImage (electron image, in)
         // binding 1: outputImage (electron image, out)
@@ -3286,7 +3325,7 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
         fpnLayoutInfo.bindingCount = static_cast<u32>(fpnBindings.size());
         fpnLayoutInfo.pBindings = fpnBindings.data();
 
-        if (vkCreateDescriptorSetLayout(device, &fpnLayoutInfo, nullptr, &m_impl->sensorFpnDescriptorSetLayout) != VK_SUCCESS) {
+        if (vkCreateDescriptorSetLayout(device, &fpnLayoutInfo, nullptr, &sensorFpnDescriptorSetLayout) != VK_SUCCESS) {
             QL_LOG_WARN("GPU Sensor: Failed to create FPN descriptor set layout");
         } else {
             // FPN pipeline layout
@@ -3298,46 +3337,46 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
             VkPipelineLayoutCreateInfo fpnPipeLayoutInfo{};
             fpnPipeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
             fpnPipeLayoutInfo.setLayoutCount = 1;
-            fpnPipeLayoutInfo.pSetLayouts = &m_impl->sensorFpnDescriptorSetLayout;
+            fpnPipeLayoutInfo.pSetLayouts = &sensorFpnDescriptorSetLayout;
             fpnPipeLayoutInfo.pushConstantRangeCount = 1;
             fpnPipeLayoutInfo.pPushConstantRanges = &fpnPushRange;
 
-            if (vkCreatePipelineLayout(device, &fpnPipeLayoutInfo, nullptr, &m_impl->sensorFpnPipelineLayout) != VK_SUCCESS) {
+            if (vkCreatePipelineLayout(device, &fpnPipeLayoutInfo, nullptr, &sensorFpnPipelineLayout) != VK_SUCCESS) {
                 QL_LOG_WARN("GPU Sensor: Failed to create FPN pipeline layout");
             } else {
                 // FPN compute pipeline
                 VkPipelineShaderStageCreateInfo fpnStageInfo{};
                 fpnStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
                 fpnStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-                fpnStageInfo.module = m_impl->sensorFpnShader;
+                fpnStageInfo.module = sensorFpnShader;
                 fpnStageInfo.pName = "main";
 
                 VkComputePipelineCreateInfo fpnPipeInfo{};
                 fpnPipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
                 fpnPipeInfo.stage = fpnStageInfo;
-                fpnPipeInfo.layout = m_impl->sensorFpnPipelineLayout;
+                fpnPipeInfo.layout = sensorFpnPipelineLayout;
 
-                if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &fpnPipeInfo, nullptr, &m_impl->sensorFpnPipeline) != VK_SUCCESS) {
+                if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &fpnPipeInfo, nullptr, &sensorFpnPipeline) != VK_SUCCESS) {
                     QL_LOG_WARN("GPU Sensor: Failed to create FPN compute pipeline");
                 }
             }
         }
 
         // Create FPN map images and allocate FPN descriptor set
-        if (m_impl->sensorFpnPipeline != VK_NULL_HANDLE) {
+        if (sensorFpnPipeline != VK_NULL_HANDLE) {
             // PRNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
-            m_impl->fpnPrnuMap = std::make_unique<GpuImage>(
+            fpnPrnuMap = std::make_unique<GpuImage>(
                 allocator, device,
-                m_impl->width, m_impl->height,
+                width, height,
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                 VMA_MEMORY_USAGE_GPU_ONLY
             );
 
             // DSNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
-            m_impl->fpnDsnuMap = std::make_unique<GpuImage>(
+            fpnDsnuMap = std::make_unique<GpuImage>(
                 allocator, device,
-                m_impl->width, m_impl->height,
+                width, height,
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                 VMA_MEMORY_USAGE_GPU_ONLY
@@ -3345,13 +3384,13 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
 
             // Transition FPN maps to GENERAL layout
             TransitionImageLayoutImmediate(
-                m_impl->fpnPrnuMap->GetImage(),
+                fpnPrnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL
             );
             TransitionImageLayoutImmediate(
-                m_impl->fpnDsnuMap->GetImage(),
+                fpnDsnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL
@@ -3360,20 +3399,20 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
             // Allocate FPN descriptor set
             VkDescriptorSetAllocateInfo fpnAllocInfo{};
             fpnAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            fpnAllocInfo.descriptorPool = m_impl->sensorDescriptorPool;
+            fpnAllocInfo.descriptorPool = sensorDescriptorPool;
             fpnAllocInfo.descriptorSetCount = 1;
-            fpnAllocInfo.pSetLayouts = &m_impl->sensorFpnDescriptorSetLayout;
+            fpnAllocInfo.pSetLayouts = &sensorFpnDescriptorSetLayout;
 
-            if (vkAllocateDescriptorSets(device, &fpnAllocInfo, &m_impl->sensorFpnDescriptorSet) != VK_SUCCESS) {
+            if (vkAllocateDescriptorSets(device, &fpnAllocInfo, &sensorFpnDescriptorSet) != VK_SUCCESS) {
                 QL_LOG_WARN("GPU Sensor: Failed to allocate FPN descriptor set");
-                m_impl->sensorFpnPipeline = VK_NULL_HANDLE;  // Disable FPN
+                sensorFpnPipeline = VK_NULL_HANDLE;  // Disable FPN
             } else {
                 QL_LOG_INFO("GPU Sensor: FPN pipeline and maps created successfully");
             }
         }
     }
 
-    m_impl->sensorInitialized = true;
+    sensorInitialized = true;
     QL_LOG_INFO("GPU Sensor: Compute pipeline created successfully");
 }
 
@@ -3381,14 +3420,14 @@ void ExternalRenderContext::CreateGPUSensorPipeline() {
 // GPU Sensor: Generate and Upload FPN Maps
 // ============================================================================
 
-void ExternalRenderContext::GenerateAndUploadFPNMaps() {
-    if (!m_impl->sensorInitialized || m_impl->sensorFpnPipeline == VK_NULL_HANDLE) return;
-    if (m_impl->fpnMapsGenerated) return;
+void ExternalRenderContext::Impl::GenerateAndUploadFPNMaps() {
+    if (!sensorInitialized || sensorFpnPipeline == VK_NULL_HANDLE) return;
+    if (fpnMapsGenerated) return;
 
-    const auto& params = m_impl->gpuSensorParams;
-    const u32 width = m_impl->width;
-    const u32 height = m_impl->height;
-    auto allocator = m_impl->contextAdapter->GetAllocator();
+    const auto& params = gpuSensorParams;
+    const u32 width = this->width;
+    const u32 height = this->height;
+    auto allocator = contextAdapter->GetAllocator();
 
     QL_LOG_INFO("GPU Sensor: Generating FPN maps {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
                 width, height, params.prnuSigma * 100.0f, params.dsnuSigma_e);
@@ -3527,13 +3566,13 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
         stagingBuffer.Upload(prnuData.data(), mapSize);
 
         TransitionImageLayoutImmediate(
-            m_impl->fpnPrnuMap->GetImage(),
+            fpnPrnuMap->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
         );
 
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
             VkBufferImageCopy region{};
             region.bufferOffset = 0;
             region.bufferRowLength = 0;
@@ -3546,12 +3585,12 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
             region.imageExtent = {width, height, 1};
 
             vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
-                m_impl->fpnPrnuMap->GetImage(),
+                fpnPrnuMap->GetImage(),
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         });
 
         TransitionImageLayoutImmediate(
-            m_impl->fpnPrnuMap->GetImage(),
+            fpnPrnuMap->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_GENERAL
@@ -3565,13 +3604,13 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
         stagingBuffer.Upload(dsnuData.data(), mapSize);
 
         TransitionImageLayoutImmediate(
-            m_impl->fpnDsnuMap->GetImage(),
+            fpnDsnuMap->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_GENERAL,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
         );
 
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
             VkBufferImageCopy region{};
             region.bufferOffset = 0;
             region.bufferRowLength = 0;
@@ -3584,12 +3623,12 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
             region.imageExtent = {width, height, 1};
 
             vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
-                m_impl->fpnDsnuMap->GetImage(),
+                fpnDsnuMap->GetImage(),
                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         });
 
         TransitionImageLayoutImmediate(
-            m_impl->fpnDsnuMap->GetImage(),
+            fpnDsnuMap->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
             VK_IMAGE_LAYOUT_GENERAL
@@ -3598,31 +3637,31 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
 
     // Update FPN descriptor set with map images
     VkDescriptorImageInfo fpnPrnuInfo{};
-    fpnPrnuInfo.imageView = m_impl->fpnPrnuMap->GetView();
+    fpnPrnuInfo.imageView = fpnPrnuMap->GetView();
     fpnPrnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkDescriptorImageInfo fpnDsnuInfo{};
-    fpnDsnuInfo.imageView = m_impl->fpnDsnuMap->GetView();
+    fpnDsnuInfo.imageView = fpnDsnuMap->GetView();
     fpnDsnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
     VkWriteDescriptorSet fpnWrites[2] = {};
     fpnWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    fpnWrites[0].dstSet = m_impl->sensorFpnDescriptorSet;
+    fpnWrites[0].dstSet = sensorFpnDescriptorSet;
     fpnWrites[0].dstBinding = 2;
     fpnWrites[0].descriptorCount = 1;
     fpnWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     fpnWrites[0].pImageInfo = &fpnPrnuInfo;
 
     fpnWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    fpnWrites[1].dstSet = m_impl->sensorFpnDescriptorSet;
+    fpnWrites[1].dstSet = sensorFpnDescriptorSet;
     fpnWrites[1].dstBinding = 3;
     fpnWrites[1].descriptorCount = 1;
     fpnWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     fpnWrites[1].pImageInfo = &fpnDsnuInfo;
 
-    vkUpdateDescriptorSets(m_impl->device, 2, fpnWrites, 0, nullptr);
+    vkUpdateDescriptorSets(device, 2, fpnWrites, 0, nullptr);
 
-    m_impl->fpnMapsGenerated = true;
+    fpnMapsGenerated = true;
     QL_LOG_INFO("GPU Sensor: FPN maps generated and uploaded ({}x{})", width, height);
 }
 
@@ -3630,15 +3669,15 @@ void ExternalRenderContext::GenerateAndUploadFPNMaps() {
 // GPU Sensor Chain Execution
 // ============================================================================
 
-void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height) {
-    if (!m_impl->sensorInitialized) return;
+void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height) {
+    if (!sensorInitialized) return;
 
     // Generate FPN maps on first use (lazy initialization)
-    if (!m_impl->fpnMapsGenerated && m_impl->sensorFpnPipeline != VK_NULL_HANDLE) {
+    if (!fpnMapsGenerated && sensorFpnPipeline != VK_NULL_HANDLE) {
         GenerateAndUploadFPNMaps();
     }
 
-    const auto& params = m_impl->gpuSensorParams;
+    const auto& params = gpuSensorParams;
 
     // Helper: Insert pipeline barrier between compute passes
     auto insertBarrier = [cmd]() {
@@ -3693,33 +3732,33 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update descriptor set: outputImage → sensorTempImage
         VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->outputImage->GetView();
+        inputInfo.imageView = outputImage->GetView();
         inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorTempImage->GetView();
+        outputInfo.imageView = sensorTempImage->GetView();
         outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = sensorDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[0].pImageInfo = &inputInfo;
 
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstSet = sensorDescriptorSet;
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &outputInfo;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurHorizontalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPsfBlurHorizontalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
@@ -3745,33 +3784,33 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update descriptor set: sensorTempImage → sensorImage
         VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->sensorTempImage->GetView();
+        inputInfo.imageView = sensorTempImage->GetView();
         inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorImage->GetView();
+        outputInfo.imageView = sensorImage->GetView();
         outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = sensorDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[0].pImageInfo = &inputInfo;
 
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstSet = sensorDescriptorSet;
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &outputInfo;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPsfBlurVerticalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPsfBlurVerticalPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
@@ -3815,33 +3854,33 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update descriptor set: sensorImage → sensorTempImage
         VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->sensorImage->GetView();
+        inputInfo.imageView = sensorImage->GetView();
         inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorTempImage->GetView();
+        outputInfo.imageView = sensorTempImage->GetView();
         outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = sensorDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[0].pImageInfo = &inputInfo;
 
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstSet = sensorDescriptorSet;
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &outputInfo;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorRadianceToElectronsPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorRadianceToElectronsPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
@@ -3861,7 +3900,7 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
             u32 padding;
         } pushConstants;
 
-        pushConstants.frameIndex = m_impl->frameIndex;
+        pushConstants.frameIndex = frameIndex;
         pushConstants.enablePoissonNoise = params.enablePoissonNoise ? 1u : 0u;
         pushConstants.readNoise_e_rms = params.readNoise_e_rms;
         pushConstants.enableReadNoise = params.enableReadNoise ? 1u : 0u;
@@ -3871,12 +3910,12 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update descriptor set: sensorTempImage (in/out)
         VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView = m_impl->sensorTempImage->GetView();
+        imageInfo.imageView = sensorTempImage->GetView();
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = sensorDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -3885,11 +3924,11 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
         writes[1] = writes[0];
         writes[1].dstBinding = 1;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPoissonNoisePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPoissonNoisePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
@@ -3897,7 +3936,7 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
     // ========================================================================
     // Pass 5: FPN (PRNU + DSNU) - in electron domain
     // ========================================================================
-    if (m_impl->sensorFpnPipeline != VK_NULL_HANDLE && m_impl->fpnMapsGenerated &&
+    if (sensorFpnPipeline != VK_NULL_HANDLE && fpnMapsGenerated &&
         params.enableFPN) {
         struct PushConstants {
             u32 enableFPN;
@@ -3916,12 +3955,12 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update FPN descriptor set: bindings 0,1 = sensorTempImage (in/out)
         VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView = m_impl->sensorTempImage->GetView();
+        imageInfo.imageView = sensorTempImage->GetView();
         imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorFpnDescriptorSet;
+        writes[0].dstSet = sensorFpnDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -3930,13 +3969,13 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
         writes[1] = writes[0];
         writes[1].dstBinding = 1;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorFpnPipeline);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorFpnPipeline);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            m_impl->sensorFpnPipelineLayout, 0, 1,
-            &m_impl->sensorFpnDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorFpnPipelineLayout,
+            sensorFpnPipelineLayout, 0, 1,
+            &sensorFpnDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorFpnPipelineLayout,
             VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
@@ -3976,33 +4015,33 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
 
         // Update descriptor set: sensorTempImage → sensorImage (final output)
         VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = m_impl->sensorTempImage->GetView();
+        inputInfo.imageView = sensorTempImage->GetView();
         inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = m_impl->sensorImage->GetView();
+        outputInfo.imageView = sensorImage->GetView();
         outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkWriteDescriptorSet writes[2] = {};
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->sensorDescriptorSet;
+        writes[0].dstSet = sensorDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[0].pImageInfo = &inputInfo;
 
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->sensorDescriptorSet;
+        writes[1].dstSet = sensorDescriptorSet;
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &outputInfo;
 
-        vkUpdateDescriptorSets(m_impl->device, 2, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
 
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorQuantizeToRadiancePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->sensorPipelineLayout, 0, 1, &m_impl->sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, m_impl->sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorQuantizeToRadiancePipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
         vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
         insertBarrier();
     }
@@ -4010,14 +4049,14 @@ void ExternalRenderContext::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width
     //QL_LOG_DEBUG("GPU Sensor: Executed 5-pass sensor chain (PSF sigma={:.2f} pixels)", psfSigma);
 }
 
-void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
+void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     // Read back image pixels
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
-        *m_impl->contextAdapter,
-        m_impl->outputImage->GetImage(),
+        *contextAdapter,
+        outputImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
-        m_impl->width,
-        m_impl->height
+        width,
+        height
     );
 
     // Collect valid luminance values and find absolute range
@@ -4107,15 +4146,15 @@ void ExternalRenderContext::ComputeImageMinMax(f32& outMin, f32& outMax) {
     //             ratio, absMin, absMax, outMin, outMax);
 }
 
-void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
-    if (!m_impl->claheInitialized) return;
+void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
+    if (!claheInitialized) return;
 
     // Dynamically update input image binding based on sensor state
-    VkImageView inputView = m_impl->outputImage->GetView();
+    VkImageView inputView = outputImage->GetView();
 
     // If sensor is enabled, CLAHE should process sensor output
-    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        inputView = m_impl->sensorImage->GetView();
+    if (gpuSensorEnabled && sensorInitialized && sensorImage) {
+        inputView = sensorImage->GetView();
         //QL_LOG_DEBUG("CLAHE: Processing sensor output");
     } else {
         //QL_LOG_DEBUG("CLAHE: Processing raw output");
@@ -4129,19 +4168,19 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
 
     VkWriteDescriptorSet inputWrite{};
     inputWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    inputWrite.dstSet = m_impl->claheDescriptorSet;
+    inputWrite.dstSet = claheDescriptorSet;
     inputWrite.dstBinding = 0;
     inputWrite.dstArrayElement = 0;
     inputWrite.descriptorCount = 1;
     inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     inputWrite.pImageInfo = &inputImageInfo;
 
-    vkUpdateDescriptorSets(m_impl->device, 1, &inputWrite, 0, nullptr);
+    vkUpdateDescriptorSets(device, 1, &inputWrite, 0, nullptr);
 
     // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
     // NOT pixels per tile
-    u32 tileCountX = static_cast<u32>(m_impl->claheParams.tileSize);
-    u32 tileCountY = static_cast<u32>(m_impl->claheParams.tileSize);
+    u32 tileCountX = static_cast<u32>(claheParams.tileSize);
+    u32 tileCountY = static_cast<u32>(claheParams.tileSize);
 
     // Clamp to max tiles (matching buffer allocation)
     tileCountX = std::min(tileCountX, 64u);
@@ -4157,8 +4196,8 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     // Use cached min/max values from previous frame
     // This avoids GPU sync issues during command buffer recording
     // First frame uses default values until cache is populated
-    f32 inputMin = m_impl->cachedImageMin;
-    f32 inputMax = m_impl->cachedImageMax;
+    f32 inputMin = cachedImageMin;
+    f32 inputMax = cachedImageMax;
 
     // Push constants structure (must match shader)
     struct CLAHEPushConstants {
@@ -4179,8 +4218,8 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     pushConstants.imageHeight = height;
     pushConstants.tileCountX = tileCountX;
     pushConstants.tileCountY = tileCountY;
-    pushConstants.clipLimit = m_impl->claheParams.clipLimit;
-    pushConstants.luminanceOnly = m_impl->claheParams.luminanceOnly ? 1 : 0;
+    pushConstants.clipLimit = claheParams.clipLimit;
+    pushConstants.luminanceOnly = claheParams.luminanceOnly ? 1 : 0;
     pushConstants.inputMin = inputMin;
     pushConstants.inputMax = inputMax;
 
@@ -4203,7 +4242,7 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     // Clear histogram buffer to zero before Pass 1
     // Without this, garbage data from uninitialized GPU memory causes
     // corrupted histograms and eventual TDR timeout (GPU crash)
-    vkCmdFillBuffer(cmd, m_impl->claheHistogramBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
+    vkCmdFillBuffer(cmd, claheHistogramBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
 
     // Buffer barrier: fill write → compute shader read/write
     VkBufferMemoryBarrier fillBarrier{};
@@ -4212,7 +4251,7 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     fillBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     fillBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     fillBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    fillBarrier.buffer = m_impl->claheHistogramBuffer->GetHandle();
+    fillBarrier.buffer = claheHistogramBuffer->GetHandle();
     fillBarrier.offset = 0;
     fillBarrier.size = VK_WHOLE_SIZE;
 
@@ -4229,11 +4268,11 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     // Pass 1: Build histograms
     // Dispatch one workgroup per tile
     pushConstants.passIndex = 0;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheHistogramPipeline);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheHistogramPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-                            m_impl->clahePipelineLayout, 0, 1,
-                            &m_impl->claheDescriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+                            clahePipelineLayout, 0, 1,
+                            &claheDescriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmd, clahePipelineLayout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        sizeof(pushConstants), &pushConstants);
     vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
@@ -4253,8 +4292,8 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
 
     // Pass 2: Clip, redistribute, compute CDF
     pushConstants.passIndex = 1;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheCdfPipeline);
-    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheCdfPipeline);
+    vkCmdPushConstants(cmd, clahePipelineLayout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        sizeof(pushConstants), &pushConstants);
     vkCmdDispatch(cmd, tileCountX, tileCountY, 1);
@@ -4272,8 +4311,8 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
 
     // Pass 3: Apply interpolated mapping
     pushConstants.passIndex = 2;
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->claheApplyPipeline);
-    vkCmdPushConstants(cmd, m_impl->clahePipelineLayout,
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheApplyPipeline);
+    vkCmdPushConstants(cmd, clahePipelineLayout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        sizeof(pushConstants), &pushConstants);
     // Dispatch one thread per pixel
@@ -4295,7 +4334,7 @@ void ExternalRenderContext::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 hei
     );
 }
 
-void ExternalRenderContext::TransitionImageLayoutImmediate(
+void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
     VkImage image,
     VkFormat format,
     VkImageLayout oldLayout,
@@ -4305,11 +4344,11 @@ void ExternalRenderContext::TransitionImageLayoutImmediate(
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandPool = m_impl->commandPool;
+    allocInfo.commandPool = commandPool;
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer cmd;
-    vkAllocateCommandBuffers(m_impl->device, &allocInfo, &cmd);
+    vkAllocateCommandBuffers(device, &allocInfo, &cmd);
 
     // Begin command buffer
     VkCommandBufferBeginInfo beginInfo{};
@@ -4355,10 +4394,10 @@ void ExternalRenderContext::TransitionImageLayoutImmediate(
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    vkQueueSubmit(m_impl->graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(m_impl->graphicsQueue);
+    vkQueueSubmit(graphicsQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    vkQueueWaitIdle(graphicsQueue);
 
-    vkFreeCommandBuffers(m_impl->device, m_impl->commandPool, 1, &cmd);
+    vkFreeCommandBuffers(device, commandPool, 1, &cmd);
 
     (void)format;  // Format used for barrier determination in more complex cases
 }

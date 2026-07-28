@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <random>
 
 namespace quantiloom {
 
@@ -17,14 +18,59 @@ constexpr f64 kPlanckConstant = 6.62607015e-34;
 // Speed of light (m/s)
 constexpr f64 kSpeedOfLight = 299792458.0;
 
+// Chain steps that carry no state. They were private statics of GenericSensor,
+// which exported them from the DLL for no reason -- nothing outside this file
+// can call them. Declared static here so the definitions below, which appear in
+// call order rather than declaration order, keep internal linkage.
+static auto ApplyPSF(const Image& img, f32 sigma_pixels) -> Image;
+static auto RadianceToElectrons(const Image& radiance, const SensorParams& p) -> Image;
+static auto QuantizeToDN(const Image& electrons, const SensorParams& p) -> Image;
+static auto ElectronsToRadiance(const Image& electrons, const SensorParams& p) -> Image;
+static auto MakeGaussianKernel(f32 sigma) -> Vector<f32>;
+static auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image;
+static auto ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image;
+
+// ============================================================================
+// State
+// ============================================================================
+
+struct GenericSensor::Impl {
+    // RNG for noise. Seeded from SensorParams::noiseSeed on first use rather
+    // than at construction, so the seed travels with the parameters (and thus
+    // with the scene TOML) instead of being fixed before they are known.
+    // Re-seeded if a later Apply asks for a different seed.
+    std::mt19937 m_Rng;
+    bool m_Seeded = false;
+    u32 m_SeededWith = 0;
+
+    // FPN maps (generated once, reused for all frames)
+    Image m_PRNUMap;  // Photo Response Non-Uniformity (multiplicative gain map)
+    Image m_DSNUMap;  // Dark Signal Non-Uniformity (additive dark current map)
+    bool m_FPNMapsGenerated = false;
+
+    // Seed the RNG from SensorParams on first use, or when the requested seed
+    // changes. Invalidates the FPN maps, which belong to the previous stream.
+    auto EnsureSeeded(u32 requestedSeed) -> void;
+
+    // Add noise sources
+    auto AddNoise(Image& electrons, const SensorParams& p) -> void;
+
+    // FPN: Generate fixed pattern noise maps (PRNU + DSNU)
+    auto GenerateFPNMaps(u32 width, u32 height, const SensorParams& p) -> void;
+
+    // FPN: Apply fixed pattern noise to electron signal
+    auto ApplyFPN(Image& electrons, const SensorParams& p) -> void;
+};
+
 // ============================================================================
 // Constructor
 // ============================================================================
 
 // The RNG is seeded in Apply from SensorParams, not here -- see EnsureSeeded.
-GenericSensor::GenericSensor() = default;
+GenericSensor::GenericSensor() : m_impl(std::make_unique<Impl>()) {}
+GenericSensor::~GenericSensor() = default;
 
-auto GenericSensor::EnsureSeeded(const u32 requestedSeed) -> void {
+auto GenericSensor::Impl::EnsureSeeded(const u32 requestedSeed) -> void {
     // Seed 0 means "give me nondeterministic noise". Anything else is honoured
     // exactly, so the same seed and parameters reproduce the same raw DN.
     // Re-seeding only when the request changes keeps successive frames from one
@@ -62,12 +108,12 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
     Log::Debug("Sensor chain: Input {}x{} ({} channels)",
                hdr.width, hdr.height, hdr.channels);
 
-    EnsureSeeded(params.noiseSeed);
+    m_impl->EnsureSeeded(params.noiseSeed);
 
     // Generate FPN maps if needed (lazy initialization)
-    if (params.enableFPN && !m_FPNMapsGenerated) {
-        GenerateFPNMaps(hdr.width, hdr.height, params);
-        m_FPNMapsGenerated = true;
+    if (params.enableFPN && !m_impl->m_FPNMapsGenerated) {
+        m_impl->GenerateFPNMaps(hdr.width, hdr.height, params);
+        m_impl->m_FPNMapsGenerated = true;
     }
 
     // Step 1: Apply PSF blur (diffraction-limited optics)
@@ -85,7 +131,7 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
     Image electrons = RadianceToElectrons(blurred, params);
 
     // Step 3: Add noise
-    AddNoise(electrons, params);
+    m_impl->AddNoise(electrons, params);
 
     // Step 4a: Quantize to DN (raw sensor output)
     Image rawDN = QuantizeToDN(electrons, params);
@@ -115,7 +161,7 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
 // Step 1: Optical PSF (Gaussian Approximation)
 // ============================================================================
 
-auto GenericSensor::ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image {
+auto ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image {
     if (sigma_pixels < 0.1f) {
         // No blur needed
         return img;
@@ -127,7 +173,7 @@ auto GenericSensor::ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image 
     return ConvolveY(temp, kernel);
 }
 
-auto GenericSensor::MakeGaussianKernel(const f32 sigma) -> Vector<f32> {
+auto MakeGaussianKernel(const f32 sigma) -> Vector<f32> {
     // Kernel radius: 3σ (covers 99.7% of Gaussian)
     const i32 radius = static_cast<i32>(std::ceil(3.0f * sigma));
     const i32 size = 2 * radius + 1;
@@ -149,7 +195,7 @@ auto GenericSensor::MakeGaussianKernel(const f32 sigma) -> Vector<f32> {
     return kernel;
 }
 
-auto GenericSensor::ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image {
+auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image {
     Image result(img.width, img.height, img.channels);
     const i32 radius = static_cast<i32>(kernel.size()) / 2;
 
@@ -170,7 +216,7 @@ auto GenericSensor::ConvolveX(const Image& img, const Vector<f32>& kernel) -> Im
     return result;
 }
 
-auto GenericSensor::ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image {
+auto ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image {
     Image result(img.width, img.height, img.channels);
     const i32 radius = static_cast<i32>(kernel.size()) / 2;
 
@@ -200,7 +246,7 @@ auto GenericSensor::ConvolveY(const Image& img, const Vector<f32>& kernel) -> Im
 // - Photon counting with quantum efficiency
 // ============================================================================
 
-auto GenericSensor::RadianceToElectrons(const Image& radiance,
+auto RadianceToElectrons(const Image& radiance,
                                          const SensorParams& p) -> Image {
     Image electrons(radiance.width, radiance.height, radiance.channels);
 
@@ -323,7 +369,7 @@ auto GenericSensor::RadianceToElectrons(const Image& radiance,
 // Step 4: ADC Quantization
 // ============================================================================
 
-auto GenericSensor::QuantizeToDN(const Image& electrons,
+auto QuantizeToDN(const Image& electrons,
                                   const SensorParams& p) -> Image {
     Image dn(electrons.width, electrons.height, electrons.channels);
 
@@ -349,7 +395,7 @@ auto GenericSensor::QuantizeToDN(const Image& electrons,
 // Step 5: Photo-electrons → Radiance (Reverse Conversion for Preview)
 // ============================================================================
 
-auto GenericSensor::ElectronsToRadiance(const Image& electrons,
+auto ElectronsToRadiance(const Image& electrons,
                                          const SensorParams& p) -> Image {
     Image radiance(electrons.width, electrons.height, electrons.channels);
 
@@ -395,7 +441,7 @@ auto GenericSensor::ElectronsToRadiance(const Image& electrons,
 // FPN: Generate Fixed Pattern Noise Maps (PRNU + DSNU)
 // ============================================================================
 
-auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
+auto GenericSensor::Impl::GenerateFPNMaps(const u32 width, const u32 height,
                                      const SensorParams& p) -> void {
     Log::Info("Generating FPN maps: {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
               width, height, p.prnuSigma * 100.0f, p.dsnuSigma_e);
@@ -538,7 +584,7 @@ auto GenericSensor::GenerateFPNMaps(const u32 width, const u32 height,
 // FPN: Apply Fixed Pattern Noise (PRNU + DSNU) with Optional NUC
 // ============================================================================
 
-auto GenericSensor::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
+auto GenericSensor::Impl::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
     if (!p.enableFPN || !m_FPNMapsGenerated) {
         return;  // FPN disabled or maps not generated
     }
@@ -605,7 +651,7 @@ auto GenericSensor::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
 // Step 3: Add Noise (Updated to include FPN)
 // ============================================================================
 
-auto GenericSensor::AddNoise(Image& electrons, const SensorParams& p) -> void {
+auto GenericSensor::Impl::AddNoise(Image& electrons, const SensorParams& p) -> void {
     std::normal_distribution<f32> gaussianDist(0.0f, 1.0f);
 
     // Apply temporal noise sources (Poisson, Read Noise)
