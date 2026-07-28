@@ -30,12 +30,15 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "renderer/AccelerationStructure.hpp"
 #include "renderer/BRDFLutGenerator.hpp"
+#include "renderer/GpuBuffer.hpp"
 #include "scene/Scene.hpp"
 
 #include <vulkan/vulkan.h>
 
 #include <memory>
+#include <vector>
 
 namespace quantiloom {
 class GpuImage;
@@ -194,6 +197,92 @@ private:
     VkSampler m_sampler = VK_NULL_HANDLE;
     u32 m_faceSize = 0;
     u32 m_mipLevels = 0;
+};
+
+/**
+ * @brief CPU mirror of the shader's InstanceGeometryInfo (descriptor binding 18)
+ *
+ * One entry per TLAS instance, indexed by InstanceIndex(). It carries where that
+ * instance's slice of each merged global buffer starts, which is how the closest-hit
+ * shader finds its vertices after every primitive was concatenated into one buffer.
+ *
+ * @note Defined once. It used to be declared separately in ExternalRenderContext.cpp
+ *       and in the CLI's main.cpp, two copies of a layout the shader depends on.
+ */
+struct InstanceGeometryInfo {
+    u32 vertexOffset;   // Offset into the merged vertex buffer, in vertices
+    u32 indexOffset;    // Offset into the merged index buffer, in indices
+    u32 normalOffset;   // Offset into the merged normal buffer, in normals
+    u32 uvOffset;       // Offset into the merged UV buffer, in UVs
+    u32 tangentOffset;  // Offset into the merged tangent buffer, in tangents
+    u32 materialId;     // Index into Scene::materials
+    u32 pad[2];         // Pad to 32 bytes
+};
+
+static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
+
+/**
+ * @brief Everything the ray tracing pipeline needs to trace a scene's geometry
+ *
+ * Concatenates every primitive's attributes into one buffer per attribute, builds a
+ * BLAS per primitive and a TLAS over the node instances, and records where each
+ * instance's slice begins so the shader can index back.
+ *
+ * Missing attributes are filled rather than omitted, so every buffer is indexable at
+ * a primitive's vertex offset regardless of what the asset supplied: normals become
+ * +Y, UVs (0,0), tangents (1,0,0,1).
+ */
+class SceneGeometry {
+public:
+    SceneGeometry() = default;
+    ~SceneGeometry();
+    SceneGeometry(SceneGeometry&&) noexcept;
+    SceneGeometry& operator=(SceneGeometry&&) noexcept;
+    SceneGeometry(const SceneGeometry&) = delete;
+    SceneGeometry& operator=(const SceneGeometry&) = delete;
+
+    /// Merge, build and upload. A scene with no primitives yields an invalid result
+    /// rather than empty buffers, since there is nothing to trace.
+    static SceneGeometry Build(VulkanContext& ctx, const Scene& scene);
+
+    /// Rebuild only the TLAS, from the BLAS already built, after node transforms
+    /// changed. A transform moves an instance; it does not touch per-primitive
+    /// structures or the merged buffers, so neither is redone.
+    void RebuildTlas(VulkanContext& ctx, const Scene& scene);
+
+    [[nodiscard]] bool IsValid() const { return m_tlas != nullptr; }
+
+    [[nodiscard]] const TLAS& Tlas() const { return *m_tlas; }
+    [[nodiscard]] const GpuBuffer& Vertices() const { return *m_vertices; }
+    [[nodiscard]] const GpuBuffer& Indices() const { return *m_indices; }
+    [[nodiscard]] const GpuBuffer& Normals() const { return *m_normals; }
+    [[nodiscard]] const GpuBuffer& UVs() const { return *m_uvs; }
+    [[nodiscard]] const GpuBuffer& Tangents() const { return *m_tangents; }
+    [[nodiscard]] const GpuBuffer& InstanceInfo() const { return *m_instanceInfo; }
+
+    /// One per TLAS instance -- node count times primitives per mesh, not BLAS count.
+    [[nodiscard]] u32 InstanceCount() const { return m_instanceCount; }
+    /// One per primitive in the scene, shared by every node that instances the mesh.
+    [[nodiscard]] u32 BlasCount() const { return static_cast<u32>(m_blas.size()); }
+    [[nodiscard]] u32 VertexCount() const { return m_vertexCount; }
+    [[nodiscard]] u32 IndexCount() const { return m_indexCount; }
+
+    /// The offsets written to InstanceInfo(), kept for tests and diagnostics.
+    [[nodiscard]] const Vector<InstanceGeometryInfo>& Instances() const { return m_instances; }
+
+private:
+    Vector<std::unique_ptr<BLAS>> m_blas;
+    std::unique_ptr<TLAS> m_tlas;
+    std::unique_ptr<GpuBuffer> m_vertices;
+    std::unique_ptr<GpuBuffer> m_indices;
+    std::unique_ptr<GpuBuffer> m_normals;
+    std::unique_ptr<GpuBuffer> m_uvs;
+    std::unique_ptr<GpuBuffer> m_tangents;
+    std::unique_ptr<GpuBuffer> m_instanceInfo;
+    Vector<InstanceGeometryInfo> m_instances;
+    u32 m_instanceCount = 0;
+    u32 m_vertexCount = 0;
+    u32 m_indexCount = 0;
 };
 
 } // namespace quantiloom::rendercore

@@ -546,4 +546,265 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
     return result;
 }
 
+// ============================================================================
+// SceneGeometry
+// ============================================================================
+
+namespace {
+
+// Spot-check the merged buffers before they reach the GPU. Only the first handful of
+// triangles, and only at debug level: a wrong offset shows up as skewed geometric
+// normals here rather than as a corrupt image several stages later.
+void LogMergeValidation(const Vector<glm::vec3>& vertices,
+                        const Vector<u32>& indices,
+                        const Vector<glm::vec3>& normals) {
+    QL_LOG_DEBUG("=== Buffer Merge Validation ===");
+    QL_LOG_DEBUG("  Total vertices: {}, Total indices: {}", vertices.size(), indices.size());
+
+    const size_t triangles = indices.size() / 3;
+    QL_LOG_DEBUG("  Total triangles: {}", triangles);
+
+    for (size_t tri = 0; tri < std::min(triangles, size_t{12}); ++tri) {
+        const u32 i0 = indices[tri * 3 + 0];
+        const u32 i1 = indices[tri * 3 + 1];
+        const u32 i2 = indices[tri * 3 + 2];
+        if (i0 >= vertices.size() || i1 >= vertices.size() || i2 >= vertices.size()) {
+            QL_LOG_ERROR("  Triangle {}: INVALID INDICES [{}, {}, {}] (max={})",
+                         tri, i0, i1, i2, vertices.size() - 1);
+            continue;
+        }
+
+        const glm::vec3 n = glm::normalize(
+            glm::cross(vertices[i1] - vertices[i0], vertices[i2] - vertices[i0]));
+        const auto onAxis = [](f32 a, f32 b, f32 c) {
+            return std::abs(std::abs(a) - 1.0f) < 0.01f && std::abs(b) < 0.01f &&
+                   std::abs(c) < 0.01f;
+        };
+        const bool axisAligned =
+            onAxis(n.x, n.y, n.z) || onAxis(n.y, n.x, n.z) || onAxis(n.z, n.x, n.y);
+
+        QL_LOG_DEBUG("  Triangle {}: indices=[{}, {}, {}], geoNormal=({:.3f}, {:.3f}, {:.3f}) {}",
+                     tri, i0, i1, i2, n.x, n.y, n.z, axisAligned ? "FINE" : "SKEWED");
+    }
+
+    if (!normals.empty()) {
+        QL_LOG_DEBUG("  --- Stored vertex normals (first 8) ---");
+        for (size_t i = 0; i < std::min(size_t{8}, normals.size()); ++i) {
+            QL_LOG_DEBUG("    normal[{}] = ({:.3f}, {:.3f}, {:.3f})",
+                         i, normals[i].x, normals[i].y, normals[i].z);
+        }
+    }
+    QL_LOG_DEBUG("=== End Buffer Merge Validation ===");
+}
+
+// Walk the scene in the order the instance list is indexed: nodes outermost, then
+// the primitives of the mesh each node references. Build and RebuildTlas must agree
+// on it, because InstanceIndex() in the shader is a position in this walk.
+template <class F>
+void ForEachInstance(const Scene& scene, F&& fn) {
+    Vector<size_t> meshToFirstPrim;
+    meshToFirstPrim.reserve(scene.meshes.size());
+    size_t firstPrim = 0;
+    for (const auto& mesh : scene.meshes) {
+        meshToFirstPrim.push_back(firstPrim);
+        firstPrim += mesh.primitives.size();
+    }
+
+    for (const auto& node : scene.nodes) {
+        const Mesh& mesh = scene.meshes[node.meshIndex];
+        const size_t base = meshToFirstPrim[node.meshIndex];
+        for (size_t prim = 0; prim < mesh.primitives.size(); ++prim) {
+            fn(node.transform, base + prim);
+        }
+    }
+}
+
+// No material is not a reason to cull: a primitive whose materialId is out of range
+// renders double-sided rather than disappearing from one side.
+bool IsDoubleSided(const Scene& scene, u32 materialId) {
+    return materialId < scene.materials.size() ? scene.materials[materialId].doubleSided
+                                               : true;
+}
+
+std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VmaAllocator allocator,
+                                                const void* data, size_t bytes) {
+    auto buffer = std::make_unique<GpuBuffer>(
+        allocator, bytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    buffer->Upload(data, bytes);
+    return buffer;
+}
+
+}  // namespace
+
+SceneGeometry::~SceneGeometry() = default;
+SceneGeometry::SceneGeometry(SceneGeometry&&) noexcept = default;
+SceneGeometry& SceneGeometry::operator=(SceneGeometry&&) noexcept = default;
+
+SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
+    QL_LOG_INFO("Building acceleration structures...");
+
+    SceneGeometry result;
+
+    // Pass one: where each primitive's slice of every merged buffer begins. Attributes
+    // the asset omitted still get a slice, sized by the vertex count, so an instance's
+    // offset is valid in every buffer.
+    Vector<InstanceGeometryInfo> primitiveOffsets;
+    u32 nVerts = 0, nIndices = 0, nNormals = 0, nUVs = 0, nTangents = 0;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& prim : mesh.primitives) {
+            InstanceGeometryInfo offset{};
+            offset.vertexOffset = nVerts;
+            offset.indexOffset = nIndices;
+            offset.normalOffset = nNormals;
+            offset.uvOffset = nUVs;
+            offset.tangentOffset = nTangents;
+            offset.materialId = prim.materialId;
+            primitiveOffsets.push_back(offset);
+
+            const auto vcount = static_cast<u32>(prim.positions.size());
+            nVerts += vcount;
+            nIndices += static_cast<u32>(prim.indices.size());
+            nNormals += prim.normals.empty() ? vcount : static_cast<u32>(prim.normals.size());
+            nUVs += prim.uvs.empty() ? vcount : static_cast<u32>(prim.uvs.size());
+            nTangents += prim.tangents.empty() ? vcount : static_cast<u32>(prim.tangents.size());
+        }
+    }
+
+    if (primitiveOffsets.empty()) {
+        QL_LOG_WARN("  Scene has no primitives, nothing to build");
+        return result;
+    }
+
+    QL_LOG_INFO("  Merged geometry: {} vertices, {} indices, {} normals, {} UVs, {} tangents",
+                nVerts, nIndices, nNormals, nUVs, nTangents);
+
+    // Pass two: fill. Defaults are the initial values, so only present attributes copy.
+    Vector<glm::vec3> vertices(nVerts);
+    Vector<u32> indices(nIndices);
+    Vector<glm::vec3> normals(nNormals, glm::vec3(0.0f, 1.0f, 0.0f));
+    Vector<glm::vec2> uvs(nUVs, glm::vec2(0.0f));
+    Vector<glm::vec4> tangents(nTangents, glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
+
+    size_t primIdx = 0;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& prim : mesh.primitives) {
+            const InstanceGeometryInfo& off = primitiveOffsets[primIdx++];
+
+            std::copy(prim.positions.begin(), prim.positions.end(),
+                      vertices.begin() + off.vertexOffset);
+            std::copy(prim.indices.begin(), prim.indices.end(),
+                      indices.begin() + off.indexOffset);
+
+            if (!prim.normals.empty()) {
+                std::copy(prim.normals.begin(), prim.normals.end(),
+                          normals.begin() + off.normalOffset);
+            } else {
+                QL_LOG_WARN("  Primitive has no normals after loading, using +Y fallback");
+            }
+            if (!prim.uvs.empty()) {
+                std::copy(prim.uvs.begin(), prim.uvs.end(), uvs.begin() + off.uvOffset);
+            }
+            if (!prim.tangents.empty()) {
+                std::copy(prim.tangents.begin(), prim.tangents.end(),
+                          tangents.begin() + off.tangentOffset);
+            }
+        }
+    }
+
+    LogMergeValidation(vertices, indices, normals);
+
+    VmaAllocator allocator = ctx.GetAllocator();
+    result.m_vertices = UploadGeometryBuffer(allocator, vertices.data(),
+                                             vertices.size() * sizeof(glm::vec3));
+    result.m_indices = UploadGeometryBuffer(allocator, indices.data(),
+                                            indices.size() * sizeof(u32));
+    result.m_normals = UploadGeometryBuffer(allocator, normals.data(),
+                                            normals.size() * sizeof(glm::vec3));
+    result.m_uvs = UploadGeometryBuffer(allocator, uvs.data(),
+                                        uvs.size() * sizeof(glm::vec2));
+    result.m_tangents = UploadGeometryBuffer(allocator, tangents.data(),
+                                             tangents.size() * sizeof(glm::vec4));
+    result.m_vertexCount = nVerts;
+    result.m_indexCount = nIndices;
+    QL_LOG_INFO("  Created merged geometry buffers");
+
+    // One BLAS per primitive, shared by every node that instances the mesh.
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& prim : mesh.primitives) {
+            result.m_blas.emplace_back(std::make_unique<BLAS>(ctx, prim));
+        }
+    }
+
+    result.m_tlas = std::make_unique<TLAS>(ctx);
+
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        for (auto& blas : result.m_blas) {
+            blas->Build(cmd);
+        }
+
+        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim) {
+            const InstanceGeometryInfo& info = primitiveOffsets[globalPrim];
+            result.m_instances.push_back(info);
+
+            QL_LOG_DEBUG("  Instance {}: vertexOff={}, indexOff={}, normalOff={}, "
+                         "uvOff={}, tangentOff={}, matId={}",
+                         result.m_instances.size() - 1, info.vertexOffset,
+                         info.indexOffset, info.normalOffset, info.uvOffset,
+                         info.tangentOffset, info.materialId);
+
+            // The second argument lands in instanceCustomIndex, which no shader reads
+            // -- the material reaches them through InstanceInfo(), indexed by
+            // InstanceIndex(). The two implementations this replaced passed different
+            // things here for exactly that reason.
+            result.m_tlas->AddInstance(*result.m_blas[globalPrim], info.materialId,
+                                       transform, IsDoubleSided(scene, info.materialId));
+        });
+
+        result.m_tlas->Build(cmd);
+    });
+
+    result.m_instanceCount = static_cast<u32>(result.m_instances.size());
+
+    if (!result.m_instances.empty()) {
+        result.m_instanceInfo = std::make_unique<GpuBuffer>(
+            allocator, result.m_instances.size() * sizeof(InstanceGeometryInfo),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        result.m_instanceInfo->Upload(result.m_instances.data(),
+                                      result.m_instances.size() * sizeof(InstanceGeometryInfo));
+        QL_LOG_INFO("  Created instance geometry info buffer ({} instances)",
+                    result.m_instanceCount);
+    }
+
+    QL_LOG_INFO("  Built {} BLAS, 1 TLAS, {} instance(s)",
+                result.m_blas.size(), result.m_instanceCount);
+    return result;
+}
+
+void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
+    if (m_blas.empty()) {
+        QL_LOG_WARN("RebuildTlas: nothing built yet");
+        return;
+    }
+
+    QL_LOG_DEBUG("Rebuilding TLAS with updated transforms...");
+    m_tlas = std::make_unique<TLAS>(ctx);
+
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        size_t instance = 0;
+        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim) {
+            // Offsets are a property of the geometry, not of where a node sits, so
+            // the instance list from Build still applies.
+            const u32 materialId = instance < m_instances.size()
+                                       ? m_instances[instance].materialId
+                                       : 0;
+            ++instance;
+            m_tlas->AddInstance(*m_blas[globalPrim], materialId, transform,
+                                IsDoubleSided(scene, materialId));
+        });
+        m_tlas->Build(cmd);
+    });
+}
+
 }  // namespace quantiloom::rendercore

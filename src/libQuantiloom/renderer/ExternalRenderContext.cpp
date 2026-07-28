@@ -134,17 +134,6 @@ static std::string GetDefaultCacheDirectory() {
 //   float3 v = vertexBuffer[geo.vertexOffset + indexBuffer[globalIdx]];
 // ============================================================================
 
-struct InstanceGeometryInfo {
-    u32 vertexOffset;   // Offset into global vertex buffer (in vertex count)
-    u32 indexOffset;    // Offset into global index buffer (in index count)
-    u32 normalOffset;   // Offset into global normal buffer (in normal count)
-    u32 uvOffset;       // Offset into global UV buffer (in UV count)
-    u32 tangentOffset;  // Offset into global tangent buffer (in tangent count)
-    u32 materialId;     // Material index (replaces instanceCustomIndex usage)
-    u32 pad[2];         // Padding for 32-byte alignment
-};
-
-static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
 
 // ============================================================================
 // ExternalRenderContext::Impl - PIMPL implementation
@@ -171,8 +160,6 @@ struct ExternalRenderContext::Impl {
     Camera camera;
 
     // Acceleration structures
-    std::vector<std::unique_ptr<BLAS>> blasList;
-    std::unique_ptr<TLAS> tlas;
 
     // GPU resources
     std::unique_ptr<GpuImage> outputImage;
@@ -191,16 +178,11 @@ struct ExternalRenderContext::Impl {
     // Merged global geometry buffers (for multi-BLAS support)
     // All BLAS geometry data is merged into single global buffers
     // Shader uses InstanceGeometryInfo offsets to index correctly
-    std::unique_ptr<GpuBuffer> globalVertexBuffer;
-    std::unique_ptr<GpuBuffer> globalIndexBuffer;
-    std::unique_ptr<GpuBuffer> globalNormalBuffer;
-    std::unique_ptr<GpuBuffer> globalUVBuffer;
-    std::unique_ptr<GpuBuffer> globalTangentBuffer;
-    std::unique_ptr<GpuBuffer> instanceGeometryBuffer;  // Per-instance geometry offsets
 
     // IBL resources
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
+    rendercore::SceneGeometry geometry;
 
     // Texture manager
     std::unique_ptr<TextureManager> textureManager;
@@ -479,15 +461,8 @@ struct ExternalRenderContext::Impl {
         sensorInitialized = false;
 
         // Reset merged global geometry buffers
-        globalVertexBuffer.reset();
-        globalIndexBuffer.reset();
-        globalNormalBuffer.reset();
-        globalUVBuffer.reset();
-        globalTangentBuffer.reset();
-        instanceGeometryBuffer.reset();
+        geometry = {};
 
-        tlas.reset();
-        blasList.clear();
 
         if (commandPool != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, commandPool, nullptr);
@@ -1608,63 +1583,19 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
 }
 
 void ExternalRenderContext::RebuildAccelerationStructure() {
-    if (!m_impl->scene || m_impl->blasList.empty()) {
-        QL_LOG_WARN("RebuildAccelerationStructure: No scene or BLAS available");
+    if (!m_impl->scene || !m_impl->geometry.IsValid()) {
+        QL_LOG_WARN("RebuildAccelerationStructure: No scene or geometry available");
         return;
     }
 
-    QL_LOG_DEBUG("Rebuilding TLAS with updated transforms...");
-
-    // Wait for GPU to finish any pending work
+    // A frame the host submitted may still be tracing the TLAS being replaced.
     vkDeviceWaitIdle(m_impl->device);
 
-    // Reset TLAS
-    m_impl->tlas.reset();
-    m_impl->tlas = std::make_unique<TLAS>(*m_impl->contextAdapter);
+    m_impl->geometry.RebuildTlas(*m_impl->contextAdapter, *m_impl->scene);
 
-    // Execute TLAS build on GPU
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        // Build mapping from mesh index to BLAS starting index
-        std::vector<size_t> meshToBlasStart;
-        meshToBlasStart.reserve(m_impl->scene->meshes.size());
-        size_t blasStart = 0;
-        for (const auto& mesh : m_impl->scene->meshes) {
-            meshToBlasStart.push_back(blasStart);
-            blasStart += mesh.primitives.size();
-        }
-
-        // Add instances to TLAS with current transforms
-        for (const auto& node : m_impl->scene->nodes) {
-            const Mesh& mesh = m_impl->scene->meshes[node.meshIndex];
-            size_t blasBase = meshToBlasStart[node.meshIndex];
-
-            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
-                const auto& primitive = mesh.primitives[primIdx];
-                // Get material's doubleSided property for hardware backface culling control
-                bool doubleSided = true;  // Default: disable culling (backward compatible)
-                if (primitive.materialId >= 0 &&
-                    static_cast<size_t>(primitive.materialId) < m_impl->scene->materials.size()) {
-                    doubleSided = m_impl->scene->materials[primitive.materialId].doubleSided;
-                }
-
-                m_impl->tlas->AddInstance(
-                    *m_impl->blasList[blasBase + primIdx],
-                    primitive.materialId,
-                    node.transform,
-                    doubleSided
-                );
-            }
-        }
-
-        m_impl->tlas->Build(cmd);
-    });
-
-    // Re-bind TLAS to pipeline
     if (m_impl->pipeline) {
-        m_impl->pipeline->BindAccelerationStructure(m_impl->tlas->GetHandle());
+        m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().GetHandle());
     }
-
-    QL_LOG_DEBUG("TLAS rebuilt successfully");
 }
 
 // ============================================================================
@@ -1966,334 +1897,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
 
 void ExternalRenderContext::Impl::BuildAccelerationStructures() {
     if (!scene) return;
-
-    QL_LOG_INFO("Building acceleration structures...");
-
-    // Clear existing
-    blasList.clear();
-    tlas.reset();
-    globalVertexBuffer.reset();
-    globalIndexBuffer.reset();
-    globalNormalBuffer.reset();
-    globalUVBuffer.reset();
-    globalTangentBuffer.reset();
-    instanceGeometryBuffer.reset();
-
-    // ========================================================================
-    // Phase 1: Calculate total sizes and offsets for merged geometry buffers
-    // ========================================================================
-
-    struct BlasGeometryOffset {
-        u32 vertexOffset;
-        u32 indexOffset;
-        u32 normalOffset;
-        u32 uvOffset;
-        u32 tangentOffset;
-        u32 materialId;
-    };
-
-    std::vector<BlasGeometryOffset> blasOffsets;
-    u32 totalVertices = 0;
-    u32 totalIndices = 0;
-    u32 totalNormals = 0;
-    u32 totalUVs = 0;
-    u32 totalTangents = 0;
-
-    // First pass: calculate offsets for each primitive
-    for (const auto& mesh : scene->meshes) {
-        for (const auto& primitive : mesh.primitives) {
-            BlasGeometryOffset offset;
-            offset.vertexOffset = totalVertices;
-            offset.indexOffset = totalIndices;
-            offset.normalOffset = totalNormals;
-            offset.uvOffset = totalUVs;
-            offset.tangentOffset = totalTangents;
-            offset.materialId = primitive.materialId;
-            blasOffsets.push_back(offset);
-
-            totalVertices += static_cast<u32>(primitive.positions.size());
-            totalIndices += static_cast<u32>(primitive.indices.size());
-            totalNormals += static_cast<u32>(primitive.normals.empty() ?
-                primitive.positions.size() : primitive.normals.size());
-            totalUVs += static_cast<u32>(primitive.uvs.empty() ?
-                primitive.positions.size() : primitive.uvs.size());
-            totalTangents += static_cast<u32>(primitive.tangents.empty() ?
-                primitive.positions.size() : primitive.tangents.size());
-        }
-    }
-
-    QL_LOG_INFO("  Merged geometry: {} vertices, {} indices, {} normals, {} UVs, {} tangents",
-                totalVertices, totalIndices, totalNormals, totalUVs, totalTangents);
-
-    // ========================================================================
-    // Phase 2: Create merged CPU-side data arrays
-    // ========================================================================
-
-    std::vector<glm::vec3> mergedVertices(totalVertices);
-    std::vector<u32> mergedIndices(totalIndices);
-    std::vector<glm::vec3> mergedNormals(totalNormals);
-    std::vector<glm::vec2> mergedUVs(totalUVs);
-    std::vector<glm::vec4> mergedTangents(totalTangents);
-
-    size_t blasIdx = 0;
-    for (const auto& mesh : scene->meshes) {
-        for (const auto& primitive : mesh.primitives) {
-            const BlasGeometryOffset& offset = blasOffsets[blasIdx];
-
-            // Copy vertices
-            std::copy(primitive.positions.begin(), primitive.positions.end(),
-                     mergedVertices.begin() + offset.vertexOffset);
-
-            // Copy indices (adjust by vertex offset for global indexing)
-            for (size_t i = 0; i < primitive.indices.size(); ++i) {
-                mergedIndices[offset.indexOffset + i] = primitive.indices[i];
-            }
-
-            // Copy normals (or generate fallback)
-            if (!primitive.normals.empty()) {
-                std::copy(primitive.normals.begin(), primitive.normals.end(),
-                         mergedNormals.begin() + offset.normalOffset);
-            } else {
-                // Loaders should have generated normals - this is a fallback for edge cases
-                QL_LOG_WARN("ExternalRenderContext: Primitive has no normals after loading - using fallback up vector");
-                std::fill(mergedNormals.begin() + offset.normalOffset,
-                         mergedNormals.begin() + offset.normalOffset + primitive.positions.size(),
-                         glm::vec3(0.0f, 1.0f, 0.0f));
-            }
-
-            // Copy UVs (or generate fallback)
-            if (!primitive.uvs.empty()) {
-                std::copy(primitive.uvs.begin(), primitive.uvs.end(),
-                         mergedUVs.begin() + offset.uvOffset);
-            } else {
-                std::fill(mergedUVs.begin() + offset.uvOffset,
-                         mergedUVs.begin() + offset.uvOffset + primitive.positions.size(),
-                         glm::vec2(0.0f, 0.0f));
-            }
-
-            // Copy tangents (or generate fallback)
-            if (!primitive.tangents.empty()) {
-                std::copy(primitive.tangents.begin(), primitive.tangents.end(),
-                         mergedTangents.begin() + offset.tangentOffset);
-            } else {
-                std::fill(mergedTangents.begin() + offset.tangentOffset,
-                         mergedTangents.begin() + offset.tangentOffset + primitive.positions.size(),
-                         glm::vec4(1.0f, 0.0f, 0.0f, 1.0f));
-            }
-
-            ++blasIdx;
-        }
-    }
-
-    // ========================================================================
-    // Phase 2.5: Validate merged buffer data (diagnostic logging)
-    // ========================================================================
-
-    QL_LOG_DEBUG("=== Buffer Merge Validation ===");
-    QL_LOG_DEBUG("  Total vertices: {}, Total indices: {}", totalVertices, totalIndices);
-
-    // Validate triangles and compute geometric normals
-    size_t numTriangles = totalIndices / 3;
-    QL_LOG_DEBUG("  Total triangles: {}", numTriangles);
-
-    for (size_t triIdx = 0; triIdx < std::min(numTriangles, size_t(12)); ++triIdx) {
-        u32 idx0 = mergedIndices[triIdx * 3 + 0];
-        u32 idx1 = mergedIndices[triIdx * 3 + 1];
-        u32 idx2 = mergedIndices[triIdx * 3 + 2];
-
-        // Validate index bounds
-        if (idx0 >= totalVertices || idx1 >= totalVertices || idx2 >= totalVertices) {
-            QL_LOG_ERROR("  Triangle {}: INVALID INDICES [{}, {}, {}] (max={})",
-                        triIdx, idx0, idx1, idx2, totalVertices - 1);
-            continue;
-        }
-
-        glm::vec3 v0 = mergedVertices[idx0];
-        glm::vec3 v1 = mergedVertices[idx1];
-        glm::vec3 v2 = mergedVertices[idx2];
-
-        // Compute geometric normal
-        glm::vec3 e0 = v1 - v0;
-        glm::vec3 e1 = v2 - v0;
-        glm::vec3 geoNormal = glm::normalize(glm::cross(e0, e1));
-
-        // Check if axis-aligned (for cube validation)
-        bool axisAligned = (std::abs(std::abs(geoNormal.x) - 1.0f) < 0.01f &&
-                           std::abs(geoNormal.y) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
-                          (std::abs(geoNormal.x) < 0.01f &&
-                           std::abs(std::abs(geoNormal.y) - 1.0f) < 0.01f && std::abs(geoNormal.z) < 0.01f) ||
-                          (std::abs(geoNormal.x) < 0.01f && std::abs(geoNormal.y) < 0.01f &&
-                           std::abs(std::abs(geoNormal.z) - 1.0f) < 0.01f);
-
-        QL_LOG_DEBUG("  Triangle {}: indices=[{}, {}, {}], geoNormal=({:.3f}, {:.3f}, {:.3f}) {}",
-                    triIdx, idx0, idx1, idx2,
-                    geoNormal.x, geoNormal.y, geoNormal.z,
-                    axisAligned ? "FINE" : "SKEWED");
-    }
-
-    // Also log stored normals for comparison
-    if (!mergedNormals.empty()) {
-        QL_LOG_DEBUG("  --- Stored vertex normals (first 8) ---");
-        for (size_t i = 0; i < std::min(size_t(8), mergedNormals.size()); ++i) {
-            QL_LOG_DEBUG("    normal[{}] = ({:.3f}, {:.3f}, {:.3f})",
-                        i, mergedNormals[i].x, mergedNormals[i].y, mergedNormals[i].z);
-        }
-    }
-
-    QL_LOG_DEBUG("=== End Buffer Merge Validation ===");
-
-    // ========================================================================
-    // Phase 3: Create merged GPU buffers and upload data
-    // ========================================================================
-
-    VmaAllocator allocator = contextAdapter->GetAllocator();
-
-    globalVertexBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        totalVertices * sizeof(glm::vec3),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    globalVertexBuffer->Upload(mergedVertices.data(), mergedVertices.size() * sizeof(glm::vec3));
-
-    globalIndexBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        totalIndices * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    globalIndexBuffer->Upload(mergedIndices.data(), mergedIndices.size() * sizeof(u32));
-
-    globalNormalBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        totalNormals * sizeof(glm::vec3),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    globalNormalBuffer->Upload(mergedNormals.data(), mergedNormals.size() * sizeof(glm::vec3));
-
-    globalUVBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        totalUVs * sizeof(glm::vec2),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    globalUVBuffer->Upload(mergedUVs.data(), mergedUVs.size() * sizeof(glm::vec2));
-
-    globalTangentBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        totalTangents * sizeof(glm::vec4),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    globalTangentBuffer->Upload(mergedTangents.data(), mergedTangents.size() * sizeof(glm::vec4));
-
-    QL_LOG_INFO("  Created merged geometry buffers");
-
-    // ========================================================================
-    // Phase 4: Build BLAS for each primitive (using original per-BLAS buffers)
-    // ========================================================================
-
-    for (const auto& mesh : scene->meshes) {
-        for (const auto& primitive : mesh.primitives) {
-            blasList.emplace_back(
-                std::make_unique<BLAS>(*contextAdapter, primitive)
-            );
-        }
-    }
-
-    // Build TLAS
-    tlas = std::make_unique<TLAS>(*contextAdapter);
-
-    // ========================================================================
-    // Phase 5: Build instance geometry info and add TLAS instances
-    // ========================================================================
-
-    // Build mapping from mesh index to BLAS starting index
-    std::vector<size_t> meshToBlasStart;
-    meshToBlasStart.reserve(scene->meshes.size());
-    size_t blasStart = 0;
-    for (const auto& mesh : scene->meshes) {
-        meshToBlasStart.push_back(blasStart);
-        blasStart += mesh.primitives.size();
-    }
-
-    // Collect instance geometry info (one per TLAS instance)
-    std::vector<InstanceGeometryInfo> instanceInfos;
-
-    // Execute builds on GPU and add TLAS instances
-    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-        // Build all BLAS
-        for (auto& blas : blasList) {
-            blas->Build(cmd);
-        }
-
-        // Add instances to TLAS and record geometry info
-        for (const auto& node : scene->nodes) {
-            const Mesh& mesh = scene->meshes[node.meshIndex];
-            size_t blasBase = meshToBlasStart[node.meshIndex];
-
-            for (size_t primIdx = 0; primIdx < mesh.primitives.size(); ++primIdx) {
-                size_t globalBlasIdx = blasBase + primIdx;
-                const BlasGeometryOffset& geoOffset = blasOffsets[globalBlasIdx];
-
-                // Create instance geometry info
-                InstanceGeometryInfo info{};
-                info.vertexOffset = geoOffset.vertexOffset;
-                info.indexOffset = geoOffset.indexOffset;
-                info.normalOffset = geoOffset.normalOffset;
-                info.uvOffset = geoOffset.uvOffset;
-                info.tangentOffset = geoOffset.tangentOffset;
-                info.materialId = geoOffset.materialId;
-                info.pad[0] = 0;
-                info.pad[1] = 0;
-                instanceInfos.push_back(info);
-
-                // Log instance geometry info for debugging
-                QL_LOG_DEBUG("  Instance {}: vertexOff={}, indexOff={}, normalOff={}, uvOff={}, tangentOff={}, matId={}",
-                            instanceInfos.size() - 1,
-                            info.vertexOffset, info.indexOffset, info.normalOffset,
-                            info.uvOffset, info.tangentOffset, info.materialId);
-
-                // Get material's doubleSided property for hardware backface culling control
-                bool doubleSided = true;  // Default: disable culling (backward compatible)
-                if (static_cast<size_t>(geoOffset.materialId) < scene->materials.size()) {
-                    doubleSided = scene->materials[geoOffset.materialId].doubleSided;
-                }
-
-                // Add TLAS instance
-                // Note: instanceCustomIndex is now the TLAS instance index (for InstanceGeometryInfo lookup)
-                // Material ID is stored in InstanceGeometryInfo instead
-                tlas->AddInstance(
-                    *blasList[globalBlasIdx],
-                    static_cast<u32>(instanceInfos.size() - 1),  // Instance index for geometry info lookup
-                    node.transform,
-                    doubleSided
-                );
-            }
-        }
-
-        tlas->Build(cmd);
-    });
-
-    // ========================================================================
-    // Phase 6: Upload instance geometry info buffer
-    // ========================================================================
-
-    if (!instanceInfos.empty()) {
-        instanceGeometryBuffer = std::make_unique<GpuBuffer>(
-            allocator,
-            instanceInfos.size() * sizeof(InstanceGeometryInfo),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU
-        );
-        instanceGeometryBuffer->Upload(instanceInfos.data(),
-            instanceInfos.size() * sizeof(InstanceGeometryInfo));
-
-        QL_LOG_INFO("  Created instance geometry info buffer ({} instances)", instanceInfos.size());
-    }
-
-    QL_LOG_INFO("  Built {} BLAS, 1 TLAS", blasList.size());
+    geometry = rendercore::SceneGeometry::Build(*contextAdapter, *scene);
 }
 
 void ExternalRenderContext::Impl::UpdateGpuResources() {
@@ -2441,24 +2045,17 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     // Bind resources
     pipeline->BindOutputImage(*outputImage);
-    pipeline->BindAccelerationStructure(tlas->GetHandle());
+    pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
     pipeline->BindLUTBuffer(*lightingParamsBuffer);
 
     // Bind merged global geometry buffers (instead of per-BLAS buffers)
-    if (globalVertexBuffer && globalIndexBuffer) {
-        pipeline->BindGeometryBuffers(
-            *globalVertexBuffer,
-            *globalIndexBuffer,
-            globalUVBuffer.get()
-        );
-        if (globalTangentBuffer) {
-            pipeline->BindTangentBuffer(*globalTangentBuffer);
-        }
-        if (globalNormalBuffer) {
-            pipeline->BindNormalBuffer(*globalNormalBuffer);
-        }
-        if (instanceGeometryBuffer) {
-            pipeline->BindInstanceGeometryBuffer(*instanceGeometryBuffer);
+    if (geometry.IsValid()) {
+        pipeline->BindGeometryBuffers(geometry.Vertices(), geometry.Indices(),
+                                      &geometry.UVs());
+        pipeline->BindTangentBuffer(geometry.Tangents());
+        pipeline->BindNormalBuffer(geometry.Normals());
+        if (geometry.InstanceCount() > 0) {
+            pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
         }
     }
 

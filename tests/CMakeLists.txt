@@ -246,6 +246,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_vulkan_device.cpp
     test_renderer/test_brdf_lut_gpu.cpp
     test_renderer/test_environment_cubemap.cpp
+    test_renderer/test_scene_geometry.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
