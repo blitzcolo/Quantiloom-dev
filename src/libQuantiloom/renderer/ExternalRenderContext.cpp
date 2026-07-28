@@ -335,6 +335,7 @@ struct ExternalRenderContext::Impl {
 
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
+        cieCmfBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -478,9 +479,18 @@ struct ExternalRenderContext::Impl {
 
         scene.reset();
 
-        // Destroy context adapter last (may own VMA allocator)
-        contextAdapter.reset();
-
+        // The context adapter is deliberately NOT reset here. It owns the VMA
+        // allocator, so anything holding a VMA allocation has to die first --
+        // and resetting it at the end of this list only covers the members the
+        // list remembers. cieCmfBuffer was missing from it for six months, and
+        // freed itself against a dangling allocator every time this context was
+        // destroyed: an access violation inside vmaDestroyBuffer, on every
+        // minimize of the Studio window.
+        //
+        // contextAdapter is the first member declared, so it is the last one
+        // destroyed, after every other member regardless of whether this
+        // function knows about it. Leave it that way and do not add a member
+        // above it.
         isReady = false;
     }
 
