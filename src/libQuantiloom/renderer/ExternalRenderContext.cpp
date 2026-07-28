@@ -207,9 +207,14 @@ struct ExternalRenderContext::Impl {
     AtmosphereNNConfig atmosphereConfig;              // CPU-side config (default: disabled)
     std::unique_ptr<AtmosModelPack> atmosModelPack;   // Loaded network packs
     uint64_t atmosBakeKey = 0;                        // 0 = nothing baked yet
+    bool atmosphereActive = false;                    // A bake is on the GPU
 
     // Rebakes/uploads the NN atmosphere LUT when the bake key changed
     void UpdateAtmosphereNN();
+
+    // Uploads lightingParams, substituting the atmosphere's air temperature
+    // while a bake is active. Every write to lightingParams goes through it.
+    void UploadLightingParams();
 
     // Environment map state
     bool hasCustomEnvMap = false;         // True if LoadEnvironmentMap succeeded
@@ -635,7 +640,7 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
-    lightingParamsBuffer->Upload(&lightingParams, sizeof(LightingParams));
+    UploadLightingParams();
 
     // Create dummy buffers for optional bindings
     CreateDummyBuffers();
@@ -766,6 +771,26 @@ const Scene* ExternalRenderContext::GetScene() const {
 // Rendering
 // ============================================================================
 
+// Uploads the lighting parameters, substituting the NN atmosphere's ground
+// temperature for the thermal-sky fallback while a bake is on the GPU.
+//
+// This is not cosmetic. AtmosSkyRadianceIR divides the network's zenith
+// downwelling by B(T_air) to recover an emissivity, so a T_air unrelated to
+// the bake distorts the entire horizon ramp, and the max-depth Planck
+// fallback in closesthit.rchit with it. src/app/main.cpp makes the same
+// substitution; without this the two front ends rendered the same scene
+// differently. The host's own value is left intact in lightingParams so it
+// returns when the atmosphere is switched off, and so GetLightingParams keeps
+// reporting what the host set.
+void ExternalRenderContext::Impl::UploadLightingParams() {
+    LightingParams effective = lightingParams;
+    if (atmosphereActive) {
+        effective.atmosphereTemperature_K =
+            static_cast<f32>(atmosphereConfig.tGroundK);
+    }
+    lightingParamsBuffer->Upload(&effective, sizeof(LightingParams));
+}
+
 // Lazily (re)bakes the NN atmosphere LUT when the bake key changed and
 // uploads header + data. On bake failure (missing network files etc.) the
 // atmosphere is disabled with a critical log -- no analytic fallback exists.
@@ -776,6 +801,8 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
         AtmosNNHeaderGPU disabledHeader{};
         atmosHeaderBuffer->Upload(&disabledHeader, sizeof(disabledHeader));
         atmosBakeKey = kDisabledKey;
+        atmosphereActive = false;
+        UploadLightingParams();  // Hand the fallback temperature back to the host
     };
 
     if (!atmosphereConfig.enabled || !atmosModelPack) {
@@ -839,6 +866,8 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
                                 baked.data.size() * sizeof(f32));
         atmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
         atmosBakeKey = key;
+        atmosphereActive = true;
+        UploadLightingParams();  // T_air must match what this LUT was baked at
     } catch (const std::exception& e) {
         QL_LOG_CRITICAL("NN atmosphere bake failed, atmosphere disabled: {}",
                         e.what());
@@ -1349,27 +1378,27 @@ DebugVisualizationMode ExternalRenderContext::GetDebugMode() const {
 
 void ExternalRenderContext::SetLightingParams(const LightingParams& params) {
     m_impl->lightingParams = params;
-    m_impl->lightingParamsBuffer->Upload(&m_impl->lightingParams, sizeof(LightingParams));
+    m_impl->UploadLightingParams();
     ResetAccumulation();
 }
 
 void ExternalRenderContext::SetSunDirection(const glm::vec3& direction) {
     m_impl->lightingParams.sunDirection = glm::normalize(direction);
-    m_impl->lightingParamsBuffer->Upload(&m_impl->lightingParams, sizeof(LightingParams));
+    m_impl->UploadLightingParams();
     ResetAccumulation();
 }
 
 void ExternalRenderContext::SetSunRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.sunRadiance_rgb = radiance;
     m_impl->lightingParams.sunRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
-    m_impl->lightingParamsBuffer->Upload(&m_impl->lightingParams, sizeof(LightingParams));
+    m_impl->UploadLightingParams();
     ResetAccumulation();
 }
 
 void ExternalRenderContext::SetSkyRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.skyRadiance_rgb = radiance;
     m_impl->lightingParams.skyRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
-    m_impl->lightingParamsBuffer->Upload(&m_impl->lightingParams, sizeof(LightingParams));
+    m_impl->UploadLightingParams();
     ResetAccumulation();
 }
 
