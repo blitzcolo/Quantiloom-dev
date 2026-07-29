@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file sensor_poisson_noise.comp.hlsl
  * @brief GPU Sensor Simulation - Pass 2: Add Poisson + Read Noise
  *

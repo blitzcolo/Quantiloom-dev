@@ -12,16 +12,16 @@ cd /mnt/d/Quantiloom-dev && ./build_wsl.sh
 ```
 
 This is the canonical path. It runs, in order:
-1. Shader compile: `cmd.exe /c "src\shaders\compile_shaders.bat"` (Windows DXC, HLSL → SPIR-V)
-2. Configure: `cmake.exe -B build -G "Visual Studio 18 2026" -A x64` with `QUANTILOOM_USE_OPENUSD=ON -DUSD_ROOT=C:/openusd`
-3. Build: `cmake.exe --build build --config Release -j` (includes the test suite)
-4. **Test gate**: runs `libquantiloom_tests.exe` — a red suite aborts the script
+1. Configure: `cmake.exe -B build -G "Visual Studio 18 2026" -A x64` with `QUANTILOOM_USE_OPENUSD=ON -DUSD_ROOT=C:/openusd`
+2. Build: `cmake.exe --build build --config Release -j` — compiles the 13 HLSL
+   shaders with DXC first, then C++ and the test suite
+3. **Test gate**: runs `libquantiloom_tests.exe` — a red suite aborts the script
    before install, so broken code never lands in the SDK. Don't "fix" a red gate
    by skipping it — fix the tests (see run-tests skill for adjudicating stale vs
    real failures).
-5. **ABI gate**: `scripts/check_exports.sh` diffs the built DLLs' export tables
+4. **ABI gate**: `scripts/check_exports.sh` diffs the built DLLs' export tables
    against `docs/abi/*.golden` — see "Common failures" below.
-6. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
+5. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
 
 There is no CI; these two gates are the only automated ones.
 
@@ -38,7 +38,7 @@ Don't re-run the full script when only part changed:
 | Changed | Command |
 |---|---|
 | C++ only | `cmake.exe --build build --config Release -j` |
-| HLSL shaders (`src/shaders/*.hlsl*`) | `cmd.exe /c "src\shaders\compile_shaders.bat" </dev/null` from repo root, then rebuild (build copies `.spv` into place) |
+| HLSL shaders (`src/shaders/*.hlsl*`, `*.hlsli`) | `cmake.exe --build build --config Release -j` — same as C++. CMake tracks every `.hlsli` as a dependency of every shader, and `compile_shaders.bat` is now only a manual fallback |
 | CMakeLists / new files | re-run full `./build_wsl.sh` (configure step included) |
 
 After any change to public headers, exported symbols, or shaders, finish with the **install** step (or full script) — the Qt frontend links the installed SDK at `D:/Quantiloom-SDK/windows_amd64`, not this repo's build tree. A stale SDK is the #1 source of "my core fix doesn't show up in the GUI" confusion. After installing, rebuild Quantiloom-Qt (see its `build-and-run` skill).

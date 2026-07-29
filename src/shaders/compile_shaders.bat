@@ -4,6 +4,12 @@ REM Quantiloom M1 - Shader Compilation Script (Windows)
 REM ============================================================================
 REM Compiles all HLSL ray tracing shaders to SPIR-V using DXC
 REM ============================================================================
+REM MANUAL FALLBACK. CMake compiles these same 13 shaders as part of a normal
+REM build (src/shaders/CMakeLists.txt), with the same flags, and tracks .hlsli
+REM dependencies -- so an ordinary build picks up shader edits on its own.
+REM Use this only when building without CMake, or to force a recompile.
+REM Keep the flags below in step with DXC_RT_FLAGS / DXC_COMP_FLAGS there.
+REM ============================================================================
 
 echo =========================================
 echo   Quantiloom Shader Compilation

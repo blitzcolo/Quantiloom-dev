@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file clahe.comp.hlsl
  * @brief CLAHE (Contrast Limited Adaptive Histogram Equalization) compute shaders
  *

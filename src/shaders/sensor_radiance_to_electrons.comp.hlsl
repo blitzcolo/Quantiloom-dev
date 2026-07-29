@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file sensor_radiance_to_electrons.comp.hlsl
  * @brief GPU Sensor Simulation - Pass 1: Radiance → Photo-electrons
  *

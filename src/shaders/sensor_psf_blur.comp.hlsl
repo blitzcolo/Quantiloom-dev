@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file sensor_psf_blur.comp.hlsl
  * @brief GPU Sensor Simulation - Pass 3/4: PSF Blur (Separable Gaussian)
  *

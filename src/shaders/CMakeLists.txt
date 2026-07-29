@@ -51,49 +51,67 @@ else()
     message(STATUS "Found glslc: ${GLSLC_EXECUTABLE}")
 endif()
 
-# Shader source files
-set(SHADER_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/raygen.rgen
-    ${CMAKE_CURRENT_SOURCE_DIR}/closesthit.rchit
-    ${CMAKE_CURRENT_SOURCE_DIR}/miss.rmiss
-    ${CMAKE_CURRENT_SOURCE_DIR}/shadow_miss.rmiss
-)
-
-# Compiled shader output directory
+# Compiled shader output directory. The .spv sit next to their sources and are
+# gitignored -- they are build output, not artefacts to commit.
 set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# DXC compilation flags
-set(DXC_FLAGS
-    -spirv                          # Generate SPIR-V
-    -T lib_6_3                      # Shader model 6.3 (required for ray tracing)
-    -fspv-target-env=vulkan1.2      # Target Vulkan 1.3
-    -WX                             # Treat warnings as errors
-    -Qembed_debug                   # Embed debug info
-    -Zi                             # Generate PDB file, -Qembed_debug requires it
-)
+# Every .hlsli is a dependency of every shader. Listing only common.hlsli, as
+# this did before, meant an edit to pbr.hlsli or blackbody.hlsli left the .spv
+# stale. Globbed at configure time: adding a new .hlsli needs a re-configure.
+file(GLOB SHADER_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.hlsli")
 
-# Create custom targets for each shader
+# Flags. These are exactly what compile_shaders.bat uses, and the .spv they
+# produce are byte-identical to the ones that shipped before this rule existed
+# -- which is how the rule was checked. -Zi/-Qembed_debug are deliberately
+# absent: they inflate closesthit.spv from 118 KB to 438 KB, and the SDK ships
+# these files.
+set(DXC_RT_FLAGS   -spirv -T lib_6_3 -fspv-target-env=vulkan1.2)
+set(DXC_COMP_FLAGS -spirv -T cs_6_0  -fspv-target-env=vulkan1.2 -E main)
+
 set(COMPILED_SHADERS)
 
-foreach(SHADER_SOURCE ${SHADER_SOURCES})
-    # Get shader filename without extension
-    get_filename_component(SHADER_NAME ${SHADER_SOURCE} NAME_WE)
+# Compile one HLSL source to one .spv. Several compute sources produce more
+# than one output, differing only by a -D, so the output name is a parameter
+# rather than derived from the source.
+function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
+    set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.spv")
+    set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${SRC_NAME}")
+    if(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
+        set(FLAGS ${DXC_COMP_FLAGS})
+    else()
+        set(FLAGS ${DXC_RT_FLAGS})
+    endif()
+    add_custom_command(
+        OUTPUT ${SHADER_OUTPUT}
+        COMMAND ${DXC_EXECUTABLE} ${FLAGS} ${ARGN} -Fo ${SHADER_OUTPUT} ${SHADER_SOURCE}
+        DEPENDS ${SHADER_SOURCE} ${SHADER_HEADERS}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        COMMENT "Compiling shader: ${OUT_NAME}"
+        VERBATIM
+    )
+    set(COMPILED_SHADERS ${COMPILED_SHADERS} ${SHADER_OUTPUT} PARENT_SCOPE)
+endfunction()
 
-    # Output SPIR-V file
-    set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv")
+if(DXC_EXECUTABLE)
+    # Ray tracing shaders
+    quantiloom_compile_hlsl(raygen       raygen.rgen)
+    quantiloom_compile_hlsl(closesthit   closesthit.rchit)
+    quantiloom_compile_hlsl(miss         miss.rmiss)
+    quantiloom_compile_hlsl(shadow_miss  shadow_miss.rmiss)
 
-    # Add custom command to compile shader
-    #add_custom_command(
-    #    OUTPUT ${SHADER_OUTPUT}
-    #    COMMAND ${DXC_EXECUTABLE} ${DXC_FLAGS} -Fo ${SHADER_OUTPUT} ${SHADER_SOURCE}
-    #    DEPENDS ${SHADER_SOURCE} ${CMAKE_CURRENT_SOURCE_DIR}/common.hlsli
-    #    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-    #    COMMENT "Compiling shader: ${SHADER_NAME}"
-    #    VERBATIM
-    #)
+    # CLAHE display enhancement: three passes from one source
+    quantiloom_compile_hlsl(clahe_histogram clahe.comp.hlsl -D CLAHE_PASS_HISTOGRAM)
+    quantiloom_compile_hlsl(clahe_cdf       clahe.comp.hlsl -D CLAHE_PASS_CDF)
+    quantiloom_compile_hlsl(clahe_apply     clahe.comp.hlsl -D CLAHE_PASS_APPLY)
 
-    list(APPEND COMPILED_SHADERS ${SHADER_OUTPUT})
-endforeach()
+    # GPU sensor chain
+    quantiloom_compile_hlsl(sensor_radiance_to_electrons sensor_radiance_to_electrons.comp.hlsl)
+    quantiloom_compile_hlsl(sensor_poisson_noise         sensor_poisson_noise.comp.hlsl)
+    quantiloom_compile_hlsl(sensor_psf_blur_horizontal   sensor_psf_blur.comp.hlsl -D SENSOR_PSF_HORIZONTAL)
+    quantiloom_compile_hlsl(sensor_psf_blur_vertical     sensor_psf_blur.comp.hlsl -D SENSOR_PSF_VERTICAL)
+    quantiloom_compile_hlsl(sensor_quantize_to_radiance  sensor_quantize_to_radiance.comp.hlsl)
+    quantiloom_compile_hlsl(sensor_fpn                   sensor_fpn.comp.hlsl)
+endif()
 
 # Create custom target that depends on all compiled shaders
 add_custom_target(CompileShaders ALL
@@ -148,8 +166,9 @@ endif()
 message(STATUS "Shader compilation configured:")
 message(STATUS "  Input directory:  ${CMAKE_CURRENT_SOURCE_DIR}")
 message(STATUS "  Output directory: ${SHADER_OUTPUT_DIR}")
-message(STATUS "  HLSL shaders to compile:")
-foreach(SHADER_SOURCE ${SHADER_SOURCES})
-    get_filename_component(SHADER_FILE ${SHADER_SOURCE} NAME)
+list(LENGTH COMPILED_SHADERS SHADER_COUNT)
+message(STATUS "  HLSL shaders to compile: ${SHADER_COUNT}")
+foreach(SHADER_OUTPUT ${COMPILED_SHADERS})
+    get_filename_component(SHADER_FILE ${SHADER_OUTPUT} NAME)
     message(STATUS "    - ${SHADER_FILE}")
 endforeach()

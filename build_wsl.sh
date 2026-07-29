@@ -9,10 +9,11 @@ cd "$(dirname "$0")"
 
 # --- Build -----------------------------------------------------------------
 
-# Compile shaders with the Windows DXC (Vulkan SDK must be on Windows PATH).
-# </dev/null keeps the bat's `pause` from blocking a non-interactive run;
-# the exit code still propagates through cmd.exe.
-cmd.exe /c "src\\shaders\\compile_shaders.bat" </dev/null
+# Shaders are compiled by CMake now, as part of the build below, so there is no
+# separate step here. src/shaders/compile_shaders.bat still works and is kept as
+# a manual fallback, but calling it from here would compile every shader twice
+# per build -- and with a different DXC than CMake finds, since the bat takes
+# whatever is on PATH. Which of the two won then depended on file timestamps.
 
 # BC7 stays OFF deliberately, not for lack of trying: it measurably slowed
 # rendering and saved little VRAM, so it is a net loss here. vendor/bc7enc_rdo/

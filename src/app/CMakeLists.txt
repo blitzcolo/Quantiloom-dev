@@ -100,8 +100,14 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
         "$<TARGET_FILE_DIR:Quantiloom>"
     COMMENT "Copying shaders to executable directory"
-    DEPENDS CompileShaders
 )
+
+# CMake ignores DEPENDS in the TARGET form of add_custom_command, so the
+# `DEPENDS CompileShaders` that used to sit in the block above did nothing.
+# It went unnoticed because CompileShaders is an ALL target and an ordinary
+# full build reaches it anyway -- but `--build build --target Quantiloom`
+# copied whatever .spv happened to be lying in the source tree.
+add_dependencies(Quantiloom CompileShaders)
 
 # Install target (optional, for packaging)
 install(TARGETS Quantiloom

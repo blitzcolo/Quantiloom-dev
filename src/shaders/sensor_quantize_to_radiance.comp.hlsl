@@ -1,4 +1,4 @@
-/**
+﻿/**
  * @file sensor_quantize_to_radiance.comp.hlsl
  * @brief GPU Sensor Simulation - Pass 5: Quantize → Radiance
  *
