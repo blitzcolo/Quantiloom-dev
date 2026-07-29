@@ -86,7 +86,12 @@ fov_y = 45.0                   # Vertical field of view (degrees)
 sun_direction = [0.5, 0.8, 0.3]   # FROM surface TO sun (normalized automatically)
 sun_radiance = [1.0, 1.0, 1.0]    # Sun radiance (RGB, averaged to spectral scalar)
 sky_radiance = [0.7, 0.7, 0.7]    # Sky radiance (RGB, averaged to spectral scalar)
-#solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"   # Solar LUT for MODTRAN, if not povided, will use sun_radiance and sky_radiance as fallback
+# The sun's spectrum, as scene data rather than something the renderer
+# invents. ASTM G-173 reference terrestrial spectrum: column 4 is the
+# direct beam, column 3 is global irradiance and so includes it.
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
 atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default sky. 280K: Warm sky. 290K: Tropical humid sky.
 
 [material]

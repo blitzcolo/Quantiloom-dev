@@ -26,7 +26,10 @@ fov_y    = 39.0
 [lighting]
 sun_direction = [0.0, 1.0, 0.0]
 sun_radiance  = [0.0, 0.0, 0.0]
-sky_radiance  = [0.3, 0.3, 0.3]
+# A closed Cornell box has no sky. It is lit by its own Light Panel material,
+# which is what the original scene is; the 0.3 ambient here was standing in for
+# an illuminant whose spectrum was never specified.
+sky_radiance  = [0.0, 0.0, 0.0]
 
 [material]
 albedo = [0.5, 0.5, 0.5]

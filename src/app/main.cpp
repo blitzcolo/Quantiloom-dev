@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // Quantiloom - Spectral Path Tracer
 // ============================================================================
 // Main entry point for Quantiloom spectral rendering system
@@ -830,6 +830,33 @@ int RunApp(int argc, char* argv[]) {
 
         std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
         std::unique_ptr<GpuBuffer> atmosDataBuffer;
+
+        // A spectral mode with a sun needs a spectrum for it. The shaders no
+        // longer invent one from lighting.sun_radiance -- that field is an RGB
+        // triple in arbitrary units, and spreading it across SWIR or MWIR made
+        // the same scene render differently depending on whether its spectrum
+        // happened to be present. Refusing here is the point of "the sun's
+        // spectrum is user-supplied data": a missing illuminant is a scene
+        // that is not finished, not a scene to guess at.
+        // Both illuminants, not just the sun: solar_lut carries the diffuse
+        // sky as well, so a scene lit only by sky_radiance loses its light
+        // just as completely. Checking one and not the other is how
+        // cornell_box_vis quietly went 55% darker instead of saying why.
+        const auto nonZero = [](const glm::vec3& c) {
+            return c.r > 0.0f || c.g > 0.0f || c.b > 0.0f;
+        };
+        const bool spectralIlluminantNeeded =
+            spectral_mode != SpectralMode::RGB &&
+            (nonZero(lightingParams.sunRadiance_rgb) ||
+             nonZero(lightingParams.skyRadiance_rgb));
+        if (spectralIlluminantNeeded && !config.Has("lighting.solar_lut")) {
+            QL_LOG_ERROR("[lighting] sun_radiance or sky_radiance is non-zero in a "
+                         "spectral mode, but no solar_lut is given. An illuminant's "
+                         "spectrum is scene data, like a reflectance curve -- name "
+                         "one, or zero both for a scene lit only by emissive "
+                         "materials.");
+            return 1;
+        }
 
         if (config.Has("lighting.solar_lut")) {
             auto solarLutPath = config.Get<String>("lighting.solar_lut");

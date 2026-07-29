@@ -80,7 +80,9 @@ fov_y = 45.0                   # Vertical field of view (degrees)
 sun_direction = [0.5, 0.8, 0.3]   # FROM surface TO sun (normalized automatically)
 sun_radiance = [5.0, 5.0, 5.0]    # Sun radiance (RGB, averaged to spectral scalar)
 sky_radiance = [0.5, 0.7, 1.0]    # Sky radiance (RGB, averaged to spectral scalar)
-#solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"   # Solar LUT for MODTRAN, if not povided, will use sun_radiance and sky_radiance as fallback
+# This scene is RGB mode, which lights from sun_radiance directly and needs no
+# spectrum. A spectral mode with a sun does need one -- there is no fallback --
+# see gltf_pbr_test.toml for the keys.
 atmosphere_temperature_k = 260.0  # 240K: Plateaus, dry cold sky. 260K: Default sky. 280K: Warm sky. 290K: Tropical humid sky.
 
 [material]

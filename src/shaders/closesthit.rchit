@@ -949,11 +949,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // For sky dome, we assume uniform sky approximation: L_sky ≈ E_sky / π
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // CORRECTED FALLBACK: Convert RGB to colored illuminant spectrum
-                // Use illuminant function (no clamp) instead of reflectance function (clamped to 1.5)
-                // This preserves HDR intensity of light sources
-                sun_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.sunRadiance_rgb, lambda);
-                sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
+                // No curve, no sun. The sun's spectrum is user-supplied data
+                // like a reflectance curve, and there is nothing sensible to
+                // invent without it: the RGB triple this used to spread across
+                // the band is in arbitrary units, so the same scene rendered
+                // differently depending on whether its spectrum was present.
+                // src/app/main.cpp refuses a spectral render that has a sun and
+                // no spectrum, so arriving here means the scene asked for none.
+                sun_radiance_lambda = 0.0;
+                sky_radiance_lambda = 0.0;
             }
 
             // 1. Get spectral reflectance at this wavelength
@@ -1126,9 +1130,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             sunRadiance_lambda = sun_irr;
             skyRadiance_lambda = sky_irr / PI;  // Diffuse sky: L ≈ E / π
         } else {
-            // FALLBACK: Use LightingParams scalar values
-            sunRadiance_lambda = lut.sunRadiance_spectral;
-            skyRadiance_lambda = lut.skyRadiance_spectral;
+            // No curve, no sun. The sun's spectrum is user-supplied data
+            // like a reflectance curve, and there is nothing sensible to
+            // invent without it: the RGB triple this used to spread across
+            // the band is in arbitrary units, so the same scene rendered
+            // differently depending on whether its spectrum was present.
+            // src/app/main.cpp refuses a spectral render that has a sun and
+            // no spectrum, so arriving here means the scene asked for none.
+            sunRadiance_lambda = 0.0;
+            skyRadiance_lambda = 0.0;
         }
 
         // 1. Query spectral reflectance: prefer measured curve, fallback to RGB upsampling
@@ -1226,19 +1236,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Check if we have spectral solar LUT for accurate SWIR illumination
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: Convert RGB radiance to spectral density for SWIR band
-        // Note: This is an approximation. Real solar spectrum extends into SWIR,
-        // but visible RGB only covers 380-780nm. We extrapolate the luminance.
-        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
-                              0.7152 * lut.sunRadiance_rgb.g +
-                              0.0722 * lut.sunRadiance_rgb.b;
-        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
-                              0.7152 * lut.skyRadiance_rgb.g +
-                              0.0722 * lut.skyRadiance_rgb.b;
-        float swir_bandwidth = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;  // 1500nm
-        float sun_power_rgb = sun_luminance / swir_bandwidth;  // Per nm (approximate)
-        float sky_power_rgb = sky_luminance / swir_bandwidth;  // Per nm (approximate)
-
         // Compute view angle for angle-dependent emissivity
         float NdotV_swir = max(dot(normal, V), 0.0);
 
@@ -1277,9 +1274,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 sun_radiance_lambda = sun_irr / PI;
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // Fallback: use RGB average (approximation)
-                sun_radiance_lambda = sun_power_rgb;
-                sky_radiance_lambda = sky_power_rgb;
+                // No curve, no sun. The sun's spectrum is user-supplied data
+                // like a reflectance curve, and there is nothing sensible to
+                // invent without it: the RGB triple this used to spread across
+                // the band is in arbitrary units, so the same scene rendered
+                // differently depending on whether its spectrum was present.
+                // src/app/main.cpp refuses a spectral render that has a sun and
+                // no spectrum, so arriving here means the scene asked for none.
+                sun_radiance_lambda = 0.0;
+                sky_radiance_lambda = 0.0;
             }
 
             // 2. Get spectral reflectance at this wavelength
@@ -1367,19 +1370,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Check if we have spectral solar LUT for accurate NIR illumination
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Fallback: Convert RGB radiance to spectral density for NIR band
-        // Note: This is an approximation. Real solar spectrum extends into NIR,
-        // but visible RGB only covers 380-780nm. We extrapolate the luminance.
-        float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
-                              0.7152 * lut.sunRadiance_rgb.g +
-                              0.0722 * lut.sunRadiance_rgb.b;
-        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
-                              0.7152 * lut.skyRadiance_rgb.g +
-                              0.0722 * lut.skyRadiance_rgb.b;
-        float nir_bandwidth = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;  // 620nm
-        float sun_power_rgb = sun_luminance / nir_bandwidth;  // Per nm (approximate)
-        float sky_power_rgb = sky_luminance / nir_bandwidth;  // Per nm (approximate)
-
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {
             float lambda = NIR_LAMBDA_MIN + float(i) * lambda_step;
@@ -1397,9 +1387,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 sun_radiance_lambda = sun_irr / PI;
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // Fallback: use RGB average (approximation)
-                sun_radiance_lambda = sun_power_rgb;
-                sky_radiance_lambda = sky_power_rgb;
+                // No curve, no sun. The sun's spectrum is user-supplied data
+                // like a reflectance curve, and there is nothing sensible to
+                // invent without it: the RGB triple this used to spread across
+                // the band is in arbitrary units, so the same scene rendered
+                // differently depending on whether its spectrum was present.
+                // src/app/main.cpp refuses a spectral render that has a sun and
+                // no spectrum, so arriving here means the scene asked for none.
+                sun_radiance_lambda = 0.0;
+                sky_radiance_lambda = 0.0;
             }
 
             // 2. Get spectral reflectance at this wavelength
@@ -1609,42 +1605,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // Query ASTM G-173 or similar (if data extends to MWIR)
                     sun_irr_lambda = SampleSunIrradiance(solarSpectralLUT[0], lambda);
                 } else {
-                    // Fallback: Planck approximation for sun at 5778K
-                    // L_sun(λ) = B(T_sun, λ) × Ω_sun
-                    // IRPlanckRadiance returns W·sr⁻¹·m⁻²·nm⁻¹
-                    // Multiply by sun solid angle to get irradiance in W·m⁻²·nm⁻¹
-                    //
-                    // Only when the scene actually has a sun. This used to
-                    // synthesize one unconditionally, so a config with
-                    // sun_radiance = [0,0,0] was lit anyway -- which is why all
-                    // three MWIR furnace cavities read high (up to 1.41x) while
-                    // their LWIR twins, which have no solar term at all, were
-                    // exact. SWIR derives its fallback from the same field.
-                    float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
-                                          0.7152 * lut.sunRadiance_rgb.g +
-                                          0.0722 * lut.sunRadiance_rgb.b;
-                    // The magnitude comes from that field too, not just the
-                    // decision to have a sun at all. It used to come from the
-                    // disk itself, so sun_radiance was a switch: doubling it
-                    // changed nothing. The convention is the one SWIR and NIR
-                    // already use for their fallback -- the luminance-weighted
-                    // sun radiance spread across the band -- so all three land
-                    // on rho * (S/bandwidth) * cos(theta). The PI below cancels
-                    // the one this branch's consumer applies.
-                    if (sun_luminance > 0.0) {
-                        // The 5778 K shape is worth keeping rather than
-                        // flattening: it falls 6.4x from 3 um to 5 um, which is
-                        // most of the contrast in a solar-lit MWIR scene.
-                        // Normalised by the trapezoid band mean of
-                        // IRPlanckRadiance(5778, lambda) over this same
-                        // 16-sample grid, hardcoded so it costs nothing per hit.
-                        const float MWIR_SOLAR_PLANCK_MEAN = 1.610856e2;  // W·sr⁻¹·m⁻²·nm⁻¹
-                        const float MWIR_BAND_NM = SPECTRAL_MWIR_LAMBDA_MAX -
-                                                   SPECTRAL_MWIR_LAMBDA_MIN;
-                        float shape = IRPlanckRadiance(5778.0, lambda) /
-                                      MWIR_SOLAR_PLANCK_MEAN;
-                        sun_irr_lambda = PI * (sun_luminance / MWIR_BAND_NM) * shape;
-                    }
+                    // No curve, no sun -- as in the other bands. The 5778 K
+                    // disk that stood in here was the last invented illuminant
+                    // in the renderer: a fixed blackbody shape scaled by an
+                    // RGB triple in arbitrary units, in a band where the solar
+                    // term is a few percent of the signal and therefore easy
+                    // to be wrong about without anyone noticing.
+                    sun_irr_lambda = 0.0;
                 }
 
                 // Convert irradiance to radiance and apply Lambertian BRDF
