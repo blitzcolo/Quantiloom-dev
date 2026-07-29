@@ -1623,11 +1623,27 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
                                           0.7152 * lut.sunRadiance_rgb.g +
                                           0.0722 * lut.sunRadiance_rgb.b;
+                    // The magnitude comes from that field too, not just the
+                    // decision to have a sun at all. It used to come from the
+                    // disk itself, so sun_radiance was a switch: doubling it
+                    // changed nothing. The convention is the one SWIR and NIR
+                    // already use for their fallback -- the luminance-weighted
+                    // sun radiance spread across the band -- so all three land
+                    // on rho * (S/bandwidth) * cos(theta). The PI below cancels
+                    // the one this branch's consumer applies.
                     if (sun_luminance > 0.0) {
-                        float L_sun_surface = IRPlanckRadiance(5778.0, lambda);
-                        // CRITICAL: Stay in nm⁻¹ for consistency with entire spectral pipeline
-                        // Previous 1e4 factor was a unit conversion error (10x too large)
-                        sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR;  // W·m⁻²·nm⁻¹
+                        // The 5778 K shape is worth keeping rather than
+                        // flattening: it falls 6.4x from 3 um to 5 um, which is
+                        // most of the contrast in a solar-lit MWIR scene.
+                        // Normalised by the trapezoid band mean of
+                        // IRPlanckRadiance(5778, lambda) over this same
+                        // 16-sample grid, hardcoded so it costs nothing per hit.
+                        const float MWIR_SOLAR_PLANCK_MEAN = 1.610856e2;  // W·sr⁻¹·m⁻²·nm⁻¹
+                        const float MWIR_BAND_NM = SPECTRAL_MWIR_LAMBDA_MAX -
+                                                   SPECTRAL_MWIR_LAMBDA_MIN;
+                        float shape = IRPlanckRadiance(5778.0, lambda) /
+                                      MWIR_SOLAR_PLANCK_MEAN;
+                        sun_irr_lambda = PI * (sun_luminance / MWIR_BAND_NM) * shape;
                     }
                 }
 
