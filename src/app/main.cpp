@@ -872,11 +872,42 @@ int RunApp(int argc, char* argv[]) {
             const bool diffuseIsGlobal =
                 config.Get<bool>("lighting.solar_lut_diffuse_is_global", false);
 
-            auto result = SpectralIO::LoadLibRadtranSunAndSky(
-                solarLutPath, "nm", directCol, diffuseCol, diffuseIsGlobal);
+            // "equal_energy" is the one illuminant that is not a file: a flat
+            // spectrum at unit luminance, CIE illuminant E. It is the neutral
+            // reference -- what a material looks like under light that favours
+            // no wavelength -- and it is not sRGB white, which is D65. Any
+            // other spectrum, D65 included, is a table the scene points at.
+            Result<std::pair<SpectralCurve, SpectralCurve>, String> result =
+                solarLutPath == "equal_energy"
+                    ? Result<std::pair<SpectralCurve, SpectralCurve>, String>(
+                          std::make_pair(MakeEqualEnergyIlluminant(),
+                                         MakeEqualEnergyIlluminant()))
+                    : SpectralIO::LoadLibRadtranSunAndSky(
+                          solarLutPath, "nm", directCol, diffuseCol, diffuseIsGlobal);
 
             if (result.has_value()) {
                 auto& [sunCurve, skyCurve] = result.value();
+
+                // One illuminant, every mode. The spectral paths sample these
+                // curves per wavelength; RGB and VIS_FUSED need a colour, and
+                // taking it from the same curve is what stops the two halves
+                // of the renderer describing different suns. It replaces
+                // whatever sun_radiance said, which was a triple in arbitrary
+                // units with no defined relationship to the spectrum beside it.
+                lightingParams.sunRadiance_rgb = SpectralIrradianceToLinearSrgb(sunCurve);
+                lightingParams.skyRadiance_rgb = SpectralIrradianceToLinearSrgb(skyCurve);
+                lightingParams.sunRadiance_spectral =
+                    (lightingParams.sunRadiance_rgb.r + lightingParams.sunRadiance_rgb.g +
+                     lightingParams.sunRadiance_rgb.b) / 3.0f;
+                lightingParams.skyRadiance_spectral =
+                    (lightingParams.skyRadiance_rgb.r + lightingParams.skyRadiance_rgb.g +
+                     lightingParams.skyRadiance_rgb.b) / 3.0f;
+                lightingParamsBuffer.Upload(&lightingParams, sizeof(LightingParams));
+                QL_LOG_INFO("  Illuminant colour from the spectrum: sun [{:.4g}, {:.4g}, "
+                            "{:.4g}], sky [{:.4g}, {:.4g}, {:.4g}]",
+                            lightingParams.sunRadiance_rgb.r, lightingParams.sunRadiance_rgb.g,
+                            lightingParams.sunRadiance_rgb.b, lightingParams.skyRadiance_rgb.r,
+                            lightingParams.skyRadiance_rgb.g, lightingParams.skyRadiance_rgb.b);
 
                 // Convert to GPU format (uniform resampling to 64 samples)
                 solarLUT = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
@@ -1573,11 +1604,17 @@ int RunApp(int argc, char* argv[]) {
                 }
             }
 
-            // IR fused modes: physical radiance values are far below 1.0
-            // (e.g. LWIR ~5e-3 W/sr/m^2/nm), so a raw [0,1] clamp yields a
-            // black PNG. Stretch the 1st..99th percentile range to [0,1]
-            // for the preview; the EXR keeps the physical values.
-            if (IsIRFusedMode(spectral_mode)) {
+            // Physical radiance does not live in [0, 1], so a raw clamp makes
+            // a preview that is all black or all white. IR fused modes are far
+            // below it (LWIR ~5e-3 W/sr/m^2/nm); a scene lit by a measured
+            // solar spectrum is far above it, since ASTM G-173 integrates to
+            // a few hundred rather than to the 5.0 someone used to type into
+            // sun_radiance. Same remedy for both: stretch the 1st..99th
+            // percentile to [0, 1] for the preview, and leave the EXR alone.
+            //
+            // Applied only when the values actually leave the range, so a
+            // scene that was already displayable previews exactly as before.
+            {
                 std::vector<f32> values(static_cast<size_t>(width) * height);
                 for (u32 y = 0; y < height; ++y) {
                     for (u32 x = 0; x < width; ++x) {
@@ -1596,12 +1633,16 @@ int RunApp(int argc, char* argv[]) {
                 const f32 hi = values[hiIdx];
                 const f32 range = std::max(hi - lo, 1e-12f);
 
-                for (u32 y = 0; y < height; ++y) {
-                    for (u32 x = 0; x < width; ++x) {
-                        for (u32 c = 0; c < 3; ++c) {
-                            pngImg(x, y, c) = (pngImg(x, y, c) - lo) / range;
+                if (IsIRFusedMode(spectral_mode) || hi > 1.0f) {
+                    for (u32 y = 0; y < height; ++y) {
+                        for (u32 x = 0; x < width; ++x) {
+                            for (u32 c = 0; c < 3; ++c) {
+                                pngImg(x, y, c) = (pngImg(x, y, c) - lo) / range;
+                            }
                         }
                     }
+                    QL_LOG_INFO("  PNG preview stretched from [{:.4g}, {:.4g}]; "
+                                "the EXR keeps the physical values", lo, hi);
                 }
                 QL_LOG_INFO("  IR PNG preview normalized: [{:.4e}, {:.4e}] -> [0, 1]", lo, hi);
             }
