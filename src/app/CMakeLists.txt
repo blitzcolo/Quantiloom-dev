@@ -29,34 +29,27 @@ add_executable(Quantiloom
 target_include_directories(Quantiloom
     PRIVATE
         ${CMAKE_CURRENT_BINARY_DIR}  # Allows #include "Version.hpp"
-
-        # TRANSITIONAL, paired with the object-library link below. main.cpp
-        # drives the Vulkan layer directly -- GpuBuffer, CommandHelper,
-        # BLAS/TLAS, RayTracingPipeline -- a second renderer running in
-        # parallel with ExternalRenderContext's private steps.
-        #
-        # Delete both once the CLI drives a core-owned render facade. Together
-        # they are the marker for that debt.
-        ${CMAKE_SOURCE_DIR}/src/libQuantiloom
 )
 
-# The objects, not the DLL -- TRANSITIONAL, see the include note above.
+# The DLL, and nothing but its public headers.
 #
-# Render stages are moving into the core's internal RenderCore one at a time, and
-# internal means not exported: the CLI can compile against those headers but cannot
-# link the symbols through Quantiloom.dll. Linking the objects is what lets the
-# migration proceed a stage at a time without exporting each stage on the way past.
-# Switch back to libQuantiloom once the offline facade is complete and the CLI needs
-# nothing but its public API -- that is also what restores the CLI to being the
-# working proof that the public API is sufficient.
+# This target is the working proof that the public API is sufficient: it renders
+# every scene the product renders, through the same include/ and the same QL_API
+# exports the SDK ships. src/libQuantiloom is not on its search path, so reaching
+# for a library internal here fails at compile time rather than at review time --
+# which makes "the header is missing" a signal to widen the SDK on purpose.
 #
-# libSpectraForge is deliberately absent, and now load-bearing rather than tidiness:
-# it is a DLL that links Quantiloom.dll, so linking it here while the core is linked
-# statically would put two copies of the library's global state in one process. The
-# CLI imported nothing from it anyway -- verified against the import table.
+# It used to link quantiloom_core (the objects) with the internal source root on
+# its include path, because main.cpp drove the Vulkan layer itself: GpuBuffer,
+# CommandHelper, BLAS/TLAS, RayTracingPipeline, a second render orchestrator
+# running in parallel with ExternalRenderContext's private steps. That is
+# OfflineRenderer now.
+#
+# libSpectraForge is deliberately absent: the CLI imports nothing from it --
+# verified against the import table.
 target_link_libraries(Quantiloom
     PRIVATE
-        quantiloom_core
+        libQuantiloom
 )
 
 # C++20 standard and RPATH set to executable directory
