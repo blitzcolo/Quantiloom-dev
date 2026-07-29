@@ -1602,10 +1602,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // L_sun(λ) = B(T_sun, λ) × Ω_sun
                     // IRPlanckRadiance returns W·sr⁻¹·m⁻²·nm⁻¹
                     // Multiply by sun solid angle to get irradiance in W·m⁻²·nm⁻¹
-                    float L_sun_surface = IRPlanckRadiance(5778.0, lambda);
-                    // CRITICAL: Stay in nm⁻¹ for consistency with entire spectral pipeline
-                    // Previous 1e4 factor was a unit conversion error (10x too large)
-                    sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR;  // W·m⁻²·nm⁻¹
+                    // Only when the scene actually has a sun. This used to
+                    // synthesize one unconditionally, so a config with
+                    // sun_radiance = [0,0,0] was lit anyway. SWIR derives its
+                    // own fallback from the same field.
+                    float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
+                                          0.7152 * lut.sunRadiance_rgb.g +
+                                          0.0722 * lut.sunRadiance_rgb.b;
+                    if (sun_luminance > 0.0) {
+                        float L_sun_surface = IRPlanckRadiance(5778.0, lambda);
+                        // CRITICAL: Stay in nm⁻¹ for consistency with entire spectral pipeline
+                        // Previous 1e4 factor was a unit conversion error (10x too large)
+                        sun_irr_lambda = L_sun_surface * SUN_SOLID_ANGLE_SR;  // W·m⁻²·nm⁻¹
+                    }
                 }
 
                 // Convert irradiance to radiance and apply Lambertian BRDF
