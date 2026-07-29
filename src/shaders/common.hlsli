@@ -399,9 +399,16 @@ float SampleSkyIrradiance(SolarSpectralLUT lut, float wavelength_nm) {
 
 static const float SUN_SOLID_ANGLE_SR = 6.8e-5;  // Sun solid angle (steradians)
 
-float SunIrradianceToRadiance(float irradiance) {
-    return irradiance / SUN_SOLID_ANGLE_SR;
-}
+// REMOVED: SunIrradianceToRadiance(E) = E / SUN_SOLID_ANGLE_SR.
+//
+// It returned the radiance of the solar disk, which is only meaningful if
+// something multiplies the solid angle back when integrating over the source.
+// Nothing did: all four callers fed the result straight into either
+// BRDF * X * NdotL or rho * X * NdotL, so enabling a solar LUT made the direct
+// term 10^4 times too large -- a SWIR render came out at 97 W/m^2/sr/nm where
+// the incident irradiance caps reflected radiance at 0.095. Use the irradiance
+// for the BRDF form and E/PI for the albedo form; SUN_SOLID_ANGLE_SR stays,
+// the MWIR Planck fallback still needs it to turn a disk radiance into one.
 
 // ============================================================================
 // Fresnel Equations for Complex Refractive Index (Conductor)

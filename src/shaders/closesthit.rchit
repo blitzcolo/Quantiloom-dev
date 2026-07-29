@@ -938,8 +938,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
 
-                // Sun disk: L = E / Ω_sun (radiance from irradiance)
-                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                // Irradiance, not the sun disk's radiance. This feeds
+                // BRDF * X * NdotL below, and for a distant source that
+                // identity wants E: L_out = BRDF·E·cosθ. Dividing by the
+                // sun's solid angle here, with nothing multiplying it back,
+                // made the term 1/Ω_sun ≈ 14700x too large whenever a solar
+                // LUT was loaded.
+                sun_radiance_lambda = sun_irr;
                 // Sky: diffuse hemispherical, already in radiance-like units (W·m⁻²·nm⁻¹·sr⁻¹ approximated)
                 // For sky dome, we assume uniform sky approximation: L_sky ≈ E_sky / π
                 sky_radiance_lambda = sky_irr / PI;
@@ -1117,8 +1122,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
             float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
 
-            // Convert irradiance to radiance
-            sunRadiance_lambda = SunIrradianceToRadiance(sun_irr);
+            // Irradiance: consumed as BRDF * X * NdotL, same as above
+            sunRadiance_lambda = sun_irr;
             skyRadiance_lambda = sky_irr / PI;  // Diffuse sky: L ≈ E / π
         } else {
             // FALLBACK: Use LightingParams scalar values
@@ -1266,7 +1271,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (hasSpectralSolarLUT) {
                 float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
-                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                // E/PI, matching the sky line below and the MWIR branch:
+                // this is multiplied by rho directly, with no BRDF to carry
+                // the 1/PI, so L = rho·(E/PI)·cosθ is the Lambertian result.
+                sun_radiance_lambda = sun_irr / PI;
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 // Fallback: use RGB average (approximation)
@@ -1383,7 +1391,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (hasSpectralSolarLUT) {
                 float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
-                sun_radiance_lambda = SunIrradianceToRadiance(sun_irr);
+                // E/PI, matching the sky line below and the MWIR branch:
+                // this is multiplied by rho directly, with no BRDF to carry
+                // the 1/PI, so L = rho·(E/PI)·cosθ is the Lambertian result.
+                sun_radiance_lambda = sun_irr / PI;
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 // Fallback: use RGB average (approximation)
@@ -1602,10 +1613,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // L_sun(λ) = B(T_sun, λ) × Ω_sun
                     // IRPlanckRadiance returns W·sr⁻¹·m⁻²·nm⁻¹
                     // Multiply by sun solid angle to get irradiance in W·m⁻²·nm⁻¹
+                    //
                     // Only when the scene actually has a sun. This used to
                     // synthesize one unconditionally, so a config with
-                    // sun_radiance = [0,0,0] was lit anyway. SWIR derives its
-                    // own fallback from the same field.
+                    // sun_radiance = [0,0,0] was lit anyway -- which is why all
+                    // three MWIR furnace cavities read high (up to 1.41x) while
+                    // their LWIR twins, which have no solar term at all, were
+                    // exact. SWIR derives its fallback from the same field.
                     float sun_luminance = 0.2126 * lut.sunRadiance_rgb.r +
                                           0.7152 * lut.sunRadiance_rgb.g +
                                           0.0722 * lut.sunRadiance_rgb.b;
