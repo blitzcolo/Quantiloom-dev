@@ -620,6 +620,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         skyRadiance = lut.skyRadiance_rgb;
     } else {
         // Spectral modes: Use scalar spectral radiance (replicate to RGB)
+        //
+        // Dead in these modes, and kept only because the declarations above are
+        // shared. These two feed `radiance` (directSun + skyAmbient + ...),
+        // which is consumed by the RGB branch alone -- every spectral branch
+        // below builds its own output_radiance from the solar LUT per
+        // wavelength. Do not read them as the spectral illuminant; the
+        // *_spectral fields are an RGB average in arbitrary units, which is
+        // exactly what the spectral paths stopped inventing.
         sunRadiance = float3(lut.sunRadiance_spectral, lut.sunRadiance_spectral, lut.sunRadiance_spectral);
         skyRadiance = float3(lut.skyRadiance_spectral, lut.skyRadiance_spectral, lut.skyRadiance_spectral);
     }
@@ -2214,6 +2222,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     if (material.volumeDensity > 0.0 && material.scatteringCoeff > 0.0) {
+        // ====================================================================
+        // What "RGB-like" means here, and why the rest of this block asks
+        // ====================================================================
+        // Below the RGB and VIS_FUSED branches, output_radiance is a single
+        // spectral value replicated across three channels -- every fused and
+        // single-wavelength branch ends that way. This block used to ignore
+        // that: it took the sun from lut.sunRadiance_rgb in every mode, so a
+        // SWIR or LWIR render had an RGB triple in arbitrary units standing in
+        // for spectral irradiance at 4 um, and it combined that with the
+        // medium's per-channel sigma to produce three different answers to a
+        // question that has one.
+        //
+        // The medium's coefficients are RGB because that is all a Material
+        // carries -- there is no spectral sigma to sample. Averaging them is
+        // the honest reduction until a medium can carry a curve the way a
+        // surface reflectance does; that is a data problem, and this is where
+        // it plugs in when it is solved.
+        const bool isRgbLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
+                                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
+
         // Create medium properties from material
         MediumProperties medium = CreateMediumFromMaterial(material);
 
@@ -2222,6 +2250,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Compute transmittance using Beer-Lambert law
         float3 volumeTransmittance = BeerLambertTransmittance(pathLength, medium);
+        if (!isRgbLike) {
+            float t_avg = (volumeTransmittance.r + volumeTransmittance.g +
+                           volumeTransmittance.b) / 3.0;
+            volumeTransmittance = float3(t_avg, t_avg, t_avg);
+        }
 
         // ====================================================================
         // Single Scattering: In-scattered Light from Sun
@@ -2232,9 +2265,29 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         float3 inScatteredLight = float3(0.0, 0.0, 0.0);
 
-        // Sun direction and radiance
+        // Sun direction and irradiance. Irradiance, not the sun disk's
+        // radiance: the phase function is normalised over the sphere, so
+        // integrating a directional source against it leaves E rather than L
+        // -- the same identity the fused surface paths spell out.
+        //
+        // Shadows the sunRadiance declared at the top of main(), on purpose:
+        // that one is the RGB path's, and reading it here is the bug this
+        // replaced.
         float3 sunDir = normalize(lut.sunDirection);
-        float3 sunRadiance = lut.sunRadiance_rgb;
+        float3 sunRadiance;
+        if (isRgbLike) {
+            // Derived from the illuminant's own spectrum by the host, so this
+            // is the same sun the spectral branches sample, just colour-matched.
+            sunRadiance = lut.sunRadiance_rgb;
+        } else if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
+            const float sun_irr =
+                SampleSunIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
+            sunRadiance = float3(sun_irr, sun_irr, sun_irr);
+        } else {
+            // No curve, no sun -- the same refusal as every surface path. An
+            // illuminant's spectrum is scene data; there is nothing to invent.
+            sunRadiance = float3(0.0, 0.0, 0.0);
+        }
 
         // Phase function: Henyey-Greenstein
         float cosTheta = dot(-WorldRayDirection(), sunDir);
@@ -2267,11 +2320,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // In-scattering: σ_s × phase × L_sun × visibility × (1 - T) / σ_t
         // The (1 - T) / σ_t term integrates scattering over the path
         float3 sigma_t = medium.sigma_t;
+        float3 sigma_s = medium.sigma_s;
         float sigma_t_avg = (sigma_t.r + sigma_t.g + sigma_t.b) / 3.0;
+        if (!isRgbLike) {
+            // See the note at the top of this block: one spectral sample means
+            // one sigma, not three.
+            const float s_avg = (sigma_s.r + sigma_s.g + sigma_s.b) / 3.0;
+            sigma_t = float3(sigma_t_avg, sigma_t_avg, sigma_t_avg);
+            sigma_s = float3(s_avg, s_avg, s_avg);
+        }
 
         if (sigma_t_avg > 0.001) {
             float3 oneMinusT = float3(1.0, 1.0, 1.0) - volumeTransmittance;
-            inScatteredLight = medium.sigma_s * phase * sunRadiance * sunVisibility * oneMinusT / sigma_t;
+            inScatteredLight = sigma_s * phase * sunRadiance * sunVisibility * oneMinusT / sigma_t;
         }
 
         // ====================================================================
