@@ -197,7 +197,14 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_power_rgb;
             }
 
-            radiance_accum += sky_radiance_lambda * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_SWIR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += sky_radiance_lambda * lambda_step * trapezoidW;
         }
 
         float band_width = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
@@ -245,7 +252,14 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_power_rgb;
             }
 
-            radiance_accum += sky_radiance_lambda * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_NIR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += sky_radiance_lambda * lambda_step * trapezoidW;
         }
 
         float band_width = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
@@ -302,7 +316,14 @@ void main(inout Payload payload) {
             } else {
                 L_sky = IRPlanckRadiance(T_atmosphere, lambda);
             }
-            radiance_accum += L_sky * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_IR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += L_sky * lambda_step * trapezoidW;
         }
 
         float band_width = lambda_max - lambda_min;

@@ -1303,7 +1303,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_lambda = tau_l * L_lambda + lpath_l;
             }
 
-            radiance_accum += L_lambda * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_SWIR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += L_lambda * lambda_step * trapezoidW;
         }
 
         // Normalize by band width to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
@@ -1409,7 +1416,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_reflected = tau_l * L_reflected + lpath_l;
             }
 
-            radiance_accum += L_reflected * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_NIR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += L_reflected * lambda_step * trapezoidW;
         }
 
         // Normalize by band width to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
@@ -1640,7 +1654,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // Accumulate (Riemann sum)
-            radiance_accum += L_lambda * lambda_step;
+            // Trapezoid rule. N samples span N-1 intervals, so the two
+            // endpoints carry half weight. Summing N full-width rectangles
+            // and then dividing by (N-1)*step made every fused band read
+            // N/(N-1) high -- 6.7% for the 16-sample bands. Checked against
+            // an isothermal cavity, which must render exactly its own
+            // blackbody and read 1.066667x it.
+            float trapezoidW = (i == 0 || i == NUM_IR_SAMPLES - 1) ? 0.5 : 1.0;
+            radiance_accum += L_lambda * lambda_step * trapezoidW;
         }
 
         // Normalize by wavelength range to get AVERAGE spectral radiance (W·sr⁻¹·m⁻²)
