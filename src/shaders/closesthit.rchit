@@ -1538,8 +1538,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 irPayload.dDdx       = float3(0,0,0);
                 irPayload.dDdy       = float3(0,0,0);
                 TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
-                // fr = reflectance/PI (Lambertian); importance sampling cancels PI for cosine path
-                L_env_shared = irPayload.radiance.r * (reflectance / pdf_ir) * NdotWi;
+                // fr = reflectance/PI (Lambertian). The PI belongs in the BRDF:
+                // with pdf = NdotWi/PI the cosine path reduces to reflectance *
+                // L, which is what "importance sampling cancels PI" means. It
+                // was missing here, so every reflected IR term was PI x too
+                // large -- visible as grazing surfaces, where Fresnel makes
+                // reflectance large, rendering brighter than a blackbody at the
+                // scene's own temperature.
+                L_env_shared = irPayload.radiance.r * (reflectance / (PI * pdf_ir)) * NdotWi;
             }
         }
 
