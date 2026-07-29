@@ -881,9 +881,14 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
 
         // Columns are 1-based with the wavelength as column 1, so the data
         // vector -- which has the wavelength removed -- is indexed from 2.
-        const u32 directIndex  = directColumn  >= 2 ? directColumn  - 2 : 0;
-        const u32 diffuseIndex = diffuseColumn >= 2 ? diffuseColumn - 2 : 0;
-        const size_t needed = std::max(directIndex, diffuseIndex) + 1;
+        // diffuseColumn = 0 means the file has no diffuse column at all, which
+        // is the shape of a reference illuminant: CIE D65 is one spectrum, not
+        // a sky and a sun. The diffuse curve then comes back empty.
+        const bool haveDiffuse = diffuseColumn >= 2;
+        const u32 directIndex  = directColumn >= 2 ? directColumn - 2 : 0;
+        const u32 diffuseIndex = haveDiffuse ? diffuseColumn - 2 : 0;
+        const size_t needed =
+            (haveDiffuse ? std::max(directIndex, diffuseIndex) : directIndex) + 1;
         if (columns.size() < needed) {
             QL_LOG_WARN("Solar spectrum: line {} has {} data columns, need {} "
                         "for direct=col{} diffuse=col{}",
@@ -902,12 +907,18 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
         // one. Using it as the sky counts the direct beam a second time, so
         // subtract it; clamped because measured global and direct columns can
         // cross by a hair in the noise floor.
-        const f32 rawDiffuse = columns[diffuseIndex];
-        const f32 diffuseSky = diffuseIsGlobal
-                                   ? std::max(0.0f, rawDiffuse - directSun)
-                                   : std::max(0.0f, rawDiffuse);
+        f32 diffuseSky = 0.0f;
+        if (haveDiffuse) {
+            const f32 rawDiffuse = columns[diffuseIndex];
+            diffuseSky = diffuseIsGlobal ? std::max(0.0f, rawDiffuse - directSun)
+                                         : std::max(0.0f, rawDiffuse);
+        }
 
         sunCurve.samples.emplace_back(wavelength_nm, directSun);
+        // Zeros rather than no samples when the file has no diffuse column: an
+        // empty curve is not the same as a dark one, and SolarSpectralLUT
+        // rejects it, which silently left the whole illuminant off the GPU
+        // while the derived RGB colour looked perfectly correct.
         skyCurve.samples.emplace_back(wavelength_nm, diffuseSky);
     }
 

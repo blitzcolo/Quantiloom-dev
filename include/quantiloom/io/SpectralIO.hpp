@@ -187,7 +187,10 @@ public:
     // @param file: Path to the spectrum
     // @param wavelengthUnit: Wavelength unit in the file ("nm", "um", "cm-1")
     // @param directColumn: 1-based column holding direct solar irradiance
-    // @param diffuseColumn: 1-based column holding diffuse (or global) sky
+    // @param diffuseColumn: 1-based column holding diffuse (or global) sky,
+    //        or 0 when the file has none -- a reference illuminant such as
+    //        CIE D65 is one spectrum, not a sun and a sky. The diffuse curve
+    //        comes back empty in that case.
     // @param diffuseIsGlobal: subtract direct from diffuseColumn, clamped at 0
     // @return: Pair of (direct_sun, diffuse_sky) spectral curves
     static Result<std::pair<SpectralCurve, SpectralCurve>, String>

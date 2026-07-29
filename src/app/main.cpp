@@ -869,6 +869,15 @@ int RunApp(int argc, char* argv[]) {
             const auto cols = config.GetArray<i32>("lighting.solar_lut_columns");
             const u32 directCol  = cols.size() >= 1 ? static_cast<u32>(cols[0]) : 2u;
             const u32 diffuseCol = cols.size() >= 2 ? static_cast<u32>(cols[1]) : 3u;
+            // Reference illuminants are published as relative spectra -- D65 is
+            // normalised to 100 at 560 nm -- so their absolute level is
+            // arbitrary and colour-matches to five figures of nothing in
+            // particular. Normalising to unit luminance puts the illuminant at
+            // Y = 1, which is what makes D65 come out as sRGB (1, 1, 1)
+            // exactly. It is also the honest separation of white balance from
+            // exposure, and it applies just as well to a measured spectrum
+            // whose absolute level you would rather set yourself.
+            const auto normalise = config.Get<String>("lighting.solar_lut_normalise", "");
             const bool diffuseIsGlobal =
                 config.Get<bool>("lighting.solar_lut_diffuse_is_global", false);
 
@@ -894,6 +903,46 @@ int RunApp(int argc, char* argv[]) {
                 // of the renderer describing different suns. It replaces
                 // whatever sun_radiance said, which was a triple in arbitrary
                 // units with no defined relationship to the spectrum beside it.
+                if (normalise == "unit_luminance") {
+                    const auto rgb = SpectralIrradianceToLinearSrgb(sunCurve);
+                    const f32 Y = 0.2126f * rgb.r + 0.7152f * rgb.g + 0.0722f * rgb.b;
+                    if (Y > 0.0f) {
+                        // Both curves by the sun's luminance, not each by its
+                        // own: scaling them separately would discard the ratio
+                        // between sun and sky, which is the one thing a
+                        // measured pair actually tells you.
+                        for (auto& v : sunCurve.samples) v.second /= Y;
+                        for (auto& v : skyCurve.samples) v.second /= Y;
+                        solarLUT = SolarSpectralLUT::FromCPU(sunCurve, skyCurve);
+                        QL_LOG_INFO("  Illuminant normalised to unit luminance (was Y={:.4g})", Y);
+                    }
+                } else if (!normalise.empty()) {
+                    QL_LOG_WARN("  Unknown solar_lut_normalise '{}' (known: unit_luminance)",
+                                normalise);
+                }
+
+                // Does the spectrum actually cover the band being rendered?
+                // SpectralCurve::Evaluate clamps to its endpoints rather than
+                // returning zero, so a curve that stops short does not fail --
+                // it holds its last value flat across everything above it, and
+                // the render looks plausible. CIE D65 stops at 830 nm, which
+                // makes it a fine reference illuminant for RGB and a silently
+                // wrong one for SWIR upward.
+                if (const auto band = GetFusedBandInfo(spectral_mode);
+                    band && !sunCurve.samples.empty()) {
+                    const f32 curveMin = sunCurve.samples.front().first;
+                    const f32 curveMax = sunCurve.samples.back().first;
+                    if (curveMin > band->lambdaMinNm || curveMax < band->lambdaMaxNm) {
+                        QL_LOG_WARN("  Illuminant spans [{:.0f}, {:.0f}] nm but this mode "
+                                    "renders [{:.0f}, {:.0f}] nm. Evaluate() clamps, so the "
+                                    "uncovered part is held flat at the nearest endpoint "
+                                    "rather than left dark -- the result will look "
+                                    "reasonable and mean nothing.",
+                                    curveMin, curveMax,
+                                    band->lambdaMinNm, band->lambdaMaxNm);
+                    }
+                }
+
                 lightingParams.sunRadiance_rgb = SpectralIrradianceToLinearSrgb(sunCurve);
                 lightingParams.skyRadiance_rgb = SpectralIrradianceToLinearSrgb(skyCurve);
                 lightingParams.sunRadiance_spectral =
@@ -917,7 +966,10 @@ int RunApp(int argc, char* argv[]) {
                     QL_LOG_INFO("  ✓ Solar LUT loaded: {} samples, λ=[{:.1f}, {:.1f}] nm",
                                 solarLUT.sunIrradiance.numSamples, minWl, maxWl);
                 } else {
-                    QL_LOG_WARN("  ⚠ Solar LUT conversion failed, using RGB fallback");
+                    QL_LOG_ERROR("  Solar LUT conversion failed. There is no RGB "
+                                 "fallback any more -- the scene would render "
+                                 "unlit, so this is fatal.");
+                    return 1;
                 }
             } else {
                 QL_LOG_WARN("  ⚠ Failed to load solar LUT: {}", result.error());
