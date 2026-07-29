@@ -1,6 +1,7 @@
 const quantiloom::GenericSensor::`vftable'
 private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
+private: quantiloom::OfflineRenderer::OfflineRenderer(void)
 private: static enum quantiloom::Log::Level quantiloom::Log::s_CurrentLevel
 public: __int64 quantiloom::Config::Get<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >,__int64 const &)const
 public: __int64 quantiloom::Config::GetInt64(class std::basic_string_view<char,struct std::char_traits<char> >,__int64)const
@@ -102,6 +103,7 @@ public: quantiloom::Material::Material(struct quantiloom::Material &&)
 public: quantiloom::Material::Material(struct quantiloom::Material const &)
 public: quantiloom::Material::Material(void)
 public: quantiloom::Material::~Material(void)
+public: quantiloom::OfflineRenderer::~OfflineRenderer(void)
 public: quantiloom::Scene::Scene(class quantiloom::Scene &&)
 public: quantiloom::Scene::Scene(class quantiloom::Scene const &)
 public: quantiloom::Scene::Scene(void)
@@ -112,6 +114,7 @@ public: static bool quantiloom::ImageIO::WritePNG(class std::basic_string<char,s
 public: static class quantiloom::Result<class quantiloom::Config,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::Load(class std::filesystem::path const &)
 public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Scene::FromConfig(class quantiloom::Config const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::ExternalRenderContext,struct std::default_delete<class quantiloom::ExternalRenderContext> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Create(struct quantiloom::ExternalRenderContext::InitParams const &)
+public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::OfflineRenderer,struct std::default_delete<class quantiloom::OfflineRenderer> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::Create(class quantiloom::Config const &,struct quantiloom::OfflineRenderer::InitParams const &)
 public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173(class std::filesystem::path const &,unsigned int)
@@ -143,6 +146,8 @@ public: struct quantiloom::ExternalRenderContext::CLAHEParams const & quantiloom
 public: struct quantiloom::LightingParams const & quantiloom::ExternalRenderContext::GetLightingParams(void)const
 public: struct quantiloom::Material & quantiloom::Material::operator=(struct quantiloom::Material &&)
 public: struct quantiloom::Material & quantiloom::Material::operator=(struct quantiloom::Material const &)
+public: struct quantiloom::OfflineRenderOutput quantiloom::OfflineRenderer::Render(void)
+public: struct quantiloom::OfflineRenderParams const & quantiloom::OfflineRenderer::Params(void)const
 public: struct quantiloom::SensorParams const & quantiloom::ExternalRenderContext::GetGPUSensorParams(void)const
 public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
 public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const

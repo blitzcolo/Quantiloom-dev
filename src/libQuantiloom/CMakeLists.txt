@@ -111,6 +111,8 @@ add_library(quantiloom_core OBJECT
     renderer/RenderCore.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
+    renderer/OfflineRenderer.cpp
+    ${QL_PUBLIC_INC}/renderer/OfflineRenderer.hpp
 
     # Scene module
     scene/Camera.cpp
