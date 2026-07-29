@@ -13,8 +13,17 @@
 #
 #   ./scripts/render-tests/run_furnace_suite.sh
 #
-# Needs a built CLI and an RTX GPU. Not wired into build_wsl.sh: it renders,
-# so it costs seconds and a GPU that a build machine may not have.
+# Exit codes, which build_wsl.sh distinguishes:
+#   0  every cavity within tolerance
+#   1  a cavity rendered and was wrong -- a real failure, stop the build
+#   2  no CLI built
+#   3  no usable GPU, so nothing was measured
+#
+# 3 is not 1 on purpose. This repo already decided that a missing ray tracing
+# device makes a GPU check skip with a reason rather than fail (see
+# tests/support/VulkanTestDevice.hpp); a build machine without an RTX card
+# should not be told its physics is broken when the truth is that nobody
+# looked.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -30,8 +39,14 @@ for band in lwir mwir; do
         # Count the success line rather than trusting the exit code: the CLI's
         # is unreliable, and a render that silently wrote nothing would
         # otherwise be checked against a stale file from a previous run.
-        if [ "$("$CLI" "$cfg" 2>&1 | grep -c 'Saved spectral image')" != 1 ]; then
+        log=$("$CLI" "$cfg" 2>&1)
+        if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+            if printf '%s' "$log" | grep -qE 'No Vulkan-compatible GPUs|Failed to create Vulkan instance|No suitable'; then
+                echo "furnace suite: no usable GPU, nothing measured" >&2
+                exit 3
+            fi
             echo "RENDER FAILED  ${band}_${case}"
+            printf '%s\n' "$log" | tail -5 >&2
             fail=1
             continue
         fi

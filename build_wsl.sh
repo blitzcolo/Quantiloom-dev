@@ -44,6 +44,29 @@ cmake.exe --build build --config Release -j -- /v:q /nologo
 
 ./scripts/check_exports.sh
 
+# --- Physics gate -----------------------------------------------------------
+# Six isothermal furnace cavities, each of which must return the Planck
+# radiance of its own temperature whatever its emissivity. Kirchhoff fixes the
+# answer with no free parameters, so unlike every other render in the repo
+# these can fail on their own rather than by comparison with a previous run.
+# Four shader bugs in one week were visible here and in no unit test: the unit
+# suite links the core and checks structure, and none of it puts a photon on a
+# surface.
+#
+# Exit 3 means no usable GPU. That is a warning, not a failure -- the same call
+# the unit suite makes for its GPU cases -- but it does mean this build was
+# never checked against anything that renders.
+
+set +e
+./scripts/render-tests/run_furnace_suite.sh
+furnace_status=$?
+set -e
+case "$furnace_status" in
+    0) ;;
+    3) echo "WARNING: physics gate skipped, no GPU on this machine" >&2 ;;
+    *) echo "Physics gate failed -- not installing." >&2; exit "$furnace_status" ;;
+esac
+
 # --- Install (only reached on successful build + green tests + stable ABI) ---
 
 rm -rf /mnt/d/Quantiloom-SDK/windows_amd64

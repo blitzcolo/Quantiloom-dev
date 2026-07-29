@@ -21,9 +21,15 @@ This is the canonical path. It runs, in order:
    real failures).
 4. **ABI gate**: `scripts/check_exports.sh` diffs the built DLLs' export tables
    against `docs/abi/*.golden` — see "Common failures" below.
-5. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
+5. **Physics gate**: `scripts/render-tests/run_furnace_suite.sh` renders six
+   isothermal furnace cavities, each of which must return the Planck radiance of
+   its own temperature whatever its emissivity. The only renders in the repo with
+   an answer known in advance rather than by comparison with a previous run, and
+   the only automated check that puts a photon on a surface. Exit 3 means no GPU:
+   a warning, not a failure, but that build was checked by nothing that renders.
+6. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
 
-There is no CI; these two gates are the only automated ones.
+There is no CI; these three gates are the only automated ones.
 
 `set -euo pipefail` guarantees install never runs on a failed build or red tests. A full run takes minutes; use a generous Bash timeout (600000 ms) and never kill it mid-install — a half-written SDK breaks the Qt frontend.
 
