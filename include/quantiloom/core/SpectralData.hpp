@@ -24,6 +24,8 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "core/Platform.hpp"   // QL_API
+#include <glm/glm.hpp>
 #include <vector>
 #include <utility>
 
@@ -500,5 +502,34 @@ struct SolarSpectralLUT {
 
 // Verify SolarSpectralLUT size: 272 + 272 = 544 bytes
 static_assert(sizeof(SolarSpectralLUT) == 544, "SolarSpectralLUT size mismatch! Expected 544 bytes");
+
+// ============================================================================
+// Illuminant colour
+// ============================================================================
+// One illuminant, every mode. A spectral mode samples the curve at each
+// wavelength; RGB and VIS_FUSED need it as a colour, and deriving that colour
+// from the same curve is what keeps them describing the same sun. Before this,
+// the RGB modes lit from a triple somebody typed into the config while the
+// spectral modes integrated a measured spectrum.
+
+// Integrate a spectral irradiance curve against the CIE 1931 2-degree
+// observer, then convert XYZ to linear sRGB (IEC 61966-2-1 primaries).
+//
+// Returns the curve's own magnitude: an absolute spectrum such as ASTM G-173
+// comes back in the hundreds, which is correct and needs exposure somewhere
+// downstream. Channels are not clamped -- a saturated illuminant legitimately
+// lands outside the sRGB gamut, and clamping would quietly change its
+// chromaticity rather than its brightness.
+QL_API glm::vec3 SpectralIrradianceToLinearSrgb(const SpectralCurve& curve);
+
+// A flat spectrum normalised so its CIE luminance is 1, which puts its linear
+// sRGB at exactly (1, 1, 1): CIE illuminant E, the neutral white illuminant.
+//
+// Useful precisely because it is not a real sun. It separates what a material
+// does to light from what the sun's own colour does, which a measured solar
+// spectrum cannot -- the ASTM G-173 direct beam is noticeably warm, x=0.339
+// y=0.350 against D65's 0.313, 0.329.
+QL_API SpectralCurve MakeEqualEnergyIlluminant(f32 lambdaMin_nm = 300.0f,
+                                               f32 lambdaMax_nm = 15000.0f);
 
 } // namespace quantiloom

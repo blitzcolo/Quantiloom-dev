@@ -183,3 +183,5 @@ public: void quantiloom::ExternalRenderContext::SetWavelength(float)
 public: void quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int,struct quantiloom::Material const &)
 public: void quantiloom::Material::ComputeSpectralAlbedo(void)
 public: void quantiloom::Scene::PrintSummary(void)const
+struct glm::vec<3,float,0> quantiloom::SpectralIrradianceToLinearSrgb(struct quantiloom::SpectralCurve const &)
+struct quantiloom::SpectralCurve quantiloom::MakeEqualEnergyIlluminant(float,float)

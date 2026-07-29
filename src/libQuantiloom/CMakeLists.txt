@@ -39,6 +39,7 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/core/Log.hpp
     core/Config.cpp
     ${QL_PUBLIC_INC}/core/Config.hpp
+    core/SpectralColour.cpp
     ${QL_PUBLIC_INC}/core/Platform.hpp
     ${QL_PUBLIC_INC}/core/Types.hpp
     ${QL_PUBLIC_INC}/core/Image.hpp
