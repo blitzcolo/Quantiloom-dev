@@ -796,15 +796,32 @@ int RunApp(int argc, char* argv[]) {
         // When valid data is available, shader uses wavelength-dependent illumination.
         // Otherwise, falls back to LightingParams RGB values.
         //
+        // The sun's spectrum is user-supplied data, like a material's
+        // reflectance curve -- the renderer does not know its shape and does
+        // not carry one. Any tabulated file will do; the scene says which
+        // columns hold what.
+        //
         // Config format:
         //   [lighting]
         //   solar_lut = "assets/luts/modtran/AM1.0_VIS23.txt"
+        //   # optional, 1-based, wavelength counts as column 1.
+        //   # Defaults below are libRadtran uvspec's layout.
+        //   solar_lut_columns = [2, 3]              # direct, diffuse
+        //   solar_lut_diffuse_is_global = false
         //
-        // File format (uvspec-compatible):
-        //   # comment
-        //   wavelength(nm)  edir(W/m2/nm)  edn(W/m2/sr/nm)  trans
+        // File format: whitespace- or comma-separated, one row per wavelength,
+        // '#' comments and a non-numeric header row both skipped.
+        //
+        //   # libRadtran uvspec
+        //   wavelength(nm)  edir(W/m2/nm)  edn(W/m2/nm)  trans
         //   380.0  1.234e+00  5.678e-02  0.9876
-        //   ...
+        //
+        // For ASTM G-173 (assets/luts/astmg173.csv), whose columns are
+        // wavelength, extraterrestrial, global-tilt, direct+circumsolar:
+        //
+        //   solar_lut = "assets/luts/astmg173.csv"
+        //   solar_lut_columns = [4, 3]
+        //   solar_lut_diffuse_is_global = true      # col 3 includes the beam
         // ====================================================================
         QL_LOG_INFO("Loading solar spectral LUT...");
 
@@ -818,8 +835,18 @@ int RunApp(int argc, char* argv[]) {
             auto solarLutPath = config.Get<String>("lighting.solar_lut");
             QL_LOG_INFO("  Loading solar LUT from: {}", solarLutPath);
 
-            // Load using existing libRadtran/uvspec loader (format is compatible)
-            auto result = SpectralIO::LoadLibRadtranSunAndSky(solarLutPath, "nm");
+            // The sun's spectrum is user-supplied data, like a reflectance
+            // curve, so the file's layout is the user's to declare. Defaults
+            // are libRadtran uvspec's; ASTM G-173 wants [4, 3] with
+            // diffuse_is_global, its column 3 being global rather than sky.
+            const auto cols = config.GetArray<i32>("lighting.solar_lut_columns");
+            const u32 directCol  = cols.size() >= 1 ? static_cast<u32>(cols[0]) : 2u;
+            const u32 diffuseCol = cols.size() >= 2 ? static_cast<u32>(cols[1]) : 3u;
+            const bool diffuseIsGlobal =
+                config.Get<bool>("lighting.solar_lut_diffuse_is_global", false);
+
+            auto result = SpectralIO::LoadLibRadtranSunAndSky(
+                solarLutPath, "nm", directCol, diffuseCol, diffuseIsGlobal);
 
             if (result.has_value()) {
                 auto& [sunCurve, skyCurve] = result.value();

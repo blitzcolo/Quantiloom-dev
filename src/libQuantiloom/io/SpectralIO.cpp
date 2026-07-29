@@ -693,9 +693,17 @@ ParseLibRadtranLine(const std::string& line) {
     // Skip comments
     if (line[start] == '#') return std::nullopt;
 
-    // Tokenize by whitespace
+    // Tokenize by whitespace, with commas and semicolons counting as
+    // whitespace so a CSV parses too. libRadtran writes columns; ASTM G-173 and
+    // most published solar spectra ship as CSV, and refusing those meant the
+    // only solar spectrum in this repository could not be loaded by the reader
+    // that exists to load solar spectra.
+    std::string body = line.substr(start);
+    std::replace_if(body.begin(), body.end(),
+                    [](char ch) { return ch == ',' || ch == ';'; }, ' ');
+
     std::vector<f32> values;
-    std::istringstream iss(line.substr(start));
+    std::istringstream iss(body);
     f32 val;
     while (iss >> val) {
         values.push_back(val);
@@ -827,7 +835,10 @@ SpectralIO::LoadLibRadtranUvspec(const std::filesystem::path& uvspecFile,
 
 Result<std::pair<SpectralCurve, SpectralCurve>, String>
 SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
-                                     const String& wavelengthUnit) {
+                                     const String& wavelengthUnit,
+                                     u32 directColumn,
+                                     u32 diffuseColumn,
+                                     bool diffuseIsGlobal) {
     // Validate wavelength unit
     if (wavelengthUnit != "nm" && wavelengthUnit != "um" && wavelengthUnit != "cm-1") {
         return Result<std::pair<SpectralCurve, SpectralCurve>>(
@@ -868,10 +879,16 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
 
         auto& [wavelength_raw, columns] = *parsed;
 
-        // Need at least edir (col 2) and edn (col 3), i.e., 2 data columns
-        if (columns.size() < 2) {
-            QL_LOG_WARN("libRadtran: Line {} has only {} data columns, need at least 2 (edir, edn)",
-                        lineNumber, columns.size());
+        // Columns are 1-based with the wavelength as column 1, so the data
+        // vector -- which has the wavelength removed -- is indexed from 2.
+        const u32 directIndex  = directColumn  >= 2 ? directColumn  - 2 : 0;
+        const u32 diffuseIndex = diffuseColumn >= 2 ? diffuseColumn - 2 : 0;
+        const size_t needed = std::max(directIndex, diffuseIndex) + 1;
+        if (columns.size() < needed) {
+            QL_LOG_WARN("Solar spectrum: line {} has {} data columns, need {} "
+                        "for direct=col{} diffuse=col{}",
+                        lineNumber, columns.size(), needed,
+                        directColumn, diffuseColumn);
             continue;
         }
 
@@ -880,10 +897,15 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
 
         if (wavelength_nm <= 0.0f) continue;
 
-        // edir = column index 0 (column 2 in 1-based)
-        // edn = column index 1 (column 3 in 1-based)
-        const f32 directSun = std::max(0.0f, columns[0]);
-        const f32 diffuseSky = std::max(0.0f, columns[1]);
+        const f32 directSun = std::max(0.0f, columns[directIndex]);
+        // ASTM G-173 and friends publish a global column rather than a diffuse
+        // one. Using it as the sky counts the direct beam a second time, so
+        // subtract it; clamped because measured global and direct columns can
+        // cross by a hair in the noise floor.
+        const f32 rawDiffuse = columns[diffuseIndex];
+        const f32 diffuseSky = diffuseIsGlobal
+                                   ? std::max(0.0f, rawDiffuse - directSun)
+                                   : std::max(0.0f, rawDiffuse);
 
         sunCurve.samples.emplace_back(wavelength_nm, directSun);
         skyCurve.samples.emplace_back(wavelength_nm, diffuseSky);

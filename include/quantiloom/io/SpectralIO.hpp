@@ -172,13 +172,30 @@ public:
                          u32 column = 2,
                          const String& wavelengthUnit = "nm");
 
-    // Load both direct sun and diffuse sky spectra from libRadtran uvspec output
-    // @param uvspecFile: Path to uvspec output file
-    // @param wavelengthUnit: Wavelength unit in input file ("nm", "um", "cm-1")
+    // Load both direct sun and diffuse sky spectra from a tabulated file
+    //
+    // The sun's spectrum is user-supplied data, the same as a material's
+    // reflectance curve. Whitespace- or comma-separated, one row per
+    // wavelength; column numbers are 1-based and count the wavelength as
+    // column 1. The defaults are libRadtran uvspec's layout.
+    //
+    // ASTM G-173, the reference terrestrial spectrum this repository ships,
+    // needs directColumn = 4 and diffuseColumn = 3 with diffuseIsGlobal set,
+    // because its column 3 is global irradiance -- direct included -- and
+    // using it as the diffuse sky would count the sun twice.
+    //
+    // @param file: Path to the spectrum
+    // @param wavelengthUnit: Wavelength unit in the file ("nm", "um", "cm-1")
+    // @param directColumn: 1-based column holding direct solar irradiance
+    // @param diffuseColumn: 1-based column holding diffuse (or global) sky
+    // @param diffuseIsGlobal: subtract direct from diffuseColumn, clamped at 0
     // @return: Pair of (direct_sun, diffuse_sky) spectral curves
     static Result<std::pair<SpectralCurve, SpectralCurve>, String>
-    LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
-                            const String& wavelengthUnit = "nm");
+    LoadLibRadtranSunAndSky(const std::filesystem::path& file,
+                            const String& wavelengthUnit = "nm",
+                            u32 directColumn = 2,
+                            u32 diffuseColumn = 3,
+                            bool diffuseIsGlobal = false);
 };
 
 } // namespace quantiloom
