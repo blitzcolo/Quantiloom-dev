@@ -12,6 +12,18 @@ configure_file(
     @ONLY
 )
 
+# The Windows version resource, from the same project(VERSION) as the header
+# above. It used to be a checked-in Quantiloom.rc with the version typed into
+# four lines of it, which meant a bump touched five files across this repo and
+# nothing failed when one was missed -- a stale FILEVERSION is only visible in
+# Explorer's Details tab. @ONLY because a .rc is full of ${...} belonging to
+# the resource compiler.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/Quantiloom.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc"
+    @ONLY
+)
+
 # Enable warnings
 if(MSVC)
     add_compile_options(/W4 /wd4251 /wd4819)
@@ -21,7 +33,7 @@ endif()
 
 add_executable(Quantiloom
     main.cpp
-    Quantiloom.rc
+    ${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc
     ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
 )
 

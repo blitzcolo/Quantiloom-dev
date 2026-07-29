@@ -20,9 +20,15 @@ add_library(libSpectraForge SHARED
     ${CMAKE_CURRENT_BINARY_DIR}/LibVersion.hpp
 )
 
-# Windows resource file
+# Windows resource file, generated so its version follows project(VERSION)
+# rather than being typed into four lines that nothing checks.
 if(WIN32)
-    target_sources(libSpectraForge PRIVATE libSpectraForge.rc)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/libSpectraForge.rc.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/libSpectraForge.rc"
+        @ONLY
+    )
+    target_sources(libSpectraForge PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/libSpectraForge.rc)
 endif()
 
 target_compile_definitions(libSpectraForge

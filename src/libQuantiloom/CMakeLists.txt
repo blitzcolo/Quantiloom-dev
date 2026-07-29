@@ -290,7 +290,16 @@ endif()
 # only the headers this target declares PUBLIC.
 # ============================================================================
 
-add_library(libQuantiloom SHARED libQuantiloom.rc)
+# Generated so the version follows project(VERSION) rather than being typed
+# into four lines of a checked-in .rc. @ONLY because a .rc is full of ${...}
+# belonging to the resource compiler.
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/libQuantiloom.rc.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc"
+    @ONLY
+)
+
+add_library(libQuantiloom SHARED ${CMAKE_CURRENT_BINARY_DIR}/libQuantiloom.rc)
 
 target_link_libraries(libQuantiloom PRIVATE quantiloom_core)
 
