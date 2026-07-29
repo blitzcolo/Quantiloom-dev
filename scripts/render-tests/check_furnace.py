@@ -36,9 +36,20 @@ BANDS = {
 }
 
 def reference_radiance(T_K, band):
+    """Band mean of a blackbody, by the same rule the shader integrates with.
+
+    Trapezoid: n samples span n-1 intervals, so the endpoints carry half
+    weight. This used to sum n full-width rectangles and divide by the range,
+    which double-counts one interval and returns n/(n-1) of the true mean --
+    the same off-by-one the shaders had. With the shaders corrected and this
+    left alone, every furnace cavity read 5.9% low in LWIR and 8.7% in MWIR,
+    identically across emissivities, which is what a reference-side error
+    looks like: a constant offset that does not care what it is measuring.
+    """
     lo, hi, n = BANDS[band]
     step = (hi - lo) / (n - 1)
-    acc = sum(planck_blackbody(T_K, lo + i * step) for i in range(n))
+    vals = [planck_blackbody(T_K, lo + i * step) for i in range(n)]
+    acc = sum(vals) - 0.5 * (vals[0] + vals[-1])
     return acc * step / (hi - lo)
 
 
@@ -73,13 +84,14 @@ def main():
     h, w = img.shape[:2]
     print(f"Image: {w}x{h}")
 
-    # Central 3x3 ROI (near-normal incidence); angle-dependent emissivity
-    # correction reduces ε at off-axis pixels, creating a reflected
-    # component with a known π-factor weighting issue.
-    cx, cy = w // 2, h // 2
-    x0, x1 = cx - 1, cx + 2
-    y0, y1 = cy - 1, cy + 2
-    roi = img[y0:y1, x0:x1]
+    # The whole image. This used to sample a central 3x3 patch to stay at
+    # near-normal incidence, because the reflected term carried "a known
+    # π-factor weighting issue" that made off-axis pixels wrong -- the missing
+    # 1/PI in the IR environment reflection, since fixed. Sampling everything
+    # is the stronger test: an isothermal cavity must return B(T) from every
+    # direction, so the whole frame is signal, and an orientation-dependent
+    # error has nowhere to hide. Restricting the ROI is what let that bug sit.
+    roi = img
 
     mean_val = float(roi.mean())
     rel_err = abs(mean_val - ref) / ref if ref > 0 else 0
