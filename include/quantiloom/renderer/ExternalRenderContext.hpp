@@ -43,6 +43,7 @@
 #include "core/Config.hpp"
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
+#include "renderer/ConfigApply.hpp"
 #include "renderer/LightingParams.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
@@ -160,11 +161,51 @@ public:
     Result<void, String> LoadSceneFromConfig(const String& configPath);
 
     /**
-     * @brief Load scene from Config object
+     * @brief Load only the scene a configuration names.
+     *
+     * Reads `scene.gltf` / `scene.usd` and nothing else. For a config that
+     * should be honoured -- its illuminant, materials, atmosphere, camera and
+     * the rest -- use ApplyConfig().
+     *
      * @param config Parsed configuration
      * @return Result indicating success or error
      */
     Result<void, String> LoadScene(const Config& config);
+
+    /**
+     * @brief Apply a whole scene configuration: the same reading the CLI does.
+     *
+     * Loads the scene, then everything else the file says -- spectral mode and
+     * wavelength, samples and seed, lighting, the solar spectrum with its
+     * normalisation, reflectance curves from CSV and from the NMF basis,
+     * complex refractive indices, the default IR surface temperature and
+     * [[materials]] overrides, the atmosphere, the environment map, the camera
+     * and the sensor model.
+     *
+     * This exists because reading those keys twice, once here and once in the
+     * host, is how the frontend and the CLI came to render the same file
+     * differently. One reading, in rendercore::ResolveRenderConfig, serves
+     * both.
+     *
+     * Values that were applied are read back through this class's own getters
+     * -- GetLightingParams(), GetAtmosphere(), GetSpectralMode(), GetCamera()
+     * and the rest. What the report carries is what no getter can answer: the
+     * diagnostics, how much of each kind of data loaded, and the keys a
+     * windowed context cannot honour (`renderer.resolution`, which a viewport
+     * renders past at its own size; `renderer.output`; `[hyperspectral]`).
+     *
+     * Accumulation restarts. Safe to call again on the same context: it is
+     * also how a host replays a document after a lost device.
+     *
+     * @param config  Parsed configuration.
+     * @param options Strictness, the directory relative paths resolve against,
+     *                and the atmosphere model pack to fall back on.
+     * @return What was applied and what was not. Check ok() before trusting a
+     *         render: under MissingKeyPolicy::Error a required key that is
+     *         absent leaves the context partly configured.
+     */
+    ConfigApplyReport ApplyConfig(const Config& config,
+                                  const ConfigApplyOptions& options = {});
 
     /**
      * @brief Load scene from glTF file
@@ -223,7 +264,16 @@ public:
      *
      * @note For real-time preview, use low SPP (1-4)
      * @note Uses progressive accumulation if SPP > 1
-     * @note HDR to SDR conversion uses simple Reinhard tone mapping
+     * @note There is no tone mapping. The accumulated linear radiance is
+     *       blitted to the target, which clamps anything above 1.0 and applies
+     *       the target format's transfer function -- so an sRGB target encodes
+     *       and a UNORM one displays linear values uncorrected. Ask for an
+     *       sRGB format (InitParams::targetColorFormat, and on the host side
+     *       QVulkanWindow::setPreferredColorFormats). Bringing a scene into
+     *       displayable range is the scene's business:
+     *       `lighting.solar_lut_normalise` for an absolute illuminant, or the
+     *       CLAHE pass for HDR and thermal content. This note said Reinhard for
+     *       a long time and never was.
      */
     void RenderFrame(
         VkCommandBuffer cmd,

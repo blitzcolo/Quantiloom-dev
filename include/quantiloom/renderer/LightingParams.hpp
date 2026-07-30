@@ -181,7 +181,13 @@ inline LightingParams CreateDefaultLightingParams() {
     params.atmosphereTemperature_K = LightingDefaults::ATMOSPHERE_TEMPERATURE_K;
     params.chromaR_correction = LightingDefaults::CHROMA_R_CORRECTION;
     params.chromaB_correction = LightingDefaults::CHROMA_B_CORRECTION;
-    params.enableShadowRays = 0u;  // Disabled by default (known GPU crash on some drivers)
+    // On, matching what a config gets when it does not name
+    // renderer.enable_shadow_rays. This defaulted off, so a host starting from
+    // these defaults -- which is what an interactive context does before any
+    // config is applied -- rendered a scene shadowless that the CLI rendered
+    // with shadows. The comment here used to cite a driver crash; the escape
+    // hatch for that is the config key, which still turns them off.
+    params.enableShadowRays = 1u;
     return params;
 }
 

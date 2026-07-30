@@ -245,6 +245,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_texture_manager.cpp
     test_renderer/test_render_core.cpp
     test_renderer/test_config_resolve.cpp
+    test_renderer/test_apply_config.cpp
     test_renderer/test_vulkan_device.cpp
     test_renderer/test_brdf_lut_gpu.cpp
     test_renderer/test_environment_cubemap.cpp
@@ -314,6 +315,29 @@ else()
 endif()
 target_compile_definitions(libquantiloom_tests
     PRIVATE QUANTILOOM_SOURCE_ROOT="${_ql_source_root}")
+
+# The compiled shaders, beside the test binary. A test that builds a ray
+# tracing pipeline -- ApplyConfig's do -- loads them by name from the working
+# directory or the executable's, the same as the CLI does, and throws when they
+# are not there. Mirrors the POST_BUILD copy in src/app/CMakeLists.txt.
+if(NOT QUANTILOOM_STANDALONE_TESTS)
+    add_custom_command(
+        TARGET libquantiloom_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/spectral_reconstruct.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+            "$<TARGET_FILE_DIR:libquantiloom_tests>"
+        COMMENT "Copying shaders next to the test binary"
+    )
+    add_dependencies(libquantiloom_tests CompileShaders)
+endif()
 
 # ============================================================================
 # Link Libraries

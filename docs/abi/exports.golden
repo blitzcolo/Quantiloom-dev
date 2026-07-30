@@ -142,6 +142,7 @@ public: static void quantiloom::Log::Warn(class std::basic_string_view<char,stru
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig &&)
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig const &)
 public: struct quantiloom::AtmosphereNNConfig const & quantiloom::ExternalRenderContext::GetAtmosphere(void)const
+public: struct quantiloom::ConfigApplyReport quantiloom::ExternalRenderContext::ApplyConfig(class quantiloom::Config const &,struct quantiloom::ConfigApplyOptions const &)
 public: struct quantiloom::ExternalRenderContext::CLAHEParams const & quantiloom::ExternalRenderContext::GetCLAHEParams(void)const
 public: struct quantiloom::LightingParams const & quantiloom::ExternalRenderContext::GetLightingParams(void)const
 public: struct quantiloom::Material & quantiloom::Material::operator=(struct quantiloom::Material &&)

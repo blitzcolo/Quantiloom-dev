@@ -9,6 +9,7 @@
 #include <vk_mem_alloc.h>
 
 #include "renderer/ExternalRenderContext.hpp"
+#include "renderer/ConfigResolve.hpp"
 #include "renderer/RenderCore.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
@@ -598,6 +599,25 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     width = params.width;
     height = params.height;
 
+    // The presenting blit is the only thing between linear radiance and the
+    // screen, so the target format's transfer function is what encodes it. A
+    // non-sRGB target displays linear values uncorrected -- about a stop and a
+    // half dark, and easy to mistake for an underexposed scene. This field was
+    // stored and never read for a long time; checking it is what it is for.
+    switch (targetColorFormat) {
+        case VK_FORMAT_B8G8R8A8_SRGB:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
+            break;
+        default:
+            QL_LOG_WARN("Target colour format {} has no sRGB encoding: the present "
+                        "blit will write linear radiance uncorrected and the viewport "
+                        "will read darker than an equivalent CLI render. Ask the "
+                        "windowing layer for an sRGB swapchain format.",
+                        static_cast<int>(targetColorFormat));
+            break;
+    }
+
     // Set pipeline cache path (use provided path or platform-specific default)
     if (!params.pipelineCacheDir.empty()) {
         pipelineCachePath = (std::filesystem::path(params.pipelineCacheDir) / "pipeline_cache.bin").string();
@@ -688,6 +708,153 @@ Result<void, String> ExternalRenderContext::LoadScene(const Config& config) {
     m_impl->AdoptScene(std::move(scene.value()));
     ResetAccumulation();
     return Result<void, String>::Ok();
+}
+
+ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
+                                                     const ConfigApplyOptions& options) {
+    ConfigApplyReport report;
+
+    // 1. Read the file before touching any GPU state, so a config that cannot
+    //    be honoured leaves the context as it was rather than half-replaced.
+    auto resolvedResult = rendercore::ResolveRenderConfig(config, options, report);
+    if (!resolvedResult.has_value()) {
+        return report;  // The messages already say why; ok() is false.
+    }
+    auto resolved = std::move(resolvedResult.value());
+
+    // 2. The scene itself.
+    auto sceneResult = rendercore::LoadSceneFromConfig(config);
+    if (!sceneResult.has_value()) {
+        report.messages.push_back({ConfigApplyMessage::Severity::Error, "scene",
+                                   "Failed to load scene: " + sceneResult.error()});
+        QL_LOG_ERROR("ApplyConfig: failed to load scene: {}", sceneResult.error());
+        return report;
+    }
+    Scene loadedScene = std::move(sceneResult.value());
+
+    if (loadedScene.materials.empty()) {
+        loadedScene.materials.push_back(
+            Material::CreateLambertian(resolved.defaultAlbedo, "DefaultMaterial"));
+    }
+
+    // 3. Everything the config says about materials, which needs the scene:
+    //    curves, refractive indices, the IR temperature backfill, [[materials]].
+    auto spectraResult =
+        rendercore::ResolveMaterialSpectra(config, loadedScene, resolved, options, report);
+    if (!spectraResult.has_value()) {
+        report.messages.push_back({ConfigApplyMessage::Severity::Error, "materials",
+                                   spectraResult.error()});
+        return report;
+    }
+    auto spectra = std::move(spectraResult.value());
+
+    // The CLI hands the resolved slots to BuildMaterialBuffer as a side table;
+    // this path has no such table, because UpdateGpuResources() reads the
+    // indices off each Material. Same mapping, written where this side looks
+    // for it -- and it must happen before AdoptScene, which builds the buffer.
+    for (auto& mat : loadedScene.materials) {
+        if (auto it = spectra.materialNameToCurve.find(mat.name);
+            it != spectra.materialNameToCurve.end()) {
+            mat.spectralReflectanceCurveIndex = it->second;
+        }
+        if (auto it = spectra.materialNameToRefractiveIndex.find(mat.name);
+            it != spectra.materialNameToRefractiveIndex.end()) {
+            mat.complexRefractiveIndexIndex = it->second;
+        }
+    }
+
+    // 4. Render state before the scene, so the one rebuild AdoptScene triggers
+    //    already builds the material buffer at the right wavelength. Setting it
+    //    afterwards would work and rebuild everything a second time.
+    m_impl->spectralMode = resolved.mode;
+    m_impl->wavelength_nm = resolved.wavelengthNm;
+    m_impl->spp = resolved.spp;
+    m_impl->samplingSeed = resolved.seed;
+    if (options.applyDebugMode) {
+        m_impl->debugMode = static_cast<DebugVisualizationMode>(resolved.debugMode);
+    }
+
+    // The curve and refractive-index tables the material indices point into.
+    // Uploaded directly rather than through AddSpectralCurve, which rebuilds
+    // the whole buffer per curve and would do so before the scene exists.
+    m_impl->spectralCurveEntries = spectra.curves;
+    m_impl->criEntries = spectra.refractiveIndices;
+    if (!m_impl->spectralCurveEntries.empty()) {
+        const size_t bytes = m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
+        m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+            m_impl->contextAdapter->GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
+    }
+    if (!m_impl->criEntries.empty()) {
+        const size_t bytes = m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU);
+        m_impl->criBuffer = std::make_unique<GpuBuffer>(
+            m_impl->contextAdapter->GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_impl->criBuffer->Upload(m_impl->criEntries.data(), bytes);
+    }
+
+    // 5. One GPU rebuild: textures, acceleration structures, material buffer,
+    //    pipeline. CreatePipeline binds whatever buffers are current, which is
+    //    why the two above are already in place.
+    m_impl->AdoptScene(std::move(loadedScene));
+    report.sceneLoaded = true;
+
+    // 6. Illuminant, then lighting. UploadLightingParams is the only legal
+    //    writer of that buffer -- it substitutes the atmosphere's air
+    //    temperature while a bake is active.
+    if (resolved.solarSunSky) {
+        SetSolarSpectralLUT(resolved.solarSunSky->first, resolved.solarSunSky->second);
+    }
+    m_impl->lightingParams = resolved.lighting;
+    m_impl->UploadLightingParams();
+
+    // 7. Atmosphere. The bake itself is lazy, on the first frame that needs it.
+    SetAtmosphere(resolved.atmosphere);
+
+    // 8. Camera. AdoptScene took the scene file's camera; the config is the
+    //    document of record and overrides it. Aspect ratio stays the
+    //    viewport's, not the config resolution's -- see the report for that.
+    m_impl->camera = resolved.camera;
+    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) /
+                                  static_cast<f32>(m_impl->height));
+
+    if (!resolved.environmentMap.empty()) {
+        if (auto envResult = LoadEnvironmentMap(resolved.environmentMap);
+            !envResult.has_value()) {
+            report.messages.push_back({ConfigApplyMessage::Severity::Warning,
+                                       "renderer.environment_map", envResult.error()});
+            QL_LOG_WARN("ApplyConfig: {}", envResult.error());
+        }
+    }
+
+    SetGPUSensorParams(resolved.sensor);
+    SetGPUSensorEnabled(resolved.sensorEnabled);
+
+    if (resolved.hasHyperspectralSection) {
+        report.messages.push_back(
+            {ConfigApplyMessage::Severity::Info, "hyperspectral",
+             "[hyperspectral] describes a cube render, which is a separate "
+             "non-progressive renderer -- this context ignores it and previews "
+             "the scene in its spectral mode instead."});
+    }
+    if (resolved.mode == SpectralMode::Multispectral) {
+        report.messages.push_back(
+            {ConfigApplyMessage::Severity::Warning, "spectral.mode",
+             "spectral.mode = \"multispectral\" renders a cube, which this "
+             "context cannot do progressively. Previewing in RGB instead."});
+        QL_LOG_WARN("ApplyConfig: multispectral previewed as RGB");
+        m_impl->spectralMode = SpectralMode::RGB;
+    }
+
+    ResetAccumulation();
+
+    QL_LOG_INFO("ApplyConfig: {} spectral curve(s), {} refractive index(es), "
+                "{} material(s) backfilled, {} overridden, atmosphere {}",
+                report.spectralCurvesLoaded, report.refractiveIndicesLoaded,
+                report.materialsTemperatureBackfilled, report.materialsOverridden,
+                report.atmosphereEnabled ? "on" : "off");
+    return report;
 }
 
 // Everything here frees GPU memory the previous scene owned before allocating
