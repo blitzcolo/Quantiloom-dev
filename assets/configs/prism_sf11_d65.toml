@@ -1,0 +1,105 @@
+# SF11 prism under D65 with a blue sky -- the neutral-white-point variant.
+#
+# Same geometry and same glass as prism_sf11_showcase.toml. The only difference
+# is the illuminant, and it is the difference between a render that looks warm
+# and one that looks neutral.
+#
+# WHY THE OTHER SCENES LOOK RED, WHICH IS NOT A BUG
+#
+# They use `solar_lut = "equal_energy"`, CIE illuminant E: a flat spectrum, no
+# wavelength favoured. That is the right choice for looking at a material or a
+# prism without an illuminant's colour on top of it -- but a flat spectrum is
+# NOT sRGB white. Illuminant E sits at the equal-energy chromaticity (1/3, 1/3)
+# while sRGB is referenced to D65 (0.3127, 0.3290), so equal energy renders as
+#
+#     linear sRGB (1.2048, 0.9484, 0.9086)   ->   R/B = 1.326
+#
+# and a scene lit by it comes out 33% warm. Measured on prism_dispersion.toml:
+# the render's channel means give R/B = 1.3260 against the illuminant's own
+# 1.3260 -- to four figures, so the cast is entirely the illuminant's and
+# nothing else in the scene is tinting anything. There is a unit test pinning
+# this exact triple (SpectralColour.EqualEnergySitsAtTheEqualEnergyPointNot-
+# AtSrgbWhite).
+#
+# D65 is sRGB white by construction, so this scene renders neutral: measured
+# sun colour [0.9999, 1, 0.9995].
+#
+# THE SKY
+#
+# assets/luts/CIE_std_illum_D65.csv carries ONE spectrum, so pointing at it
+# directly means `solar_lut_columns = [2, 0]` -- no diffuse column -- and the
+# sky goes black, costing the scene an order of magnitude of light. This config
+# uses the paired file instead, whose column 3 is a Rayleigh-scattered sky:
+#
+#     sky(lambda) = D65(lambda) * (lambda/560)^-4,  8% of the beam's luminance
+#     -> linear sRGB (0.0392, 0.0813, 0.1872),  B/R = 4.8
+#
+# That is single-scattering Rayleigh and nothing else -- no ozone Chappuis
+# band, no aerosol, no multiple scattering, no angular variation. It is a
+# plausible blue sky for an sRGB-referenced test render, not an atmosphere. Use
+# [atmosphere] for that; it is a MODTRAN surrogate and covers every band.
+#
+# EXPECT A COOL RENDER, and know why before reaching for the knobs. Pure
+# Rayleigh at lambda^-4 gives B/R = 4.8, which is bluer than a photograph
+# because a real clear sky also carries aerosol scattering that is nearly
+# wavelength-neutral and dilutes it. On top of that, this scene is a glass prism
+# against an empty background, so much of the frame is the prism picking up the
+# environment -- which is the sky. Measured here: the sun-lit 1% sits at
+# R/B = 0.51 rather than the sun's own 1.00.
+#
+#   python3 scripts/make_d65_sun_sky.py --exponent 3 --sky-fraction 0.08
+#
+# softens it to B/R = 3.2, closer to what a camera records. The exponent is a
+# physical claim, so it is 4 by default; lowering it is choosing to model
+# aerosol crudely rather than not at all.
+#
+# `solar_lut_normalise = "unit_luminance"` divides BOTH curves by the SUN's
+# luminance, not each by its own, which is what preserves the 8% ratio between
+# them. Scaling them separately would throw away the one thing a measured pair
+# actually tells you.
+#
+# Geometry, generated:
+#   python3 scripts/render-tests/make_prism_scene.py --glass SF11 --side 2.0 \
+#       --out assets/models/prism_sf11.gltf
+#
+# STAGING: the same caveat as prism_sf11_showcase.toml applies -- the dispersion
+# here is real but faint, because the background behind the prism is smooth and
+# a bent view of a smooth thing is still smooth. This config exists to show the
+# white point, not the spectrum.
+
+[renderer]
+resolution = [512, 512]
+spp = 512
+output = "prism_sf11_d65.exr"
+seed = 12345
+
+[spectral]
+mode = "rgb"
+
+[camera]
+# Along -X, so rays enter one slanted face and leave the other. A camera looking
+# along -Z would pass through the two parallel triangular caps instead, which is
+# a glass slab and deviates nothing.
+position = [3.0, 1.0, 0.0]
+look_at = [0.0, 1.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[scene]
+gltf = "assets/models/prism_sf11.gltf"
+world_units_to_meters = 1.0
+
+[lighting]
+sun_direction = [-0.75, 0.45, 0.48]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.15, 0.15, 0.15]
+
+solar_lut = "assets/luts/D65_sun_rayleigh_sky.csv"
+solar_lut_columns = [2, 3]
+solar_lut_normalise = "unit_luminance"
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[sensor]
+enabled = false
