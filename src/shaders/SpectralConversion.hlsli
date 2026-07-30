@@ -434,11 +434,24 @@ float3 ConvertXYZToLinearRGB(float3 XYZ) {
          0.0557, -0.2040,  1.0570
     );
 
-    float3 rgb_linear = mul(XYZ_TO_RGB, XYZ);
-
-    // Clamp negative values (can occur due to out-of-gamut colors)
-    // In production, you might want to use gamut mapping instead
-    return max(rgb_linear, 0.0);
+    // Returned UNCLAMPED. An out-of-gamut colour has negative channels and that
+    // is information, not an error: a narrow-band or monochromatic spectrum is
+    // always out of gamut, and its negative channels are what cancel against
+    // other wavelengths' positive ones when a spectrum is integrated or when
+    // Monte Carlo samples over wavelength are averaged.
+    //
+    // This used to `return max(rgb_linear, 0.0)`, and that clamp was a bias
+    // rather than a safety net. At 590 nm the blue channel is genuinely about
+    // -0.0961 per unit XYZ; zeroing it made the hero-wavelength estimator
+    // converge to the wrong answer no matter how many samples it took.
+    //
+    // Non-spectral callers are unaffected: the VIS_FUSED paths in
+    // closesthit.rchit and miss.rmiss both clamp output_radiance to [0, 1000]
+    // a few lines later, so a broadband result is bounded exactly as before.
+    // Only a value that must survive further arithmetic -- one wavelength's
+    // contribution, on its way to being summed with others -- reaches a caller
+    // that does not clamp.
+    return mul(XYZ_TO_RGB, XYZ);
 }
 
 // ============================================================================

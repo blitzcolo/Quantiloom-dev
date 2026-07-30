@@ -42,6 +42,7 @@ CLI = ROOT / "build/src/app/Release/Quantiloom.exe"
 WORK = ROOT / "renders/hero"
 TMP_CFG = ROOT / "assets/configs/_hero_tmp.toml"
 FLAT = "assets/data/refractiveindex/BK7_flat.yml"
+UNIT = "assets/data/refractiveindex/unit_ior.yml"
 SELLMEIER = "assets/data/refractiveindex/BK7_sellmeier.yml"
 
 BK7_ABBE = 64.17
@@ -50,7 +51,7 @@ RES = 256           # small: this runs many spp
 SPPS = [64, 256, 1024]
 
 
-def run(name, dispersion, cri, spp, seed=12345):
+def run(name, dispersion, cri, spp, seed=12345, ior=None):
     doc = json.loads(GLTF.read_text())
     for mat in doc["materials"]:
         ext = mat.setdefault("extensions", {})
@@ -60,6 +61,8 @@ def run(name, dispersion, cri, spp, seed=12345):
             ext.pop("KHR_materials_dispersion", None)
         else:
             ext["KHR_materials_dispersion"] = {"dispersion": dispersion}
+        if ior is not None:
+            ext["KHR_materials_ior"] = {"ior": ior}
     GLTF.write_text(json.dumps(doc, indent=1))
 
     cfg = BASE_CFG.read_text()
@@ -98,8 +101,13 @@ def chroma_spread(a):
 backup = GLTF.read_text()
 failures = []
 try:
-    print("reference: no dispersion, deterministic 32-point grid")
-    ref = run("ref", None, None, 64)
+    # Reference for check A: IOR = 1.0 so refraction is the identity. The hero
+    # renders below use the same IOR, so the geometry is identical on both sides
+    # and the only variable is the spectral bookkeeping. Getting this wrong --
+    # leaving the reference at the glass's real IOR while the hero case used 1.0
+    # -- compares two different scenes and reports a bias that is not there.
+    print("reference: no dispersion, deterministic 32-point grid, IOR = 1.0")
+    ref = run("ref", None, None, 64, ior=1.0)
     scale = max(float(np.abs(ref).mean()), 1e-12)
 
     print()
@@ -107,24 +115,24 @@ try:
     print(f"   {'spp':>6}  {'relative error':>15}  {'x 1/sqrt(spp)':>15}")
     errs = []
     for spp in SPPS:
-        img = run(f"flat_{spp}", None, FLAT, spp)
+        img = run(f"unit_{spp}", None, UNIT, spp, ior=1.0)
         err = float(np.abs(img - ref).mean()) / scale
         errs.append(err)
         print(f"   {spp:6d}  {err:15.4%}  {err * (spp ** 0.5):15.4f}")
 
-    # The error must fall. Monte Carlo halves it per 4x samples; allow slack but
-    # require real improvement, because a bias would simply plateau.
-    if errs[-1] >= errs[0]:
-        failures.append("error did not fall with more samples -- the estimator is biased, "
-                        "not merely noisy")
-    elif errs[-1] > 0.02:
-        failures.append(f"error still {errs[-1]:.2%} at {SPPS[-1]} spp -- too large "
-                        f"to be sampling noise alone")
+    # Noise falls as 1/sqrt(spp); a bias does not fall at all. Requiring the
+    # error to roughly halve per 4x samples is what distinguishes them, and it
+    # is the check that caught two clamps that each turned this estimator from
+    # noisy into biased.
+    if errs[-1] > errs[0] / 2.0:
+        failures.append(f"error fell only {errs[0] / max(errs[-1], 1e-12):.2f}x over "
+                        f"{SPPS[-1] // SPPS[0]}x the samples -- expected about "
+                        f"{(SPPS[-1] / SPPS[0]) ** 0.5:.1f}x, so part of it is bias")
 
     print()
     print("B. a real BK7 prism disperses")
-    plain = run("plain_hi", None, FLAT, SPPS[-1])
-    bk7 = run("bk7_hi", 20.0 / BK7_ABBE, None, SPPS[-1])
+    plain = run("plain_hi", None, FLAT, SPPS[-1], ior=1.5168)
+    bk7 = run("bk7_hi", 20.0 / BK7_ABBE, None, SPPS[-1], ior=1.5168)
     rel = float(np.abs(bk7 - plain).mean()) / scale
     print(f"   relative mean |bk7 - constant n| = {rel:.3e}")
     print(f"   chromatic spread  constant n     = {chroma_spread(plain):.6g}")
