@@ -1,0 +1,94 @@
+# A prism spectroscope: bright slit, SF11 prism, camera at minimum deviation.
+#
+# This is the scene that actually shows dispersion, and the reason the two
+# before it did not is worth stating, because both failures were physical
+# rather than bugs:
+#
+#   - A camera looking along -Z passes through the prism's two triangular caps.
+#     Those are PARALLEL, so the net deviation is zero -- a glass slab. No
+#     dispersion, correctly.
+#   - Looking along -X hits the slanted faces and does deviate by 66 degrees,
+#     but a prism in front of a FEATURELESS background still shows nothing:
+#     every wavelength lands on the same uniform brightness. Dispersion is only
+#     visible where the thing being refracted has an edge.
+#
+# So this scene supplies the missing ingredient: a compact bright source, in an
+# otherwise dark room. That is what a spectroscope is.
+#
+# The geometry is solved rather than guessed:
+#   python3 scripts/render-tests/make_spectroscope_scene.py \
+#       --glass SF11 --base-y 4.2 --slit-distance 5.5
+#
+# It traces Snell's law through both faces at minimum deviation, checks the
+# internal ray comes out parallel to the base (|dy| = 0.0000, the symmetric
+# case), and places the slit on the exit ray. It prints the camera position
+# below. SF11 at a 60-degree apex deviates 66.34 degrees, with 400 nm bent
+# 9.73 degrees further than 780 nm.
+#
+# There is no floor and no sky on purpose -- sun and sky radiance are zero and
+# the only light in the scene is the slit. A dark room is what makes a spectrum
+# readable; it is also why no solar_lut is needed here, since nothing but
+# emissive material emits.
+#
+# ============================================================================
+# STAGING UNRESOLVED -- this scene does not currently show a spectrum, and the
+# reason is the renderer, not the camera. Do not treat it as a demonstration.
+# ============================================================================
+#
+# There is NO next-event estimation for emissive geometry. Emissive contributes
+# only when a path happens to hit the emitting surface; the only explicitly
+# sampled light is the directional sun, which gets a shadow ray. A small bright
+# quad in an otherwise dark room is therefore the worst case this renderer has:
+#
+#   - the frame is mostly black, because most paths never find the slit
+#   - it needs thousands of samples before the noise settles
+#   - the slit reads as a flat white band that does not change with viewing
+#     angle, which is what emissive looks like when seen DIRECTLY rather than
+#     through the prism
+#
+# That last one is the tell. Emission is view-independent, so a band whose
+# colour never changes as the camera orbits is the source itself, not a
+# refracted image of it. No amount of re-aiming fixes that.
+#
+# A spectroscope wants either next-event estimation for area lights, or a
+# different design that uses what this renderer samples well: the sun, with its
+# explicit shadow ray, lighting a high-contrast EDGE that the prism then
+# spreads. See docs/participating-media-and-dispersion.md.
+#
+# What IS trustworthy here is the geometry solver that produced the asset:
+# make_spectroscope_scene.py traces Snell's law through both faces and checks
+# the internal ray comes out parallel to the base (|dy| = 0.0000, the symmetric
+# minimum-deviation case), reproducing the analytic 66.34 deg deviation.
+
+[renderer]
+resolution = [512, 512]
+spp = 2048
+output = "prism_spectroscope.exr"
+seed = 12345
+
+[spectral]
+mode = "vis_fused"
+
+[camera]
+# From the solver: on the entry ray, 3.2 units back from the right slanted face.
+position = [3.079, 3.142, 0.0]
+look_at = [0.400, 4.893, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 30.0
+
+[scene]
+gltf = "assets/models/prism_spectroscope.gltf"
+world_units_to_meters = 1.0
+
+[lighting]
+# Dark room. Both zero, so the illuminant validation does not ask for a
+# solar_lut: nothing here is lit by a sun or a sky.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[sensor]
+enabled = false

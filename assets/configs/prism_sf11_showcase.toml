@@ -1,0 +1,86 @@
+# Dispersion showcase: an SF11 dense-flint prism, VIS_FUSED, hero wavelength.
+#
+# The physics is the same as prism_dispersion.toml; this one is staged so the
+# effect is actually visible. Three levers, in order of how much they buy:
+#
+#   1. GLASS. Angular separation of a 60-degree prism at minimum deviation,
+#      400 to 780 nm:
+#           BK7  (crown,       Abbe 64.17)   1.71 deg
+#           SF11 (dense flint, Abbe 25.76)   9.73 deg   <- this scene
+#           SF57 (extra dense, Abbe 23.83)  13.84 deg
+#      At 45 deg vertical field over 512 px, one degree is about 11 px, so BK7
+#      spreads the spectrum over ~19 px and SF11 over ~110 px. Same code, same
+#      formula; the only difference is a real material property.
+#   2. SIZE IN FRAME. Edge 2.0 rather than 1.2, camera closer. Dispersion happens
+#      at the refracting faces, so more of the frame being prism means more of
+#      the frame carrying the effect.
+#   3. THE RAYS MUST HIT THE SLANTED FACES. The prism is extruded along Z, so
+#      its two slanted faces have normals in the XY plane and all deviation
+#      happens there. A camera looking along -Z goes in one triangular cap and
+#      out the other -- two PARALLEL surfaces, net deviation zero, a glass slab.
+#      That is what the first version of this scene did, and it produced no
+#      dispersion at all for a perfectly good reason.
+#      The camera therefore looks along -X. At minimum deviation SF11 bends the
+#      view 66.3 deg, and 400 nm is deviated 9.73 deg further than 780 nm
+#      (73.6 vs 63.9).
+#   4. CONTRAST BEHIND IT. What disperses is whatever the prism refracts, so a
+#      featureless background shows nothing however dispersive the glass -- every
+#      wavelength lands on the same uniform brightness. The horizon, where floor
+#      meets sky, is the sharp edge this scene relies on.
+#
+# Geometry is generated:
+#   python3 scripts/render-tests/make_prism_scene.py --glass SF11 --side 2.0 \
+#       --out assets/models/prism_sf11.gltf
+#
+# spp is high on purpose. Hero wavelength sampling puts the Monte Carlo noise in
+# the wavelength dimension, so a dispersing surface needs samples the way a
+# rough surface needs them. Nothing outside a dispersive refraction is affected.
+#
+# ============================================================================
+# STAGING UNRESOLVED. The dispersion here is real but faint -- 0.10% against the
+# same glass with a constant n(lambda). Measured, not guessed: the chromatic
+# spread of this render is 3.70e-04 and of the constant-n control 3.63e-04, so
+# nearly all the colour you see is hero-sampling NOISE, not dispersion.
+#
+# The cause is item 4 above. The background behind the prism is smooth floor and
+# smooth sky, and bending a view of a smooth thing by nine degrees still shows a
+# smooth thing. Dispersion needs an edge to spread, and this scene does not put
+# one where the deviated view lands.
+# ============================================================================
+
+[renderer]
+resolution = [512, 512]
+spp = 512
+output = "prism_sf11_showcase.exr"
+seed = 12345
+
+[spectral]
+mode = "vis_fused"
+
+[camera]
+# Along -X, so rays enter one slanted face and leave the other. Near eye level
+# so the horizon passes behind the prism and gives the deviation something with
+# contrast to spread.
+position = [3.0, 1.0, 0.0]
+look_at = [0.0, 1.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[scene]
+gltf = "assets/models/prism_sf11.gltf"
+world_units_to_meters = 1.0
+
+[lighting]
+sun_direction = [-0.75, 0.45, 0.48]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.15, 0.15, 0.15]
+
+# Equal energy, so the colours in the fan are the prism's doing and not the
+# illuminant's. A flat spectrum favours no wavelength.
+solar_lut = "equal_energy"
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[sensor]
+enabled = false

@@ -1,0 +1,147 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "Quantiloom scripts/render-tests/make_prism_scene.py"
+ },
+ "extensionsUsed": [
+  "KHR_materials_transmission",
+  "KHR_materials_ior",
+  "KHR_materials_dispersion"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0,
+    1
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "mesh": 0,
+   "name": "Prism"
+  },
+  {
+   "mesh": 1,
+   "name": "Floor"
+  }
+ ],
+ "meshes": [
+  {
+   "name": "Prism",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0
+     },
+     "indices": 1,
+     "material": 0
+    }
+   ]
+  },
+  {
+   "name": "Floor",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0
+     },
+     "indices": 2,
+     "material": 1
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "PrismGlass_BK7",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     1.0,
+     1.0,
+     1.0,
+     1.0
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.0
+   },
+   "extensions": {
+    "KHR_materials_transmission": {
+     "transmissionFactor": 1.0
+    },
+    "KHR_materials_ior": {
+     "ior": 1.7847
+    },
+    "KHR_materials_dispersion": {
+     "dispersion": 0.7763975155279502
+    }
+   }
+  },
+  {
+   "name": "Floor_Diffuse",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0.8,
+     0.8,
+     0.8,
+     1.0
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 1.0
+   }
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 30,
+   "type": "VEC3",
+   "min": [
+    -8.0,
+    0.0,
+    -8.0
+   ],
+   "max": [
+    8.0,
+    1.9320508075688771,
+    8.0
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5123,
+   "byteOffset": 0,
+   "count": 24,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5123,
+   "byteOffset": 48,
+   "count": 6,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 360,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 360,
+   "byteLength": 60,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 420,
+   "uri": "data:application/octet-stream;base64,AACAv83MTD4AAIA/AACAP83MTD4AAIA/AAAAAHFN9z8AAIA/AAAAAHFN9z8AAIC/AACAP83MTD4AAIC/AACAv83MTD4AAIC/AACAv83MTD4AAIA/AACAv83MTD4AAIC/AACAP83MTD4AAIC/AACAv83MTD4AAIA/AACAP83MTD4AAIC/AACAP83MTD4AAIA/AACAP83MTD4AAIA/AACAP83MTD4AAIC/AAAAAHFN9z8AAIC/AACAP83MTD4AAIA/AAAAAHFN9z8AAIC/AAAAAHFN9z8AAIA/AAAAAHFN9z8AAIA/AAAAAHFN9z8AAIC/AACAv83MTD4AAIC/AAAAAHFN9z8AAIA/AACAv83MTD4AAIC/AACAv83MTD4AAIA/AAAAwQAAAAAAAADBAAAAQQAAAAAAAADBAAAAQQAAAAAAAABBAAAAwQAAAAAAAADBAAAAQQAAAAAAAABBAAAAwQAAAAAAAABBAAABAAIAAwAEAAUABgAHAAgACQAKAAsADAANAA4ADwAQABEAEgATABQAFQAWABcAGAAZABoAGwAcAB0A"
+  }
+ ]
+}

@@ -16,25 +16,39 @@ and B should come out at 0.00420 um^2.
 
 Writes assets/models/prism_dispersion.gltf (self-contained, base64 buffer).
 """
+import argparse
 import base64
 import json
 import math
 import pathlib
 import struct
 
-OUT = pathlib.Path(__file__).resolve().parents[2] / "assets/models/prism_dispersion.gltf"
+GLASSES = {
+    # name:      (n_d,    Abbe V_d)  -- angular separation of a 60 deg prism at
+    #                                   minimum deviation, 400 to 780 nm
+    "BK7":  (1.5168, 64.17),   # crown, 1.7 deg  -- realistic but subtle
+    "SF11": (1.7847, 25.76),   # dense flint, 9.7 deg -- the demonstration glass
+    "SF57": (1.8467, 23.83),   # extra dense flint, 13.8 deg
+}
 
-BK7_IOR = 1.5168
-BK7_ABBE = 64.17
+ap = argparse.ArgumentParser(description=__doc__)
+ap.add_argument("--glass", choices=sorted(GLASSES), default="BK7")
+ap.add_argument("--side", type=float, default=1.2, help="prism edge length")
+ap.add_argument("--out", default="assets/models/prism_dispersion.gltf")
+args = ap.parse_args()
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+OUT = ROOT / args.out
+GLASS_IOR, GLASS_ABBE = GLASSES[args.glass]
 
 # ---------------------------------------------------------------------------
 # Geometry
 # ---------------------------------------------------------------------------
 # Equilateral triangular prism, apex up, extruded along Z. Side 1.2, so the
 # apex angle is 60 degrees -- the classic dispersing prism.
-SIDE = 1.2
+SIDE = args.side
 H = SIDE * math.sqrt(3) / 2.0
-Z0, Z1 = -0.6, 0.6
+Z0, Z1 = -SIDE / 2.0, SIDE / 2.0
 BASE_Y = 0.2  # lifted off the floor so refracted rays can reach it
 
 tri = [
@@ -126,7 +140,7 @@ gltf = {
     ],
     "materials": [
         {
-            "name": "PrismGlass_BK7",
+            "name": "PrismGlass_BK7",  # kept stable: configs reference it by name
             "pbrMetallicRoughness": {
                 "baseColorFactor": [1.0, 1.0, 1.0, 1.0],
                 "metallicFactor": 0.0,
@@ -134,12 +148,12 @@ gltf = {
             },
             "extensions": {
                 "KHR_materials_transmission": {"transmissionFactor": 1.0},
-                "KHR_materials_ior": {"ior": BK7_IOR},
+                "KHR_materials_ior": {"ior": GLASS_IOR},
                 # The ratified extension stores 20/V_d, not 1/V_d. GltfLoader
                 # divides by 20 to reach Material::dispersion. Using the
                 # standard spelling on purpose -- this asset should be readable
                 # by any glTF viewer, and it also exercises that conversion.
-                "KHR_materials_dispersion": {"dispersion": 20.0 / BK7_ABBE},
+                "KHR_materials_dispersion": {"dispersion": 20.0 / GLASS_ABBE},
             },
         },
         {
@@ -183,15 +197,26 @@ OUT.write_text(json.dumps(gltf, indent=1))
 print(f"wrote {OUT}")
 print(f"  {len(positions)} vertices, {len(indices)} indices "
       f"({prism_index_count} prism + {len(indices) - prism_index_count} floor)")
-print(f"  BK7: ior={BK7_IOR}, KHR dispersion=20/{BK7_ABBE}={20.0/BK7_ABBE:.6f}"
-      f"  -> internal 1/V_d = {1.0/BK7_ABBE:.6f}")
+print(f"  {args.glass}: n_d={GLASS_IOR}, Abbe={GLASS_ABBE}, side={SIDE}")
+print(f"    KHR dispersion = 20/{GLASS_ABBE} = {20.0/GLASS_ABBE:.6f}"
+      f"  -> internal 1/V_d = {1.0/GLASS_ABBE:.6f}")
 
 
 def n_of(lam):
-    d = 1.0 / BK7_ABBE
-    return BK7_IOR + (BK7_IOR - 1.0) * d * (523655.0 / (lam * lam) - 1.5168)
+    d = 1.0 / GLASS_ABBE
+    return GLASS_IOR + (GLASS_IOR - 1.0) * d * (523655.0 / (lam * lam) - 1.5168)
 
 
 nF, nC = n_of(486.13), n_of(656.27)
-print(f"  n(587.56) = {n_of(587.56):.6f} (= n_d), n_F = {nF:.6f}, n_C = {nC:.6f}")
-print(f"  round-trip Abbe = {(BK7_IOR - 1.0) / (nF - nC):.2f} (catalogue {BK7_ABBE})")
+print(f"    n(587.56) = {n_of(587.56):.6f} (= n_d), n_F = {nF:.6f}, n_C = {nC:.6f}")
+print(f"    round-trip Abbe = {(GLASS_IOR - 1.0) / (nF - nC):.2f} (catalogue {GLASS_ABBE})")
+
+
+def deviation(n, apex_deg=60.0):
+    """Minimum deviation of a prism, which is where the spectrum is sharpest."""
+    a = math.radians(apex_deg)
+    return 2.0 * math.asin(n * math.sin(a / 2.0)) - a
+
+
+spread = math.degrees(deviation(n_of(400.0)) - deviation(n_of(780.0)))
+print(f"    angular separation 400-780 nm at minimum deviation: {spread:.2f} deg")
