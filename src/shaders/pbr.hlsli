@@ -223,6 +223,44 @@ float ComputeF0_Scalar(float spectralAlbedo, float metallic,
 }
 
 // ============================================================================
+// Refraction Index at a Wavelength
+// ============================================================================
+// The n that Snell's law and the dielectric Fresnel term should use, in
+// priority order:
+//
+//   1. MEASURED n(λ) from the material's refractive-index table (binding 14,
+//      loaded from a refractiveindex.info YAML). This is real data over the
+//      wavelengths it covers, and it is right where a Cauchy fit is not:
+//      the infrared, and any region of anomalous dispersion.
+//   2. Two-term Cauchy from n_d and the Abbe number.
+//
+// The table was already being loaded and bound -- it is what gives metals
+// their wavelength-dependent F0 above -- but refraction ignored it and used
+// `material.ior` with a Cauchy fit. For a renderer covering 380-15000 nm that
+// is backwards: the fit is the fallback, the measurement is the answer.
+//
+// Only the real part is used. k is absorption, which belongs to Fresnel and to
+// Beer-Lambert, not to the refraction angle.
+//
+// @param wavelength_nm  Pass 0 to mean "no wavelength in this mode" (RGB),
+//                       which falls through to the material's n_d.
+// ============================================================================
+
+float RefractionIOR(MaterialData material, float wavelength_nm) {
+    if (wavelength_nm <= 0.0) {
+        return material.ior;
+    }
+    if (material.complexRefractiveIndexIndex >= 0) {
+        ComplexRefractiveIndexGPU cri =
+            complexRefractiveIndices[material.complexRefractiveIndexIndex];
+        return SampleComplexRefractiveIndex(cri, wavelength_nm).x;
+    }
+    // Degenerates to material.ior when dispersion is 0, so this is safe as the
+    // single entry point for every refraction site.
+    return CauchyIOR(material.ior, material.dispersion, wavelength_nm);
+}
+
+// ============================================================================
 // Cook-Torrance Microfacet BRDF
 // ============================================================================
 // Full PBR BRDF combining diffuse and specular terms

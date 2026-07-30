@@ -732,7 +732,35 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
         if (dispExt.Has("dispersion")) {
             mat.dispersion = static_cast<f32>(dispExt.Get("dispersion").GetNumberAsDouble());
-            QL_LOG_INFO("    dispersion: {:.6f}", mat.dispersion);
+            QL_LOG_INFO("    dispersion: {:.6f} (1/Abbe)", mat.dispersion);
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_dispersion (ratified Khronos extension)
+    // ========================================================================
+    // The standard way to say this, and the one an asset downloaded from
+    // anywhere will use. Read after the custom extension above so that it wins
+    // when a file carries both.
+    //
+    // UNIT CONVERSION, and it is 20x: the extension stores **20/V_d**, chosen
+    // so that 1.0 lands on V_d = 20, about the lowest Abbe number a real
+    // material has. Material::dispersion holds **1/V_d**. Loading the property
+    // straight through would make every glass twenty times as dispersive as
+    // its own Abbe number says, which looks like a bug in the shader.
+    // ========================================================================
+    if (auto khrDispIt = gltfMaterial.extensions.find("KHR_materials_dispersion");
+        khrDispIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_dispersion extension for material '{}'", mat.name);
+
+        const tinygltf::Value& khrDisp = khrDispIt->second;
+
+        if (khrDisp.Has("dispersion")) {
+            const f64 khrValue = khrDisp.Get("dispersion").GetNumberAsDouble();
+            mat.dispersion = static_cast<f32>(khrValue / 20.0);
+            QL_LOG_INFO("    dispersion: {:.6f} (20/Abbe) -> {:.6f} (1/Abbe), Abbe = {:.1f}",
+                        khrValue, mat.dispersion,
+                        mat.dispersion > 0.0f ? 1.0f / mat.dispersion : 0.0f);
         }
     }
 

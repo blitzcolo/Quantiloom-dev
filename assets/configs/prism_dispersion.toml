@@ -1,0 +1,62 @@
+# Dispersion test: a BK7 glass prism over a diffuse floor, VIS_FUSED.
+#
+# Exists because nothing in the repository dispersed. No config set
+# `dispersion`, no shipped model carried the extension, so the VIS_FUSED
+# dispersion path had nothing to render -- and until 2026-07-30 that path did
+# not disperse at all: it pinned n at 550 nm for every wavelength, leaving the
+# RGB mode better at the one phenomenon the spectral mode exists for.
+#
+# The geometry is generated, not committed by hand:
+#   python3 scripts/render-tests/make_prism_scene.py
+#
+# RGB mode on purpose: it is the only mode that disperses today, via three rays
+# at 650/550/450 nm. VIS_FUSED integrates the whole band along ONE geometric
+# path, so it cannot -- dispersion is by definition a path that depends on
+# wavelength. Fixing that is a spectral sampling change (hero wavelength); see
+# docs/participating-media-and-dispersion.md.
+#
+# What to look for: chromatic fringing where rays leave the slanted faces, blue
+# deviated more than red because n(450) > n(650).
+#
+# The prism material is BK7 (n_d = 1.5168, Abbe 64.17) declared through the
+# ratified KHR_materials_dispersion, whose property is 20/Abbe. A real glass
+# with a catalogue Abbe number, so the spread is checkable rather than a look.
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+output = "prism_dispersion.exr"
+seed = 12345
+
+[spectral]
+mode = "rgb"
+
+[camera]
+# Looking slightly down at the prism, with the floor filling the lower frame so
+# the dispersed fan has somewhere to land.
+position = [0.0, 1.6, 4.2]
+look_at = [0.0, 0.5, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[scene]
+gltf = "assets/models/prism_dispersion.gltf"
+world_units_to_meters = 1.0
+
+[lighting]
+# Low and off to one side, so rays enter one slanted face and leave the other
+# rather than passing straight through.
+sun_direction = [-0.75, 0.45, 0.48]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.05, 0.05, 0.05]
+
+# Equal energy, not D65: a flat spectrum makes the fan's own colours the
+# material's doing rather than the illuminant's. Nothing to bias which band
+# looks brightest.
+solar_lut = "equal_energy"
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[sensor]
+enabled = false

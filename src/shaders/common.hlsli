@@ -56,6 +56,7 @@
 #define SPECTRAL_LWIR_LAMBDA_MIN   8000.0
 #define SPECTRAL_LWIR_LAMBDA_MAX  12000.0
 
+
 // ============================================================================
 // Debug Visualization Modes
 // ============================================================================
@@ -652,33 +653,57 @@ float3 BeerLambertAbsorption(float3 absorptionColor, float distance, float atten
 // ============================================================================
 // Cauchy Dispersion Formula (Wavelength-Dependent IOR)
 // ============================================================================
-// Computes wavelength-dependent refractive index using Cauchy's equation.
+// This is the formula KHR_materials_dispersion specifies, which is the one the
+// glTF ecosystem agrees on:
 //
-// PHYSICS:
-//   n(λ) = A + B/λ² + C/λ⁴ + ...
-//   Simplified: n(λ) ≈ n_d + dispersion / λ²
+//   n(lambda) = max( n_d + (n_d - 1)/V_d * (523655/lambda^2 - 1.5168), 1 )
 //
-// For typical glass:
-//   - n_d (D-line, 589nm): 1.5 for crown glass, 1.7+ for flint glass
-//   - dispersion: controls color spread (related to Abbe number)
+// with lambda in NANOMETRES. `Material::dispersion` holds 1/V_d, so
+// (n_d - 1)/V_d is (n_d - 1)*dispersion.
+//
+// NOTE the extension's own property is 20/V_d, not 1/V_d -- GltfLoader divides
+// by 20 on the way in. Keep the two straight; they differ by 20x and both are
+// spelled "dispersion".
+//
+// Two things about the shape are worth not undoing:
+//
+//   - 523655 is 0.523655 um^2, i.e. 1/(1/lambda_F^2 - 1/lambda_C^2) over the F
+//     and C Fraunhofer lines. Deriving it by hand from lambda_F = 486.1 nm and
+//     lambda_C = 656.3 nm gives 0.523454 -- the same number to four figures.
+//   - The -1.5168 is NOT decoration. It anchors the curve so that
+//     n(587.56 nm) = n_d exactly, which is what makes n_d the d-line index
+//     everybody quotes. Without it n_d becomes the asymptotic index at
+//     lambda -> infinity and every n comes out high by 1.5168*(n_d - 1)/V_d --
+//     0.0122 for BK7, which is 3x BK7's entire F-to-C spread.
+//
+// Verified for BK7 (n_d = 1.5168, V_d = 64.17): n(587.56) = 1.51680,
+// n_F = 1.52243, n_C = 1.51438, giving (n_d - 1)/(n_F - n_C) = 64.15 against
+// the catalogue's 64.17.
+//
+// This replaced `n_d + dispersion*0.01/lambda_um^2`, a scaling with nothing
+// behind it that understated the spread by 52*(n_d - 1) -- 27x for BK7. It
+// produced a rainbow, but far too narrow a one, and wrong by a factor that
+// moved with the material.
+//
+// LIMITS: a visible-range fit. Inaccurate in the infrared and unable to
+// represent anomalous dispersion at all, so it is the fallback, not the
+// preference -- see RefractionIOR in pbr.hlsli, which prefers measured n(lambda).
 //
 // Input:
-//   ior_d: refractive index at D-line (589nm)
-//   dispersion: dispersion coefficient (related to 1/Abbe number)
-//   wavelength_nm: wavelength in nanometers
-//
-// Returns:
-//   Refractive index at the given wavelength
+//   ior_d: refractive index at the d-line (587.56 nm)
+//   dispersion: 1 / Abbe number (0 = no dispersion)
+//   wavelength_nm: wavelength in nanometers, or 0 for "this mode has none"
 // ============================================================================
 
 float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
-    // Convert nm to μm for numerical stability
-    float lambda_um = wavelength_nm / 1000.0;
-    float lambda_um2 = lambda_um * lambda_um;
-
-    // Cauchy formula: n(λ) = n_d + B/λ²
-    // dispersion coefficient B is scaled for reasonable values
-    return ior_d + dispersion * 0.01 / lambda_um2;
+    // Guarded here rather than at every call site: wavelength_nm is 0 in modes
+    // that have no single wavelength, and n_d is the right answer there.
+    if (dispersion <= 0.0 || wavelength_nm <= 0.0) {
+        return ior_d;
+    }
+    float n = ior_d + (ior_d - 1.0) * dispersion *
+                      (523655.0 / (wavelength_nm * wavelength_nm) - 1.5168);
+    return max(n, 1.0);
 }
 
 // ============================================================================

@@ -916,6 +916,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float  LAMBDA_MAX_VIS = SPECTRAL_VIS_LAMBDA_MAX;
         const float  LAMBDA_STEP = (LAMBDA_MAX_VIS - LAMBDA_MIN_VIS) / float(NUM_WAVELENGTH_SAMPLES - 1);
 
+
         // Accumulate XYZ tristimulus values
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
@@ -2427,10 +2428,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         recursivePayload.depth = payload.depth + 1;
         recursivePayload.rngState = rngState;
 
-        // Check if dispersion is enabled and significant
-        bool hasDispersion = (material.dispersion > 0.001) &&
-                            (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
-                             SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
+        // A material disperses if it carries an Abbe number or a measured
+        // n(lambda) table. The table is the better source and refraction used
+        // to ignore it entirely.
+        bool materialDisperses = (material.dispersion > 0.001) ||
+                                 (material.complexRefractiveIndexIndex >= 0);
+
+        // RGB only. VIS_FUSED cannot disperse: it integrates the whole band in
+        // one closest-hit invocation along one geometric path, and dispersion
+        // is by definition a path that depends on wavelength. See
+        // docs/participating-media-and-dispersion.md -- the fix is a spectral
+        // sampling change (hero wavelength), not a patch here.
+        bool hasDispersion = materialDisperses &&
+                             (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB);
 
         if (hasDispersion && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
             // ================================================================
@@ -2450,7 +2460,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             [loop]
             for (int ch = 0; ch < 3; ch++) {
                 float lambda = wavelengths[ch];
-                float ior_lambda = CauchyIOR(material.ior, material.dispersion, lambda);
+                float ior_lambda = RefractionIOR(material, lambda);
 
                 float n1 = entering ? 1.0 : ior_lambda;
                 float n2 = entering ? ior_lambda : 1.0;
@@ -2502,14 +2512,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Standard Refraction (no dispersion or single wavelength mode)
             // ================================================================
 
-            // Compute IOR (wavelength-dependent if in spectral mode with dispersion)
-            float effectiveIOR = material.ior;
-            if (material.dispersion > 0.001 && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
-                effectiveIOR = CauchyIOR(material.ior, material.dispersion, camera.wavelength_nm);
-            } else if (material.dispersion > 0.001 && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
-                // Use central visible wavelength for VIS_FUSED
-                effectiveIOR = CauchyIOR(material.ior, material.dispersion, 550.0);
-            }
+            // The wavelength this ray is accountable for, or 0 where the mode
+            // has none and n falls back to the material's n_d. RGB and
+            // VIS_FUSED have no single wavelength; SINGLE and the fused IR
+            // bands do.
+            float refractLambda =
+                (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
+                 SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED)
+                    ? 0.0 : camera.wavelength_nm;
+
+            float effectiveIOR = RefractionIOR(material, refractLambda);
 
             float n1 = entering ? 1.0 : effectiveIOR;
             float n2 = entering ? effectiveIOR : 1.0;
