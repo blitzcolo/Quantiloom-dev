@@ -228,8 +228,24 @@ void main() {
 
     float3 linearHDR = payload.radiance;
 
-    // Clamp to reasonable HDR range (prevents fireflies from dominating accumulation)
-    linearHDR = clamp(linearHDR, 0.0, 10000.0);
+    // Clamp to a reasonable HDR range, so a firefly cannot dominate the
+    // accumulation. SYMMETRIC on purpose -- the lower bound used to be 0.
+    //
+    // A sample may legitimately be negative. A hero-wavelength ray carries one
+    // wavelength, and a monochromatic radiance converted to linear sRGB lands
+    // outside the gamut: at 590 nm the blue channel is genuinely about
+    // -0.00083 for the prism scene. Those negative excursions are what cancel
+    // against other wavelengths' positive ones when the samples are averaged,
+    // and clipping each sample at zero first destroys the cancellation. It made
+    // the estimator biased rather than merely noisy -- +18% on transmission
+    // pixels, weighted towards red because R has the largest matrix
+    // coefficients and therefore the largest excursions in both directions.
+    //
+    // Bounding fireflies does not require a one-sided bound; -10000 serves that
+    // purpose as well as 0 did. Samples that reach here without a hero
+    // wavelength were already clamped non-negative by the closest-hit and miss
+    // shaders, so nothing else changes.
+    linearHDR = clamp(linearHDR, -10000.0, 10000.0);
 
     if (pushConsts.sampleIndex == 0) {
         // First sample: Initialize output with current radiance
