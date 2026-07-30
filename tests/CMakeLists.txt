@@ -244,6 +244,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_acceleration_structure.cpp
     test_renderer/test_texture_manager.cpp
     test_renderer/test_render_core.cpp
+    test_renderer/test_config_resolve.cpp
     test_renderer/test_vulkan_device.cpp
     test_renderer/test_brdf_lut_gpu.cpp
     test_renderer/test_environment_cubemap.cpp
