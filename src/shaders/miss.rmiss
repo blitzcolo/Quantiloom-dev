@@ -107,8 +107,17 @@ void main(inout Payload payload) {
 
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
-        for (uint i = 0; i < NUM_WAVELENGTH_SAMPLES; ++i) {
-            float lambda = LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP;
+        // A ray past a dispersive refraction carries one wavelength; it must
+        // bring back that wavelength's sky radiance and no more, or the caller
+        // weights the whole band by a single cmf(λ_h) and the sky arrives
+        // hundreds of times too bright.
+        const bool heroRay = (payload.heroLambda > 0.0);
+        const uint sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
+        float heroRadiance = 0.0;
+
+        for (uint i = 0; i < sampleCount; ++i) {
+            float lambda = heroRay ? payload.heroLambda
+                                   : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP);
 
             // Query sky radiance at this wavelength
             float sky_radiance_lambda;
@@ -126,6 +135,11 @@ void main(inout Payload payload) {
             float y_bar = xyz_cmf.y;
             float z_bar = xyz_cmf.z;
 
+            if (heroRay) {
+                heroRadiance = sky_radiance_lambda;   // scalar, caller weights it
+                continue;
+            }
+
             // Riemann sum: XYZ += L(λ) × CMF(λ) × Δλ
             XYZ_accum.x += sky_radiance_lambda * x_bar * LAMBDA_STEP;
             XYZ_accum.y += sky_radiance_lambda * y_bar * LAMBDA_STEP;
@@ -141,6 +155,12 @@ void main(inout Payload payload) {
         // Apply chromaticity correction (consistent with closesthit)
         payload.radiance.r *= lut.chromaR_correction;
         payload.radiance.b *= lut.chromaB_correction;
+
+        // After the correction, for the reason given in closesthit.rchit: it
+        // scales R and B against G and would turn one scalar into three.
+        if (heroRay) {
+            payload.radiance = float3(heroRadiance, heroRadiance, heroRadiance);
+        }
 
         // Validation
         if (!isfinite(payload.radiance.r) || !isfinite(payload.radiance.g) || !isfinite(payload.radiance.b)) {

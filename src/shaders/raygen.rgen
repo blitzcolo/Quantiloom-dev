@@ -181,6 +181,10 @@ void main() {
     // Initialize shadow flag (will be set by shadow miss shader)
     payload.isShadowed = 0;
 
+    // A primary ray carries the whole visible band. Only a dispersive
+    // refraction narrows it to one wavelength -- see Payload::heroLambda.
+    payload.heroLambda = 0.0;
+
     // Initialize recursion depth (0 = primary ray)
     payload.depth = 0;
 

@@ -56,6 +56,11 @@
 #define SPECTRAL_LWIR_LAMBDA_MIN   8000.0
 #define SPECTRAL_LWIR_LAMBDA_MAX  12000.0
 
+// Width of the visible band, which is 1/pdf for a uniformly sampled hero
+// wavelength. Named because it appears once when λ_h is drawn and once when the
+// result is weighted, and the two must agree.
+#define SPECTRAL_VIS_BANDWIDTH (SPECTRAL_VIS_LAMBDA_MAX - SPECTRAL_VIS_LAMBDA_MIN)
+
 
 // ============================================================================
 // Debug Visualization Modes
@@ -202,7 +207,32 @@ struct Payload {
     // Used for Russian roulette termination and importance sampling
     uint rngState;    // PCG hash state                                  // 4 bytes
 
-    // TOTAL: 48 bytes (under 64-byte RT Core limit)
+    // Hero wavelength, in nm, or 0 for "this ray carries the whole band".
+    //
+    // Non-zero only past a dispersive refraction. n(λ) sends each wavelength
+    // somewhere different, so a ray that has been bent can only be accountable
+    // for the one wavelength it was bent for -- there is no single path the
+    // band shares any more. The refracting surface samples λ_h uniformly and
+    // undoes the pdf when it converts the result back to a colour.
+    //
+    // "Dispersive" is about the medium, not about glass: anything with n
+    // meaningfully above 1 disperses, and the Abbe numbers are comparable --
+    // water 1.333/55.7, ice, acrylic, quartz, gemstones. The gate below keys on
+    // whether a material carries an Abbe number or an n(λ) table, not on what
+    // it is called, so a water surface reaches this path the same way a prism
+    // does. That is also why this is the mechanism participating media will need
+    // when they arrive.
+    //
+    // A ray with heroLambda != 0 reports SCALAR spectral radiance in
+    // `radiance`, not RGB. The two never mix: only the VIS_FUSED paths read
+    // this, and only the surface that sampled λ_h converts back.
+    float heroLambda;  // nm, 0 = whole band                             // 4 bytes
+
+    // TOTAL: 52 bytes (under 64-byte RT Core limit)
+    //
+    // Every site that constructs a Payload must set heroLambda. Left
+    // uninitialised it is not a crash -- it silently turns an ordinary ray into
+    // a single-wavelength one and the frame loses most of its light.
 
     // REMOVED for performance (if needed, can be recomputed or approximated):
     // float3 dOdx;  // ∂O/∂x (ray origin differential) - usually ~0 for primary rays
