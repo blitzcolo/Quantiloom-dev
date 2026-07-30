@@ -722,8 +722,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     }
     auto resolved = std::move(resolvedResult.value());
 
-    // 2. The scene itself.
-    auto sceneResult = rendercore::LoadSceneFromConfig(config);
+    // 2. The scene itself, its path resolved the same way every other path in
+    //    the file is.
+    auto sceneResult = rendercore::LoadSceneFromConfig(config, options.baseDir);
     if (!sceneResult.has_value()) {
         report.messages.push_back({ConfigApplyMessage::Severity::Error, "scene",
                                    "Failed to load scene: " + sceneResult.error()});

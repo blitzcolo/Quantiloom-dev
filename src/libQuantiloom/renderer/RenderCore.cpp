@@ -20,9 +20,9 @@
 
 namespace quantiloom::rendercore {
 
-Result<Scene, String> LoadSceneFromConfig(const Config& config) {
+Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& baseDir) {
     if (config.Has("scene.usd")) {
-        const auto usdPath = config.Get<String>("scene.usd");
+        const auto usdPath = ResolveConfigPath(config.Get<String>("scene.usd"), baseDir);
         QL_LOG_INFO("Loading USD scene: {}", usdPath);
 
         auto result = UsdLoader::LoadFromFile(usdPath);
@@ -33,7 +33,7 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config) {
     }
 
     if (config.Has("scene.gltf")) {
-        const auto gltfPath = config.Get<String>("scene.gltf");
+        const auto gltfPath = ResolveConfigPath(config.Get<String>("scene.gltf"), baseDir);
         QL_LOG_INFO("Loading glTF model: {}", gltfPath);
 
         auto result = GltfLoader::LoadFromFile(gltfPath);

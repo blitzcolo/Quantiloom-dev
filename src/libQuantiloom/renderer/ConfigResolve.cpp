@@ -80,20 +80,35 @@ private:
     String m_firstError;
 };
 
-/// Resolve a path the config named against the config's own directory.
+}  // namespace
+
+/// Resolve a path the config named, against the config's own directory when
+/// that finds the file and otherwise not at all.
 ///
-/// An empty baseDir means the process working directory, which is the CLI's
-/// convention -- it is run from the repo root and its configs name assets from
-/// there. A GUI opens files from anywhere, so it passes the file's directory
-/// and relative paths keep working.
-String ResolvePath(const String& path, const String& baseDir) {
+/// Two conventions are in use and both have to keep working. The CLI is run
+/// from the repo root and its configs name assets from there, so their relative
+/// paths are working-directory-relative -- `assets/luts/D65.csv` beside a
+/// config that itself lives in `assets/configs/`. A config a GUI user opens
+/// from an arbitrary directory has no such root, and expects its paths to be
+/// relative to itself.
+///
+/// Trying the base directory first and falling back to the path as written
+/// serves both: a self-contained scene folder resolves against itself, and a
+/// repo-root-relative path is left alone to resolve against the working
+/// directory as it always did. An empty baseDir -- what the CLI passes --
+/// skips the attempt entirely.
+String ResolveConfigPath(const String& path, const String& baseDir) {
     if (path.empty() || baseDir.empty()) return path;
     std::filesystem::path p(path);
     if (p.is_absolute()) return path;
-    return (std::filesystem::path(baseDir) / p).lexically_normal().string();
-}
 
-}  // namespace
+    std::error_code ec;
+    const auto candidate = (std::filesystem::path(baseDir) / p).lexically_normal();
+    if (std::filesystem::exists(candidate, ec)) {
+        return candidate.string();
+    }
+    return path;
+}
 
 // ============================================================================
 // Scene-independent keys
@@ -126,7 +141,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     report.outputPath = out.outputPath;
     out.environmentMap = config.Get<String>("renderer.environment_map", "");
     if (!out.environmentMap.empty()) {
-        out.environmentMap = ResolvePath(out.environmentMap, options.baseDir);
+        out.environmentMap = ResolveConfigPath(out.environmentMap, options.baseDir);
     }
     out.seed = config.Get<u32>("renderer.seed", constants::DEFAULT_SAMPLING_SEED);
     out.debugMode = config.Get<i32>("renderer.debug_mode", 0);
@@ -349,7 +364,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                       std::make_pair(MakeEqualEnergyIlluminant(),
                                      MakeEqualEnergyIlluminant()))
                 : SpectralIO::LoadLibRadtranSunAndSky(
-                      ResolvePath(namedPath, options.baseDir), "nm", directCol,
+                      ResolveConfigPath(namedPath, options.baseDir), "nm", directCol,
                       diffuseCol, diffuseIsGlobal);
 
         if (result.has_value()) {
@@ -463,7 +478,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     if (config.Has("atmosphere.model_pack") || config.Has("atmosphere.preset")) {
         out.atmosphere.modelPackDir =
             config.Has("atmosphere.model_pack")
-                ? ResolvePath(config.Get<String>("atmosphere.model_pack"), options.baseDir)
+                ? ResolveConfigPath(config.Get<String>("atmosphere.model_pack"), options.baseDir)
                 : options.atmosphereModelPackFallback;
         if (out.atmosphere.modelPackDir.empty()) {
             diag.Required("atmosphere.model_pack",
@@ -727,7 +742,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             QL_LOG_INFO("  Loading spectral curve for '{}' from '{}'", materialName, csvPath);
 
             auto result =
-                SpectralIO::LoadSpectralCurveCSV(ResolvePath(csvPath, options.baseDir));
+                SpectralIO::LoadSpectralCurveCSV(ResolveConfigPath(csvPath, options.baseDir));
             if (!result) {
                 diag.Warn("spectral_curves",
                           "    Failed to load: " + result.error());
@@ -770,8 +785,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         QL_LOG_INFO("  Active band: {}", activeBand);
 
         SpectralBasisLoader basisLoader;
-        if (basisLoader.Load(ResolvePath(basisFilePath, options.baseDir),
-                             ResolvePath(materialsJsonPath, options.baseDir))) {
+        if (basisLoader.Load(ResolveConfigPath(basisFilePath, options.baseDir),
+                             ResolveConfigPath(materialsJsonPath, options.baseDir))) {
             QL_LOG_INFO("  SpectralBaker data loaded: {} materials, {} bands",
                         basisLoader.GetMaterialCount(), basisLoader.GetNumBands());
 
@@ -850,7 +865,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             QL_LOG_INFO("  Loading n,k data for '{}' from '{}'", materialName, yamlPath);
 
             auto result =
-                SpectralIO::LoadRefractiveIndexYAML(ResolvePath(yamlPath, options.baseDir));
+                SpectralIO::LoadRefractiveIndexYAML(ResolveConfigPath(yamlPath, options.baseDir));
             if (!result) {
                 diag.Warn("refractive_index", "    Failed to load: " + result.error());
                 continue;

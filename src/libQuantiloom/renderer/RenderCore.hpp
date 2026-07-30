@@ -71,8 +71,24 @@ namespace quantiloom::rendercore {
  *       the CLI took the USD, the context the glTF. No config in assets/configs does
  *       both, so the case was unreachable either way; the CLI's order is kept
  *       because it is the one covered by a render test.
+ *
+ * @param baseDir Directory a relative path is tried against before being used
+ *        as written. Empty -- what the CLI passes -- means as written, i.e.
+ *        relative to the working directory. Both conventions are in use; see
+ *        ResolveConfigPath.
  */
-Result<Scene, String> LoadSceneFromConfig(const Config& config);
+Result<Scene, String> LoadSceneFromConfig(const Config& config,
+                                          const String& baseDir = {});
+
+/**
+ * @brief Resolve a path a config named, against the config's own directory
+ *
+ * Tries @p baseDir first and falls back to the path as written, so a
+ * self-contained scene folder resolves against itself while a repo-root-relative
+ * path keeps resolving against the working directory. An empty @p baseDir skips
+ * the attempt. Defined in ConfigResolve.cpp, next to the rest of the reading.
+ */
+String ResolveConfigPath(const String& path, const String& baseDir);
 
 /**
  * @brief Convert an equirectangular (latitude-longitude) environment map to cubemap faces
