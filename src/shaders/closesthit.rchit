@@ -1195,10 +1195,36 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 F0_scalar = lerp(float3(0.04, 0.04, 0.04), float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
         float3 F_scalar = FresnelSchlick(F0_scalar, max(dot(normal, V), 0.0));
         float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
-        float skyAmbient_scalar = kD_scalar * spectralAlbedo / PI * skyRadiance_lambda;
+        // No 1/PI here. skyRadiance_lambda is already E_sky/PI -- the conversion
+        // from irradiance to radiance happened when it was sampled -- so the
+        // Lambertian identity L_out = rho*E/PI is complete at this point. This
+        // used to divide by PI a second time and the term came out PI times too
+        // dark. VIS_FUSED does not, and the RGB branch spells the cancellation
+        // out: the hemisphere integral's PI cancels the one in the BRDF
+        // denominator.
+        float skyAmbient_scalar = kD_scalar * spectralAlbedo * skyRadiance_lambda;
 
-        // 5. Total spectral radiance (scalar)
-        float radiance_spectral = directSun_scalar + skyAmbient_scalar + emissive.r;  // Assume emissive is grayscale in spectral mode
+        // 5. IBL specular contribution, matching VIS_FUSED.
+        //    Was absent entirely, so every specular or metallic surface lost its
+        //    environment reflection in the mode labelled "quantitative" -- worth
+        //    30% of the frame on a smooth dielectric.
+        // Same predicate as VIS_FUSED's, recomputed because that one is local to
+        // its branch.
+        const bool useIBL_scalar = (metallic > 0.01 || roughness < 0.99);
+        float ibl_scalar = 0.0;
+        if (useIBL_scalar) {
+            float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+            ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+        }
+
+        // 6. Total spectral radiance (scalar)
+        //    Emissive goes through the RGB->spectrum conversion rather than
+        //    having its red channel read off as a spectral value, which is what
+        //    `emissive.r` did. An emissive colour is a colour; at a wavelength
+        //    it has to be evaluated, not indexed.
+        float emissive_scalar = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda);
+        float radiance_spectral = directSun_scalar + skyAmbient_scalar +
+                                  emissive_scalar + ibl_scalar;
 
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
         if (atmosEnabled) {
