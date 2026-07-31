@@ -709,6 +709,23 @@ public:
      */
     void RebuildAccelerationStructure();
 
+    /**
+     * @brief Refit the acceleration structure after transform-only edits
+     *
+     * The interactive path for RebuildAccelerationStructure: updates the
+     * existing TLAS in place (no allocation, no device idle) so a gizmo
+     * drag can apply SetNodeTransform per mouse-move without stalling.
+     * Falls back to a full rebuild internally when a refit is not possible
+     * (topology changed since the last build).
+     *
+     * A refit degrades trace quality slightly for large movements; call
+     * RebuildAccelerationStructure once when the drag ends.
+     *
+     * @note Like SetNodeTransform, does not reset accumulation -- that is
+     *       the caller's job.
+     */
+    void RefitAccelerationStructure();
+
     // ========================================================================
     // Status and Statistics
     // ========================================================================

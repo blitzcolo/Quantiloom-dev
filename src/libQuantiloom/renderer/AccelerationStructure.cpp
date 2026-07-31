@@ -2,6 +2,7 @@
 #include "CommandHelper.hpp"
 #include "core/Log.hpp"
 #include <glm/gtc/type_ptr.hpp>
+#include <algorithm>
 #include <stdexcept>
 #include <cstring>
 #include <memory>
@@ -642,7 +643,9 @@ void TLAS::Build(VkCommandBuffer cmd) {
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    // ALLOW_UPDATE so Update() can refit transforms in place during drags
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
     buildInfo.geometryCount = 1;
     buildInfo.pGeometries = &geometry;
@@ -682,10 +685,10 @@ void TLAS::Build(VkCommandBuffer cmd) {
         throw std::runtime_error("Failed to create TLAS");
     }
 
-    // Create scratch buffer
+    // Create scratch buffer, sized for both the build and later refits
     m_scratchBuffer = std::make_unique<GpuBuffer>(
         allocator,
-        sizeInfo.buildScratchSize,
+        std::max(sizeInfo.buildScratchSize, sizeInfo.updateScratchSize),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY,
         ScratchAlignment(m_context)
@@ -725,6 +728,85 @@ void TLAS::Build(VkCommandBuffer cmd) {
 
     m_built = true;
     QL_LOG_INFO("  TLAS built successfully with {} instance(s)", m_instances.size());
+}
+
+void TLAS::SetInstanceTransform(size_t index, const glm::mat4& transform) {
+    if (index >= m_instances.size()) {
+        QL_LOG_WARN("TLAS::SetInstanceTransform: index {} out of range ({})",
+                    index, m_instances.size());
+        return;
+    }
+
+    VkTransformMatrixKHR vkTransform{};
+    const f32* mat = glm::value_ptr(transform);
+    for (int row = 0; row < 3; ++row) {
+        for (int col = 0; col < 4; ++col) {
+            vkTransform.matrix[row][col] = mat[col * 4 + row];  // transpose
+        }
+    }
+    m_instances[index].transform = vkTransform;
+}
+
+void TLAS::Update(VkCommandBuffer cmd) {
+    if (!m_built) {
+        throw std::runtime_error("TLAS::Update called before Build");
+    }
+
+    VkDevice device = m_context.GetDevice();
+
+    auto vkCmdBuildAccelerationStructuresKHR = reinterpret_cast<PFN_vkCmdBuildAccelerationStructuresKHR>(
+        vkGetDeviceProcAddr(device, "vkCmdBuildAccelerationStructuresKHR"));
+    if (!vkCmdBuildAccelerationStructuresKHR) {
+        throw std::runtime_error("Failed to load acceleration structure functions");
+    }
+
+    // Same size, same buffer: only the transforms changed
+    m_instanceBuffer->Upload(m_instances.data(),
+                             m_instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
+    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
+    geometry.geometry.instances.arrayOfPointers = VK_FALSE;
+    geometry.geometry.instances.data.deviceAddress = m_instanceBuffer->GetDeviceAddress(device);
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
+    buildInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR |
+                      VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = m_as;
+    buildInfo.dstAccelerationStructure = m_as;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries = &geometry;
+    buildInfo.scratchData.deviceAddress = m_scratchBuffer->GetDeviceAddress(device);
+
+    // In-flight frames may still be reading this AS: order the refit after them
+    VkMemoryBarrier preBarrier{};
+    preBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    preBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    preBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         0, 1, &preBarrier, 0, nullptr, 0, nullptr);
+
+    VkAccelerationStructureBuildRangeInfoKHR buildRange{};
+    buildRange.primitiveCount = static_cast<u32>(m_instances.size());
+    const VkAccelerationStructureBuildRangeInfoKHR* pBuildRange = &buildRange;
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pBuildRange);
+
+    VkMemoryBarrier postBarrier{};
+    postBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    postBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    postBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         0, 1, &postBarrier, 0, nullptr, 0, nullptr);
 }
 
 } // namespace quantiloom

@@ -175,6 +175,7 @@ public: virtual quantiloom::GenericSensor::~GenericSensor(void)
 public: void quantiloom::Config::Print(void)const
 public: void quantiloom::ExternalRenderContext::BlitDepthTo(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: void quantiloom::ExternalRenderContext::RebuildAccelerationStructure(void)
+public: void quantiloom::ExternalRenderContext::RefitAccelerationStructure(void)
 public: void quantiloom::ExternalRenderContext::RenderFrame(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: void quantiloom::ExternalRenderContext::ResetAccumulation(void)
 public: void quantiloom::ExternalRenderContext::Resize(unsigned int,unsigned int)

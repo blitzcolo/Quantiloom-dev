@@ -279,6 +279,13 @@ public:
     /// structures or the merged buffers, so neither is redone.
     void RebuildTlas(VulkanContext& ctx, const Scene& scene);
 
+    /// Refit the TLAS in place for transform-only edits: no allocation, no
+    /// teardown, same handle -- cheap enough to run per mouse-move during a
+    /// drag. Returns false without touching anything when a refit is not
+    /// possible (nothing built yet, or the instance count changed, i.e. a
+    /// topology edit); the caller falls back to a full rebuild.
+    [[nodiscard]] bool RefitTlas(VulkanContext& ctx, const Scene& scene);
+
     [[nodiscard]] bool IsValid() const { return m_tlas != nullptr; }
 
     [[nodiscard]] const TLAS& Tlas() const { return *m_tlas; }

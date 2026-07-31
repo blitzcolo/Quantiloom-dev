@@ -814,6 +814,34 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
     });
 }
 
+bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
+    if (!m_tlas || !m_tlas->IsBuilt()) {
+        return false;
+    }
+
+    size_t instance = 0;
+    bool inRange = true;
+    ForEachInstance(scene, [&](const glm::mat4& transform, size_t /*globalPrim*/,
+                               size_t /*nodeIndex*/) {
+        if (instance >= m_tlas->InstanceCount()) {
+            inRange = false;
+        } else {
+            m_tlas->SetInstanceTransform(instance, transform);
+        }
+        ++instance;
+    });
+    if (!inRange || instance != m_tlas->InstanceCount()) {
+        // Topology changed under us; the transforms already written are
+        // harmless (the caller's rebuild replaces the TLAS outright)
+        return false;
+    }
+
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        m_tlas->Update(cmd);
+    });
+    return true;
+}
+
 // ============================================================================
 // Materials
 // ============================================================================

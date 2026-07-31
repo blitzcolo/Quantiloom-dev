@@ -253,6 +253,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_material_conversion.cpp
     test_renderer/test_depth_aov.cpp
     test_renderer/test_pick.cpp
+    test_renderer/test_tlas_refit.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)

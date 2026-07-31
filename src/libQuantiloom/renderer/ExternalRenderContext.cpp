@@ -1893,6 +1893,20 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     }
 }
 
+void ExternalRenderContext::RefitAccelerationStructure() {
+    if (!m_impl->scene || !m_impl->geometry.IsValid()) {
+        QL_LOG_WARN("RefitAccelerationStructure: No scene or geometry available");
+        return;
+    }
+
+    // Same handle, updated in place: no rebind, no device idle. The refit
+    // command's own barriers order it against in-flight tracing.
+    if (!m_impl->geometry.RefitTlas(*m_impl->contextAdapter, *m_impl->scene)) {
+        QL_LOG_DEBUG("RefitAccelerationStructure: topology changed, rebuilding");
+        RebuildAccelerationStructure();
+    }
+}
+
 // ============================================================================
 // Status and Statistics
 // ============================================================================
