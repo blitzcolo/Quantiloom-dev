@@ -22,6 +22,16 @@
  * it and the CLI stops needing library internals -- which is what still keeps ~274
  * symbols exported for its sake alone.
  *
+ * ## Config reading came next, and it is done
+ *
+ * The other half of the same problem was that the two hosts also *read the config*
+ * separately -- the CLI inside OfflineRenderer, Quantiloom Studio in its own
+ * ConfigManager -- and those had drifted further than the orchestrators had: opposite
+ * shadow-ray defaults, a band-centre wavelength rule only one of them had, a
+ * normalisation key only one of them honoured, the NMF basis and [refractive_index]
+ * read by one alone. That reading is now ConfigResolve.{hpp,cpp}, and both hosts go
+ * through it: the CLI directly, Studio via ExternalRenderContext::ApplyConfig.
+ *
  * @author blitzcolo
  */
 
