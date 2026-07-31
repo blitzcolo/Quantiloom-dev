@@ -38,6 +38,18 @@ public:
     /// @return Result containing parsed config or error
     static Result<Config, String> Load(const std::filesystem::path& filePath);
 
+    /// Parse a TOML document held in memory
+    ///
+    /// The same reading as Load(), for callers that have the text rather than a
+    /// file: an agent sending a configuration over a socket, a test with its
+    /// document inline. Relative paths inside the document still resolve
+    /// against whatever base directory the consumer supplies -- parsing does not
+    /// know where the text came from.
+    ///
+    /// @param document TOML source
+    /// @return Result containing parsed config or the parse error
+    static Result<Config, String> Parse(StringView document);
+
     /// Create an empty configuration
     Config();
 

@@ -139,6 +139,21 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/postprocess/MultibandFusion.hpp
     ${QL_PUBLIC_INC}/postprocess/PostprocessConfig.hpp
 
+    # MCP module (agent-facing front end; the protocol is internal, the
+    # facade the hosts drive is not)
+    mcp/McpServer.cpp
+    ${QL_PUBLIC_INC}/mcp/McpServer.hpp
+    mcp/CommandQueue.cpp
+    mcp/CommandQueue.hpp
+    mcp/ToolRegistry.cpp
+    mcp/ToolRegistry.hpp
+    mcp/Protocol.cpp
+    mcp/Protocol.hpp
+    mcp/HttpTransport.cpp
+    mcp/HttpTransport.hpp
+    mcp/McpImageUtil.cpp
+    mcp/McpImageUtil.hpp
+
     # Hyperspectral core module
     hs_core/HyperspectralConfig.hpp
     hs_core/HyperspectralRenderer.cpp
@@ -217,6 +232,7 @@ target_link_libraries(quantiloom_core
         spdlog::spdlog
         tomlplusplus::tomlplusplus
         nlohmann_json
+        cpp_httplib
         VMA
         OpenEXR::OpenEXR
         Imath::Imath

@@ -111,6 +111,22 @@ Result<Config, String> Config::Load(const std::filesystem::path& filePath) {
     }
 }
 
+Result<Config, String> Config::Parse(const StringView document) {
+    try {
+        toml::table table = toml::parse(document);
+
+        auto impl = std::make_unique<Impl>(std::move(table));
+        return Config(std::move(impl));
+    }
+    catch (const toml::parse_error& err) {
+        std::ostringstream oss;
+        oss << "TOML parse error: " << err.description()
+            << " at line " << err.source().begin.line
+            << ", column " << err.source().begin.column;
+        return Result<Config, String>::Err(oss.str());
+    }
+}
+
 // ============================================================================
 // Key Existence
 // ============================================================================

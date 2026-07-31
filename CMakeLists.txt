@@ -268,6 +268,27 @@ if(nlohmann_json_ADDED)
     message(STATUS "nlohmann/json v3.11.3 added (header-only JSON parser)")
 endif()
 
+# cpp-httplib: HTTP server (header-only), used by the MCP server's transport.
+# Sockets only, no TLS: the server binds loopback and refuses everything else,
+# so there is no wire to encrypt.
+CPMAddPackage(
+    NAME cpp_httplib
+    VERSION 0.18.3
+    GITHUB_REPOSITORY yhirose/cpp-httplib
+    DOWNLOAD_ONLY YES
+)
+
+if(cpp_httplib_ADDED)
+    add_library(cpp_httplib INTERFACE)
+    target_include_directories(cpp_httplib INTERFACE
+        ${cpp_httplib_SOURCE_DIR}
+    )
+    if(WIN32)
+        target_link_libraries(cpp_httplib INTERFACE ws2_32 crypt32)
+    endif()
+    message(STATUS "cpp-httplib v0.18.3 added (header-only HTTP server)")
+endif()
+
 # ============================================================================
 # OpenUSD (Pixar USD) - Official USD Library
 # ============================================================================

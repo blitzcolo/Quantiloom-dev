@@ -278,6 +278,12 @@ set(TEST_HS_CORE_SOURCES
     test_hs_core/test_gpu_spectral_reconstructor.cpp
 )
 
+# MCP tests (protocol framing and the command queue; no GPU, no sockets)
+set(TEST_MCP_SOURCES
+    test_mcp/test_mcp_protocol.cpp
+    test_mcp/test_mcp_registry.cpp
+)
+
 # Test main (custom main function with logging initialization)
 set(TEST_MAIN_SOURCE
     test_main.cpp
@@ -293,6 +299,7 @@ set(ALL_TEST_SOURCES
     ${TEST_RENDERER_SOURCES}
     ${TEST_POSTPROCESS_SOURCES}
     ${TEST_HS_CORE_SOURCES}
+    ${TEST_MCP_SOURCES}
 )
 
 # ============================================================================
@@ -381,6 +388,10 @@ else()
             GTest::GTest
             # Note: Using custom main in test_main.cpp instead of GTest::Main
             quantiloom_core  # Objects, not the DLL -- see above
+            # The core links this PRIVATE, which CMake records as $<LINK_ONLY:>
+            # -- the objects come through, the include directory does not. The
+            # MCP tests read JSON responses, so they ask for it by name.
+            nlohmann_json
     )
 endif()
 

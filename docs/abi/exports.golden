@@ -2,6 +2,7 @@ const quantiloom::GenericSensor::`vftable'
 private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
 private: quantiloom::OfflineRenderer::OfflineRenderer(void)
+private: quantiloom::mcp::Server::Server(void)
 private: static enum quantiloom::Log::Level quantiloom::Log::s_CurrentLevel
 public: __int64 quantiloom::Config::Get<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >,__int64 const &)const
 public: __int64 quantiloom::Config::GetInt64(class std::basic_string_view<char,struct std::char_traits<char> >,__int64)const
@@ -50,6 +51,7 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromConfig(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromGltf(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::RegisterTool(struct quantiloom::mcp::ToolDef const &)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
 public: class quantiloom::Scene const * quantiloom::ExternalRenderContext::GetScene(void)const
@@ -108,13 +110,16 @@ public: quantiloom::Scene::Scene(class quantiloom::Scene &&)
 public: quantiloom::Scene::Scene(class quantiloom::Scene const &)
 public: quantiloom::Scene::Scene(void)
 public: quantiloom::Scene::~Scene(void)
+public: quantiloom::mcp::Server::~Server(void)
 public: static bool quantiloom::ImageIO::FileExists(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static bool quantiloom::ImageIO::WriteEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &)
 public: static bool quantiloom::ImageIO::WritePNG(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &)
 public: static class quantiloom::Result<class quantiloom::Config,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::Load(class std::filesystem::path const &)
+public: static class quantiloom::Result<class quantiloom::Config,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::Parse(class std::basic_string_view<char,struct std::char_traits<char> >)
 public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Scene::FromConfig(class quantiloom::Config const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::ExternalRenderContext,struct std::default_delete<class quantiloom::ExternalRenderContext> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Create(struct quantiloom::ExternalRenderContext::InitParams const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::OfflineRenderer,struct std::default_delete<class quantiloom::OfflineRenderer> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::Create(class quantiloom::Config const &,struct quantiloom::OfflineRenderer::InitParams const &)
+public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::mcp::Server,struct std::default_delete<class quantiloom::mcp::Server> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::Create(struct quantiloom::mcp::ServerOptions const &)
 public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173(class std::filesystem::path const &,unsigned int)
@@ -161,6 +166,8 @@ public: unsigned int quantiloom::ExternalRenderContext::GetSPP(void)const
 public: unsigned int quantiloom::ExternalRenderContext::GetSamplingSeed(void)const
 public: unsigned int quantiloom::Scene::GetTotalTriangleCount(void)const
 public: unsigned int quantiloom::Scene::GetTotalVertexCount(void)const
+public: unsigned int quantiloom::mcp::Server::PendingCommands(void)const
+public: unsigned short quantiloom::mcp::Server::Port(void)const
 public: virtual class quantiloom::Result<struct quantiloom::SensorOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::GenericSensor::Apply(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
 public: virtual quantiloom::GenericSensor::~GenericSensor(void)
 public: void quantiloom::Config::Print(void)const
@@ -189,5 +196,7 @@ public: void quantiloom::ExternalRenderContext::SetWavelength(float)
 public: void quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int,struct quantiloom::Material const &)
 public: void quantiloom::Material::ComputeSpectralAlbedo(void)
 public: void quantiloom::Scene::PrintSummary(void)const
+public: void quantiloom::mcp::Server::Pump(void)
+public: void quantiloom::mcp::Server::Stop(void)
 struct glm::vec<3,float,0> quantiloom::SpectralIrradianceToLinearSrgb(struct quantiloom::SpectralCurve const &)
 struct quantiloom::SpectralCurve quantiloom::MakeEqualEnergyIlluminant(float,float)
