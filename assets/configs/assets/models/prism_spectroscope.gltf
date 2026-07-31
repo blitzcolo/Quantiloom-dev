@@ -1,0 +1,158 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "make_spectroscope_scene.py"
+ },
+ "extensionsUsed": [
+  "KHR_materials_transmission",
+  "KHR_materials_ior",
+  "KHR_materials_dispersion",
+  "KHR_materials_emissive_strength"
+ ],
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0,
+    1
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "mesh": 0,
+   "name": "Prism"
+  },
+  {
+   "mesh": 1,
+   "name": "Slit"
+  }
+ ],
+ "meshes": [
+  {
+   "name": "Prism",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0
+     },
+     "indices": 1,
+     "material": 0
+    }
+   ]
+  },
+  {
+   "name": "Slit",
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 0
+     },
+     "indices": 2,
+     "material": 1
+    }
+   ]
+  }
+ ],
+ "materials": [
+  {
+   "name": "PrismGlass_BK7",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     1,
+     1,
+     1,
+     1
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 0.0
+   },
+   "extensions": {
+    "KHR_materials_transmission": {
+     "transmissionFactor": 1.0
+    },
+    "KHR_materials_ior": {
+     "ior": 1.7847
+    },
+    "KHR_materials_dispersion": {
+     "dispersion": 0.7763975155279502
+    }
+   }
+  },
+  {
+   "name": "Slit_Emissive",
+   "pbrMetallicRoughness": {
+    "baseColorFactor": [
+     0,
+     0,
+     0,
+     1
+    ],
+    "metallicFactor": 0.0,
+    "roughnessFactor": 1.0
+   },
+   "emissiveFactor": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "extensions": {
+    "KHR_materials_emissive_strength": {
+     "emissiveStrength": 60.0
+    }
+   }
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5126,
+   "count": 30,
+   "type": "VEC3",
+   "min": [
+    -5.0530144063102505,
+    1.8082875656746,
+    -1.4
+   ],
+   "max": [
+    0.8,
+    5.5856406460551025,
+    1.4
+   ]
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5123,
+   "byteOffset": 0,
+   "count": 24,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5123,
+   "byteOffset": 48,
+   "count": 6,
+   "type": "SCALAR"
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 360,
+   "target": 34962
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 360,
+   "byteLength": 60,
+   "target": 34963
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 420,
+   "uri": "data:application/octet-stream;base64,zcxMv2ZmhkDNzEw/zcxMP2ZmhkDNzEw/AAAAAJG9skDNzEw/AAAAAJG9skDNzEy/zcxMP2ZmhkDNzEy/zcxMv2ZmhkDNzEy/zcxMv2ZmhkDNzEw/zcxMv2ZmhkDNzEy/zcxMP2ZmhkDNzEy/zcxMv2ZmhkDNzEw/zcxMP2ZmhkDNzEy/zcxMP2ZmhkDNzEw/zcxMP2ZmhkDNzEw/zcxMP2ZmhkDNzEy/AAAAAJG9skDNzEy/zcxMP2ZmhkDNzEw/AAAAAJG9skDNzEy/AAAAAJG9skDNzEw/AAAAAJG9skDNzEw/AAAAAJG9skDNzEy/zcxMv2ZmhkDNzEy/AAAAAJG9skDNzEw/zcxMv2ZmhkDNzEy/zcxMv2ZmhkDNzEw/S7KhwBa/+j8zM7O/houewPh15z8zM7O/houewPh15z8zM7M/S7KhwBa/+j8zM7O/houewPh15z8zM7M/S7KhwBa/+j8zM7M/AAABAAIAAwAEAAUABgAHAAgACQAKAAsADAANAA4ADwAQABEAEgATABQAFQAWABcAGAAZABoAGwAcAB0A"
+  }
+ ]
+}
