@@ -57,7 +57,7 @@ namespace quantiloom {
  * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
  * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
  * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
- * Offset 64: enableShadowRays (u32) + _padding[3] (12 bytes)
+ * Offset 64: enableShadowRays (u32) + enableEnvironmentMap (u32) + _padding[2] (8 bytes)
  * Total: 80 bytes
  * @endcode
  *
@@ -89,7 +89,16 @@ struct LightingParams {
     f32 chromaB_correction;         // VIS_FUSED chromaticity correction for B channel, offset 60
 
     u32 enableShadowRays;           // Shadow ray enable flag: 0 = disabled, 1 = enabled, offset 64
-    f32 _padding[3];                // Padding to 80 bytes (16-byte aligned), offset 68-80
+    // Image-based lighting from the environment cubemap: 0 = the map contributes
+    // nothing, 1 = it lights the scene. Off means off -- the surface gets no
+    // environment specular at all, rather than the light of some substitute sky.
+    // The background a ray sees when it misses is lighting.sky_radiance either
+    // way; the miss shader has never read this map.
+    //
+    // Took the first of the three padding floats, so the struct is still 80
+    // bytes and the shader mirror still matches.
+    u32 enableEnvironmentMap;       // 0 = disabled, 1 = enabled, offset 68
+    f32 _padding[2];                // Padding to 80 bytes (16-byte aligned), offset 72-80
 };  // Total: 80 bytes
 
 // ============================================================================
@@ -122,6 +131,8 @@ static_assert(offsetof(LightingParams, chromaR_correction) == 56,
     "chromaR_correction offset mismatch");
 static_assert(offsetof(LightingParams, chromaB_correction) == 60,
     "chromaB_correction offset mismatch");
+static_assert(offsetof(LightingParams, enableEnvironmentMap) == 68,
+    "enableEnvironmentMap offset mismatch");
 static_assert(offsetof(LightingParams, enableShadowRays) == 64,
     "enableShadowRays offset mismatch");
 
@@ -188,6 +199,9 @@ inline LightingParams CreateDefaultLightingParams() {
     // with shadows. The comment here used to cite a driver crash; the escape
     // hatch for that is the config key, which still turns them off.
     params.enableShadowRays = 1u;
+    // On, so a context handed an environment map lights with it. A scene that
+    // wants none says so, and gets none -- not a substitute sky.
+    params.enableEnvironmentMap = 1u;
     return params;
 }
 

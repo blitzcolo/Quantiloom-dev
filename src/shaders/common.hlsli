@@ -779,7 +779,8 @@ struct LightingParams {
     float  chromaB_correction;   // VIS_FUSED chromaticity correction for B channel (default: 1.0437)
 
     uint   enableShadowRays;     // Shadow ray enable flag: 0 = disabled, 1 = enabled (configurable)
-    float  _padding[3];          // Padding to 80 bytes (16-byte aligned)
+    uint   enableEnvironmentMap; // IBL from the environment cubemap: 0 = contributes nothing, 1 = lights the scene
+    float  _padding[2];          // Padding to 80 bytes (16-byte aligned)
 };
 
 // ============================================================================

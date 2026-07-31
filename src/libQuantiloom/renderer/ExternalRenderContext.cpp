@@ -820,7 +820,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) /
                                   static_cast<f32>(m_impl->height));
 
-    if (!resolved.environmentMap.empty()) {
+    // Skipped when the config turned it off: the fallback stays bound and the
+    // lighting flag keeps the shader from sampling it either way.
+    if (resolved.environmentMapEnabled) {
         if (auto envResult = LoadEnvironmentMap(resolved.environmentMap);
             !envResult.has_value()) {
             report.messages.push_back({ConfigApplyMessage::Severity::Warning,

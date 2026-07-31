@@ -143,6 +143,15 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     if (!out.environmentMap.empty()) {
         out.environmentMap = ResolveConfigPath(out.environmentMap, options.baseDir);
     }
+    // Whether image-based lighting contributes at all. Independent of whether a
+    // map is named: with no path the fallback cubemap is what lights the scene,
+    // and that has always contributed -- turning this off by default would
+    // silently change every scene that does not name a map.
+    //
+    // The key exists so a scene can keep its path while lighting from something
+    // else, which is how you compare the two without editing the path out and
+    // back in.
+    out.environmentMapEnabled = config.Get<bool>("renderer.environment_map_enabled", true);
     out.seed = config.Get<u32>("renderer.seed", constants::DEFAULT_SAMPLING_SEED);
     out.debugMode = config.Get<i32>("renderer.debug_mode", 0);
 
@@ -313,6 +322,30 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     out.lighting.chromaR_correction = chromaR;
     out.lighting.chromaB_correction = chromaB;
     out.lighting.enableShadowRays = enableShadowRays ? 1u : 0u;
+    out.lighting.enableEnvironmentMap = out.environmentMapEnabled ? 1u : 0u;
+
+    const auto nonZero = [](const glm::vec3& c) {
+        return c.r > 0.0f || c.g > 0.0f || c.b > 0.0f;
+    };
+
+    // An environment map is a light source, and a sky HDRI has a sun painted
+    // into it. Adding an analytic sun on top of one is counting the same
+    // illumination twice, and because nothing aligns the two directions the
+    // usual symptom is two specular highlights on the same surface, in
+    // different places. Both hosts warn about it because neither can tell
+    // whether it was meant: a synthetic HDRI with no sun in it plus an analytic
+    // sun is a legitimate way to light a scene.
+    if (!out.environmentMap.empty() && out.environmentMapEnabled &&
+        (nonZero(sunRadiance) || nonZero(skyRadiance))) {
+        diag.Warn("renderer.environment_map",
+                  "  Scene has both an environment map and a non-zero analytic "
+                  "sun or sky. An HDRI sky already carries its own illumination, "
+                  "so the two are added and the same light is counted twice -- "
+                  "typically two specular highlights in different places. Zero "
+                  "lighting.sun_radiance and sky_radiance to light from the map "
+                  "alone, or drop renderer.environment_map to light from the "
+                  "analytic sun alone.");
+    }
 
     // ------------------------------------------------------------------
     // Solar spectral LUT. Before the atmosphere -- see the header.
@@ -326,9 +359,6 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // present. Both illuminants, not just the sun: solar_lut carries the sky
     // too, so a scene lit only by sky_radiance loses its light just as
     // completely.
-    const auto nonZero = [](const glm::vec3& c) {
-        return c.r > 0.0f || c.g > 0.0f || c.b > 0.0f;
-    };
     const bool spectralIlluminantNeeded =
         out.mode != SpectralMode::RGB && (nonZero(sunRadiance) || nonZero(skyRadiance));
     if (spectralIlluminantNeeded && !config.Has("lighting.solar_lut")) {

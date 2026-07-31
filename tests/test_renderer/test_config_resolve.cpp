@@ -308,6 +308,68 @@ TEST_F(ConfigResolveTest, TheIlluminantsColourComesFromItsSpectrum) {
 }
 
 // ============================================================================
+// Environment map and the double-count it invites
+// ============================================================================
+// An HDRI sky has a sun painted into it. Adding an analytic sun on top counts
+// the same illumination twice, and nothing aligns the two directions -- the
+// symptom is two specular highlights on one surface, in different places.
+
+TEST_F(ConfigResolveTest, EnvironmentMapWithAnAnalyticSunWarnsAboutDoubleCounting) {
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n",
+                         .sunRadiance = "[1.0, 1.0, 1.0]"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    bool warned = false;
+    for (const auto& m : report.messages) {
+        if (m.key == "renderer.environment_map" &&
+            m.severity == ConfigApplyMessage::Severity::Warning) {
+            warned = true;
+        }
+    }
+    EXPECT_TRUE(warned);
+}
+
+TEST_F(ConfigResolveTest, AnEnvironmentMapAloneDoesNotWarn) {
+    // Zero analytic sun and sky: the map is the only light, which is the
+    // physically honest way to use one.
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    for (const auto& m : report.messages) {
+        EXPECT_NE(m.key, "renderer.environment_map");
+    }
+}
+
+TEST_F(ConfigResolveTest, ADisabledMapDoesNotDoubleCountAndDoesNotWarn) {
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n"
+                                         "environment_map_enabled = false\n",
+                         .sunRadiance = "[1.0, 1.0, 1.0]"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    EXPECT_FALSE(resolved.value().environmentMapEnabled);
+    EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 0u);
+    // The path survives being turned off, so a host can switch it back on.
+    EXPECT_FALSE(resolved.value().environmentMap.empty());
+
+    for (const auto& m : report.messages) {
+        EXPECT_NE(m.key, "renderer.environment_map");
+    }
+}
+
+TEST_F(ConfigResolveTest, ImageBasedLightingIsOnByDefaultEvenWithNoMapNamed) {
+    // With no path the fallback cubemap is what lights the scene, and it always
+    // has. Defaulting this off would silently darken every config without a map.
+    auto config = Parse({});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_TRUE(resolved.value().environmentMapEnabled);
+    EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 1u);
+}
+
+// ============================================================================
 // Atmosphere geometry
 // ============================================================================
 // A scene that states a geometry means it, whoever renders. One that does not

@@ -813,8 +813,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 envBRDF = float2(0.0, 0.0);
 
     // Only compute IBL for surfaces with non-zero metallic or roughness < 1.0
-    // This optimization skips perfectly diffuse surfaces (no specular reflection)
-    if (metallic > 0.01 || roughness < 0.99) {
+    // This optimization skips perfectly diffuse surfaces (no specular reflection).
+    //
+    // enableEnvironmentMap off means the map contributes nothing at all, rather
+    // than being swapped for a substitute sky: a scene lit by an analytic sun
+    // and an HDRI at once counts the same illumination twice, and turning one
+    // off has to actually remove it for the other to be measurable.
+    if (lut.enableEnvironmentMap != 0 && (metallic > 0.01 || roughness < 0.99)) {
         // 1. Compute reflection vector R = reflect(-V, N)
         //    This is the direction we would see a perfect mirror reflection
         float3 R = reflect(-V, normal);

@@ -417,7 +417,10 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // will not load. Load() reads through ImageIO::ReadImage, so .hdr and the
     // LDR formats work as well as .exr -- this used to call ReadEXR directly
     // and take the fallback for anything else.
-    const auto& envMapPath = resolved.environmentMap;
+    // A disabled map is not loaded at all: the binding still has to be valid, so
+    // the fallback is bound and the shader skips it on the lighting flag. Off
+    // means it contributes nothing, not that it is replaced by a sky.
+    const String envMapPath = resolved.environmentMapEnabled ? resolved.environmentMap : String{};
     if (envMapPath.empty()) {
         QL_LOG_INFO("  No environment map specified in config, using fallback");
         envMap = rendercore::EnvironmentCubemap::Fallback(context);
