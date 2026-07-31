@@ -32,7 +32,9 @@
 
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <random>
@@ -268,6 +270,18 @@ struct ExternalRenderContext::Impl {
     VkShaderModule claheApplyShader = VK_NULL_HANDLE;
     bool claheInitialized = false;
 
+    // Viewport pick (1x1 inline ray-query dispatch; see Pick())
+    std::unique_ptr<GpuBuffer> pickOutputBuffer;  // host-visible, one PickResultGpu
+    VkDescriptorSetLayout pickDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout pickPipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool pickDescriptorPool = VK_NULL_HANDLE;
+    VkDescriptorSet pickDescriptorSet = VK_NULL_HANDLE;
+    VkPipeline pickPipeline = VK_NULL_HANDLE;
+    VkShaderModule pickShader = VK_NULL_HANDLE;
+    bool pickInitAttempted = false;  // one failed attempt is not retried
+
+    void CreatePickPipeline();
+
     // Cached min/max values for CLAHE (computed after frame completion)
     f32 cachedImageMin = 0.0f;
     f32 cachedImageMax = 1.0f;
@@ -391,6 +405,32 @@ struct ExternalRenderContext::Impl {
             }
         }
         claheInitialized = false;
+
+        // Destroy pick resources
+        pickOutputBuffer.reset();
+        if (device != VK_NULL_HANDLE) {
+            if (pickPipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(device, pickPipeline, nullptr);
+                pickPipeline = VK_NULL_HANDLE;
+            }
+            if (pickShader != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device, pickShader, nullptr);
+                pickShader = VK_NULL_HANDLE;
+            }
+            if (pickDescriptorPool != VK_NULL_HANDLE) {
+                vkDestroyDescriptorPool(device, pickDescriptorPool, nullptr);
+                pickDescriptorPool = VK_NULL_HANDLE;
+            }
+            if (pickPipelineLayout != VK_NULL_HANDLE) {
+                vkDestroyPipelineLayout(device, pickPipelineLayout, nullptr);
+                pickPipelineLayout = VK_NULL_HANDLE;
+            }
+            if (pickDescriptorSetLayout != VK_NULL_HANDLE) {
+                vkDestroyDescriptorSetLayout(device, pickDescriptorSetLayout, nullptr);
+                pickDescriptorSetLayout = VK_NULL_HANDLE;
+            }
+        }
+        pickInitAttempted = false;
 
         // Destroy GPU sensor resources
         sensorImage.reset();
@@ -2001,6 +2041,137 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     return result;
 }
 
+namespace {
+
+// Must match PickResultGpu in pick.rayq.hlsl (std430, 32 bytes)
+struct PickResultGpu {
+    u32 hit;
+    u32 instanceIndex;
+    u32 primitiveIndex;
+    f32 hitT;
+    glm::vec3 worldPosition;
+    u32 _pad;
+};
+static_assert(sizeof(PickResultGpu) == 32, "PickResultGpu size mismatch");
+
+// Must match PickPushConstants in pick.rayq.hlsl (80 bytes)
+struct PickPushConstants {
+    glm::vec3 origin;
+    f32 fovScale;
+    glm::vec3 forward;
+    f32 aspectRatio;
+    glm::vec3 right;
+    u32 pixelX;
+    glm::vec3 up;
+    u32 pixelY;
+    u32 width;
+    u32 height;
+    u32 _pad0;
+    u32 _pad1;
+};
+static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch");
+
+}  // namespace
+
+Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
+    if (!m_impl->isReady || !m_impl->geometry.IsValid()) {
+        return Result<PickResult, String>::Err("Pick: no scene loaded");
+    }
+    if (x >= m_impl->width || y >= m_impl->height) {
+        return Result<PickResult, String>::Err("Pick: pixel out of bounds");
+    }
+
+    m_impl->CreatePickPipeline();
+    if (m_impl->pickPipeline == VK_NULL_HANDLE || !m_impl->pickOutputBuffer) {
+        return Result<PickResult, String>::Err("Pick: pipeline unavailable");
+    }
+
+    // Rebind every call: RebuildTlas replaces the TLAS object outright
+    VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
+    VkWriteDescriptorSetAccelerationStructureKHR asInfo{};
+    asInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asInfo.accelerationStructureCount = 1;
+    asInfo.pAccelerationStructures = &tlas;
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = m_impl->pickOutputBuffer->GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[0].pNext = &asInfo;
+    writes[0].dstSet = m_impl->pickDescriptorSet;
+    writes[0].dstBinding = 0;
+    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    writes[0].descriptorCount = 1;
+    writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    writes[1].dstSet = m_impl->pickDescriptorSet;
+    writes[1].dstBinding = 1;
+    writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    writes[1].descriptorCount = 1;
+    writes[1].pBufferInfo = &bufferInfo;
+    vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()),
+                           writes.data(), 0, nullptr);
+
+    // The exact camera the raygen shader gets, so the pick ray matches the frame
+    const CameraData cameraData = m_impl->camera.GetCameraData();
+    PickPushConstants pc{};
+    pc.origin = cameraData.origin;
+    pc.fovScale = cameraData.fovScale;
+    pc.forward = cameraData.forward;
+    pc.aspectRatio = cameraData.aspectRatio;
+    pc.right = cameraData.right;
+    pc.pixelX = x;
+    pc.up = cameraData.up;
+    pc.pixelY = y;
+    pc.width = m_impl->width;
+    pc.height = m_impl->height;
+
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pickPipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                m_impl->pickPipelineLayout, 0, 1,
+                                &m_impl->pickDescriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmd, m_impl->pickPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT,
+                           0, sizeof(pc), &pc);
+        vkCmdDispatch(cmd, 1, 1, 1);
+
+        VkBufferMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer = m_impl->pickOutputBuffer->GetHandle();
+        barrier.offset = 0;
+        barrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &barrier,
+                             0, nullptr);
+    });
+
+    PickResultGpu gpu{};
+    void* mapped = m_impl->pickOutputBuffer->Map();
+    std::memcpy(&gpu, mapped, sizeof(gpu));
+    m_impl->pickOutputBuffer->Unmap();
+
+    PickResult result;
+    result.hit = gpu.hit != 0;
+    if (result.hit) {
+        const auto& toNode = m_impl->geometry.InstanceToNode();
+        if (gpu.instanceIndex >= toNode.size()) {
+            return Result<PickResult, String>::Err("Pick: instance index out of range");
+        }
+        result.nodeIndex = toNode[gpu.instanceIndex];
+        result.instanceIndex = gpu.instanceIndex;
+        result.primitiveIndex = gpu.primitiveIndex;
+        result.hitT = gpu.hitT;
+        result.worldPosition = gpu.worldPosition;
+    }
+    return result;
+}
+
 Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
     if (!m_impl->isReady || !m_impl->outputImage) {
         return Result<Image, String>::Err("Render context not ready");
@@ -2300,6 +2471,143 @@ static std::filesystem::path GetExecutableDirectory() {
 #else
     return std::filesystem::current_path();
 #endif
+}
+
+// ============================================================================
+// Viewport pick pipeline (1x1 inline ray-query dispatch)
+// ============================================================================
+
+void ExternalRenderContext::Impl::CreatePickPipeline() {
+    if (pickInitAttempted) return;
+    pickInitAttempted = true;
+
+    QL_LOG_INFO("Creating pick compute pipeline...");
+
+    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
+        std::ifstream file(path, std::ios::binary | std::ios::ate);
+        if (!file.is_open()) return {};
+        size_t fileSize = static_cast<size_t>(file.tellg());
+        if (fileSize == 0 || fileSize % 4 != 0) return {};
+        std::vector<u32> code(fileSize / 4);
+        file.seekg(0);
+        file.read(reinterpret_cast<char*>(code.data()), fileSize);
+        return code;
+    };
+
+    auto exeDir = GetExecutableDirectory();
+    const std::vector<std::filesystem::path> shaderPaths = {
+        "pick.spv",
+        exeDir / "pick.spv",
+        "shaders/pick.spv",
+        exeDir / "shaders" / "pick.spv",
+        "../shaders/pick.spv",
+        "src/shaders/pick.spv",
+    };
+    std::vector<u32> code;
+    for (const auto& path : shaderPaths) {
+        code = loadShaderFile(path.string());
+        if (!code.empty()) {
+            QL_LOG_DEBUG("Pick: loaded shader from {}", path.string());
+            break;
+        }
+    }
+    if (code.empty()) {
+        QL_LOG_WARN("Pick: could not load pick.spv, picking disabled");
+        return;
+    }
+
+    VkShaderModuleCreateInfo moduleInfo{};
+    moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    moduleInfo.codeSize = code.size() * sizeof(u32);
+    moduleInfo.pCode = code.data();
+    if (vkCreateShaderModule(device, &moduleInfo, nullptr, &pickShader) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to create shader module");
+        return;
+    }
+
+    // binding 0: TLAS, binding 1: result buffer
+    std::vector<VkDescriptorSetLayoutBinding> bindings(2);
+    bindings[0].binding = 0;
+    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+    bindings[0].descriptorCount = 1;
+    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[1].binding = 1;
+    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[1].descriptorCount = 1;
+    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
+                                    &pickDescriptorSetLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to create descriptor set layout");
+        return;
+    }
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pushRange.offset = 0;
+    pushRange.size = sizeof(PickPushConstants);
+
+    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    pipelineLayoutInfo.setLayoutCount = 1;
+    pipelineLayoutInfo.pSetLayouts = &pickDescriptorSetLayout;
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushRange;
+    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr,
+                               &pickPipelineLayout) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to create pipeline layout");
+        return;
+    }
+
+    VkPipelineShaderStageCreateInfo stageInfo{};
+    stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    stageInfo.module = pickShader;
+    stageInfo.pName = "main";
+
+    VkComputePipelineCreateInfo pipelineInfo{};
+    pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    pipelineInfo.stage = stageInfo;
+    pipelineInfo.layout = pickPipelineLayout;
+    if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+                                 &pickPipeline) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to create compute pipeline");
+        pickPipeline = VK_NULL_HANDLE;
+        return;
+    }
+
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+        {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1},
+    };
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+    poolInfo.maxSets = 1;
+    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &pickDescriptorPool) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to create descriptor pool");
+        return;
+    }
+
+    VkDescriptorSetAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = pickDescriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &pickDescriptorSetLayout;
+    if (vkAllocateDescriptorSets(device, &allocInfo, &pickDescriptorSet) != VK_SUCCESS) {
+        QL_LOG_WARN("Pick: failed to allocate descriptor set");
+        pickDescriptorSet = VK_NULL_HANDLE;
+        return;
+    }
+
+    pickOutputBuffer = std::make_unique<GpuBuffer>(
+        contextAdapter->GetAllocator(), sizeof(PickResultGpu),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
 }
 
 void ExternalRenderContext::Impl::CreateCLAHEPipeline() {

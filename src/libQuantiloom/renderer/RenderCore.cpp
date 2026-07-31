@@ -613,11 +613,12 @@ void ForEachInstance(const Scene& scene, F&& fn) {
         firstPrim += mesh.primitives.size();
     }
 
-    for (const auto& node : scene.nodes) {
+    for (size_t nodeIndex = 0; nodeIndex < scene.nodes.size(); ++nodeIndex) {
+        const auto& node = scene.nodes[nodeIndex];
         const Mesh& mesh = scene.meshes[node.meshIndex];
         const size_t base = meshToFirstPrim[node.meshIndex];
         for (size_t prim = 0; prim < mesh.primitives.size(); ++prim) {
-            fn(node.transform, base + prim);
+            fn(node.transform, base + prim, nodeIndex);
         }
     }
 }
@@ -747,9 +748,11 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
             blas->Build(cmd);
         }
 
-        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim) {
+        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
+                                   size_t nodeIndex) {
             const InstanceGeometryInfo& info = primitiveOffsets[globalPrim];
             result.m_instances.push_back(info);
+            result.m_instanceToNode.push_back(static_cast<u32>(nodeIndex));
 
             QL_LOG_DEBUG("  Instance {}: vertexOff={}, indexOff={}, normalOff={}, "
                          "uvOff={}, tangentOff={}, matId={}",
@@ -796,7 +799,8 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
 
     CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
         size_t instance = 0;
-        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim) {
+        ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
+                                   size_t /*nodeIndex*/) {
             // Offsets are a property of the geometry, not of where a node sits, so
             // the instance list from Build still applies.
             const u32 materialId = instance < m_instances.size()

@@ -45,6 +45,7 @@
 #include "scene/Camera.hpp"
 #include "renderer/ConfigApply.hpp"
 #include "renderer/LightingParams.hpp"
+#include "renderer/Pick.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
 #include "core/SpectralData.hpp"
@@ -758,6 +759,24 @@ public:
      *       original = (output - 0.5) * 2)
      */
     [[nodiscard]] Result<glm::vec4, String> ReadPixelValue(u32 x, u32 y);
+
+    /**
+     * @brief What is under this pixel: trace the pixel's primary camera ray
+     *
+     * A 1x1 inline ray-query compute dispatch against the live TLAS, using
+     * exactly the raygen shader's ray for the pixel (pixel center, no
+     * jitter, no lens offset), so the answer agrees with what is on screen.
+     * The instance index is mapped back to a Scene::nodes index host-side.
+     *
+     * @param x X coordinate (pixels, 0 = left), same space as ReadPixelValue
+     * @param y Y coordinate (pixels, 0 = top)
+     * @return PickResult (hit == false when the ray reached the sky), or an
+     *         error when no scene is loaded or the pixel is out of bounds
+     *
+     * @note Synchronous: submits and waits like ReadPixelValue. A 1x1
+     *       dispatch is sub-millisecond; intended per click, not per frame.
+     */
+    [[nodiscard]] Result<PickResult, String> Pick(u32 x, u32 y);
 
     /**
      * @brief Capture current render output to CPU Image

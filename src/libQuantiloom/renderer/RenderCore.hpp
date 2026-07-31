@@ -299,6 +299,11 @@ public:
     /// The offsets written to InstanceInfo(), kept for tests and diagnostics.
     [[nodiscard]] const Vector<InstanceGeometryInfo>& Instances() const { return m_instances; }
 
+    /// Scene::nodes index for each TLAS instance, in InstanceIndex() order.
+    /// Filled by Build alongside m_instances (node transforms move instances,
+    /// they do not renumber them, so RebuildTlas leaves it untouched).
+    [[nodiscard]] const Vector<u32>& InstanceToNode() const { return m_instanceToNode; }
+
 private:
     Vector<std::unique_ptr<BLAS>> m_blas;
     std::unique_ptr<TLAS> m_tlas;
@@ -309,6 +314,7 @@ private:
     std::unique_ptr<GpuBuffer> m_tangents;
     std::unique_ptr<GpuBuffer> m_instanceInfo;
     Vector<InstanceGeometryInfo> m_instances;
+    Vector<u32> m_instanceToNode;
     u32 m_instanceCount = 0;
     u32 m_vertexCount = 0;
     u32 m_indexCount = 0;

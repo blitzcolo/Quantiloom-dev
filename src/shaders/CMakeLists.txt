@@ -67,6 +67,8 @@ file(GLOB SHADER_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.hlsli"
 # these files.
 set(DXC_RT_FLAGS   -spirv -T lib_6_3 -fspv-target-env=vulkan1.2)
 set(DXC_COMP_FLAGS -spirv -T cs_6_0  -fspv-target-env=vulkan1.2 -E main)
+# Inline ray query needs SM 6.5; everything else stays on the byte-stable 6.0
+set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 
 set(COMPILED_SHADERS)
 
@@ -76,7 +78,9 @@ set(COMPILED_SHADERS)
 function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
     set(SHADER_OUTPUT "${SHADER_OUTPUT_DIR}/${OUT_NAME}.spv")
     set(SHADER_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/${SRC_NAME}")
-    if(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
+    if(${SRC_NAME} MATCHES "\\.rayq\\.hlsl$")
+        set(FLAGS ${DXC_RQ_FLAGS})
+    elseif(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
         set(FLAGS ${DXC_COMP_FLAGS})
     else()
         set(FLAGS ${DXC_RT_FLAGS})
@@ -111,6 +115,9 @@ if(DXC_EXECUTABLE)
     quantiloom_compile_hlsl(sensor_psf_blur_vertical     sensor_psf_blur.comp.hlsl -D SENSOR_PSF_VERTICAL)
     quantiloom_compile_hlsl(sensor_quantize_to_radiance  sensor_quantize_to_radiance.comp.hlsl)
     quantiloom_compile_hlsl(sensor_fpn                   sensor_fpn.comp.hlsl)
+
+    # Viewport pick (inline ray query, cs_6_5)
+    quantiloom_compile_hlsl(pick pick.rayq.hlsl)
 endif()
 
 # Create custom target that depends on all compiled shaders
