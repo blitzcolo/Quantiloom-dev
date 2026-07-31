@@ -408,6 +408,11 @@ float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavele
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
+    // Record this ray's hit distance for the depth AOV. Only the depth-0
+    // (primary) value survives: raygen snapshots its own payload right after
+    // the primary trace, and recursive rays carry separate Payload instances.
+    payload.primaryHitT = RayTCurrent();
+
     // ========================================================================
     // Get instance geometry info for multi-BLAS support
     // ========================================================================

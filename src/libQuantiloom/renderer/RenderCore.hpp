@@ -364,7 +364,8 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
  *       every Resize(), and the CLI creates one per run. All three specified the same
  *       format, usage and initial transition; only the surrounding code differed.
  */
-std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 height);
+std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 height,
+                                             VkFormat format = VK_FORMAT_R32G32B32A32_SFLOAT);
 
 /**
  * @brief Everything the ray tracing pipeline binds, in one place
@@ -378,6 +379,7 @@ std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, u32 width, u32 
  */
 struct PipelineBindings {
     const GpuImage* outputImage = nullptr;
+    const GpuImage* depthImage = nullptr;  // primary-hit depth AOV (binding 22)
     const SceneGeometry* geometry = nullptr;
     const GpuBuffer* lightingParams = nullptr;
     const GpuBuffer* materials = nullptr;

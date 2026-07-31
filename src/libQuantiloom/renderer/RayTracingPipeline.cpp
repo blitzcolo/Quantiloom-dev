@@ -256,7 +256,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(22);  // Added environment sampler (binding 21)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(23);  // Added depth AOV (binding 22)
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -493,9 +493,16 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[21].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[21].pImmutableSamplers = nullptr;
 
+    // Binding 22: Primary-hit depth AOV (raygen writes hit distance, -1 = miss)
+    bindings[22].binding = 22;
+    bindings[22].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[22].descriptorCount = 1;
+    bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[22].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(22, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(23, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -518,7 +525,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Create descriptor pool
     std::vector<VkDescriptorPoolSize> poolSizes(5);
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 1;
+    poolSizes[0].descriptorCount = 2;  // output image + depth AOV
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -872,6 +879,25 @@ void RayTracingPipeline::BindOutputImage(const GpuImage& image) const {
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 0;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.descriptorCount = 1;
+    write.pImageInfo = &imageInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindDepthImage(const GpuImage& image) const {
+    VkDevice device = m_context.GetDevice();
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.imageView = image.GetView();
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 22;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     write.descriptorCount = 1;

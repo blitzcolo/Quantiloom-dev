@@ -18,6 +18,11 @@
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
 [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;  // Fallback lighting (unused here)
 
+// Primary-hit depth AOV: distance along the normalized primary ray, -1 on
+// miss. Overwritten every frame (never accumulated) so it always reflects the
+// current scene; consumed by ExternalRenderContext::BlitDepthTo.
+[[vk::binding(22, 0)]] RWTexture2D<float> depthImage;
+
 // ============================================================================
 // Push Constants (Extended for Accumulation Sampling)
 // ============================================================================
@@ -191,6 +196,9 @@ void main() {
     // Initialize RNG state from pixel seed for stochastic decisions
     payload.rngState = seed;
 
+    // Miss sentinel for the depth AOV; the closest-hit shader overwrites it
+    payload.primaryHitT = -1.0;
+
     // Trace ray (hit group index 0, miss index 0)
     TraceRay(
         scene,              // Acceleration structure
@@ -202,6 +210,12 @@ void main() {
         ray,                // Ray descriptor
         payload             // Ray payload
     );
+
+    // Snapshot the primary hit distance before anything else can touch the
+    // payload. Written unconditionally: unlike radiance this is not averaged,
+    // the last sample simply wins (jitter makes it flicker sub-pixel at
+    // silhouettes, which the grid overlay's epsilon absorbs).
+    depthImage[launchID] = payload.primaryHitT;
 
     // ========================================================================
     // Output: Accumulative Sampling with Progressive Refinement

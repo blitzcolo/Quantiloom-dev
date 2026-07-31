@@ -900,13 +900,14 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
 // ============================================================================
 
 std::unique_ptr<GpuImage> CreateRenderTarget(VulkanContext& ctx, const u32 width,
-                                             const u32 height) {
-    QL_LOG_INFO("Creating output image ({}x{})...", width, height);
+                                             const u32 height, const VkFormat format) {
+    QL_LOG_INFO("Creating render target ({}x{}, format {})...", width, height,
+                static_cast<int>(format));
 
     auto image = std::make_unique<GpuImage>(
         ctx.GetAllocator(), ctx.GetDevice(),
         width, height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
+        format,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
 
@@ -932,6 +933,9 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
 
     if (bindings.outputImage) {
         pipeline->BindOutputImage(*bindings.outputImage);            // 0
+    }
+    if (bindings.depthImage) {
+        pipeline->BindDepthImage(*bindings.depthImage);              // 22
     }
     if (bindings.geometry && bindings.geometry->IsValid()) {
         const SceneGeometry& geometry = *bindings.geometry;

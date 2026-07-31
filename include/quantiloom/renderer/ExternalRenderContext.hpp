@@ -284,6 +284,37 @@ public:
     );
 
     /**
+     * @brief Blit the primary-hit depth AOV into a caller-owned image
+     *
+     * The depth AOV is R32_SFLOAT: the hit distance along the normalized
+     * primary camera ray in world units (a Euclidean camera-to-surface
+     * distance), or -1.0 where the primary ray missed. It is overwritten
+     * every frame -- never accumulated -- so it always reflects the current
+     * scene, including mid-drag transform edits.
+     *
+     * Mirrors RenderFrame's contract: the caller owns the target image and
+     * this method only records commands. Record it after RenderFrame in the
+     * same command buffer. The target must be R32_SFLOAT with
+     * TRANSFER_DST and SAMPLED usage; it is left in
+     * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, ready to be sampled by an
+     * overlay pass (the only intended consumer).
+     *
+     * @param cmd Command buffer (must be in recording state)
+     * @param targetImage Caller-owned R32_SFLOAT image
+     * @param targetCurrentLayout Current layout of targetImage
+     *        (VK_IMAGE_LAYOUT_UNDEFINED on first use)
+     * @param width Render width (must match RenderFrame's)
+     * @param height Render height (must match RenderFrame's)
+     */
+    void BlitDepthTo(
+        VkCommandBuffer cmd,
+        VkImage targetImage,
+        VkImageLayout targetCurrentLayout,
+        u32 width,
+        u32 height
+    );
+
+    /**
      * @brief Resize render target
      * @param width New width
      * @param height New height

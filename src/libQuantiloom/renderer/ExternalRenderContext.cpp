@@ -164,6 +164,7 @@ struct ExternalRenderContext::Impl {
 
     // GPU resources
     std::unique_ptr<GpuImage> outputImage;
+    std::unique_ptr<GpuImage> depthAovImage;  // primary-hit distance, R32_SFLOAT (binding 22)
     std::unique_ptr<GpuBuffer> lightingParamsBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
@@ -343,6 +344,7 @@ struct ExternalRenderContext::Impl {
         materialBuffer.reset();
         lightingParamsBuffer.reset();
         outputImage.reset();
+        depthAovImage.reset();
         pixelReadbackBuffer.reset();
 
         // Cleanup CLAHE resources
@@ -662,6 +664,8 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     lightingParams = CreateDefaultLightingParams();
 
     outputImage = rendercore::CreateRenderTarget(*contextAdapter, params.width, params.height);
+    depthAovImage = rendercore::CreateRenderTarget(*contextAdapter, params.width, params.height,
+                                                   VK_FORMAT_R32_SFLOAT);
 
     // Create lighting params buffer
     lightingParamsBuffer = std::make_unique<GpuBuffer>(
@@ -1280,6 +1284,88 @@ void ExternalRenderContext::RenderFrame(
     m_impl->lastFrameTimeMs = duration.count() / 1000.0f;
 }
 
+void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage,
+                                        VkImageLayout targetCurrentLayout,
+                                        u32 width, u32 height) {
+    if (!m_impl->depthAovImage) {
+        return;
+    }
+
+    VkImageSubresourceRange colorRange{};
+    colorRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    colorRange.baseMipLevel = 0;
+    colorRange.levelCount = 1;
+    colorRange.baseArrayLayer = 0;
+    colorRange.layerCount = 1;
+
+    // Source: depth AOV GENERAL (raygen storage write) -> TRANSFER_SRC
+    VkImageMemoryBarrier srcBarrier{};
+    srcBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    srcBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    srcBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    srcBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    srcBarrier.image = m_impl->depthAovImage->GetImage();
+    srcBarrier.subresourceRange = colorRange;
+    srcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+
+    // Target: caller's layout -> TRANSFER_DST
+    VkImageMemoryBarrier dstBarrier{};
+    dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    dstBarrier.oldLayout = targetCurrentLayout;
+    dstBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    dstBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    dstBarrier.image = targetImage;
+    dstBarrier.subresourceRange = colorRange;
+    dstBarrier.srcAccessMask = 0;  // previous reads need no flush
+    dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+
+    VkImageMemoryBarrier preBarriers[2] = {srcBarrier, dstBarrier};
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, preBarriers);
+
+    // NEAREST on purpose: depth values must never be mixed across silhouettes
+    VkImageBlit blitRegion{};
+    blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    blitRegion.srcSubresource.mipLevel = 0;
+    blitRegion.srcSubresource.baseArrayLayer = 0;
+    blitRegion.srcSubresource.layerCount = 1;
+    blitRegion.srcOffsets[0] = {0, 0, 0};
+    blitRegion.srcOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+    blitRegion.dstSubresource = blitRegion.srcSubresource;
+    blitRegion.dstOffsets[0] = {0, 0, 0};
+    blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+
+    vkCmdBlitImage(cmd,
+                   m_impl->depthAovImage->GetImage(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blitRegion, VK_FILTER_NEAREST);
+
+    // Source back to GENERAL for next frame's raygen write
+    srcBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    srcBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    srcBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+    // Target ready for sampling in the caller's overlay fragment shader
+    dstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    dstBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dstBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
+    VkImageMemoryBarrier postBarriers[2] = {srcBarrier, dstBarrier};
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, postBarriers);
+}
+
 void ExternalRenderContext::Resize(u32 width, u32 height) {
     if (width == m_impl->width && height == m_impl->height) {
         return;
@@ -1296,10 +1382,13 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
 
     m_impl->outputImage =
         rendercore::CreateRenderTarget(*m_impl->contextAdapter, width, height);
+    m_impl->depthAovImage = rendercore::CreateRenderTarget(
+        *m_impl->contextAdapter, width, height, VK_FORMAT_R32_SFLOAT);
 
-    // Re-bind output image
+    // Re-bind output and depth AOV images
     if (m_impl->pipeline) {
         m_impl->pipeline->BindOutputImage(*m_impl->outputImage);
+        m_impl->pipeline->BindDepthImage(*m_impl->depthAovImage);
     }
 
     // Recreate CLAHE display image if initialized
@@ -2165,6 +2254,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     rendercore::PipelineBindings bindings;
     bindings.outputImage = outputImage.get();
+    bindings.depthImage = depthAovImage.get();
     bindings.geometry = &geometry;
     bindings.lightingParams = lightingParamsBuffer.get();
     bindings.materials = materialBuffer.get();

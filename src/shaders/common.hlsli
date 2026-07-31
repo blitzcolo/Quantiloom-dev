@@ -228,7 +228,14 @@ struct Payload {
     // this, and only the surface that sampled λ_h converts back.
     float heroLambda;  // nm, 0 = whole band                             // 4 bytes
 
-    // TOTAL: 52 bytes (under 64-byte RT Core limit)
+    // Hit distance of THIS ray, in world units (RayTCurrent()), or -1 on
+    // miss. Ray directions are normalized in raygen, so for the primary ray
+    // this is the Euclidean camera-to-surface distance. Raygen snapshots it
+    // into the depth AOV (binding 22) right after the primary trace returns;
+    // recursive payloads carry their own value, which nothing reads.
+    float primaryHitT;                                                   // 4 bytes
+
+    // TOTAL: 56 bytes (under 64-byte RT Core limit)
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into

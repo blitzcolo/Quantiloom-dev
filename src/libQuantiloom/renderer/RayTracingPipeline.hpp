@@ -204,6 +204,9 @@ public:
     // Bind output image (binding 0)
     void BindOutputImage(const GpuImage& image) const;
 
+    // Bind primary-hit depth AOV image (binding 22)
+    void BindDepthImage(const GpuImage& image) const;
+
     // Bind TLAS (binding 1)
     void BindAccelerationStructure(VkAccelerationStructureKHR tlas) const;
 

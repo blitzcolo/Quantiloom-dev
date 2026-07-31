@@ -172,6 +172,7 @@ public: unsigned short quantiloom::mcp::Server::Port(void)const
 public: virtual class quantiloom::Result<struct quantiloom::SensorOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::GenericSensor::Apply(struct quantiloom::Image const &,struct quantiloom::SensorParams const &)
 public: virtual quantiloom::GenericSensor::~GenericSensor(void)
 public: void quantiloom::Config::Print(void)const
+public: void quantiloom::ExternalRenderContext::BlitDepthTo(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: void quantiloom::ExternalRenderContext::RebuildAccelerationStructure(void)
 public: void quantiloom::ExternalRenderContext::RenderFrame(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: void quantiloom::ExternalRenderContext::ResetAccumulation(void)
