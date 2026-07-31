@@ -14,17 +14,13 @@
 
 #include "core/Log.hpp"
 #include "core/Config.hpp"
-#include "core/Image.hpp"
-#include "io/ImageIO.hpp"
-#include "renderer/OfflineRenderer.hpp"
-#include "postprocess/GenericSensor.hpp"
-#include "postprocess/PostprocessConfig.hpp"
 
+#include "McpServe.hpp"
+#include "RenderJob.hpp"
 #include "Version.hpp"
 
 #include <iostream>
 #include <filesystem>
-#include <algorithm>  // For std::nth_element
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>  // For std::getenv
@@ -93,11 +89,14 @@ void PrintHelp(const char* progname) {
         << "\n"
         << "Usage:\n"
         << "  " << progname << " <config.toml> [options]\n"
+        << "  " << progname << " serve [--port N]\n"
         << "  " << progname << " --help\n"
         << "  " << progname << " --version\n"
         << "\n"
         << "Options:\n"
         << "  <config.toml>          Scene configuration file (required)\n"
+        << "  serve                  Answer MCP on 127.0.0.1 so an agent can render\n"
+        << "  --port N               Port for serve mode (default 8766)\n"
         << "  -h, --help             Show this help message and exit\n"
         << "  -v, --version          Show version number and exit\n"
         << "  -V, --build-info       Show full build information and exit\n"
@@ -154,6 +153,32 @@ int RunApp(int argc, char* argv[]) {
     // ========================================================================
     Log::Init("quantiloom.log", Log::Level::Info);
 
+    // ========================================================================
+    // serve → answer MCP instead of rendering one scene and exiting
+    // ========================================================================
+    if (std::strcmp(argv[1], "serve") == 0) {
+        u16 port = 8766;  // Studio defaults to 8765; both can run at once
+        for (int i = 2; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
+                const long parsed = std::strtol(argv[++i], nullptr, 10);
+                if (parsed < 1 || parsed > 65535) {
+                    std::cerr << "Error: --port must be between 1 and 65535.\n";
+                    Log::Shutdown();
+                    return 1;
+                }
+                port = static_cast<u16>(parsed);
+            } else {
+                std::cerr << "Error: unrecognised option for serve: " << argv[i] << "\n";
+                Log::Shutdown();
+                return 1;
+            }
+        }
+
+        const int code = app::RunMcpServer(port, ResolveDefaultAtmosModelPack(argv[0]));
+        Log::Shutdown();
+        return code;
+    }
+
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("  Quantiloom Spectral Path Tracer v{}", version::AppVersionString);
     QL_LOG_INFO("  {} {} | {} ({})", version::CompilerId, version::CompilerVer,
@@ -178,204 +203,17 @@ int RunApp(int argc, char* argv[]) {
         // Render
         // ====================================================================
         // Everything from the Vulkan device to the frame readback lives behind
-        // OfflineRenderer now. What stays here is what a *host* does: decide
-        // where the assets are, and write the files.
-        OfflineRenderer::InitParams initParams;
-        initParams.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+        // OfflineRenderer, and everything from there to the files on disk lives
+        // in RenderJob -- shared with serve mode, so an agent's render and a
+        // command-line render are the same render.
+        const app::RenderOutcome outcome =
+            app::RenderConfigToFiles(config, ResolveDefaultAtmosModelPack(argv[0]));
 
-        auto rendererResult = OfflineRenderer::Create(config, initParams);
-        if (!rendererResult.has_value()) {
-            QL_LOG_ERROR("{}", rendererResult.error());
+        if (!outcome.ok && outcome.width == 0) {
+            QL_LOG_ERROR("{}", outcome.error);
             Log::Shutdown();
             return 1;
         }
-        OfflineRenderer& renderer = *rendererResult.value();
-
-        // Read rather than re-parsed. Two readers of one TOML key is the bug
-        // class this project keeps closing.
-        const u32 width = renderer.Params().width;
-        const u32 height = renderer.Params().height;
-        const SpectralMode spectral_mode = renderer.Params().mode;
-        const String spectralModeStr = renderer.Params().modeName;
-        const f32 wavelength_nm = renderer.Params().wavelengthNm;
-        const String outputPath = renderer.Params().outputPath;
-
-        OfflineRenderOutput rendered = renderer.Render();
-        if (!rendered.error.empty()) {
-            QL_LOG_ERROR("{}", rendered.error);
-        }
-
-        // The hyperspectral cube streams itself to disk band by band; there is
-        // no frame to save. Everything below is the single-frame output stage.
-        if (!rendered.wroteItsOwnOutput) {
-        Image& img = rendered.radiance;
-        // ====================================================================
-        // Sensor Simulation (Optional Postprocessing)
-        // ====================================================================
-        if (PostprocessConfig::IsSensorEnabled(config)) {
-            QL_LOG_INFO("Applying sensor simulation...");
-
-            // Parse sensor parameters from config
-            SensorParams sensorParams = PostprocessConfig::ParseSensorParams(config);
-
-            // ================================================================
-            // IR fused modes: unit fixup for the sensor photon budget
-            // ================================================================
-            // The renderer stores per-nm AVERAGE spectral radiance
-            // (band integral / band width, see closesthit.rchit) while the
-            // sensor chain expects band-INTEGRATED radiance (W/sr/m^2).
-            // Multiply by the band width here, and use the band center for
-            // photon energy instead of the 550 nm visible-light default.
-            //
-            // Both numbers come back with the frame rather than being derived
-            // here: the renderer is the only party that knows which band it
-            // just integrated.
-            const f32 bandScale = rendered.sensorRadianceScale;
-            if (rendered.sensorWavelengthNm > 0.0f) {
-                sensorParams.wavelength_nm = rendered.sensorWavelengthNm;
-            }
-            if (bandScale != 1.0f) {
-                QL_LOG_INFO("  IR sensor units: radiance x{:.0f} nm bandwidth, photon wavelength {:.0f} nm",
-                            bandScale, sensorParams.wavelength_nm);
-            }
-
-            // Create sensor model
-            GenericSensor sensor;
-
-            // Extract RGB/grayscale channels (drop alpha for sensor simulation)
-            Image hdrInput(width, height, 3);
-            for (u32 y = 0; y < height; ++y) {
-                for (u32 x = 0; x < width; ++x) {
-                    hdrInput(x, y, 0) = img(x, y, 0) * bandScale;  // R
-                    hdrInput(x, y, 1) = img(x, y, 1) * bandScale;  // G
-                    hdrInput(x, y, 2) = img(x, y, 2) * bandScale;  // B
-                }
-            }
-
-            // Apply sensor chain
-            auto sensorResult = sensor.Apply(hdrInput, sensorParams);
-            if (!sensorResult.has_value()) {
-                QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", sensorResult.error());
-            } else {
-                QL_LOG_INFO("  [OK] Sensor simulation complete");
-
-                const SensorOutput& sensorOutput = sensorResult.value();
-
-                // Replace image with enhanced preview (noisy radiance, for PNG/visualization).
-                // Divide the band scale back out so the EXR keeps the same
-                // per-nm average radiance units as the sensor-off path.
-                const Image& enhancedPreview = sensorOutput.enhancedPreview;
-                const f32 invBandScale = 1.0f / bandScale;
-                for (u32 y = 0; y < height; ++y) {
-                    for (u32 x = 0; x < width; ++x) {
-                        img(x, y, 0) = enhancedPreview(x, y, 0) * invBandScale;  // R
-                        img(x, y, 1) = enhancedPreview(x, y, 1) * invBandScale;  // G
-                        img(x, y, 2) = enhancedPreview(x, y, 2) * invBandScale;  // B
-                        // Alpha unchanged
-                    }
-                }
-
-                // Update metadata
-                img.metadata["postprocess"] = "sensor_simulation_preview";
-
-                // Save raw DN image to separate file
-                std::filesystem::path exrPath(outputPath);
-                std::string rawDnPath = (exrPath.parent_path() / (exrPath.stem().string() + "_rawdn.exr")).string();
-
-                QL_LOG_INFO("Saving raw DN image to {}...", rawDnPath);
-                if (ImageIO::WriteEXR(rawDnPath, sensorOutput.rawDN)) {
-                    QL_LOG_INFO("  [OK] Saved raw DN image");
-                } else {
-                    QL_LOG_WARN("  [WARN] Failed to save raw DN image");
-                }
-            }
-        } else {
-            QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
-        }
-
-        // Save as EXR
-        if (ImageIO::WriteEXR(outputPath, img)) {
-            QL_LOG_INFO("  [OK] Saved spectral image to {}", outputPath);
-        } else {
-            QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outputPath);
-        }
-
-        // For fused modes (RGB, VIS_FUSED, MWIR, LWIR), also save PNG preview
-        // These modes output both EXR (HDR/physical) and PNG (LDR preview)
-        bool isFusedMode = (spectral_mode == SpectralMode::RGB ||
-                           spectral_mode == SpectralMode::VIS_Fused ||
-                           spectral_mode == SpectralMode::MWIR_Fused ||
-                           spectral_mode == SpectralMode::LWIR_Fused ||
-                           spectral_mode == SpectralMode::SWIR_Fused);
-
-        if (isFusedMode) {
-            // Generate PNG path from EXR path (replace extension)
-            std::filesystem::path exrPath(outputPath);
-            std::filesystem::path pngPath = exrPath.parent_path() / (exrPath.stem().string() + ".png");
-
-            // Create RGB image for PNG (drop alpha channel)
-            Image pngImg(width, height, 3);
-            pngImg.channelNames = {"R", "G", "B"};
-
-            for (u32 y = 0; y < height; ++y) {
-                for (u32 x = 0; x < width; ++x) {
-                    pngImg(x, y, 0) = img(x, y, 0);  // R
-                    pngImg(x, y, 1) = img(x, y, 1);  // G
-                    pngImg(x, y, 2) = img(x, y, 2);  // B
-                }
-            }
-
-            // Physical radiance does not live in [0, 1], so a raw clamp makes
-            // a preview that is all black or all white. IR fused modes are far
-            // below it (LWIR ~5e-3 W/sr/m^2/nm); a scene lit by a measured
-            // solar spectrum is far above it, since ASTM G-173 integrates to
-            // a few hundred rather than to the 5.0 someone used to type into
-            // sun_radiance. Same remedy for both: stretch the 1st..99th
-            // percentile to [0, 1] for the preview, and leave the EXR alone.
-            //
-            // Applied only when the values actually leave the range, so a
-            // scene that was already displayable previews exactly as before.
-            {
-                std::vector<f32> values(static_cast<size_t>(width) * height);
-                for (u32 y = 0; y < height; ++y) {
-                    for (u32 x = 0; x < width; ++x) {
-                        values[static_cast<size_t>(y) * width + x] = pngImg(x, y, 0);
-                    }
-                }
-                const size_t loIdx = values.size() / 100;
-                const size_t hiIdx = values.size() - 1 - loIdx;
-                std::nth_element(values.begin(),
-                                 values.begin() + static_cast<std::ptrdiff_t>(loIdx),
-                                 values.end());
-                const f32 lo = values[loIdx];
-                std::nth_element(values.begin(),
-                                 values.begin() + static_cast<std::ptrdiff_t>(hiIdx),
-                                 values.end());
-                const f32 hi = values[hiIdx];
-                const f32 range = std::max(hi - lo, 1e-12f);
-
-                if (IsIRFusedMode(spectral_mode) || hi > 1.0f) {
-                    for (u32 y = 0; y < height; ++y) {
-                        for (u32 x = 0; x < width; ++x) {
-                            for (u32 c = 0; c < 3; ++c) {
-                                pngImg(x, y, c) = (pngImg(x, y, c) - lo) / range;
-                            }
-                        }
-                    }
-                    QL_LOG_INFO("  PNG preview stretched from [{:.4g}, {:.4g}]; "
-                                "the EXR keeps the physical values", lo, hi);
-                }
-                QL_LOG_INFO("  IR PNG preview normalized: [{:.4e}, {:.4e}] -> [0, 1]", lo, hi);
-            }
-
-            if (ImageIO::WritePNG(pngPath.string(), pngImg)) {
-                QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
-            } else {
-                QL_LOG_WARN("  [WARN] Failed to save PNG preview to {}", pngPath.string());
-            }
-        }
-
-        } // End of the single-frame output stage
 
         // ====================================================================
         // Success
@@ -383,20 +221,21 @@ int RunApp(int argc, char* argv[]) {
         QL_LOG_INFO("========================================");
         QL_LOG_INFO("  Rendering COMPLETED");
         QL_LOG_INFO("========================================");
-        QL_LOG_INFO("  Spectral mode: {}", spectralModeStr);
-        if (spectral_mode == SpectralMode::Single ||
-            spectral_mode == SpectralMode::MWIR_Fused ||
-            spectral_mode == SpectralMode::LWIR_Fused ||
-            spectral_mode == SpectralMode::SWIR_Fused) {
-            QL_LOG_INFO("  Wavelength: {:.1f} nm", wavelength_nm);
-        } else if (spectral_mode == SpectralMode::Multispectral) {
+        QL_LOG_INFO("  Spectral mode: {}", outcome.modeName);
+        const SpectralMode spectralMode =
+            ParseSpectralMode(outcome.modeName).has_value()
+                ? ParseSpectralMode(outcome.modeName).value()
+                : SpectralMode::RGB;
+        if (spectralMode == SpectralMode::Single ||
+            spectralMode == SpectralMode::MWIR_Fused ||
+            spectralMode == SpectralMode::LWIR_Fused ||
+            spectralMode == SpectralMode::SWIR_Fused) {
+            QL_LOG_INFO("  Wavelength: {:.1f} nm", outcome.wavelengthNm);
+        } else if (spectralMode == SpectralMode::Multispectral) {
             QL_LOG_INFO("  Mode: Hyperspectral data cube");
         }
-        QL_LOG_INFO("  Output: {}", outputPath);
+        QL_LOG_INFO("  Output: {}", outcome.exrPath);
         QL_LOG_INFO("========================================");
-
-        // The pipeline cache is written back and the device torn down when
-        // `renderer` goes out of scope below.
     } catch (const std::exception& e) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());
         Log::Shutdown();

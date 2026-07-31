@@ -57,6 +57,7 @@
 
 #pragma once
 
+#include "core/Image.hpp"
 #include "core/Platform.hpp"
 #include "core/Types.hpp"
 
@@ -129,6 +130,24 @@ struct ToolResult {
 
 /// Receives the tool call's `arguments` object as a JSON document.
 using ToolHandler = std::function<ToolResult(const String& argumentsJson)>;
+
+/**
+ * @brief Encode a frame for ToolResult::imageBase64
+ *
+ * Downsamples so the long edge is at most `maxDimension`, sRGB-encodes it the
+ * way ImageIO::WritePNG does, and base64s the PNG. Both hosts go through this
+ * rather than each reaching for its own image library, so a frame looks the
+ * same to an agent whichever one produced it.
+ *
+ * The default size is a cost decision. An image block costs a model roughly
+ * width x height / 750 tokens, so a 1080p frame is about 2,800 and a 768px one
+ * under a thousand -- and nothing anybody asks a renderer about is invisible at
+ * 768. Values are clamped to [0,1]: a linear HDR frame with no exposure applied
+ * will clip, which is itself worth seeing.
+ *
+ * @return Base64 PNG, or an empty string if the image was empty or unencodable.
+ */
+[[nodiscard]] QL_API String EncodeImageContent(const Image& image, u32 maxDimension = 768);
 
 /**
  * @brief One tool, as the agent sees it and as the host implements it

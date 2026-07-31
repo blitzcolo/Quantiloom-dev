@@ -3,12 +3,17 @@
 #include "core/Log.hpp"
 #include "mcp/CommandQueue.hpp"
 #include "mcp/HttpTransport.hpp"
+#include "mcp/McpImageUtil.hpp"
 #include "mcp/Protocol.hpp"
 #include "mcp/ToolRegistry.hpp"
 
 #include <utility>
 
 namespace quantiloom::mcp {
+
+String EncodeImageContent(const Image& image, const u32 maxDimension) {
+    return EncodePngBase64(Downsample(image, maxDimension));
+}
 
 struct Server::Impl {
     ToolRegistry registry;

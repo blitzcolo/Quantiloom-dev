@@ -1,3 +1,4 @@
+class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::mcp::EncodeImageContent(struct quantiloom::Image const &,unsigned int)
 const quantiloom::GenericSensor::`vftable'
 private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)

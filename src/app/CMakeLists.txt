@@ -33,6 +33,10 @@ endif()
 
 add_executable(Quantiloom
     main.cpp
+    RenderJob.cpp
+    RenderJob.hpp
+    McpServe.cpp
+    McpServe.hpp
     ${CMAKE_CURRENT_BINARY_DIR}/Quantiloom.rc
     ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
 )
@@ -59,9 +63,14 @@ target_include_directories(Quantiloom
 #
 # libSpectraForge is deliberately absent: the CLI imports nothing from it --
 # verified against the import table.
+#
+# nlohmann_json is a third-party header-only library, not a Quantiloom internal:
+# serve mode reads tool arguments and writes tool results, and the constraint
+# above is about reaching into src/libQuantiloom, not about doing without JSON.
 target_link_libraries(Quantiloom
     PRIVATE
         libQuantiloom
+        nlohmann_json
 )
 
 # C++20 standard and RPATH set to executable directory
