@@ -474,6 +474,19 @@ Scene MakeSceneWithMaterials(std::initializer_list<const char*> names) {
     return scene;
 }
 
+/// A scene whose nodes are named, for the [[nodes]] cases. Transforms start at
+/// identity so an override is visible.
+Scene MakeSceneWithNodes(const std::vector<const char*>& names) {
+    Scene scene;
+    for (const char* name : names) {
+        SceneNode node;
+        node.name = name;
+        node.transform = glm::mat4(1.0f);
+        scene.nodes.push_back(node);
+    }
+    return scene;
+}
+
 }  // namespace
 
 TEST_F(ConfigResolveTest, DefaultTemperatureBackfillsMaterialsInThermalModes) {
@@ -503,6 +516,146 @@ TEST_F(ConfigResolveTest, NoTemperatureBackfillInRgbMode) {
     auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
     ASSERT_TRUE(spectra.has_value()) << spectra.error();
     EXPECT_EQ(spectra.value().temperatureBackfilled, 0u);
+}
+
+TEST_F(ConfigResolveTest, MaterialsTableAppliesPbrOverrides) {
+    // The half of a material Studio can edit but could not write down: an agent
+    // or a person changing a colour in the GUI had it disappear on save.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Panel"
+base_color = [0.9, 0.1, 0.1]
+metallic = 0.75
+roughness = 0.2
+emissive = [1.0, 0.5, 0.0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel", "Other"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].baseColorFactor.r, 0.9f);
+    EXPECT_FLOAT_EQ(scene.materials[0].baseColorFactor.b, 0.1f);
+    EXPECT_FLOAT_EQ(scene.materials[0].metallicFactor, 0.75f);
+    EXPECT_FLOAT_EQ(scene.materials[0].roughnessFactor, 0.2f);
+    EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.g, 0.5f);
+}
+
+// An entry that sets one thing must not reset the rest: a [[materials]] block
+// carrying only a temperature used to be the whole material's new definition.
+TEST_F(ConfigResolveTest, MaterialsTableLeavesUnmentionedPbrKeysAlone) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([[materials]]
+name = "Panel"
+ir_temperature_k = 350.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel"});
+    scene.materials[0].metallicFactor = 0.6f;
+    scene.materials[0].roughnessFactor = 0.3f;
+    const glm::vec4 loadedColour = scene.materials[0].baseColorFactor;
+
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].metallicFactor, 0.6f);
+    EXPECT_FLOAT_EQ(scene.materials[0].roughnessFactor, 0.3f);
+    EXPECT_FLOAT_EQ(scene.materials[0].baseColorFactor.r, loadedColour.r);
+    EXPECT_FLOAT_EQ(scene.materials[0].irTemperature_K, 350.0f);
+}
+
+// ============================================================================
+// [[nodes]] transform overrides
+// ============================================================================
+
+TEST_F(ConfigResolveTest, NodesTableAppliesTrsToTheNamedNode) {
+    auto config = Parse({.trailing = R"([[nodes]]
+name = "Hull"
+translation = [1.0, 2.0, 3.0]
+rotation_euler_degrees = [0.0, 90.0, 0.0]
+scale = [2.0, 2.0, 2.0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithNodes({"Hull", "Mast"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(spectra.value().nodesTransformed, 1u);
+    const glm::mat4& m = scene.nodes[0].transform;
+    // Translation lands in the fourth column.
+    EXPECT_FLOAT_EQ(m[3][0], 1.0f);
+    EXPECT_FLOAT_EQ(m[3][1], 2.0f);
+    EXPECT_FLOAT_EQ(m[3][2], 3.0f);
+    // 90 degrees about Y takes the x axis to -z, scaled by 2.
+    EXPECT_NEAR(m[0][0], 0.0f, 1e-5f);
+    EXPECT_NEAR(m[0][2], -2.0f, 1e-5f);
+    // The node not named keeps identity.
+    EXPECT_FLOAT_EQ(scene.nodes[1].transform[3][0], 0.0f);
+}
+
+// Degrees, not radians: a file full of 0.6108 is a file nobody edits twice, and
+// writing degrees into something expecting radians has shipped as a bug here.
+TEST_F(ConfigResolveTest, NodesTableRotationIsInDegrees) {
+    auto config = Parse({.trailing = R"([[nodes]]
+name = "Hull"
+rotation_euler_degrees = [0.0, 180.0, 0.0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithNodes({"Hull"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_NEAR(scene.nodes[0].transform[0][0], -1.0f, 1e-5f);
+    EXPECT_NEAR(scene.nodes[0].transform[2][2], -1.0f, 1e-5f);
+}
+
+TEST_F(ConfigResolveTest, NodesTableAcceptsAMatrixDirectly) {
+    auto config = Parse({.trailing = R"([[nodes]]
+name = "Hull"
+matrix = [1.0, 0.0, 0.0, 0.0,
+          0.0, 1.0, 0.0, 0.0,
+          0.0, 0.0, 1.0, 0.0,
+          4.0, 5.0, 6.0, 1.0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithNodes({"Hull"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.nodes[0].transform[3][0], 4.0f);
+    EXPECT_FLOAT_EQ(scene.nodes[0].transform[3][1], 5.0f);
+    EXPECT_FLOAT_EQ(scene.nodes[0].transform[3][2], 6.0f);
+}
+
+TEST_F(ConfigResolveTest, NodesTableWarnsAboutANameTheSceneDoesNotHave) {
+    auto config = Parse({.trailing = R"([[nodes]]
+name = "NotInTheScene"
+translation = [1.0, 0.0, 0.0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithNodes({"Hull"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(spectra.value().nodesTransformed, 0u);
+    EXPECT_FALSE(report.messages.empty());
 }
 
 TEST_F(ConfigResolveTest, MaterialsTableAppliesIrOverridesToTheNamedMaterial) {

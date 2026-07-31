@@ -13,6 +13,8 @@
 #include "postprocess/PostprocessConfig.hpp"
 #include "scene/Material.hpp"
 
+#include <glm/gtc/matrix_transform.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -684,6 +686,24 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             continue;
         }
 
+        // PBR overrides. Absent keys leave the loaded value alone, so a
+        // [[materials]] entry that only sets a temperature does not silently
+        // reset the surface to white plastic.
+        if (const auto colour = matTable.GetFloatArray("base_color"); colour.size() >= 3) {
+            it->baseColorFactor = glm::vec4(colour[0], colour[1], colour[2],
+                                            colour.size() >= 4 ? colour[3]
+                                                               : it->baseColorFactor.a);
+        }
+        if (matTable.Has("metallic")) {
+            it->metallicFactor = matTable.GetFloat("metallic", it->metallicFactor);
+        }
+        if (matTable.Has("roughness")) {
+            it->roughnessFactor = matTable.GetFloat("roughness", it->roughnessFactor);
+        }
+        if (const auto emissive = matTable.GetFloatArray("emissive"); emissive.size() >= 3) {
+            it->emissiveFactor = glm::vec3(emissive[0], emissive[1], emissive[2]);
+        }
+
         constexpr f32 kMwirNm = 4000.0f;
         constexpr f32 kLwirNm = 10000.0f;
         const f32 emissivity = matTable.GetFloat("ir_emissivity", 0.0f);
@@ -709,6 +729,82 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                     it->irTemperature_K);
     }
     report.materialsOverridden = out.materialsOverridden;
+
+    // ------------------------------------------------------------------
+    // [[nodes]] transform overrides
+    // ------------------------------------------------------------------
+    // A world transform for a node the scene file already placed, so a
+    // position arrived at by moving something in Studio can be written down and
+    // rendered again -- by Studio, and by the CLI, which is the point of it
+    // living here rather than in either host.
+    //
+    //   [[nodes]]
+    //   name = "Hull"
+    //   translation = [0.0, 1.5, 0.0]
+    //   rotation_euler_degrees = [0.0, 35.0, 0.0]
+    //   scale = [1.0, 1.0, 1.0]
+    //
+    // Or, for something a rotation order cannot express, the matrix itself:
+    //
+    //   matrix = [ ... 16 numbers, column-major ... ]
+    //
+    // Degrees, because a person writes these by hand and a file full of 0.6108
+    // is a file nobody edits twice. They are converted here, once.
+    for (const auto& nodeTable : config.GetTableArray("nodes")) {
+        const auto name = nodeTable.GetString("name", "");
+        if (name.empty()) continue;
+
+        auto it = std::find_if(scene.nodes.begin(), scene.nodes.end(),
+                               [&name](const SceneNode& n) { return n.name == name; });
+        if (it == scene.nodes.end()) {
+            diag.Warn("nodes",
+                      "  [[nodes]] names '" + name + "', which the scene has no node by");
+            continue;
+        }
+
+        if (const auto matrix = nodeTable.GetFloatArray("matrix"); !matrix.empty()) {
+            if (matrix.size() != 16) {
+                diag.Warn("nodes",
+                          "  [[nodes]] '" + name + "' has a matrix of " +
+                              std::to_string(matrix.size()) + " numbers; 16 are needed");
+                continue;
+            }
+            for (int c = 0; c < 4; ++c) {
+                for (int r = 0; r < 4; ++r) {
+                    it->transform[c][r] = matrix[static_cast<usize>(c * 4 + r)];
+                }
+            }
+        } else {
+            const auto translation = nodeTable.GetFloatArray("translation");
+            const auto rotation = nodeTable.GetFloatArray("rotation_euler_degrees");
+            const auto scale = nodeTable.GetFloatArray("scale");
+            if (translation.empty() && rotation.empty() && scale.empty()) {
+                diag.Warn("nodes",
+                          "  [[nodes]] '" + name + "' sets no transform; give translation, "
+                          "rotation_euler_degrees and scale, or matrix");
+                continue;
+            }
+
+            glm::mat4 transform(1.0f);
+            if (translation.size() >= 3) {
+                transform = glm::translate(
+                    transform, glm::vec3(translation[0], translation[1], translation[2]));
+            }
+            if (rotation.size() >= 3) {
+                transform = glm::rotate(transform, glm::radians(rotation[0]), glm::vec3(1, 0, 0));
+                transform = glm::rotate(transform, glm::radians(rotation[1]), glm::vec3(0, 1, 0));
+                transform = glm::rotate(transform, glm::radians(rotation[2]), glm::vec3(0, 0, 1));
+            }
+            if (scale.size() >= 3) {
+                transform = glm::scale(transform, glm::vec3(scale[0], scale[1], scale[2]));
+            }
+            it->transform = transform;
+        }
+
+        ++out.nodesTransformed;
+        QL_LOG_INFO("  Node '{}': transform overridden", name);
+    }
+    report.nodesTransformed = out.nodesTransformed;
 
     // ------------------------------------------------------------------
     // sRGB upsampling gate

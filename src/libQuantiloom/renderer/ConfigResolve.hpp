@@ -148,6 +148,7 @@ struct ResolvedMaterialSpectra {
 
     u32 temperatureBackfilled = 0;
     u32 materialsOverridden = 0;
+    u32 nodesTransformed = 0;
 };
 
 /**

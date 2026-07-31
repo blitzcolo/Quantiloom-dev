@@ -114,6 +114,7 @@ struct ConfigApplyReport {
     u32 refractiveIndicesLoaded = 0;
     u32 materialsTemperatureBackfilled = 0;
     u32 materialsOverridden = 0;          ///< From [[materials]] entries.
+    u32 nodesTransformed = 0;             ///< From [[nodes]] transform overrides.
 
     /// @name Keys a windowed context cannot honour, echoed for the host
     /// @{
