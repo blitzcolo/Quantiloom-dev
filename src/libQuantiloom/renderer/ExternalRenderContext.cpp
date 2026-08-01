@@ -1724,7 +1724,7 @@ const LightingParams& ExternalRenderContext::GetLightingParams() const {
 // Returns fallback if the curve has fewer than two samples.
 
 // ============================================================================
-// Scene Editing (Stubs for Phase 2)
+// Scene Editing
 // ============================================================================
 
 u32 ExternalRenderContext::AddMesh(const Mesh& mesh, const glm::mat4& transform) {
@@ -1735,11 +1735,53 @@ u32 ExternalRenderContext::AddMesh(const Mesh& mesh, const glm::mat4& transform)
     return 0;
 }
 
+Result<u32, String> ExternalRenderContext::DuplicateNode(u32 sourceNodeIndex,
+                                                         const String& newName) {
+    if (!m_impl->scene) {
+        return Result<u32, String>::Err("DuplicateNode: no scene loaded");
+    }
+    auto& nodes = m_impl->scene->nodes;
+    if (sourceNodeIndex >= nodes.size()) {
+        return Result<u32, String>::Err("DuplicateNode: invalid node index " +
+                                        std::to_string(sourceNodeIndex));
+    }
+
+    SceneNode copy = nodes[sourceNodeIndex];
+    copy.name = newName;
+    copy.active = true;
+    nodes.push_back(std::move(copy));
+
+    const u32 newIndex = static_cast<u32>(nodes.size() - 1);
+    QL_LOG_DEBUG("DuplicateNode: node {} -> {} ('{}')", sourceNodeIndex, newIndex, newName);
+    return newIndex;
+}
+
 bool ExternalRenderContext::RemoveNode(u32 nodeIndex) {
-    // TODO: Implement in Phase 2
-    (void)nodeIndex;
-    QL_LOG_WARN("ExternalRenderContext::RemoveNode not implemented yet");
-    return false;
+    if (!m_impl->scene || nodeIndex >= m_impl->scene->nodes.size()) {
+        QL_LOG_WARN("RemoveNode: invalid node index {}", nodeIndex);
+        return false;
+    }
+    auto& node = m_impl->scene->nodes[nodeIndex];
+    if (!node.active) {
+        return false;  // already tombstoned
+    }
+    node.active = false;
+    QL_LOG_DEBUG("RemoveNode: node {} ('{}') tombstoned", nodeIndex, node.name);
+    return true;
+}
+
+bool ExternalRenderContext::RestoreNode(u32 nodeIndex) {
+    if (!m_impl->scene || nodeIndex >= m_impl->scene->nodes.size()) {
+        QL_LOG_WARN("RestoreNode: invalid node index {}", nodeIndex);
+        return false;
+    }
+    auto& node = m_impl->scene->nodes[nodeIndex];
+    if (node.active) {
+        return false;  // nothing to restore
+    }
+    node.active = true;
+    QL_LOG_DEBUG("RestoreNode: node {} ('{}') reactivated", nodeIndex, node.name);
+    return true;
 }
 
 void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& transform) {
@@ -1890,6 +1932,11 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
 
     if (m_impl->pipeline) {
         m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().GetHandle());
+        // A topology edit makes RebuildTlas replace the instance info buffer;
+        // rebinding unconditionally is cheap on the already-idle device
+        if (m_impl->geometry.InstanceCount() > 0) {
+            m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo());
+        }
     }
 }
 

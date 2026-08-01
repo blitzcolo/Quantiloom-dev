@@ -17,6 +17,7 @@ public: bool quantiloom::ExternalRenderContext::HasScene(void)const
 public: bool quantiloom::ExternalRenderContext::IsGPUSensorEnabled(void)const
 public: bool quantiloom::ExternalRenderContext::IsReady(void)const
 public: bool quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
+public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
 public: bool quantiloom::Material::HasIRData(void)const
 public: bool quantiloom::Material::HasQuantiloomRef(void)const
 public: bool quantiloom::Material::HasTextures(void)const
@@ -48,6 +49,7 @@ public: class quantiloom::Result<struct quantiloom::Image,class std::basic_strin
 public: class quantiloom::Result<struct quantiloom::PickResult,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Pick(unsigned int,unsigned int)
 public: class quantiloom::Result<unsigned __int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::DuplicateNode(unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadEnvironmentMap(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadScene(class quantiloom::Config const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromConfig(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)

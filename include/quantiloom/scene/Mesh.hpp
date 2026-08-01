@@ -281,6 +281,12 @@ struct SceneNode {
     // Metadata
     String name;  // Node name (for debugging)
 
+    // Tombstone for runtime removal. A removed node stays in Scene::nodes
+    // with active == false so that node indices held by callers (selection,
+    // undo stacks, instance->node maps) never shift; RestoreNode flips it
+    // back for undo. Inactive nodes contribute no TLAS instances.
+    bool active = true;
+
     // ========================================================================
     // Utilities
     // ========================================================================

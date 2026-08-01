@@ -640,11 +640,51 @@ public:
     u32 AddMesh(const Mesh& mesh, const glm::mat4& transform);
 
     /**
-     * @brief Remove node from scene
+     * @brief Instance an existing node: same mesh, same materials, own transform
+     *
+     * The shallow copy of a scene editor's copy/paste (Blender's Alt+D,
+     * Unreal's asset-by-reference duplicate): the new node references the
+     * source's mesh, so geometry and materials are shared and a material
+     * edit shows on every copy. The new node starts with the source's
+     * transform; move it with SetNodeTransform.
+     *
+     * Call RebuildAccelerationStructure afterwards -- the instance count
+     * changed, so a refit is not enough. Like SetNodeTransform, does not
+     * reset accumulation; that is the caller's job.
+     *
+     * @param sourceNodeIndex Node to instance (a tombstoned source is allowed;
+     *                        the copy is created active)
+     * @param newName Name for the new node -- what [[nodes]] / [[duplicates]]
+     *                config entries match on, so it should be unique
+     * @return Index of the new node, or an error for an invalid source
+     */
+    Result<u32, String> DuplicateNode(u32 sourceNodeIndex, const String& newName);
+
+    /**
+     * @brief Remove node from scene (tombstone)
+     *
+     * Marks the node inactive rather than erasing it: indices held by
+     * callers never shift, and RestoreNode can undo the removal. The
+     * node contributes no TLAS instances after the next
+     * RebuildAccelerationStructure, which the caller must invoke.
+     * Does not reset accumulation.
+     *
      * @param nodeIndex Index of node to remove
-     * @return true if removed successfully
+     * @return true if removed; false if out of range or already removed
      */
     bool RemoveNode(u32 nodeIndex);
+
+    /**
+     * @brief Reactivate a node removed by RemoveNode
+     *
+     * The undo of RemoveNode: the node keeps its index, mesh, name and
+     * last transform. Call RebuildAccelerationStructure afterwards.
+     * Does not reset accumulation.
+     *
+     * @param nodeIndex Index of node to restore
+     * @return true if restored; false if out of range or not removed
+     */
+    bool RestoreNode(u32 nodeIndex);
 
     /**
      * @brief Update node transform

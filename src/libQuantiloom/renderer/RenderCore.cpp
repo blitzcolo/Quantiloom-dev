@@ -615,6 +615,9 @@ void ForEachInstance(const Scene& scene, F&& fn) {
 
     for (size_t nodeIndex = 0; nodeIndex < scene.nodes.size(); ++nodeIndex) {
         const auto& node = scene.nodes[nodeIndex];
+        if (!node.active) {
+            continue;  // tombstoned by RemoveNode; index reserved, no instances
+        }
         const Mesh& mesh = scene.meshes[node.meshIndex];
         const size_t base = meshToFirstPrim[node.meshIndex];
         for (size_t prim = 0; prim < mesh.primitives.size(); ++prim) {
@@ -772,6 +775,7 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     });
 
     result.m_instanceCount = static_cast<u32>(result.m_instances.size());
+    result.m_primitiveOffsets = std::move(primitiveOffsets);
 
     if (!result.m_instances.empty()) {
         result.m_instanceInfo = std::make_unique<GpuBuffer>(
@@ -794,24 +798,56 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
         return;
     }
 
-    QL_LOG_DEBUG("Rebuilding TLAS with updated transforms...");
+    // Regenerate the instance tables from the current walk. A duplicated or
+    // tombstoned node changes which walk position maps to which primitive
+    // slice and node, so the tables from the last build cannot be reused;
+    // m_primitiveOffsets is per-primitive geometry and survives node edits.
+    Vector<InstanceGeometryInfo> instances;
+    Vector<u32> instanceToNode;
+    ForEachInstance(scene, [&](const glm::mat4& /*transform*/, size_t globalPrim,
+                               size_t nodeIndex) {
+        instances.push_back(m_primitiveOffsets[globalPrim]);
+        instanceToNode.push_back(static_cast<u32>(nodeIndex));
+    });
+
+    if (instances.empty()) {
+        // TLAS::Build cannot represent an empty scene; keep tracing the last
+        // good one rather than crash. The editor should not let a removal
+        // empty the scene in the first place.
+        QL_LOG_WARN("RebuildTlas: no active instances; keeping previous TLAS");
+        return;
+    }
+
+    QL_LOG_DEBUG("Rebuilding TLAS ({} -> {} instances)...", m_instanceCount,
+                 instances.size());
     m_tlas = std::make_unique<TLAS>(ctx);
 
     CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
         size_t instance = 0;
         ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
                                    size_t /*nodeIndex*/) {
-            // Offsets are a property of the geometry, not of where a node sits, so
-            // the instance list from Build still applies.
-            const u32 materialId = instance < m_instances.size()
-                                       ? m_instances[instance].materialId
-                                       : 0;
+            const u32 materialId = instances[instance].materialId;
             ++instance;
             m_tlas->AddInstance(*m_blas[globalPrim], materialId, transform,
                                 IsDoubleSided(scene, materialId));
         });
         m_tlas->Build(cmd);
     });
+
+    const u32 newCount = static_cast<u32>(instances.size());
+    const size_t bytes = instances.size() * sizeof(InstanceGeometryInfo);
+    if (newCount != m_instanceCount || !m_instanceInfo) {
+        // New buffer object: the caller must rebind InstanceInfo() (the
+        // rebuild path already runs on an idle device)
+        m_instanceInfo = std::make_unique<GpuBuffer>(
+            ctx.GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    m_instanceInfo->Upload(instances.data(), bytes);
+
+    m_instances = std::move(instances);
+    m_instanceToNode = std::move(instanceToNode);
+    m_instanceCount = newCount;
 }
 
 bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
