@@ -82,6 +82,61 @@ private:
     String m_firstError;
 };
 
+/// One table's worth of the transform grammar shared by [[nodes]] and
+/// [[duplicates]]: `matrix` (16 numbers, column-major) wins; otherwise
+/// translation / rotation_euler_degrees / scale compose in that order.
+/// Degrees, because a person writes these by hand and a file full of
+/// 0.6108 is a file nobody edits twice.
+struct TransformKeys {
+    bool present = false;   ///< some transform key appeared
+    bool valid = false;     ///< ...and parsed cleanly
+    usize matrixCount = 0;  ///< for the wrong-size warning
+    glm::mat4 transform{1.0f};
+};
+
+TransformKeys ParseTransformKeys(const Config& table) {
+    TransformKeys out;
+    if (const auto matrix = table.GetFloatArray("matrix"); !matrix.empty()) {
+        out.present = true;
+        out.matrixCount = matrix.size();
+        if (matrix.size() != 16) {
+            return out;
+        }
+        for (int c = 0; c < 4; ++c) {
+            for (int r = 0; r < 4; ++r) {
+                out.transform[c][r] = matrix[static_cast<usize>(c * 4 + r)];
+            }
+        }
+        out.valid = true;
+        return out;
+    }
+
+    const auto translation = table.GetFloatArray("translation");
+    const auto rotation = table.GetFloatArray("rotation_euler_degrees");
+    const auto scale = table.GetFloatArray("scale");
+    if (translation.empty() && rotation.empty() && scale.empty()) {
+        return out;
+    }
+    out.present = true;
+
+    glm::mat4 transform(1.0f);
+    if (translation.size() >= 3) {
+        transform = glm::translate(
+            transform, glm::vec3(translation[0], translation[1], translation[2]));
+    }
+    if (rotation.size() >= 3) {
+        transform = glm::rotate(transform, glm::radians(rotation[0]), glm::vec3(1, 0, 0));
+        transform = glm::rotate(transform, glm::radians(rotation[1]), glm::vec3(0, 1, 0));
+        transform = glm::rotate(transform, glm::radians(rotation[2]), glm::vec3(0, 0, 1));
+    }
+    if (scale.size() >= 3) {
+        transform = glm::scale(transform, glm::vec3(scale[0], scale[1], scale[2]));
+    }
+    out.transform = transform;
+    out.valid = true;
+    return out;
+}
+
 }  // namespace
 
 /// Resolve a path the config named, against the config's own directory when
@@ -731,6 +786,63 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     report.materialsOverridden = out.materialsOverridden;
 
     // ------------------------------------------------------------------
+    // [[duplicates]] -- nodes pasted in Studio
+    // ------------------------------------------------------------------
+    // A node the scene file did not place: a shallow copy of one it did.
+    // Same sharing rule as the editor's copy-paste (geometry and materials
+    // shared, transform its own), and it lives here rather than in either
+    // host so a config written after a paste renders the same everywhere --
+    // Studio and the CLI.
+    //
+    //   [[duplicates]]
+    //   source = "Hull"
+    //   name = "Hull.001"
+    //   translation = [2.0, 0.0, 0.0]   # [[nodes]] grammar; omitted = in place
+    //
+    // Resolved before [[nodes]] so a [[nodes]] entry may address a duplicate
+    // by name; entries resolve in file order, so a duplicate may itself be
+    // the source of a later one.
+    for (const auto& dupTable : config.GetTableArray("duplicates")) {
+        const auto source = dupTable.GetString("source", "");
+        const auto name = dupTable.GetString("name", "");
+        if (source.empty() || name.empty()) {
+            diag.Warn("duplicates",
+                      "  [[duplicates]] needs both source and name");
+            continue;
+        }
+
+        const auto it = std::find_if(scene.nodes.begin(), scene.nodes.end(),
+                                     [&source](const SceneNode& n) { return n.name == source; });
+        if (it == scene.nodes.end()) {
+            diag.Warn("duplicates",
+                      "  [[duplicates]] sources '" + source +
+                          "', which the scene has no node by");
+            continue;
+        }
+
+        const TransformKeys keys = ParseTransformKeys(dupTable);
+        if (keys.present && !keys.valid) {
+            diag.Warn("duplicates",
+                      "  [[duplicates]] '" + name + "' has a matrix of " +
+                          std::to_string(keys.matrixCount) + " numbers; 16 are needed");
+            continue;
+        }
+
+        // Copy before push_back: the insertion invalidates `it`
+        SceneNode copy = *it;
+        copy.name = name;
+        copy.active = true;
+        if (keys.present) {
+            copy.transform = keys.transform;
+        }
+        scene.nodes.push_back(std::move(copy));
+
+        ++out.nodesDuplicated;
+        QL_LOG_INFO("  Node '{}' duplicated as '{}'", source, name);
+    }
+    report.nodesDuplicated = out.nodesDuplicated;
+
+    // ------------------------------------------------------------------
     // [[nodes]] transform overrides
     // ------------------------------------------------------------------
     // A world transform for a node the scene file already placed, so a
@@ -748,8 +860,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     //
     //   matrix = [ ... 16 numbers, column-major ... ]
     //
-    // Degrees, because a person writes these by hand and a file full of 0.6108
-    // is a file nobody edits twice. They are converted here, once.
+    // Grammar shared with [[duplicates]]; see ParseTransformKeys.
     for (const auto& nodeTable : config.GetTableArray("nodes")) {
         const auto name = nodeTable.GetString("name", "");
         if (name.empty()) continue;
@@ -762,44 +873,20 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             continue;
         }
 
-        if (const auto matrix = nodeTable.GetFloatArray("matrix"); !matrix.empty()) {
-            if (matrix.size() != 16) {
-                diag.Warn("nodes",
-                          "  [[nodes]] '" + name + "' has a matrix of " +
-                              std::to_string(matrix.size()) + " numbers; 16 are needed");
-                continue;
-            }
-            for (int c = 0; c < 4; ++c) {
-                for (int r = 0; r < 4; ++r) {
-                    it->transform[c][r] = matrix[static_cast<usize>(c * 4 + r)];
-                }
-            }
-        } else {
-            const auto translation = nodeTable.GetFloatArray("translation");
-            const auto rotation = nodeTable.GetFloatArray("rotation_euler_degrees");
-            const auto scale = nodeTable.GetFloatArray("scale");
-            if (translation.empty() && rotation.empty() && scale.empty()) {
-                diag.Warn("nodes",
-                          "  [[nodes]] '" + name + "' sets no transform; give translation, "
-                          "rotation_euler_degrees and scale, or matrix");
-                continue;
-            }
-
-            glm::mat4 transform(1.0f);
-            if (translation.size() >= 3) {
-                transform = glm::translate(
-                    transform, glm::vec3(translation[0], translation[1], translation[2]));
-            }
-            if (rotation.size() >= 3) {
-                transform = glm::rotate(transform, glm::radians(rotation[0]), glm::vec3(1, 0, 0));
-                transform = glm::rotate(transform, glm::radians(rotation[1]), glm::vec3(0, 1, 0));
-                transform = glm::rotate(transform, glm::radians(rotation[2]), glm::vec3(0, 0, 1));
-            }
-            if (scale.size() >= 3) {
-                transform = glm::scale(transform, glm::vec3(scale[0], scale[1], scale[2]));
-            }
-            it->transform = transform;
+        const TransformKeys keys = ParseTransformKeys(nodeTable);
+        if (!keys.present) {
+            diag.Warn("nodes",
+                      "  [[nodes]] '" + name + "' sets no transform; give translation, "
+                      "rotation_euler_degrees and scale, or matrix");
+            continue;
         }
+        if (!keys.valid) {
+            diag.Warn("nodes",
+                      "  [[nodes]] '" + name + "' has a matrix of " +
+                          std::to_string(keys.matrixCount) + " numbers; 16 are needed");
+            continue;
+        }
+        it->transform = keys.transform;
 
         ++out.nodesTransformed;
         QL_LOG_INFO("  Node '{}': transform overridden", name);

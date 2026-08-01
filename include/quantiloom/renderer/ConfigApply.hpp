@@ -115,6 +115,7 @@ struct ConfigApplyReport {
     u32 materialsTemperatureBackfilled = 0;
     u32 materialsOverridden = 0;          ///< From [[materials]] entries.
     u32 nodesTransformed = 0;             ///< From [[nodes]] transform overrides.
+    u32 nodesDuplicated = 0;              ///< From [[duplicates]] entries.
 
     /// @name Keys a windowed context cannot honour, echoed for the host
     /// @{
