@@ -843,6 +843,34 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     report.nodesDuplicated = out.nodesDuplicated;
 
     // ------------------------------------------------------------------
+    // scene.removed_nodes -- nodes deleted in Studio
+    // ------------------------------------------------------------------
+    // The other half of runtime scene editing: a node the scene file placed
+    // but the user deleted. Tombstoned, not erased, exactly like the editor's
+    // RemoveNode -- the node keeps its index and contributes no instances.
+    //
+    //   [scene]
+    //   removed_nodes = ["Backdrop", "Node_3"]
+    //
+    // Resolved after [[duplicates]] so a duplicate can be removed too (a
+    // config written by hand may want that; one written by Studio simply
+    // drops the [[duplicates]] entry instead).
+    for (const auto& name : config.GetStringArray("scene.removed_nodes")) {
+        const auto it = std::find_if(scene.nodes.begin(), scene.nodes.end(),
+                                     [&name](const SceneNode& n) { return n.name == name; });
+        if (it == scene.nodes.end()) {
+            diag.Warn("scene.removed_nodes",
+                      "  removed_nodes names '" + name +
+                          "', which the scene has no node by");
+            continue;
+        }
+        it->active = false;
+        ++out.nodesRemoved;
+        QL_LOG_INFO("  Node '{}' removed", name);
+    }
+    report.nodesRemoved = out.nodesRemoved;
+
+    // ------------------------------------------------------------------
     // [[nodes]] transform overrides
     // ------------------------------------------------------------------
     // A world transform for a node the scene file already placed, so a

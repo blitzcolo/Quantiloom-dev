@@ -155,6 +155,36 @@ TEST_F(ConfigDuplicatesTest, ChainsAndNodesOverridesCompose) {
     EXPECT_EQ(glm::vec3(copyB.transform[3]), glm::vec3(123.0f, 0.0f, 0.0f));
 }
 
+TEST_F(ConfigDuplicatesTest, RemovedNodeStopsTracing) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+
+    // Learn which node the center ray hits, then re-apply with that node
+    // removed: the same ray must not report it again
+    auto report = ApplyScene("");
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+    auto pick = context->Pick(kSize / 2, kSize / 2);
+    ASSERT_TRUE(pick.has_value()) << pick.error();
+    ASSERT_TRUE(pick.value().hit);
+    const u32 removedIndex = pick.value().nodeIndex;
+    const String removedName = context->GetScene()->nodes[removedIndex].name;
+
+    // `extra` lands right after the [scene] table's gltf key, so a bare
+    // key continues that table
+    report = ApplyScene("removed_nodes = [\"" + removedName + "\"]\n");
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+    EXPECT_EQ(report.nodesRemoved, 1u);
+
+    const Scene* scene = context->GetScene();
+    ASSERT_NE(scene, nullptr);
+    EXPECT_FALSE(scene->nodes[removedIndex].active) << "tombstoned, not erased";
+
+    pick = context->Pick(kSize / 2, kSize / 2);
+    ASSERT_TRUE(pick.has_value()) << pick.error();
+    if (pick.value().hit) {
+        EXPECT_NE(pick.value().nodeIndex, removedIndex);
+    }
+}
+
 TEST_F(ConfigDuplicatesTest, UnknownSourceWarnsWithoutFailing) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
 

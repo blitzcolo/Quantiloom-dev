@@ -150,6 +150,7 @@ struct ResolvedMaterialSpectra {
     u32 materialsOverridden = 0;
     u32 nodesTransformed = 0;
     u32 nodesDuplicated = 0;
+    u32 nodesRemoved = 0;
 };
 
 /**
