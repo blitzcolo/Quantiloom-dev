@@ -910,3 +910,74 @@ TEST_F(ConfigResolveTest, AnUnnamedIlluminantIsAnError) {
     request.pathOrEqualEnergy = "no/such/spectrum.csv";
     EXPECT_FALSE(ResolveSolarLut(request, "", SpectralMode::RGB).has_value());
 }
+
+// ============================================================================
+// camera.projection
+// ============================================================================
+// Orthographic rays share a direction and start spread across the film plane,
+// which is what makes a front or top view measurable. Absent means
+// perspective, so every scene written before the key existed still means what
+// it meant.
+
+TEST_F(ConfigResolveTest, CameraIsPerspectiveUnlessTheConfigSaysOtherwise) {
+    auto config = Parse({});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_EQ(resolved.value().camera.GetProjection(), Camera::Projection::Perspective);
+}
+
+TEST_F(ConfigResolveTest, OrthographicProjectionIsRead) {
+    auto config = Parse({.trailing = R"([camera.extra]
+)"});
+    // The fixture writes [camera] itself, so the key goes in through the
+    // camera block it already emits.
+    const auto path = testDir / "ortho.toml";
+    {
+        std::ofstream file(path);
+        file << "[renderer]\nresolution = [64, 64]\n"
+                "[spectral]\n"
+                "[scene]\n"
+                "[camera]\nposition = [0.0, 0.0, 5.0]\nlook_at = [0.0, 0.0, 0.0]\n"
+                "fov_y = 60.0\nprojection = \"orthographic\"\northo_height = 4.0\n"
+                "[lighting]\nsun_direction = [0.0, 1.0, 0.0]\n"
+                "sun_radiance = [0.0, 0.0, 0.0]\nsky_radiance = [0.0, 0.0, 0.0]\n"
+                "[material]\nalbedo = [0.8, 0.8, 0.8]\n";
+    }
+    auto loaded = Config::Load(path.string());
+    ASSERT_TRUE(loaded.has_value());
+    auto resolved = ResolveStrict(loaded.value());
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    EXPECT_EQ(resolved.value().camera.GetProjection(), Camera::Projection::Orthographic);
+    EXPECT_FLOAT_EQ(resolved.value().camera.GetOrthoHeight(), 4.0f);
+
+    // And it reaches the GPU struct raygen actually reads.
+    const CameraData data = resolved.value().camera.GetCameraData();
+    EXPECT_EQ(data.projection, 1u);
+    EXPECT_FLOAT_EQ(data.orthoHeight, 4.0f);
+}
+
+TEST_F(ConfigResolveTest, OrthoHeightDefaultsToWhatThePerspectiveCameraFramed) {
+    // Switching projection should not also change how much of the scene is in
+    // shot; without a stated height the framing follows from the distance and
+    // the field of view.
+    const auto path = testDir / "ortho_default.toml";
+    {
+        std::ofstream file(path);
+        file << "[renderer]\nresolution = [64, 64]\n"
+                "[spectral]\n"
+                "[scene]\n"
+                "[camera]\nposition = [0.0, 0.0, 10.0]\nlook_at = [0.0, 0.0, 0.0]\n"
+                "fov_y = 60.0\nprojection = \"orthographic\"\n"
+                "[lighting]\nsun_direction = [0.0, 1.0, 0.0]\n"
+                "sun_radiance = [0.0, 0.0, 0.0]\nsky_radiance = [0.0, 0.0, 0.0]\n"
+                "[material]\nalbedo = [0.8, 0.8, 0.8]\n";
+    }
+    auto loaded = Config::Load(path.string());
+    ASSERT_TRUE(loaded.has_value());
+    auto resolved = ResolveStrict(loaded.value());
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    // 2 * 10 * tan(30 deg) = 11.547
+    EXPECT_NEAR(resolved.value().camera.GetOrthoHeight(), 11.547f, 0.01f);
+}

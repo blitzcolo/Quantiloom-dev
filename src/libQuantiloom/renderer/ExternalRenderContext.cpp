@@ -1919,6 +1919,16 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
                 lut.sunIrradiance.numSamples, lut.skyIrradiance.numSamples);
 }
 
+void ExternalRenderContext::SetCameraProjection(CameraProjection projection, f32 orthoHeight) {
+    m_impl->camera.SetProjection(projection == CameraProjection::Orthographic
+                                     ? Camera::Projection::Orthographic
+                                     : Camera::Projection::Perspective);
+    if (orthoHeight > 0.0f) {
+        m_impl->camera.SetOrthoHeight(orthoHeight);
+    }
+    ResetAccumulation();
+}
+
 Result<void, String> ExternalRenderContext::SetSolarSpectralLUTFromSpec(
     const SolarLutSpec& spec, const String& baseDir) {
     // The same function ResolveRenderConfig calls for [lighting] solar_lut*.
@@ -2163,8 +2173,9 @@ struct PickPushConstants {
     u32 pixelY;
     u32 width;
     u32 height;
-    u32 _pad0;
-    u32 _pad1;
+    // Same two words the shader repurposed; the struct is still 80 bytes.
+    u32 projection;
+    f32 orthoHeight;
 };
 static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch");
 
@@ -2224,6 +2235,10 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     pc.pixelY = y;
     pc.width = m_impl->width;
     pc.height = m_impl->height;
+    // From the same CameraData raygen is given, so a pick and a render agree
+    // about which projection is in use.
+    pc.projection = cameraData.projection;
+    pc.orthoHeight = cameraData.orthoHeight;
 
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pickPipeline);

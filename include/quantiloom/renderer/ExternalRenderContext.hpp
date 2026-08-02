@@ -71,6 +71,13 @@ class BLAS;
 class TLAS;
 struct ComplexRefractiveIndex;
 
+/// How the camera generates rays. Mirrors Camera::Projection, restated here
+/// so a host setting it does not need scene/Camera.hpp.
+enum class CameraProjection : u32 {
+    Perspective = 0,
+    Orthographic = 1,
+};
+
 /**
  * @struct SolarLutSpec
  * @brief What a scene declares about its illuminant
@@ -773,6 +780,21 @@ public:
      */
     void SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
                              const SpectralCurve& skyIrradiance);
+
+    /**
+     * @brief Switch between perspective and orthographic ray generation
+     *
+     * Orthographic rays share a direction and start spread across the film
+     * plane, so parallel edges stay parallel and two things the same size
+     * measure the same at any depth -- which is what a front, top or side view
+     * is for. Picking follows automatically; it reads the same camera.
+     *
+     * @param projection Which projection to use
+     * @param orthoHeight World-space height of the film plane. Ignored in
+     *        perspective, and ignored when not positive, which leaves whatever
+     *        was set before.
+     */
+    void SetCameraProjection(CameraProjection projection, f32 orthoHeight = 0.0f);
 
     /**
      * @brief Set the illuminant the way a scene file would have

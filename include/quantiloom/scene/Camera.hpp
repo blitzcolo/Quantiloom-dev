@@ -55,7 +55,11 @@ struct CameraData {
     glm::vec3 up;            // Up vector (normalized)
     u32 spectral_mode;       // Spectral rendering mode (see SpectralMode enum)
     u32 debug_mode;          // Debug visualization mode (see DebugVisualizationMode enum)
-    u32 _padding[3];         // Padding for 16-byte alignment (total: 80 bytes)
+    // Projection. Carved out of what was three words of padding, so the struct
+    // is the same 80 bytes it has always been and no layout moves.
+    u32 projection;          // 0 = perspective, 1 = orthographic
+    f32 orthoHeight;         // World-space height of the film plane when orthographic
+    u32 _padding;            // Padding for 16-byte alignment (total: 80 bytes)
 };
 
 /**
@@ -129,6 +133,32 @@ public:
     void SetLookAt(const glm::vec3& lookAt);
     void SetUp(const glm::vec3& up);
     void SetFovY(f32 fovYDegrees);
+
+    /**
+     * @brief How rays are generated across the film plane
+     *
+     * Perspective rays share an origin and fan out; orthographic rays share a
+     * direction and start spread across the plane. The second is what a
+     * front/top/side view is for -- parallel edges stay parallel, and two
+     * things the same size measure the same regardless of depth.
+     */
+    enum class Projection : u32 {
+        Perspective = 0,
+        Orthographic = 1,
+    };
+
+    void SetProjection(Projection projection) { m_projection = projection; }
+    [[nodiscard]] Projection GetProjection() const { return m_projection; }
+
+    /**
+     * @brief World-space height the film plane covers, orthographic only
+     *
+     * The orthographic equivalent of the field of view: it is what "how much
+     * of the scene fits" means when there is no convergence angle. Ignored in
+     * perspective.
+     */
+    void SetOrthoHeight(f32 height) { m_orthoHeight = height > 0.0f ? height : m_orthoHeight; }
+    [[nodiscard]] f32 GetOrthoHeight() const { return m_orthoHeight; }
     void SetAspectRatio(f32 aspectRatio);
 
     // Accessors
@@ -156,6 +186,8 @@ private:
     glm::vec3 m_right{1, 0, 0};
 
     f32 m_fovYDegrees = 60.0f;
+    Projection m_projection = Projection::Perspective;
+    f32 m_orthoHeight = 2.0f;
     f32 m_aspectRatio = 16.0f / 9.0f;
 };
 

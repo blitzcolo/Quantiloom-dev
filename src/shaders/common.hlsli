@@ -808,8 +808,14 @@ struct CameraData {
     float3 up;             // Up vector (normalized)
     uint   spectral_mode;  // Spectral rendering mode (see SPECTRAL_MODE_* defines)
     uint   debug_mode;     // Debug visualization mode (see DEBUG_MODE_* defines)
-    uint   _padding[3];    // Padding for 16-byte alignment
+    uint   projection;     // CAMERA_PROJECTION_* below
+    float  orthoHeight;    // Film-plane height in world units, orthographic only
+    uint   _padding;       // Padding for 16-byte alignment
 };
+
+// Must match Camera::Projection in scene/Camera.hpp.
+#define CAMERA_PROJECTION_PERSPECTIVE  0u
+#define CAMERA_PROJECTION_ORTHOGRAPHIC 1u
 
 // ============================================================================
 // Push Constants for Ray Generation Shader

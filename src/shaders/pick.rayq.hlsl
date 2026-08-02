@@ -36,8 +36,8 @@ struct PickPushConstants {
     float3 up;       uint  pixelY;
     uint   width;
     uint   height;
-    uint   _pad0;
-    uint   _pad1;
+    uint   projection;      // CAMERA_PROJECTION_* -- must match raygen
+    float  orthoHeight;
 };
 
 [[vk::push_constant]] PickPushConstants pc;
@@ -50,14 +50,27 @@ void main() {
     float2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
 
-    float3 direction = normalize(
-        pc.forward +
-        ndc.x * pc.right * pc.fovScale * pc.aspectRatio +
-        ndc.y * pc.up * pc.fovScale
-    );
+    // The same two projections raygen generates, and for the same reason: a
+    // pick that used perspective rays against an orthographic render would
+    // select whatever is under a different pixel.
+    float3 direction;
+    float3 origin;
+    if (pc.projection == 1u) {
+        const float halfH = pc.orthoHeight * 0.5;
+        const float halfW = halfH * pc.aspectRatio;
+        direction = normalize(pc.forward);
+        origin = pc.origin + ndc.x * pc.right * halfW + ndc.y * pc.up * halfH;
+    } else {
+        direction = normalize(
+            pc.forward +
+            ndc.x * pc.right * pc.fovScale * pc.aspectRatio +
+            ndc.y * pc.up * pc.fovScale
+        );
+        origin = pc.origin;
+    }
 
     RayDesc ray;
-    ray.Origin = pc.origin;
+    ray.Origin = origin;
     ray.Direction = direction;
     ray.TMin = 0.001;
     ray.TMax = 10000.0;
@@ -75,7 +88,7 @@ void main() {
         r.instanceIndex = query.CommittedInstanceIndex();
         r.primitiveIndex = query.CommittedPrimitiveIndex();
         r.hitT = query.CommittedRayT();
-        r.worldPosition = pc.origin + direction * r.hitT;
+        r.worldPosition = origin + direction * r.hitT;
     } else {
         r.hit = 0;
         r.instanceIndex = 0;

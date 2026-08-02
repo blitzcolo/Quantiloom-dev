@@ -105,15 +105,33 @@ void main() {
     float2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;  // Flip Y axis
 
-    // Compute ray direction using camera parameters
-    float3 direction = normalize(
-        pushConsts.camera.forward +
-        ndc.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
-        ndc.y * pushConsts.camera.up * pushConsts.camera.fovScale
-    );
+    // Camera ray. The two projections differ in which of origin and direction
+    // varies across the film plane: perspective rays share an origin and fan
+    // out, orthographic rays share a direction and start spread across the
+    // plane. Everything downstream -- differentials, the payload, the trace --
+    // is the same either way.
+    float3 direction;
+    float3 origin;
+    const bool orthographic =
+        pushConsts.camera.projection == CAMERA_PROJECTION_ORTHOGRAPHIC;
 
-    // Ray origin from camera
-    float3 origin = pushConsts.camera.origin;
+    if (orthographic) {
+        // Half-extents from the film height; the width follows the aspect
+        // ratio, exactly as fovScale is scaled by it in the perspective case.
+        const float halfH = pushConsts.camera.orthoHeight * 0.5;
+        const float halfW = halfH * pushConsts.camera.aspectRatio;
+        direction = normalize(pushConsts.camera.forward);
+        origin = pushConsts.camera.origin +
+                 ndc.x * pushConsts.camera.right * halfW +
+                 ndc.y * pushConsts.camera.up * halfH;
+    } else {
+        direction = normalize(
+            pushConsts.camera.forward +
+            ndc.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
+            ndc.y * pushConsts.camera.up * pushConsts.camera.fovScale
+        );
+        origin = pushConsts.camera.origin;
+    }
 
     // Setup ray
     RayDesc ray;
@@ -156,17 +174,26 @@ void main() {
     ndcYp1.y = -ndcYp1.y;
 
     // Compute adjacent ray directions
-    float3 directionXp1 = normalize(
-        pushConsts.camera.forward +
-        ndcXp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
-        ndcXp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
-    );
-
-    float3 directionYp1 = normalize(
-        pushConsts.camera.forward +
-        ndcYp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
-        ndcYp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
-    );
+    float3 directionXp1;
+    float3 directionYp1;
+    if (orthographic) {
+        // Every orthographic ray points the same way, so the direction
+        // differentials are zero and the footprint comes from the origin
+        // spacing instead -- which is constant, and handled below.
+        directionXp1 = direction;
+        directionYp1 = direction;
+    } else {
+        directionXp1 = normalize(
+            pushConsts.camera.forward +
+            ndcXp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
+            ndcXp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
+        );
+        directionYp1 = normalize(
+            pushConsts.camera.forward +
+            ndcYp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
+            ndcYp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
+        );
+    }
 
     // Compute differentials (change in direction per pixel)
     float3 dDdx = directionXp1 - direction;

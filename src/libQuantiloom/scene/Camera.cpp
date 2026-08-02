@@ -48,6 +48,8 @@ CameraData Camera::GetCameraData() const {
     data.fovScale = glm::tan(glm::radians(m_fovYDegrees) * 0.5f);
     data.aspectRatio = m_aspectRatio;
     data.wavelength_nm = 550.0f;  // Default wavelength (will be overridden by renderer)
+    data.projection = static_cast<u32>(m_projection);
+    data.orthoHeight = m_orthoHeight;
     return data;
 }
 
@@ -120,6 +122,23 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
 
     // Create camera
     Camera camera(position, lookAt, up, fovY, aspectRatio);
+
+    // Projection. Absent means perspective, which is what every scene written
+    // before this key existed meant. An orthographic camera has no field of
+    // view to speak of, so the framing comes from ortho_height instead; the
+    // default is derived from the distance to the target and the stated FOV,
+    // which frames roughly what the perspective camera would have.
+    const String projection = config.Get<String>("camera.projection", "perspective");
+    if (projection == "orthographic" || projection == "ortho") {
+        camera.SetProjection(Projection::Orthographic);
+        const f32 distance = glm::length(lookAt - position);
+        const f32 implied = 2.0f * distance * glm::tan(glm::radians(fovY) * 0.5f);
+        camera.SetOrthoHeight(config.Get<f32>("camera.ortho_height",
+                                              implied > 0.0f ? implied : 2.0f));
+    } else if (projection != "perspective") {
+        QL_LOG_WARN("camera.projection '{}' is not recognised (known: perspective, "
+                    "orthographic); using perspective", projection);
+    }
 
     QL_LOG_INFO("Camera loaded from config:");
     QL_LOG_INFO("  Position: ({:.2f}, {:.2f}, {:.2f})", position.x, position.y, position.z);
