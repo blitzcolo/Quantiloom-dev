@@ -19,6 +19,7 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Types.hpp"
+#include "renderer/OfflineRenderer.hpp"
 
 namespace quantiloom::app {
 
@@ -58,6 +59,20 @@ struct RenderOutcome {
 
 /**
  * @brief Render a configuration and write its outputs
+ *
+ * @param config Parsed scene configuration.
+ * @param init   Everything host-side the renderer needs: the atmosphere weights
+ *               fallback, the config's own directory, and -- for batch mode --
+ *               the shared device the render runs on.
+ */
+RenderOutcome RenderConfigToFiles(const Config& config,
+                                  const OfflineRenderer::InitParams& init);
+
+/**
+ * @brief Render a configuration on a device of its own
+ *
+ * What a host rendering one scene wants, and what the CLI's single-config path
+ * and serve mode both call.
  *
  * @param config                        Parsed scene configuration.
  * @param atmosphereModelPackFallback   Where to find atmosphere weights when

@@ -156,11 +156,15 @@ Image BuildPreview(const Image& img, const SpectralMode mode, const u32 width, c
 }  // namespace
 
 RenderOutcome RenderConfigToFiles(const Config& config, const String& atmosphereModelPackFallback) {
-    RenderOutcome outcome;
-    const auto started = std::chrono::steady_clock::now();
-
     OfflineRenderer::InitParams initParams;
     initParams.atmosphereModelPackFallback = atmosphereModelPackFallback;
+    return RenderConfigToFiles(config, initParams);
+}
+
+RenderOutcome RenderConfigToFiles(const Config& config,
+                                  const OfflineRenderer::InitParams& initParams) {
+    RenderOutcome outcome;
+    const auto started = std::chrono::steady_clock::now();
 
     auto rendererResult = OfflineRenderer::Create(config, initParams);
     if (!rendererResult.has_value()) {
@@ -231,8 +235,9 @@ RenderOutcome RenderConfigToFiles(const Config& config, const String& atmosphere
     outcome.seconds = std::chrono::duration<f64>(std::chrono::steady_clock::now() - started).count();
     outcome.ok = outcome.error.empty();
 
-    // The pipeline cache is written back and the device torn down when
-    // `rendererResult` goes out of scope here.
+    // The renderer is torn down when `rendererResult` goes out of scope here --
+    // and with it the device and the pipeline cache, unless a shared RenderDevice
+    // was passed in, in which case both outlive this call.
     return outcome;
 }
 

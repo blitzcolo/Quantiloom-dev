@@ -15,6 +15,7 @@
 #include "core/Log.hpp"
 #include "core/Config.hpp"
 
+#include "BatchJob.hpp"
 #include "McpServe.hpp"
 #include "RenderJob.hpp"
 #include "Version.hpp"
@@ -89,17 +90,38 @@ void PrintHelp(const char* progname) {
         << "\n"
         << "Usage:\n"
         << "  " << progname << " <config.toml> [options]\n"
+        << "  " << progname << " batch <list.txt> [options]\n"
         << "  " << progname << " serve [--port N]\n"
         << "  " << progname << " --help\n"
         << "  " << progname << " --version\n"
         << "\n"
         << "Options:\n"
         << "  <config.toml>          Scene configuration file (required)\n"
+        << "  batch <list.txt>       Render every config the list names, in order,\n"
+        << "                         reusing one GPU device across all of them\n"
         << "  serve                  Answer MCP on 127.0.0.1 so an agent can render\n"
         << "  --port N               Port for serve mode (default 8766)\n"
         << "  -h, --help             Show this help message and exit\n"
         << "  -v, --version          Show version number and exit\n"
         << "  -V, --build-info       Show full build information and exit\n"
+        << "\n"
+        << "Batch options:\n"
+        << "  --override FILE        A TOML document layered over every config, key by\n"
+        << "                         key: keys it names win, keys it omits keep each\n"
+        << "                         config's own value. Tables merge; arrays (and\n"
+        << "                         [[materials]]) are replaced whole. It may not set\n"
+        << "                         renderer.output -- use --output-dir instead\n"
+        << "  --output-dir DIR       Write every output to DIR, named after its config.\n"
+        << "                         Without it each config keeps its own\n"
+        << "                         renderer.output, resolved beside that config\n"
+        << "  --fail-fast            Stop at the first failure (default: finish the\n"
+        << "                         list and summarise)\n"
+        << "  --dry-run              Print the resolved job table and exit\n"
+        << "\n"
+        << "  A list is one .toml path per line; blank lines and lines starting with #\n"
+        << "  are ignored, and relative paths resolve against the list's own directory.\n"
+        << "  Jobs run one after another. Two configs that would write the same file\n"
+        << "  get -2, -3 appended, with a warning, rather than overwriting each other.\n"
         << "\n"
         << "Spectral modes (set in config file [spectral] section):\n"
         << "  rgb                    Standard RGB rendering\n"
@@ -114,6 +136,8 @@ void PrintHelp(const char* progname) {
         << "  " << progname << " assets/configs/cornell_box_vis.toml\n"
         << "  " << progname << " assets/configs/cube_usdc.toml\n"
         << "  " << progname << " assets/configs/cornell_box_lwir.toml\n"
+        << "  " << progname << " batch scenes.txt --output-dir renders\n"
+        << "  " << progname << " batch scenes.txt --override preview.toml --dry-run\n"
         << "\n"
         << "Homepage: https://github.com/blitzcolo/Quantiloom-dev\n";
 }
@@ -179,6 +203,42 @@ int RunApp(int argc, char* argv[]) {
         return code;
     }
 
+    // ========================================================================
+    // batch → render a list of configurations on one device
+    // ========================================================================
+    if (std::strcmp(argv[1], "batch") == 0) {
+        if (argc < 3) {
+            std::cerr << "Error: batch needs a list file.\n"
+                         "Usage: " << argv[0] << " batch <list.txt> [options]\n";
+            Log::Shutdown();
+            return 1;
+        }
+
+        app::BatchOptions options;
+        options.manifestPath = argv[2];
+        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+
+        for (int i = 3; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
+                options.overridePath = argv[++i];
+            } else if (std::strcmp(argv[i], "--output-dir") == 0 && i + 1 < argc) {
+                options.outputDir = argv[++i];
+            } else if (std::strcmp(argv[i], "--fail-fast") == 0) {
+                options.failFast = true;
+            } else if (std::strcmp(argv[i], "--dry-run") == 0) {
+                options.dryRun = true;
+            } else {
+                std::cerr << "Error: unrecognised option for batch: " << argv[i] << "\n";
+                Log::Shutdown();
+                return 1;
+            }
+        }
+
+        const int code = app::RunBatch(options);
+        Log::Shutdown();
+        return code;
+    }
+
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("  Quantiloom Spectral Path Tracer v{}", version::AppVersionString);
     QL_LOG_INFO("  {} {} | {} ({})", version::CompilerId, version::CompilerVer,
@@ -206,8 +266,15 @@ int RunApp(int argc, char* argv[]) {
         // OfflineRenderer, and everything from there to the files on disk lives
         // in RenderJob -- shared with serve mode, so an agent's render and a
         // command-line render are the same render.
-        const app::RenderOutcome outcome =
-            app::RenderConfigToFiles(config, ResolveDefaultAtmosModelPack(argv[0]));
+        OfflineRenderer::InitParams init;
+        init.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+        // Relative asset paths inside the config resolve against the config's own
+        // directory first, then against the working directory as before -- so a
+        // self-contained scene folder renders from anywhere, and every config in
+        // assets/configs/ keeps resolving its repo-root-relative paths.
+        init.baseDir = configPath.parent_path().string();
+
+        const app::RenderOutcome outcome = app::RenderConfigToFiles(config, init);
 
         if (!outcome.ok && outcome.width == 0) {
             QL_LOG_ERROR("{}", outcome.error);

@@ -33,6 +33,8 @@ endif()
 
 add_executable(Quantiloom
     main.cpp
+    BatchJob.cpp
+    BatchJob.hpp
     RenderJob.cpp
     RenderJob.hpp
     McpServe.cpp
