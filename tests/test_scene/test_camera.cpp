@@ -111,6 +111,49 @@ TEST(CameraTest, UpVectorComputation) {
     EXPECT_TRUE(IsNormalized(computedUp));
 }
 
+TEST(CameraTest, UpReferenceSurvivesOrthonormalization) {
+    // A pitched camera: forward is not horizontal, so the derived up tilts.
+    Camera cam(glm::vec3(0, 5, 5), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+
+    // The derived up is orthonormal, and therefore not (0,1,0) here...
+    EXPECT_TRUE(IsNormalized(cam.GetUp()));
+    EXPECT_FALSE(VecEqual(cam.GetUp(), glm::vec3(0, 1, 0)));
+
+    // ...but the reference is exactly what the author said, untouched by the
+    // orthonormalization. A host saving camera state reads this one back.
+    EXPECT_EQ(cam.GetUpReference(), glm::vec3(0, 1, 0));
+
+    // Moving the camera does not rewrite the reference either.
+    cam.SetPosition(glm::vec3(5, 5, 0));
+    EXPECT_EQ(cam.GetUpReference(), glm::vec3(0, 1, 0));
+}
+
+TEST(CameraTest, NoRollDriftAcrossMoves) {
+    // Orbit a pitched camera a quarter turn in small steps. UpdateVectors used
+    // to re-derive from the previous step's derived up, so each step leaked a
+    // little of the old view plane into the new basis and roll accumulated.
+    // The basis after N moves must match a fresh camera built at the final
+    // pose -- the path taken to get there must not be visible in it.
+    const glm::vec3 target(0, 0, 0);
+    const f32 pitchY = 5.0f;
+    const f32 radius = 5.0f;
+
+    Camera cam(glm::vec3(0, pitchY, radius), target, glm::vec3(0, 1, 0));
+
+    const int steps = 32;
+    for (int i = 1; i <= steps; ++i) {
+        const f32 angle = glm::half_pi<f32>() * static_cast<f32>(i) /
+                          static_cast<f32>(steps);
+        cam.SetPosition(glm::vec3(radius * std::sin(angle), pitchY,
+                                  radius * std::cos(angle)));
+    }
+
+    Camera fresh(cam.GetPosition(), target, glm::vec3(0, 1, 0));
+    EXPECT_TRUE(VecEqual(cam.GetUp(), fresh.GetUp()));
+    EXPECT_TRUE(VecEqual(cam.GetRight(), fresh.GetRight()));
+    EXPECT_TRUE(VecEqual(cam.GetForward(), fresh.GetForward()));
+}
+
 TEST(CameraTest, OrthonormalBasis) {
     glm::vec3 position(5, 3, -10);
     glm::vec3 lookAt(0, 1, 0);

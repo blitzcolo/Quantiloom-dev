@@ -37,8 +37,11 @@ Result<Scene, String> Scene::FromConfig(const Config& config) {
                 }
             }
 
-            // Up vector
-            glm::vec3 up = scene.camera.GetUp();
+            // Up vector. The reference, not the derived basis vector: this is
+            // the default for a config that omits "up", and it feeds SetUp()
+            // below -- freezing one view's orthonormalized up as the next
+            // reference is how roll used to creep in.
+            glm::vec3 up = scene.camera.GetUpReference();
             if (cam.Has("up")) {
                 if (auto upArr = cam.GetArray<f32>("up"); upArr.size() == 3) {
                     up = glm::vec3(upArr[0], upArr[1], upArr[2]);

@@ -9,7 +9,7 @@ Camera::Camera(const glm::vec3& position, const glm::vec3& lookAt,
                const glm::vec3& up, f32 fovYDegrees, f32 aspectRatio)
     : m_position(position)
     , m_lookAt(lookAt)
-    , m_up(glm::normalize(up))
+    , m_upReference(glm::normalize(up))
     , m_fovYDegrees(fovYDegrees)
     , m_aspectRatio(aspectRatio)
 {
@@ -27,7 +27,7 @@ void Camera::SetLookAt(const glm::vec3& lookAt) {
 }
 
 void Camera::SetUp(const glm::vec3& up) {
-    m_up = glm::normalize(up);
+    m_upReference = glm::normalize(up);
     UpdateVectors();
 }
 
@@ -70,7 +70,9 @@ void Camera::UpdateVectors() {
     // 2. forward parallel to up -> zero cross product. Happens for an ordinary
     //    straight-down or straight-up camera with the default up of +Y. Swing
     //    to an axis that is not parallel; the orthogonal up is rebuilt below.
-    glm::vec3 up = m_up;
+    //    The reference, not m_up: deriving from the previous frame's derived
+    //    up let roll accumulate across camera moves.
+    glm::vec3 up = m_upReference;
     if (std::abs(glm::dot(m_forward, up)) > 1.0f - kDegenerate) {
         up = (std::abs(m_forward.y) > 0.9f) ? glm::vec3(0.0f, 0.0f, 1.0f)
                                             : glm::vec3(0.0f, 1.0f, 0.0f);

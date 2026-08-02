@@ -165,6 +165,21 @@ public:
     [[nodiscard]] glm::vec3 GetPosition() const { return m_position; }
     [[nodiscard]] glm::vec3 GetLookAt() const { return m_lookAt; }
     [[nodiscard]] glm::vec3 GetUp() const { return m_up; }
+
+    /**
+     * @brief The up vector as authored, before orthonormalization
+     *
+     * GetUp() answers "which way is up on the film plane" -- the orthonormal
+     * basis vector, recomputed for the current view direction, which a pitched
+     * camera tilts even when the scene said plain y-up. This accessor answers
+     * "which way did the author say is up": the reference SetUp() was given,
+     * which UpdateVectors() reads but never writes. A host that round-trips
+     * camera state to a config file wants this one -- writing the derived up
+     * freezes one view's tilt into the file, where it turns into visible roll
+     * as soon as the camera moves (how: the reference no longer lies in the
+     * vertical plane of the new forward).
+     */
+    [[nodiscard]] glm::vec3 GetUpReference() const { return m_upReference; }
     [[nodiscard]] glm::vec3 GetForward() const { return m_forward; }
     [[nodiscard]] glm::vec3 GetRight() const { return m_right; }
     [[nodiscard]] f32 GetFovY() const { return m_fovYDegrees; }
@@ -177,11 +192,17 @@ public:
     static Result<Camera, String> FromConfig(const Config& config, f32 aspectRatio);
 
 private:
-    void UpdateVectors();  // Recompute forward/right/up from position/lookAt
+    // Recompute forward/right/up from position/lookAt/m_upReference. Reads the
+    // reference, never feeds m_up back into itself: deriving from the previous
+    // derived up accumulated roll over successive SetPosition/SetLookAt calls
+    // (classic up-vector drift), which reached the GUI as a whole viewport
+    // tilted a few degrees.
+    void UpdateVectors();
 
     glm::vec3 m_position{0, 2, -8};
     glm::vec3 m_lookAt{0, 1, 0};
-    glm::vec3 m_up{0, 1, 0};
+    glm::vec3 m_upReference{0, 1, 0};  // As authored; the derivation input
+    glm::vec3 m_up{0, 1, 0};           // Orthonormal, derived by UpdateVectors
     glm::vec3 m_forward{0, 0, 1};
     glm::vec3 m_right{1, 0, 0};
 
