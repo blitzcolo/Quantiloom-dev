@@ -41,6 +41,8 @@
 
 namespace quantiloom {
 
+class RenderDevice;
+
 /**
  * @struct OfflineProgress
  * @brief How far a hyperspectral cube has got
@@ -154,7 +156,38 @@ public:
         String atmosphereModelPackFallback;
 
         /// Read at start-up and written back afterwards. Empty disables both.
+        /// Ignored when `sharedDevice` is set -- the cache belongs to the device.
         String pipelineCachePath = "pipeline_cache.bin";
+
+        /**
+         * @brief A device to render on instead of creating one
+         *
+         * The device, the pipeline cache, the BRDF LUT, the colour matching table
+         * and the fallback environment map then come from it rather than being
+         * built here -- roughly 250 ms and a pair of LUT generations per render,
+         * which is what a batch of a hundred scenes was paying a hundred times.
+         *
+         * Null keeps the original behaviour: this instance creates and owns
+         * everything, as a single-render host wants. Non-null, the device must
+         * outlive this renderer, and renders sharing one run one at a time.
+         *
+         * @see RenderDevice
+         */
+        RenderDevice* sharedDevice = nullptr;
+
+        /**
+         * @brief Directory a relative path inside the config resolves against
+         *
+         * Tried first, with the path as written as the fallback, so a
+         * self-contained scene folder resolves against itself while a
+         * repo-root-relative path keeps working from the working directory.
+         * Normally the directory the config file was loaded from.
+         *
+         * Empty -- the default -- means paths resolve against the working
+         * directory alone, which is what this renderer did before the field
+         * existed.
+         */
+        String baseDir;
 
         /// Per-frame GPU timings. Empty disables the logger.
         String performanceCsvPath = "quantiloom_performance.csv";

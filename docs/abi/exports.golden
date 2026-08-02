@@ -3,6 +3,7 @@ const quantiloom::GenericSensor::`vftable'
 private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
 private: quantiloom::OfflineRenderer::OfflineRenderer(void)
+private: quantiloom::RenderDevice::RenderDevice(void)
 private: quantiloom::mcp::Server::Server(void)
 private: static enum quantiloom::Log::Level quantiloom::Log::s_CurrentLevel
 public: __int64 quantiloom::Config::Get<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >,__int64 const &)const
@@ -28,6 +29,7 @@ public: bool quantiloom::Scene::IsValid(void)const
 public: class quantiloom::Camera const & quantiloom::ExternalRenderContext::GetCamera(void)const
 public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config &&)
 public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config const &)
+public: class quantiloom::Config quantiloom::Config::MergedWith(class quantiloom::Config const &)const
 public: class quantiloom::ExternalRenderContext & quantiloom::ExternalRenderContext::operator=(class quantiloom::ExternalRenderContext &&)
 public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO &&)
 public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO const &)
@@ -112,6 +114,7 @@ public: quantiloom::Material::Material(struct quantiloom::Material const &)
 public: quantiloom::Material::Material(void)
 public: quantiloom::Material::~Material(void)
 public: quantiloom::OfflineRenderer::~OfflineRenderer(void)
+public: quantiloom::RenderDevice::~RenderDevice(void)
 public: quantiloom::Scene::Scene(class quantiloom::Scene &&)
 public: quantiloom::Scene::Scene(class quantiloom::Scene const &)
 public: quantiloom::Scene::Scene(void)
@@ -125,6 +128,7 @@ public: static class quantiloom::Result<class quantiloom::Config,class std::basi
 public: static class quantiloom::Result<class quantiloom::Scene,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Scene::FromConfig(class quantiloom::Config const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::ExternalRenderContext,struct std::default_delete<class quantiloom::ExternalRenderContext> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Create(struct quantiloom::ExternalRenderContext::InitParams const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::OfflineRenderer,struct std::default_delete<class quantiloom::OfflineRenderer> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::Create(class quantiloom::Config const &,struct quantiloom::OfflineRenderer::InitParams const &)
+public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::RenderDevice,struct std::default_delete<class quantiloom::RenderDevice> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::RenderDevice::Create(struct quantiloom::RenderDevice::InitParams const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::mcp::Server,struct std::default_delete<class quantiloom::mcp::Server> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::Create(struct quantiloom::mcp::ServerOptions const &)
 public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)

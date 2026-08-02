@@ -155,6 +155,25 @@ public:
     [[nodiscard]] std::unordered_map<String, String> GetSection(StringView key) const;
 
     // ========================================================================
+    // Merging
+    // ========================================================================
+
+    /// Layer another configuration over this one, key by key
+    ///
+    /// Tables merge recursively, so an override document naming only
+    /// `[renderer] spp` leaves `renderer.resolution` as this configuration had
+    /// it. Everything else -- scalars, and arrays including arrays of tables
+    /// such as `[[materials]]` -- is replaced whole rather than combined:
+    /// array elements carry no identity to pair them up by, so an override
+    /// material list is *the* list, not an addition to this one.
+    ///
+    /// Neither input is modified.
+    ///
+    /// @param overrides Configuration whose keys win wherever both define one
+    /// @return The merged configuration
+    [[nodiscard]] Config MergedWith(const Config& overrides) const;
+
+    // ========================================================================
     // Template Interface (for backward compatibility)
     // Supported types: String, i32, i64, u32, u64, f32, f64, bool
     // ========================================================================

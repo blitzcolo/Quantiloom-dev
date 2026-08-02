@@ -388,3 +388,149 @@ TEST_F(ConfigTest, ComplexNestedStructure) {
     EXPECT_EQ(config.Get<i32>("spectral.band_samples", 0), 4);
     EXPECT_EQ(config.Get<String>("atmosphere.mode", ""), "LUT_FAST");
 }
+
+// ============================================================================
+// MergedWith
+// ============================================================================
+
+TEST_F(ConfigTest, MergeOverridesScalar) {
+    auto base = Config::Parse(R"(
+        [renderer]
+        spp = 4
+    )").value();
+    auto over = Config::Parse(R"(
+        [renderer]
+        spp = 64
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 64);
+    // Neither input is touched
+    EXPECT_EQ(base.Get<i32>("renderer.spp", 0), 4);
+    EXPECT_EQ(over.Get<i32>("renderer.spp", 0), 64);
+}
+
+TEST_F(ConfigTest, MergeKeepsKeysTheOverrideDoesNotName) {
+    auto base = Config::Parse(R"(
+        [renderer]
+        spp = 4
+        resolution = [1280, 720]
+        output = "base.exr"
+
+        [scene]
+        gltf = "cube.gltf"
+    )").value();
+    auto over = Config::Parse(R"(
+        [renderer]
+        spp = 8
+    )").value();
+
+    auto merged = base.MergedWith(over);
+
+    // The whole point: a table merges rather than replacing.
+    EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 8);
+    EXPECT_EQ(merged.Get<String>("renderer.output", ""), "base.exr");
+    auto resolution = merged.GetArray<i32>("renderer.resolution");
+    ASSERT_EQ(resolution.size(), 2u);
+    EXPECT_EQ(resolution[0], 1280);
+    // Sections the override never mentions survive whole.
+    EXPECT_EQ(merged.Get<String>("scene.gltf", ""), "cube.gltf");
+}
+
+TEST_F(ConfigTest, MergeRecursesIntoNestedTables) {
+    auto base = Config::Parse(R"(
+        [a.b]
+        keep = 1
+        change = 2
+    )").value();
+    auto over = Config::Parse(R"(
+        [a.b]
+        change = 99
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    EXPECT_EQ(merged.Get<i32>("a.b.keep", 0), 1);
+    EXPECT_EQ(merged.Get<i32>("a.b.change", 0), 99);
+}
+
+TEST_F(ConfigTest, MergeAddsSectionsTheBaseLacks) {
+    auto base = Config::Parse(R"(
+        [renderer]
+        spp = 4
+    )").value();
+    auto over = Config::Parse(R"(
+        [quality]
+        fail_on_srgb_upsample = true
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 4);
+    EXPECT_TRUE(merged.Get<bool>("quality.fail_on_srgb_upsample", false));
+}
+
+TEST_F(ConfigTest, MergeReplacesArraysWhole) {
+    auto base = Config::Parse(R"(
+        [renderer]
+        resolution = [1280, 720, 999]
+    )").value();
+    auto over = Config::Parse(R"(
+        [renderer]
+        resolution = [400, 400]
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    auto resolution = merged.GetArray<i32>("renderer.resolution");
+    // Replaced, not element-wise merged and not appended.
+    ASSERT_EQ(resolution.size(), 2u);
+    EXPECT_EQ(resolution[0], 400);
+    EXPECT_EQ(resolution[1], 400);
+}
+
+TEST_F(ConfigTest, MergeReplacesArrayOfTablesWhole) {
+    auto base = Config::Parse(R"(
+        [[materials]]
+        name = "steel"
+        ir_emissivity = 0.2
+
+        [[materials]]
+        name = "paint"
+        ir_emissivity = 0.9
+    )").value();
+    auto over = Config::Parse(R"(
+        [[materials]]
+        name = "water"
+        ir_emissivity = 0.98
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    auto materials = merged.GetTableArray("materials");
+    ASSERT_EQ(materials.size(), 1u);
+    EXPECT_EQ(materials[0].Get<String>("name", ""), "water");
+}
+
+TEST_F(ConfigTest, MergeWithEmptyIsIdentity) {
+    auto base = Config::Parse(R"(
+        [renderer]
+        spp = 4
+        output = "a.exr"
+    )").value();
+
+    auto merged = base.MergedWith(Config{});
+    EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 4);
+    EXPECT_EQ(merged.Get<String>("renderer.output", ""), "a.exr");
+}
+
+TEST_F(ConfigTest, MergeOverrideWinsAcrossTypes) {
+    // A scalar in the base, a table in the override under the same key.
+    auto base = Config::Parse(R"(
+        renderer = "nonsense"
+    )").value();
+    auto over = Config::Parse(R"(
+        [renderer]
+        spp = 16
+    )").value();
+
+    auto merged = base.MergedWith(over);
+    EXPECT_TRUE(merged.HasSection("renderer"));
+    EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 16);
+}

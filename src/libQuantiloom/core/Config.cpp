@@ -384,6 +384,37 @@ std::unordered_map<String, String> Config::GetSection(const StringView key) cons
     return result;
 }
 
+// ============================================================================
+// Merging
+// ============================================================================
+
+namespace {
+
+/// Layer `overrides` onto `base` in place. Two tables under the same key are
+/// merged; anything else the override names replaces what was there.
+void MergeTableInto(toml::table& base, const toml::table& overrides) {
+    for (const auto& [key, node] : overrides) {
+        auto existing = base.find(key);
+        if (existing != base.end() && existing->second.is_table() && node.is_table()) {
+            MergeTableInto(*existing->second.as_table(), *node.as_table());
+            continue;
+        }
+        // visit() hands us the concrete node type, which is what toml++ can
+        // copy into the table -- the abstract toml::node is not insertable.
+        node.visit([&](const auto& concrete) {
+            base.insert_or_assign(key, concrete);
+        });
+    }
+}
+
+}  // namespace
+
+Config Config::MergedWith(const Config& overrides) const {
+    auto merged = std::make_unique<Impl>(*m_impl);
+    MergeTableInto(merged->root, overrides.m_impl->root);
+    return Config(std::move(merged));
+}
+
 void Config::Print() const {
     std::ostringstream oss;
     oss << m_impl->root;

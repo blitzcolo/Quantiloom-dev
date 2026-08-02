@@ -44,6 +44,7 @@
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/RenderCore.hpp"
+#include "renderer/RenderDeviceImpl.hpp"
 #include "renderer/MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 #include "scene/Camera.hpp"
@@ -98,6 +99,10 @@ struct OfflineRenderer::Impl {
     // cost a device. Each method below binds it back to a plain `context`
     // reference, which is also why nothing here is *named* context: a member
     // of that name would be shadowed rather than referenced (MSVC C4458).
+    //
+    // Null when InitParams::sharedDevice was given: the device is then a
+    // RenderDevice's and outlives this instance. `contextRef` is the one to
+    // read; it points at whichever of the two is in play.
     // ------------------------------------------------------------------
     std::unique_ptr<VulkanContext> contextPtr;
     Scene loadedScene;
@@ -119,11 +124,29 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<RayTracingPipeline> pipeline;
     std::unique_ptr<PerformanceLogger> perfLogger;
 
+    // ------------------------------------------------------------------
+    // Borrowed from a shared RenderDevice, or all null. Not GPU state this
+    // instance owns, so position among the members above does not matter --
+    // none of it is destroyed here.
+    //
+    // Filled in by Create(), which is the friend RenderDevice named; keeping
+    // the reach into RenderDevice::Impl in one place is why these are five
+    // plain pointers rather than one pointer to that Impl.
+    // ------------------------------------------------------------------
+    VulkanContext* contextRef = nullptr;
+    const rendercore::BrdfLut* brdfLutRef = nullptr;
+    const rendercore::EnvironmentCubemap* fallbackEnvMapRef = nullptr;
+    /// Either the shared fallback or `envMap` above, decided in BuildPipeline.
+    const rendercore::EnvironmentCubemap* envMapRef = nullptr;
+    const GpuBuffer* cieCMF_LUTRef = nullptr;
+    bool borrowingDevice = false;
+
     ~Impl() {
         // Before the members go, because it was created against the context and
         // the context is one of them. Saved on the way out so the next run
-        // starts warm.
-        if (pipelineCache != VK_NULL_HANDLE && contextPtr) {
+        // starts warm. A borrowed cache belongs to the RenderDevice, which saves
+        // and destroys it once for the whole batch.
+        if (!borrowingDevice && pipelineCache != VK_NULL_HANDLE && contextPtr) {
             if (!init.pipelineCachePath.empty()) {
                 RayTracingPipeline::SavePipelineCache(*contextPtr, pipelineCache,
                                                       init.pipelineCachePath);
@@ -145,11 +168,11 @@ struct OfflineRenderer::Impl {
 // ============================================================================
 
 SetupResult OfflineRenderer::Impl::BuildScene() {
-    VulkanContext& context = *contextPtr;
+    VulkanContext& context = *contextRef;
 
     QL_LOG_INFO("Loading scene...");
 
-    auto sceneResult = rendercore::LoadSceneFromConfig(config);
+    auto sceneResult = rendercore::LoadSceneFromConfig(config, configOptions.baseDir);
     if (!sceneResult.has_value()) {
         return SetupResult::Err("Failed to load scene: " + sceneResult.error());
     }
@@ -196,7 +219,7 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 }
 
 SetupResult OfflineRenderer::Impl::BuildIlluminants() {
-    VulkanContext& context = *contextPtr;
+    VulkanContext& context = *contextRef;
 
     // Nothing here reads the config any more: the curves, the illuminant and
     // the atmosphere configuration all arrived resolved. What is left is
@@ -348,7 +371,11 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     // ====================================================================
     // Compiled in rather than parsed from assets/luts/, so there is no path to
     // get wrong and no "VIS_FUSED will produce INCORRECT colors" fallback to hit.
-    cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(context);
+    // The table is the same for every scene, so a shared device already has one.
+    if (!cieCMF_LUTRef) {
+        cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(context);
+        cieCMF_LUTRef = cieCMF_LUTBuffer.get();
+    }
 
     // ====================================================================
     // Material buffer
@@ -393,7 +420,7 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
 // ============================================================================
 
 SetupResult OfflineRenderer::Impl::BuildPipeline() {
-    VulkanContext& context = *contextPtr;
+    VulkanContext& context = *contextRef;
 
     // ====================================================================
     // Load or Generate BRDF Integration LUT for IBL (with Disk Caching)
@@ -403,9 +430,13 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // Subsequent runs: Load from cache (instant)
     // ====================================================================
 
-    brdfLut = rendercore::BrdfLut::Create(context);
-    if (!brdfLut.IsValid()) {
-        return SetupResult::Err("Failed to create BRDF LUT sampler");
+    // A shared device generated it once for the whole batch.
+    if (!brdfLutRef) {
+        brdfLut = rendercore::BrdfLut::Create(context);
+        if (!brdfLut.IsValid()) {
+            return SetupResult::Err("Failed to create BRDF LUT sampler");
+        }
+        brdfLutRef = &brdfLut;
     }
 
     // ====================================================================
@@ -420,27 +451,42 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // A disabled map is not loaded at all: the binding still has to be valid, so
     // the fallback is bound and the shader skips it on the lighting flag. Off
     // means it contributes nothing, not that it is replaced by a sky.
+    // The fallback is uniform sky blue and identical for every scene, so a shared
+    // device supplies one. A map the config *names* is this render's own.
+    const auto useFallback = [&] {
+        if (fallbackEnvMapRef) {
+            envMapRef = fallbackEnvMapRef;
+        } else {
+            envMap = rendercore::EnvironmentCubemap::Fallback(context);
+            envMapRef = &envMap;
+        }
+    };
+
     const String envMapPath = resolved.environmentMapEnabled ? resolved.environmentMap : String{};
     if (envMapPath.empty()) {
         QL_LOG_INFO("  No environment map specified in config, using fallback");
-        envMap = rendercore::EnvironmentCubemap::Fallback(context);
+        useFallback();
     } else {
         auto loaded = rendercore::EnvironmentCubemap::Load(context, envMapPath);
         if (loaded.has_value()) {
             envMap = std::move(loaded.value());
+            envMapRef = &envMap;
         } else {
             QL_LOG_WARN("  {}, using fallback", loaded.error());
-            envMap = rendercore::EnvironmentCubemap::Fallback(context);
+            useFallback();
         }
     }
 
     QL_LOG_INFO("  Prefiltered environment map ready ({}x{} per face, {} mip levels)",
-                envMap.FaceSize(), envMap.FaceSize(), envMap.MipLevels());
+                envMapRef->FaceSize(), envMapRef->FaceSize(), envMapRef->MipLevels());
 
     // ====================================================================
     // Create Ray Tracing Pipeline
     // ====================================================================
-    if (!init.pipelineCachePath.empty()) {
+    // A borrowed cache arrived already loaded and is saved once by the device;
+    // Create() put it in `pipelineCache` and set borrowingDevice so that ~Impl
+    // leaves it alone.
+    if (!borrowingDevice && !init.pipelineCachePath.empty()) {
         pipelineCache =
             RayTracingPipeline::LoadPipelineCache(context, init.pipelineCachePath);
     }
@@ -451,14 +497,14 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.lightingParams = lightingParamsBuffer.get();
     bindings.materials = materialBuffer.get();
     bindings.textures = textureManager.get();
-    bindings.environment = &envMap;
-    bindings.brdfLut = &brdfLut;
+    bindings.environment = envMapRef;
+    bindings.brdfLut = brdfLutRef;
     bindings.spectralCurves = spectralCurvesBuffer.get();
     bindings.complexRefractiveIndex = criBuffer.get();
     bindings.solarLut = solarSpectralLUTBuffer.get();
     bindings.atmosphereHeader = atmosHeaderBuffer.get();
     bindings.atmosphereData = atmosDataBuffer.get();
-    bindings.cieColourMatching = cieCMF_LUTBuffer.get();
+    bindings.cieColourMatching = cieCMF_LUTRef;
 
     pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
 
@@ -515,6 +561,10 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     // should refuse rather than quietly substitute a default into.
     impl.configOptions.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
     impl.configOptions.atmosphereModelPackFallback = params.atmosphereModelPackFallback;
+    // Empty until this field existed, which meant every relative asset path in a
+    // CLI-rendered config resolved against the working directory rather than
+    // against the config -- the interactive context had always passed it.
+    impl.configOptions.baseDir = params.baseDir;
     // One camera, one image: sun angles and observer altitude are pinned at
     // load time rather than following a camera that will not move.
     impl.configOptions.freezeDerivedAtmosGeometry = true;
@@ -545,11 +595,24 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     // ====================================================================
     // Initialize Vulkan Context
     // ====================================================================
-    QL_LOG_INFO("Initializing Vulkan context...");
-    impl.contextPtr = std::make_unique<VulkanContext>();
+    if (params.sharedDevice) {
+        // The one place that reaches into RenderDevice::Impl -- this function is
+        // the friend it named. Everything below works off the plain pointers.
+        RenderDevice::Impl& shared = *params.sharedDevice->m_impl;
+        impl.borrowingDevice = true;
+        impl.contextRef = shared.context.get();
+        impl.brdfLutRef = &shared.brdfLut;
+        impl.fallbackEnvMapRef = &shared.fallbackEnvMap;
+        impl.cieCMF_LUTRef = shared.cieCMF_LUTBuffer.get();
+        impl.pipelineCache = shared.pipelineCache;
+    } else {
+        QL_LOG_INFO("Initializing Vulkan context...");
+        impl.contextPtr = std::make_unique<VulkanContext>();
+        impl.contextRef = impl.contextPtr.get();
 
-    if (!impl.contextPtr->IsRayTracingSupported()) {
-        return CreateResult::Err("Ray tracing not supported on this device");
+        if (!impl.contextPtr->IsRayTracingSupported()) {
+            return CreateResult::Err("Ray tracing not supported on this device");
+        }
     }
 
     if (auto r = impl.BuildScene(); !r.has_value()) {
@@ -557,7 +620,7 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     }
 
     impl.lightingParamsBuffer = std::make_unique<GpuBuffer>(
-        impl.contextPtr->GetAllocator(),
+        impl.contextRef->GetAllocator(),
         sizeof(LightingParams),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
@@ -587,7 +650,7 @@ OfflineRenderOutput OfflineRenderer::Render() {
 }
 
 OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
-    VulkanContext& context = *contextPtr;
+    VulkanContext& context = *contextRef;
 
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("  MULTISPECTRAL RENDERING MODE");
@@ -688,7 +751,7 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
 }
 
 OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
-    VulkanContext& context = *contextPtr;
+    VulkanContext& context = *contextRef;
 
     const u32 width = params.width;
     const u32 height = params.height;
