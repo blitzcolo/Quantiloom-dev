@@ -199,6 +199,35 @@ public:
                             u32 directColumn = 2,
                             u32 diffuseColumn = 3,
                             bool diffuseIsGlobal = false);
+
+    // ========================================================================
+    // NMF measured-material database
+    // ========================================================================
+
+    // Reconstruct one material's measured reflectance from an NMF basis.
+    //
+    // The databases baked into assets/spectral/ (USGS, ECOSTRESS, RII) store a
+    // shared basis plus per-material weights; a curve is the weighted sum. The
+    // renderer does this internally when a scene names
+    // quantiloom_material_ref, but a host that wants to *offer* the database --
+    // a material browser, a preview plot -- needs the same reconstruction
+    // without loading a scene, which is what this is for.
+    //
+    // The name is matched exactly first, then as a case-insensitive substring,
+    // the same order and meaning the config path uses. Both files are parsed on
+    // first use and cached, because the materials JSON is megabytes and a
+    // browser reconstructs a curve per selection.
+    //
+    // @param basisFile: quantiloom_basis_v3_*.qlbin
+    // @param materialsJson: quantiloom_materials_*.json
+    // @param materialName: database entry, exact or substring
+    // @param band: "VIS", "NIR", "SWIR", "MWIR" or "LWIR"
+    // @return: the reconstructed curve, or why it could not be produced
+    static Result<SpectralCurve, String>
+    ReconstructBasisCurve(const std::filesystem::path& basisFile,
+                          const std::filesystem::path& materialsJson,
+                          const String& materialName,
+                          const String& band);
 };
 
 } // namespace quantiloom

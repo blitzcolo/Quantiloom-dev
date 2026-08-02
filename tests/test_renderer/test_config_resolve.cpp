@@ -570,6 +570,92 @@ ir_temperature_k = 350.0
 }
 
 // ============================================================================
+// Transmission, dispersion, participating media and the spectral database ref
+// ============================================================================
+// The fields always reached the GPU; only glTF's KHR extensions could set them.
+// A config could not describe a piece of glass, and the prism and water scenes
+// carried their intent in comments the reader never saw.
+
+TEST_F(ConfigResolveTest, MaterialsTableAppliesTransmissionAndVolumeKeys) {
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Glass"
+ior = 1.52
+transmission = 0.95
+dispersion = 0.018
+attenuation_color = [0.8, 0.9, 1.0]
+attenuation_distance = 0.35
+thickness = 0.02
+volume_density = 0.4
+scattering_coeff = 1.5
+absorption_coeff = 0.25
+phase_g = 0.6
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Glass"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const Material& glass = scene.materials[0];
+    EXPECT_FLOAT_EQ(glass.ior, 1.52f);
+    EXPECT_FLOAT_EQ(glass.transmission, 0.95f);
+    EXPECT_FLOAT_EQ(glass.dispersion, 0.018f);
+    EXPECT_FLOAT_EQ(glass.attenuationColor.b, 1.0f);
+    EXPECT_FLOAT_EQ(glass.attenuationDistance, 0.35f);
+    EXPECT_FLOAT_EQ(glass.thicknessFactor, 0.02f);
+    EXPECT_FLOAT_EQ(glass.volumeDensity, 0.4f);
+    EXPECT_FLOAT_EQ(glass.scatteringCoeff, 1.5f);
+    EXPECT_FLOAT_EQ(glass.absorptionCoeff, 0.25f);
+    EXPECT_FLOAT_EQ(glass.phaseG, 0.6f);
+}
+
+TEST_F(ConfigResolveTest, TransmissionKeysLeaveTheLoadedValueWhenAbsent) {
+    // Same absent-key rule the PBR half follows: an entry that sets a colour
+    // must not silently make the glass opaque.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Glass"
+base_color = [0.5, 0.5, 0.5]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Glass"});
+    scene.materials[0].transmission = 0.9f;
+    scene.materials[0].ior = 1.7f;
+
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].transmission, 0.9f);
+    EXPECT_FLOAT_EQ(scene.materials[0].ior, 1.7f);
+}
+
+TEST_F(ConfigResolveTest, MaterialsTableCarriesTheSpectralDatabaseReference) {
+    // What a measured-material assignment made in Studio has to survive a save
+    // as. The NMF reconstruction runs later in the same resolve and reads these
+    // two fields, so setting them here is the whole of the plumbing.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Roof"
+spectral_material_type = "quantiloom_usgs"
+spectral_material_ref = "Aluminum brushed 293K"
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Roof"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(scene.materials[0].quantiloomMaterialType, "quantiloom_usgs");
+    EXPECT_EQ(scene.materials[0].quantiloomMaterialRef, "Aluminum brushed 293K");
+    EXPECT_TRUE(scene.materials[0].HasQuantiloomRef());
+}
+
+// ============================================================================
 // [[nodes]] transform overrides
 // ============================================================================
 
@@ -734,4 +820,93 @@ TEST_F(ConfigResolveTest, SpectralCurvesAreKeyedByMaterialName) {
     auto it = spectra.value().materialNameToCurve.find("Panel");
     ASSERT_NE(it, spectra.value().materialNameToCurve.end());
     EXPECT_EQ(it->second, 0);
+}
+
+// ============================================================================
+// The illuminant resolves the same way for a file and for a host
+// ============================================================================
+// ResolveSolarLut is what [lighting] solar_lut* means. Both the config path and
+// ExternalRenderContext::SetSolarSpectralLUTFromSpec go through it, so a host
+// that offers a choice of illuminant cannot make one mean something else.
+
+TEST_F(ConfigResolveTest, EqualEnergyIlluminantNeedsNoFile) {
+    SolarLutRequest request;
+    request.pathOrEqualEnergy = "equal_energy";
+
+    auto result = ResolveSolarLut(request, "", SpectralMode::RGB);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    EXPECT_FALSE(result.value().sun.samples.empty());
+    EXPECT_FALSE(result.value().sky.samples.empty());
+
+    // Illuminant E is flat in *energy* and normalised to unit luminance, which
+    // is not the same as being sRGB white: sRGB's white point is D65, and E is
+    // slightly warm against it. So Y is exactly 1 and the channels are merely
+    // close -- asserting (1, 1, 1) would be asserting that E is D65.
+    const glm::vec3 rgb = result.value().sunRadianceRgb;
+    const float Y = 0.2126f * rgb.r + 0.7152f * rgb.g + 0.0722f * rgb.b;
+    EXPECT_NEAR(Y, 1.0f, 1e-3f);
+    // (1.205, 0.948, 0.909) as measured. Note that the doc comment on
+    // MakeEqualEnergyIlluminant claims linear sRGB "exactly (1, 1, 1)", which
+    // holds only if sRGB's white point were E; it is D65, so E reads warm.
+    // Pinned loosely -- the point is that E is near-neutral and on the warm
+    // side, not the third decimal of a chromatic adaptation.
+    EXPECT_GT(rgb.r, rgb.b) << "E is warm against D65, not cool";
+    EXPECT_LT(rgb.r / rgb.b, 1.5f) << "...but still recognisably neutral";
+}
+
+TEST_F(ConfigResolveTest, UnitLuminanceNormalisationKeepsTheSunSkyRatio) {
+    // Scaling the two curves separately would put each at Y = 1 and discard
+    // the ratio between them, which is the one thing a measured pair says.
+    SolarLutRequest plain;
+    plain.pathOrEqualEnergy = "equal_energy";
+    auto unnormalised = ResolveSolarLut(plain, "", SpectralMode::RGB);
+    ASSERT_TRUE(unnormalised.has_value());
+
+    SolarLutRequest normalised = plain;
+    normalised.normaliseUnitLuminance = true;
+    auto scaled = ResolveSolarLut(normalised, "", SpectralMode::RGB);
+    ASSERT_TRUE(scaled.has_value());
+
+    const auto ratioOf = [](const ResolvedSolarLut& lut) {
+        return lut.skyRadianceRgb.g / lut.sunRadianceRgb.g;
+    };
+    EXPECT_NEAR(ratioOf(unnormalised.value()), ratioOf(scaled.value()), 1e-4f);
+
+    // ...and the sun itself lands at unit luminance.
+    const glm::vec3 sun = scaled.value().sunRadianceRgb;
+    const float Y = 0.2126f * sun.r + 0.7152f * sun.g + 0.0722f * sun.b;
+    EXPECT_NEAR(Y, 1.0f, 1e-3f);
+}
+
+TEST_F(ConfigResolveTest, AnIlluminantTooNarrowForTheBandSaysSo) {
+    // Evaluate() clamps rather than returning zero, so a spectrum that stops
+    // short renders plausibly and means nothing. CIE D65 stopping at 830 nm is
+    // the real case: a fine reference for RGB, silently wrong for SWIR upward.
+    const auto spectrum = testDir / "narrow.csv";
+    {
+        std::ofstream file(spectrum);
+        file << "# wavelength direct diffuse\n";
+        for (int nm = 400; nm <= 830; nm += 10) {
+            file << nm << " 1.0 0.1\n";
+        }
+    }
+
+    SolarLutRequest request;
+    request.pathOrEqualEnergy = spectrum.string();
+
+    auto visible = ResolveSolarLut(request, "", SpectralMode::RGB);
+    ASSERT_TRUE(visible.has_value()) << visible.error();
+    EXPECT_TRUE(visible.value().warnings.empty());
+
+    auto thermal = ResolveSolarLut(request, "", SpectralMode::LWIR_Fused);
+    ASSERT_TRUE(thermal.has_value()) << thermal.error();
+    EXPECT_FALSE(thermal.value().warnings.empty())
+        << "a spectrum that does not reach the band must not pass silently";
+}
+
+TEST_F(ConfigResolveTest, AnUnnamedIlluminantIsAnError) {
+    SolarLutRequest request;
+    EXPECT_FALSE(ResolveSolarLut(request, "", SpectralMode::RGB).has_value());
+    request.pathOrEqualEnergy = "no/such/spectrum.csv";
+    EXPECT_FALSE(ResolveSolarLut(request, "", SpectralMode::RGB).has_value());
 }

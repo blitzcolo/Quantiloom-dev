@@ -72,6 +72,38 @@ class TLAS;
 struct ComplexRefractiveIndex;
 
 /**
+ * @struct SolarLutSpec
+ * @brief What a scene declares about its illuminant
+ *
+ * The `[lighting] solar_lut*` keys, as a struct. Passed to
+ * ExternalRenderContext::SetSolarSpectralLUTFromSpec so a host can change the
+ * illuminant without re-applying a whole configuration and without deciding
+ * for itself what any of these mean -- the core reads them one way, for the
+ * file and for the host alike.
+ */
+struct SolarLutSpec {
+    /// A path to a spectrum, or the literal "equal_energy" for CIE illuminant
+    /// E -- a flat spectrum at unit luminance, the neutral reference. Not sRGB
+    /// white, which is D65.
+    String pathOrEqualEnergy;
+
+    /// 1-based columns holding direct sun and diffuse sky. The defaults are
+    /// libRadtran uvspec's layout. ASTM G-173 -- assets/luts/astmg173.csv --
+    /// wants {4, 3} with diffuseIsGlobal set, because its column 3 is global
+    /// irradiance and using it as the sky would count the sun twice.
+    u32 directColumn = 2;
+    u32 diffuseColumn = 3;
+    bool diffuseIsGlobal = false;
+
+    /// Divide both curves by the *sun's* luminance, putting the illuminant at
+    /// Y = 1. Published reference spectra are relative, so their absolute level
+    /// is arbitrary; this is what makes D65 come out as sRGB (1, 1, 1). Both by
+    /// the same divisor, so the sun-to-sky ratio -- the one thing a measured
+    /// pair actually tells you -- survives.
+    bool normaliseUnitLuminance = false;
+};
+
+/**
  * @class ExternalRenderContext
  * @brief Renders to externally-managed Vulkan surfaces using dynamic rendering
  *
@@ -741,6 +773,33 @@ public:
      */
     void SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
                              const SpectralCurve& skyIrradiance);
+
+    /**
+     * @brief Set the illuminant the way a scene file would have
+     *
+     * SetSolarSpectralLUT above takes two curves and asks no questions: the
+     * caller has already decided what the file meant, how to normalise it and
+     * what colour the non-spectral paths should use. A host that offers the
+     * user a choice of illuminant would have to answer all three, and any
+     * answer it invented would be a second reading of keys the core already
+     * reads -- the class of divergence that made the same TOML render
+     * differently in the CLI and in Studio.
+     *
+     * This takes the declaration instead of the conclusion. It loads the file
+     * (or CIE illuminant E for the literal "equal_energy"), normalises it,
+     * derives the RGB the non-spectral paths need, uploads the LUT and updates
+     * LightingParams -- exactly what [lighting] solar_lut* does, through the
+     * same function.
+     *
+     * @param spec     What to load and how to read it
+     * @param baseDir  Directory relative paths resolve against; empty for the
+     *                 working directory, as the CLI passes
+     * @return Nothing, or why the illuminant could not be loaded. Warnings
+     *         that do not prevent loading -- a spectrum too narrow for the
+     *         band being rendered -- go to the log.
+     */
+    Result<void, String> SetSolarSpectralLUTFromSpec(const SolarLutSpec& spec,
+                                                     const String& baseDir = "");
 
     /**
      * @brief Rebuild acceleration structure after scene changes

@@ -36,9 +36,36 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 
+#include <functional>
 #include <memory>
 
 namespace quantiloom {
+
+/**
+ * @struct OfflineProgress
+ * @brief How far a hyperspectral cube has got
+ *
+ * The public face of the band-by-band progress the renderer already tracks.
+ * A cube is minutes of work that produces nothing until the last band, so a
+ * host offering it needs these numbers to say anything at all while it runs.
+ */
+struct OfflineProgress {
+    u32 currentBand = 0;              ///< Bands finished so far
+    u32 totalBands = 0;               ///< Bands in this cube
+    f32 currentWavelength_nm = 0.0f;  ///< Where the render has got to
+    f32 elapsedSeconds = 0.0f;
+    /// Extrapolated from the bands done so far, so it is meaningless until a
+    /// few have completed and settles as the render proceeds.
+    f32 estimatedTotalSeconds = 0.0f;
+
+    [[nodiscard]] f32 GetPercentage() const {
+        if (totalBands == 0) return 0.0f;
+        return 100.0f * static_cast<f32>(currentBand) / static_cast<f32>(totalBands);
+    }
+    [[nodiscard]] f32 GetRemainingSeconds() const {
+        return estimatedTotalSeconds - elapsedSeconds;
+    }
+};
 
 /**
  * @brief What the renderer resolved from the configuration
@@ -131,6 +158,20 @@ public:
 
         /// Per-frame GPU timings. Empty disables the logger.
         String performanceCsvPath = "quantiloom_performance.csv";
+
+        /**
+         * @brief Called as each hyperspectral band completes
+         *
+         * A cube is minutes of work with no output until the last band, so a
+         * host that offers it needs somewhere to put a progress bar. The
+         * renderer has always tracked this -- it logs a line every ten bands
+         * -- but the numbers had no way out of the library.
+         *
+         * Called from the render thread, between bands, with the render
+         * paused. Do not call back into the renderer from it. Empty by
+         * default, and unused by a non-hyperspectral render.
+         */
+        std::function<void(const OfflineProgress&)> onProgress;
     };
 
     /**

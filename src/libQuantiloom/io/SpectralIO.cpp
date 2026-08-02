@@ -1,10 +1,15 @@
 #include "io/SpectralIO.hpp"
 
+#include "io/SpectralBasisLoader.hpp"
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <limits>
 #include <algorithm>
+#include <memory>
+#include <mutex>
+#include <unordered_map>
 
 namespace quantiloom {
 
@@ -952,6 +957,95 @@ SpectralIO::LoadLibRadtranSunAndSky(const std::filesystem::path& uvspecFile,
                 sunCurve.samples.front().first, sunCurve.samples.back().first);
 
     return Result(std::make_pair(std::move(sunCurve), std::move(skyCurve)));
+}
+
+// ============================================================================
+// Public API: ReconstructBasisCurve
+// ============================================================================
+
+Result<SpectralCurve, String>
+SpectralIO::ReconstructBasisCurve(const std::filesystem::path& basisFile,
+                                  const std::filesystem::path& materialsJson,
+                                  const String& materialName,
+                                  const String& band) {
+    using Err = Result<SpectralCurve, String>::Err;
+
+    if (materialName.empty()) {
+        return Result<SpectralCurve, String>(Err{"No material name given"});
+    }
+
+    // One loader per (basis, materials) pair, kept alive for the process. The
+    // JSON is megabytes and a browser reconstructs a curve per selection, so
+    // re-parsing per call would make selecting a row visibly slow. Keyed on
+    // both paths because a scene can name a different database than the one
+    // the previous scene did.
+    //
+    // Deliberately not thread-safe beyond the mutex: reconstruction is pure
+    // once the loader is built, and the mutex only guards the cache itself.
+    struct CacheKey {
+        std::string basis;
+        std::string materials;
+        bool operator==(const CacheKey& other) const {
+            return basis == other.basis && materials == other.materials;
+        }
+    };
+    struct CacheKeyHash {
+        size_t operator()(const CacheKey& key) const {
+            return std::hash<std::string>{}(key.basis) ^
+                   (std::hash<std::string>{}(key.materials) << 1);
+        }
+    };
+
+    static std::mutex cacheMutex;
+    static std::unordered_map<CacheKey, std::shared_ptr<SpectralBasisLoader>, CacheKeyHash> cache;
+
+    const CacheKey key{basisFile.string(), materialsJson.string()};
+
+    std::shared_ptr<SpectralBasisLoader> loader;
+    {
+        std::lock_guard<std::mutex> lock(cacheMutex);
+        if (auto it = cache.find(key); it != cache.end()) {
+            loader = it->second;
+        } else {
+            if (!std::filesystem::exists(basisFile)) {
+                return Result<SpectralCurve, String>(
+                    Err{"Basis file not found: " + basisFile.string()});
+            }
+            if (!std::filesystem::exists(materialsJson)) {
+                return Result<SpectralCurve, String>(
+                    Err{"Materials JSON not found: " + materialsJson.string()});
+            }
+            auto fresh = std::make_shared<SpectralBasisLoader>();
+            if (!fresh->Load(basisFile, materialsJson)) {
+                return Result<SpectralCurve, String>(
+                    Err{"Failed to load NMF database from " + basisFile.string() +
+                        " and " + materialsJson.string()});
+            }
+            QL_LOG_INFO("SpectralIO::ReconstructBasisCurve: loaded {} materials, {} bands from {}",
+                        fresh->GetMaterialCount(), fresh->GetNumBands(),
+                        basisFile.filename().string());
+            loader = fresh;
+            cache.emplace(key, loader);
+        }
+    }
+
+    // Exact first, then substring -- the same order and meaning ConfigResolve
+    // applies to quantiloom_material_ref, so a name that renders also browses.
+    const MaterialSpectralData* data = loader->FindMaterial(materialName);
+    if (!data) {
+        data = loader->FindMaterialPartial(materialName);
+    }
+    if (!data) {
+        return Result<SpectralCurve, String>(
+            Err{"Material '" + materialName + "' is not in this database"});
+    }
+
+    SpectralCurve curve = loader->ReconstructCurve(data->name, band);
+    if (curve.samples.empty()) {
+        return Result<SpectralCurve, String>(
+            Err{"Material '" + data->name + "' has no data for band '" + band + "'"});
+    }
+    return Result<SpectralCurve, String>(std::move(curve));
 }
 
 } // namespace quantiloom

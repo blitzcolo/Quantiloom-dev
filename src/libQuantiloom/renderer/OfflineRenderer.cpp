@@ -636,14 +636,32 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     // Create hyperspectral renderer
     HyperspectralRenderer hsRenderer(context, *pipeline, loadedScene);
 
-    // Progress callback for status updates
-    auto progressCallback = [](const HyperspectralProgress& p, void*) {
+    // Progress: the log line every ten bands as before, plus the host's
+    // callback on every band when it asked for one. The void* the internal
+    // signature carries is how the host callback reaches this lambda -- it is
+    // called from the band loop, so capturing `this` would be no safer and
+    // less explicit.
+    auto progressCallback = [](const HyperspectralProgress& p, void* userData) {
         if (p.currentBand % 10 == 0 || p.currentBand == p.totalBands) {
             QL_LOG_INFO("  Band {}/{} ({:.1f} nm) - {:.1f}% - ETA: {:.1f}s",
                         p.currentBand, p.totalBands, p.currentWavelength_nm,
                         p.GetPercentage(), p.GetRemainingSeconds());
         }
+        if (userData) {
+            const auto& hostCallback =
+                *static_cast<const std::function<void(const OfflineProgress&)>*>(userData);
+            OfflineProgress out;
+            out.currentBand = p.currentBand;
+            out.totalBands = p.totalBands;
+            out.currentWavelength_nm = p.currentWavelength_nm;
+            out.elapsedSeconds = p.elapsedSeconds;
+            out.estimatedTotalSeconds = p.estimatedTotalSeconds;
+            hostCallback(out);
+        }
     };
+    // Null when the host wants no callback, which is what the lambda tests.
+    void* const progressUserData =
+        init.onProgress ? static_cast<void*>(&init.onProgress) : nullptr;
 
     OfflineRenderOutput output;
     // The cube is streamed to disk band by band rather than assembled in
@@ -652,7 +670,7 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     output.wroteItsOwnOutput = true;
 
     // Execute hyperspectral rendering
-    auto status = hsRenderer.Render(hsConfig, progressCallback, nullptr);
+    auto status = hsRenderer.Render(hsConfig, progressCallback, progressUserData);
 
     if (status == HyperspectralStatus::Success) {
         QL_LOG_INFO("  Hyperspectral rendering complete!");

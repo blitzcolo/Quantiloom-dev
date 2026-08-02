@@ -182,4 +182,59 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     const Config& config, Scene& scene, const ResolvedRenderConfig& resolved,
     const ConfigApplyOptions& options, ConfigApplyReport& report);
 
+/**
+ * @brief The illuminant, resolved from what a scene declares about it.
+ *
+ * Everything `lighting.solar_lut*` means, in one place: which file (or the
+ * literal "equal_energy"), which columns it keeps the sun and sky in, whether
+ * column 3 is global rather than sky, and whether to normalise.
+ *
+ * Split out of ResolveRenderConfig so that a host can set the illuminant
+ * without re-applying a whole configuration -- and so that doing so cannot
+ * mean anything different from what the file would have meant. A second
+ * reading of these keys is exactly the class of divergence this repository
+ * spent a release removing.
+ */
+struct SolarLutRequest {
+    /// A path, or the literal "equal_energy" for CIE illuminant E.
+    String pathOrEqualEnergy;
+    /// 1-based columns. libRadtran uvspec's layout is the default; ASTM G-173
+    /// wants {4, 3} with diffuseIsGlobal.
+    u32 directColumn = 2;
+    u32 diffuseColumn = 3;
+    /// Subtract direct from the diffuse column, clamped at zero.
+    bool diffuseIsGlobal = false;
+    /// Divide both curves by the sun's luminance, putting the illuminant at
+    /// Y = 1. Published reference spectra are relative, so their absolute
+    /// level is arbitrary.
+    bool normaliseUnitLuminance = false;
+};
+
+/// What an illuminant resolves to: the two curves, and the RGB the renderer's
+/// non-spectral paths must use so that both halves describe one sun.
+struct ResolvedSolarLut {
+    SpectralCurve sun;
+    SpectralCurve sky;
+    glm::vec3 sunRadianceRgb{0.0f};
+    glm::vec3 skyRadianceRgb{0.0f};
+    f32 sunRadianceSpectral = 0.0f;
+    f32 skyRadianceSpectral = 0.0f;
+    /// Things the caller should surface: an unknown normalise mode, a spectrum
+    /// that does not span the band being rendered. Not errors -- the render
+    /// proceeds and looks plausible, which is why they must be said out loud.
+    Vector<String> warnings;
+};
+
+/**
+ * @brief Load, normalise and colour-derive one illuminant.
+ *
+ * @param request   What the scene (or the host) asked for.
+ * @param baseDir   Directory relative paths resolve against.
+ * @param mode      Only for the band-coverage warning; pass the mode being
+ *                  rendered, or RGB to skip that check.
+ */
+Result<ResolvedSolarLut, String> ResolveSolarLut(const SolarLutRequest& request,
+                                                 const String& baseDir,
+                                                 SpectralMode mode);
+
 }  // namespace quantiloom::rendercore

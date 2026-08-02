@@ -1919,6 +1919,42 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
                 lut.sunIrradiance.numSamples, lut.skyIrradiance.numSamples);
 }
 
+Result<void, String> ExternalRenderContext::SetSolarSpectralLUTFromSpec(
+    const SolarLutSpec& spec, const String& baseDir) {
+    // The same function ResolveRenderConfig calls for [lighting] solar_lut*.
+    // Reading the spec here instead would be the second reading this facade
+    // exists to prevent.
+    rendercore::SolarLutRequest request;
+    request.pathOrEqualEnergy = spec.pathOrEqualEnergy;
+    request.directColumn = spec.directColumn;
+    request.diffuseColumn = spec.diffuseColumn;
+    request.diffuseIsGlobal = spec.diffuseIsGlobal;
+    request.normaliseUnitLuminance = spec.normaliseUnitLuminance;
+
+    auto resolved = rendercore::ResolveSolarLut(request, baseDir, m_impl->spectralMode);
+    if (!resolved.has_value()) {
+        return Result<void, String>::Err(resolved.error());
+    }
+    auto& lut = resolved.value();
+    for (const auto& warning : lut.warnings) {
+        QL_LOG_WARN("{}", warning);
+    }
+
+    SetSolarSpectralLUT(lut.sun, lut.sky);
+
+    // The colour half, so the non-spectral paths describe the same sun as the
+    // spectral ones. ApplyConfig does this through ResolvedRenderConfig; here
+    // there is no config to route it through.
+    m_impl->lightingParams.sunRadiance_rgb = lut.sunRadianceRgb;
+    m_impl->lightingParams.skyRadiance_rgb = lut.skyRadianceRgb;
+    m_impl->lightingParams.sunRadiance_spectral = lut.sunRadianceSpectral;
+    m_impl->lightingParams.skyRadiance_spectral = lut.skyRadianceSpectral;
+    m_impl->UploadLightingParams();
+
+    ResetAccumulation();
+    return Result<void, String>();
+}
+
 void ExternalRenderContext::RebuildAccelerationStructure() {
     if (!m_impl->scene || !m_impl->geometry.IsValid()) {
         QL_LOG_WARN("RebuildAccelerationStructure: No scene or geometry available");

@@ -427,103 +427,41 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     }
 
     if (config.Has("lighting.solar_lut")) {
-        const auto namedPath = config.Get<String>("lighting.solar_lut");
-        QL_LOG_INFO("  Loading solar LUT from: {}", namedPath);
+        // Every key below means what ResolveSolarLut says it means, and the
+        // facade a host calls to change the illuminant at runtime goes through
+        // the same function. Two readings of these keys is the divergence this
+        // repository spent a release removing.
+        SolarLutRequest request;
+        request.pathOrEqualEnergy = config.Get<String>("lighting.solar_lut");
+        QL_LOG_INFO("  Loading solar LUT from: {}", request.pathOrEqualEnergy);
 
-        // The file's layout is the scene's to declare: the sun's spectrum is
-        // user-supplied data and the renderer does not know its shape.
-        // Defaults are libRadtran uvspec's; ASTM G-173 wants [4, 3] with
-        // diffuse_is_global, its column 3 being global rather than sky.
         const auto cols = config.GetArray<i32>("lighting.solar_lut_columns");
-        const u32 directCol = cols.size() >= 1 ? static_cast<u32>(cols[0]) : 2u;
-        const u32 diffuseCol = cols.size() >= 2 ? static_cast<u32>(cols[1]) : 3u;
+        if (cols.size() >= 1) request.directColumn = static_cast<u32>(cols[0]);
+        if (cols.size() >= 2) request.diffuseColumn = static_cast<u32>(cols[1]);
+
         const auto normalise = config.Get<String>("lighting.solar_lut_normalise", "");
-        const bool diffuseIsGlobal =
+        request.normaliseUnitLuminance = (normalise == "unit_luminance");
+        if (!normalise.empty() && !request.normaliseUnitLuminance) {
+            diag.Warn("lighting.solar_lut_normalise",
+                      "  Unknown solar_lut_normalise '" + normalise +
+                          "' (known: unit_luminance)");
+        }
+        request.diffuseIsGlobal =
             config.Get<bool>("lighting.solar_lut_diffuse_is_global", false);
 
-        // "equal_energy" is the one illuminant that is not a file: a flat
-        // spectrum at unit luminance, CIE illuminant E. It is the neutral
-        // reference -- what a material looks like under light that favours no
-        // wavelength -- and it is not sRGB white, which is D65.
-        auto result =
-            namedPath == "equal_energy"
-                ? Result<std::pair<SpectralCurve, SpectralCurve>, String>(
-                      std::make_pair(MakeEqualEnergyIlluminant(),
-                                     MakeEqualEnergyIlluminant()))
-                : SpectralIO::LoadLibRadtranSunAndSky(
-                      ResolveConfigPath(namedPath, options.baseDir), "nm", directCol,
-                      diffuseCol, diffuseIsGlobal);
-
+        auto result = ResolveSolarLut(request, options.baseDir, out.mode);
         if (result.has_value()) {
-            auto& [sunCurve, skyCurve] = result.value();
-
-            // Reference illuminants are published as relative spectra -- D65 is
-            // normalised to 100 at 560 nm -- so their absolute level is
-            // arbitrary. Normalising to unit luminance puts the illuminant at
-            // Y = 1, which is what makes D65 come out as sRGB (1, 1, 1)
-            // exactly. It is also the honest separation of white balance from
-            // exposure.
-            if (normalise == "unit_luminance") {
-                const auto rgb = SpectralIrradianceToLinearSrgb(sunCurve);
-                const f32 Y = 0.2126f * rgb.r + 0.7152f * rgb.g + 0.0722f * rgb.b;
-                if (Y > 0.0f) {
-                    // Both curves by the sun's luminance, not each by its own:
-                    // scaling them separately would discard the ratio between
-                    // sun and sky, which is the one thing a measured pair
-                    // actually tells you.
-                    for (auto& v : sunCurve.samples) v.second /= Y;
-                    for (auto& v : skyCurve.samples) v.second /= Y;
-                    QL_LOG_INFO("  Illuminant normalised to unit luminance (was Y={:.4g})",
-                                Y);
-                }
-            } else if (!normalise.empty()) {
-                diag.Warn("lighting.solar_lut_normalise",
-                          "  Unknown solar_lut_normalise '" + normalise +
-                              "' (known: unit_luminance)");
+            auto& lut = result.value();
+            for (const auto& warning : lut.warnings) {
+                QL_LOG_WARN("{}", warning);
             }
 
-            // Does the spectrum actually cover the band being rendered?
-            // SpectralCurve::Evaluate clamps to its endpoints rather than
-            // returning zero, so a curve that stops short does not fail -- it
-            // holds its last value flat across everything above it, and the
-            // render looks plausible. CIE D65 stops at 830 nm, which makes it a
-            // fine reference illuminant for RGB and a silently wrong one for
-            // SWIR upward.
-            if (const auto band = GetFusedBandInfo(out.mode);
-                band && !sunCurve.samples.empty()) {
-                const f32 curveMin = sunCurve.samples.front().first;
-                const f32 curveMax = sunCurve.samples.back().first;
-                if (curveMin > band->lambdaMinNm || curveMax < band->lambdaMaxNm) {
-                    QL_LOG_WARN("  Illuminant spans [{:.0f}, {:.0f}] nm but this mode "
-                                "renders [{:.0f}, {:.0f}] nm. Evaluate() clamps, so the "
-                                "uncovered part is held flat at the nearest endpoint "
-                                "rather than left dark -- the result will look "
-                                "reasonable and mean nothing.",
-                                curveMin, curveMax, band->lambdaMinNm, band->lambdaMaxNm);
-                }
-            }
+            out.lighting.sunRadiance_rgb = lut.sunRadianceRgb;
+            out.lighting.skyRadiance_rgb = lut.skyRadianceRgb;
+            out.lighting.sunRadiance_spectral = lut.sunRadianceSpectral;
+            out.lighting.skyRadiance_spectral = lut.skyRadianceSpectral;
 
-            // One illuminant, every mode. The spectral paths sample these
-            // curves per wavelength; RGB and VIS_Fused need a colour, and
-            // taking it from the same curve is what stops the two halves of the
-            // renderer describing different suns. It replaces whatever
-            // sun_radiance said, which was a triple in arbitrary units with no
-            // defined relationship to the spectrum beside it.
-            out.lighting.sunRadiance_rgb = SpectralIrradianceToLinearSrgb(sunCurve);
-            out.lighting.skyRadiance_rgb = SpectralIrradianceToLinearSrgb(skyCurve);
-            out.lighting.sunRadiance_spectral =
-                (out.lighting.sunRadiance_rgb.r + out.lighting.sunRadiance_rgb.g +
-                 out.lighting.sunRadiance_rgb.b) / 3.0f;
-            out.lighting.skyRadiance_spectral =
-                (out.lighting.skyRadiance_rgb.r + out.lighting.skyRadiance_rgb.g +
-                 out.lighting.skyRadiance_rgb.b) / 3.0f;
-            QL_LOG_INFO("  Illuminant colour from the spectrum: sun [{:.4g}, {:.4g}, "
-                        "{:.4g}], sky [{:.4g}, {:.4g}, {:.4g}]",
-                        out.lighting.sunRadiance_rgb.r, out.lighting.sunRadiance_rgb.g,
-                        out.lighting.sunRadiance_rgb.b, out.lighting.skyRadiance_rgb.r,
-                        out.lighting.skyRadiance_rgb.g, out.lighting.skyRadiance_rgb.b);
-
-            out.solarSunSky = std::make_pair(std::move(sunCurve), std::move(skyCurve));
+            out.solarSunSky = std::make_pair(std::move(lut.sun), std::move(lut.sky));
             report.solarLutLoaded = true;
         } else {
             diag.Warn("lighting.solar_lut",
@@ -677,6 +615,99 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
 }
 
 // ============================================================================
+// The illuminant
+// ============================================================================
+
+Result<ResolvedSolarLut, String> ResolveSolarLut(const SolarLutRequest& request,
+                                                 const String& baseDir,
+                                                 SpectralMode mode) {
+    using LutResult = Result<ResolvedSolarLut, String>;
+
+    if (request.pathOrEqualEnergy.empty()) {
+        return LutResult::Err("No illuminant named");
+    }
+
+    // "equal_energy" is the one illuminant that is not a file: a flat spectrum
+    // at unit luminance, CIE illuminant E. It is the neutral reference -- what
+    // a material looks like under light that favours no wavelength -- and it is
+    // not sRGB white, which is D65.
+    auto loaded =
+        request.pathOrEqualEnergy == "equal_energy"
+            ? Result<std::pair<SpectralCurve, SpectralCurve>, String>(
+                  std::make_pair(MakeEqualEnergyIlluminant(), MakeEqualEnergyIlluminant()))
+            : SpectralIO::LoadLibRadtranSunAndSky(
+                  ResolveConfigPath(request.pathOrEqualEnergy, baseDir), "nm",
+                  request.directColumn, request.diffuseColumn, request.diffuseIsGlobal);
+
+    if (!loaded.has_value()) {
+        return LutResult::Err(loaded.error());
+    }
+
+    ResolvedSolarLut out;
+    auto& [sunCurve, skyCurve] = loaded.value();
+
+    // Reference illuminants are published as relative spectra -- D65 is
+    // normalised to 100 at 560 nm -- so their absolute level is arbitrary.
+    // Normalising to unit luminance puts the illuminant at Y = 1, which is what
+    // makes D65 come out as sRGB (1, 1, 1) exactly. It is also the honest
+    // separation of white balance from exposure.
+    if (request.normaliseUnitLuminance) {
+        const auto rgb = SpectralIrradianceToLinearSrgb(sunCurve);
+        const f32 Y = 0.2126f * rgb.r + 0.7152f * rgb.g + 0.0722f * rgb.b;
+        if (Y > 0.0f) {
+            // Both curves by the sun's luminance, not each by its own: scaling
+            // them separately would discard the ratio between sun and sky,
+            // which is the one thing a measured pair actually tells you.
+            for (auto& v : sunCurve.samples) v.second /= Y;
+            for (auto& v : skyCurve.samples) v.second /= Y;
+            QL_LOG_INFO("  Illuminant normalised to unit luminance (was Y={:.4g})", Y);
+        }
+    }
+
+    // Does the spectrum actually cover the band being rendered?
+    // SpectralCurve::Evaluate clamps to its endpoints rather than returning
+    // zero, so a curve that stops short does not fail -- it holds its last
+    // value flat across everything above it, and the render looks plausible.
+    // CIE D65 stops at 830 nm, which makes it a fine reference illuminant for
+    // RGB and a silently wrong one for SWIR upward.
+    if (const auto band = GetFusedBandInfo(mode); band && !sunCurve.samples.empty()) {
+        const f32 curveMin = sunCurve.samples.front().first;
+        const f32 curveMax = sunCurve.samples.back().first;
+        if (curveMin > band->lambdaMinNm || curveMax < band->lambdaMaxNm) {
+            out.warnings.push_back(
+                "  Illuminant spans [" + std::to_string(static_cast<int>(curveMin)) +
+                ", " + std::to_string(static_cast<int>(curveMax)) +
+                "] nm but this mode renders [" +
+                std::to_string(static_cast<int>(band->lambdaMinNm)) + ", " +
+                std::to_string(static_cast<int>(band->lambdaMaxNm)) +
+                "] nm. Evaluate() clamps, so the uncovered part is held flat at the "
+                "nearest endpoint rather than left dark -- the result will look "
+                "reasonable and mean nothing.");
+        }
+    }
+
+    // One illuminant, every mode. The spectral paths sample these curves per
+    // wavelength; RGB and VIS_Fused need a colour, and taking it from the same
+    // curve is what stops the two halves of the renderer describing different
+    // suns. It replaces whatever sun_radiance said, which was a triple in
+    // arbitrary units with no defined relationship to the spectrum beside it.
+    out.sunRadianceRgb = SpectralIrradianceToLinearSrgb(sunCurve);
+    out.skyRadianceRgb = SpectralIrradianceToLinearSrgb(skyCurve);
+    out.sunRadianceSpectral =
+        (out.sunRadianceRgb.r + out.sunRadianceRgb.g + out.sunRadianceRgb.b) / 3.0f;
+    out.skyRadianceSpectral =
+        (out.skyRadianceRgb.r + out.skyRadianceRgb.g + out.skyRadianceRgb.b) / 3.0f;
+    QL_LOG_INFO("  Illuminant colour from the spectrum: sun [{:.4g}, {:.4g}, {:.4g}], "
+                "sky [{:.4g}, {:.4g}, {:.4g}]",
+                out.sunRadianceRgb.r, out.sunRadianceRgb.g, out.sunRadianceRgb.b,
+                out.skyRadianceRgb.r, out.skyRadianceRgb.g, out.skyRadianceRgb.b);
+
+    out.sun = std::move(sunCurve);
+    out.sky = std::move(skyCurve);
+    return LutResult(std::move(out));
+}
+
+// ============================================================================
 // Scene-dependent keys
 // ============================================================================
 
@@ -757,6 +788,57 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         }
         if (const auto emissive = matTable.GetFloatArray("emissive"); emissive.size() >= 3) {
             it->emissiveFactor = glm::vec3(emissive[0], emissive[1], emissive[2]);
+        }
+
+        // Transmission, dispersion and participating media. The fields have
+        // always reached the GPU, but only glTF's KHR extensions could set
+        // them -- a config could not describe a piece of glass, and the
+        // prism and water scenes carried their intent in comments the reader
+        // never saw. Same absent-key-leaves-the-loaded-value rule as above.
+        if (matTable.Has("ior")) {
+            it->ior = matTable.GetFloat("ior", it->ior);
+        }
+        if (matTable.Has("transmission")) {
+            it->transmission = matTable.GetFloat("transmission", it->transmission);
+        }
+        if (matTable.Has("dispersion")) {
+            it->dispersion = matTable.GetFloat("dispersion", it->dispersion);
+        }
+        if (const auto attenuation = matTable.GetFloatArray("attenuation_color");
+            attenuation.size() >= 3) {
+            it->attenuationColor = glm::vec3(attenuation[0], attenuation[1], attenuation[2]);
+        }
+        if (matTable.Has("attenuation_distance")) {
+            it->attenuationDistance =
+                matTable.GetFloat("attenuation_distance", it->attenuationDistance);
+        }
+        if (matTable.Has("thickness")) {
+            it->thicknessFactor = matTable.GetFloat("thickness", it->thicknessFactor);
+        }
+        if (matTable.Has("volume_density")) {
+            it->volumeDensity = matTable.GetFloat("volume_density", it->volumeDensity);
+        }
+        if (matTable.Has("scattering_coeff")) {
+            it->scatteringCoeff = matTable.GetFloat("scattering_coeff", it->scatteringCoeff);
+        }
+        if (matTable.Has("absorption_coeff")) {
+            it->absorptionCoeff = matTable.GetFloat("absorption_coeff", it->absorptionCoeff);
+        }
+        if (matTable.Has("phase_g")) {
+            it->phaseG = matTable.GetFloat("phase_g", it->phaseG);
+        }
+
+        // The measured-material database entry this surface stands for. Set
+        // here rather than only from glTF extras, so an assignment made in
+        // Studio survives being saved: the NMF reconstruction loop below runs
+        // after this block and picks it up with no further plumbing.
+        if (matTable.Has("spectral_material_type")) {
+            it->quantiloomMaterialType =
+                matTable.GetString("spectral_material_type", it->quantiloomMaterialType);
+        }
+        if (matTable.Has("spectral_material_ref")) {
+            it->quantiloomMaterialRef =
+                matTable.GetString("spectral_material_ref", it->quantiloomMaterialRef);
         }
 
         constexpr f32 kMwirNm = 4000.0f;

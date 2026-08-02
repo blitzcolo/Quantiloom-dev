@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 #include "io/SpectralIO.hpp"
+#include "io/SpectralBasisLoader.hpp"
 #include "core/SpectralData.hpp"
 #include <filesystem>
 #include <fstream>
@@ -426,4 +427,79 @@ TEST_F(SpectralIOTest, LoadLibRadtranUvspecInvalidUnit) {
 
     auto result = SpectralIO::LoadLibRadtranUvspec(filepath, 2, "invalid_unit");
     EXPECT_FALSE(result.has_value());
+}
+
+// ============================================================================
+// ReconstructBasisCurve
+// ============================================================================
+// The host-facing half of the NMF database: a material browser needs a curve
+// without loading a scene, and must get the same curve the renderer would.
+
+TEST_F(SpectralIOTest, ReconstructBasisCurveMatchesTheLoaderItWraps) {
+    const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+    const auto basis = root / "assets" / "spectral" / "quantiloom_basis_v3_usgs.qlbin";
+    const auto json = root / "assets" / "spectral" / "quantiloom_materials_usgs.json";
+    ASSERT_TRUE(std::filesystem::exists(basis)) << basis.string();
+    ASSERT_TRUE(std::filesystem::exists(json)) << json.string();
+
+    SpectralBasisLoader reference;
+    ASSERT_TRUE(reference.Load(basis, json));
+    const auto names = reference.GetMaterialNames();
+    ASSERT_FALSE(names.empty());
+    const SpectralCurve expected = reference.ReconstructCurve(names[0], "VIS");
+    ASSERT_FALSE(expected.samples.empty());
+
+    auto result = SpectralIO::ReconstructBasisCurve(basis, json, names[0], "VIS");
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    // Same curve, sample for sample -- a browser that previewed something
+    // other than what renders would be worse than no preview.
+    ASSERT_EQ(result.value().samples.size(), expected.samples.size());
+    for (size_t i = 0; i < expected.samples.size(); ++i) {
+        EXPECT_FLOAT_EQ(result.value().samples[i].first, expected.samples[i].first);
+        EXPECT_FLOAT_EQ(result.value().samples[i].second, expected.samples[i].second);
+    }
+}
+
+TEST_F(SpectralIOTest, ReconstructBasisCurveFallsBackToPartialName) {
+    const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+    const auto basis = root / "assets" / "spectral" / "quantiloom_basis_v3_usgs.qlbin";
+    const auto json = root / "assets" / "spectral" / "quantiloom_materials_usgs.json";
+    ASSERT_TRUE(std::filesystem::exists(basis));
+
+    SpectralBasisLoader reference;
+    ASSERT_TRUE(reference.Load(basis, json));
+    const auto names = reference.GetMaterialNames();
+    ASSERT_FALSE(names.empty());
+
+    // A substring of a real name must resolve, the same way a scene's
+    // quantiloom_material_ref does -- exact first, then substring.
+    const String fragment = names[0].substr(0, names[0].size() / 2);
+    ASSERT_FALSE(fragment.empty());
+    auto result = SpectralIO::ReconstructBasisCurve(basis, json, fragment, "VIS");
+    EXPECT_TRUE(result.has_value()) << result.error();
+}
+
+TEST_F(SpectralIOTest, ReconstructBasisCurveReportsWhatWentWrong) {
+    const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+    const auto basis = root / "assets" / "spectral" / "quantiloom_basis_v3_usgs.qlbin";
+    const auto json = root / "assets" / "spectral" / "quantiloom_materials_usgs.json";
+    ASSERT_TRUE(std::filesystem::exists(basis));
+
+    // A name nothing matches, a band this database does not carry, and a
+    // missing file are three different failures and each says which.
+    EXPECT_FALSE(
+        SpectralIO::ReconstructBasisCurve(basis, json, "no such material at all", "VIS")
+            .has_value());
+    // USGS stops at 2.5 um, so LWIR is absent by construction.
+    SpectralBasisLoader reference;
+    ASSERT_TRUE(reference.Load(basis, json));
+    const auto names = reference.GetMaterialNames();
+    ASSERT_FALSE(names.empty());
+    EXPECT_FALSE(
+        SpectralIO::ReconstructBasisCurve(basis, json, names[0], "LWIR").has_value());
+    EXPECT_FALSE(
+        SpectralIO::ReconstructBasisCurve(root / "nope.qlbin", json, names[0], "VIS")
+            .has_value());
+    EXPECT_FALSE(SpectralIO::ReconstructBasisCurve(basis, json, "", "VIS").has_value());
 }
