@@ -49,7 +49,7 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 | `include/quantiloom/` | **Public** headers — the only ones the SDK installs, 7 modules |
 | `src/libQuantiloom/` | Core library sources and **internal** headers |
 | `src/shaders/` | HLSL → SPIR-V, ray tracing + compute |
-| `src/app/` | CLI: `Quantiloom.exe <config.toml>` |
+| `src/app/` | CLI: `Quantiloom.exe <config.toml>`, `batch <list.txt>`, `serve` |
 | `src/libSpectraForge/` | IR material generation library |
 | `src/tools/` | `fusion_tool`, `QLTrans` (MODTRAN wrapper) |
 | `tests/` | GoogleTest; directories mirror libQuantiloom module names |
