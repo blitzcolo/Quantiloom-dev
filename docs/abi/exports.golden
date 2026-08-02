@@ -16,6 +16,7 @@ public: bool quantiloom::ExternalRenderContext::HasEnvironmentMap(void)const
 public: bool quantiloom::ExternalRenderContext::HasScene(void)const
 public: bool quantiloom::ExternalRenderContext::IsGPUSensorEnabled(void)const
 public: bool quantiloom::ExternalRenderContext::IsReady(void)const
+public: bool quantiloom::ExternalRenderContext::PresentAccumulated(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: bool quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
 public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
 public: bool quantiloom::Material::HasIRData(void)const

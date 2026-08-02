@@ -570,6 +570,19 @@ struct ExternalRenderContext::Impl {
     void GenerateAndUploadFPNMaps();
     void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
 
+    /// Which image the swapchain blit should read: the sensor chain's output
+    /// if enabled, then CLAHE's, otherwise the raw accumulation. One function
+    /// because RenderFrame and PresentAccumulated must never disagree about
+    /// what "the current image" is.
+    [[nodiscard]] VkImage CurrentDisplaySource() const;
+
+    /// Copy @p source onto the swapchain image and leave it in PRESENT_SRC.
+    /// The transitions and the format-converting blit, with no tracing --
+    /// which is what lets a frame be drawn without advancing the accumulation.
+    void BlitToTarget(VkCommandBuffer cmd, VkImage source, VkImage targetImage,
+                      VkImageLayout targetLayout, u32 width, u32 height,
+                      VkPipelineStageFlags sourceStage);
+
     void TransitionImageLayoutImmediate(
         VkImage image,
         VkFormat format,
@@ -1184,39 +1197,59 @@ void ExternalRenderContext::RenderFrame(
     // Execute ray tracing (writes to internal outputImage in GENERAL layout)
     m_impl->pipeline->TraceRays(cmd, width, height);
 
-    // Determine which image to blit to the swapchain
-    // Priority: GPU Sensor → CLAHE → Raw output
-    VkImage blitSourceImage = m_impl->outputImage->GetImage();
-
-    // Apply GPU sensor simulation if enabled
+    // Post-processing, then the blit. Both halves are shared with
+    // PresentAccumulated, which does them without the trace above.
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        // Execute GPU sensor chain: outputImage -> sensorImage
         m_impl->ExecuteGPUSensorChain(cmd, width, height);
-        blitSourceImage = m_impl->sensorImage->GetImage();
     }
-
-    // Apply CLAHE to sensor output (or raw output if sensor disabled)
     if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        // If sensor is enabled, CLAHE processes sensorImage
-        // If sensor is disabled, CLAHE processes outputImage
-        // Note: ExecuteCLAHE reads from outputImage by default, need to update descriptor
-        // For now, CLAHE always reads from outputImage (TODO: make it read from current source)
+        // Note: ExecuteCLAHE reads from outputImage by default (TODO: make it
+        // read from the sensor output when that is enabled).
         m_impl->ExecuteCLAHE(cmd, width, height);
-        blitSourceImage = m_impl->displayImage->GetImage();
     }
 
-    // ========================================================================
-    // Blit source image to target swapchain image
-    // ========================================================================
+    const VkImage blitSourceImage = m_impl->CurrentDisplaySource();
+    // Whichever pass wrote it last is what the barrier has to wait on.
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+    if (blitSourceImage != m_impl->outputImage->GetImage()) {
+        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    }
+    m_impl->BlitToTarget(cmd, blitSourceImage, targetImage, targetLayout,
+                         width, height, srcStage);
 
-    // Step 1: Transition source image from GENERAL to TRANSFER_SRC_OPTIMAL
+    m_impl->accumulatedSamples++;
+    m_impl->frameIndex++;
+
+    // Calculate frame time
+    auto frameEndTime = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(frameEndTime - m_impl->frameStartTime);
+    m_impl->lastFrameTimeMs = duration.count() / 1000.0f;
+}
+
+VkImage ExternalRenderContext::Impl::CurrentDisplaySource() const {
+    // Priority: GPU sensor -> CLAHE -> raw accumulation.
+    if (claheParams.enabled && claheInitialized && displayImage) {
+        return displayImage->GetImage();
+    }
+    if (gpuSensorEnabled && sensorInitialized && sensorImage) {
+        return sensorImage->GetImage();
+    }
+    return outputImage->GetImage();
+}
+
+void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
+                                               VkImage targetImage,
+                                               VkImageLayout targetLayout,
+                                               u32 width, u32 height,
+                                               VkPipelineStageFlags sourceStage) {
+    // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL
     VkImageMemoryBarrier outputBarrier{};
     outputBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     outputBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     outputBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     outputBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    outputBarrier.image = blitSourceImage;
+    outputBarrier.image = source;
     outputBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     outputBarrier.subresourceRange.baseMipLevel = 0;
     outputBarrier.subresourceRange.levelCount = 1;
@@ -1225,7 +1258,7 @@ void ExternalRenderContext::RenderFrame(
     outputBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     outputBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
 
-    // Step 2: Transition target image to TRANSFER_DST_OPTIMAL
+    // Step 2: target -> TRANSFER_DST_OPTIMAL
     VkImageMemoryBarrier targetBarrier{};
     targetBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     targetBarrier.oldLayout = targetLayout;
@@ -1242,25 +1275,11 @@ void ExternalRenderContext::RenderFrame(
     targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
 
     VkImageMemoryBarrier barriers[2] = {outputBarrier, targetBarrier};
-    // Use appropriate source stage based on which processing was applied
-    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized) {
-        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;  // CLAHE was last
-    } else if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized) {
-        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;  // GPU sensor was last
-    }
-    vkCmdPipelineBarrier(
-        cmd,
-        srcStage,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0,
-        0, nullptr,
-        0, nullptr,
-        2, barriers
-    );
+    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, barriers);
 
-    // Step 3: Blit (with format conversion: R32G32B32A32_SFLOAT -> B8G8R8A8_SRGB)
-    // vkCmdBlitImage handles HDR->SDR clamping automatically (values > 1.0 become 1.0)
+    // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format.
+    // vkCmdBlitImage clamps anything above 1.0.
     VkImageBlit blitRegion{};
     blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blitRegion.srcSubresource.mipLevel = 0;
@@ -1268,7 +1287,6 @@ void ExternalRenderContext::RenderFrame(
     blitRegion.srcSubresource.layerCount = 1;
     blitRegion.srcOffsets[0] = {0, 0, 0};
     blitRegion.srcOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
-
     blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blitRegion.dstSubresource.mipLevel = 0;
     blitRegion.dstSubresource.baseArrayLayer = 0;
@@ -1276,24 +1294,17 @@ void ExternalRenderContext::RenderFrame(
     blitRegion.dstOffsets[0] = {0, 0, 0};
     blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
 
-    vkCmdBlitImage(
-        cmd,
-        blitSourceImage,
-        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-        targetImage,
-        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-        1,
-        &blitRegion,
-        VK_FILTER_NEAREST  // No filtering needed for same-size blit
-    );
+    vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   1, &blitRegion, VK_FILTER_NEAREST);
 
-    // Step 4: Transition source image back to GENERAL for next frame
+    // Step 4: source back to GENERAL for the next pass to write
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     outputBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     outputBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     outputBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
 
-    // Step 5: Transition target to PRESENT_SRC_KHR for presentation
+    // Step 5: target to PRESENT_SRC_KHR
     targetBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     targetBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     targetBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1301,27 +1312,45 @@ void ExternalRenderContext::RenderFrame(
 
     barriers[0] = outputBarrier;
     barriers[1] = targetBarrier;
-    // Use appropriate destination stage for the source image
-    VkPipelineStageFlags dstStage = (blitSourceImage == m_impl->outputImage->GetImage())
-        ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    vkCmdPipelineBarrier(
-        cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        dstStage | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-        0,
-        0, nullptr,
-        0, nullptr,
-        2, barriers
-    );
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         sourceStage | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                         0, 0, nullptr, 0, nullptr, 2, barriers);
+}
 
-    m_impl->accumulatedSamples++;
-    m_impl->frameIndex++;
+bool ExternalRenderContext::PresentAccumulated(
+    VkCommandBuffer cmd,
+    VkImage targetImage,
+    VkImageLayout targetLayout,
+    u32 width,
+    u32 height) {
 
-    // Calculate frame time
-    auto frameEndTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(frameEndTime - m_impl->frameStartTime);
-    m_impl->lastFrameTimeMs = duration.count() / 1000.0f;
+    if (!m_impl->isReady || !m_impl->outputImage) {
+        return false;
+    }
+    // Nothing has been traced, so there is no accumulation to show. The caller
+    // has to draw a real frame instead -- returning true here would present an
+    // image whose contents are undefined.
+    if (m_impl->accumulatedSamples == 0) {
+        return false;
+    }
+    // A resize invalidates the accumulation the caller is asking to re-present,
+    // and Resize() is RenderFrame's job. Same answer: draw a real frame.
+    if (width != m_impl->width || height != m_impl->height) {
+        return false;
+    }
+
+    const VkImage source = m_impl->CurrentDisplaySource();
+    // The post-processed images still hold the last frame's result -- nothing
+    // has changed the accumulation since -- so the chains are not re-run.
+    const VkPipelineStageFlags sourceStage =
+        (source == m_impl->outputImage->GetImage())
+            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
+                         width, height, sourceStage);
+    // Deliberately no accumulatedSamples++: that is the whole point.
+    return true;
 }
 
 void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage,

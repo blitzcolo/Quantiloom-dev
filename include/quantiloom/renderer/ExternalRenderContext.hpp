@@ -324,6 +324,43 @@ public:
     );
 
     /**
+     * @brief Show the accumulated image again without tracing anything
+     *
+     * RenderFrame traces and presents together, so a host that needs to draw a
+     * frame for its own reasons -- an editor compositing a selection outline or
+     * a gizmo over the render -- has no way to do it without adding a sample.
+     * That makes the sample count of a finished image depend on how many times
+     * the user clicked, which for a renderer whose output is a measurement is
+     * not a cosmetic problem.
+     *
+     * This is the second half of RenderFrame on its own: the same source image
+     * (sensor chain, then CLAHE, then the raw accumulation), the same
+     * format-converting blit, the same PRESENT_SRC transition -- and no trace,
+     * no post-processing re-run, and no change to the accumulation. The
+     * post-processed images still hold the last frame's result, because
+     * nothing has changed the accumulation since.
+     *
+     * @param cmd           Command buffer to record into
+     * @param targetImage   Target swapchain image
+     * @param targetLayout  Its current layout
+     * @param width         Must equal the current render width
+     * @param height        Must equal the current render height
+     * @return True when the frame was presented. False when there is nothing
+     *         to show -- no context, nothing traced yet, or a size that does
+     *         not match the accumulation. **The caller must then call
+     *         RenderFrame instead**: nothing has been recorded, so the target
+     *         image is left as it was and presenting it would show undefined
+     *         contents.
+     */
+    [[nodiscard]] bool PresentAccumulated(
+        VkCommandBuffer cmd,
+        VkImage targetImage,
+        VkImageLayout targetLayout,
+        u32 width,
+        u32 height
+    );
+
+    /**
      * @brief Blit the primary-hit depth AOV into a caller-owned image
      *
      * The depth AOV is R32_SFLOAT: the hit distance along the normalized
