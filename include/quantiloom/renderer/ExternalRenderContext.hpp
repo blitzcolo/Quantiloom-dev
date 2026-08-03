@@ -361,6 +361,42 @@ public:
     );
 
     /**
+     * @brief Re-run post-processing on the accumulation and present, without
+     *        tracing anything
+     *
+     * The gap between its two siblings. RenderFrame re-runs everything and
+     * costs a sample; PresentAccumulated costs nothing but re-presents the
+     * post-processed images as they were. Neither serves a host whose user
+     * just changed a display-stage setting -- sensor simulation on or off,
+     * its parameters, CLAHE -- after accumulation has stopped: the first
+     * charges the sample budget for a display edit, the second shows the
+     * image from before the edit.
+     *
+     * This is RenderFrame minus the trace: the sensor chain and CLAHE re-run
+     * over the accumulation exactly as it stands, then the same blit and
+     * PRESENT_SRC transition. No sample is added and the accumulation is not
+     * touched, so the result is what RenderFrame would have produced had the
+     * new display settings been set all along.
+     *
+     * @param cmd           Command buffer to record into
+     * @param targetImage   Target swapchain image
+     * @param targetLayout  Its current layout
+     * @param width         Must equal the current render width
+     * @param height        Must equal the current render height
+     * @return True when the frame was presented. False for the same three
+     *         reasons as PresentAccumulated -- no context, nothing traced
+     *         yet, or a stale size -- and with the same obligation: nothing
+     *         has been recorded, so the caller must call RenderFrame instead.
+     */
+    [[nodiscard]] bool ReprocessAccumulated(
+        VkCommandBuffer cmd,
+        VkImage targetImage,
+        VkImageLayout targetLayout,
+        u32 width,
+        u32 height
+    );
+
+    /**
      * @brief Blit the primary-hit depth AOV into a caller-owned image
      *
      * The depth AOV is R32_SFLOAT: the hit distance along the normalized

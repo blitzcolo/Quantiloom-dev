@@ -1353,6 +1353,55 @@ bool ExternalRenderContext::PresentAccumulated(
     return true;
 }
 
+bool ExternalRenderContext::ReprocessAccumulated(
+    VkCommandBuffer cmd,
+    VkImage targetImage,
+    VkImageLayout targetLayout,
+    u32 width,
+    u32 height) {
+
+    // The same three refusals as PresentAccumulated, for the same reasons.
+    if (!m_impl->isReady || !m_impl->outputImage) {
+        return false;
+    }
+    if (m_impl->accumulatedSamples == 0) {
+        return false;
+    }
+    if (width != m_impl->width || height != m_impl->height) {
+        return false;
+    }
+
+    // The min/max cache reads the raw accumulation, which this path never
+    // changes -- so a filled cache is still right, whatever display setting
+    // prompted the reprocess. Only a cache that has never been filled needs
+    // computing: CLAHE enabled for the first time after the trace stopped.
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized &&
+        !m_impl->hasCachedMinMax) {
+        m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
+        m_impl->hasCachedMinMax = true;
+    }
+
+    // The post-processing half of RenderFrame, over the accumulation as it
+    // stands.
+    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
+        m_impl->ExecuteGPUSensorChain(cmd, width, height);
+    }
+    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+        m_impl->ExecuteCLAHE(cmd, width, height);
+    }
+
+    const VkImage source = m_impl->CurrentDisplaySource();
+    const VkPipelineStageFlags sourceStage =
+        (source == m_impl->outputImage->GetImage())
+            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+
+    m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
+                         width, height, sourceStage);
+    // Like PresentAccumulated: no accumulatedSamples++.
+    return true;
+}
+
 void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage,
                                         VkImageLayout targetCurrentLayout,
                                         u32 width, u32 height) {
