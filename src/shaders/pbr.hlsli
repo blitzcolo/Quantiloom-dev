@@ -47,6 +47,19 @@ static const float EPSILON = 1e-6;
 //     - For dielectrics: ~0.04 (grayscale)
 //     - For metals: baseColor (colored)
 // cosTheta: dot(v, h) where v=view direction, h=half vector
+//
+// NOTE THE ARGUMENT ORDER, and that it is the opposite of the same-named
+// scalar in common.hlsli:
+//
+//     common.hlsli: float  FresnelSchlick(float cosTheta, float F0)
+//     here:         float3 FresnelSchlick(float3 F0, float cosTheta)
+//
+// Two floats therefore bind to common.hlsli's, which is an EXACT match, ahead
+// of this one, which needs a splat -- silently, with the two arguments
+// swapped. That is what broke every spectral mode below: `FresnelSchlick(F0,
+// VdotH)` in CookTorranceBRDF_Spectral returned ~0.94 instead of ~0.04, which
+// buried the measured reflectance under a specular pedestal. Pass a float3 F0
+// to reach this overload, and a scalar F0 second to reach common.hlsli's.
 // ============================================================================
 
 float3 FresnelSchlick(float3 F0, float cosTheta) {
@@ -408,7 +421,12 @@ float CookTorranceBRDF_Spectral(
         float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
         F = FresnelConductor(VdotH, nk.x, nk.y);
     } else {
-        F = FresnelSchlick(F0, VdotH);
+        // Cosine first: F0 is a scalar here, so this is common.hlsli's
+        // FresnelSchlick(cosTheta, F0), not the float3 one declared above.
+        // Written in that one's order it read F0 as the cosine and VdotH as
+        // F0, giving F ~ 0.94 on a dielectric instead of ~0.04 -- see the note
+        // at the top of this file.
+        F = FresnelSchlick(VdotH, F0);
     }
 
     float alpha = roughness * roughness;
