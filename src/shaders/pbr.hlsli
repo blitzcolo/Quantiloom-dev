@@ -42,37 +42,19 @@ static const float EPSILON = 1e-6;
 // ============================================================================
 // Fresnel Term (Schlick Approximation)
 // ============================================================================
-// Fresnel reflectance for dielectrics and metals
-// F0: Reflectance at normal incidence (specular color)
-//     - For dielectrics: ~0.04 (grayscale)
-//     - For metals: baseColor (colored)
-// cosTheta: dot(v, h) where v=view direction, h=half vector
+// Both variants live in common.hlsli, and both take the cosine FIRST:
 //
-// NOTE THE ARGUMENT ORDER, and that it is the opposite of the same-named
-// scalar in common.hlsli:
+//     float  FresnelSchlick   (float cosTheta, float  F0)
+//     float3 FresnelSchlickRGB(float cosTheta, float3 F0)
 //
-//     common.hlsli: float  FresnelSchlick(float cosTheta, float F0)
-//     here:         float3 FresnelSchlick(float3 F0, float cosTheta)
-//
-// Two floats therefore bind to common.hlsli's, which is an EXACT match, ahead
-// of this one, which needs a splat -- silently, with the two arguments
-// swapped. That is what broke every spectral mode below: `FresnelSchlick(F0,
-// VdotH)` in CookTorranceBRDF_Spectral returned ~0.94 instead of ~0.04, which
-// buried the measured reflectance under a specular pedestal. Pass a float3 F0
-// to reach this overload, and a scalar F0 second to reach common.hlsli's.
+// This file used to declare a float3 overload of FresnelSchlick with the
+// arguments the other way round. HLSL overload resolution then bound scalar
+// calls written in THAT order to common.hlsli's exact (float, float) match --
+// silently, with the arguments swapped -- which broke every spectral mode:
+// F came out ~0.94 on a dielectric instead of ~0.04 and buried the measured
+// reflectance under a specular pedestal. Do not reintroduce a same-named
+// overload with a different argument order.
 // ============================================================================
-
-float3 FresnelSchlick(float3 F0, float cosTheta) {
-    // Clamp to avoid artifacts when cosTheta < 0
-    cosTheta = saturate(cosTheta);
-
-    // Schlick approximation: F0 + (1 - F0) * (1 - cosTheta)^5
-    float oneMinusCos = 1.0 - cosTheta;
-    float oneMinusCos2 = oneMinusCos * oneMinusCos;
-    float oneMinusCos5 = oneMinusCos2 * oneMinusCos2 * oneMinusCos;
-
-    return F0 + (1.0 - F0) * oneMinusCos5;
-}
 
 // ============================================================================
 // GGX Normal Distribution Function (Trowbridge-Reitz)
@@ -349,7 +331,7 @@ float3 CookTorranceBRDF(
                    FresnelConductor(VdotH, nk.x, nk.y),
                    FresnelConductor(VdotH, nk.x, nk.y));
     } else {
-        F = FresnelSchlick(F0, VdotH);
+        F = FresnelSchlickRGB(VdotH, F0);
     }
 
     // Normal distribution function (GGX)
@@ -421,11 +403,6 @@ float CookTorranceBRDF_Spectral(
         float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
         F = FresnelConductor(VdotH, nk.x, nk.y);
     } else {
-        // Cosine first: F0 is a scalar here, so this is common.hlsli's
-        // FresnelSchlick(cosTheta, F0), not the float3 one declared above.
-        // Written in that one's order it read F0 as the cosine and VdotH as
-        // F0, giving F ~ 0.94 on a dielectric instead of ~0.04 -- see the note
-        // at the top of this file.
         F = FresnelSchlick(VdotH, F0);
     }
 
@@ -466,7 +443,8 @@ float CookTorranceBRDF_Spectral(
 
 // Fresnel-Schlick with roughness correction for IBL
 // Accounts for energy loss at grazing angles for rough surfaces
-float3 FresnelSchlickRoughness(float3 F0, float cosTheta, float roughness) {
+// Cosine first, matching FresnelSchlick / FresnelSchlickRGB in common.hlsli.
+float3 FresnelSchlickRoughness(float cosTheta, float3 F0, float roughness) {
     cosTheta = saturate(cosTheta);
     float oneMinusCos = 1.0 - cosTheta;
 

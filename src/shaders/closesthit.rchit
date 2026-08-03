@@ -796,7 +796,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     // Compute diffuse reflection coefficient (energy conservation with specular)
-    float3 kD = (1.0 - FresnelSchlick(F0, max(dot(normal, V), 0.0))) * (1.0 - metallic);
+    float3 kD = (1.0 - FresnelSchlickRGB(max(dot(normal, V), 0.0), F0)) * (1.0 - metallic);
 
     // Hemispherical integration with Lambertian BRDF
     // Factor of π from hemisphere integral cancels with π in BRDF denominator
@@ -1274,7 +1274,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)
         float3 F0_scalar = lerp(float3(0.04, 0.04, 0.04), float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
-        float3 F_scalar = FresnelSchlick(F0_scalar, max(dot(normal, V), 0.0));
+        float3 F_scalar = FresnelSchlickRGB(max(dot(normal, V), 0.0), F0_scalar);
         float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
 
         // No 1/PI here. skyRadiance_lambda is already E_sky/PI -- the conversion
@@ -1965,7 +1965,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             case DEBUG_MODE_FRESNEL: {
                 // Fresnel at current viewing angle
                 float NdotV_fresnel = max(dot(normal, V), 0.0);
-                debug_output = FresnelSchlick(F0, NdotV_fresnel);
+                debug_output = FresnelSchlickRGB(NdotV_fresnel, F0);
                 break;
             }
 
