@@ -820,30 +820,53 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Only compute IBL for surfaces with non-zero metallic or roughness < 1.0
     // This optimization skips perfectly diffuse surfaces (no specular reflection).
     //
-    // enableEnvironmentMap off means the map contributes nothing at all, rather
-    // than being swapped for a substitute sky: a scene lit by an analytic sun
-    // and an HDRI at once counts the same illumination twice, and turning one
-    // off has to actually remove it for the other to be measurable.
-    if (lut.enableEnvironmentMap != 0 && (metallic > 0.01 || roughness < 0.99)) {
-        // 1. Compute reflection vector R = reflect(-V, N)
-        //    This is the direction we would see a perfect mirror reflection
-        float3 R = reflect(-V, normal);
-
-        // 2. Select mipmap level based on roughness
-        //    Rougher surfaces sample blurrier reflections (higher mip levels)
-        //    Query number of mip levels at runtime (shader intrinsic)
-        uint width, height, numMips;
-        prefilteredEnvMap.GetDimensions(0, width, height, numMips);
-        float lod = roughness * float(numMips - 1);
-
-        // 3. Sample prefiltered environment map
-        //    SampleLevel = explicit LOD (required in ray tracing shaders)
-        prefilteredColor = prefilteredEnvMap.SampleLevel(envSampler, R, lod).rgb;
-
-        // 4. Sample BRDF integration LUT
+    // enableEnvironmentMap off removes the *map*, not the sky. The two are
+    // different illuminants and only the first one double counts: an HDRI
+    // alongside an analytic sun states the same light twice, so turning the map
+    // off has to actually remove it. The analytic sky does not go away when it
+    // does -- skyAmbient above still integrates it over the hemisphere -- and
+    // taking the specular lobe to zero here made that sky light Lambertian
+    // surfaces and not mirrors. A metal has kD = (1-F)(1-metallic) = 0, so it
+    // lost every term but the sun and rendered black under a bright sky.
+    //
+    // The substitute is the dome the diffuse term already assumes: uniform
+    // radiance skyRadiance. Prefiltering a uniform dome returns that radiance at
+    // every roughness and direction, so this adds no assumption the diffuse side
+    // has not already made, and it is what a reflection ray would fetch -- the
+    // miss shader returns exactly lut.skyRadiance_rgb. What it cannot do is
+    // reflect the *scene*: opaque surfaces spawn no bounce ray (only shadow,
+    // transmission and the IR environment sample recurse), so a mirror here
+    // shows sky and sun, never the ground.
+    const bool hasEnvMap = (lut.enableEnvironmentMap != 0);
+    if (metallic > 0.01 || roughness < 0.99) {
+        // 1. Sample BRDF integration LUT
         //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
+        //    Independent of the environment, and the LUT is always generated.
         float NdotV_clamped = max(dot(normal, V), 0.0);
         envBRDF = brdfLUT.SampleLevel(iblSampler, float2(NdotV_clamped, roughness), 0.0).rg;
+
+        if (hasEnvMap) {
+            // 2. Compute reflection vector R = reflect(-V, N)
+            //    This is the direction we would see a perfect mirror reflection
+            float3 R = reflect(-V, normal);
+
+            // 3. Select mipmap level based on roughness
+            //    Rougher surfaces sample blurrier reflections (higher mip levels)
+            //    Query number of mip levels at runtime (shader intrinsic)
+            uint width, height, numMips;
+            prefilteredEnvMap.GetDimensions(0, width, height, numMips);
+            float lod = roughness * float(numMips - 1);
+
+            // 4. Sample prefiltered environment map
+            //    SampleLevel = explicit LOD (required in ray tracing shaders)
+            prefilteredColor = prefilteredEnvMap.SampleLevel(envSampler, R, lod).rgb;
+        } else {
+            // Uniform analytic sky dome. Valid for the RGB branch only -- the
+            // spectral branches below rebuild this term from the solar LUT per
+            // wavelength, because skyRadiance is an RGB average in arbitrary
+            // units there (see the sunRadiance/skyRadiance selection above).
+            prefilteredColor = skyRadiance;
+        }
 
         // 5. Split-sum approximation
         //    L_ibl = ∫ L(l) * BRDF(l,v) * (n·l) dl
@@ -1065,8 +1088,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // This preserves colored metal reflections (gold, copper)
             float L_ibl = 0.0;
             if (useIBL) {
-                float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
-                L_ibl = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+                if (hasEnvMap) {
+                    float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+                    L_ibl = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+                } else {
+                    // Uniform analytic sky dome, kept on the measured solar LUT:
+                    // prefiltering a uniform dome returns its radiance, which at
+                    // this wavelength is sky_radiance_lambda. Routing it through
+                    // the RGB triple instead would substitute an arbitrary-unit
+                    // average for the illuminant this mode exists to integrate.
+                    L_ibl = sky_radiance_lambda *
+                            (F0_at_lambda * envBRDF.x + envBRDF.y);
+                }
             }
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
@@ -1262,8 +1295,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const bool useIBL_scalar = (metallic > 0.01 || roughness < 0.99);
         float ibl_scalar = 0.0;
         if (useIBL_scalar) {
-            float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
-            ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+            if (hasEnvMap) {
+                float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+                ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+            } else {
+                // Uniform analytic sky dome on the solar LUT, as VIS_FUSED.
+                ibl_scalar = skyRadiance_lambda *
+                             (F0_scalar.r * envBRDF.x + envBRDF.y);
+            }
         }
 
         // 6. Total spectral radiance (scalar)
