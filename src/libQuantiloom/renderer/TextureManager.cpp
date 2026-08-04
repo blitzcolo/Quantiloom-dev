@@ -84,6 +84,28 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
                 m_images.size(), m_samplers.size());
 }
 
+i32 TextureManager::AppendTexture(const Texture& texture) {
+    if (!texture.IsValid()) {
+        QL_LOG_WARN("AppendTexture: invalid texture '{}'", texture.name);
+        return -1;
+    }
+
+    auto gpuImage = UploadTexture(texture);
+    if (!gpuImage) {
+        return -1;
+    }
+    VkSampler sampler = CreateSampler(texture.sampler);
+
+    const i32 index = static_cast<i32>(m_images.size());
+    m_imageViews.push_back(gpuImage->GetView());
+    m_samplers.push_back(sampler);
+    m_images.push_back(std::move(gpuImage));
+
+    QL_LOG_INFO("  Appended texture '{}' at index {} ({} total)", texture.name, index,
+                m_images.size());
+    return index;
+}
+
 // ============================================================================
 // Internal Helper Functions
 // ============================================================================

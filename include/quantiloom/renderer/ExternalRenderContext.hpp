@@ -838,6 +838,33 @@ public:
     i32 AddSpectralCurve(const SpectralCurve& curve);
 
     /**
+     * @brief Build an endmember weight map for a material, from its base colour
+     * @param materialIndex   Material to unmix
+     * @param endmemberColors Linear sRGB colour of each endmember curve, in the
+     *                        order their indices will be assigned; at most
+     *                        Material::MAX_ENDMEMBERS
+     * @return Index into the texture array, or an error explaining what was missing
+     *
+     * The runtime half of what a scene config gets at load: asks of every texel
+     * how much of each endmember would produce that colour, and uploads the
+     * answer as a texture. Assign the result to Material::weightTextureIndex,
+     * the curve indices from AddSpectralCurve() to
+     * Material::spectralReflectanceCurveIndex and endmemberCurveIndex1..3, then
+     * call UpdateMaterial().
+     *
+     * Get the colours from ReflectanceToLinearSrgbD65() on the same curves --
+     * they must be what the endmembers look like under D65, or the weights are
+     * fitted against something the texture never depicted.
+     *
+     * Fails when the material has no base-colour texture, or when its pixels
+     * were released after upload. The context keeps the base colours of
+     * curve-bound materials on the CPU for this; a material that had no curve
+     * when the scene loaded will not have them.
+     */
+    Result<i32, String> BuildEndmemberWeightTexture(
+        u32 materialIndex, const Vector<glm::vec3>& endmemberColors);
+
+    /**
      * @brief Set the solar and sky irradiance spectra used for quantitative lighting
      * @param sunIrradiance Direct solar spectral irradiance (W/m^2/nm)
      * @param skyIrradiance Diffuse sky spectral irradiance (W/m^2/nm)

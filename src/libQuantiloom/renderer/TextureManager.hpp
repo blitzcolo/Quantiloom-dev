@@ -144,6 +144,20 @@ public:
     // Index matches original texture index from scene
     [[nodiscard]] const std::vector<VkSampler>& GetSamplers() const { return m_samplers; }
 
+    // Upload one more texture and return its index, leaving the ones already
+    // uploaded alone.
+    //
+    // UploadTextures above is a full rebuild -- it destroys every image and
+    // sampler first -- which is right when a scene is replaced and wrong when
+    // a single texture is added to a scene already on the device. The caller
+    // must rebind the descriptor array afterwards, and must have waited for
+    // the device to be idle: this changes what the shader's texture array
+    // means while a frame could be reading it.
+    //
+    // CPU pixels are NOT released here. An appended texture is typically one
+    // the caller just generated and may regenerate.
+    [[nodiscard]] i32 AppendTexture(const Texture& texture);
+
     // Check if textures have been uploaded
     [[nodiscard]] bool IsEmpty() const { return m_images.empty(); }
 

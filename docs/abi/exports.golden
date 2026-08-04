@@ -47,6 +47,7 @@ public: class quantiloom::Result<float,class std::basic_string<char,struct std::
 public: class quantiloom::Result<float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredFloat(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredInt(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class quantiloom::Result<int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::BuildEndmemberWeightTexture(unsigned int,class std::vector<struct glm::vec<3,float,0>,class std::allocator<struct glm::vec<3,float,0> > > const &)
 public: class quantiloom::Result<struct glm::vec<4,float,0>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::ReadPixelValue(unsigned int,unsigned int)
 public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureDisplayImage(void)
 public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureScreenshot(void)
@@ -144,6 +145,7 @@ public: static class std::optional<class std::tuple<unsigned int,unsigned int,un
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadImage(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static enum quantiloom::Log::Level quantiloom::Log::GetLevel(void)
+public: static int const quantiloom::Material::MAX_ENDMEMBERS
 public: static struct quantiloom::Material quantiloom::Material::CreateLambertian(struct glm::vec<3,float,0> const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static void quantiloom::Log::Critical(class std::basic_string_view<char,struct std::char_traits<char> >)
 public: static void quantiloom::Log::Debug(class std::basic_string_view<char,struct std::char_traits<char> >)

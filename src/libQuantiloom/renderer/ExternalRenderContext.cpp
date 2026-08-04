@@ -1998,6 +1998,85 @@ i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
     return index;
 }
 
+Result<i32, String> ExternalRenderContext::BuildEndmemberWeightTexture(
+    const u32 materialIndex, const Vector<glm::vec3>& endmemberColors) {
+    using WeightResult = Result<i32, String>;
+
+    if (!m_impl->scene || materialIndex >= m_impl->scene->materials.size()) {
+        return WeightResult::Err("BuildEndmemberWeightTexture: material index out of range");
+    }
+    if (endmemberColors.empty() ||
+        endmemberColors.size() > static_cast<usize>(Material::MAX_ENDMEMBERS)) {
+        return WeightResult::Err("BuildEndmemberWeightTexture: need 1 to " +
+                                 std::to_string(Material::MAX_ENDMEMBERS) + " endmember colours");
+    }
+    if (!m_impl->textureManager) {
+        return WeightResult::Err("BuildEndmemberWeightTexture: no textures uploaded yet");
+    }
+
+    const Material& material = m_impl->scene->materials[materialIndex];
+    if (material.baseColorTextureIndex < 0 ||
+        material.baseColorTextureIndex >= static_cast<i32>(m_impl->scene->textures.size())) {
+        return WeightResult::Err("Material '" + material.name +
+                                 "' has no base-colour texture to unmix");
+    }
+
+    const Texture& source =
+        m_impl->scene->textures[static_cast<usize>(material.baseColorTextureIndex)];
+    if (source.pixels.empty()) {
+        // Only the base colours of materials that were curve-bound when the
+        // scene loaded are kept on the CPU. Binding a curve to a material that
+        // had none lands here, and the honest answer is that the pixels are
+        // gone rather than a weight map fitted to nothing.
+        return WeightResult::Err("Base-colour pixels for '" + material.name +
+                                 "' were released after upload; reload the scene to unmix it");
+    }
+    if (source.channels != 4) {
+        return WeightResult::Err("Base-colour texture for '" + material.name +
+                                 "' is not RGBA");
+    }
+
+    const u64 texelCount = static_cast<u64>(source.width) * source.height;
+
+    Texture weights;
+    weights.name = "__unmix_" + material.name;
+    weights.width = source.width;
+    weights.height = source.height;
+    weights.channels = 4;
+    weights.isSRGB = false;
+    weights.skipBlockCompression = true;
+    weights.retainCpuPixels = true;  // a further reassignment rebuilds from it
+    weights.pixels.resize(static_cast<usize>(texelCount) * 4);
+
+    rendercore::UnmixTexels(source.pixels.data(), texelCount, source.isSRGB,
+                            glm::vec3(material.baseColorFactor), endmemberColors.data(),
+                            static_cast<i32>(endmemberColors.size()), weights.pixels.data());
+
+    // The texture array is what the shader indexes, so nothing may be reading
+    // it while the descriptor is rewritten.
+    vkDeviceWaitIdle(m_impl->contextAdapter->GetDevice());
+
+    const i32 index = m_impl->textureManager->AppendTexture(weights);
+    if (index < 0) {
+        return WeightResult::Err("Failed to upload the weight texture for '" + material.name + "'");
+    }
+
+    // Kept on the scene too: a later AdoptScene or full rebuild re-uploads
+    // from here, and a weight map that existed only on the device would
+    // silently disappear.
+    m_impl->scene->textures.push_back(std::move(weights));
+
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindTextures(m_impl->textureManager->GetImageViews(),
+                                       m_impl->textureManager->GetSamplers());
+    }
+
+    QL_LOG_INFO("BuildEndmemberWeightTexture: material '{}' unmixed into {} endmember(s), "
+                "texture index {}",
+                material.name, endmemberColors.size(), index);
+    return index;
+}
+
 void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
                                                 const SpectralCurve& skyIrradiance) {
     if (!sunIrradiance.IsValid() && !skyIrradiance.IsValid()) {
