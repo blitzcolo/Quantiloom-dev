@@ -222,11 +222,12 @@ static void ParallelLoadTextures(
 
     QL_LOG_INFO("  Parallel texture loading complete: {} textures loaded", outTextures.size());
 
-    // Parallel BC7 compression (if available)
-    // This happens after loading so textures are compressed in parallel
-    if (TextureCompressor::IsAvailable() && !outTextures.empty()) {
-        TextureCompressor::ParallelCompressTextures(outTextures, false /* fast mode */);
-    }
+    // Compression does NOT happen here. BC7CompressedData captures isSRGB at
+    // compression time (TextureCompressor.cpp:103) and the upload picks its
+    // format from that copy (TextureManager.cpp:311), so a texture compressed
+    // before its colour space is known is stuck with the wrong one. Materials
+    // are what say which textures are colour, and they are parsed after this
+    // function -- so the caller compresses, once the marking is done.
 }
 
 // ============================================================================
@@ -1755,6 +1756,26 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
     // Ensure at least one default material exists
     if (scene.materials.empty()) {
         scene.materials.push_back(Material::CreateLambertian(glm::vec3(0.8f), "DefaultMaterial"));
+    }
+
+    // Mark textures as sRGB based on usage, as GltfLoader does. UsdPreviewSurface
+    // authors diffuseColor and emissiveColor in sRGB like glTF does; the data
+    // channels (metallic/roughness, normal, occlusion, temperature) are linear.
+    // Without this every USD base colour was uploaded as R8G8B8A8_UNORM and the
+    // shader read gamma-encoded values as if they were linear.
+    for (const auto& mat : scene.materials) {
+        if (mat.baseColorTextureIndex >= 0 && mat.baseColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.baseColorTextureIndex].isSRGB = true;
+        }
+        if (mat.emissiveTextureIndex >= 0 && mat.emissiveTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.emissiveTextureIndex].isSRGB = true;
+        }
+    }
+
+    // Parallel BC7 compression. After the marking, never before -- see the note
+    // at the end of ParallelLoadTextures.
+    if (TextureCompressor::IsAvailable() && !scene.textures.empty()) {
+        TextureCompressor::ParallelCompressTextures(scene.textures, false /* fast mode */);
     }
 
     // ========================================================================
