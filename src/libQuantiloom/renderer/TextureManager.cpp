@@ -71,8 +71,13 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
         m_images.push_back(std::move(gpuImage));
 
         // CRITICAL: Release CPU memory after GPU upload to free ~8GB RAM
-        // The pixel data and BC7 compressed data are now on the GPU
-        texture.ReleaseCPUMemory();
+        // The pixel data and BC7 compressed data are now on the GPU.
+        // Unless the texture asked to keep them: an interactive session
+        // re-unmixes base colours against new endmembers, and the GPU copy is
+        // compressed, mipped and unreadable for that.
+        if (!texture.retainCpuPixels) {
+            texture.ReleaseCPUMemory();
+        }
     }
 
     QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers (CPU memory released)",

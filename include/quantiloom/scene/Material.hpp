@@ -268,6 +268,44 @@ struct QL_API Material {
     }
 
     // ========================================================================
+    // Endmember Mixing (spatially varying spectral reflectance)
+    // ========================================================================
+    // A single bound curve replaces the base-colour texture outright, so a
+    // measured surface renders as one flat reflectance and loses every bit of
+    // spatial detail the texture carried. A mixture restores it:
+    //
+    //   rho(lambda, uv) = sum_i w_i(uv) * rho_i(lambda)
+    //
+    // where the rho_i are up to MAX_ENDMEMBERS measured curves (this ref plus
+    // quantiloomExtraRefs) and w_i comes from a weight texture, by default
+    // unmixed from the base colour at load. With one endmember the mixture
+    // degenerates to brightness modulation of that curve, which is why the
+    // default applies to existing single-ref materials too.
+    //
+    // The mixing is evaluated per wavelength on the GPU, never collapsed to a
+    // scalar on the CPU: hyperspectral renders loop bands without rebuilding
+    // the material buffer, so anything pre-evaluated at one wavelength would
+    // be frozen there.
+    enum class SpectralUnmixMode : u8 {
+        Auto = 0,   // derive weights from the base-colour texture at load
+        Texture,    // use the weight texture named below, as authored
+        Off         // no weights: the first curve, flat, as before
+    };
+
+    Vector<String> quantiloomExtraRefs;  // endmembers 1..3; endmember 0 is the ref above
+    SpectralUnmixMode spectralUnmixMode = SpectralUnmixMode::Auto;
+    String spectralWeightTexturePath;    // relative to the config, for Texture mode
+
+    // Runtime slots, filled by ResolveMaterialSpectra the way
+    // spectralReflectanceCurveIndex is (that one holds endmember 0).
+    // -1 means absent, and a weight texture of -1 means w = (1, 0, 0, 0),
+    // which reproduces the flat single-curve behaviour exactly.
+    i32 endmemberCurveIndex1 = -1;
+    i32 endmemberCurveIndex2 = -1;
+    i32 endmemberCurveIndex3 = -1;
+    i32 weightTextureIndex = -1;
+
+    // ========================================================================
     // BRDF Model Selection (CPU-side analytical evaluation)
     // ========================================================================
     enum class BRDFModel : uint8_t {

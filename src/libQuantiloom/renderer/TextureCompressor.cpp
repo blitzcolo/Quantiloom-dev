@@ -51,6 +51,15 @@ bool TextureCompressor::IsAvailable() {
 }
 
 bool TextureCompressor::CanCompress(const Texture& texture) {
+    // Numeric data opts out: BC7 is lossy per 4x4 block, which is invisible in
+    // an image and destructive in a texture whose channels are values.
+    // Checked first, and here rather than at the call sites, because every
+    // compression path funnels through this predicate -- the parallel pass,
+    // the single-texture entry, and TextureManager's upload-time fallback.
+    if (texture.skipBlockCompression) {
+        return false;
+    }
+
     // BC7 requires 4x4 blocks
     if (texture.width < 4 || texture.height < 4) {
         return false;

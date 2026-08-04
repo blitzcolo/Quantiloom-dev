@@ -125,6 +125,20 @@ struct Texture {
     // Color space (glTF 2.0 spec requires baseColor/emissive in sRGB, others in linear)
     bool isSRGB = false;  // Default to linear
 
+    // Numeric data rather than an image: never block-compress it. BC7 encodes
+    // each 4x4 block from a pair of endpoints, so it trades channel-exact
+    // values for perceptual similarity -- fine for colour, wrong for a texture
+    // whose channels ARE the numbers (endmember weights). This is checked in
+    // TextureCompressor::CanCompress, which every compression path goes
+    // through, including TextureManager's upload-time fallback.
+    bool skipBlockCompression = false;
+
+    // Keep the pixels after upload. TextureManager releases CPU memory as soon
+    // as a texture reaches the GPU, which is right for rendering and wrong for
+    // an interactive session that may need to re-unmix this texture against a
+    // new set of endmembers -- reading it back off the GPU is not an option.
+    bool retainCpuPixels = false;
+
     // Sampler parameters
     TextureSampler sampler;
 
