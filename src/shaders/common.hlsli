@@ -940,6 +940,25 @@ struct MaterialData {
     float  absorptionCoeff;              // Absorption coefficient σ_a (m⁻¹)                        // Offset: 168-172
     float  phaseG;                       // Henyey-Greenstein g parameter [-1,1]                    // Offset: 172-176
 
+    // ========================================================================
+    // Endmember Mixing (spatially varying spectral reflectance)
+    // ========================================================================
+    // rho(lambda, uv) = sum_i w_i(uv) * rho_i(lambda)
+    //
+    // Endmember 0 is spectralReflectanceCurveIndex above; 1..3 are here.
+    // The weights come from weightTextureIndex, RGBA channel i holding w_i/2
+    // -- halved because a single-endmember mixture is brightness modulation
+    // and needs w > 1 for texels brighter than the curve's own colour, which
+    // a UNORM texture cannot store otherwise.
+    //
+    // weightTextureIndex < 0 means w = (1, 0, 0, 0): the first curve, flat,
+    // exactly as before this existed.
+
+    int    endmemberCurveIndex1;         // Index into spectralCurves (-1 = unused)                 // Offset: 176-180
+    int    endmemberCurveIndex2;         // Index into spectralCurves (-1 = unused)                 // Offset: 180-184
+    int    endmemberCurveIndex3;         // Index into spectralCurves (-1 = unused)                 // Offset: 184-188
+    int    weightTextureIndex;           // Index into texture array (-1 = single endmember)        // Offset: 188-192
+
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity
 };

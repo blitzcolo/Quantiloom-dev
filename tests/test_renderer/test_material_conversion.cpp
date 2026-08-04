@@ -88,6 +88,54 @@ TEST(RenderCoreConvertMaterial, TakesCurveSlotsFromTheCaller) {
     EXPECT_EQ(unset.complexRefractiveIndexIndex, -1);
 }
 
+TEST(RenderCoreConvertMaterial, TakesEndmemberSlotsFromTheCaller) {
+    Material mat;
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f, {2, 3, 11, 12, 13, 4});
+    EXPECT_EQ(gpu.endmemberCurveIndex1, 11);
+    EXPECT_EQ(gpu.endmemberCurveIndex2, 12);
+    EXPECT_EQ(gpu.endmemberCurveIndex3, 13);
+    EXPECT_EQ(gpu.weightTextureIndex, 4);
+}
+
+// The default is not merely "unset", it is the pre-endmember behaviour: no
+// extra curves and no weight texture means the shader reads w = (1, 0, 0, 0)
+// and evaluates the single bound curve flat, as it always did.
+TEST(RenderCoreConvertMaterial, NoEndmembersMeansTheOldFlatBehaviour) {
+    Material mat;
+    mat.spectralReflectanceCurveIndex = 5;
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f, {5, -1});
+
+    EXPECT_EQ(gpu.endmemberCurveIndex1, -1);
+    EXPECT_EQ(gpu.endmemberCurveIndex2, -1);
+    EXPECT_EQ(gpu.endmemberCurveIndex3, -1);
+    EXPECT_EQ(gpu.weightTextureIndex, -1);
+}
+
+// The interactive path resolves spectra into the Material and hands them back
+// through this helper in two places; if it dropped a slot, one of those two
+// uploads would be silently short.
+TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
+    Material mat;
+    mat.spectralReflectanceCurveIndex = 1;
+    mat.complexRefractiveIndexIndex = 2;
+    mat.endmemberCurveIndex1 = 3;
+    mat.endmemberCurveIndex2 = 4;
+    mat.endmemberCurveIndex3 = 5;
+    mat.weightTextureIndex = 6;
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f,
+                                                 rendercore::IndicesFromMaterial(mat));
+
+    EXPECT_EQ(gpu.spectralReflectanceCurveIndex, 1);
+    EXPECT_EQ(gpu.complexRefractiveIndexIndex, 2);
+    EXPECT_EQ(gpu.endmemberCurveIndex1, 3);
+    EXPECT_EQ(gpu.endmemberCurveIndex2, 4);
+    EXPECT_EQ(gpu.endmemberCurveIndex3, 5);
+    EXPECT_EQ(gpu.weightTextureIndex, 6);
+}
+
 TEST(RenderCoreConvertMaterial, CarriesThePbrFactorsThrough) {
     Material mat;
     mat.metallicFactor = 0.25f;

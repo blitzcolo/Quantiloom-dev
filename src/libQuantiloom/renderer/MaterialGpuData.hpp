@@ -56,9 +56,17 @@ struct MaterialDataCPU {
     f32 scatteringCoeff;                     // offset 164,  4
     f32 absorptionCoeff;                     // offset 168,  4
     f32 phaseG;                              // offset 172,  4
-};  // 176 bytes total
 
-static_assert(sizeof(MaterialDataCPU) == 176);
+    // Endmember mixing. Endmember 0 is spectralReflectanceCurveIndex above;
+    // these are 1..3, and -1 for a weight texture means w = (1, 0, 0, 0),
+    // which is the single flat curve this feature generalises.
+    i32 endmemberCurveIndex1;                // offset 176,  4
+    i32 endmemberCurveIndex2;                // offset 180,  4
+    i32 endmemberCurveIndex3;                // offset 184,  4
+    i32 weightTextureIndex;                  // offset 188,  4
+};  // 192 bytes total
+
+static_assert(sizeof(MaterialDataCPU) == 192);
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex)       ==  16);
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex)          ==  32);
 static_assert(offsetof(MaterialDataCPU, doubleSided)                 ==  40);
@@ -80,5 +88,9 @@ static_assert(offsetof(MaterialDataCPU, transmission)                == 116);
 static_assert(offsetof(MaterialDataCPU, transmissionTextureIndex)    == 120);
 static_assert(offsetof(MaterialDataCPU, irTransmittanceCurveIndex)   == 124);
 static_assert(offsetof(MaterialDataCPU, attenuationColor)            == 128);
+static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex1)        == 176);
+static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex2)        == 180);
+static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex3)        == 184);
+static_assert(offsetof(MaterialDataCPU, weightTextureIndex)          == 188);
 
 } // namespace quantiloom

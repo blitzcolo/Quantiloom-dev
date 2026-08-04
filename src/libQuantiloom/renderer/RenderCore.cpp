@@ -932,6 +932,12 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.absorptionCoeff = material.absorptionCoeff;
     cpuMat.phaseG = material.phaseG;
 
+    // Endmember mixing, from the same resolved indices as endmember 0
+    cpuMat.endmemberCurveIndex1 = indices.endmemberCurve1;
+    cpuMat.endmemberCurveIndex2 = indices.endmemberCurve2;
+    cpuMat.endmemberCurveIndex3 = indices.endmemberCurve3;
+    cpuMat.weightTextureIndex = indices.weightTexture;
+
     return cpuMat;
 }
 
@@ -948,10 +954,7 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
     for (size_t i = 0; i < scene.materials.size(); ++i) {
         const Material& material = scene.materials[i];
         const MaterialGpuIndices resolved =
-            i < indices.size()
-                ? indices[i]
-                : MaterialGpuIndices{material.spectralReflectanceCurveIndex,
-                                     material.complexRefractiveIndexIndex};
+            i < indices.size() ? indices[i] : IndicesFromMaterial(material);
         gpuMaterials.push_back(ConvertMaterial(material, wavelengthNm, resolved));
     }
 

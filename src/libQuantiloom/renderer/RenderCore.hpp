@@ -346,7 +346,31 @@ private:
 struct MaterialGpuIndices {
     i32 spectralReflectanceCurve = -1;  // -1: no curve, shader falls back to RGB
     i32 complexRefractiveIndex = -1;    // -1: no CRI, shader uses the F0 approximation
+
+    // Endmember mixing. spectralReflectanceCurve above is endmember 0.
+    // -1 for the weight texture means w = (1, 0, 0, 0), i.e. that curve alone.
+    i32 endmemberCurve1 = -1;
+    i32 endmemberCurve2 = -1;
+    i32 endmemberCurve3 = -1;
+    i32 weightTexture = -1;
 };
+
+/**
+ * @brief The indices a Material already carries, as a MaterialGpuIndices
+ *
+ * The interactive path resolves spectra into the Material itself and then has
+ * to hand them back here, in two different places. One function so the two
+ * cannot disagree about which fields count -- adding a slot and updating only
+ * one caller is otherwise a silent partial upload.
+ */
+[[nodiscard]] inline MaterialGpuIndices IndicesFromMaterial(const Material& material) {
+    return MaterialGpuIndices{material.spectralReflectanceCurveIndex,
+                              material.complexRefractiveIndexIndex,
+                              material.endmemberCurveIndex1,
+                              material.endmemberCurveIndex2,
+                              material.endmemberCurveIndex3,
+                              material.weightTextureIndex};
+}
 
 /**
  * @brief Convert a Material into the layout the closest-hit shader reads

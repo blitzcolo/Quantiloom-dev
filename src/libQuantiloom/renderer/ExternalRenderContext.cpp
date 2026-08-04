@@ -1897,10 +1897,8 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     m_impl->scene->materials[materialIndex] = material;
 
     // 2. Convert to GPU format
-    const rendercore::MaterialGpuIndices indices{material.spectralReflectanceCurveIndex,
-                                                 material.complexRefractiveIndexIndex};
-    MaterialDataCPU cpuMat =
-        rendercore::ConvertMaterial(material, m_impl->wavelength_nm, indices);
+    MaterialDataCPU cpuMat = rendercore::ConvertMaterial(
+        material, m_impl->wavelength_nm, rendercore::IndicesFromMaterial(material));
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
