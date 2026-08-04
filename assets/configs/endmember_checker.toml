@@ -1,0 +1,62 @@
+# ============================================================================
+# Quantiloom - Endmember mixing check
+# ============================================================================
+# A plane whose base colour is a checkerboard of exactly two endmember colours,
+# bound to exactly those two measured curves. Every texel is unambiguously one
+# material or the other, so the unmixer's right answer is known: weight (1, 0)
+# on one block, (0, 1) on the other.
+#
+# Geometry: python scripts/utils/generate_endmember_checker.py
+# Check:    python scripts/render-tests/check_endmember_mix.py
+#
+# The checker also renders this config with each curve bound alone, by
+# rewriting the [[materials]] block -- the mixed render must reproduce each
+# single-curve result inside the matching block, which is a comparison that
+# needs no model of the illumination at all.
+# ============================================================================
+
+[renderer]
+resolution = [512, 512]
+spp = 32
+seed = 42
+output = "endmember_checker.exr"
+environment_map = ""
+environment_map_enabled = false
+
+[spectral]
+mode = "vis_fused"
+band = "VIS"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+
+[scene]
+gltf = "assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+default_temperature_k = 293.0
+
+[camera]
+# Straight down, so every block is lit and viewed identically and the only
+# thing that varies across the frame is the material.
+position = [0.0, 12.0, 0.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 0.0, -1.0]
+fov_y = 60.0
+
+[lighting]
+# High sun, near the view direction: no shadows, no grazing angles, nothing
+# geometric to explain a difference between two blocks.
+sun_direction = [0.15, 0.98, 0.1]
+sun_radiance = [3.0, 3.0, 3.0]
+sky_radiance = [0.4, 0.5, 0.7]
+
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[[materials]]
+name = "CheckerGround"
+spectral_material_type = "quantiloom_usgs"
+spectral_material_refs = ["Spar.patens CRMS322v06 grn.a", "Grass_Golden_Dry GDS480"]
