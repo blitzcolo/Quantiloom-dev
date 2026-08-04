@@ -9,6 +9,7 @@
 
 #include "core/SpectralData.hpp"
 #include "core/CIE_CMF_Data.hpp"
+#include "core/D65Illuminant.hpp"
 
 #include <algorithm>
 
@@ -69,6 +70,62 @@ glm::vec3 SpectralIrradianceToLinearSrgb(const SpectralCurve& curve) {
         static_cast<f32>( 3.2406 * xyz.x - 1.5372 * xyz.y - 0.4986 * xyz.z),
         static_cast<f32>(-0.9689 * xyz.x + 1.8758 * xyz.y + 0.0415 * xyz.z),
         static_cast<f32>( 0.0557 * xyz.x - 0.2040 * xyz.y + 1.0570 * xyz.z));
+}
+
+glm::vec3 ReflectanceToLinearSrgbD65(const SpectralCurve& reflectance) {
+    if (reflectance.samples.empty()) {
+        return glm::vec3(0.0f);
+    }
+
+    // Same trapezoid over the same 1 nm observer grid as above, but weighted by
+    // D65 and divided by the illuminant's own luminance, so a perfect diffuser
+    // (rho == 1) comes out at (1, 1, 1) instead of at D65's absolute magnitude.
+    // That is the difference from SpectralIrradianceToLinearSrgb, which reports
+    // the curve's own magnitude because for a sun the magnitude IS the answer.
+    Tristimulus xyz;
+    f64 yNorm = 0.0;
+    f64 prevX = 0.0, prevY = 0.0, prevZ = 0.0, prevN = 0.0;
+    bool havePrev = false;
+
+    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
+        const f32 lambda = kCieLambdaMin + static_cast<f32>(i);
+        const f64 e = static_cast<f64>(D65Relative(lambda));
+        const f64 r = static_cast<f64>(reflectance.Evaluate(lambda));
+        const f64 cx = r * e * CIE_1931_2DEG[i][0];
+        const f64 cy = r * e * CIE_1931_2DEG[i][1];
+        const f64 cz = r * e * CIE_1931_2DEG[i][2];
+        const f64 cn = e * CIE_1931_2DEG[i][1];
+
+        if (havePrev) {
+            xyz.x += 0.5 * (cx + prevX);
+            xyz.y += 0.5 * (cy + prevY);
+            xyz.z += 0.5 * (cz + prevZ);
+            yNorm += 0.5 * (cn + prevN);
+        }
+        prevX = cx;
+        prevY = cy;
+        prevZ = cz;
+        prevN = cn;
+        havePrev = true;
+    }
+
+    if (yNorm <= 0.0) {
+        return glm::vec3(0.0f);
+    }
+    xyz.x /= yNorm;
+    xyz.y /= yNorm;
+    xyz.z /= yNorm;
+
+    const glm::vec3 rgb(
+        static_cast<f32>( 3.2406 * xyz.x - 1.5372 * xyz.y - 0.4986 * xyz.z),
+        static_cast<f32>(-0.9689 * xyz.x + 1.8758 * xyz.y + 0.0415 * xyz.z),
+        static_cast<f32>( 0.0557 * xyz.x - 0.2040 * xyz.y + 1.0570 * xyz.z));
+
+    // Clamped, unlike the illuminant conversion. This colour is compared
+    // against texels, which are themselves in [0, 1]; a spectrum outside the
+    // sRGB gamut that came back with a negative channel would pull the unmix
+    // toward weights that no texture can express.
+    return glm::clamp(rgb, glm::vec3(0.0f), glm::vec3(1.0f));
 }
 
 SpectralCurve MakeEqualEnergyIlluminant(f32 lambdaMin_nm, f32 lambdaMax_nm) {

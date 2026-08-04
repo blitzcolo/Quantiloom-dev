@@ -213,5 +213,6 @@ public: void quantiloom::Material::ComputeSpectralAlbedo(void)
 public: void quantiloom::Scene::PrintSummary(void)const
 public: void quantiloom::mcp::Server::Pump(void)
 public: void quantiloom::mcp::Server::Stop(void)
+struct glm::vec<3,float,0> quantiloom::ReflectanceToLinearSrgbD65(struct quantiloom::SpectralCurve const &)
 struct glm::vec<3,float,0> quantiloom::SpectralIrradianceToLinearSrgb(struct quantiloom::SpectralCurve const &)
 struct quantiloom::SpectralCurve quantiloom::MakeEqualEnergyIlluminant(float,float)

@@ -522,6 +522,18 @@ static_assert(sizeof(SolarSpectralLUT) == 544, "SolarSpectralLUT size mismatch! 
 // chromaticity rather than its brightness.
 QL_API glm::vec3 SpectralIrradianceToLinearSrgb(const SpectralCurve& curve);
 
+// Integrate a spectral REFLECTANCE curve under CIE illuminant D65 and return
+// the linear sRGB colour it would appear as, normalised so a perfect diffuser
+// is (1, 1, 1) and clamped to the gamut.
+//
+// D65 rather than the scene's sun because the question this answers is "what
+// colour would a texture author have painted for this material", and sRGB
+// textures are authored against D65 by definition. Use it to compare a
+// measured curve with a base-colour texel -- which is what the endmember
+// unmixer does. It is NOT a rendering path: an actual render illuminates the
+// curve with the scene's own solar spectrum, wavelength by wavelength.
+QL_API glm::vec3 ReflectanceToLinearSrgbD65(const SpectralCurve& reflectance);
+
 // A flat spectrum normalised so its CIE luminance is 1, which puts its linear
 // sRGB at exactly (1, 1, 1): CIE illuminant E, the neutral white illuminant.
 //

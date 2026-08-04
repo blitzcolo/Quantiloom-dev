@@ -210,6 +210,7 @@ set(TEST_CORE_SOURCES
     test_core/test_types.cpp
     test_core/test_image.cpp
     test_core/test_spectral_colour.cpp
+    test_core/test_endmember_unmix.cpp
     test_core/test_spectral_data.cpp
     test_core/test_blackbody_physics.cpp
     test_core/test_ir_energy_conservation.cpp
