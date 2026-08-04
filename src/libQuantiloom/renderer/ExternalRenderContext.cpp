@@ -819,6 +819,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             it != spectra.materialNameToRefractiveIndex.end()) {
             mat.complexRefractiveIndexIndex = it->second;
         }
+        if (auto it = spectra.materialNameToEndmembers.find(mat.name);
+            it != spectra.materialNameToEndmembers.end()) {
+            mat.endmemberCurveIndex1 = it->second.curves[1];
+            mat.endmemberCurveIndex2 = it->second.curves[2];
+            mat.endmemberCurveIndex3 = it->second.curves[3];
+            mat.weightTextureIndex = it->second.weightTextureIndex;
+        }
     }
 
     // 4. Render state before the scene, so the one rebuild AdoptScene triggers

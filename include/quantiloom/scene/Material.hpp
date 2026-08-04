@@ -292,6 +292,10 @@ struct QL_API Material {
         Off         // no weights: the first curve, flat, as before
     };
 
+    // Four: one per channel of an RGBA weight texture, and the most that three
+    // colour equations can be asked to resolve.
+    static constexpr i32 MAX_ENDMEMBERS = 4;
+
     Vector<String> quantiloomExtraRefs;  // endmembers 1..3; endmember 0 is the ref above
     SpectralUnmixMode spectralUnmixMode = SpectralUnmixMode::Auto;
     String spectralWeightTexturePath;    // relative to the config, for Texture mode

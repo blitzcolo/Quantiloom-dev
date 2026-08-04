@@ -841,6 +841,63 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 matTable.GetString("spectral_material_ref", it->quantiloomMaterialRef);
         }
 
+        // Endmembers. The plural key holds the whole list: entry 0 is the same
+        // slot the singular key writes, so a one-entry list and the singular
+        // form mean exactly the same thing. Naming both is refused rather than
+        // merged, because either reading of the intent would be a guess.
+        if (matTable.Has("spectral_material_refs")) {
+            const auto refs = matTable.GetStringArray("spectral_material_refs");
+            if (matTable.Has("spectral_material_ref")) {
+                diag.Fatal("materials.spectral_material_refs",
+                           "  Material '" + name +
+                               "': spectral_material_ref and spectral_material_refs are "
+                               "both set. The plural form already includes the first "
+                               "endmember -- keep one.");
+            } else if (refs.empty()) {
+                diag.Warn("materials.spectral_material_refs",
+                          "  Material '" + name + "': spectral_material_refs is empty");
+            } else if (refs.size() > static_cast<size_t>(Material::MAX_ENDMEMBERS)) {
+                diag.Fatal("materials.spectral_material_refs",
+                           "  Material '" + name + "': " + std::to_string(refs.size()) +
+                               " endmembers, at most " + std::to_string(Material::MAX_ENDMEMBERS) +
+                               " fit in an RGBA weight texture");
+            } else {
+                it->quantiloomMaterialRef = refs.front();
+                it->quantiloomExtraRefs.assign(refs.begin() + 1, refs.end());
+            }
+        }
+
+        if (matTable.Has("spectral_unmix")) {
+            const auto mode = matTable.GetString("spectral_unmix", "auto");
+            if (mode == "auto") {
+                it->spectralUnmixMode = Material::SpectralUnmixMode::Auto;
+            } else if (mode == "texture") {
+                it->spectralUnmixMode = Material::SpectralUnmixMode::Texture;
+            } else if (mode == "off") {
+                it->spectralUnmixMode = Material::SpectralUnmixMode::Off;
+            } else {
+                diag.Warn("materials.spectral_unmix",
+                          "  Material '" + name + "': unknown spectral_unmix '" + mode +
+                              "', expected auto|texture|off. Using auto.");
+                it->spectralUnmixMode = Material::SpectralUnmixMode::Auto;
+            }
+        }
+
+        if (matTable.Has("spectral_weight_texture")) {
+            it->spectralWeightTexturePath = matTable.GetString("spectral_weight_texture", "");
+            if (it->spectralUnmixMode != Material::SpectralUnmixMode::Texture) {
+                diag.Warn("materials.spectral_weight_texture",
+                          "  Material '" + name +
+                              "': spectral_weight_texture is only read with "
+                              "spectral_unmix = \"texture\"; ignoring it");
+            }
+        } else if (it->spectralUnmixMode == Material::SpectralUnmixMode::Texture) {
+            diag.Fatal("materials.spectral_unmix",
+                       "  Material '" + name +
+                           "': spectral_unmix = \"texture\" needs "
+                           "spectral_weight_texture to name one");
+        }
+
         constexpr f32 kMwirNm = 4000.0f;
         constexpr f32 kLwirNm = 10000.0f;
         const f32 emissivity = matTable.GetFloat("ir_emissivity", 0.0f);
@@ -1113,6 +1170,82 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             QL_LOG_INFO("  SpectralBaker data loaded: {} materials, {} bands",
                         basisLoader.GetMaterialCount(), basisLoader.GetNumBands());
 
+            // One reconstruction per distinct reference, not per material that
+            // names it: two surfaces of the same measured concrete are the
+            // same curve, and uploading it twice costs a buffer slot and an
+            // opportunity for them to disagree.
+            struct ResolvedRef {
+                i32 curveIndex = -1;
+                glm::vec3 colorLinear{0.0f};
+                bool hasVisColor = false;
+            };
+            std::unordered_map<String, ResolvedRef> refCache;
+
+            // A reference resolved to a curve index and to the colour it would
+            // read as under D65. Returns nullptr, having logged why, when the
+            // reference names nothing or its band cannot be reconstructed.
+            const auto resolveRef =
+                [&](const String& ref, const String& materialName) -> const ResolvedRef* {
+                if (auto cached = refCache.find(ref); cached != refCache.end()) {
+                    return cached->second.curveIndex >= 0 ? &cached->second : nullptr;
+                }
+
+                const MaterialSpectralData* spectralData = basisLoader.FindMaterial(ref);
+                if (!spectralData) {
+                    spectralData = basisLoader.FindMaterialPartial(ref);
+                    if (spectralData) {
+                        // The full name, because a partial match is where a
+                        // mixture silently binds two endmembers to the same
+                        // library entry, or to the wrong one.
+                        QL_LOG_INFO("    '{}' matched via partial search: '{}'",
+                                    ref, spectralData->name);
+                    }
+                }
+                if (!spectralData) {
+                    QL_LOG_WARN("    Material '{}': '{}' not found in SpectralBaker database",
+                                materialName, ref);
+                    refCache[ref] = ResolvedRef{};
+                    return nullptr;
+                }
+
+                SpectralCurveGPU gpuCurve =
+                    basisLoader.ReconstructCurveGPU(spectralData->name, activeBand);
+                if (gpuCurve.numSamples == 0) {
+                    QL_LOG_WARN("    Material '{}': failed to reconstruct '{}' for band '{}'",
+                                materialName, ref, activeBand);
+                    refCache[ref] = ResolvedRef{};
+                    return nullptr;
+                }
+
+                ResolvedRef entry;
+                entry.curveIndex = static_cast<i32>(out.curves.size());
+                out.curves.push_back(gpuCurve);
+
+                // The VIS reconstruction, separately from the render band: the
+                // colour is only ever compared against a base-colour texel, and
+                // a SWIR curve has no colour to compare.
+                const SpectralCurve visCurve = basisLoader.ReconstructCurve(spectralData->name, "VIS");
+                if (!visCurve.samples.empty()) {
+                    entry.colorLinear = ReflectanceToLinearSrgbD65(visCurve);
+                    entry.hasVisColor = true;
+                }
+
+                const MaterialSpectralData::BandData* bandData = nullptr;
+                if (auto bandIt = spectralData->bands.find(activeBand);
+                    bandIt != spectralData->bands.end()) {
+                    bandData = &bandIt->second;
+                }
+                QL_LOG_INFO("    Reconstructed '{}': {} samples, λ=[{:.1f}, {:.1f}] nm, "
+                            "RMSE={:.4f}, coverage={:.2f} → index {}",
+                            spectralData->name, gpuCurve.numSamples, gpuCurve.startWavelength_nm,
+                            gpuCurve.GetWavelength(gpuCurve.numSamples - 1),
+                            bandData ? bandData->rmse : 0.0f,
+                            bandData ? bandData->coverage : 1.0f, entry.curveIndex);
+
+                auto [it, _] = refCache.emplace(ref, entry);
+                return &it->second;
+            };
+
             for (const auto& mat : scene.materials) {
                 if (!mat.HasQuantiloomRef()) continue;
 
@@ -1127,43 +1260,50 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 QL_LOG_INFO("  Processing Quantiloom material: '{}' -> type='{}', name='{}'",
                             mat.name, mat.quantiloomMaterialType, mat.quantiloomMaterialRef);
 
-                const MaterialSpectralData* spectralData =
-                    basisLoader.FindMaterial(mat.quantiloomMaterialRef);
-                if (!spectralData) {
-                    spectralData = basisLoader.FindMaterialPartial(mat.quantiloomMaterialRef);
-                    if (spectralData) {
-                        QL_LOG_INFO("    Matched via partial search: '{}'", spectralData->name);
-                    }
-                }
-                if (!spectralData) {
-                    QL_LOG_WARN("    Material '{}' not found in SpectralBaker database",
-                                mat.quantiloomMaterialRef);
-                    continue;
+                // Endmember 0 is the material's own reference. If it does not
+                // resolve there is no mixture to speak of, and the material
+                // falls back to RGB upsampling exactly as it did before.
+                const ResolvedRef* first = resolveRef(mat.quantiloomMaterialRef, mat.name);
+                if (!first) continue;
+
+                EndmemberSlots slots;
+                slots.unmix = mat.spectralUnmixMode;
+                slots.weightTexturePath = mat.spectralWeightTexturePath;
+                slots.curves[0] = first->curveIndex;
+                slots.colorsLinear[0] = first->colorLinear;
+                slots.count = 1;
+                bool everyEndmemberHasColor = first->hasVisColor;
+
+                for (const auto& extraRef : mat.quantiloomExtraRefs) {
+                    if (slots.count >= Material::MAX_ENDMEMBERS) break;
+                    const ResolvedRef* extra = resolveRef(extraRef, mat.name);
+                    if (!extra) continue;
+                    slots.curves[slots.count] = extra->curveIndex;
+                    slots.colorsLinear[slots.count] = extra->colorLinear;
+                    everyEndmemberHasColor = everyEndmemberHasColor && extra->hasVisColor;
+                    ++slots.count;
                 }
 
-                SpectralCurveGPU gpuCurve =
-                    basisLoader.ReconstructCurveGPU(spectralData->name, activeBand);
-                if (gpuCurve.numSamples == 0) {
-                    QL_LOG_WARN("    Failed to reconstruct curve for band '{}'", activeBand);
-                    continue;
+                // Unmixing compares endmember colours against a texel, so an
+                // endmember with no visible-light spectrum has nothing to
+                // compare. Better one flat measured curve than a mixture
+                // weighted by a colour that was invented.
+                if (slots.unmix != Material::SpectralUnmixMode::Off && !everyEndmemberHasColor) {
+                    diag.Warn("materials.spectral_material_refs",
+                              "  Material '" + mat.name +
+                                  "': an endmember has no VIS band, so its colour is unknown "
+                                  "and the weights cannot be derived. Falling back to the "
+                                  "first curve, flat.");
+                    slots.unmix = Material::SpectralUnmixMode::Off;
                 }
 
                 // Keyed by the glTF material name, not the spectral reference.
-                const i32 curveIndex = static_cast<i32>(out.curves.size());
-                out.materialNameToCurve[mat.name] = curveIndex;
-                out.curves.push_back(gpuCurve);
+                out.materialNameToCurve[mat.name] = slots.curves[0];
+                out.materialNameToEndmembers[mat.name] = slots;
 
-                const MaterialSpectralData::BandData* bandData = nullptr;
-                if (auto bandIt = spectralData->bands.find(activeBand);
-                    bandIt != spectralData->bands.end()) {
-                    bandData = &bandIt->second;
+                if (slots.count > 1) {
+                    QL_LOG_INFO("    Mixture of {} endmembers", slots.count);
                 }
-
-                QL_LOG_INFO("    Reconstructed: {} samples, λ=[{:.1f}, {:.1f}] nm, "
-                            "RMSE={:.4f} → index {}",
-                            gpuCurve.numSamples, gpuCurve.startWavelength_nm,
-                            gpuCurve.GetWavelength(gpuCurve.numSamples - 1),
-                            bandData ? bandData->rmse : 0.0f, curveIndex);
             }
         } else {
             diag.Warn("spectral.basis_file",

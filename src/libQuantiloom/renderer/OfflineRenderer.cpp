@@ -402,6 +402,14 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             QL_LOG_INFO("  Material '{}': using physical Fresnel (CRI index {})",
                         mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToEndmembers.find(mat.name);
+            it != spectra.materialNameToEndmembers.end()) {
+            const auto& slotsIn = it->second;
+            slots.endmemberCurve1 = slotsIn.curves[1];
+            slots.endmemberCurve2 = slotsIn.curves[2];
+            slots.endmemberCurve3 = slotsIn.curves[3];
+            slots.weightTexture = slotsIn.weightTextureIndex;
+        }
 
         materialIndices.push_back(slots);
     }

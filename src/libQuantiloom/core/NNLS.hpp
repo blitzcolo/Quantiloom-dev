@@ -14,14 +14,16 @@
 #pragma once
 
 #include "core/Types.hpp"
+#include "scene/Material.hpp"
 
 #include <glm/glm.hpp>
 
 namespace quantiloom {
 
-// Maximum endmembers in one mixture. Four because that is what fits in an
-// RGBA8 weight texture, and because three RGB equations cannot resolve more.
-inline constexpr i32 MAX_ENDMEMBERS = 4;
+// Maximum endmembers in one mixture, from the material model that defines it
+// (scene/Material.hpp). Aliased rather than redeclared: two constants that
+// must agree are one constant with extra steps.
+inline constexpr i32 MAX_ENDMEMBERS = Material::MAX_ENDMEMBERS;
 
 // Ridge term added to the normal equations. With k = 4 the system is
 // underdetermined (three equations, four unknowns) and the unregularised

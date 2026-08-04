@@ -366,6 +366,8 @@ bool SpectralBasisLoader::LoadMaterials(const std::filesystem::path& jsonFilePat
                                     bandData.rmse = ParseNumber(json, pos);
                                 } else if (bandKey == "explained_variance") {
                                     bandData.explainedVariance = ParseNumber(json, pos);
+                                } else if (bandKey == "coverage") {
+                                    bandData.coverage = ParseNumber(json, pos);
                                 } else {
                                     SkipValue(json, pos);
                                 }

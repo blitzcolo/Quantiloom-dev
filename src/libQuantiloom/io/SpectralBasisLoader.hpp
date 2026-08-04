@@ -128,6 +128,12 @@ struct MaterialSpectralData {
         std::vector<f32> weights;         // NMF weights [numBasis]
         f32 rmse = 0.0f;                  // Reconstruction RMSE
         f32 explainedVariance = 0.0f;     // Explained variance ratio
+
+        // Fraction of the band the source measurement actually spans [0, 1].
+        // Below 1 the reconstruction extrapolates over the rest, which is a
+        // fit rather than a measurement -- ECOSTRESS in particular has entries
+        // whose spectra start well into the red and so cover ~0.84 of VIS.
+        f32 coverage = 1.0f;
     };
 
     std::unordered_map<String, BandData> bands;  // "VIS", "NIR", "SWIR", "MWIR", "LWIR"

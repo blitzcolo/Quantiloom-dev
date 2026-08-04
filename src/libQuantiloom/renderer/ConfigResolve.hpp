@@ -139,9 +139,34 @@ struct ResolvedRenderConfig {
  * Material objects themselves, which is where its own buffer builder reads
  * them. Same data, two conventions.
  */
+/**
+ * @brief One material's endmember mixture, resolved against the curve buffer
+ *
+ * curves[0] is the same index materialNameToCurve holds for this material --
+ * endmember 0 is the material's own reference, not a separate thing.
+ *
+ * colorsLinear is what each curve looks like under D65, and it exists so the
+ * unmixer can ask "how much of each of these is this texel". Always taken from
+ * the VIS band whatever the render band is: the weights are a spatial
+ * abundance, wavelength-independent by construction, while the texture that
+ * suggests them is a visible-light image.
+ */
+struct EndmemberSlots {
+    i32 curves[Material::MAX_ENDMEMBERS] = {-1, -1, -1, -1};
+    glm::vec3 colorsLinear[Material::MAX_ENDMEMBERS]{};
+    i32 count = 0;
+    Material::SpectralUnmixMode unmix = Material::SpectralUnmixMode::Auto;
+    String weightTexturePath;
+    i32 weightTextureIndex = -1;  ///< filled by the unmixer, after this resolve
+};
+
 struct ResolvedMaterialSpectra {
     Vector<SpectralCurveGPU> curves;
     std::unordered_map<String, i32> materialNameToCurve;
+
+    /// Endmember mixtures, keyed like materialNameToCurve. A material appears
+    /// in both: the first map is endmember 0, this one is the whole mixture.
+    std::unordered_map<String, EndmemberSlots> materialNameToEndmembers;
 
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
