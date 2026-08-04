@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.21)
 # Project Definition
 # ============================================================================
 project(Quantiloom
-    VERSION 0.1.6
+    VERSION 0.1.7
     DESCRIPTION "Unified Spectral Path Tracing System on Vulkan Ray Tracing"
     LANGUAGES CXX
 )
