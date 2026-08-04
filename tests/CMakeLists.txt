@@ -252,6 +252,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_environment_cubemap.cpp
     test_renderer/test_scene_geometry.cpp
     test_renderer/test_material_conversion.cpp
+    test_renderer/test_spectral_unmixer.cpp
     test_renderer/test_depth_aov.cpp
     test_renderer/test_pick.cpp
     test_renderer/test_config_duplicates.cpp

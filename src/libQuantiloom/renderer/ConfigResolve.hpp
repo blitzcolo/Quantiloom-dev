@@ -71,6 +71,17 @@
 namespace quantiloom::rendercore {
 
 /**
+ * @brief Resolve a path a config named, the way every other config path is
+ *
+ * Against the config's own directory when that finds the file, and otherwise
+ * left as written -- the two conventions in use are a self-contained scene
+ * folder and a repo-root-relative CLI config, and both have to keep working.
+ * See the definition for the full reasoning. Declared here because anything
+ * that reads a file a config pointed at has to agree about this.
+ */
+String ResolveConfigPath(const String& path, const String& baseDir);
+
+/**
  * @brief Everything a scene TOML says that does not depend on the scene file.
  */
 struct ResolvedRenderConfig {

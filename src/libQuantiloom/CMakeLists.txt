@@ -114,6 +114,8 @@ add_library(quantiloom_core OBJECT
     renderer/RenderCore.hpp
     renderer/ConfigResolve.cpp
     renderer/ConfigResolve.hpp
+    renderer/SpectralUnmixer.cpp
+    renderer/SpectralUnmixer.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
     renderer/OfflineRenderer.cpp

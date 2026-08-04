@@ -10,6 +10,7 @@
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/SpectralUnmixer.hpp"
 #include "renderer/RenderCore.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
@@ -810,6 +811,23 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // this path has no such table, because UpdateGpuResources() reads the
     // indices off each Material. Same mapping, written where this side looks
     // for it -- and it must happen before AdoptScene, which builds the buffer.
+    // Endmember weight maps first: it reads the base-colour pixels, which
+    // AdoptScene's upload releases, and it fills in the weight texture indices
+    // the loop below copies onto the materials.
+    rendercore::BuildUnmixWeightTextures(loadedScene, spectra, options.baseDir, report);
+
+    // Keep the base colours of curve-bound materials readable. Assigning a new
+    // endmember from the library panel re-unmixes them, and by then the only
+    // other copy is compressed and mipped on the device.
+    for (const auto& mat : loadedScene.materials) {
+        if (!spectra.materialNameToEndmembers.contains(mat.name)) continue;
+        if (mat.baseColorTextureIndex < 0 ||
+            mat.baseColorTextureIndex >= static_cast<i32>(loadedScene.textures.size())) {
+            continue;
+        }
+        loadedScene.textures[static_cast<usize>(mat.baseColorTextureIndex)].retainCpuPixels = true;
+    }
+
     for (auto& mat : loadedScene.materials) {
         if (auto it = spectra.materialNameToCurve.find(mat.name);
             it != spectra.materialNameToCurve.end()) {

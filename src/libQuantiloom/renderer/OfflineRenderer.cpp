@@ -35,6 +35,7 @@
 #include "core/SpectralData.hpp"
 #include "io/SpectralIO.hpp"
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/SpectralUnmixer.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/GpuBuffer.hpp"
@@ -203,6 +204,13 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
         return SetupResult::Err(std::move(spectraResult).error());
     }
     spectra = std::move(spectraResult.value());
+
+    // Endmember weight maps, unmixed out of the base colours. Here because it
+    // needs both what the resolve just produced (the endmember colours) and
+    // what the upload is about to destroy (the base-colour pixels): the window
+    // is exactly between the two.
+    rendercore::BuildUnmixWeightTextures(loadedScene, spectra, configOptions.baseDir,
+                                         configReport);
 
     // Merged geometry buffers, one BLAS per primitive, a TLAS over the node
     // instances, and the per-instance offset table the closest-hit shader indexes
