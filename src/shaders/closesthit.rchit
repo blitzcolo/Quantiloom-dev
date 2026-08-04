@@ -267,6 +267,66 @@ float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallb
                                 float2(0.0, 0.0), float2(0.0, 0.0), fallback);
 }
 
+// ============================================================================
+// Endmember Mixing
+// ============================================================================
+// rho(lambda, uv) = sum_i w_i(uv) * rho_i(lambda)
+//
+// A bound spectral curve replaces the base-colour texture, so a measured
+// surface renders as one flat reflectance and loses everything the texture
+// said about where it varies. Mixing several measured curves per texel gives
+// that back without giving up the measurement: the spectra stay exactly what
+// was measured, and only how much of each is present varies across the
+// surface.
+//
+// The weights come from a texture the loader unmixes out of the base colour,
+// channel i holding w_i / 2. Halved because a single-endmember mixture is
+// brightness modulation and needs w > 1 wherever the texture is brighter than
+// the curve's own colour, which a UNORM texture cannot otherwise store.
+// ============================================================================
+
+// Weights for this texel. No weight texture means the first endmember alone,
+// which reproduces the flat single-curve behaviour exactly.
+float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
+    if (material.weightTextureIndex < 0) {
+        return float4(1.0, 0.0, 0.0, 0.0);
+    }
+
+    // LOD 0: the weight map is data, and a mip average of it would blend
+    // materials that are not adjacent in the mixture.
+    float4 w = 2.0 * SampleTexture(material.weightTextureIndex,
+                                   material.weightTextureIndex, uv,
+                                   float4(0.5, 0.0, 0.0, 0.0));
+
+    // A texel with no material in it at all is a black surface, which is
+    // almost always a hole in the unmix rather than a physical black. Fall
+    // back to the first curve rather than render nothing.
+    if (w.x + w.y + w.z + w.w < 1e-4) {
+        return float4(1.0, 0.0, 0.0, 0.0);
+    }
+    return w;
+}
+
+// Mixed reflectance at one wavelength. The weights are NOT normalised -- a
+// texel darker than every endmember is a legitimately dimmer patch of the same
+// material, which is the whole point -- so the sum is clamped instead.
+float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
+                                   MaterialData material, float2 uv, float lambda) {
+    float4 w = SampleEndmemberWeights(material, uv);
+
+    float rho = w.x * EvaluateSpectralCurve(curves, material.spectralReflectanceCurveIndex, lambda);
+    if (material.endmemberCurveIndex1 >= 0) {
+        rho += w.y * EvaluateSpectralCurve(curves, material.endmemberCurveIndex1, lambda);
+    }
+    if (material.endmemberCurveIndex2 >= 0) {
+        rho += w.z * EvaluateSpectralCurve(curves, material.endmemberCurveIndex2, lambda);
+    }
+    if (material.endmemberCurveIndex3 >= 0) {
+        rho += w.w * EvaluateSpectralCurve(curves, material.endmemberCurveIndex3, lambda);
+    }
+    return saturate(rho);
+}
+
 // Compute UV differentials from ray differentials
 // Estimates how UV coordinates change per screen pixel using ray differentials
 //
@@ -1026,7 +1086,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 // Quantitative path: measured spectral curve
-                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
             } else {
                 // Fallback path: RGB → Spectrum upsampling
                 rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
@@ -1236,12 +1296,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         if (material.spectralReflectanceCurveIndex >= 0) {
             // QUANTITATIVE PATH: Use physically-measured spectral reflectance curve
-            // This enables physically-accurate spectral rendering
-            spectralAlbedo = EvaluateSpectralCurve(
-                spectralCurves,
-                material.spectralReflectanceCurveIndex,
-                lambda
-            );
+            // This enables physically-accurate spectral rendering.
+            // One endmember and no weight texture is the single flat curve.
+            spectralAlbedo = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
         } else {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
             // WARNING: This path does NOT guarantee physical accuracy
@@ -1411,7 +1468,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 2. Get spectral reflectance at this wavelength
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
-                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
             } else {
                 // Fallback: use IR reflectance from energy conservation
                 rho_lambda = reflectance;
@@ -1525,7 +1582,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 // Quantitative path: use measured spectral curve
-                rho_lambda = EvaluateSpectralCurve(spectralCurves, material.spectralReflectanceCurveIndex, lambda);
+                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
             } else {
                 // Fallback: RGB upsampling (NIR is close enough to visible for this to be reasonable)
                 // This uses Gaussian basis functions centered at R/G/B wavelengths
@@ -1690,7 +1747,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // large -- visible as grazing surfaces, where Fresnel makes
                 // reflectance large, rendering brighter than a blackbody at the
                 // scene's own temperature.
-                L_env_shared = irPayload.radiance.r * (reflectance / (PI * pdf_ir)) * NdotWi;
+                //
+                // Reflectance is NOT folded in here. A material carrying a
+                // measured curve has a reflectance that varies across the
+                // band, so it has to multiply inside the wavelength loop; the
+                // shared sample is the incident radiance alone.
+                L_env_shared = irPayload.radiance.r * (1.0 / (PI * pdf_ir)) * NdotWi;
             }
         }
 
@@ -1699,24 +1761,46 @@ void main(inout Payload payload, in HitAttributes attribs) {
         for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
             float lambda = lambda_min + float(i) * lambda_step;
 
+            // 0. Emissivity and reflectance at this wavelength.
+            // ================================================================
+            // Kirchhoff's law in thermal equilibrium: a surface emits exactly
+            // as well as it absorbs, so eps = 1 - rho - tau. With a measured
+            // reflectance curve bound, that makes emissivity spectral AND
+            // spatial for free -- the same endmember weights that vary the
+            // reflectance across the surface vary what it radiates, which is
+            // the thing a thermal image is actually of.
+            //
+            // Without a curve these stay the scalars computed outside the
+            // loop, so materials that never had one render bit for bit as
+            // before.
+            float emissivity_l = emissivity;
+            float reflectance_l = reflectance;
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                float rho_l = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+                float eps_l = saturate(1.0 - rho_l - material.irTransmittance);
+                emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
+                reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
+                                                              NdotV, material.metallicFactor);
+            }
+
             // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)
             float L_emission = 0.0;
             if (T_surface > 0.0) {
                 float L_blackbody = IRPlanckRadiance(T_surface, lambda);
-                L_emission = emissivity * L_blackbody;
+                L_emission = emissivity_l * L_blackbody;
             }
 
             // 2. Reflected environmental IR radiance
             float L_reflected_atm;
             if (tracedEnvSample) {
-                L_reflected_atm = L_env_shared;
+                L_reflected_atm = reflectance_l * L_env_shared;
             } else {
                 // Max depth: per-wavelength downwelling from NN LUT when
                 // baked, otherwise fixed atmospheric Planck
                 float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
                     ? SampleAtmosLdown(atmos, atmosNNData, i)
                     : IRPlanckRadiance(T_atmosphere, lambda);
-                L_reflected_atm = reflectance * L_down;
+                L_reflected_atm = reflectance_l * L_down;
             }
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
@@ -1744,7 +1828,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // View-path attenuation comes from the NN composition below;
                 // sun-path attenuation is folded into the illumination source.
                 float sun_radiance_lambda = sun_irr_lambda / PI;
-                L_reflected_sun = reflectance * sun_radiance_lambda * NdotL;
+                L_reflected_sun = reflectance_l * sun_radiance_lambda * NdotL;
             }
 
             // 4. IR Transmittance: Background radiation through transparent materials
