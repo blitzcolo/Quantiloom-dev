@@ -110,6 +110,13 @@
 
 static const uint MAX_PATH_DEPTH = 8;
 
+// Bounces below this depth are always traced when the surface reflects at all;
+// deeper ones survive with probability equal to that reflectance. Two keeps the
+// guaranteed levels the fixed `depth < 2` gate used to provide, so nothing that
+// converged before converges more slowly now, and the roulette above it is what
+// lets a polished cavity keep bouncing while a matte one stops after one.
+static const uint BOUNCE_DEPTH_DETERMINISTIC = 2;
+
 // ============================================================================
 // RGB Channel Representative Wavelengths (sRGB primaries approximation)
 // ============================================================================
@@ -1701,6 +1708,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint  NUM_IR_SAMPLES = 16;  // Fewer samples than visible (smoother spectra)
         const float lambda_step = (lambda_max - lambda_min) / float(NUM_IR_SAMPLES - 1);
 
+        // A ray spawned by an environment bounce carries one wavelength, not
+        // the band: the surface that spawned it sampled that wavelength and
+        // weighs what comes back by it, so integrating the whole band along
+        // this path would answer a question nobody asked. It reports scalar
+        // spectral radiance, by the contract on Payload::heroLambda.
+        const bool heroRay = (payload.heroLambda > 0.0);
+        const uint sampleCount = heroRay ? 1u : NUM_IR_SAMPLES;
+        float heroRadiance = 0.0;
+
         // Accumulate band-integrated radiance
         float radiance_accum = 0.0;
 
@@ -1733,60 +1749,143 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Check if we have spectral solar LUT for accurate MWIR illumination
         bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
 
-        // Sun solid angle for converting surface radiance to irradiance
-        // Ω_sun ≈ 6.8e-5 sr (subtends ~0.53° angular diameter)
-        const float SUN_SOLID_ANGLE_SR = 6.8e-5;
+        // ====================================================================
+        // Reflected environment: one ray, one wavelength, residual form
+        // ====================================================================
+        // The wavelength loop below already reflects the analytic downwelling
+        // spectrum -- rho(lambda) * L_down(lambda) -- from every direction at
+        // once. That is a complete answer for a surface under an unobstructed
+        // sky and a wrong one for a surface that can see other surfaces, so
+        // this ray carries only the difference:
+        //
+        //     Corr = rho(lambda_b) * W_dir * (L_in(lambda_b) - L_base(lambda_b))
+        //
+        // with lambda_b uniform over the band. Its expectation is the full
+        // reflected-environment integral minus the base the loop already paid,
+        // so base + Corr is unbiased -- and in an isothermal cavity, where the
+        // incoming radiance IS the base by induction, the difference is
+        // identically zero and the estimator has no variance at all. That is
+        // what keeps the furnace suite exact at 1 spp while the same code
+        // renders interreflection in a scene that has some.
+        //
+        // One ray, not sixteen. The wavelength is sampled rather than looped
+        // because a ray per wavelength multiplies the path count 16x per
+        // bounce for information a single correlated sample already carries:
+        // rho and L_in are evaluated at the SAME lambda_b, which is exactly the
+        // correlation the old band-averaged shared sample destroyed. A surface
+        // with a sloped emissivity curve reflecting a surface at a different
+        // temperature could not be rendered before this.
+        //
+        // The wavelength this bounce is accountable for. A ray that already
+        // carries one keeps it: it was sampled by the surface that spawned it
+        // and the whole chain has to answer at that wavelength. Hoisted above
+        // the depth gate because the wavelength loop needs its LUT index too.
+        const float lambda_b = heroRay
+            ? payload.heroLambda
+            : lambda_min + pcg_float(payload.rngState) * (lambda_max - lambda_min);
 
-        // Reflected environmental IR radiance: ONE shared Monte Carlo
-        // hemisphere sample for the whole band. The recursive trace returns
-        // BAND-INTEGRATED radiance (secondary hits run this same branch), so
-        // per-wavelength rays carry no extra spectral information -- they only
-        // multiply the ray count 16x per bounce (16^depth ray explosion).
-        // Directional variance is covered by the SPP accumulation loop.
-        bool tracedEnvSample = (payload.depth < 2);
-        float L_env_shared = 0.0;
-        if (tracedEnvSample) {
-            float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-            float pdf_ir;
-            float3 wi_ir = (roughness > 0.5)
-                ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_ir)
-                : ImportanceSampleGGX_PCG(normal, -WorldRayDirection(), roughness*roughness, payload.rngState, pdf_ir);
-            float NdotWi = dot(normal, wi_ir);
-            if (NdotWi > 0.0 && pdf_ir > 1e-6) {
-                RayDesc irRay;
-                irRay.Origin    = irHitPos + normal * 1e-3;
-                irRay.Direction = wi_ir;
-                irRay.TMin      = 0.0;
-                irRay.TMax      = 1e9;
-                Payload irPayload;
-                irPayload.radiance   = float3(0,0,0);
-                irPayload.depth      = payload.depth + 1;
-                irPayload.rngState   = payload.rngState;
-                irPayload.isShadowed = 0;
-                irPayload.heroLambda = 0.0;  // IR bands are not hero-sampled
-                irPayload.dDdx       = float3(0,0,0);
-                irPayload.dDdy       = float3(0,0,0);
-                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
-                // fr = reflectance/PI (Lambertian). The PI belongs in the BRDF:
-                // with pdf = NdotWi/PI the cosine path reduces to reflectance *
-                // L, which is what "importance sampling cancels PI" means. It
-                // was missing here, so every reflected IR term was PI x too
-                // large -- visible as grazing surfaces, where Fresnel makes
-                // reflectance large, rendering brighter than a blackbody at the
-                // scene's own temperature.
-                //
-                // Reflectance is NOT folded in here. A material carrying a
-                // measured curve has a reflectance that varies across the
-                // band, so it has to multiply inside the wavelength loop; the
-                // shared sample is the incident radiance alone.
-                L_env_shared = irPayload.radiance.r * (1.0 / (PI * pdf_ir)) * NdotWi;
+        // The atmosphere LUT is baked on the loop's own sample points, so a
+        // sampled wavelength has no index of its own -- take the nearest, as
+        // VIS_FUSED does for a hero ray.
+        const uint atmosIdx_b = (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
+                                            0.0, float(NUM_IR_SAMPLES - 1));
+
+        float bounceCorr = 0.0;
+        if (payload.depth < MAX_PATH_DEPTH) {
+            // Reflectance at lambda_b, by the same rule the loop uses.
+            float rho_b = reflectance;
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                float rho_l = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b);
+                float eps_l = saturate(1.0 - rho_l - material.irTransmittance);
+                rho_b = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
+                                                       NdotV, material.metallicFactor);
+            }
+
+            // Russian roulette on reflectance, applied to the correction only.
+            // The base term is always paid, so a killed bounce is not a lost
+            // path -- it falls back to the analytic sky, which is the honest
+            // answer when nothing else is known. Surviving with probability
+            // rho_b makes the weight rho_b/p = 1, so a mirror keeps bouncing at
+            // full strength and a near-black surface almost never does.
+            bool  traceBounce = (rho_b > 0.0);
+            float rrWeight    = rho_b;
+            if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
+                traceBounce = (pcg_float(payload.rngState) < rho_b);
+                rrWeight    = 1.0;
+            }
+
+            if (traceBounce) {
+                float pdf_ir;
+                const bool diffuseLobe = (roughness > 0.5);
+                float3 wi_ir = diffuseLobe
+                    ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_ir)
+                    : ImportanceSampleGGX_PCG(normal, V, roughness*roughness, payload.rngState, pdf_ir);
+                float NdotWi = dot(normal, wi_ir);
+                if (NdotWi > 0.0 && pdf_ir > 1e-6) {
+                    // f * cos / pdf, with the reflectance factored out into
+                    // rrWeight above.
+                    //
+                    //   cosine lobe: f = 1/PI, pdf = cos/PI, so the weight is 1.
+                    //   GGX lobe:    D cancels against the pdf and what is left
+                    //                is G * VdotH / (NdotV * NdotH).
+                    //
+                    // The GGX case used to be weighted as if it were the cosine
+                    // one, which made every smooth surface reflect the
+                    // environment as a Lambertian. A polished panel could not
+                    // mirror the cold sky, which is one of the most recognisable
+                    // things in a thermal image.
+                    float W_dir = 1.0;
+                    if (!diffuseLobe) {
+                        float3 H     = normalize(V + wi_ir);
+                        float  VdotH = max(dot(V, H), 1e-4);
+                        float  NdotH = max(dot(normal, H), 1e-4);
+                        W_dir = GeometrySmith_IBL(NdotV, NdotWi, roughness) *
+                                VdotH / (max(NdotV, 1e-4) * NdotH);
+                    }
+
+                    float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+                    RayDesc irRay;
+                    irRay.Origin    = irHitPos + normal * 1e-3;
+                    irRay.Direction = wi_ir;
+                    irRay.TMin      = 0.0;
+                    irRay.TMax      = 1e9;
+
+                    Payload irPayload;
+                    irPayload.radiance    = float3(0,0,0);
+                    irPayload.depth       = payload.depth + 1;
+                    irPayload.rngState    = payload.rngState;
+                    irPayload.isShadowed  = 0;
+                    irPayload.heroLambda  = lambda_b;
+                    irPayload.dDdx        = float3(0,0,0);
+                    irPayload.dDdy        = float3(0,0,0);
+                    irPayload.primaryHitT = -1.0;
+                    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, irRay, irPayload);
+
+                    // Carry the child's consumption forward. Without this the
+                    // parent's later draws repeat numbers the child already
+                    // used, and with paths this long that correlation is
+                    // visible.
+                    payload.rngState = irPayload.rngState;
+
+                    // The base this correction is measured against: the same
+                    // downwelling the loop reflects, at lambda_b.
+                    float L_base_b = (atmos.enabled != 0 && atmos.hasLdown != 0)
+                        ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx_b)
+                        : IRPlanckRadiance(T_atmosphere, lambda_b);
+
+                    bounceCorr = rrWeight * W_dir * (irPayload.radiance.r - L_base_b);
+                }
             }
         }
 
-        // Loop over wavelengths in IR band ([loop]: keep code size bounded)
+        // Loop over wavelengths in IR band ([loop]: keep code size bounded).
+        // A hero ray runs one iteration at its own wavelength and reports a
+        // scalar; see Payload::heroLambda.
         [loop]
-        for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
-            float lambda = lambda_min + float(i) * lambda_step;
+        for (uint i = 0; i < sampleCount; ++i) {
+            float lambda = heroRay ? payload.heroLambda
+                                   : lambda_min + float(i) * lambda_step;
+            uint  atmosIdx = heroRay ? atmosIdx_b : i;
 
             // 0. Emissivity and reflectance at this wavelength.
             // ================================================================
@@ -1817,18 +1916,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_emission = emissivity_l * L_blackbody;
             }
 
-            // 2. Reflected environmental IR radiance
-            float L_reflected_atm;
-            if (tracedEnvSample) {
-                L_reflected_atm = reflectance_l * L_env_shared;
-            } else {
-                // Max depth: per-wavelength downwelling from NN LUT when
-                // baked, otherwise fixed atmospheric Planck
-                float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
-                    ? SampleAtmosLdown(atmos, atmosNNData, i)
-                    : IRPlanckRadiance(T_atmosphere, lambda);
-                L_reflected_atm = reflectance_l * L_down;
-            }
+            // 2. Reflected environment, base term.
+            // ================================================================
+            // The whole hemisphere filled with the analytic downwelling
+            // spectrum. Unconditional now: this is not the fallback it used to
+            // be when the traced sample was unavailable, it is the control
+            // variate the traced sample corrects. Two things follow from that.
+            // It is per-wavelength and exact, so a measured reflectance curve
+            // multiplies the right spectrum at every lambda rather than a band
+            // average. And it is the closure at the end of every path -- a
+            // bounce that is killed, or that runs out of depth, leaves this
+            // standing, which is why an isothermal cavity still returns its own
+            // Planck radiance no matter where the path stops.
+            float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
+                ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx)
+                : IRPlanckRadiance(T_atmosphere, lambda);
+            float L_reflected_atm = reflectance_l * L_down;
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
             float L_reflected_sun = 0.0;
@@ -1874,7 +1977,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // For IR, we approximate background as atmospheric thermal emission
                 // In a full implementation, would trace through and sample far surface
                 float L_background = (atmos.enabled != 0 && atmos.hasLdown != 0)
-                    ? SampleAtmosLdown(atmos, atmosNNData, i)
+                    ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx)
                     : IRPlanckRadiance(T_atmosphere, lambda);
                 L_transmitted = transmittance * L_background;
 
@@ -1889,9 +1992,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             // (MWIR L_path already merges PTH_THRML + night-gated SOL_SCAT at bake time)
             if (atmosEnabled) {
-                float tau_l = SampleAtmosTau(atmos, atmosNNData, i, atmosA);
-                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, i, atmosA, atmosAz);
+                float tau_l = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
+                float lpath_l = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
                 L_lambda = tau_l * L_lambda + lpath_l;
+            }
+
+            if (heroRay) {
+                // Scalar spectral radiance: no trapezoid weight and no band
+                // normalisation. The surface that sampled this wavelength
+                // applies whatever weighting it owes.
+                heroRadiance = L_lambda;
+                continue;
             }
 
             // Accumulate (Riemann sum)
@@ -1909,7 +2020,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // This allows fair comparison across bands with different bandwidths.
         // For sensor simulation or thermal analysis, use radiance_accum (band-integrated radiance).
         float band_width = lambda_max - lambda_min;
-        float radiance_avg = radiance_accum / band_width;
+        float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
+
+        // The bounce correction. Sampling lambda_b uniformly gives pdf =
+        // 1/band_width, which cancels the 1/band_width the band average carries,
+        // so the estimator is added with no further weight -- and it is the same
+        // expression for a hero ray, where neither factor is present. Multiplying
+        // by band_width here and dividing again above is the mistake to avoid.
+        //
+        // The view-path transmittance still applies: the loop's terms each got
+        // tau(lambda_i), so this one gets tau(lambda_b). L_path does not -- it is
+        // added once per pixel by the loop, not once per light path.
+        if (atmosEnabled) {
+            bounceCorr *= SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
+        }
+        radiance_avg += bounceCorr;
 
         // Validation
         if (!isfinite(radiance_avg)) {
@@ -2812,17 +2937,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // The wavelength this ray is accountable for, or 0 where the mode
             // has none and n falls back to the material's n_d.
             //
-            //   VIS_FUSED carrying a hero wavelength -> that wavelength
-            //   VIS_FUSED undivided, or RGB           -> none
-            //   SINGLE and the fused IR bands         -> the render wavelength
+            //   any band, ray carrying a hero wavelength -> that wavelength
+            //   VIS_FUSED undivided, or RGB              -> none
+            //   SINGLE and the undivided fused IR bands  -> the render wavelength
             //
             // A hero ray reaching here means the material does not disperse, or
             // it is the second dispersive interface on the same path. Either
-            // way it keeps refracting at its own wavelength.
+            // way it keeps refracting at its own wavelength -- and since the IR
+            // bands now spawn hero rays of their own for the environment
+            // bounce, a bounce that then passes through a window has to refract
+            // at the wavelength it was sampled for, not at camera.wavelength_nm.
             float refractLambda;
-            if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
-                refractLambda = payload.heroLambda;   // 0 when undivided
-            } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
+            if (payload.heroLambda > 0.0) {
+                refractLambda = payload.heroLambda;
+            } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+                       SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
                 refractLambda = 0.0;
             } else {
                 refractLambda = camera.wavelength_nm;

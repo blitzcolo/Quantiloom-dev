@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Render the six furnace cavities and check each against Planck.
+# Render the furnace cavities and check each against Planck.
 #
 # An isothermal cavity must return B(T) from every direction and for every
 # emissivity -- Kirchhoff, with no free parameters. That makes these the only
@@ -32,7 +32,23 @@ CLI="${CLI:-./build/src/app/Release/Quantiloom.exe}"
 
 fail=0
 for band in lwir mwir; do
-    for case in e1 e05 rho1; do
+    # Two LWIR-only cavities, each covering something the grey ones cannot.
+    #
+    #   spectral  measured quartz emissivity. Fails if eps(lambda) and the
+    #             incident radiance are evaluated at different wavelengths --
+    #             invisible to a grey wall, where rhō·L̄ and <rho·L> are the
+    #             same number, and 1.15% here.
+    #   specular  the same wall at roughness 0.2, which routes the bounce
+    #             through the GGX lobe. Every other cavity is roughness 1, so
+    #             nothing else here weights a specular sample; getting that
+    #             weight wrong reads 8.8% low.
+    #
+    # Both are LWIR because quartz's reststrahlen band is, and a flat curve
+    # would test neither.
+    cases="e1 e05 rho1"
+    [ "$band" = lwir ] && cases="e1 e05 rho1 spectral specular"
+
+    for case in $cases; do
         cfg="assets/configs/furnace_${band}_${case}.toml"
         out="furnace_${band}_${case}_output.exr"
 
@@ -65,7 +81,7 @@ for band in lwir mwir; do
 done
 
 if [ "$fail" = 0 ]; then
-    echo "furnace suite: all six cavities within tolerance"
+    echo "furnace suite: all cavities within tolerance"
 else
     echo "furnace suite: FAILURES above" >&2
 fi

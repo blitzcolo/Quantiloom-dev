@@ -1,0 +1,62 @@
+# Furnace cavity, measured spectral emissivity, SMOOTH walls. LWIR, T=300K
+#
+# Identical to furnace_lwir_spectral.toml except roughnessFactor is 0.2, which
+# is what routes the environment bounce through the GGX lobe instead of the
+# cosine one. Every other cavity in the suite is roughness 1, so this is the
+# only check on the bounce's specular weighting.
+#
+# Kirchhoff still fixes the answer at B̄(T): a cavity returns its own Planck
+# radiance whatever the BRDF's directional shape, because the shape only says
+# where the light goes, not how much there is. So the reference is unchanged
+# and the tolerance stays at the suite default.
+#
+# What it catches: weighting a GGX-sampled direction as if it were a cosine one
+# leaves the estimator biased by the ratio of the two pdfs, which reads 8.8%
+# low here. Single-scattering GGX does lose a little energy at grazing angles
+# and the analytic base backfills it at the wrong temperature, but that residue
+# is 0.03% -- two orders of magnitude below the error it is distinguishing.
+#
+# Geometry: python scripts/utils/generate_furnace_cavity.py
+# Check:    python scripts/render-tests/check_furnace.py furnace_lwir_specular_output.exr LWIR
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+output = "furnace_lwir_specular_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+basis_file = "assets/spectral/quantiloom_basis_v3_ecostress.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_ecostress.json"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_spectral_smooth.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.0, 0.0]
+look_at  = [0.0, 0.0, -1.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 90.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 250.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "furnace_spectral_smooth"
+spectral_material_type = "quantiloom_ecostress"
+spectral_material_ref = "Quartz SiO2 (quartz_1)"
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

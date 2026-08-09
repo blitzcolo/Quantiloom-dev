@@ -1,14 +1,24 @@
 #!/usr/bin/env python3
 """Generate furnace-cavity glTF test scenes for IR energy conservation checks.
 
-Outputs three .gltf variants with QUANTILOOM_material_ir extension:
-  furnace_e1.gltf   — ε=1 (perfect emitter / absorber)
-  furnace_e05.gltf  — ε=0.5
-  furnace_rho1.gltf — ε=0, ρ=1 (perfect reflector, white furnace)
+Outputs four .gltf variants with QUANTILOOM_material_ir extension:
+  furnace_e1.gltf       — ε=1 (perfect emitter / absorber)
+  furnace_e05.gltf      — ε=0.5
+  furnace_rho1.gltf     — ε=0, ρ=1 (perfect reflector, white furnace)
+  furnace_spectral.gltf — no scalar emissivity; the companion TOML binds a
+                          measured curve, so ε and ρ both vary across the band
 
 Each is a cube with INWARD-facing normals so the camera placed at the origin
 sees only cavity walls.  T_surface set to 300K by default via
 scene.default_temperature_k in the companion TOML files.
+
+The spectral variant tests something the three scalar ones cannot. Kirchhoff
+fixes the cavity answer at B(T) for any emissivity, including one that varies
+with wavelength -- but only if ε(λ) and ρ(λ) multiply radiance at the SAME λ.
+A renderer that reflects a band-averaged environment gets ρ̄·L̄ where it owes
+∫ρ(λ)L(λ), and the two differ exactly when the curve is not flat. Quartz is
+bound for that reason: its reststrahlen band makes LWIR reflectance anything
+but flat.
 """
 
 import json, struct, base64, os, pathlib
@@ -77,7 +87,7 @@ def write_csv(path, value):
         f.write(f"15000, {value}\n")
 
 
-def make_gltf(name, emissivity, out_dir):
+def make_gltf(name, emissivity, out_dir, roughness=1.0):
     positions, normals, indices = build_geometry()
     pos_b, nor_b, idx_b = pack_binary(positions, normals, indices)
     buf = idx_b + pos_b + nor_b
@@ -95,12 +105,15 @@ def make_gltf(name, emissivity, out_dir):
     ys = positions[1::3]
     zs = positions[2::3]
 
-    emiss_csv = f"{name}_emissivity.csv"
-    write_csv(out_dir / emiss_csv, emissivity)
-
     ext = {}
-    if emissivity > 0:
-        ext["emissivityCurve"] = emiss_csv
+    if emissivity is not None:
+        # A constant curve, so ε is scalar and ρ = 1 - ε is too.
+        emiss_csv = f"{name}_emissivity.csv"
+        write_csv(out_dir / emiss_csv, emissivity)
+        if emissivity > 0:
+            ext["emissivityCurve"] = emiss_csv
+    # emissivity None: the config binds a measured spectral curve to this
+    # material by name, and the shader derives ε(λ) = 1 - ρ(λ) from it.
     ext["temperature_K"] = 300.0
 
     gltf = {
@@ -115,7 +128,7 @@ def make_gltf(name, emissivity, out_dir):
             "pbrMetallicRoughness": {
                 "baseColorFactor": [0.5, 0.5, 0.5, 1.0],
                 "metallicFactor": 0.0,
-                "roughnessFactor": 1.0
+                "roughnessFactor": roughness
             },
             "doubleSided": True,
             "extensions": {"QUANTILOOM_material_ir": ext}
@@ -146,6 +159,12 @@ def main():
     make_gltf("furnace_e1",   1.0, OUT_DIR)
     make_gltf("furnace_e05",  0.5, OUT_DIR)
     make_gltf("furnace_rho1", 0.0, OUT_DIR)  # ε=0 → ρ=1
+    make_gltf("furnace_spectral", None, OUT_DIR)  # curve bound by the config
+    # Same wall, smooth enough to take the GGX lobe instead of the cosine one.
+    # Kirchhoff does not care how a surface distributes its reflection, so this
+    # must return B(T) as well -- which makes it the only check on the bounce's
+    # specular weighting, since every other cavity here is roughness 1.
+    make_gltf("furnace_spectral_smooth", None, OUT_DIR, roughness=0.2)
 
     print(f"Generated furnace cavities in {OUT_DIR}")
 

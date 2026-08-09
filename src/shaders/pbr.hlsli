@@ -103,6 +103,23 @@ float GeometrySmith(float NdotV, float NdotL, float roughness) {
     return ggx1 * ggx2;
 }
 
+// The environment variant, k = alpha/2 with alpha = roughness^2. Same function,
+// different remap, and which one is correct depends on what the result is
+// weighed against rather than on the surface: the split-sum envBRDF LUT is
+// built with this k (BRDFLutGenerator::GeometrySmith_GGX_IBL and
+// ibl_brdf_lut.comp, which agree), so a traced environment bounce has to use it
+// too. Weighting a bounce with the direct-lighting remap and subtracting a
+// base term built from the LUT leaves a roughness-dependent residue that looks
+// like a physical effect and is not one.
+float GeometrySmith_IBL(float NdotV, float NdotL, float roughness) {
+    float k = (roughness * roughness) / 2.0;
+
+    float ggx1 = GeometrySchlickGGX(NdotL, k);
+    float ggx2 = GeometrySchlickGGX(NdotV, k);
+
+    return ggx1 * ggx2;
+}
+
 // ============================================================================
 // Optimized Visibility Term: Vis = G / (4 * NdotV * NdotL)
 // ============================================================================

@@ -326,16 +326,43 @@ void main(inout Payload payload) {
         bool useNNLdown = (atmos.enabled != 0 && atmos.hasLdown != 0);
         float cosZenith = WorldRayDirection().y;  // Y-up: +1 = zenith, 0 = horizon
 
-        for (uint i = 0; i < NUM_IR_SAMPLES; ++i) {
-            float lambda = lambda_min + float(i) * lambda_step;
+        // A ray spawned by an environment bounce carries one wavelength and
+        // must bring back that wavelength's sky radiance and no more. Returning
+        // the band average to a surface that weighs it by a single reflectance
+        // sample is what erased the spectral correlation these bands are for --
+        // a sloped emissivity curve reflecting a cold sky would read as if the
+        // sky were grey.
+        const bool heroRay = (payload.heroLambda > 0.0);
+        const uint sampleCount = heroRay ? 1u : NUM_IR_SAMPLES;
+        float heroRadiance = 0.0;
+
+        for (uint i = 0; i < sampleCount; ++i) {
+            float lambda = heroRay ? payload.heroLambda
+                                   : lambda_min + float(i) * lambda_step;
+
+            // The LUT is baked on the loop's sample points, so a sampled
+            // wavelength takes the nearest index -- matching what the
+            // closest-hit shader does for the same ray.
+            uint atmosIdx = heroRay
+                ? (uint)clamp(round((lambda - lambda_min) / lambda_step),
+                              0.0, float(NUM_IR_SAMPLES - 1))
+                : i;
 
             float L_sky;
             if (useNNLdown) {
-                L_sky = AtmosSkyRadianceIR(atmos, atmosNNData, i, lambda,
+                L_sky = AtmosSkyRadianceIR(atmos, atmosNNData, atmosIdx, lambda,
                                            cosZenith, T_atmosphere);
             } else {
                 L_sky = IRPlanckRadiance(T_atmosphere, lambda);
             }
+
+            if (heroRay) {
+                // Scalar spectral radiance, by the contract on
+                // Payload::heroLambda: no trapezoid weight, no band average.
+                heroRadiance = L_sky;
+                continue;
+            }
+
             // Trapezoid rule. N samples span N-1 intervals, so the two
             // endpoints carry half weight. Summing N full-width rectangles
             // and then dividing by (N-1)*step made every fused band read
@@ -347,7 +374,7 @@ void main(inout Payload payload) {
         }
 
         float band_width = lambda_max - lambda_min;
-        float radiance_avg = radiance_accum / band_width;
+        float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
         if (!isfinite(radiance_avg)) {

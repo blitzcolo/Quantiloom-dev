@@ -1,0 +1,68 @@
+# Furnace cavity with a MEASURED spectral emissivity, LWIR 8-12µm, T=300K
+#
+# The three scalar cavities check that emitted + reflected sums to B(T) for a
+# grey wall. This one checks the same identity for a wall whose emissivity
+# varies across the band, which is a strictly stronger statement: Kirchhoff
+# gives eps(lambda) + rho(lambda) = 1 at every wavelength, so
+#
+#     L(lambda) = eps(lambda)*B(lambda,T) + rho(lambda)*B(lambda,T) = B(lambda,T)
+#
+# holds per wavelength and the band mean is B̄(T) exactly, same reference as
+# the scalar cavities.
+#
+# It only holds if rho(lambda) multiplies the environment AT THAT WAVELENGTH.
+# Reflecting a band-averaged environment gives rho(lambda)*L̄ instead, whose
+# band mean is rhō*L̄, and rhō*L̄ != <rho*L> precisely when the curve is not
+# flat. Quartz is bound here for that reason -- its reststrahlen band makes
+# LWIR reflectance about as un-flat as measured data gets.
+#
+# atmosphere_temperature_k is deliberately 250, not 300. The renderer's
+# analytic downwelling is the base its traced bounce corrects, so matching it
+# to the wall temperature would make the correction identically zero and the
+# bounce would go untested. At 250 K the base is wrong by ~40% and the whole
+# answer rides on the traced term being right.
+#
+# Geometry: python scripts/utils/generate_furnace_cavity.py
+# Check:    python scripts/render-tests/check_furnace.py furnace_lwir_spectral_output.exr LWIR
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+output = "furnace_lwir_spectral_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+basis_file = "assets/spectral/quantiloom_basis_v3_ecostress.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_ecostress.json"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_spectral.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.0, 0.0]
+look_at  = [0.0, 0.0, -1.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 90.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 250.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "furnace_spectral"
+spectral_material_type = "quantiloom_ecostress"
+spectral_material_ref = "Quartz SiO2 (quartz_1)"
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
