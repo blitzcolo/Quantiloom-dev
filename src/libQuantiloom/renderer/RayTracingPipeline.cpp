@@ -19,6 +19,22 @@
 namespace quantiloom {
 
 // ============================================================================
+// Ray Recursion Depth
+// ============================================================================
+// The deepest TraceRay chain the closest-hit shader can build. Its budget is
+// spelled out at MAX_PATH_DEPTH in src/shaders/closesthit.rchit: eight child
+// rays sharing one payload.depth counter, plus the primary ray and one shadow
+// ray at the bottom of the chain.
+//
+// Validated against the device below rather than clamped. Clamping would keep
+// the pipeline creating and let chains run past the limit, which is undefined
+// behaviour that surfaces as a device loss somewhere unrelated; and silently
+// shortening paths would change the physics without saying so.
+// ============================================================================
+
+static constexpr u32 kMaxPipelineRayRecursionDepth = 10;
+
+// ============================================================================
 // Helper: Get Maximum Texture Count
 // ============================================================================
 // Dynamic texture limit based on device capabilities
@@ -179,6 +195,20 @@ RayTracingPipeline::RayTracingPipeline(
 
     // Cache RT properties
     m_rtProperties = m_context.GetRayTracingProperties();
+
+    // The shaders assume the full recursion chain is available. A device that
+    // offers less cannot run them at any quality setting, and the failure it
+    // would produce -- chains overrunning the pipeline's declared depth -- is
+    // undefined behaviour that surfaces as a device loss somewhere unrelated.
+    // Checked once at construction so it names itself instead.
+    if (m_rtProperties.maxRayRecursionDepth < kMaxPipelineRayRecursionDepth) {
+        throw std::runtime_error(
+            "Ray tracing device supports a recursion depth of only " +
+            std::to_string(m_rtProperties.maxRayRecursionDepth) +
+            "; Quantiloom's path depth needs " +
+            std::to_string(kMaxPipelineRayRecursionDepth) +
+            " (see MAX_PATH_DEPTH in src/shaders/closesthit.rchit)");
+    }
 
     // Initialize dynamic texture limit based on device capabilities
     m_maxTextures = GetMaxTexturesForDevice(m_context);
@@ -754,7 +784,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     pipelineInfo.pStages = stages.data();
     pipelineInfo.groupCount = static_cast<u32>(groups.size());
     pipelineInfo.pGroups = groups.data();
-    pipelineInfo.maxPipelineRayRecursionDepth = 10;
+    pipelineInfo.maxPipelineRayRecursionDepth = kMaxPipelineRayRecursionDepth;
     pipelineInfo.layout = m_pipelineLayout;
 
     QL_LOG_INFO("  [CreatePipelineVariant] spectralMode={}, debugEnabled={}", spec.spectralMode, spec.debugEnabled);

@@ -91,15 +91,24 @@
 [[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
 
 // ============================================================================
-// Transmission Ray Tracing Constants
+// Path Depth
 // ============================================================================
-// Maximum recursion depth for reflection/refraction rays
-// Higher values allow more accurate glass rendering but increase GPU cost
-// Typical values: 4-8 for real-time, 16+ for offline rendering
+// One counter for every kind of child ray -- refraction, reflection and the
+// environment bounce all advance payload.depth and all stop at the same gate.
+// Giving any of them its own budget would break the accounting below.
+//
+// The pipeline is created with maxPipelineRayRecursionDepth = 10
+// (RayTracingPipeline.cpp, kMaxPipelineRayRecursionDepth), and 8 is what fits:
+//
+//   raygen -> primary                            TraceRay call 1
+//   child i, gated on depth < MAX_PATH_DEPTH     calls 2..9   (depth 1..8)
+//   the depth-8 hit spawns no child, only its shadow ray      call 10
+//
+// so a chain reaches exactly 10 and no further. Raising this constant without
+// raising the pipeline's limit is undefined behaviour, not a slow render.
 // ============================================================================
 
-static const uint MAX_TRANSMISSION_DEPTH = 8;
-static const float MIN_CONTRIBUTION_THRESHOLD = 0.001;  // Russian roulette cutoff
+static const uint MAX_PATH_DEPTH = 8;
 
 // ============================================================================
 // RGB Channel Representative Wavelengths (sRGB primaries approximation)
@@ -1860,7 +1869,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float L_transmitted = 0.0;
             float transmittance = material.irTransmittance;
 
-            if (transmittance > 0.001 && payload.depth < MAX_TRANSMISSION_DEPTH) {
+            if (transmittance > 0.001 && payload.depth < MAX_PATH_DEPTH) {
                 // Trace transmission ray to get background radiance
                 // For IR, we approximate background as atmospheric thermal emission
                 // In a full implementation, would trace through and sample far surface
@@ -2587,7 +2596,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     //   Russian roulette ensures unbiased estimation of both paths
     // ========================================================================
 
-    if (material.transmission > 0.0 && payload.depth < MAX_TRANSMISSION_DEPTH) {
+    if (material.transmission > 0.0 && payload.depth < MAX_PATH_DEPTH) {
         // Get hit point and ray direction
         float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         float3 rayDir = WorldRayDirection();
