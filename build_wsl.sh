@@ -67,20 +67,20 @@ case "$furnace_status" in
     *) echo "Physics gate failed -- not installing." >&2; exit "$furnace_status" ;;
 esac
 
-# The cavities have no sun, so nothing above can see an illumination bug. The
-# shadow suite is the complement: one material on one normal, rendered twice
-# with the sun above and below the horizon, so the difference is the direct
-# solar term and it must be zero behind an occluder. NIR, SWIR and MWIR each
-# traced that shadow ray and discarded its answer.
+# The cavities have no sun, no sky and no scene outside their own walls, so
+# nothing above can see a bug in how light REACHES a surface. This is the
+# complement: sun occlusion per band, an open sky where the traced bounce must
+# contribute exactly zero, and a Cornell box lit only by emissive geometry
+# where every lit pixel is bounced light by construction.
 
 set +e
-./scripts/render-tests/run_shadow_suite.sh
-shadow_status=$?
+./scripts/render-tests/run_illumination_suite.sh
+illum_status=$?
 set -e
-case "$shadow_status" in
+case "$illum_status" in
     0) ;;
-    3) echo "WARNING: shadow gate skipped, no GPU on this machine" >&2 ;;
-    *) echo "Shadow gate failed -- not installing." >&2; exit "$shadow_status" ;;
+    3) echo "WARNING: illumination gate skipped, no GPU on this machine" >&2 ;;
+    *) echo "Illumination gate failed -- not installing." >&2; exit "$illum_status" ;;
 esac
 
 # --- Install (only reached on successful build + green tests + stable ABI) ---

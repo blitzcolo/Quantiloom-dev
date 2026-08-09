@@ -501,47 +501,72 @@ float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavele
 // there. Evaluating them at different wavelengths is the error this replaced.
 //
 // Russian roulette lives here too. Below BOUNCE_DEPTH_DETERMINISTIC every
-// reflecting surface bounces; above it a path survives with probability rho_b,
-// which collapses the weight to 1. Killing a path is safe because the caller's
-// analytic term is still paid -- the fallback is the sky, not zero -- so there
-// is no closure to substitute and nothing to bias.
+// reflecting surface bounces; above it a path survives with probability
+// rrSurvive and the weight is divided by it -- so passing the surface's own
+// reflectance collapses the weight to 1 and a mirror keeps bouncing at full
+// strength while a near-black surface almost never does. Killing a path is
+// safe because the caller's analytic term is still paid: the fallback is the
+// sky, not zero, so there is no closure to substitute and nothing to bias.
+//
+// Lobe selection is the caller's, through qSpec:
+//
+//   qSpec = 0    always cosine-sample, weight wDiffuse
+//   qSpec = 1    always GGX-sample,    weight wSpecular * G*VdotH/(NdotV*NdotH)
+//   in between   pick stochastically and divide by the selection probability
+//
+// The thermal and reflective IR bands pass 0 or 1 -- they model one total
+// reflectance and the lobe is purely a sampling shape for it. VIS_FUSED passes
+// a Fresnel-weighted probability, because there the two lobes carry physically
+// different terms (kD*rho against F) and both have to be reachable.
 //
 // Returns 0 when no bounce was taken, which is the correct correction to a
 // base the caller has already added.
 // ============================================================================
 
 float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
-                             float roughness, float rho_b, float L_base_b,
-                             float lambda_b, inout Payload payload)
+                             float roughness, float qSpec,
+                             float wDiffuse, float wSpecular, float rrSurvive,
+                             float L_base_b, float lambda_b, inout Payload payload)
 {
-    if (payload.depth >= MAX_PATH_DEPTH || rho_b <= 0.0) {
+    if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
         return 0.0;
     }
 
-    float rrWeight = rho_b;
+    float weight = 1.0;
     if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
-        if (pcg_float(payload.rngState) >= rho_b) {
+        if (pcg_float(payload.rngState) >= rrSurvive) {
             return 0.0;
         }
-        rrWeight = 1.0;   // rho_b / p, with p = rho_b
+        weight = 1.0 / rrSurvive;
     }
 
-    // Which lobe to sample from. The threshold is a sampling decision, not a
-    // material one: a rough surface scatters near-uniformly and a cosine
-    // distribution fits it, a smooth one concentrates around the mirror
-    // direction and needs GGX to find it.
+    // Which lobe to sample from. A rough surface scatters near-uniformly and a
+    // cosine distribution fits it; a smooth one concentrates around the mirror
+    // direction and needs GGX to find it at all.
+    const bool specularLobe = (qSpec >= 1.0)
+        ? true
+        : (qSpec > 0.0 && pcg_float(payload.rngState) < qSpec);
+
+    if (specularLobe) {
+        weight *= wSpecular / max(qSpec, 1e-4);
+    } else {
+        weight *= wDiffuse / max(1.0 - qSpec, 1e-4);
+    }
+    if (weight == 0.0) {
+        return 0.0;
+    }
+
     float pdf_dir;
-    const bool diffuseLobe = (roughness > 0.5);
-    const float3 wi = diffuseLobe
-        ? CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_dir)
-        : ImportanceSampleGGX_PCG(normal, V, roughness * roughness, payload.rngState, pdf_dir);
+    const float3 wi = specularLobe
+        ? ImportanceSampleGGX_PCG(normal, V, roughness * roughness, payload.rngState, pdf_dir)
+        : CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_dir);
 
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0 || pdf_dir <= 1e-6) {
         return 0.0;
     }
 
-    // f * cos / pdf, with the reflectance factored out into rrWeight.
+    // f * cos / pdf, with the reflectance already folded into weight.
     //
     //   cosine lobe: f = 1/PI and pdf = cos/PI, so the whole thing is 1.
     //   GGX lobe:    D cancels against the pdf, leaving G*VdotH/(NdotV*NdotH).
@@ -551,13 +576,12 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // panel could not mirror the sky. G uses the IBL remap because this is
     // weighed against a split-sum base built with that remap; see
     // GeometrySmith_IBL.
-    float W_dir = 1.0;
-    if (!diffuseLobe) {
+    if (specularLobe) {
         const float3 H     = normalize(V + wi);
         const float  VdotH = max(dot(V, H), 1e-4);
         const float  NdotH = max(dot(normal, H), 1e-4);
-        W_dir = GeometrySmith_IBL(NdotV, NdotWi, roughness) *
-                VdotH / (max(NdotV, 1e-4) * NdotH);
+        weight *= GeometrySmith_IBL(NdotV, NdotWi, roughness) *
+                  VdotH / (max(NdotV, 1e-4) * NdotH);
     }
 
     RayDesc bounceRay;
@@ -584,7 +608,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
 
     // Scalar spectral radiance at lambda_b, by the contract on
     // Payload::heroLambda.
-    return rrWeight * W_dir * (child.radiance.r - L_base_b);
+    return weight * (child.radiance.r - L_base_b);
 }
 
 // ============================================================================
@@ -1157,6 +1181,115 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint  sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
         float heroRadiance = 0.0;
 
+        // ====================================================================
+        // Indirect light: the traced correction
+        // ====================================================================
+        // Until now an opaque surface in this mode spawned no ray at all. Its
+        // ambient light was L_ambient + L_ibl below -- an unoccluded uniform sky
+        // dome, integrated analytically -- which is exact for a surface with an
+        // open sky above it and simply wrong for a surface in a room, where it
+        // grants full sky illumination through the ceiling and omits every
+        // photon that arrived off a wall.
+        //
+        // Both errors are fixed by the same ray, carrying the difference
+        // between what the hemisphere actually sends back and the uniform dome
+        // the analytic terms assumed. Occlusion arrives as a negative
+        // correction, interreflection as a positive one, and where the
+        // assumption holds the correction is exactly zero, so an open scene
+        // renders as it always did -- see scripts/render-tests/check_sky_equiv.py.
+        //
+        // The estimator is the dispersion path's, at a wavelength sampled
+        // uniformly over the band and weighted by cmf(lambda_b) * bandwidth;
+        // that equivalence is checked in check_hero_wavelength.py.
+        //
+        // Two lobes here, unlike the IR bands. There a surface has one total
+        // reflectance and the lobe is only a sampling shape; here the diffuse
+        // and specular terms are physically distinct -- kD*rho against F -- so
+        // the choice is Fresnel-weighted and both must stay reachable, or a
+        // metal (kD = 0) would lose all of its indirect light.
+        float3 XYZ_bounce = float3(0.0, 0.0, 0.0);
+        float  heroBounce = 0.0;
+
+        {
+            const float lambda_b = heroRay
+                ? payload.heroLambda
+                : LAMBDA_MIN_VIS + pcg_float(payload.rngState) * SPECTRAL_VIS_BANDWIDTH;
+
+            // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
+            const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
+                ? EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b)
+                : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
+
+            float F0_b;
+            if (lambda_b < 450.0)      F0_b = F0.b;
+            else if (lambda_b < 500.0) F0_b = lerp(F0.b, F0.g, (lambda_b - 450.0) / 50.0);
+            else if (lambda_b < 600.0) F0_b = lerp(F0.g, F0.r, (lambda_b - 500.0) / 100.0);
+            else                       F0_b = F0.r;
+
+            const float NdotV_b = max(dot(normal, V), 0.0);
+            const float F_b     = FresnelSchlick(NdotV_b, F0_b);
+            const float kD_b    = (1.0 - F_b) * (1.0 - metallic);
+
+            // Pick the specular lobe about as often as it carries energy. The
+            // floor keeps a rough dielectric's specular reachable; metals go to
+            // 1 because their diffuse term is identically zero.
+            //
+            // Except with an environment map bound, where the specular lobe is
+            // off entirely. The base it would be corrected against is the
+            // prefiltered map, and the ray comes back carrying the analytic sky
+            // the miss shader returns; the difference between two different
+            // illuminants is not a correction to anything. The diffuse side has
+            // no such problem -- L_ambient reflects the analytic sky whether or
+            // not a map is loaded, which is the same thing the ray brings back.
+            // So an env-mapped scene keeps split-sum specular exactly as before
+            // and still gains diffuse interreflection; only a metal, whose
+            // diffuse term is identically zero, gets no bounce at all there.
+            // Lifting this needs the miss shader to sample the map.
+            const float qSpec_b = (useIBL && !hasEnvMap)
+                ? clamp(lerp(FresnelSchlick(NdotV_b, (F0.r + F0.g + F0.b) / 3.0), 1.0, metallic),
+                        0.05, 1.0)
+                : 0.0;
+
+            // Roulette on the surface's own brightness, not on one wavelength:
+            // the lobe split already accounts for where the energy goes, and a
+            // wavelength-dependent survival would fight it. Capped below 1 so a
+            // white room still terminates.
+            const float rrSurvive_b =
+                clamp(lerp(max(baseColor.r, max(baseColor.g, baseColor.b)), 1.0, metallic),
+                      0.0, 0.95);
+
+            // The base both lobes are measured against: the uniform sky dome at
+            // lambda_b, which is what L_ambient reflects and -- prefiltering a
+            // uniform dome being the identity -- what L_ibl reflects too.
+            const float sky_b = hasSpectralSolarLUT
+                ? SampleSkyIrradiance(solarSpectralLUT[0], lambda_b) / PI
+                : 0.0;
+
+            const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+            const float  corr_b = TraceEnvBounceResidual(
+                visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
+                kD_b * rho_b, F_b, rrSurvive_b,
+                sky_b, lambda_b, payload);
+
+            if (heroRay) {
+                // Scalar: the surface that sampled lambda_h owns the weighting.
+                heroBounce = corr_b;
+            } else {
+                // XYZ = L(lambda_b) * cmf(lambda_b) / pdf, pdf = 1/bandwidth.
+                // Same estimator, same normalisation as the deterministic grid
+                // below, which divides by CIE_Y_INTEGRAL once for both.
+                float tau_b = 1.0;
+                if (atmosEnabled) {
+                    const uint atmosIdx_b = (uint)clamp(
+                        round((lambda_b - LAMBDA_MIN_VIS) / LAMBDA_STEP),
+                        0.0, float(NUM_WAVELENGTH_SAMPLES - 1));
+                    tau_b = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
+                }
+                XYZ_bounce = corr_b * tau_b * SPECTRAL_VIS_BANDWIDTH *
+                             SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
+            }
+        }
+
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
         // Modern GPUs handle small loops efficiently without forced unrolling
@@ -1298,8 +1431,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             if (heroRay) {
                 // Scalar spectral radiance: no CIE weighting and no dλ here.
-                // The surface that sampled λ_h applies both, with 1/pdf.
-                heroRadiance = L_lambda;
+                // The surface that sampled λ_h applies both, with 1/pdf. The
+                // indirect correction is at this same wavelength, so it adds
+                // straight in.
+                heroRadiance = L_lambda + heroBounce;
                 continue;
             }
 
@@ -1315,6 +1450,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
             XYZ_accum.y += L_lambda * y_bar * LAMBDA_STEP;
             XYZ_accum.z += L_lambda * z_bar * LAMBDA_STEP;
         }
+
+        // The indirect correction, already carrying cmf(lambda_b) and the 1/pdf
+        // that the deterministic grid gets from its LAMBDA_STEP. Zero for a hero
+        // ray, which took it above instead.
+        XYZ_accum += XYZ_bounce;
 
         // ====================================================================
         // XYZ Normalization for RGB Input Compatibility
@@ -1594,9 +1734,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             ? SampleSkyIrradiance(solarSpectralLUT[0], lambda_b) / PI
             : 0.0;
 
+        // One total reflectance, so the lobe is only a sampling shape for it:
+        // qSpec is 0 or 1 and both weights are rho_b.
         const float3 swirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        float bounceCorr = TraceEnvBounceResidual(swirHitPos, normal, V, NdotV_swir, roughness,
-                                                  rho_b, L_base_b, lambda_b, payload);
+        float bounceCorr = TraceEnvBounceResidual(
+            swirHitPos, normal, V, NdotV_swir, roughness,
+            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            L_base_b, lambda_b, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -1771,8 +1915,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             : 0.0;
 
         const float3 nirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        float bounceCorr = TraceEnvBounceResidual(nirHitPos, normal, V, NdotV_nir, roughness,
-                                                  rho_b, L_base_b, lambda_b, payload);
+        float bounceCorr = TraceEnvBounceResidual(
+            nirHitPos, normal, V, NdotV_nir, roughness,
+            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            L_base_b, lambda_b, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -2001,8 +2147,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             : IRPlanckRadiance(T_atmosphere, lambda_b);
 
         const float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        float bounceCorr = TraceEnvBounceResidual(irHitPos, normal, V, NdotV, roughness,
-                                                  rho_b, L_base_b, lambda_b, payload);
+        float bounceCorr = TraceEnvBounceResidual(
+            irHitPos, normal, V, NdotV, roughness,
+            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            L_base_b, lambda_b, payload);
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
         // A hero ray runs one iteration at its own wavelength and reports a
