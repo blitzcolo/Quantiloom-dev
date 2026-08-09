@@ -152,8 +152,16 @@ TransformKeys ParseTransformKeys(const Config& table) {
 /// Trying the base directory first and falling back to the path as written
 /// serves both: a self-contained scene folder resolves against itself, and a
 /// repo-root-relative path is left alone to resolve against the working
-/// directory as it always did. An empty baseDir -- what the CLI passes --
-/// skips the attempt entirely.
+/// directory as it always did. Both callers pass a real base directory -- the
+/// CLI passes the config's own parent -- so the first attempt is the normal
+/// case, not an exception.
+///
+/// When BOTH candidates exist the base directory wins, and that is worth
+/// saying out loud. A stale duplicate under the config's directory shadows the
+/// canonical asset silently and indefinitely: three copies of the prism models
+/// under assets/configs/assets/ did exactly that for six weeks, and because
+/// the render still succeeded, the two dispersion checkers went on editing a
+/// file nothing read and reporting the resulting no-op as a renderer bug.
 String ResolveConfigPath(const String& path, const String& baseDir) {
     if (path.empty() || baseDir.empty()) return path;
     std::filesystem::path p(path);
@@ -162,6 +170,13 @@ String ResolveConfigPath(const String& path, const String& baseDir) {
     std::error_code ec;
     const auto candidate = (std::filesystem::path(baseDir) / p).lexically_normal();
     if (std::filesystem::exists(candidate, ec)) {
+        if (std::filesystem::exists(p, ec)) {
+            QL_LOG_WARN("Config path '{}' exists both under the config's directory "
+                        "('{}') and as written; using the former. Delete one -- a "
+                        "duplicate beside the config shadows the real asset and "
+                        "edits to it will appear to do nothing.",
+                        path, candidate.string());
+        }
         return candidate.string();
     }
     return path;

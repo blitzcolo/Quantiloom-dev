@@ -65,10 +65,23 @@ Neither is `ctest`; both need a GPU and both run from `build_wsl.sh`.
 | `run_furnace_suite.sh` | what a surface does with light once it arrives | anything about how it arrives — no sun, no sky, no scene outside the cavity |
 | `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness, indirect | radiometry of the surface itself |
 
-Two checkers, `check_dispersion.py` and `check_hero_wavelength.py`, are **red on
-`main` and were red before the bounce work** — same figures to four decimals at
-`b09706a`. Don't read them as a regression you caused; do fix them if you are in
-VIS_FUSED's dispersion path.
+A third pair, `check_dispersion.py` and `check_hero_wavelength.py`, is run by
+neither gate and has to be invoked by hand. Both edit
+`assets/models/prism_*.gltf` in place and restore it in a `finally`, so they
+cannot run concurrently with each other or with anything else reading those
+models.
+
+Both spent six weeks red for a reason that was in no shader: three copies of
+the prism models sat under `assets/configs/assets/models/`, and
+`ResolveConfigPath` prefers the config's own directory, so every render read
+the duplicates while the checkers edited the originals. A patched glTF that
+nothing loads renders identically to the unpatched one — which
+`check_dispersion` reported as "switching dispersion on changed nothing", and
+`check_hero_wavelength` reported as a bias floor, because its reference and its
+test case then differed only by a config-injected IOR that *did* take effect.
+The duplicates are deleted and `ResolveConfigPath` now warns when a path
+resolves two ways. If a checker ever again insists a shader change did nothing,
+read the render log's `Loading glTF model:` line before believing it.
 
 ## Commits
 
