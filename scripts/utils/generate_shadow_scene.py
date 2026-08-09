@@ -45,9 +45,10 @@ def quad(x0, x1, y, z0, z1):
     return [a, b, c, a, c, d]
 
 
-def build_geometry():
+def build_geometry(with_slab=True):
     verts = quad(-GROUND_HALF, GROUND_HALF, 0.0, -GROUND_HALF, GROUND_HALF)
-    verts += quad(-SLAB_HALF_X, SLAB_HALF_X, SLAB_Y, -GROUND_HALF, GROUND_HALF)
+    if with_slab:
+        verts += quad(-SLAB_HALF_X, SLAB_HALF_X, SLAB_Y, -GROUND_HALF, GROUND_HALF)
 
     positions = [c for v in verts for c in v]
     normals = [c for _ in verts for c in (0.0, 1.0, 0.0)]
@@ -63,11 +64,10 @@ def write_csv(path, value):
         f.write(f"15000, {value}\n")
 
 
-def main():
+def write_scene(name, with_slab):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    name = "shadow_scene"
 
-    positions, normals, indices = build_geometry()
+    positions, normals, indices = build_geometry(with_slab)
 
     pos_b = struct.pack(f"<{len(positions)}f", *positions)
     nor_b = struct.pack(f"<{len(normals)}f", *normals)
@@ -125,7 +125,16 @@ def main():
     with open(OUT_DIR / f"{name}.bin", "wb") as f:
         f.write(buf)
 
-    print(f"Generated shadow scene in {OUT_DIR}")
+
+def main():
+    write_scene("shadow_scene", with_slab=True)
+    # The same ground with nothing above it. Every bounce ray escapes, so the
+    # traced correction is identically zero and the render must equal the
+    # analytic Lambertian answer rho*(E_sun/pi*cos + E_sky/pi) exactly -- which
+    # is the check that the bounce was added as a correction to the analytic sky
+    # term and not on top of it.
+    write_scene("shadow_scene_open", with_slab=False)
+    print(f"Generated shadow scenes in {OUT_DIR}")
 
 
 if __name__ == "__main__":

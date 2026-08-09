@@ -206,8 +206,16 @@ void main(inout Payload payload) {
         float swir_bandwidth = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
         float sky_power_rgb = sky_luminance / swir_bandwidth;
 
-        for (uint i = 0; i < NUM_SWIR_SAMPLES; ++i) {
-            float lambda = SWIR_LAMBDA_MIN + float(i) * lambda_step;
+        // An environment bounce carries one wavelength and must get that
+        // wavelength's sky back; the band average would be weighed by a single
+        // reflectance sample and lose the correlation the bounce exists for.
+        const bool heroRay = (payload.heroLambda > 0.0);
+        const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
+        float heroRadiance = 0.0;
+
+        for (uint i = 0; i < sampleCount; ++i) {
+            float lambda = heroRay ? payload.heroLambda
+                                   : SWIR_LAMBDA_MIN + float(i) * lambda_step;
 
             float sky_radiance_lambda;
             if (hasSpectralSolarLUT) {
@@ -215,6 +223,13 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = sky_power_rgb;
+            }
+
+            if (heroRay) {
+                // Scalar spectral radiance, by the contract on
+                // Payload::heroLambda.
+                heroRadiance = sky_radiance_lambda;
+                continue;
             }
 
             // Trapezoid rule. N samples span N-1 intervals, so the two
@@ -228,7 +243,7 @@ void main(inout Payload payload) {
         }
 
         float band_width = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
-        float radiance_avg = radiance_accum / band_width;
+        float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
         if (!isfinite(radiance_avg)) {
@@ -261,8 +276,14 @@ void main(inout Payload payload) {
         float nir_bandwidth = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
         float sky_power_rgb = sky_luminance / nir_bandwidth;
 
-        for (uint i = 0; i < NUM_NIR_SAMPLES; ++i) {
-            float lambda = NIR_LAMBDA_MIN + float(i) * lambda_step;
+        // Hero rays as in the SWIR branch above.
+        const bool heroRay = (payload.heroLambda > 0.0);
+        const uint sampleCount = heroRay ? 1u : NUM_NIR_SAMPLES;
+        float heroRadiance = 0.0;
+
+        for (uint i = 0; i < sampleCount; ++i) {
+            float lambda = heroRay ? payload.heroLambda
+                                   : NIR_LAMBDA_MIN + float(i) * lambda_step;
 
             float sky_radiance_lambda;
             if (hasSpectralSolarLUT) {
@@ -270,6 +291,11 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = sky_power_rgb;
+            }
+
+            if (heroRay) {
+                heroRadiance = sky_radiance_lambda;   // scalar, caller weights it
+                continue;
             }
 
             // Trapezoid rule. N samples span N-1 intervals, so the two
@@ -283,7 +309,7 @@ void main(inout Payload payload) {
         }
 
         float band_width = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
-        float radiance_avg = radiance_accum / band_width;
+        float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
         if (!isfinite(radiance_avg)) {

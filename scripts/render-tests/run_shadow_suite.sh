@@ -57,8 +57,28 @@ for band in nir swir mwir; do
     fi
 done
 
+# The complement of the shadow checks: the same ground with nothing above it,
+# where the traced environment bounce must contribute exactly zero and the
+# render must equal the closed-form Lambertian answer. A bounce added on top of
+# the analytic sky term rather than as a correction to it doubles the ambient
+# in every open scene, and passes every occlusion check above while doing so.
+log=$("$CLI" assets/configs/skyequiv_swir.toml 2>&1)
+if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+    echo "RENDER FAILED  skyequiv_swir"
+    printf '%s\n' "$log" | tail -5 >&2
+    fail=1
+else
+    printf '%-8s ' "open"
+    if report=$(python3 scripts/render-tests/check_sky_equiv.py skyequiv_swir_output.exr); then
+        echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
+    else
+        echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
+        fail=1
+    fi
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "shadow suite: every band occludes the sun"
+    echo "shadow suite: every band occludes the sun, open sky exact"
 else
     echo "shadow suite: FAILURES above" >&2
 fi
