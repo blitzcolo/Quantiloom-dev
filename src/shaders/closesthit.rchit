@@ -1636,6 +1636,35 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float radiance_spectral = directSun_scalar + skyAmbient_scalar +
                                   emissive_scalar + ibl_scalar;
 
+        // 7. Indirect light: the traced correction to terms 4 and 5.
+        //    This mode is the one labelled quantitative, so it is the last place
+        //    an unoccluded uniform sky should stand in for the actual
+        //    hemisphere. Same residual as every other band; the only difference
+        //    is that no wavelength is sampled, because the whole render is at
+        //    one. The child ray carries heroLambda = 0 and arrives back in this
+        //    same branch, which evaluates at camera.wavelength_nm -- the same
+        //    wavelength, by construction rather than by being told.
+        //
+        //    Costs roughly one extra ray per hit, roulette-limited. RGB mode is
+        //    the one to reach for when that matters.
+        {
+            const float NdotV_s = max(dot(normal, V), 0.0);
+
+            // Env-map scenes keep split-sum specular, as VIS_FUSED: the
+            // prefiltered map and the analytic sky the miss shader returns are
+            // different illuminants, and their difference corrects nothing.
+            const float qSpec_s = (useIBL_scalar && !hasEnvMap)
+                ? clamp(lerp(F_scalar.r, 1.0, metallic), 0.05, 1.0)
+                : 0.0;
+            const float rrSurvive_s = clamp(lerp(spectralAlbedo, 1.0, metallic), 0.0, 0.95);
+
+            const float3 singleHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+            radiance_spectral += TraceEnvBounceResidual(
+                singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
+                kD_scalar * spectralAlbedo, F_scalar.r, rrSurvive_s,
+                skyRadiance_lambda, 0.0, payload);
+        }
+
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
         if (atmosEnabled) {
             float tau_l = SampleAtmosTau(atmos, atmosNNData, 0, atmosA);
