@@ -87,6 +87,14 @@ void BoxAverage(const std::vector<double>& src, const std::vector<int>& binOf,
 
 AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
     // Sample counts below MUST stay in sync with closesthit.rchit / miss.rmiss.
+    //
+    // The shaders index this grid by their spectral loop counter, so the grid
+    // points ARE the loop's wavelengths. Rays that carry a sampled wavelength
+    // instead -- a dispersive refraction, or an environment bounce -- have no
+    // index of their own and take the nearest grid point. tau and L_path vary
+    // slowly enough across a step for that to be reasonable, but it is an
+    // approximation the deterministic path does not make, and coarsening any
+    // count below widens it.
     auto uniformGrid = [](const char* band, double lo, double hi, int n) {
         AtmosLambdaGrid g;
         g.band = band;

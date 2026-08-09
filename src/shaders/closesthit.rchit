@@ -1042,10 +1042,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // radiance skyRadiance. Prefiltering a uniform dome returns that radiance at
     // every roughness and direction, so this adds no assumption the diffuse side
     // has not already made, and it is what a reflection ray would fetch -- the
-    // miss shader returns exactly lut.skyRadiance_rgb. What it cannot do is
-    // reflect the *scene*: opaque surfaces spawn no bounce ray (only shadow,
-    // transmission and the IR environment sample recurse), so a mirror here
-    // shows sky and sun, never the ground.
+    // miss shader returns exactly lut.skyRadiance_rgb.
+    //
+    // What it cannot do is reflect the *scene*. This whole block, and the
+    // skyAmbient above it, describe an unoccluded uniform dome and nothing else,
+    // so a mirror shading from them shows sky and sun and never the ground.
+    //
+    // For RGB mode -- the interactive preview, and the only consumer of the
+    // `radiance` these two feed -- that is the end of the story: opaque surfaces
+    // spawn no bounce ray there, and only shadow rays and transmission recurse.
+    // Every spectral band instead treats these terms as the analytic base of a
+    // residual and traces one ray per hit for the difference; see
+    // TraceEnvBounceResidual. They still read envBRDF and prefilteredColor from
+    // here, which is why the block runs for them too.
     const bool hasEnvMap = (lut.enableEnvironmentMap != 0);
     if (metallic > 0.01 || roughness < 0.99) {
         // 1. Sample BRDF integration LUT

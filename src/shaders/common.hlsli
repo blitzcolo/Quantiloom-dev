@@ -209,23 +209,36 @@ struct Payload {
 
     // Hero wavelength, in nm, or 0 for "this ray carries the whole band".
     //
-    // Non-zero only past a dispersive refraction. n(λ) sends each wavelength
-    // somewhere different, so a ray that has been bent can only be accountable
-    // for the one wavelength it was bent for -- there is no single path the
-    // band shares any more. The refracting surface samples λ_h uniformly and
-    // undoes the pdf when it converts the result back to a colour.
-    //
-    // "Dispersive" is about the medium, not about glass: anything with n
-    // meaningfully above 1 disperses, and the Abbe numbers are comparable --
-    // water 1.333/55.7, ice, acrylic, quartz, gemstones. The gate below keys on
-    // whether a material carries an Abbe number or an n(λ) table, not on what
-    // it is called, so a water surface reaches this path the same way a prism
-    // does. That is also why this is the mechanism participating media will need
-    // when they arrive.
-    //
     // A ray with heroLambda != 0 reports SCALAR spectral radiance in
-    // `radiance`, not RGB. The two never mix: only the VIS_FUSED paths read
-    // this, and only the surface that sampled λ_h converts back.
+    // `radiance`, not RGB, and every band's closest-hit and miss branch honours
+    // that: it runs one loop iteration at λ_h, skips its trapezoid weight and
+    // its band normalisation, and leaves both to whichever surface sampled the
+    // wavelength. RGB mode is the exception and never sees one.
+    //
+    // Two things set it, for the same underlying reason -- a path that can only
+    // answer for one wavelength must say so.
+    //
+    // DISPERSIVE REFRACTION. n(λ) sends each wavelength somewhere different, so
+    // a bent ray is accountable for the one wavelength it was bent for; there
+    // is no single path the band shares any more. "Dispersive" is about the
+    // medium, not about glass: anything with n meaningfully above 1 disperses,
+    // and the Abbe numbers are comparable -- water 1.333/55.7, ice, acrylic,
+    // quartz, gemstones. The gate keys on whether a material carries an Abbe
+    // number or an n(λ) table, not on what it is called, so a water surface
+    // reaches this path the same way a prism does. That is also why this is the
+    // mechanism participating media will need when they arrive.
+    //
+    // ENVIRONMENT BOUNCE. TraceEnvBounceResidual samples one wavelength per hit
+    // and weighs what comes back by the surface's reflectance AT THAT
+    // wavelength. Sending the band instead would return an average, and the
+    // product of two averages is not the average of the product -- which is
+    // exactly how much a quartz cavity was wrong by before the thermal bands
+    // carried a wavelength here. One ray either way; the wavelength is what
+    // makes it worth tracing.
+    //
+    // SINGLE mode leaves this at 0 and is not an exception to any of the above:
+    // the whole render is at camera.wavelength_nm, so a child ray arrives at
+    // the right wavelength by construction rather than by being told.
     float heroLambda;  // nm, 0 = whole band                             // 4 bytes
 
     // Hit distance of THIS ray, in world units (RayTCurrent()), or -1 on
