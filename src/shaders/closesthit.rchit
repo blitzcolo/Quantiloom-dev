@@ -1474,8 +1474,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 rho_lambda = reflectance;
             }
 
-            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL + L_sky(λ))
-            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL + sky_radiance_lambda);
+            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
+            //
+            // shadowFactor is the sun-visibility term traced above. It was
+            // computed for every mode and then read by RGB, VIS_FUSED and
+            // SINGLE only, so in this band the sun shone through walls -- the
+            // shadow ray's cost was already paid and its answer thrown away.
+            // The sky term stays unoccluded here; the traced bounce is what
+            // will occlude it.
+            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
+                                              + sky_radiance_lambda);
 
             // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
@@ -1589,8 +1597,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
             }
 
-            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL + L_sky(λ))
-            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL + sky_radiance_lambda);
+            // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
+            //
+            // shadowFactor as in the SWIR branch: traced for every mode, read
+            // by three of them. NIR is the band where losing it is least
+            // defensible -- reflected solar is the entire signal here.
+            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
+                                              + sky_radiance_lambda);
 
             // Note: Thermal emission is negligible in NIR for T < 600K
             // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
@@ -1661,8 +1674,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             lambda_min = SPECTRAL_MWIR_LAMBDA_MIN;
             lambda_max = SPECTRAL_MWIR_LAMBDA_MAX;
             // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
-            // Only include if surface is facing sun and sun is above horizon
-            includeSolarReflection = (NdotL > 0.0);
+            // Only include if surface faces the sun AND the sun is visible.
+            // shadowFactor was traced for every mode and read by three of
+            // them, so this band's solar term used to ignore occluders
+            // entirely. Gating here skips the LUT sample on shadowed pixels;
+            // the term is also scaled by it below, which is what a partial
+            // shadowFactor would need.
+            includeSolarReflection = (NdotL > 0.0 && shadowFactor > 0.0);
         } else {  // LWIR
             lambda_min = SPECTRAL_LWIR_LAMBDA_MIN;
             lambda_max = SPECTRAL_LWIR_LAMBDA_MAX;
@@ -1828,7 +1846,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // View-path attenuation comes from the NN composition below;
                 // sun-path attenuation is folded into the illumination source.
                 float sun_radiance_lambda = sun_irr_lambda / PI;
-                L_reflected_sun = reflectance_l * sun_radiance_lambda * NdotL;
+                L_reflected_sun = reflectance_l * sun_radiance_lambda * NdotL * shadowFactor;
             }
 
             // 4. IR Transmittance: Background radiation through transparent materials

@@ -1,0 +1,48 @@
+# Sun-occlusion check, MWIR — sun above the horizon.
+#
+# One material, one normal (+Y), orthographic top-down camera: material,
+# orientation and view angle are identical for every visible pixel, so sun
+# visibility is the only thing left that can vary. A renderer that drops
+# shadowFactor renders this frame perfectly flat.
+#
+# Paired with shadow_mwir_nosun.toml (same scene, sun below the horizon), which
+# is what the shadowed band must equal. See scripts/render-tests/check_shadow.py.
+
+[renderer]
+resolution = [256, 256]
+spp = 64
+output = "shadow_mwir_sun_output.exr"
+
+[spectral]
+mode = "mwir_fused"
+band = "MWIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

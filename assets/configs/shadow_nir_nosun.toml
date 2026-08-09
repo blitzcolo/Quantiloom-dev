@@ -1,0 +1,46 @@
+# Sun-occlusion check, NIR — reference render with the sun below the horizon.
+#
+# Identical to shadow_nir_sun.toml except sun_direction is mirrored through the
+# ground plane, so NdotL <= 0 everywhere and the solar term vanishes without
+# touching the solar LUT (dropping the LUT would take the sky term with it,
+# since both columns come from the same file). This is the level the shadowed
+# band of the sunlit render must reach.
+
+[renderer]
+resolution = [256, 256]
+spp = 64
+output = "shadow_nir_nosun_output.exr"
+
+[spectral]
+mode = "nir_fused"
+band = "NIR"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, -0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
