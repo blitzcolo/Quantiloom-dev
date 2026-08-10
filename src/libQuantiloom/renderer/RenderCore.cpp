@@ -1117,37 +1117,58 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
     // physically ideal measure of "brightness".
     constexpr glm::vec3 kLuminance{0.2126f, 0.7152f, 0.0722f};
 
+    // Flat table of every primitive in walk order, so the callback below is a
+    // lookup rather than a scan over the mesh list per instance.
+    Vector<const GeometryPrimitive*> primitives;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& prim : mesh.primitives) {
+            primitives.push_back(&prim);
+        }
+    }
+
     Vector<EmissiveTriangleGPU> triangles;
     f32 runningPower = 0.0f;
 
     ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
                                size_t /*nodeIndex*/) {
-        // Find the primitive this walk position refers to, the same way the
-        // geometry build does.
-        size_t seen = 0;
-        const GeometryPrimitive* primitive = nullptr;
-        for (const auto& mesh : scene.meshes) {
-            if (globalPrim < seen + mesh.primitives.size()) {
-                primitive = &mesh.primitives[globalPrim - seen];
-                break;
-            }
-            seen += mesh.primitives.size();
+        if (globalPrim >= primitives.size()) {
+            return;
         }
+        const GeometryPrimitive* primitive = primitives[globalPrim];
         if (!primitive || primitive->materialId >= scene.materials.size()) {
             return;
         }
 
-        const glm::vec3 emissive = scene.materials[primitive->materialId].emissiveFactor;
+        const Material& mat = scene.materials[primitive->materialId];
+
+        // A texture-modulated emitter is left out of the list entirely.
+        //
+        // Not for speed -- because including it would be wrong. The density a
+        // BSDF ray has to recover when it lands on an emitter is built from the
+        // material alone, since it cannot know which texel it will read until it
+        // gets there; so the light sampler must use the untextured factor too,
+        // and then it reports the whole surface emitting at full strength while
+        // the BSDF path reports what the texture actually says. Two different
+        // quantities, and MIS combines them into neither.
+        //
+        // Sampling the texture at the sampled point would fix it and is the
+        // natural next step; it needs UVs per triangle in this struct. Until
+        // then a textured emitter is found the way it always was, by BSDF
+        // sampling, and EmissiveMisWeight leaves its emission alone. Worth
+        // noting that such surfaces are poor light-sampling candidates anyway:
+        // DamagedHelmet's emissive texture is mostly black across 15452
+        // triangles, so uniform-area sampling would spend a shadow ray to find
+        // nothing almost every time.
+        if (mat.emissiveTextureIndex >= 0) {
+            return;
+        }
+
+        const glm::vec3 emissive = mat.emissiveFactor;
         const f32 luminance = glm::dot(emissive, kLuminance);
         if (luminance <= 0.0f) {
             return;  // not an emitter; the overwhelmingly common case
         }
 
-        // An emissive texture modulates the radiance but not the density: the
-        // shader has to be able to recover the density from the material alone
-        // when a BSDF ray lands here, and it does not know which texel it will
-        // read until it gets there. Sampling is then merely suboptimal for a
-        // textured emitter, not wrong -- both strategies agree on the number.
         for (size_t i = 0; i + 2 < primitive->indices.size(); i += 3) {
             const glm::vec3 p0 = glm::vec3(
                 transform * glm::vec4(primitive->positions[primitive->indices[i]], 1.0f));

@@ -576,17 +576,26 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout uint rngState) {
         return s;
     }
 
-    // First entry whose running power passes the target. Linear because the
-    // list is short -- a Cornell box has two triangles -- and a linear scan
-    // has no divergence a binary search would avoid.
+    // First entry whose running power passes the target. Binary search, because
+    // the list is as long as the scene's emissive geometry and nothing bounds
+    // that: a Cornell box has 2 triangles, a glTF model with an emissive
+    // material has as many as the mesh does. This was a linear scan, which on a
+    // 15452-triangle emitter cost 190x the whole sample -- 1.13 ms to 214.65 --
+    // and on a larger scene ran past the driver's watchdog and took the process
+    // with it. cumulativePower is non-decreasing by construction, so the search
+    // is exact and the loop is 14 iterations there instead of 7700.
     const float target = pcg_float(rngState) * total;
-    uint idx = count - 1u;
-    [loop] for (uint i = 0u; i < count; ++i) {
-        if (emissiveTriangles[i].cumulativePower >= target) {
-            idx = i;
-            break;
+    uint lo = 0u;
+    uint hi = count - 1u;
+    [loop] while (lo < hi) {
+        const uint mid = lo + (hi - lo) / 2u;
+        if (emissiveTriangles[mid].cumulativePower >= target) {
+            hi = mid;
+        } else {
+            lo = mid + 1u;
         }
     }
+    const uint idx = lo;
 
     const EmissiveTriangleGPU tri = emissiveTriangles[idx];
 
@@ -667,11 +676,19 @@ float PowerHeuristic(float thisPdf, float otherPdf) {
 // The density the light sampler would have used is recovered from the
 // material alone: p_A = luminance(emissive) / totalPower, converted to solid
 // angle with this hit's own distance and grazing angle.
-float EmissiveMisWeight(float3 emissive, float3 geometricNormal,
+float EmissiveMisWeight(float3 emissive, int emissiveTextureIndex,
+                        float3 geometricNormal,
                         float3 rayDir, float hitT, float bsdfPdf) {
     const uint  count = lightingParams[0].emissiveTriangleCount;
     const float total = lightingParams[0].emissiveTotalPower;
     if (bsdfPdf <= 0.0 || count == 0u || total <= 0.0 || hitT <= 0.0) {
+        return 1.0;
+    }
+    // A texture-modulated emitter is not in the list -- see
+    // CollectEmissiveTriangles for why -- so nothing sampled it and this
+    // surface keeps all of its emission. The two sides read the same field to
+    // decide, which is what keeps them from disagreeing.
+    if (emissiveTextureIndex >= 0) {
         return 1.0;
     }
     const float cosAtLight = abs(dot(geometricNormal, rayDir));
@@ -991,7 +1008,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // emissiveFactor, matching the CDF the host built.
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
-        emissive *= EmissiveMisWeight(material.emissiveFactor, worldGeometricNormal,
+        emissive *= EmissiveMisWeight(material.emissiveFactor,
+                                      material.emissiveTextureIndex,
+                                      worldGeometricNormal,
                                       rayDir, RayTCurrent(), payload.bsdfPdf);
     }
 
