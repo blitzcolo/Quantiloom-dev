@@ -614,21 +614,80 @@ void BuildBasis(float3 N, out float3 T, out float3 B) {
 }
 
 // GGX importance sample — returns world-space wi, outputs pdf
-float3 ImportanceSampleGGX_PCG(float3 N, float3 V, float alpha, inout uint rng, out float pdf) {
-    float u1 = pcg_float(rng), u2 = pcg_float(rng);
-    float a2 = alpha * alpha;
-    float cosTheta = sqrt((1.0 - u1) / max(1.0 + (a2 - 1.0)*u1, 1e-7));
-    float sinTheta = sqrt(max(1.0 - cosTheta*cosTheta, 0.0));
-    float phi = 2.0 * PI * u2;
-    float3 H_local = float3(sinTheta*cos(phi), sinTheta*sin(phi), cosTheta);
+// The roughness floor every bounce-side function applies before doing anything
+// with it. Matches the one CookTorranceBRDF_Spectral already imposes on the
+// shading side. Without it a perfectly smooth surface reaches DistributionGGX
+// with alpha = 0, whose denominator is zero at NdotH = 1, and the resulting NaN
+// slips through a `pdf <= 1e-6` guard because every comparison against NaN is
+// false. It surfaced as black speckle on polished surfaces.
+//
+// Load-bearing that all three of BsdfMixturePdf, EvalBounceBrdf and
+// TraceEnvBounceResidual apply the SAME floor: they are a sampling density, a
+// BRDF evaluation and a weight for one and the same lobe, and MIS only
+// partitions correctly if they agree on which lobe that is.
+static const float MIN_BOUNCE_ROUGHNESS = 0.045;
+
+// Smith's masking function for GGX, exact rather than the Schlick fit the
+// shading terms use. This one is the sampling density's, so it has to be the
+// real thing: it is what SampleGGXVNDF_PCG below actually draws from.
+float SmithG1_GGX(float NdotV, float alpha) {
+    const float a2 = alpha * alpha;
+    const float c  = max(NdotV, 1e-4);
+    return 2.0 * c / (c + sqrt(a2 + (1.0 - a2) * c * c));
+}
+
+// Sample a half vector from the distribution of VISIBLE normals (Heitz 2018,
+// "Sampling the GGX Distribution of Visible Normals", JCGT 7(4)).
+//
+// The previous sampler drew from D alone, which proposes half vectors the view
+// direction cannot actually see. Those come back with a weight of
+// G * VdotH / (NdotV * NdotH) -- a ratio with nothing bounding it, since NdotH
+// is floored at 1e-4 and NDF sampling is exactly what puts H far from N. The
+// result is the classic firefly: one sample worth thousands of the ones around
+// it, which the running average then carries for a long time. Sampling visible
+// normals instead makes the weight G2/G1, which is at most 1.
+//
+// Returns the reflected direction and its solid-angle density.
+float3 SampleGGXVNDF_PCG(float3 N, float3 V, float alpha, inout uint rng, out float pdf) {
     float3 T, B;
     BuildBasis(N, T, B);
-    float3 H = normalize(T*H_local.x + B*H_local.y + N*H_local.z);
-    float3 wi = reflect(-V, H);
-    float NdotH = max(dot(N, H), 0.0);
-    float VdotH = max(dot(V, H), 0.0);
-    float D = a2 / (PI * pow(NdotH*NdotH*(a2-1.0)+1.0, 2.0));
-    pdf = (D * NdotH) / max(4.0*VdotH, 1e-7);
+
+    // Into the tangent frame, where the normal is +Z.
+    const float3 Ve = float3(dot(V, T), dot(V, B), dot(V, N));
+
+    // Section 3.2: stretch the view direction to the hemisphere configuration.
+    const float3 Vh = normalize(float3(alpha * Ve.x, alpha * Ve.y, max(Ve.z, 1e-6)));
+
+    // Section 4.1: an orthonormal basis around Vh.
+    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq)
+                                  : float3(1.0, 0.0, 0.0);
+    const float3 T2 = cross(Vh, T1);
+
+    // Section 4.2: a uniform point on the projected disk, squashed to match the
+    // visible area.
+    const float u1 = pcg_float(rng);
+    const float u2 = pcg_float(rng);
+    const float r   = sqrt(u1);
+    const float phi = 2.0 * PI * u2;
+    const float t1 = r * cos(phi);
+    float       t2 = r * sin(phi);
+    const float s  = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(max(1.0 - t1 * t1, 0.0)) + s * t2;
+
+    // Section 4.3: back onto the hemisphere, then unstretch.
+    const float3 Nh = t1 * T1 + t2 * T2 +
+                      sqrt(max(1.0 - t1 * t1 - t2 * t2, 0.0)) * Vh;
+    const float3 Ne = normalize(float3(alpha * Nh.x, alpha * Nh.y, max(Nh.z, 0.0)));
+
+    const float3 H  = normalize(T * Ne.x + B * Ne.y + N * Ne.z);
+    const float3 wi = reflect(-V, H);
+
+    // p(wi) = D_vis(H) / (4 VdotH), and D_vis = G1 VdotH D / NdotV, so the
+    // VdotH cancels and this needs no half-vector term of its own.
+    const float NdotV = max(dot(N, V), 1e-4);
+    const float NdotH = max(dot(N, H), 0.0);
+    pdf = SmithG1_GGX(NdotV, alpha) * DistributionGGX(NdotH, alpha) / (4.0 * NdotV);
     return wi;
 }
 

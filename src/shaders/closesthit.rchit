@@ -498,17 +498,21 @@ struct LightSample {
 // the light's density on both sides of the weight, and both sides have to be
 // evaluating the same function of direction.
 float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float qSpec) {
+    roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0) {
         return 0.0;
     }
     float pdf = (1.0 - qSpec) * NdotWi / PI;
     if (qSpec > 0.0) {
+        // The visible-normal density SampleGGXVNDF_PCG draws from, which is
+        // G1 D / (4 NdotV) -- no half-vector term, the VdotH cancels.
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
-        const float  VdotH = max(dot(V, H), 1e-4);
-        const float  alpha = max(roughness * roughness, 1e-4);
-        pdf += qSpec * DistributionGGX(NdotH, alpha) * NdotH / (4.0 * VdotH);
+        const float  NdotV = max(dot(normal, V), 1e-4);
+        const float  alpha = roughness * roughness;
+        pdf += qSpec * SmithG1_GGX(NdotV, alpha) *
+               DistributionGGX(NdotH, alpha) / (4.0 * NdotV);
     }
     return pdf;
 }
@@ -540,6 +544,7 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
 float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
                      float roughness, float qSpec,
                      float wDiffuse, float wSpecular) {
+    roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0) {
         return 0.0;
@@ -548,7 +553,7 @@ float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
     if (qSpec > 0.0) {
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
-        const float  alpha = max(roughness * roughness, 1e-4);
+        const float  alpha = roughness * roughness;
         const float  D     = DistributionGGX(NdotH, alpha);
         const float  G     = GeometrySmith_IBL(NdotV, NdotWi, roughness);
         f += wSpecular * D * G / (4.0 * max(NdotV, 1e-4) * NdotWi);
@@ -708,6 +713,9 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
         return 0.0;
     }
+    // The same floor BsdfMixturePdf and EvalBounceBrdf apply; all three must
+    // see one lobe.
+    roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
 
     float weight = 1.0;
     if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
@@ -735,30 +743,38 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
 
     float pdf_dir;
     const float3 wi = specularLobe
-        ? ImportanceSampleGGX_PCG(normal, V, roughness * roughness, payload.rngState, pdf_dir)
+        ? SampleGGXVNDF_PCG(normal, V, roughness * roughness, payload.rngState, pdf_dir)
         : CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_dir);
 
     const float NdotWi = dot(normal, wi);
-    if (NdotWi <= 0.0 || pdf_dir <= 1e-6) {
+    // Negated comparisons, so that a NaN fails them. Written the other way a
+    // NaN pdf passes every guard -- every comparison against NaN is false --
+    // and rides out as a NaN weight to be zeroed much later, as black speckle.
+    if (!(NdotWi > 0.0) || !(pdf_dir > 1e-6)) {
         return 0.0;
     }
 
     // f * cos / pdf, with the reflectance already folded into weight.
     //
     //   cosine lobe: f = 1/PI and pdf = cos/PI, so the whole thing is 1.
-    //   GGX lobe:    D cancels against the pdf, leaving G*VdotH/(NdotV*NdotH).
+    //   GGX lobe:    sampling visible normals gives pdf = G1 D / (4 NdotV), and
+    //                f cos = D G / (4 NdotV), so D and NdotV both cancel and
+    //                what is left is the masking ratio G / G1.
     //
-    // The GGX case used to be weighted as if it were the cosine one, which made
-    // every smooth surface scatter the environment diffusely -- a polished
-    // panel could not mirror the sky. G uses the IBL remap because this is
-    // weighed against a split-sum base built with that remap; see
-    // GeometrySmith_IBL.
+    // That ratio is at most 1, which is the point of sampling visible normals.
+    // Drawing from D alone instead left G VdotH / (NdotV NdotH) here, unbounded
+    // because NdotH is floored at 1e-4 and NDF sampling is exactly what puts H
+    // far from N -- one sample worth thousands of its neighbours, carried by
+    // the running average long after.
+    //
+    // G is the IBL remap because this is weighed against a split-sum base built
+    // with that remap (see GeometrySmith_IBL), while G1 is the exact Smith term
+    // the sampler actually drew from. They are deliberately not the same
+    // function: one belongs to the BRDF, the other to the density.
     if (specularLobe) {
-        const float3 H     = normalize(V + wi);
-        const float  VdotH = max(dot(V, H), 1e-4);
-        const float  NdotH = max(dot(normal, H), 1e-4);
-        weight *= GeometrySmith_IBL(NdotV, NdotWi, roughness) *
-                  VdotH / (max(NdotV, 1e-4) * NdotH);
+        const float alpha = roughness * roughness;
+        weight *= GeometrySmith_IBL(NdotV, NdotWi, roughness) /
+                  max(SmithG1_GGX(NdotV, alpha), 1e-4);
     }
 
     RayDesc bounceRay;
