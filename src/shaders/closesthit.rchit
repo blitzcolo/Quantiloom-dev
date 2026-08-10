@@ -300,10 +300,13 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
 // Mixed reflectance at one wavelength. The weights are NOT normalised -- a
 // texel darker than every endmember is a legitimately dimmer patch of the same
 // material, which is the whole point -- so the sum is clamped instead.
-float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
-                                   MaterialData material, float2 uv, float lambda) {
-    float4 w = SampleEndmemberWeights(material, uv);
-
+// The mixture at one wavelength, given weights already sampled.
+//
+// Split from the texture fetch because the weights do not depend on lambda and
+// the caller loops over 32 of them: fetching inside meant re-reading the same
+// texel at the same LOD 32 times per hit, 16 in the IR bands.
+float EvaluateEndmemberReflectanceW(StructuredBuffer<SpectralCurveGPU> curves,
+                                    MaterialData material, float4 w, float lambda) {
     float rho = w.x * EvaluateSpectralCurve(curves, material.spectralReflectanceCurveIndex, lambda);
     if (material.endmemberCurveIndex1 >= 0) {
         rho += w.y * EvaluateSpectralCurve(curves, material.endmemberCurveIndex1, lambda);
@@ -315,6 +318,14 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
         rho += w.w * EvaluateSpectralCurve(curves, material.endmemberCurveIndex3, lambda);
     }
     return saturate(rho);
+}
+
+// Convenience for the single-evaluation callers, which have no loop to hoist
+// the fetch out of.
+float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
+                                   MaterialData material, float2 uv, float lambda) {
+    return EvaluateEndmemberReflectanceW(curves, material,
+                                         SampleEndmemberWeights(material, uv), lambda);
 }
 
 // Compute TBN matrix for normal mapping (Gram-Schmidt orthogonalization)
@@ -387,8 +398,7 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic, float wavelength_nm) {
     if (material.complexRefractiveIndexIndex >= 0) {
         // PHYSICAL PATH: Use measured n,k data from RefractiveIndex.INFO
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[material.complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm);
         float n = nk.x;
         float k = nk.y;
 
@@ -410,8 +420,7 @@ float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic, f
 // Used for specular highlight computation (not just F0)
 float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavelength_nm) {
     if (material.complexRefractiveIndexIndex >= 0) {
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[material.complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm);
         return FresnelConductor(cosTheta, nk.x, nk.y);
     }
 
@@ -1002,6 +1011,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // This is intentional for self-luminous surfaces (e.g., lights, displays, neon signs)
     // No clamping is applied here; emissive can be arbitrarily high for physically-based rendering
     // The final radiance will be clamped in the validation step to prevent NaN/Inf
+    // The endmember mixture weights, fetched once. They do not vary with
+    // wavelength, and every band below loops over 16 or 32 of those.
+    const float4 endmemberW = SampleEndmemberWeights(material, uv);
+
     float3 emissive = material.emissiveFactor;
     if (material.emissiveTextureIndex >= 0) {
         emissive *= SampleTexture(
@@ -1457,7 +1470,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
             const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
-                ? EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b)
+                ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
                 : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
 
             float F0_b;
@@ -1502,7 +1515,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // lambda_b, which is what L_ambient reflects and -- prefiltering a
             // uniform dome being the identity -- what L_ibl reflects too.
             const float sky_b = hasSpectralSolarLUT
-                ? SampleSkyIrradiance(solarSpectralLUT[0], lambda_b) / PI
+                ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
                 : 0.0;
 
             const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
@@ -1576,8 +1589,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (hasSpectralSolarLUT) {
                 // PHYSICAL PATH: Query ASTM G-173 spectral irradiance curves
                 // Convert irradiance (W·m⁻²·nm⁻¹) to radiance (W·sr⁻¹·m⁻²·nm⁻¹)
-                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
 
                 // Irradiance, not the sun disk's radiance. This feeds
                 // BRDF * X * NdotL below, and for a distant source that
@@ -1605,7 +1618,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 // Quantitative path: measured spectral curve
-                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+                rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
             } else {
                 // Fallback path: RGB → Spectrum upsampling
                 rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
@@ -1831,8 +1844,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
             // PHYSICAL PATH: Query ASTM G-173 spectral irradiance curves
-            float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
-            float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+            float sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
+            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
 
             // Irradiance: consumed as BRDF * X * NdotL, same as above
             sunRadiance_lambda = sun_irr;
@@ -1856,7 +1869,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // QUANTITATIVE PATH: Use physically-measured spectral reflectance curve
             // This enables physically-accurate spectral rendering.
             // One endmember and no weight texture is the single flat curve.
-            spectralAlbedo = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+            spectralAlbedo = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
         } else {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
             // WARNING: This path does NOT guarantee physical accuracy
@@ -2068,13 +2081,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         float rho_b = reflectance;
         if (material.spectralReflectanceCurveIndex >= 0) {
-            rho_b = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b);
+            rho_b = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
         }
 
         // The base is the loop's own sky radiance, at lambda_b. Continuous in
         // wavelength, so unlike the thermal bands there is no grid to snap to.
         const float L_base_b = hasSpectralSolarLUT
-            ? SampleSkyIrradiance(solarSpectralLUT[0], lambda_b) / PI
+            ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
             : 0.0;
 
         // One total reflectance, so the lobe is only a sampling shape for it:
@@ -2096,8 +2109,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float sky_radiance_lambda;
 
             if (hasSpectralSolarLUT) {
-                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 // E/PI, matching the sky line below and the MWIR branch:
                 // this is multiplied by rho directly, with no BRDF to carry
                 // the 1/PI, so L = rho·(E/PI)·cosθ is the Lambertian result.
@@ -2118,7 +2131,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 2. Get spectral reflectance at this wavelength
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
-                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+                rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
             } else {
                 // Fallback: use IR reflectance from energy conservation
                 rho_lambda = reflectance;
@@ -2251,11 +2264,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Reflectance at lambda_b, by the same rule the loop uses.
         const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
-            ? EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b)
+            ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
             : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
 
         const float L_base_b = hasSpectralSolarLUT
-            ? SampleSkyIrradiance(solarSpectralLUT[0], lambda_b) / PI
+            ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
             : 0.0;
 
         const float3 nirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
@@ -2275,8 +2288,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float sky_radiance_lambda;
 
             if (hasSpectralSolarLUT) {
-                float sun_irr = SampleSunIrradiance(solarSpectralLUT[0], lambda);
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 // E/PI, matching the sky line below and the MWIR branch:
                 // this is multiplied by rho directly, with no BRDF to carry
                 // the 1/PI, so L = rho·(E/PI)·cosθ is the Lambertian result.
@@ -2298,7 +2311,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 // Quantitative path: use measured spectral curve
-                rho_lambda = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+                rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
             } else {
                 // Fallback: RGB upsampling (NIR is close enough to visible for this to be reasonable)
                 // This uses Gaussian basis functions centered at R/G/B wavelengths
@@ -2482,7 +2495,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Reflectance at lambda_b, by the same rule the loop uses.
         float rho_b = reflectance;
         if (material.spectralReflectanceCurveIndex >= 0) {
-            float rho_curve = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda_b);
+            float rho_curve = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
             float eps_b = saturate(1.0 - rho_curve - material.irTransmittance);
             rho_b = GetAngleDependentIRReflectance(eps_b, material.irTransmittance,
                                                    NdotV, material.metallicFactor);
@@ -2522,7 +2535,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float emissivity_l = emissivity;
             float reflectance_l = reflectance;
             if (material.spectralReflectanceCurveIndex >= 0) {
-                float rho_l = EvaluateEndmemberReflectance(spectralCurves, material, uv, lambda);
+                float rho_l = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
                 float eps_l = saturate(1.0 - rho_l - material.irTransmittance);
                 emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
                 reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
@@ -2561,7 +2574,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
                 if (hasSpectralSolarLUT) {
                     // Query ASTM G-173 or similar (if data extends to MWIR)
-                    sun_irr_lambda = SampleSunIrradiance(solarSpectralLUT[0], lambda);
+                    sun_irr_lambda = SampleSunIrradiance(solarSpectralLUT, lambda);
                 } else {
                     // No curve, no sun -- as in the other bands. The 5778 K
                     // disk that stood in here was the last invented illuminant
@@ -3256,7 +3269,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             sunRadiance = lut.sunRadiance_rgb;
         } else if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
             const float sun_irr =
-                SampleSunIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
+                SampleSunIrradiance(solarSpectralLUT, camera.wavelength_nm);
             sunRadiance = float3(sun_irr, sun_irr, sun_irr);
         } else {
             // No curve, no sun -- the same refusal as every surface path. An

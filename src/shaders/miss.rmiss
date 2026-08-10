@@ -122,7 +122,7 @@ void main(inout Payload payload) {
             // Query sky radiance at this wavelength
             float sky_radiance_lambda;
             if (hasSpectralSolarLUT) {
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
@@ -176,7 +176,7 @@ void main(inout Payload payload) {
             // Thermal single wavelength: NN downwelling spectrum (one sample)
             radiance_spectral = SampleAtmosLdown(atmos, atmosNNData, 0);
         } else if (hasSpectralSolarLUT) {
-            float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], camera.wavelength_nm);
+            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, camera.wavelength_nm);
             radiance_spectral = sky_irr / PI;
         } else {
             radiance_spectral = lut.skyRadiance_spectral;
@@ -219,7 +219,7 @@ void main(inout Payload payload) {
 
             float sky_radiance_lambda;
             if (hasSpectralSolarLUT) {
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = sky_power_rgb;
@@ -287,7 +287,7 @@ void main(inout Payload payload) {
 
             float sky_radiance_lambda;
             if (hasSpectralSolarLUT) {
-                float sky_irr = SampleSkyIrradiance(solarSpectralLUT[0], lambda);
+                float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = sky_power_rgb;

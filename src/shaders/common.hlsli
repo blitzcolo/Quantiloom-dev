@@ -313,38 +313,6 @@ struct SpectralCurveGPU {
     uint  _padding;                      // Padding for 16-byte alignment
 };
 
-// ============================================================================
-// Helper: Query Spectral Curve at Arbitrary Wavelength (O(1) lookup)
-// ============================================================================
-// Performs fast linear interpolation on uniformly-sampled spectral curve
-// Returns: Interpolated spectral value at query_wavelength_nm
-// ============================================================================
-
-float SampleSpectralCurve(SpectralCurveGPU curve, float query_wavelength_nm) {
-    // Handle empty curve
-    if (curve.numSamples == 0) {
-        return 0.0;
-    }
-
-    // Compute fractional index: (λ - λ₀) / Δλ
-    float index_f = (query_wavelength_nm - curve.startWavelength_nm) / curve.stepSize_nm;
-
-    // Clamp to valid range [0, numSamples-1]
-    if (index_f < 0.0) {
-        return curve.values[0];  // Below range: use first value
-    }
-
-    if (index_f >= float(curve.numSamples - 1)) {
-        return curve.values[curve.numSamples - 1];  // Above range: use last value
-    }
-
-    // Linear interpolation between adjacent samples
-    uint  index0 = uint(floor(index_f));
-    uint  index1 = index0 + 1;
-    float t = frac(index_f);  // Fractional part for interpolation
-
-    return lerp(curve.values[index0], curve.values[index1], t);
-}
 
 // ============================================================================
 // Emissive Triangle (GPU) - next-event estimation
@@ -398,33 +366,35 @@ struct ComplexRefractiveIndexGPU {
 // Returns: float2(n, k) - refractive index and extinction coefficient
 // ============================================================================
 
-float2 SampleComplexRefractiveIndex(ComplexRefractiveIndexGPU cri, float query_wavelength_nm) {
-    // Handle empty data
-    if (cri.numSamples == 0) {
+// Buffer plus index, never the struct by value: it is 528 bytes with two
+// fixed-size arrays, and a by-value parameter makes the compiler materialise
+// the whole thing in scratch memory before reading two floats out of it. The
+// wavelength loops call this once or twice per iteration.
+float2 SampleComplexRefractiveIndex(StructuredBuffer<ComplexRefractiveIndexGPU> buf,
+                                    int index, float query_wavelength_nm) {
+    if (index < 0) {
         return float2(1.0, 0.0);  // Default: air
     }
+    const uint numSamples = buf[index].numSamples;
+    if (numSamples == 0) {
+        return float2(1.0, 0.0);
+    }
 
-    // Compute fractional index
-    float index_f = (query_wavelength_nm - cri.startWavelength_nm) / cri.stepSize_nm;
+    const float start = buf[index].startWavelength_nm;
+    const float step  = buf[index].stepSize_nm;
+    const float index_f = (query_wavelength_nm - start) / step;
 
-    // Clamp to valid range
     if (index_f < 0.0) {
-        return float2(cri.n[0], cri.k[0]);
+        return float2(buf[index].n[0], buf[index].k[0]);
+    }
+    if (index_f >= float(numSamples - 1)) {
+        return float2(buf[index].n[numSamples - 1], buf[index].k[numSamples - 1]);
     }
 
-    if (index_f >= float(cri.numSamples - 1)) {
-        return float2(cri.n[cri.numSamples - 1], cri.k[cri.numSamples - 1]);
-    }
-
-    // Linear interpolation
-    uint  i0 = uint(floor(index_f));
-    uint  i1 = i0 + 1;
-    float t = frac(index_f);
-
-    return float2(
-        lerp(cri.n[i0], cri.n[i1], t),
-        lerp(cri.k[i0], cri.k[i1], t)
-    );
+    const uint  i0 = uint(floor(index_f));
+    const float t  = frac(index_f);
+    return float2(lerp(buf[index].n[i0], buf[index].n[i0 + 1], t),
+                  lerp(buf[index].k[i0], buf[index].k[i0 + 1], t));
 }
 
 // ============================================================================
@@ -440,8 +410,8 @@ float2 SampleComplexRefractiveIndex(ComplexRefractiveIndexGPU cri, float query_w
 // - libRadtran: Custom atmospheric conditions
 //
 // USAGE:
-// - Query sun irradiance: SampleSpectralCurve(solarLUT.sunIrradiance, wavelength_nm)
-// - Query sky irradiance: SampleSpectralCurve(solarLUT.skyIrradiance, wavelength_nm)
+// - Query sun irradiance: SampleSunIrradiance(solarSpectralLUT, wavelength_nm)
+// - Query sky irradiance: SampleSkyIrradiance(solarSpectralLUT, wavelength_nm)
 // - Convert irradiance E to radiance L: L = E / Ω_sun (for sun disk)
 //   where Ω_sun ≈ 6.8e-5 sr (angular diameter ~0.53°)
 //
@@ -459,12 +429,43 @@ struct SolarSpectralLUT {
 // Convenience wrappers for querying sun/sky spectral irradiance
 // ============================================================================
 
-float SampleSunIrradiance(SolarSpectralLUT lut, float wavelength_nm) {
-    return SampleSpectralCurve(lut.sunIrradiance, wavelength_nm);
+// Buffer, not the struct: SolarSpectralLUT is 544 bytes (two 272-byte curves),
+// and these are called twice per wavelength iteration in every band. Passing it
+// by value spilled the pair of curves to scratch memory on each call.
+float SampleSunIrradiance(StructuredBuffer<SolarSpectralLUT> lutBuf, float wavelength_nm) {
+    const uint n = lutBuf[0].sunIrradiance.numSamples;
+    if (n == 0) {
+        return 0.0;
+    }
+    const float index_f = (wavelength_nm - lutBuf[0].sunIrradiance.startWavelength_nm) /
+                          lutBuf[0].sunIrradiance.stepSize_nm;
+    if (index_f < 0.0) {
+        return lutBuf[0].sunIrradiance.values[0];
+    }
+    if (index_f >= float(n - 1)) {
+        return lutBuf[0].sunIrradiance.values[n - 1];
+    }
+    const uint i0 = uint(floor(index_f));
+    return lerp(lutBuf[0].sunIrradiance.values[i0],
+                lutBuf[0].sunIrradiance.values[i0 + 1], frac(index_f));
 }
 
-float SampleSkyIrradiance(SolarSpectralLUT lut, float wavelength_nm) {
-    return SampleSpectralCurve(lut.skyIrradiance, wavelength_nm);
+float SampleSkyIrradiance(StructuredBuffer<SolarSpectralLUT> lutBuf, float wavelength_nm) {
+    const uint n = lutBuf[0].skyIrradiance.numSamples;
+    if (n == 0) {
+        return 0.0;
+    }
+    const float index_f = (wavelength_nm - lutBuf[0].skyIrradiance.startWavelength_nm) /
+                          lutBuf[0].skyIrradiance.stepSize_nm;
+    if (index_f < 0.0) {
+        return lutBuf[0].skyIrradiance.values[0];
+    }
+    if (index_f >= float(n - 1)) {
+        return lutBuf[0].skyIrradiance.values[n - 1];
+    }
+    const uint i0 = uint(floor(index_f));
+    return lerp(lutBuf[0].skyIrradiance.values[i0],
+                lutBuf[0].skyIrradiance.values[i0 + 1], frac(index_f));
 }
 
 // ============================================================================

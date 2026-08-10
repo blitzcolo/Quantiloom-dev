@@ -216,8 +216,7 @@ float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness)
 float3 ComputeF0(float3 albedo, float metallic,
                  int complexRefractiveIndexIndex, float wavelength_nm) {
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         float F0_physical = FresnelF0(nk.x, nk.y);
         return float3(F0_physical, F0_physical, F0_physical);
     }
@@ -227,8 +226,7 @@ float3 ComputeF0(float3 albedo, float metallic,
 float ComputeF0_Scalar(float spectralAlbedo, float metallic,
                        int complexRefractiveIndexIndex, float wavelength_nm) {
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         return FresnelF0(nk.x, nk.y);
     }
     return lerp(0.04, spectralAlbedo, metallic);
@@ -263,9 +261,7 @@ float RefractionIOR(MaterialData material, float wavelength_nm) {
         return material.ior;
     }
     if (material.complexRefractiveIndexIndex >= 0) {
-        ComplexRefractiveIndexGPU cri =
-            complexRefractiveIndices[material.complexRefractiveIndexIndex];
-        return SampleComplexRefractiveIndex(cri, wavelength_nm).x;
+        return SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm).x;
     }
     // Degenerates to material.ior when dispersion is 0, so this is safe as the
     // single entry point for every refraction site.
@@ -342,8 +338,7 @@ float3 CookTorranceBRDF(
     // Fresnel term: use exact conductor Fresnel when n,k data is available
     float3 F;
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         F = float3(FresnelConductor(VdotH, nk.x, nk.y),
                    FresnelConductor(VdotH, nk.x, nk.y),
                    FresnelConductor(VdotH, nk.x, nk.y));
@@ -416,8 +411,7 @@ float CookTorranceBRDF_Spectral(
 
     float F;
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
-        ComplexRefractiveIndexGPU cri = complexRefractiveIndices[complexRefractiveIndexIndex];
-        float2 nk = SampleComplexRefractiveIndex(cri, wavelength_nm);
+        float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         F = FresnelConductor(VdotH, nk.x, nk.y);
     } else {
         F = FresnelSchlick(VdotH, F0);
