@@ -1131,7 +1131,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Shadow ray enable flag from LightingParams (configurable via renderer.enable_shadow_rays)
     // Can be disabled for debugging GPU crashes or driver issues
-    const bool ENABLE_SHADOW_RAYS = (lut.enableShadowRays != 0);
+    //
+    // LWIR excluded: its branch sets includeSolarReflection = false
+    // unconditionally, because solar is under 0.1% of that band, so it is the
+    // one mode that traces this ray and then reads nothing from it. The mode is
+    // a specialization constant, so the whole block folds away in that variant
+    // rather than costing a runtime branch in the others.
+    const bool ENABLE_SHADOW_RAYS = (lut.enableShadowRays != 0) &&
+                                    (SPEC_SPECTRAL_MODE != SPECTRAL_MODE_LWIR_FUSED);
 
     // Step 1: Geometric normal check - prevents self-shadowing artifacts on curved surfaces
     // Use worldGeometricNormal (computed earlier) instead of shading normal
