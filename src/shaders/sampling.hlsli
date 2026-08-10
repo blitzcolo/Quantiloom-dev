@@ -74,6 +74,51 @@
 // producing plausible-looking uniform numbers, that two slots are jointly
 // uniform, and that prefixes stay stratified.
 //
+// WHY THERE IS NO ADAPTIVE SAMPLING HERE
+//
+// The obvious next step is to stop sampling pixels that have converged and
+// spend the samples on the ones that have not. It was built, measured, and
+// removed, and the reason is worth writing down because the idea keeps looking
+// good on paper.
+//
+// It can be done without bias -- that part worked. A pixel judging its OWN
+// error is the textbook optimal-stopping bias (the stopping time depends on the
+// samples being averaged), but a pixel that judges only pixels EARLIER in
+// raster order makes the dependency graph acyclic, so its sample count is a
+// function of other pixels' samples alone and its mean stays exactly mu. That
+// version passed an on/off region-mean gate at 0.01%.
+//
+// It just does not pay, for a structural reason rather than a tuning one: on
+// these scenes the low-variance pixels are also the CHEAP pixels. Sky and
+// background miss all geometry, trace one ray, spawn no bounce, and have
+// essentially zero variance -- so stopping them removes a great many samples
+// and almost no work. Anything the renderer is actually slow on is slow
+// because it bounces, and it bounces because there is variance there.
+//
+// Measured on seaside VIS at 384x384, all against one 8192-spp reference:
+//
+//   adaptive, 2% threshold    12.7 s   1.331%   <- SLOWER than uniform, same image
+//   adaptive, 5% threshold    11.2 s   1.455%
+//   adaptive, 10% threshold    9.3 s   2.419%
+//   uniform, 1536 spp          9.1 s   1.597%   <- better than adaptive at 9.3 s
+//   uniform, 1792 spp         10.7 s   1.450%   <- better than adaptive at 11.2 s
+//   uniform, 2048 spp         11.8 s   1.330%   <- better than adaptive at 12.7 s
+//
+// Uniform sampling wins at every time budget. At a threshold tight enough to
+// preserve the image, the per-sample bookkeeping costs more than the skipped
+// samples save. At a threshold loose enough to save real time, what stops is
+// the expensive pixels, before they have converged.
+//
+// The ceiling was low to begin with. For L2 error the best possible allocation
+// beats uniform by E[sigma^2]/E[sigma]^2 over the pixels, which on this scene
+// measures 1.85x -- and that is an oracle that already knows every pixel's
+// variance and pays nothing to learn it. Stratification above delivered more
+// than that, for no memory and no tuning parameter.
+//
+// If this is revisited, the thing to fix is the premise, not the criterion:
+// weight the allocation by measured per-pixel COST as well as variance. That
+// needs a cost AOV the renderer does not currently produce.
+//
 // References:
 //   Owen, "Randomly Permuted (t,m,s)-Nets and (t,s)-Sequences", 1995
 //   Burley, "Practical Hash-based Owen Scrambling", JCGT 9(4), 2020
