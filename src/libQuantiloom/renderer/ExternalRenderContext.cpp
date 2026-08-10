@@ -19,6 +19,7 @@
 #include "GpuImage.hpp"
 #include "TextureManager.hpp"
 #include "CommandHelper.hpp"
+#include "PerformanceLogger.hpp"
 #include "BRDFLutGenerator.hpp"
 #include "renderer/LightingParams.hpp"
 #include "MaterialGpuData.hpp"
@@ -34,7 +35,6 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
 #include <array>
-#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -198,6 +198,10 @@ struct ExternalRenderContext::Impl {
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     std::string pipelineCachePath;  // Set in Create() based on InitParams or platform default
 
+    // GPU timestamps around the trace dispatch. Resolved non-blocking at the
+    // top of each RenderFrame, since the host submits after we return.
+    std::unique_ptr<PerformanceLogger> perfLogger;
+
     // Command pool for internal operations
     VkCommandPool commandPool = VK_NULL_HANDLE;
 
@@ -246,9 +250,12 @@ struct ExternalRenderContext::Impl {
         rng.seed(samplingSeed != 0U ? samplingSeed : std::random_device{}());
     }
 
-    // Statistics
-    f32 lastFrameTimeMs = 0.0f;
-    std::chrono::steady_clock::time_point frameStartTime;
+    // Statistics: GPU time of the most recent resolved trace dispatch, in
+    // milliseconds. One dispatch = one sample, so this is the per-sample cost.
+    // This used to be a steady_clock span across RenderFrame, which only
+    // *records* commands -- it measured CPU command recording (microseconds)
+    // while every reader treated it as the cost of tracing the scene.
+    f32 lastSampleGpuMs = 0.0f;
 
     // Pixel readback buffer (for debug hover display)
     std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
@@ -333,6 +340,7 @@ struct ExternalRenderContext::Impl {
         }
 
         // Destroy resources in reverse order
+        perfLogger.reset();  // query pool needs the (external) device alive
         pipeline.reset();
 
         // Save and destroy pipeline cache
@@ -702,6 +710,8 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     } catch (const std::exception& e) {
         return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") + e.what());
     }
+
+    perfLogger = std::make_unique<PerformanceLogger>(*contextAdapter);
 
     // Create command pool
     VkCommandPoolCreateInfo poolInfo{};
@@ -1149,7 +1159,12 @@ void ExternalRenderContext::RenderFrame(
         return;
     }
 
-    m_impl->frameStartTime = std::chrono::steady_clock::now();
+    // Collect GPU timings from frames the GPU has finished by now. Never
+    // blocks: with the host's frames-in-flight the previous dispatch may
+    // still be running, and its result is simply picked up next time.
+    if (m_impl->perfLogger && m_impl->perfLogger->TryResolvePending()) {
+        m_impl->lastSampleGpuMs = m_impl->perfLogger->GetLastFrameGpuMs();
+    }
 
     // Update CLAHE min/max cache from previous frame's output image
     // This is safe here because QVulkanWindow ensures the previous frame's
@@ -1219,8 +1234,12 @@ void ExternalRenderContext::RenderFrame(
         randomSeed
     );
 
-    // Execute ray tracing (writes to internal outputImage in GENERAL layout)
+    // Execute ray tracing (writes to internal outputImage in GENERAL layout).
+    // Timestamps bracket the trace alone -- not the sensor chain, CLAHE or the
+    // blit -- so what gets measured is the cost of one sample of *this scene*.
+    if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
     m_impl->pipeline->TraceRays(cmd, width, height);
+    if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
 
     // Post-processing, then the blit. Both halves are shared with
     // PresentAccumulated, which does them without the trace above.
@@ -1244,11 +1263,6 @@ void ExternalRenderContext::RenderFrame(
 
     m_impl->accumulatedSamples++;
     m_impl->frameIndex++;
-
-    // Calculate frame time
-    auto frameEndTime = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(frameEndTime - m_impl->frameStartTime);
-    m_impl->lastFrameTimeMs = duration.count() / 1000.0f;
 }
 
 VkImage ExternalRenderContext::Impl::CurrentDisplaySource() const {
@@ -2189,7 +2203,7 @@ u32 ExternalRenderContext::GetAccumulatedSamples() const {
 }
 
 f32 ExternalRenderContext::GetLastFrameTimeMs() const {
-    return m_impl->lastFrameTimeMs;
+    return m_impl->lastSampleGpuMs;
 }
 
 bool ExternalRenderContext::IsReady() const {

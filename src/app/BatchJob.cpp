@@ -327,8 +327,6 @@ int RunBatch(const BatchOptions& options) {
         init.atmosphereModelPackFallback = options.atmosphereModelPackFallback;
         init.sharedDevice = device.value().get();
         init.baseDir = job.configPath.parent_path().string();
-        // Per-job CSVs would all be the same file, each run truncating the last.
-        init.performanceCsvPath = "";
 
         RenderOutcome outcome;
         try {

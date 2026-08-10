@@ -536,15 +536,9 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
 
     QL_LOG_INFO("  Pipeline created and resources bound");
 
-    // ====================================================================
-    // Initialize Performance Logger
-    // ====================================================================
-    QL_LOG_INFO("Initializing performance logger...");
-
-    PerformanceLogger::Config perfConfig;
-    perfConfig.csvFilePath = init.performanceCsvPath;
-    perfConfig.enableLogging = !init.performanceCsvPath.empty();
-    perfLogger = std::make_unique<PerformanceLogger>(context, perfConfig);
+    // GPU timestamps around each trace; per-sample cost is logged after
+    // every fence wait in the render loop
+    perfLogger = std::make_unique<PerformanceLogger>(context);
 
     return SetupResult::Ok();
 }
@@ -875,7 +869,6 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
 
         vkDestroyFence(context.GetDevice(), fence, nullptr);
         vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
-        perfLogger->Flush();
 
         QL_LOG_INFO("  All samples completed!");
         QL_LOG_INFO("  Total GPU time: {:.2f} ms ({:.2f} ms/sample)",

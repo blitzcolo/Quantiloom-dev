@@ -106,7 +106,9 @@ assets/spectral/ecospeclib-all/
 /hyperspectral_output.*
 /hyperspectral_output_bands/
 /pipeline_cache.bin
-/quantiloom_performance.csv
+
+# Cached reference and test renders from measure_convergence.py
+/_convergence/
 
 # ============================================================================
 # Manually-fetched third-party source

@@ -4,25 +4,25 @@
 #include "core/Platform.hpp"
 #include "VulkanContext.hpp"
 #include <vulkan/vulkan.h>
-#include <string>
-#include <vector>
-#include <fstream>
 
 // ============================================================================
-// PerformanceLogger - GPU timestamp queries and CSV logging
+// PerformanceLogger - GPU timestamps around the ray-tracing dispatch
 // ============================================================================
-// Measures GPU rendering performance using Vulkan timestamp queries
-// and logs results to CSV files for analysis
+// A pool of timestamp query pairs with independent write and read cursors, so
+// several dispatches can be recorded into one submit and resolved later.
 //
-// Usage:
-//   PerformanceLogger logger(context);
-//   logger.BeginFrame(cmdBuffer);
-//   // ... render commands ...
-//   logger.EndFrame(cmdBuffer);
-//   logger.LogFrame(frameIndex, width, height, spp, wavelength);
+// Two consumers, two resolve paths:
 //
-// Output CSV format:
-//   frame,width,height,spp,wavelength_nm,gpu_ms,rays_per_sec,spectral_mode
+//   OfflineRenderer waits on a fence after each batch, so its results are
+//   guaranteed ready -- it calls ResolveLastGpuMs(), which uses WAIT_BIT and
+//   would deadlock on a query that was never recorded (hence the pending-frame
+//   guard).
+//
+//   ExternalRenderContext only *records* commands; the host (QVulkanWindow)
+//   submits them after RenderFrame returns, and the next RenderFrame can start
+//   while earlier ones are still in flight. It calls TryResolvePending(),
+//   which drains every pair the GPU has finished and never blocks -- a stall
+//   here would serialize the CPU on the GPU and show up as lost frames.
 //
 // References:
 // - Vulkan spec: VkQueryPool for timestamp queries
@@ -31,8 +31,6 @@
 
 namespace quantiloom {
 
-// TODO: Consider if this should be public API or internal tool
-// Currently exported for backward compatibility with existing main.cpp
 class PerformanceLogger {
 public:
     // ========================================================================
@@ -40,9 +38,7 @@ public:
     // ========================================================================
 
     struct Config {
-        String csvFilePath = "performance_log.csv";
-        bool enableLogging = true;
-        u32 queryPoolSize = 128;  // Number of frames to buffer
+        u32 queryPoolSize = 128;  // Timestamps (2 per frame); 64 frames in flight
     };
 
     // ========================================================================
@@ -67,28 +63,22 @@ public:
     // End frame timing (records end timestamp)
     void EndFrame(VkCommandBuffer cmd);
 
-    // Log frame statistics to CSV
-    // Call after GPU execution completes (after vkQueueWaitIdle or fence)
-    void LogFrame(u32 frameIndex, u32 width, u32 height, u32 spp,
-                  f32 wavelength_nm, const String& spectralMode);
-
-    // Flush CSV file (ensure all data is written)
-    void Flush();
-
     // ========================================================================
     // Accessors
     // ========================================================================
 
-    // Get last frame GPU time in milliseconds
+    // Get last resolved frame GPU time in milliseconds
     [[nodiscard]] f32 GetLastFrameGpuMs() const { return m_lastFrameGpuMs; }
 
-    // Get last frame rays per second
-    [[nodiscard]] f64 GetLastFrameRaysPerSec() const { return m_lastFrameRaysPerSec; }
-
     // Query the current timestamp pair, store result, advance query index.
-    // Call after GPU work has completed (fence wait / vkQueueWaitIdle).
-    // Unlike LogFrame(), does NOT write to the CSV.
+    // Blocks until the result is available (WAIT_BIT) -- only call after the
+    // GPU work is known complete (fence wait / vkQueueWaitIdle).
     f32 ResolveLastGpuMs();
+
+    // Resolve every recorded pair the GPU has already finished, oldest first,
+    // without blocking. GetLastFrameGpuMs() afterwards returns the newest
+    // resolved pair. Returns true if at least one pair was resolved.
+    bool TryResolvePending();
 
 private:
     // ========================================================================
@@ -98,9 +88,13 @@ private:
     VulkanContext& m_context;
     Config m_config;
 
+    // False when the device reports no timestamp support; every method is a
+    // no-op then.
+    bool m_timestampsSupported = false;
+
     // Vulkan query pool for timestamps.
     // Write cursor advances as frames are recorded (EndFrame);
-    // read cursor advances as results are resolved (ResolveLastGpuMs/LogFrame).
+    // read cursor advances as results are resolved.
     // Separate cursors allow multiple frames recorded per submit (batching).
     VkQueryPool m_queryPool = VK_NULL_HANDLE;
     u32 m_writeQueryIndex = 0;
@@ -110,20 +104,14 @@ private:
     // Timestamp frequency (nanoseconds per tick)
     f64 m_timestampPeriod = 1.0;
 
-    // CSV output
-    std::ofstream m_csvFile;
-    bool m_csvHeaderWritten = false;
-
     // Last frame statistics
     f32 m_lastFrameGpuMs = 0.0f;
-    f64 m_lastFrameRaysPerSec = 0.0;
 
     // ========================================================================
     // Helpers
     // ========================================================================
 
     void CreateQueryPool();
-    void WriteCSVHeader();
     f32 QueryGpuTimeMs(u32 queryIndex);
 };
 

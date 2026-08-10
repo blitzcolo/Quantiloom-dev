@@ -189,9 +189,6 @@ public:
          */
         String baseDir;
 
-        /// Per-frame GPU timings. Empty disables the logger.
-        String performanceCsvPath = "quantiloom_performance.csv";
-
         /**
          * @brief Called as each hyperspectral band completes
          *

@@ -957,7 +957,14 @@ public:
     [[nodiscard]] u32 GetAccumulatedSamples() const;
 
     /**
-     * @brief Get last frame render time in milliseconds
+     * @brief GPU time of the most recent trace dispatch, in milliseconds
+     *
+     * Measured with Vulkan timestamp queries around the ray-tracing dispatch
+     * alone -- post-processing and the blit are excluded -- so one dispatch
+     * being one sample, this is the per-sample cost of the current scene.
+     * Results lag by however many frames the host keeps in flight (they are
+     * resolved without blocking at the start of the next RenderFrame), and
+     * the value is 0 until the first dispatch completes.
      */
     [[nodiscard]] f32 GetLastFrameTimeMs() const;
 
