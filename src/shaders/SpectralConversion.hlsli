@@ -297,6 +297,53 @@ float3 SampleCIE_XYZ_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
     return lerp(cieLUT[idx0], cieLUT[idx1], t);
 }
 
+// ============================================================================
+// Importance sampling of the visible band
+// ============================================================================
+// A stochastically sampled wavelength is worth cmf(lambda)/pdf(lambda) to the
+// image, and drawing lambda uniformly makes that weight track the colour
+// matching functions themselves: near zero at both ends of the band and at its
+// largest in the middle, a spread of roughly 4x on Y alone and two-lobed on X
+// and Z. Every sample is then a saturated chromatic spike whose size depends
+// on which wavelength it happened to draw, which is variance the image did not
+// have to carry.
+//
+// Sampling proportionally to a curve shaped like the CMFs flattens it. The
+// curve is PBRT's sech^2 fit, restricted to this renderer's 400-780 nm band and
+// renormalised over it rather than over the 360-830 nm PBRT integrates -- the
+// untruncated version would return wavelengths outside the atmosphere LUT's
+// coverage and outside the deterministic grid the estimator is checked against.
+//
+//   p(lambda) = k sech^2(k (lambda - L0)) / (T(780) - T(400))
+//   CDF^-1(u) = L0 + atanh( T(400) + u (T(780) - T(400)) ) / k
+//
+// with T(x) = tanh(k (x - L0)). Exact inverse, no table, no rejection, and by
+// construction it cannot leave the band.
+//
+// Reference: PBRT v4, "SampleVisibleWavelengths" (Radziszewski et al. 2009).
+// ============================================================================
+
+static const float VIS_IS_K      = 0.0072;      // 1/nm, curve width
+static const float VIS_IS_LAMBDA0 = 538.0;      // nm, curve centre
+static const float VIS_IS_TMIN   = -0.758893192; // tanh(k (400 - L0))
+static const float VIS_IS_TMAX   =  0.940504350; // tanh(k (780 - L0))
+static const float VIS_IS_TRANGE = VIS_IS_TMAX - VIS_IS_TMIN;
+
+// u in [0,1) -> a wavelength in [400, 780] nm.
+float SampleVisibleWavelength(float u) {
+    const float t = VIS_IS_TMIN + u * VIS_IS_TRANGE;
+    // atanh is not in HLSL; the closed form is stable here because |t| < 0.941
+    // by construction and u is clamped away from the endpoints regardless.
+    const float tc = clamp(t, -0.999999, 0.999999);
+    return VIS_IS_LAMBDA0 + 0.5 * log((1.0 + tc) / (1.0 - tc)) / VIS_IS_K;
+}
+
+// The density the above draws from, per nm. Integrates to 1 over 400-780 nm.
+float VisibleWavelengthPDF(float lambda) {
+    const float th = tanh(VIS_IS_K * (lambda - VIS_IS_LAMBDA0));
+    return VIS_IS_K * (1.0 - th * th) / VIS_IS_TRANGE;
+}
+
 // Individual channel accessors for LUT version
 float SampleCIE_X_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
     return SampleCIE_XYZ_LUT(cieLUT, lambda).x;

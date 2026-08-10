@@ -1220,9 +1220,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float  heroBounce = 0.0;
 
         {
+            // Drawn against a curve shaped like the colour matching functions
+            // rather than flat, so that cmf(lambda_b)/pdf below does not swing
+            // by 4x with nothing but the draw. See SampleVisibleWavelength.
+            // A hero ray has no choice to make -- its wavelength was fixed by
+            // the refraction that created it.
             const float lambda_b = heroRay
                 ? payload.heroLambda
-                : LAMBDA_MIN_VIS + pcg_float(payload.rngState) * SPECTRAL_VIS_BANDWIDTH;
+                : SampleVisibleWavelength(pcg_float(payload.rngState));
 
             // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
             const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
@@ -1284,9 +1289,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Scalar: the surface that sampled lambda_h owns the weighting.
                 heroBounce = corr_b;
             } else {
-                // XYZ = L(lambda_b) * cmf(lambda_b) / pdf, pdf = 1/bandwidth.
-                // Same estimator, same normalisation as the deterministic grid
-                // below, which divides by CIE_Y_INTEGRAL once for both.
+                // XYZ = L(lambda_b) * cmf(lambda_b) / pdf. Same estimator and
+                // same normalisation as the deterministic grid below, which
+                // divides by CIE_Y_INTEGRAL once for both. The pdf is no longer
+                // the constant 1/bandwidth, so it is evaluated rather than
+                // folded in as a literal.
                 float tau_b = 1.0;
                 if (atmosEnabled) {
                     const uint atmosIdx_b = (uint)clamp(
@@ -1294,7 +1301,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         0.0, float(NUM_WAVELENGTH_SAMPLES - 1));
                     tau_b = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
                 }
-                XYZ_bounce = corr_b * tau_b * SPECTRAL_VIS_BANDWIDTH *
+                XYZ_bounce = corr_b * tau_b / VisibleWavelengthPDF(lambda_b) *
                              SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
             }
         }
@@ -1520,7 +1527,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
             output_radiance = float3(0.0, 0.0, 0.0);  // Fallback to black
         }
-        output_radiance = clamp(output_radiance, 0.0, 1000.0);  // Reasonable HDR range
+        // SYMMETRIC, for the reason raygen.rgen gives at its own clamp, plus a
+        // second one that applies to every band.
+        //
+        // A single sample here is out of gamut twice over. The indirect term is
+        // one wavelength, and a monochromatic radiance converted to linear sRGB
+        // lands outside the triangle with a genuinely negative channel; those
+        // excursions are what cancel against other wavelengths' when the
+        // samples are averaged. And the correction itself is a residual,
+        // L_in - L_base, which is negative wherever the hemisphere is darker
+        // than the uniform sky the analytic term assumed -- that is what
+        // occlusion IS in this estimator.
+        //
+        // Rectifying either at zero turns a mean of zero into a mean of
+        // (1 - rrSurvive) * rho * sky: the samples that kill the path keep the
+        // full analytic term while the ones that would have cancelled it are
+        // clipped away. Enclosed and shadowed surfaces read too bright, by more
+        // the darker they are. Neither the furnace suite nor check_sky_equiv
+        // can see it -- both are built on scenes where the correction is
+        // identically zero.
+        output_radiance = clamp(output_radiance, -1000.0, 1000.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
         // ====================================================================
@@ -1681,11 +1707,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             radiance_spectral = tau_l * radiance_spectral + lpath_l;
         }
 
-        // Validation
+        // Validation. Symmetric: the bounce above is a residual and goes
+        // negative under occlusion; see the note at the VIS_FUSED clamp.
         if (!isfinite(radiance_spectral)) {
             radiance_spectral = 0.0;
         }
-        radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+        radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
 
         // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
@@ -1882,11 +1909,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         radiance_avg += bounceCorr;
 
-        // Validation
+        // Validation. Symmetric: bounceCorr is a residual and goes negative
+        // under occlusion; see the note at the VIS_FUSED clamp.
         if (!isfinite(radiance_avg)) {
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
@@ -2053,7 +2081,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (!isfinite(radiance_avg)) {
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        // Symmetric: bounceCorr is a residual and goes negative under
+        // occlusion; see the note at the VIS_FUSED clamp.
+        radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
 
@@ -2352,7 +2382,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (!isfinite(radiance_avg)) {
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);  // Allow high dynamic range for IR
+        // Symmetric, and wide for IR's dynamic range: bounceCorr is a residual
+        // and goes negative under occlusion; see the note at the VIS_FUSED
+        // clamp.
+        radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         // Output as grayscale (IR images are single-channel)
         output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
@@ -3117,15 +3150,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Hero wavelength: one wavelength, one path, weighted by 1/pdf
             // ================================================================
             // The band cannot follow one path through a dispersive interface,
-            // so pick a wavelength and follow that. λ_h is uniform over the
-            // band, so pdf = 1/bandwidth and the estimator is
+            // so pick a wavelength and follow that. The estimator is
             //
-            //   XYZ = L(λ_h) · cmf(λ_h) / pdf
+            //   XYZ = L(λ_h) · cmf(λ_h) / pdf(λ_h)
             //
             // whose expectation is ∫L(λ)cmf(λ)dλ -- the same integral the
             // deterministic 32-point grid approximates. That equivalence is the
             // test: with a CONSTANT n(λ) this must converge to the
             // non-dispersing render, and it does, to 0.29% at 512 spp.
+            //
+            // λ_h is drawn against the CMF-shaped density rather than flat, for
+            // the reason given at SampleVisibleWavelength: uniform draws make
+            // the weight cmf/pdf swing with nothing but the draw, and a prism
+            // pixel already carries the reflect/refract coin on top of it.
             //
             // Wavelength is where the noise goes. Nothing outside a dispersive
             // refraction samples it, so an ordinary scene is unaffected.
@@ -3137,8 +3174,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             payload.rngState = heroState;
 
             const float u_lambda = float(heroWord) / 4294967296.0;
-            const float lambda_h = SPECTRAL_VIS_LAMBDA_MIN +
-                                   u_lambda * SPECTRAL_VIS_BANDWIDTH;
+            const float lambda_h = SampleVisibleWavelength(u_lambda);
 
             const float ior_h = RefractionIOR(material, lambda_h);
             const float n1 = entering ? 1.0 : ior_h;
@@ -3168,7 +3204,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             const float3 cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_h);
-            float3 XYZ_h = L_h * cmf * SPECTRAL_VIS_BANDWIDTH;  // × 1/pdf
+            float3 XYZ_h = L_h * cmf / VisibleWavelengthPDF(lambda_h);
             XYZ_h /= CIE_Y_INTEGRAL;
 
             float3 heroRgb = ConvertXYZToLinearRGB(XYZ_h);
