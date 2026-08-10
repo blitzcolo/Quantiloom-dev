@@ -251,6 +251,58 @@ struct InstanceGeometryInfo {
 static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
 
 /**
+ * @brief One emissive triangle, in world space, for next-event estimation
+ *
+ * Light sampling needs to put a point on an emitter without tracing towards it
+ * first, which means the emitters have to exist as geometry the shader can
+ * address directly -- the acceleration structure only answers questions about
+ * rays that already have a direction.
+ *
+ * World space rather than object space because that is what the shader needs
+ * and nothing else would save work: the transform is applied once here per
+ * build instead of once per sample. The cost is that a moved node invalidates
+ * the buffer, which is why RefitTlas rebuilds it.
+ *
+ * `cumulativePower` is the running sum of `luminance(emissive) * area` up to
+ * and including this triangle, so the last entry holds the total and a single
+ * uniform variate selects a triangle by scanning for the first entry above
+ * `u * total`. Choosing in proportion to power and then uniformly over the
+ * triangle makes the area-measure density `luminance(emissive) / total`, in
+ * which the area has cancelled -- see LightingParams::emissiveTotalPower.
+ */
+struct EmissiveTriangleGPU {
+    glm::vec3 v0;         float cumulativePower;  //  0..16
+    glm::vec3 edge1;      float area;             // 16..32
+    glm::vec3 edge2;      float _pad0;            // 32..48
+    glm::vec3 emissive;   float _pad1;            // 48..64
+};
+
+static_assert(sizeof(EmissiveTriangleGPU) == 64, "EmissiveTriangleGPU size mismatch");
+
+/**
+ * @brief The emissive triangles of a scene, in world space, power-ordered CDF built
+ *
+ * Walks the same node/primitive order as the geometry build, so a triangle's
+ * material is the one the shader would find through InstanceGeometryInfo.
+ *
+ * Returns an empty vector when the scene has no emissive material, which is the
+ * common case and the one that must stay free: with no triangles the shader
+ * skips light sampling entirely and every sun-and-sky scene renders exactly as
+ * it did before this existed.
+ */
+Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene);
+
+/**
+ * @brief Upload emissive triangles for binding 23
+ *
+ * Never returns null: an empty list still gets a one-element zero-filled buffer,
+ * because the descriptor has to be written with something and
+ * LightingParams::emissiveTriangleCount is what says whether to read it.
+ */
+std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
+    VulkanContext& ctx, const Vector<EmissiveTriangleGPU>& triangles);
+
+/**
  * @brief Everything the ray tracing pipeline needs to trace a scene's geometry
  *
  * Concatenates every primitive's attributes into one buffer per attribute, builds a
@@ -443,6 +495,7 @@ struct PipelineBindings {
     const GpuBuffer* atmosphereHeader = nullptr;
     const GpuBuffer* atmosphereData = nullptr;
     const GpuBuffer* cieColourMatching = nullptr;
+    const GpuBuffer* emissiveTriangles = nullptr;
 };
 
 /**

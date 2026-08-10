@@ -91,6 +91,16 @@
 [[vk::binding(20, 0)]] StructuredBuffer<float> atmosNNData;
 
 // ============================================================================
+// Emissive geometry (next-event estimation)
+// ============================================================================
+// World-space emitters with a cumulative-power CDF. Always bound -- a scene
+// with no emissive material gets a single zero entry -- so read
+// lightingParams[0].emissiveTriangleCount before touching it.
+// ============================================================================
+
+[[vk::binding(23, 0)]] StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles;
+
+// ============================================================================
 // Path Depth
 // ============================================================================
 // One counter for every kind of child ray -- refraction, reflection and the
@@ -454,6 +464,225 @@ float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavele
 // base the caller has already added.
 // ============================================================================
 
+// ============================================================================
+// Next-event estimation: the light, sampled directly
+// ============================================================================
+// A path finds an emitter two ways. It can bounce and land on one, which is
+// what this renderer did exclusively -- and which, in a room lit only by a
+// ceiling panel, means almost every sample returns nothing and the image needs
+// thousands of them. Or the shading point can pick a point on an emitter and
+// ask whether it is visible, which costs one shadow ray and always returns
+// something.
+//
+// Neither is good at everything. Light sampling collapses for a near-mirror,
+// where the BRDF is nonzero only in a sliver of directions the light sampler
+// almost never picks; BSDF sampling collapses for a small or distant light. So
+// both run, and each contribution is scaled by the power heuristic over the two
+// densities. The weights sum to one at every direction, so the total is still
+// an unbiased estimate of the same integral -- MIS buys variance, never energy.
+//
+// The two densities must be expressed in the same measure. Light sampling is
+// natural in area measure and is converted: p_omega = p_A * d^2 / |cos_light|.
+// ============================================================================
+
+struct LightSample {
+    float3 wi;          // shading point towards the light
+    float  dist;        // distance to the sampled point
+    float3 emissive;    // the emitter's RGB emissive factor
+    float  pdfSolid;    // density in solid angle measure at the shading point
+    bool   valid;
+};
+
+// The density with which the BSDF lobes would have produced direction wi.
+// The MIXTURE over both lobes, not the chosen one's: this is compared against
+// the light's density on both sides of the weight, and both sides have to be
+// evaluating the same function of direction.
+float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float qSpec) {
+    const float NdotWi = dot(normal, wi);
+    if (NdotWi <= 0.0) {
+        return 0.0;
+    }
+    float pdf = (1.0 - qSpec) * NdotWi / PI;
+    if (qSpec > 0.0) {
+        const float3 H     = normalize(V + wi);
+        const float  NdotH = max(dot(normal, H), 0.0);
+        const float  VdotH = max(dot(V, H), 1e-4);
+        const float  alpha = max(roughness * roughness, 1e-4);
+        pdf += qSpec * DistributionGGX(NdotH, alpha) * NdotH / (4.0 * VdotH);
+    }
+    return pdf;
+}
+
+// The BRDF that TraceEnvBounceResidual is implicitly sampling, evaluated at an
+// arbitrary direction.
+//
+// Light sampling and BSDF sampling only combine into an unbiased estimator if
+// they are estimating the same integral, which means evaluating the same f.
+// Reaching for CookTorranceBRDF_Spectral here instead looks right and is not:
+// that function takes its Fresnel at the half vector, the way direct sun does,
+// while the bounce takes it at the view vector, the way the split-sum ambient
+// terms it is correcting do. Two different BRDFs, so the MIS weights partition
+// one integral while the strategies estimate another. It reads as a scene that
+// gets brighter the more grazing the view -- 25% on the side walls of a Cornell
+// box, 3% on the back wall, which is what pointed at the cause.
+//
+// So this inverts the bounce's own weights instead. Given weight = f cos / pdf
+// for each lobe:
+//
+//   cosine lobe: weight = wDiffuse/(1-qSpec), pdf = cos/PI   =>  f = wDiffuse/PI
+//   GGX lobe:    weight = wSpecular/qSpec * G VdotH/(NdotV NdotH),
+//                pdf    = D NdotH/(4 VdotH)
+//                                        =>  f = wSpecular G D / (4 NdotV NdotWi)
+//
+// The specular term is gated on qSpec because a surface with qSpec == 0 never
+// samples that lobe, so it is not part of what the bounce estimates and must
+// not be part of what the light sampler estimates either.
+float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
+                     float roughness, float qSpec,
+                     float wDiffuse, float wSpecular) {
+    const float NdotWi = dot(normal, wi);
+    if (NdotWi <= 0.0) {
+        return 0.0;
+    }
+    float f = wDiffuse / PI;
+    if (qSpec > 0.0) {
+        const float3 H     = normalize(V + wi);
+        const float  NdotH = max(dot(normal, H), 0.0);
+        const float  alpha = max(roughness * roughness, 1e-4);
+        const float  D     = DistributionGGX(NdotH, alpha);
+        const float  G     = GeometrySmith_IBL(NdotV, NdotWi, roughness);
+        f += wSpecular * D * G / (4.0 * max(NdotV, 1e-4) * NdotWi);
+    }
+    return f;
+}
+
+// Pick an emitter in proportion to its power, then a point uniformly on it.
+//
+// Because the triangle is chosen with probability (luminance * area) / total
+// and the point uniformly within it, the area-measure density is
+// luminance / total -- the area cancels. That is what lets an emitter compute
+// its own sampling density later from nothing but its material.
+LightSample SampleEmissiveGeometry(float3 hitPos, inout uint rngState) {
+    LightSample s;
+    s.wi = float3(0.0, 1.0, 0.0);
+    s.dist = 0.0;
+    s.emissive = float3(0.0, 0.0, 0.0);
+    s.pdfSolid = 0.0;
+    s.valid = false;
+
+    const uint  count = lightingParams[0].emissiveTriangleCount;
+    const float total = lightingParams[0].emissiveTotalPower;
+    if (count == 0u || total <= 0.0) {
+        return s;
+    }
+
+    // First entry whose running power passes the target. Linear because the
+    // list is short -- a Cornell box has two triangles -- and a linear scan
+    // has no divergence a binary search would avoid.
+    const float target = pcg_float(rngState) * total;
+    uint idx = count - 1u;
+    [loop] for (uint i = 0u; i < count; ++i) {
+        if (emissiveTriangles[i].cumulativePower >= target) {
+            idx = i;
+            break;
+        }
+    }
+
+    const EmissiveTriangleGPU tri = emissiveTriangles[idx];
+
+    // Uniform on the triangle: fold the far half of the unit square back.
+    float u = pcg_float(rngState);
+    float v = pcg_float(rngState);
+    if (u + v > 1.0) {
+        u = 1.0 - u;
+        v = 1.0 - v;
+    }
+    const float3 lightPoint = tri.v0 + u * tri.edge1 + v * tri.edge2;
+
+    const float3 toLight = lightPoint - hitPos;
+    const float  dist2   = dot(toLight, toLight);
+    if (dist2 < 1e-9) {
+        return s;   // the shading point is on the emitter
+    }
+    const float dist = sqrt(dist2);
+    const float3 wi = toLight / dist;
+
+    const float3 lightNormal = SafeNormalize(cross(tri.edge1, tri.edge2));
+    // Absolute, because emission here is two-sided: the closest-hit shader adds
+    // a surface's emissive term whichever face was hit, so a light seen from
+    // behind is lit. Taking a signed cosine would make the light sampler
+    // disagree with what the BSDF side actually collects.
+    const float cosAtLight = abs(dot(lightNormal, -wi));
+    if (cosAtLight <= 1e-6) {
+        return s;   // edge-on: it subtends nothing and p_omega would diverge
+    }
+
+    const float pdfArea = dot(tri.emissive, EMISSIVE_LUMINANCE_WEIGHTS) / total;
+
+    s.wi       = wi;
+    s.dist     = dist;
+    s.emissive = tri.emissive;
+    s.pdfSolid = pdfArea * dist2 / cosAtLight;
+    s.valid    = s.pdfSolid > 0.0;
+    return s;
+}
+
+// Is the sampled point on the emitter visible from the shading point?
+bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
+    RayDesc shadowRay;
+    shadowRay.Origin    = hitPos + normal * 1e-3;
+    shadowRay.Direction = s.wi;
+    shadowRay.TMin      = 0.001;
+    // Stop short of the emitter, or the emitter itself is the occluder.
+    shadowRay.TMax      = s.dist * 0.999;
+
+    Payload shadowPayload;
+    shadowPayload.radiance    = float3(0.0, 0.0, 0.0);
+    shadowPayload.isShadowed  = 1;   // cleared by shadow_miss
+    shadowPayload.depth       = 0;
+    shadowPayload.rngState    = 0;
+    shadowPayload.heroLambda  = 0.0;
+    shadowPayload.primaryHitT = -1.0;
+    shadowPayload.bsdfPdf     = 0.0;
+
+    TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+             0xFF, 0, 0, 1, shadowRay, shadowPayload);
+
+    return shadowPayload.isShadowed == 0;
+}
+
+// Power heuristic, beta = 2, guarded so that a zero opposing density gives the
+// whole contribution to this strategy rather than 0/0.
+float PowerHeuristic(float thisPdf, float otherPdf) {
+    const float a = thisPdf * thisPdf;
+    const float b = otherPdf * otherPdf;
+    const float denom = a + b;
+    return denom > 0.0 ? a / denom : 0.0;
+}
+
+// The weight an emitter's own emission keeps when the path arrived by a BSDF
+// bounce. 1 when nothing else could have found it -- no emitters registered, or
+// this ray was not a BSDF sample (primary, refracted, shadow).
+//
+// The density the light sampler would have used is recovered from the
+// material alone: p_A = luminance(emissive) / totalPower, converted to solid
+// angle with this hit's own distance and grazing angle.
+float EmissiveMisWeight(float3 emissive, float3 geometricNormal,
+                        float3 rayDir, float hitT, float bsdfPdf) {
+    const uint  count = lightingParams[0].emissiveTriangleCount;
+    const float total = lightingParams[0].emissiveTotalPower;
+    if (bsdfPdf <= 0.0 || count == 0u || total <= 0.0 || hitT <= 0.0) {
+        return 1.0;
+    }
+    const float cosAtLight = abs(dot(geometricNormal, rayDir));
+    if (cosAtLight <= 1e-6) {
+        return 1.0;
+    }
+    const float pdfArea  = dot(emissive, EMISSIVE_LUMINANCE_WEIGHTS) / total;
+    const float pdfLight = pdfArea * hitT * hitT / cosAtLight;
+    return PowerHeuristic(bsdfPdf, pdfLight);
+}
+
 float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
                              float roughness, float qSpec,
                              float wDiffuse, float wSpecular, float rrSurvive,
@@ -528,6 +757,11 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     child.rngState    = payload.rngState;
     child.heroLambda  = lambda_b;
     child.primaryHitT = -1.0;
+    // If this ray lands on an emitter, that surface has to know how likely the
+    // BSDF was to have sent a ray its way, so it can weigh its emission against
+    // the light sampling the same vertex did. The mixture density, evaluated at
+    // the direction actually taken -- see BsdfMixturePdf.
+    child.bsdfPdf     = BsdfMixturePdf(normal, V, wi, roughness, qSpec);
     TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, bounceRay, child);
 
     // Carry the child's consumption forward, or the parent's later draws
@@ -743,6 +977,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
             uv,
             float4(1.0, 1.0, 1.0, 1.0)
         ).rgb;
+    }
+
+    // If a BSDF-sampled bounce landed here and this surface emits, the vertex
+    // that sent the ray also sampled the emitters explicitly, and both would
+    // report the same light. Keep the share the power heuristic gives this
+    // strategy; the other share is added back at that vertex.
+    //
+    // Only in the modes that do light sampling. The mode is a specialization
+    // constant, so this and the NEE terms below compile out together and the
+    // thermal bands -- which spawn bounce rays but sample no lights -- keep
+    // whatever emission they find. The density is built from the untextured
+    // emissiveFactor, matching the CDF the host built.
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+        emissive *= EmissiveMisWeight(material.emissiveFactor, worldGeometricNormal,
+                                      rayDir, RayTCurrent(), payload.bsdfPdf);
     }
 
     // ========================================================================
@@ -1147,6 +1397,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 XYZ_bounce = float3(0.0, 0.0, 0.0);
         float  heroBounce = 0.0;
 
+        // Light sampling. The direction and its two densities do not depend on
+        // wavelength, so they are settled once here; only the BRDF and the
+        // emitter's spectrum are evaluated per lambda inside the loop.
+        //
+        // visNeeScale is f-independent: cos(theta) * w_MIS / pdf. Zero means
+        // there is nothing to add -- no emitters, edge-on, occluded, or below
+        // the horizon -- and the loop skips the work.
+        LightSample visLight;
+        float visNeeScale = 0.0;
+        // The bounce's BRDF terms, kept so the loop evaluates the same f the
+        // bounce samples. wDiffuse is per-wavelength, so what is carried out is
+        // everything except rho: kD_b, and the pieces of the specular lobe.
+        float visKD = 0.0, visF = 0.0, visQSpec = 0.0, visNdotV = 0.0;
         {
             // Drawn against a curve shaped like the colour matching functions
             // rather than flat, so that cmf(lambda_b)/pdf below does not swing
@@ -1208,6 +1471,25 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 : 0.0;
 
             const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+
+            // Sampled before the bounce so both draw from the same RNG stream
+            // in a fixed order; the bounce advances payload.rngState itself.
+            visLight = SampleEmissiveGeometry(visHitPos, payload.rngState);
+            if (visLight.valid) {
+                const float NdotWl = dot(normal, visLight.wi);
+                if (NdotWl > 0.0 && LightSampleVisible(visHitPos, normal, visLight)) {
+                    const float pdfBsdfAtLight =
+                        BsdfMixturePdf(normal, V, visLight.wi, roughness, qSpec_b);
+                    visNeeScale = NdotWl *
+                                  PowerHeuristic(visLight.pdfSolid, pdfBsdfAtLight) /
+                                  visLight.pdfSolid;
+                    visKD     = kD_b;
+                    visF      = F_b;
+                    visQSpec  = qSpec_b;
+                    visNdotV  = NdotV_b;
+                }
+            }
+
             const float  corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
                 kD_b * rho_b, F_b, rrSurvive_b,
@@ -1364,7 +1646,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 }
             }
 
-            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl;
+            // 4b. Light sampled directly on an emitter, at this wavelength.
+            // f * L_e * cos * w / p_omega -- the geometry term and the area-to-
+            // solid-angle conversion are both already inside pdfSolid.
+            float L_nee = 0.0;
+            if (visNeeScale > 0.0) {
+                const float brdf_at_light = EvalBounceBrdf(
+                    normal, V, visLight.wi, visNdotV, roughness, visQSpec,
+                    visKD * rho_lambda, visF);
+                L_nee = brdf_at_light *
+                        ConvertLinearRGBToIlluminantSpectrum(visLight.emissive, lambda) *
+                        visNeeScale;
+            }
+
+            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee;
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
@@ -1622,6 +1917,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
             const float rrSurvive_s = clamp(lerp(spectralAlbedo, 1.0, metallic), 0.0, 0.95);
 
             const float3 singleHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+
+            // 7b. Light sampling, as VIS_FUSED. One wavelength, so there is no
+            // loop to hoist anything out of: the emitter's spectrum is
+            // evaluated here alongside everything else.
+            LightSample s = SampleEmissiveGeometry(singleHitPos, payload.rngState);
+            if (s.valid) {
+                const float NdotWl = dot(normal, s.wi);
+                if (NdotWl > 0.0 && LightSampleVisible(singleHitPos, normal, s)) {
+                    const float pdfBsdfAtLight =
+                        BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s);
+                    const float brdf_at_light = EvalBounceBrdf(
+                        normal, V, s.wi, NdotV_s, roughness, qSpec_s,
+                        kD_scalar * spectralAlbedo, F_scalar.r);
+                    radiance_spectral +=
+                        brdf_at_light *
+                        ConvertLinearRGBToIlluminantSpectrum(s.emissive, lambda) *
+                        NdotWl * PowerHeuristic(s.pdfSolid, pdfBsdfAtLight) / s.pdfSolid;
+                }
+            }
+
             radiance_spectral += TraceEnvBounceResidual(
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
                 kD_scalar * spectralAlbedo, F_scalar.r, rrSurvive_s,

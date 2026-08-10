@@ -39,6 +39,11 @@ TEST(LightingParamsTest, FieldOffsets) {
     EXPECT_EQ(offsetof(LightingParams, chromaR_correction), 56u);
     EXPECT_EQ(offsetof(LightingParams, chromaB_correction), 60u);
     EXPECT_EQ(offsetof(LightingParams, enableShadowRays), 64u);
+    EXPECT_EQ(offsetof(LightingParams, enableEnvironmentMap), 68u);
+    // The last two padding floats. Nothing is left: another field here changes
+    // sizeof, and with it the SDK/Studio pairing.
+    EXPECT_EQ(offsetof(LightingParams, emissiveTriangleCount), 72u);
+    EXPECT_EQ(offsetof(LightingParams, emissiveTotalPower), 76u);
 }
 
 TEST(LightingParamsTest, Alignment16Byte) {

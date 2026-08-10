@@ -286,7 +286,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(23);  // Added depth AOV (binding 22)
+    std::vector<VkDescriptorSetLayoutBinding> bindings(24);  // ..22 depth AOV, 23 emissive triangles
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -530,9 +530,19 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[22].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     bindings[22].pImmutableSamplers = nullptr;
 
+    // Binding 23: Emissive triangles for next-event estimation
+    // (StructuredBuffer<EmissiveTriangleGPU>). Always bound, possibly with a
+    // single zero entry; LightingParams::emissiveTriangleCount says whether the
+    // shader may read it.
+    bindings[23].binding = 23;
+    bindings[23].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[23].descriptorCount = 1;
+    bindings[23].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[23].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(23, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(24, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -559,7 +569,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    poolSizes[2].descriptorCount = 13;  // LUT + vertex + index + material + UV + tangent + normal + spectral curves + CRI + solar LUT + atmospheric params + instance geometry info + CIE CMF LUT
+    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23. Counted from the layout
+    // rather than from the list below, which had drifted: it omitted the
+    // atmosphere data blob (binding 20) and so asked the pool for one fewer
+    // descriptor than the set declares.
+    poolSizes[2].descriptorCount = 15;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1405,6 +1419,28 @@ void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) con
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 18;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_DEBUG("Binding emissive triangle buffer to descriptor set (binding 23)");
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 23;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;

@@ -118,6 +118,17 @@ struct ResolvedRenderConfig {
     /// apply -- so this is what goes to the GPU, not a first draft of it.
     LightingParams lighting{};
 
+    /// Whether emissive geometry is sampled directly (next-event estimation).
+    ///
+    /// On by default and there is no reason to turn it off for a picture: it
+    /// costs one shadow ray per hit and is worth roughly thirty times the
+    /// samples in a scene lit by emissive geometry. The switch exists so that
+    /// the two light-transport strategies can be measured against each other --
+    /// with it off, emitters are found only by BSDF sampling, and the two must
+    /// converge to the same image. scripts/render-tests/check_nee_mis.py is
+    /// that comparison.
+    bool enableLightSampling = true;
+
     /// The sun and sky spectra, normalised if the config asked for it. Absent
     /// when the scene names no solar_lut, which in a spectral mode means it
     /// renders unlit -- the shaders have no RGB fallback.

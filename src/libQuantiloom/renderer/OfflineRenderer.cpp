@@ -118,6 +118,7 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
     std::unique_ptr<GpuBuffer> atmosDataBuffer;
     std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
+    std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
@@ -521,6 +522,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.atmosphereHeader = atmosHeaderBuffer.get();
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCMF_LUTRef;
+    bindings.emissiveTriangles = emissiveTriangleBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
 
@@ -627,6 +629,22 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
 
     if (auto r = impl.BuildScene(); !r.has_value()) {
         return CreateResult::Err(std::move(r).error());
+    }
+
+    // Emissive geometry for next-event estimation. Before the upload below,
+    // because the triangle count and total power travel in LightingParams --
+    // and after BuildScene, because they are world-space and need the node
+    // transforms. Nothing moves during an offline render, so this runs once.
+    {
+        const auto emissiveTris = impl.resolved.enableLightSampling
+            ? rendercore::CollectEmissiveTriangles(impl.loadedScene)
+            : Vector<rendercore::EmissiveTriangleGPU>{};
+        impl.emissiveTriangleBuffer =
+            rendercore::CreateEmissiveTriangleBuffer(*impl.contextRef, emissiveTris);
+        impl.lightingParams.emissiveTriangleCount =
+            static_cast<u32>(emissiveTris.size());
+        impl.lightingParams.emissiveTotalPower =
+            emissiveTris.empty() ? 0.0f : emissiveTris.back().cumulativePower;
     }
 
     impl.lightingParamsBuffer = std::make_unique<GpuBuffer>(

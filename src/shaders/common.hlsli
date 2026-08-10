@@ -347,6 +347,27 @@ float SampleSpectralCurve(SpectralCurveGPU curve, float query_wavelength_nm) {
 }
 
 // ============================================================================
+// Emissive Triangle (GPU) - next-event estimation
+// ============================================================================
+// One world-space emissive triangle. Must match rendercore::EmissiveTriangleGPU
+// (64 bytes). See that struct for why the positions are world space and what
+// cumulativePower is for.
+// ============================================================================
+
+struct EmissiveTriangleGPU {
+    float3 v0;        float cumulativePower;
+    float3 edge1;     float area;
+    float3 edge2;     float _pad0;
+    float3 emissive;  float _pad1;
+};
+
+// The weighting that turns an emissive RGB triple into the single number the
+// sampling density is built from. The host uses the same one to build the CDF;
+// the two must agree exactly or the light and BSDF strategies disagree about
+// how likely a path was and the MIS weights stop summing to one.
+#define EMISSIVE_LUMINANCE_WEIGHTS float3(0.2126, 0.7152, 0.0722)
+
+// ============================================================================
 // Complex Refractive Index Data Structure (GPU)
 // ============================================================================
 // Fixed-size complex refractive index N = n + ik for Fresnel calculations
@@ -813,7 +834,9 @@ struct LightingParams {
 
     uint   enableShadowRays;     // Shadow ray enable flag: 0 = disabled, 1 = enabled (configurable)
     uint   enableEnvironmentMap; // IBL from the environment cubemap: 0 = contributes nothing, 1 = lights the scene
-    float  _padding[2];          // Padding to 80 bytes (16-byte aligned)
+    uint   emissiveTriangleCount;// Entries in emissiveTriangles (binding 23); 0 = no light sampling
+    float  emissiveTotalPower;   // Sum of luminance(emissive) * area; the area-measure sampling
+                                 // density on any emitter is luminance(emissive) / this
 };
 
 // ============================================================================

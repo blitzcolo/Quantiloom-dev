@@ -176,6 +176,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
+    std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -361,6 +362,7 @@ struct ExternalRenderContext::Impl {
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
         cieCmfBuffer.reset();
+        emissiveTriangleBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -566,6 +568,12 @@ struct ExternalRenderContext::Impl {
 
     void BuildAccelerationStructures();
     void UpdateGpuResources();
+    void RebuildEmissiveGeometry();
+    // Config's renderer.enable_light_sampling. Held here rather than in
+    // LightingParams, which has no bits left: turning it off is expressed by
+    // publishing an emitter count of zero, which is the same thing the shader
+    // already understands as "no lights to sample".
+    bool enableLightSampling = true;
     void CreateDummyBuffers();
     void CreateBRDFLut();
     void CreateFallbackEnvMap();
@@ -900,7 +908,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         SetSolarSpectralLUT(resolved.solarSunSky->first, resolved.solarSunSky->second);
     }
     m_impl->lightingParams = resolved.lighting;
-    m_impl->UploadLightingParams();
+    // resolved.lighting is built from the config alone, so its emissive fields
+    // are zero -- assigning it wholesale would switch light sampling off for
+    // every scene loaded through a config, silently and only there. The scene
+    // is already adopted at this point, so recomputing them is both correct and
+    // where the config's own switch takes effect.
+    m_impl->enableLightSampling = resolved.enableLightSampling;
+    m_impl->RebuildEmissiveGeometry();   // also uploads the lighting params
 
     // 7. Atmosphere. The bake itself is lazy, on the first frame that needs it.
     SetAtmosphere(resolved.atmosphere);
@@ -1803,7 +1817,17 @@ DebugVisualizationMode ExternalRenderContext::GetDebugMode() const {
 // ============================================================================
 
 void ExternalRenderContext::SetLightingParams(const LightingParams& params) {
+    // The emissive fields describe the scene, not the caller's lighting
+    // intent -- a host that round-trips GetLightingParams through its own
+    // struct would otherwise zero the emitter count and silently turn off
+    // light sampling. They are the renderer's to set; preserve them.
+    const u32 emissiveCount = m_impl->lightingParams.emissiveTriangleCount;
+    const f32 emissivePower = m_impl->lightingParams.emissiveTotalPower;
+
     m_impl->lightingParams = params;
+    m_impl->lightingParams.emissiveTriangleCount = emissiveCount;
+    m_impl->lightingParams.emissiveTotalPower = emissivePower;
+
     m_impl->UploadLightingParams();
     ResetAccumulation();
 }
@@ -2178,6 +2202,10 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
             m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo());
         }
     }
+
+    // World-space emitters, so a topology or transform edit invalidates them
+    // exactly as it does the TLAS.
+    m_impl->RebuildEmissiveGeometry();
 }
 
 void ExternalRenderContext::RefitAccelerationStructure() {
@@ -2190,8 +2218,15 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     // command's own barriers order it against in-flight tracing.
     if (!m_impl->geometry.RefitTlas(*m_impl->contextAdapter, *m_impl->scene)) {
         QL_LOG_DEBUG("RefitAccelerationStructure: topology changed, rebuilding");
-        RebuildAccelerationStructure();
+        RebuildAccelerationStructure();  // redoes the emitters itself
+        return;
     }
+
+    // The emitter list holds world-space positions, so a moved node leaves it
+    // describing where the light used to be. Nothing else notices -- the TLAS
+    // is correct, so the light renders in its new place while being sampled at
+    // its old one, which reads as a light that has stopped illuminating.
+    m_impl->RebuildEmissiveGeometry();
 }
 
 // ============================================================================
@@ -2644,7 +2679,39 @@ void ExternalRenderContext::Impl::UpdateGpuResources() {
 
     QL_LOG_INFO("Updating GPU resources...");
     materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm);
+    RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
+}
+
+// The emitter list is world space, so it is invalidated by anything that moves
+// a node -- not only by loading a scene. RefitAccelerationStructure calls this
+// for the same reason it re-uploads the TLAS instances.
+//
+// Rebinds the descriptor itself rather than leaving that to CreatePipeline.
+// Most callers do go on to build a pipeline, but SetWavelength does not: it
+// calls UpdateGpuResources to refresh the material buffer and then rebinds only
+// that. Allocating a new buffer here and returning would leave binding 23
+// pointing at the freed one.
+void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
+    if (!scene) return;
+
+    const auto triangles = enableLightSampling
+        ? rendercore::CollectEmissiveTriangles(*scene)
+        : Vector<rendercore::EmissiveTriangleGPU>{};
+    emissiveTriangleBuffer =
+        rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
+
+    f32 totalPower = 0.0f;
+    if (!triangles.empty()) {
+        totalPower = triangles.back().cumulativePower;  // the CDF's last entry
+    }
+    lightingParams.emissiveTriangleCount = static_cast<u32>(triangles.size());
+    lightingParams.emissiveTotalPower = totalPower;
+    UploadLightingParams();
+
+    if (pipeline) {
+        pipeline->BindEmissiveTriangleBuffer(*emissiveTriangleBuffer);
+    }
 }
 
 void ExternalRenderContext::Impl::CreateDummyBuffers() {
@@ -2713,6 +2780,10 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     }
 
     cieCmfBuffer = rendercore::CreateCieColourMatchingBuffer(*contextAdapter);
+
+    // No scene yet, so no emitters -- but the descriptor still has to be
+    // written, and CreatePipeline can run before any scene is loaded.
+    emissiveTriangleBuffer = rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, {});
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {
@@ -2744,6 +2815,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.atmosphereHeader = atmosHeaderBuffer.get();
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCmfBuffer.get();
+    bindings.emissiveTriangles = emissiveTriangleBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);

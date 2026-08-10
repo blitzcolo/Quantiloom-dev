@@ -32,6 +32,7 @@
  * - Binding 18: Instance geometry info (storage buffer)
  * - Binding 19: CIE CMF LUT (storage buffer)
  * - Binding 20: NN atmosphere LUT data blob (storage buffer)
+ * - Binding 23: Emissive triangles for next-event estimation (storage buffer)
  *
  * Usage example:
  * @code
@@ -315,6 +316,19 @@ public:
 
     // Bind CIE CMF LUT buffer (binding 19)
     void BindCIE_CMF_LUT(const GpuBuffer& buffer) const;
+
+    // ========================================================================
+    // Emissive triangles (Binding 23)
+    // ========================================================================
+    // World-space emissive triangles with a cumulative-power CDF, so the hit
+    // shader can sample a point on a light directly instead of waiting for a
+    // BSDF ray to find one. Always bound -- a scene with no emitters gets a
+    // single zero entry, and LightingParams::emissiveTriangleCount is what
+    // tells the shader not to read it.
+    // ========================================================================
+
+    // Bind emissive triangle buffer (binding 23)
+    void BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const;
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();

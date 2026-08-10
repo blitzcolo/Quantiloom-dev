@@ -393,6 +393,12 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     out.lighting.atmosphereTemperature_K = atmosphereTemperature_K;
     out.lighting.chromaR_correction = chromaR;
     out.lighting.chromaB_correction = chromaB;
+    out.enableLightSampling = config.Get<bool>("renderer.enable_light_sampling", true);
+    if (!out.enableLightSampling) {
+        QL_LOG_INFO("Light sampling DISABLED via config: emitters are found by "
+                    "BSDF sampling alone");
+    }
+
     out.lighting.enableShadowRays = enableShadowRays ? 1u : 0u;
     out.lighting.enableEnvironmentMap = out.environmentMapEnabled ? 1u : 0u;
 

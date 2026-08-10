@@ -1045,6 +1045,9 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     pipeline->BindAtmosphereNN(bindings.atmosphereHeader,
                                bindings.atmosphereData);             // 17, 20
 
+    if (bindings.emissiveTriangles) {
+        pipeline->BindEmissiveTriangleBuffer(*bindings.emissiveTriangles);  // 23
+    }
     if (bindings.cieColourMatching) {
         pipeline->BindCIE_CMF_LUT(*bindings.cieColourMatching);      // 19
     }
@@ -1099,6 +1102,101 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
     buffer->Upload(table.data(), bytes);
 
     QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm)", CIE_CMF_LUT_SIZE);
+    return buffer;
+}
+
+// ============================================================================
+// Emissive geometry
+// ============================================================================
+
+Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
+    // Rec. 709 luminance, the same weighting the tone mapping assumes. It is
+    // only ever used to rank emitters against each other and to define the
+    // sampling density, so what matters is that the shader computes the
+    // identical number from the same emissiveFactor -- not that it is the
+    // physically ideal measure of "brightness".
+    constexpr glm::vec3 kLuminance{0.2126f, 0.7152f, 0.0722f};
+
+    Vector<EmissiveTriangleGPU> triangles;
+    f32 runningPower = 0.0f;
+
+    ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
+                               size_t /*nodeIndex*/) {
+        // Find the primitive this walk position refers to, the same way the
+        // geometry build does.
+        size_t seen = 0;
+        const GeometryPrimitive* primitive = nullptr;
+        for (const auto& mesh : scene.meshes) {
+            if (globalPrim < seen + mesh.primitives.size()) {
+                primitive = &mesh.primitives[globalPrim - seen];
+                break;
+            }
+            seen += mesh.primitives.size();
+        }
+        if (!primitive || primitive->materialId >= scene.materials.size()) {
+            return;
+        }
+
+        const glm::vec3 emissive = scene.materials[primitive->materialId].emissiveFactor;
+        const f32 luminance = glm::dot(emissive, kLuminance);
+        if (luminance <= 0.0f) {
+            return;  // not an emitter; the overwhelmingly common case
+        }
+
+        // An emissive texture modulates the radiance but not the density: the
+        // shader has to be able to recover the density from the material alone
+        // when a BSDF ray lands here, and it does not know which texel it will
+        // read until it gets there. Sampling is then merely suboptimal for a
+        // textured emitter, not wrong -- both strategies agree on the number.
+        for (size_t i = 0; i + 2 < primitive->indices.size(); i += 3) {
+            const glm::vec3 p0 = glm::vec3(
+                transform * glm::vec4(primitive->positions[primitive->indices[i]], 1.0f));
+            const glm::vec3 p1 = glm::vec3(
+                transform * glm::vec4(primitive->positions[primitive->indices[i + 1]], 1.0f));
+            const glm::vec3 p2 = glm::vec3(
+                transform * glm::vec4(primitive->positions[primitive->indices[i + 2]], 1.0f));
+
+            const glm::vec3 e1 = p1 - p0;
+            const glm::vec3 e2 = p2 - p0;
+            const f32 area = 0.5f * glm::length(glm::cross(e1, e2));
+            if (!(area > 0.0f)) {
+                continue;  // degenerate, and it would divide by zero downstream
+            }
+
+            runningPower += luminance * area;
+
+            EmissiveTriangleGPU tri{};
+            tri.v0 = p0;
+            tri.cumulativePower = runningPower;
+            tri.edge1 = e1;
+            tri.area = area;
+            tri.edge2 = e2;
+            tri.emissive = emissive;
+            triangles.push_back(tri);
+        }
+    });
+
+    if (!triangles.empty()) {
+        QL_LOG_INFO("  Emissive geometry: {} triangles, total power {:.4g}",
+                    triangles.size(), runningPower);
+    }
+    return triangles;
+}
+
+std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
+    VulkanContext& ctx, const Vector<EmissiveTriangleGPU>& triangles) {
+    // One zero-filled entry when there are none: the descriptor must point at
+    // something, and emissiveTriangleCount is what stops the shader reading it.
+    const EmissiveTriangleGPU empty{};
+    const void* data = triangles.empty() ? static_cast<const void*>(&empty)
+                                         : static_cast<const void*>(triangles.data());
+    const size_t bytes = (triangles.empty() ? 1 : triangles.size()) *
+                         sizeof(EmissiveTriangleGPU);
+
+    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    buffer->Upload(data, bytes);
     return buffer;
 }
 

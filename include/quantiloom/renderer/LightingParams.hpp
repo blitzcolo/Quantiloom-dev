@@ -57,7 +57,8 @@ namespace quantiloom {
  * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
  * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
  * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
- * Offset 64: enableShadowRays (u32) + enableEnvironmentMap (u32) + _padding[2] (8 bytes)
+ * Offset 64: enableShadowRays (u32) + enableEnvironmentMap (u32) +
+ *            emissiveTriangleCount (u32) + emissiveTotalPower (f32)
  * Total: 80 bytes
  * @endcode
  *
@@ -98,7 +99,26 @@ struct LightingParams {
     // Took the first of the three padding floats, so the struct is still 80
     // bytes and the shader mirror still matches.
     u32 enableEnvironmentMap;       // 0 = disabled, 1 = enabled, offset 68
-    f32 _padding[2];                // Padding to 80 bytes (16-byte aligned), offset 72-80
+
+    // Emissive geometry, for next-event estimation. Set by the renderer from
+    // the scene, not by the caller -- SetLightingParams overwrites whatever it
+    // is handed here.
+    //
+    // Zero triangles disables light sampling entirely, which is what every
+    // scene lit only by sun and sky gets, and is why those scenes are
+    // unchanged bit for bit.
+    u32 emissiveTriangleCount;      // offset 72
+    // Sum over emissive triangles of luminance(emissive) * area, in world
+    // units squared. The sampling density on a triangle is
+    // luminance(emissive) / this, because triangles are chosen in proportion
+    // to their power and then uniformly over their area, so the area cancels.
+    // That is what lets a surface which turns out to be an emitter compute the
+    // density it would have been sampled with, from its own material alone,
+    // with no way back to the triangle list.
+    f32 emissiveTotalPower;         // offset 76
+
+    // The two padding floats this struct was carrying are now both spoken for.
+    // Anything further changes sizeof and therefore the SDK/Studio pairing.
 };  // Total: 80 bytes
 
 // ============================================================================
@@ -135,6 +155,10 @@ static_assert(offsetof(LightingParams, enableEnvironmentMap) == 68,
     "enableEnvironmentMap offset mismatch");
 static_assert(offsetof(LightingParams, enableShadowRays) == 64,
     "enableShadowRays offset mismatch");
+static_assert(offsetof(LightingParams, emissiveTriangleCount) == 72,
+    "emissiveTriangleCount offset mismatch");
+static_assert(offsetof(LightingParams, emissiveTotalPower) == 76,
+    "emissiveTotalPower offset mismatch");
 
 // ============================================================================
 // Default Values
@@ -202,6 +226,9 @@ inline LightingParams CreateDefaultLightingParams() {
     // On, so a context handed an environment map lights with it. A scene that
     // wants none says so, and gets none -- not a substitute sky.
     params.enableEnvironmentMap = 1u;
+    // No scene yet, so no emitters. Filled in when one is built.
+    params.emissiveTriangleCount = 0u;
+    params.emissiveTotalPower = 0.0f;
     return params;
 }
 
