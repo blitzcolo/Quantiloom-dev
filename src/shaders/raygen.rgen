@@ -141,74 +141,11 @@ void main() {
     ray.TMax = 10000.0; // Far plane
 
     // ========================================================================
-    // Initialize Ray Differentials (OPTIMIZED)
-    // ========================================================================
-    // Compute ray direction differentials for adjacent pixels
-    // This enables proper texture LOD computation for antialiasing
-    //
-    // For a pinhole camera with perspective projection:
-    //   dD/dx = difference in ray direction between (x, y) and (x+1, y)
-    //   dD/dy = difference in ray direction between (x, y) and (x, y+1)
-    //
-    // OPTIMIZATION NOTE:
-    // Ray origin differentials (dO/dx, dO/dy) have been removed from Payload
-    // to reduce payload size from 60 bytes to 36 bytes (40% reduction).
-    // For pinhole cameras, dO/dx = dO/dy = 0 always (origin is constant),
-    // so this optimization is lossless for primary rays.
-    //
-    // For secondary rays (reflections/refractions), origin differentials would
-    // improve texture filtering quality, but the performance cost (50% larger
-    // payload) outweighs the visual benefit for most IR rendering applications.
-    // ========================================================================
-
-    // Compute ray direction for adjacent pixels (x+1, y) and (x, y+1)
-    float2 pixelCenterXp1 = float2(launchID.x + 1, launchID.y) + 0.5;
-    float2 pixelCenterYp1 = float2(launchID.x, launchID.y + 1) + 0.5;
-
-    float2 uvXp1 = pixelCenterXp1 / float2(launchSize);
-    float2 uvYp1 = pixelCenterYp1 / float2(launchSize);
-
-    float2 ndcXp1 = uvXp1 * 2.0 - 1.0;
-    float2 ndcYp1 = uvYp1 * 2.0 - 1.0;
-    ndcXp1.y = -ndcXp1.y;  // Flip Y
-    ndcYp1.y = -ndcYp1.y;
-
-    // Compute adjacent ray directions
-    float3 directionXp1;
-    float3 directionYp1;
-    if (orthographic) {
-        // Every orthographic ray points the same way, so the direction
-        // differentials are zero and the footprint comes from the origin
-        // spacing instead -- which is constant, and handled below.
-        directionXp1 = direction;
-        directionYp1 = direction;
-    } else {
-        directionXp1 = normalize(
-            pushConsts.camera.forward +
-            ndcXp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
-            ndcXp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
-        );
-        directionYp1 = normalize(
-            pushConsts.camera.forward +
-            ndcYp1.x * pushConsts.camera.right * pushConsts.camera.fovScale * pushConsts.camera.aspectRatio +
-            ndcYp1.y * pushConsts.camera.up * pushConsts.camera.fovScale
-        );
-    }
-
-    // Compute differentials (change in direction per pixel)
-    float3 dDdx = directionXp1 - direction;
-    float3 dDdy = directionYp1 - direction;
-
-    // ========================================================================
-    // Trace Ray with Differentials
+    // Trace the primary ray
     // ========================================================================
     // Initialize payload
     Payload payload;
     payload.radiance = float3(0.0, 0.0, 0.0);
-
-    // Set ray direction differentials (origin differentials removed for performance)
-    payload.dDdx = dDdx;
-    payload.dDdy = dDdy;
 
     // Initialize shadow flag (will be set by shadow miss shader)
     payload.isShadowed = 0;
@@ -225,6 +162,10 @@ void main() {
 
     // Miss sentinel for the depth AOV; the closest-hit shader overwrites it
     payload.primaryHitT = -1.0;
+
+    // A primary ray is not a BSDF sample, so an emitter it lands on shows its
+    // full emission -- what the camera sees looking straight at a light.
+    payload.bsdfPdf = 0.0;
 
     // Trace ray (hit group index 0, miss index 0)
     TraceRay(

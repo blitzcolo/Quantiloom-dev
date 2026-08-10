@@ -188,12 +188,6 @@
 struct Payload {
     float3 radiance;  // Accumulated radiance (W·sr⁻¹·m⁻²)              // 12 bytes
 
-    // Ray direction differentials for texture filtering (LOD computation)
-    // dDdx: change in ray direction per pixel in X direction
-    // dDdy: change in ray direction per pixel in Y direction
-    float3 dDdx;  // ∂D/∂x (ray direction differential)                 // 12 bytes
-    float3 dDdy;  // ∂D/∂y (ray direction differential)                 // 12 bytes
-
     // Shadow ray result (set by shadow miss shader)
     // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
     uint isShadowed;  // Shadow occlusion flag                          // 4 bytes
@@ -248,15 +242,34 @@ struct Payload {
     // recursive payloads carry their own value, which nothing reads.
     float primaryHitT;                                                   // 4 bytes
 
-    // TOTAL: 56 bytes (under 64-byte RT Core limit)
+    // Solid-angle density with which the BSDF chose this ray's direction, or 0
+    // for "this ray is not a BSDF sample" -- primary rays, shadow rays and
+    // refracted rays all pass 0.
+    //
+    // It exists so that a surface which turns out to be an emitter can tell how
+    // else the path reaching it might have been found. Emissive geometry is
+    // reachable two ways: by a BSDF-sampled bounce that happens to land on it,
+    // and by the light sampling the parent vertex did explicitly. Counting both
+    // at full strength would double the light, so each is weighted by the power
+    // heuristic over the two densities, which needs the other strategy's density
+    // at the same direction. The light side can compute the BSDF density itself;
+    // the BSDF side cannot know the light's, so it carries its own here and the
+    // emitter finishes the comparison.
+    //
+    // The density is the MIXTURE over both lobes -- qSpec * pdf_ggx +
+    // (1 - qSpec) * pdf_cos -- not the pdf of whichever lobe was chosen. Both
+    // sides must use the same function of direction for the weights to sum to
+    // one; which function it is only affects how good the split is.
+    float bsdfPdf;    // sr^-1, 0 = not a BSDF sample                     // 4 bytes
+
+    // TOTAL: 36 bytes (under 64-byte RT Core limit)
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into
-    // a single-wavelength one and the frame loses most of its light.
-
-    // REMOVED for performance (if needed, can be recomputed or approximated):
-    // float3 dOdx;  // ∂O/∂x (ray origin differential) - usually ~0 for primary rays
-    // float3 dOdy;  // ∂O/∂y (ray origin differential) - usually ~0 for primary rays
+    // a single-wavelength one and the frame loses most of its light. bsdfPdf has
+    // the same property in the other direction: left uninitialised it can make
+    // an ordinary ray claim to be a light-sampling candidate and lose the
+    // emission it should have carried.
 };
 
 // ============================================================================

@@ -218,41 +218,21 @@ float3 SafeNormalize(float3 v) {
 // CRITICAL: This bounds check prevents GPU hangs from invalid descriptor access
 static const int MAX_TEXTURE_INDEX = 1024;
 
-// Compute texture LOD from ray differentials
-// Uses ray differential method to determine appropriate mipmap level
+// Ray tracing has no screen-space derivatives, so the mip level has to be
+// stated rather than inferred -- and every fetch here states 0.
 //
-// Algorithm:
-// 1. Compute how UV coordinates change per pixel (dUV/dx, dUV/dy)
-// 2. Convert to texture space (multiply by texture dimensions)
-// 3. Take maximum footprint as LOD
+// There used to be a ray-differential LOD path: the payload carried dD/dx and
+// dD/dy, and ComputeUVDifferentialX/Y turned them into a UV footprint. It never
+// worked and never ran. Both of those functions returned a hardcoded heuristic
+// (`float2(t * length(dDdx), 0) * 0.001`) rather than an actual UV gradient,
+// neither had a single caller, and the only path into the LOD computation passed
+// literal zeros -- whose log2 is -inf, so the clamp handed back LOD 0 anyway.
+// 24 of the payload's 56 bytes existed to feed it.
 //
-// References:
-// - "Ray Differentials" in PBRT-v4 §10.1
-// - Igehy, "Tracing Ray Differentials" (1999)
-float ComputeTextureLOD(float2 uv, float2 dUVdx, float2 dUVdy, float2 textureDimensions) {
-    // Convert UV differentials to texture-space footprint
-    float2 dTexdx = dUVdx * textureDimensions;
-    float2 dTexdy = dUVdy * textureDimensions;
-
-    // Compute maximum footprint (anisotropic filtering approximation)
-    float footprintX = length(dTexdx);
-    float footprintY = length(dTexdy);
-    float maxFootprint = max(footprintX, footprintY);
-
-    // LOD = log2(maxFootprint), clamped to reasonable range
-    // If footprint < 1 pixel, use LOD 0 (highest detail)
-    float lod = max(0.0, log2(maxFootprint));
-
-    return lod;
-}
-
-// Sample texture with ray differential LOD
-// NOTE: In ray tracing, we cannot use automatic LOD (Sample), must use explicit LOD (SampleLevel)
-// - Ray tracing shaders don't have screen-space derivatives for automatic LOD selection
-// - We compute LOD from ray differentials for accurate texture filtering
-// - This prevents aliasing artifacts at grazing angles and distant surfaces
-float4 SampleTextureWithLOD(int textureIndex, int samplerIndex, float2 uv,
-                            float2 dUVdx, float2 dUVdy, float4 fallback) {
+// Filtering the indirect bounces would want this back, and would want it
+// computed rather than guessed. Until then LOD 0 is what the renderer does, said
+// once, in one place.
+float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
     // Check both lower AND upper bounds to prevent invalid descriptor access
     // Invalid indices (negative or out-of-range) can cause GPU hangs with PARTIALLY_BOUND descriptors
     if (textureIndex < 0 || textureIndex >= MAX_TEXTURE_INDEX) {
@@ -262,25 +242,9 @@ float4 SampleTextureWithLOD(int textureIndex, int samplerIndex, float2 uv,
     if (samplerIndex < 0 || samplerIndex >= MAX_TEXTURE_INDEX) {
         return fallback;
     }
-
-    // Get texture dimensions for LOD computation
-    // For simplicity, assume 2048x2048 textures (typical size)
-    // In production, use GetDimensions() or pass as parameter
-    float2 textureDimensions = float2(2048.0, 2048.0);
-
-    // Compute LOD from ray differentials
-    float lod = ComputeTextureLOD(uv, dUVdx, dUVdy, textureDimensions);
-
-    // Sample with computed LOD
     return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(
-        samplers[NonUniformResourceIndex(samplerIndex)], uv, lod
+        samplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0
     );
-}
-
-// Legacy function for compatibility (uses LOD 0)
-float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
-    return SampleTextureWithLOD(textureIndex, samplerIndex, uv,
-                                float2(0.0, 0.0), float2(0.0, 0.0), fallback);
 }
 
 // ============================================================================
@@ -341,39 +305,6 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
         rho += w.w * EvaluateSpectralCurve(curves, material.endmemberCurveIndex3, lambda);
     }
     return saturate(rho);
-}
-
-// Compute UV differentials from ray differentials
-// Estimates how UV coordinates change per screen pixel using ray differentials
-//
-// Algorithm:
-// 1. Propagate ray differentials through intersection
-// 2. Compute auxiliary intersection points for differential rays
-// 3. Interpolate UVs at auxiliary points
-// 4. Compute dUV = UVauxiliary - UVcenter
-//
-// Simplified version: Use triangle edge vectors to estimate UV gradient
-float2 ComputeUVDifferentialX(float3 rayDir, float3 dDdx, float t, float3 edge1, float3 edge2,
-                               float2 uv0, float2 uv1, float2 uv2, float2 bary) {
-    // Propagate differential ray: O' = O + t * dD/dx
-    // For small differential, approximate intersection as moving along triangle plane
-    // dUV/dx ≈ (∂UV/∂edge1) * (dP/dx · edge1) + (∂UV/∂edge2) * (dP/dx · edge2)
-
-    // Simplified: Use ray direction change scaled by distance
-    // This gives a reasonable approximation for LOD computation
-    float scale = t * length(dDdx);
-    float2 dUV = float2(scale, 0.0) * 0.001;  // Heuristic scaling
-
-    return dUV;
-}
-
-float2 ComputeUVDifferentialY(float3 rayDir, float3 dDdy, float t, float3 edge1, float3 edge2,
-                               float2 uv0, float2 uv1, float2 uv2, float2 bary) {
-    // Similar to X differential
-    float scale = t * length(dDdy);
-    float2 dUV = float2(0.0, scale) * 0.001;  // Heuristic scaling
-
-    return dUV;
 }
 
 // Compute TBN matrix for normal mapping (Gram-Schmidt orthogonalization)
@@ -592,8 +523,6 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
 
     Payload child;
     child.radiance    = float3(0.0, 0.0, 0.0);
-    child.dDdx        = float3(0.0, 0.0, 0.0);
-    child.dDdy        = float3(0.0, 0.0, 0.0);
     child.isShadowed  = 0;
     child.depth       = payload.depth + 1;
     child.rngState    = payload.rngState;
@@ -935,10 +864,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Initialize shadow payload - assume shadowed (will be cleared by shadow_miss)
         Payload shadowPayload;
         shadowPayload.radiance = float3(0.0, 0.0, 0.0);
-        shadowPayload.dDdx = float3(0.0, 0.0, 0.0);
-        shadowPayload.dDdy = float3(0.0, 0.0, 0.0);
         shadowPayload.isShadowed = 1;  // Assume shadowed, shadow_miss will clear this
         shadowPayload.heroLambda = payload.heroLambda;
+        shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample; carries no emission
 
         // Trace shadow ray with optimized flags:
         // - RAY_FLAG_SKIP_CLOSEST_HIT_SHADER: Don't run closest hit, just check occlusion
@@ -3008,6 +2936,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowPayload.heroLambda = payload.heroLambda;
         shadowPayload.depth = payload.depth + 1;
         shadowPayload.rngState = payload.rngState;
+        shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample
 
         // Trace shadow ray (uses miss shader index 1 for shadows)
         TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
@@ -3119,9 +3048,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Prepare recursive payload template
         Payload recursivePayload;
-        recursivePayload.dDdx = payload.dDdx;
-        recursivePayload.dDdy = payload.dDdy;
         recursivePayload.isShadowed = 0;
+        // A refracted or specularly reflected ray is not a BSDF *sample* in the
+        // MIS sense -- the direction was determined, not drawn from a density --
+        // so an emitter it lands on contributes its full emission.
+        recursivePayload.bsdfPdf = 0.0;
         recursivePayload.depth = payload.depth + 1;
         recursivePayload.rngState = rngState;
 
