@@ -299,8 +299,9 @@ public:
      * @param cmd Command buffer (must be in recording state)
      * @param targetImage Target swapchain image (from QVulkanWindow::swapChainImage)
      * @param targetLayout Current layout of target image (typically UNDEFINED or PRESENT_SRC_KHR)
-     * @param width Render width
-     * @param height Render height
+     * @param width Target width -- the extent of @p targetImage, not
+     *        necessarily what gets traced. See SetRenderScale.
+     * @param height Target height, likewise
      *
      * @note For real-time preview, use low SPP (1-4)
      * @note Uses progressive accumulation if SPP > 1
@@ -343,11 +344,12 @@ public:
      * @param cmd           Command buffer to record into
      * @param targetImage   Target swapchain image
      * @param targetLayout  Its current layout
-     * @param width         Must equal the current render width
-     * @param height        Must equal the current render height
+     * @param width         Must equal the current target width
+     * @param height        Must equal the current target height
      * @return True when the frame was presented. False when there is nothing
-     *         to show -- no context, nothing traced yet, or a size that does
-     *         not match the accumulation. **The caller must then call
+     *         to show -- no context, nothing traced yet, a size that does not
+     *         match the accumulation, or a render scale not yet acted on.
+     *         **The caller must then call
      *         RenderFrame instead**: nothing has been recorded, so the target
      *         image is left as it was and presenting it would show undefined
      *         contents.
@@ -381,11 +383,11 @@ public:
      * @param cmd           Command buffer to record into
      * @param targetImage   Target swapchain image
      * @param targetLayout  Its current layout
-     * @param width         Must equal the current render width
-     * @param height        Must equal the current render height
-     * @return True when the frame was presented. False for the same three
-     *         reasons as PresentAccumulated -- no context, nothing traced
-     *         yet, or a stale size -- and with the same obligation: nothing
+     * @param width         Must equal the current target width
+     * @param height        Must equal the current target height
+     * @return True when the frame was presented. False for the same reasons
+     *         as PresentAccumulated -- no context, nothing traced yet, a
+     *         stale size or a pending scale -- and with the same obligation: nothing
      *         has been recorded, so the caller must call RenderFrame instead.
      */
     [[nodiscard]] bool ReprocessAccumulated(
@@ -416,8 +418,12 @@ public:
      * @param targetImage Caller-owned R32_SFLOAT image
      * @param targetCurrentLayout Current layout of targetImage
      *        (VK_IMAGE_LAYOUT_UNDEFINED on first use)
-     * @param width Render width (must match RenderFrame's)
-     * @param height Render height (must match RenderFrame's)
+     * @param width Target width (must match RenderFrame's)
+     * @param height Target height (must match RenderFrame's)
+     *
+     * @note Magnified with VK_FILTER_NEAREST when the render scale is below
+     *       1.0, because an interpolated depth across a silhouette would be a
+     *       surface that is not in the scene.
      */
     void BlitDepthTo(
         VkCommandBuffer cmd,
@@ -428,13 +434,66 @@ public:
     );
 
     /**
-     * @brief Resize render target
-     * @param width New width
-     * @param height New height
+     * @brief Set the target extent
+     * @param width New target width
+     * @param height New target height
      *
-     * Call when viewport size changes (e.g., window resize)
+     * Call when viewport size changes (e.g., window resize). The render extent
+     * follows from this and the render scale; RenderFrame does the same thing
+     * on its own when the extent it is handed differs from the last one, so
+     * calling this is only necessary to resize ahead of a frame.
+     *
+     * @note Resets the accumulation when the render extent actually changes.
      */
     void Resize(u32 width, u32 height);
+
+    /**
+     * @brief Trace at a fraction of the target extent
+     *
+     * The render extent -- what the trace, the sensor chain, CLAHE and every
+     * extent-sized image are sized to -- is the target extent handed to
+     * RenderFrame, scaled by this factor and rounded, at least 1x1. The
+     * presenting blit magnifies back to the target, linearly where the driver
+     * can and NEAREST where it cannot.
+     *
+     * This buys frames during interaction. Half the linear extent is a quarter
+     * of the pixels, so a scene tracing at 20 samples/s traces at about 80
+     * while the user is dragging the camera, and both the sample rate and the
+     * present rate rise with it. The image is softer for as long as the scale
+     * is down, and exactly what it always was once it returns to 1.0 --
+     * nothing in the estimator changes, and no frame ever mixes the two.
+     *
+     * @param scale Clamped to [0.25, 1.0]
+     *
+     * @note Takes effect on the next RenderFrame(), which is where the extent
+     *       change and its vkDeviceWaitIdle can be afforded. A no-op when the
+     *       clamped value is the current one. Until then PresentAccumulated
+     *       and ReprocessAccumulated refuse, so a host whose loop has stopped
+     *       at its target sample count still picks the new scale up.
+     * @note Every scale that actually changes the render extent resets the
+     *       accumulation. Do not drive this from anything finer-grained than
+     *       a user gesture.
+     */
+    void SetRenderScale(f32 scale);
+
+    /**
+     * @brief The factor last given to SetRenderScale, clamped
+     */
+    [[nodiscard]] f32 GetRenderScale() const;
+
+    /**
+     * @brief Width of the image actually being traced
+     *
+     * Equals the width handed to RenderFrame when the render scale is 1.0.
+     * This is the extent of everything CaptureScreenshot, CaptureDisplayImage
+     * and the AOV readbacks return.
+     */
+    [[nodiscard]] u32 GetRenderWidth() const;
+
+    /**
+     * @brief Height of the image actually being traced
+     */
+    [[nodiscard]] u32 GetRenderHeight() const;
 
     /**
      * @brief Reset accumulation (call when camera/scene changes)
@@ -994,8 +1053,10 @@ public:
      * pixel position. This is useful for debug visualization to show
      * the actual rendered values (before swapchain format conversion).
      *
-     * @param x X coordinate (pixels, 0 = left)
-     * @param y Y coordinate (pixels, 0 = top)
+     * @param x X coordinate in the target extent (pixels, 0 = left) -- the
+     *        pixel the host presented into, which below a render scale of 1.0
+     *        is mapped into the smaller render grid here
+     * @param y Y coordinate in the target extent (pixels, 0 = top)
      * @return Raw float4 value from outputImage, or error if out of bounds
      *
      * @note Call this AFTER RenderFrame to get meaningful results
@@ -1013,7 +1074,8 @@ public:
      * jitter, no lens offset), so the answer agrees with what is on screen.
      * The instance index is mapped back to a Scene::nodes index host-side.
      *
-     * @param x X coordinate (pixels, 0 = left), same space as ReadPixelValue
+     * @param x X coordinate (pixels, 0 = left), same target-extent space as
+     *        ReadPixelValue
      * @param y Y coordinate (pixels, 0 = top)
      * @return PickResult (hit == false when the ray reached the sky), or an
      *         error when no scene is loaded or the pixel is out of bounds

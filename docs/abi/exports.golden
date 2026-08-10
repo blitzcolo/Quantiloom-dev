@@ -91,6 +91,7 @@ public: enum quantiloom::SpectralMode quantiloom::ExternalRenderContext::GetSpec
 public: float quantiloom::Config::Get<float>(class std::basic_string_view<char,struct std::char_traits<char> >,float const &)const
 public: float quantiloom::Config::GetFloat(class std::basic_string_view<char,struct std::char_traits<char> >,float)const
 public: float quantiloom::ExternalRenderContext::GetLastFrameTimeMs(void)const
+public: float quantiloom::ExternalRenderContext::GetRenderScale(void)const
 public: float quantiloom::ExternalRenderContext::GetWavelength(void)const
 public: float quantiloom::Material::GetIREmissivity(float)const
 public: float quantiloom::Material::GetIRReflectance(float)const
@@ -176,6 +177,8 @@ public: unsigned int quantiloom::Config::Get<unsigned int>(class std::basic_stri
 public: unsigned int quantiloom::Config::GetUInt(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned int)const
 public: unsigned int quantiloom::ExternalRenderContext::AddMesh(struct quantiloom::Mesh const &,struct glm::mat<4,4,float,0> const &)
 public: unsigned int quantiloom::ExternalRenderContext::GetAccumulatedSamples(void)const
+public: unsigned int quantiloom::ExternalRenderContext::GetRenderHeight(void)const
+public: unsigned int quantiloom::ExternalRenderContext::GetRenderWidth(void)const
 public: unsigned int quantiloom::ExternalRenderContext::GetSPP(void)const
 public: unsigned int quantiloom::ExternalRenderContext::GetSamplingSeed(void)const
 public: unsigned int quantiloom::Scene::GetTotalTriangleCount(void)const
@@ -202,6 +205,7 @@ public: void quantiloom::ExternalRenderContext::SetGPUSensorEnabled(bool)
 public: void quantiloom::ExternalRenderContext::SetGPUSensorParams(struct quantiloom::SensorParams const &)
 public: void quantiloom::ExternalRenderContext::SetLightingParams(struct quantiloom::LightingParams const &)
 public: void quantiloom::ExternalRenderContext::SetNodeTransform(unsigned int,struct glm::mat<4,4,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetRenderScale(float)
 public: void quantiloom::ExternalRenderContext::SetSPP(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetSamplingSeed(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetSkyRadiance(struct glm::vec<3,float,0> const &)

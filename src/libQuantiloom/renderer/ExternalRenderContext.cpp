@@ -35,6 +35,7 @@
 #include <glm/gtc/matrix_inverse.hpp>
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -155,9 +156,24 @@ struct ExternalRenderContext::Impl {
     u32 graphicsQueueFamily = 0;
     VkFormat targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
 
-    // Current dimensions
+    // Current internal render extent -- what the trace, the sensor chain,
+    // CLAHE and every extent-sized image are sized to.
     u32 width = 1280;
     u32 height = 720;
+
+    // The extent the host last asked to be presented into, and the factor
+    // between the two. The render extent is the target extent scaled down, so
+    // a host that wants cheaper frames during a camera drag lowers the scale
+    // and keeps presenting into the same swapchain image; the presenting blit
+    // magnifies. At scale 1.0 (the default) the two extents are equal and
+    // every path below is bit-identical to what it was before the split.
+    u32 targetWidth = 1280;
+    u32 targetHeight = 720;
+    f32 renderScale = 1.0f;
+
+    // Whether the accumulation format can be magnified with VK_FILTER_LINEAR.
+    // Queried once at init; NEAREST is the fallback and only looks blockier.
+    bool linearBlitSupported = false;
 
     // Scene data
     std::unique_ptr<Scene> scene;
@@ -604,9 +620,50 @@ struct ExternalRenderContext::Impl {
     /// Copy @p source onto the swapchain image and leave it in PRESENT_SRC.
     /// The transitions and the format-converting blit, with no tracing --
     /// which is what lets a frame be drawn without advancing the accumulation.
+    /// @p srcWidth/@p srcHeight are the internal render extent, @p dstWidth/
+    /// @p dstHeight the target's. They differ whenever the render scale is
+    /// below 1.0, and the blit magnifies.
     void BlitToTarget(VkCommandBuffer cmd, VkImage source, VkImage targetImage,
-                      VkImageLayout targetLayout, u32 width, u32 height,
+                      VkImageLayout targetLayout,
+                      u32 srcWidth, u32 srcHeight,
+                      u32 dstWidth, u32 dstHeight,
                       VkPipelineStageFlags sourceStage);
+
+    /// Recreate every render-extent-sized resource at @p renderW x @p renderH.
+    /// Waits for the GPU and resets the accumulation: nothing survives a
+    /// change of extent.
+    void ApplyInternalExtent(u32 renderW, u32 renderH);
+
+    /// Record the extent the host is presenting into and bring the internal
+    /// render extent in line with it and the current scale. The single place
+    /// the two extents are related; both Resize() and RenderFrame() go
+    /// through it.
+    void EnsureExtent(u32 targetW, u32 targetH);
+
+    /// One dimension of the target extent, scaled. Never zero.
+    [[nodiscard]] u32 ScaledDim(u32 targetDim) const {
+        const auto scaled = static_cast<u32>(
+            std::lround(static_cast<f64>(targetDim) * renderScale));
+        return std::max(1u, scaled);
+    }
+
+    /// Whether the internal render extent is the one the current scale and
+    /// target extent call for. False between a SetRenderScale and the
+    /// RenderFrame that acts on it.
+    [[nodiscard]] bool ExtentMatchesScale() const {
+        return ScaledDim(targetWidth) == width && ScaledDim(targetHeight) == height;
+    }
+
+    /// Map one coordinate from target space into render space, clamped to the
+    /// last row/column. The identity at scale 1.0.
+    [[nodiscard]] static u32 MapToRender(u32 coord, u32 targetDim, u32 renderDim) {
+        if (targetDim == 0U || targetDim == renderDim) {
+            return coord;
+        }
+        const u64 scaled =
+            (static_cast<u64>(coord) * renderDim) / static_cast<u64>(targetDim);
+        return static_cast<u32>(std::min<u64>(scaled, renderDim - 1U));
+    }
 
     void TransitionImageLayoutImmediate(
         VkImage image,
@@ -678,6 +735,22 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     targetColorFormat = params.targetColorFormat;
     width = params.width;
     height = params.height;
+    targetWidth = params.width;
+    targetHeight = params.height;
+
+    // Magnifying the accumulation needs a filterable source. Every driver that
+    // supports ray tracing supports this for RGBA32F, but the fallback costs
+    // one query and turns "wrong" into "blockier".
+    VkFormatProperties accumFormatProps{};
+    vkGetPhysicalDeviceFormatProperties(physicalDevice, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                        &accumFormatProps);
+    linearBlitSupported =
+        (accumFormatProps.optimalTilingFeatures &
+         VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0U;
+    if (!linearBlitSupported) {
+        QL_LOG_WARN("R32G32B32A32_SFLOAT does not support linear filtering: a "
+                    "reduced render scale will magnify with NEAREST");
+    }
 
     // The presenting blit is the only thing between linear radiance and the
     // screen, so the target format's transfer function is what encodes it. A
@@ -931,8 +1004,11 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     //    document of record and overrides it. Aspect ratio stays the
     //    viewport's, not the config resolution's -- see the report for that.
     m_impl->camera = resolved.camera;
-    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->width) /
-                                  static_cast<f32>(m_impl->height));
+    // Target extent, not render extent, for the same reason ApplyInternalExtent
+    // uses it: the two differ by rounding under a reduced render scale, and the
+    // framing must not depend on the scale.
+    m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->targetWidth) /
+                                  static_cast<f32>(m_impl->targetHeight));
 
     // Skipped when the config turned it off: the fallback stays bound and the
     // lighting flag keeps the shader from sampling it either way.
@@ -1205,10 +1281,12 @@ void ExternalRenderContext::RenderFrame(
         //             m_impl->cachedImageMin, m_impl->cachedImageMax);
     }
 
-    // Handle resize
-    if (width != m_impl->width || height != m_impl->height) {
-        Resize(width, height);
-    }
+    // Record the target extent and bring the render extent in line with it and
+    // the current scale. Everything below traces and post-processes at the
+    // render extent; only the closing blit knows about the target's.
+    m_impl->EnsureExtent(width, height);
+    const u32 renderW = m_impl->width;
+    const u32 renderH = m_impl->height;
 
     // Rebake the NN atmosphere LUT if the bake key changed (band, weather,
     // quantized altitude / sun geometry)
@@ -1261,18 +1339,20 @@ void ExternalRenderContext::RenderFrame(
     // Timestamps bracket the trace alone -- not the sensor chain, CLAHE or the
     // blit -- so what gets measured is the cost of one sample of *this scene*.
     if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
-    m_impl->pipeline->TraceRays(cmd, width, height);
+    m_impl->pipeline->TraceRays(cmd, renderW, renderH);
     if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
 
     // Post-processing, then the blit. Both halves are shared with
-    // PresentAccumulated, which does them without the trace above.
+    // PresentAccumulated, which does them without the trace above. They run at
+    // the render extent, before the magnifying blit, so a reduced scale makes
+    // them cheaper too -- and CLAHE never sees an upsampled image.
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        m_impl->ExecuteGPUSensorChain(cmd, width, height);
+        m_impl->ExecuteGPUSensorChain(cmd, renderW, renderH);
     }
     if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
         // Note: ExecuteCLAHE reads from outputImage by default (TODO: make it
         // read from the sensor output when that is enabled).
-        m_impl->ExecuteCLAHE(cmd, width, height);
+        m_impl->ExecuteCLAHE(cmd, renderW, renderH);
     }
 
     const VkImage blitSourceImage = m_impl->CurrentDisplaySource();
@@ -1282,7 +1362,7 @@ void ExternalRenderContext::RenderFrame(
         srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     m_impl->BlitToTarget(cmd, blitSourceImage, targetImage, targetLayout,
-                         width, height, srcStage);
+                         renderW, renderH, width, height, srcStage);
 
     m_impl->accumulatedSamples++;
     m_impl->frameIndex++;
@@ -1302,7 +1382,8 @@ VkImage ExternalRenderContext::Impl::CurrentDisplaySource() const {
 void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
                                                VkImage targetImage,
                                                VkImageLayout targetLayout,
-                                               u32 width, u32 height,
+                                               u32 srcWidth, u32 srcHeight,
+                                               u32 dstWidth, u32 dstHeight,
                                                VkPipelineStageFlags sourceStage) {
     // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL
     VkImageMemoryBarrier outputBarrier{};
@@ -1340,7 +1421,8 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 2, barriers);
 
-    // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format.
+    // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format and
+    // magnifying when the render extent is below the target's.
     // vkCmdBlitImage clamps anything above 1.0.
     VkImageBlit blitRegion{};
     blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -1348,17 +1430,24 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     blitRegion.srcSubresource.baseArrayLayer = 0;
     blitRegion.srcSubresource.layerCount = 1;
     blitRegion.srcOffsets[0] = {0, 0, 0};
-    blitRegion.srcOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+    blitRegion.srcOffsets[1] = {static_cast<i32>(srcWidth), static_cast<i32>(srcHeight), 1};
     blitRegion.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blitRegion.dstSubresource.mipLevel = 0;
     blitRegion.dstSubresource.baseArrayLayer = 0;
     blitRegion.dstSubresource.layerCount = 1;
     blitRegion.dstOffsets[0] = {0, 0, 0};
-    blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+    blitRegion.dstOffsets[1] = {static_cast<i32>(dstWidth), static_cast<i32>(dstHeight), 1};
+
+    // NEAREST when the extents match: a 1:1 blit resolves to a copy either
+    // way, and this is the path every full-scale frame takes.
+    const bool magnifying = (srcWidth != dstWidth) || (srcHeight != dstHeight);
+    const VkFilter filter = (magnifying && linearBlitSupported)
+                                ? VK_FILTER_LINEAR
+                                : VK_FILTER_NEAREST;
 
     vkCmdBlitImage(cmd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    targetImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   1, &blitRegion, VK_FILTER_NEAREST);
+                   1, &blitRegion, filter);
 
     // Step 4: source back to GENERAL for the next pass to write
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1395,9 +1484,20 @@ bool ExternalRenderContext::PresentAccumulated(
     if (m_impl->accumulatedSamples == 0) {
         return false;
     }
-    // A resize invalidates the accumulation the caller is asking to re-present,
-    // and Resize() is RenderFrame's job. Same answer: draw a real frame.
-    if (width != m_impl->width || height != m_impl->height) {
+    // A change of target extent invalidates the accumulation the caller is
+    // asking to re-present, and reacting to one is RenderFrame's job. Same
+    // answer: draw a real frame. Compared against the target extent, not the
+    // render extent -- below a scale of 1.0 the two differ by design, and it
+    // is the target the caller is talking about.
+    if (width != m_impl->targetWidth || height != m_impl->targetHeight) {
+        return false;
+    }
+    // A render scale set since the last trace has not taken effect yet --
+    // reacting to one is also RenderFrame's job, and until it does the
+    // accumulation is at the wrong extent. Without this a host whose loop has
+    // stopped at its target sample count would re-present forever and never
+    // pick up the new scale.
+    if (!m_impl->ExtentMatchesScale()) {
         return false;
     }
 
@@ -1410,7 +1510,8 @@ bool ExternalRenderContext::PresentAccumulated(
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
-                         width, height, sourceStage);
+                         m_impl->width, m_impl->height, width, height,
+                         sourceStage);
     // Deliberately no accumulatedSamples++: that is the whole point.
     return true;
 }
@@ -1429,7 +1530,15 @@ bool ExternalRenderContext::ReprocessAccumulated(
     if (m_impl->accumulatedSamples == 0) {
         return false;
     }
-    if (width != m_impl->width || height != m_impl->height) {
+    if (width != m_impl->targetWidth || height != m_impl->targetHeight) {
+        return false;
+    }
+    // A render scale set since the last trace has not taken effect yet --
+    // reacting to one is also RenderFrame's job, and until it does the
+    // accumulation is at the wrong extent. Without this a host whose loop has
+    // stopped at its target sample count would re-present forever and never
+    // pick up the new scale.
+    if (!m_impl->ExtentMatchesScale()) {
         return false;
     }
 
@@ -1444,12 +1553,12 @@ bool ExternalRenderContext::ReprocessAccumulated(
     }
 
     // The post-processing half of RenderFrame, over the accumulation as it
-    // stands.
+    // stands -- at the render extent, like RenderFrame runs it.
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        m_impl->ExecuteGPUSensorChain(cmd, width, height);
+        m_impl->ExecuteGPUSensorChain(cmd, m_impl->width, m_impl->height);
     }
     if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        m_impl->ExecuteCLAHE(cmd, width, height);
+        m_impl->ExecuteCLAHE(cmd, m_impl->width, m_impl->height);
     }
 
     const VkImage source = m_impl->CurrentDisplaySource();
@@ -1459,7 +1568,8 @@ bool ExternalRenderContext::ReprocessAccumulated(
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
     m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
-                         width, height, sourceStage);
+                         m_impl->width, m_impl->height, width, height,
+                         sourceStage);
     // Like PresentAccumulated: no accumulatedSamples++.
     return true;
 }
@@ -1509,14 +1619,18 @@ void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 2, preBarriers);
 
-    // NEAREST on purpose: depth values must never be mixed across silhouettes
+    // NEAREST on purpose: depth values must never be mixed across silhouettes.
+    // That holds all the more when the render extent is below the target's and
+    // this is a magnification -- an interpolated depth there would be a
+    // surface that is not in the scene.
     VkImageBlit blitRegion{};
     blitRegion.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     blitRegion.srcSubresource.mipLevel = 0;
     blitRegion.srcSubresource.baseArrayLayer = 0;
     blitRegion.srcSubresource.layerCount = 1;
     blitRegion.srcOffsets[0] = {0, 0, 0};
-    blitRegion.srcOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
+    blitRegion.srcOffsets[1] = {static_cast<i32>(m_impl->width),
+                                static_cast<i32>(m_impl->height), 1};
     blitRegion.dstSubresource = blitRegion.srcSubresource;
     blitRegion.dstOffsets[0] = {0, 0, 0};
     blitRegion.dstOffsets[1] = {static_cast<i32>(width), static_cast<i32>(height), 1};
@@ -1547,43 +1661,80 @@ void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage
 }
 
 void ExternalRenderContext::Resize(u32 width, u32 height) {
-    if (width == m_impl->width && height == m_impl->height) {
+    m_impl->EnsureExtent(width, height);
+}
+
+void ExternalRenderContext::SetRenderScale(f32 scale) {
+    const f32 clamped = std::clamp(scale, 0.25f, 1.0f);
+    if (clamped == m_impl->renderScale) {
         return;
     }
+    m_impl->renderScale = clamped;
+    // Deliberately not resizing here. The extent changes on the next
+    // RenderFrame, where the host is between frames and a vkDeviceWaitIdle is
+    // already what a resize costs; doing it from an input handler would wait
+    // on a frame the host is still recording.
+}
 
-    QL_LOG_INFO("ExternalRenderContext::Resize {}x{} -> {}x{}",
-                m_impl->width, m_impl->height, width, height);
+f32 ExternalRenderContext::GetRenderScale() const {
+    return m_impl->renderScale;
+}
 
-    m_impl->width = width;
-    m_impl->height = height;
+u32 ExternalRenderContext::GetRenderWidth() const {
+    return m_impl->width;
+}
+
+u32 ExternalRenderContext::GetRenderHeight() const {
+    return m_impl->height;
+}
+
+void ExternalRenderContext::Impl::EnsureExtent(u32 targetW, u32 targetH) {
+    targetWidth = targetW;
+    targetHeight = targetH;
+
+    const u32 renderW = ScaledDim(targetW);
+    const u32 renderH = ScaledDim(targetH);
+    if (renderW != width || renderH != height) {
+        ApplyInternalExtent(renderW, renderH);
+    }
+}
+
+void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) {
+    QL_LOG_INFO("ExternalRenderContext render extent {}x{} -> {}x{} "
+                "(target {}x{}, scale {:.3f})",
+                width, height, renderW, renderH,
+                targetWidth, targetHeight, renderScale);
+
+    width = renderW;
+    height = renderH;
 
     // Wait for GPU
-    vkDeviceWaitIdle(m_impl->device);
+    vkDeviceWaitIdle(device);
 
-    m_impl->outputImage =
-        rendercore::CreateRenderTarget(*m_impl->contextAdapter, width, height);
-    m_impl->depthAovImage = rendercore::CreateRenderTarget(
-        *m_impl->contextAdapter, width, height, VK_FORMAT_R32_SFLOAT);
+    outputImage =
+        rendercore::CreateRenderTarget(*contextAdapter, width, height);
+    depthAovImage = rendercore::CreateRenderTarget(
+        *contextAdapter, width, height, VK_FORMAT_R32_SFLOAT);
 
     // Re-bind output and depth AOV images
-    if (m_impl->pipeline) {
-        m_impl->pipeline->BindOutputImage(*m_impl->outputImage);
-        m_impl->pipeline->BindDepthImage(*m_impl->depthAovImage);
+    if (pipeline) {
+        pipeline->BindOutputImage(*outputImage);
+        pipeline->BindDepthImage(*depthAovImage);
     }
 
     // Recreate CLAHE display image if initialized
-    if (m_impl->claheInitialized && m_impl->displayImage) {
-        m_impl->displayImage = std::make_unique<GpuImage>(
-            m_impl->contextAdapter->GetAllocator(),
-            m_impl->contextAdapter->GetDevice(),
+    if (claheInitialized && displayImage) {
+        displayImage = std::make_unique<GpuImage>(
+            contextAdapter->GetAllocator(),
+            contextAdapter->GetDevice(),
             width, height,
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY
         );
 
-        m_impl->TransitionImageLayoutImmediate(
-            m_impl->displayImage->GetImage(),
+        TransitionImageLayoutImmediate(
+            displayImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL
@@ -1591,38 +1742,38 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
 
         // Update CLAHE descriptor set with new images
         VkDescriptorImageInfo inputImageInfo{};
-        inputImageInfo.imageView = m_impl->outputImage->GetView();
+        inputImageInfo.imageView = outputImage->GetView();
         inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         VkDescriptorImageInfo outputImageInfo{};
-        outputImageInfo.imageView = m_impl->displayImage->GetView();
+        outputImageInfo.imageView = displayImage->GetView();
         outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
         std::vector<VkWriteDescriptorSet> writes(2);
 
         writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = m_impl->claheDescriptorSet;
+        writes[0].dstSet = claheDescriptorSet;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[0].pImageInfo = &inputImageInfo;
 
         writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = m_impl->claheDescriptorSet;
+        writes[1].dstSet = claheDescriptorSet;
         writes[1].dstBinding = 1;
         writes[1].descriptorCount = 1;
         writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         writes[1].pImageInfo = &outputImageInfo;
 
-        vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+        vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
     }
 
     // Recreate sensor images if initialized
-    if (m_impl->sensorInitialized && m_impl->sensorImage) {
-        auto sensorAllocator = m_impl->contextAdapter->GetAllocator();
-        auto sensorDevice = m_impl->contextAdapter->GetDevice();
+    if (sensorInitialized && sensorImage) {
+        auto sensorAllocator = contextAdapter->GetAllocator();
+        auto sensorDevice = contextAdapter->GetDevice();
 
-        m_impl->sensorImage = std::make_unique<GpuImage>(
+        sensorImage = std::make_unique<GpuImage>(
             sensorAllocator, sensorDevice,
             width, height,
             VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -1630,7 +1781,7 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
             VMA_MEMORY_USAGE_GPU_ONLY
         );
 
-        m_impl->sensorTempImage = std::make_unique<GpuImage>(
+        sensorTempImage = std::make_unique<GpuImage>(
             sensorAllocator, sensorDevice,
             width, height,
             VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -1638,30 +1789,30 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
             VMA_MEMORY_USAGE_GPU_ONLY
         );
 
-        m_impl->TransitionImageLayoutImmediate(
-            m_impl->sensorImage->GetImage(),
+        TransitionImageLayoutImmediate(
+            sensorImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL
         );
 
-        m_impl->TransitionImageLayoutImmediate(
-            m_impl->sensorTempImage->GetImage(),
+        TransitionImageLayoutImmediate(
+            sensorTempImage->GetImage(),
             VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_LAYOUT_GENERAL
         );
 
         // Recreate FPN map images for new dimensions
-        if (m_impl->fpnPrnuMap) {
-            m_impl->fpnPrnuMap = std::make_unique<GpuImage>(
+        if (fpnPrnuMap) {
+            fpnPrnuMap = std::make_unique<GpuImage>(
                 sensorAllocator, sensorDevice,
                 width, height,
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                 VMA_MEMORY_USAGE_GPU_ONLY
             );
-            m_impl->fpnDsnuMap = std::make_unique<GpuImage>(
+            fpnDsnuMap = std::make_unique<GpuImage>(
                 sensorAllocator, sensorDevice,
                 width, height,
                 VK_FORMAT_R32G32B32A32_SFLOAT,
@@ -1669,14 +1820,14 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
                 VMA_MEMORY_USAGE_GPU_ONLY
             );
 
-            m_impl->TransitionImageLayoutImmediate(
-                m_impl->fpnPrnuMap->GetImage(),
+            TransitionImageLayoutImmediate(
+                fpnPrnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL
             );
-            m_impl->TransitionImageLayoutImmediate(
-                m_impl->fpnDsnuMap->GetImage(),
+            TransitionImageLayoutImmediate(
+                fpnDsnuMap->GetImage(),
                 VK_FORMAT_R32G32B32A32_SFLOAT,
                 VK_IMAGE_LAYOUT_UNDEFINED,
                 VK_IMAGE_LAYOUT_GENERAL
@@ -1684,14 +1835,22 @@ void ExternalRenderContext::Resize(u32 width, u32 height) {
         }
 
         // Invalidate FPN maps so they get regenerated for new dimensions
-        m_impl->fpnMapsGenerated = false;
+        fpnMapsGenerated = false;
     }
 
-    // Update camera aspect ratio
-    m_impl->camera.SetAspectRatio(static_cast<f32>(width) / static_cast<f32>(height));
+    // Aspect comes from the target extent, not the render extent. Rounding
+    // makes the two disagree by a fraction of a pixel, and taking it from the
+    // render extent would nudge the framing every time the scale changed --
+    // which is once at the start of every camera drag.
+    if (targetHeight > 0U) {
+        camera.SetAspectRatio(static_cast<f32>(targetWidth) /
+                              static_cast<f32>(targetHeight));
+    }
 
-    // Reset accumulation
-    ResetAccumulation();
+    // Nothing survives a change of extent. Same two steps as
+    // ExternalRenderContext::ResetAccumulation.
+    accumulatedSamples = 0;
+    ReseedRng();
 }
 
 void ExternalRenderContext::ResetAccumulation() {
@@ -2259,10 +2418,14 @@ const String& ExternalRenderContext::GetPipelineCachePath() const {
 }
 
 Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
-    // Validate bounds
-    if (x >= m_impl->width || y >= m_impl->height) {
+    // Coordinates are in the target extent -- the pixels the host presented
+    // into and the user clicked on. Below a render scale of 1.0 they index a
+    // larger grid than the accumulation has, so map before reading.
+    if (x >= m_impl->targetWidth || y >= m_impl->targetHeight) {
         return Result<glm::vec4, String>::Err("Pixel coordinates out of bounds");
     }
+    x = Impl::MapToRender(x, m_impl->targetWidth, m_impl->width);
+    y = Impl::MapToRender(y, m_impl->targetHeight, m_impl->height);
 
     if (!m_impl->isReady || !m_impl->outputImage) {
         return Result<glm::vec4, String>::Err("Render context not ready");
@@ -2423,9 +2586,13 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     if (!m_impl->isReady || !m_impl->geometry.IsValid()) {
         return Result<PickResult, String>::Err("Pick: no scene loaded");
     }
-    if (x >= m_impl->width || y >= m_impl->height) {
+    // Target-extent coordinates, like ReadPixelValue's -- the pick ray is
+    // reconstructed from the render grid, so map into it first.
+    if (x >= m_impl->targetWidth || y >= m_impl->targetHeight) {
         return Result<PickResult, String>::Err("Pick: pixel out of bounds");
     }
+    x = Impl::MapToRender(x, m_impl->targetWidth, m_impl->width);
+    y = Impl::MapToRender(y, m_impl->targetHeight, m_impl->height);
 
     m_impl->CreatePickPipeline();
     if (m_impl->pickPipeline == VK_NULL_HANDLE || !m_impl->pickOutputBuffer) {
