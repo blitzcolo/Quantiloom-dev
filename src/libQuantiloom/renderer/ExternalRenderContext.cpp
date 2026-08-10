@@ -245,10 +245,18 @@ struct ExternalRenderContext::Impl {
     std::mt19937 rng{constants::DEFAULT_SAMPLING_SEED};
     std::uniform_int_distribution<u32> randDist{0, std::numeric_limits<u32>::max()};
 
+    // Seeds the Owen scrambles that stratify the first bounce. Drawn once per
+    // accumulation round and then held for the whole round, which is the
+    // opposite of what randomSeed above does and the reason they are separate:
+    // the stratification is a property of the sequence of samples, so moving
+    // its seed between samples would leave nothing to stratify.
+    u32 sequenceSeed = constants::DEFAULT_SAMPLING_SEED;
+
     // Restart the sampling sequence. Called from ResetAccumulation() so the
     // sequence and the accumulation it feeds always begin together.
     void ReseedRng() {
         rng.seed(samplingSeed != 0U ? samplingSeed : std::random_device{}());
+        sequenceSeed = randDist(rng);
     }
 
     // Statistics: GPU time of the most recent resolved trace dispatch, in
@@ -1245,7 +1253,8 @@ void ExternalRenderContext::RenderFrame(
         kShaderFrameIndex,
         m_impl->accumulatedSamples,
         m_impl->spp,
-        randomSeed
+        randomSeed,
+        m_impl->sequenceSeed
     );
 
     // Execute ray tracing (writes to internal outputImage in GENERAL layout).

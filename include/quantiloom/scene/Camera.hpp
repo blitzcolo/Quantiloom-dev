@@ -79,7 +79,14 @@ struct PushConstantsRayGen {
     u32 frameIndex;          // Frame counter (for temporal effects)
     u32 sampleIndex;         // Current sample index (0 to spp-1)
     u32 totalSamples;        // Total samples per pixel (spp)
-    u32 randomSeed;          // Random seed for this frame
+    u32 randomSeed;          // Re-rolled every sample; seeds the PCG stream
+
+    // Fixed for a whole accumulation round; seeds the Owen scrambles that
+    // stratify the first bounce. It must NOT move while sampleIndex advances --
+    // consecutive samples would then come from unrelated scrambles of the
+    // sequence, which is white noise with extra steps. That is the opposite of
+    // what randomSeed wants, which is why these are two fields.
+    u32 sequenceSeed;
 };
 
 /**

@@ -188,12 +188,47 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 [[vk::binding(21, 0)]] SamplerState envSampler;                // Trilinear sampler for the prefiltered environment
 
 // ============================================================================
-// Push Constants
+// Sample sources
 // ============================================================================
-// Camera data for accessing spectral mode and wavelength
+// The push-constant block itself lives in common.hlsli, shared with raygen and
+// miss. This shader reads sampleIndex and sequenceSeed from it.
+//
+// Where a uniform number comes from depends on how deep the path is.
+//
+// On the FIRST bounce every decision has a fixed identity -- this draw is
+// always the wavelength, that one is always the bounce direction -- so each can
+// have its own padded, Owen-scrambled copy of the Sobol' sequence and be
+// stratified across the samples of the accumulation round. That is where nearly
+// all of the variance is, and where stratifying pays.
+//
+// DEEPER the identity is gone: whether a vertex picks a lobe, or samples a
+// light, or terminates on Russian roulette depends on what the path hit, so
+// sample i's third draw at depth 3 is not measuring the same thing as sample
+// j's. Stratifying along a dimension whose meaning moves between samples buys
+// nothing, so those keep drawing from PCG.
+//
+// Both are unbiased; they differ only in how the samples are correlated with
+// each other.
 // ============================================================================
 
-[[vk::push_constant]] CameraData camera;
+// A stratified draw for a first-bounce decision, PCG otherwise. `slot` is a
+// SAMPLE_SLOT_* constant and identifies which padded copy of the sequence this
+// decision owns.
+float PathSample1D(inout Payload payload, uint slot) {
+    if (payload.depth == 0u) {
+        return StratifiedSample1D(pushConsts.sampleIndex, DispatchRaysIndex().xy,
+                                  slot, pushConsts.sequenceSeed);
+    }
+    return pcg_float(payload.rngState);
+}
+
+float2 PathSample2D(inout Payload payload, uint slot) {
+    if (payload.depth == 0u) {
+        return StratifiedSample2D(pushConsts.sampleIndex, DispatchRaysIndex().xy,
+                                  slot, pushConsts.sequenceSeed);
+    }
+    return float2(pcg_float(payload.rngState), pcg_float(payload.rngState));
+}
 
 // ============================================================================
 // Hit Attributes
@@ -514,7 +549,7 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
     }
     float pdf = (1.0 - qSpec) * NdotWi / PI;
     if (qSpec > 0.0) {
-        // The visible-normal density SampleGGXVNDF_PCG draws from, which is
+        // The visible-normal density SampleGGXVNDF draws from, which is
         // G1 D / (4 NdotV) -- no half-vector term, the VdotH cancels.
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
@@ -576,7 +611,7 @@ float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
 // and the point uniformly within it, the area-measure density is
 // luminance / total -- the area cancels. That is what lets an emitter compute
 // its own sampling density later from nothing but its material.
-LightSample SampleEmissiveGeometry(float3 hitPos, inout uint rngState) {
+LightSample SampleEmissiveGeometry(float3 hitPos, inout Payload payload) {
     LightSample s;
     s.wi = float3(0.0, 1.0, 0.0);
     s.dist = 0.0;
@@ -598,7 +633,7 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout uint rngState) {
     // and on a larger scene ran past the driver's watchdog and took the process
     // with it. cumulativePower is non-decreasing by construction, so the search
     // is exact and the loop is 14 iterations there instead of 7700.
-    const float target = pcg_float(rngState) * total;
+    const float target = PathSample1D(payload, SAMPLE_SLOT_LIGHT_PICK) * total;
     uint lo = 0u;
     uint hi = count - 1u;
     [loop] while (lo < hi) {
@@ -614,8 +649,9 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout uint rngState) {
     const EmissiveTriangleGPU tri = emissiveTriangles[idx];
 
     // Uniform on the triangle: fold the far half of the unit square back.
-    float u = pcg_float(rngState);
-    float v = pcg_float(rngState);
+    const float2 uv = PathSample2D(payload, SAMPLE_SLOT_LIGHT_UV);
+    float u = uv.x;
+    float v = uv.y;
     if (u + v > 1.0) {
         u = 1.0 - u;
         v = 1.0 - v;
@@ -728,6 +764,8 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
 
     float weight = 1.0;
     if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
+        // Never reached at depth 0, so this draw has no stratified slot: it is
+        // a deep-path decision and PCG is the right source for it.
         if (pcg_float(payload.rngState) >= rrSurvive) {
             return 0.0;
         }
@@ -739,7 +777,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // direction and needs GGX to find it at all.
     const bool specularLobe = (qSpec >= 1.0)
         ? true
-        : (qSpec > 0.0 && pcg_float(payload.rngState) < qSpec);
+        : (qSpec > 0.0 && PathSample1D(payload, SAMPLE_SLOT_LOBE) < qSpec);
 
     if (specularLobe) {
         weight *= wSpecular / max(qSpec, 1e-4);
@@ -750,10 +788,15 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
         return 0.0;
     }
 
+    // One 2D draw feeds whichever lobe was chosen. The two lobes share the slot
+    // because they are the same decision -- which way does this path go -- and
+    // only one of them is ever taken per bounce.
+    const float2 uDir = PathSample2D(payload, SAMPLE_SLOT_DIRECTION);
+
     float pdf_dir;
     const float3 wi = specularLobe
-        ? SampleGGXVNDF_PCG(normal, V, roughness * roughness, payload.rngState, pdf_dir)
-        : CosineSampleHemisphere_PCG(normal, payload.rngState, pdf_dir);
+        ? SampleGGXVNDF(normal, V, roughness * roughness, uDir, pdf_dir)
+        : CosineSampleHemisphere(normal, uDir, pdf_dir);
 
     const float NdotWi = dot(normal, wi);
     // Negated comparisons, so that a NaN fails them. Written the other way a
@@ -1112,7 +1155,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, camera.wavelength_nm);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm);
 
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
     // L_out = BRDF * L_sun * τ(λ, d) * (N · L)
@@ -1201,7 +1244,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute F0 (reflectance at normal incidence) for Fresnel calculations
     // Uses physical n,k data when available for wavelength-accurate metal reflections
-    float3 F0 = ComputePhysicalF0(material, albedo, metallic, camera.wavelength_nm);
+    float3 F0 = ComputePhysicalF0(material, albedo, metallic, pushConsts.camera.wavelength_nm);
 
     // ------------------------------------------------------------------------
     // Sky Radiance Hemispherical Integration (Diffuse Ambient)
@@ -1473,7 +1516,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // the refraction that created it.
             const float lambda_b = heroRay
                 ? payload.heroLambda
-                : SampleVisibleWavelength(pcg_float(payload.rngState));
+                : SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_LAMBDA));
 
             // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
             const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
@@ -1529,7 +1572,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // Sampled before the bounce so both draw from the same RNG stream
             // in a fixed order; the bounce advances payload.rngState itself.
-            visLight = SampleEmissiveGeometry(visHitPos, payload.rngState);
+            visLight = SampleEmissiveGeometry(visHitPos, payload);
             if (visLight.valid) {
                 const float NdotWl = dot(normal, visLight.wi);
                 if (NdotWl > 0.0 && LightSampleVisible(visHitPos, normal, visLight)) {
@@ -1841,7 +1884,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 2. LightingParams.sunRadiance_spectral → Scalar fallback
         // ====================================================================
 
-        float lambda = camera.wavelength_nm;
+        float lambda = pushConsts.camera.wavelength_nm;
 
         // ================================================================
         // Query Sun/Sky Spectral Radiance at Wavelength λ
@@ -1955,7 +1998,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    hemisphere. Same residual as every other band; the only difference
         //    is that no wavelength is sampled, because the whole render is at
         //    one. The child ray carries heroLambda = 0 and arrives back in this
-        //    same branch, which evaluates at camera.wavelength_nm -- the same
+        //    same branch, which evaluates at pushConsts.camera.wavelength_nm -- the same
         //    wavelength, by construction rather than by being told.
         //
         //    Costs roughly one extra ray per hit, roulette-limited. RGB mode is
@@ -1976,7 +2019,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 7b. Light sampling, as VIS_FUSED. One wavelength, so there is no
             // loop to hoist anything out of: the emitter's spectrum is
             // evaluated here alongside everything else.
-            LightSample s = SampleEmissiveGeometry(singleHitPos, payload.rngState);
+            LightSample s = SampleEmissiveGeometry(singleHitPos, payload);
             if (s.valid) {
                 const float NdotWl = dot(normal, s.wi);
                 if (NdotWl > 0.0 && LightSampleVisible(singleHitPos, normal, s)) {
@@ -2082,7 +2125,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // it does in the visible, and the band had no bounce at all.
         const float lambda_b = heroRay
             ? payload.heroLambda
-            : SWIR_LAMBDA_MIN + pcg_float(payload.rngState) * (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN);
+            : SWIR_LAMBDA_MIN + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN);
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - SWIR_LAMBDA_MIN) / lambda_step),
                                             0.0, float(NUM_SWIR_SAMPLES - 1));
 
@@ -2265,7 +2308,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float NdotV_nir = max(dot(normal, V), 0.0);
         const float lambda_b = heroRay
             ? payload.heroLambda
-            : NIR_LAMBDA_MIN + pcg_float(payload.rngState) * (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN);
+            : NIR_LAMBDA_MIN + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN);
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - NIR_LAMBDA_MIN) / lambda_step),
                                             0.0, float(NUM_NIR_SAMPLES - 1));
 
@@ -2491,7 +2534,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // at that wavelength throughout, base and correction alike.
         const float lambda_b = heroRay
             ? payload.heroLambda
-            : lambda_min + pcg_float(payload.rngState) * (lambda_max - lambda_min);
+            : lambda_min + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (lambda_max - lambda_min);
 
         // The atmosphere LUT is baked on the loop's own sample points, so a
         // sampled wavelength has no index of its own -- take the nearest, as
@@ -2710,10 +2753,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // This allows inspecting intermediate rendering data for debugging pipeline issues
     // ========================================================================
 
-    if (SPEC_DEBUG_ENABLED != 0 && camera.debug_mode != DEBUG_MODE_NONE) {
+    if (SPEC_DEBUG_ENABLED != 0 && pushConsts.camera.debug_mode != DEBUG_MODE_NONE) {
         float3 debug_output = float3(1.0, 0.0, 1.0);  // Magenta = unhandled mode
 
-        switch (camera.debug_mode) {
+        switch (pushConsts.camera.debug_mode) {
             // ----------------------------------------------------------------
             // Geometry Debug (1-9)
             // ----------------------------------------------------------------
@@ -3276,7 +3319,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             sunRadiance = lut.sunRadiance_rgb;
         } else if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
             const float sun_irr =
-                SampleSunIrradiance(solarSpectralLUT, camera.wavelength_nm);
+                SampleSunIrradiance(solarSpectralLUT, pushConsts.camera.wavelength_nm);
             sunRadiance = float3(sun_irr, sun_irr, sun_irr);
         } else {
             // No curve, no sun -- the same refusal as every surface path. An
@@ -3395,7 +3438,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //
         // For RGB mode: Approximate by tracing 3 rays at R/G/B wavelengths
         // For VIS_FUSED: Use central wavelength (550nm) for single ray
-        // For SINGLE: Use camera.wavelength_nm
+        // For SINGLE: Use pushConsts.camera.wavelength_nm
         //
         // Cauchy formula: n(λ) = n_d + dispersion × 0.01 / λ²
         // ====================================================================
@@ -3595,7 +3638,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // way it keeps refracting at its own wavelength -- and since the IR
             // bands now spawn hero rays of their own for the environment
             // bounce, a bounce that then passes through a window has to refract
-            // at the wavelength it was sampled for, not at camera.wavelength_nm.
+            // at the wavelength it was sampled for, not at pushConsts.camera.wavelength_nm.
             float refractLambda;
             if (payload.heroLambda > 0.0) {
                 refractLambda = payload.heroLambda;
@@ -3603,7 +3646,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
                 refractLambda = 0.0;
             } else {
-                refractLambda = camera.wavelength_nm;
+                refractLambda = pushConsts.camera.wavelength_nm;
             }
 
             float effectiveIOR = RefractionIOR(material, refractLambda);

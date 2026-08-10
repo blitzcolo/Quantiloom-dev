@@ -23,24 +23,15 @@
 // current scene; consumed by ExternalRenderContext::BlitDepthTo.
 [[vk::binding(22, 0)]] RWTexture2D<float> depthImage;
 
-// ============================================================================
-// Push Constants (Extended for Accumulation Sampling)
-// ============================================================================
-
-struct PushConstantsRayGen {
-    CameraData camera;       // Camera parameters
-    uint frameIndex;         // Frame counter (for temporal effects)
-    uint sampleIndex;        // Current sample index (0 to spp-1)
-    uint totalSamples;       // Total samples per pixel (spp)
-    uint randomSeed;         // Random seed for this frame
-};
-
-[[vk::push_constant]] PushConstantsRayGen pushConsts;
+// The push-constant block lives in common.hlsli, shared with the closest-hit
+// and miss shaders.
 
 // ============================================================================
-// Random Number Generator (Wang Hash)
+// PCG Seed (Wang Hash)
 // ============================================================================
-// Fast pseudo-random number generator for GPU
+// Seeds the PCG stream that the closest-hit shader draws from past the first
+// bounce. The first bounce itself is stratified and does not touch this -- see
+// sampling.hlsli.
 // Reference: "Hash Functions for GPU Rendering" (Mark Jarzynski, 2020)
 // ============================================================================
 
@@ -51,17 +42,6 @@ uint WangHash(uint seed) {
     seed *= 0x27d4eb2d;
     seed = seed ^ (seed >> 15);
     return seed;
-}
-
-// Generate random float in [0, 1)
-float RandomFloat(inout uint seed) {
-    seed = WangHash(seed);
-    return float(seed) / 4294967296.0;  // 2^32
-}
-
-// Generate random float2 in [0, 1)^2
-float2 RandomFloat2(inout uint seed) {
-    return float2(RandomFloat(seed), RandomFloat(seed));
 }
 
 // ============================================================================
@@ -75,10 +55,11 @@ void main() {
     uint2 launchSize = DispatchRaysDimensions().xy;
 
     // ========================================================================
-    // Initialize Random Seed
+    // Initialize the PCG Seed
     // ========================================================================
-    // Combine pixel position, frame index, and sample index for unique seed
-    // This ensures different random sequences for each pixel and sample
+    // Combine pixel position, frame index, and sample index so that every
+    // (pixel, sample) pair gets its own stream. Handed to the payload below and
+    // consumed only past the first bounce.
     uint seed = pushConsts.randomSeed;
     seed ^= launchID.x * 1973 + launchID.y * 9277;
     seed ^= pushConsts.frameIndex * 26699;
@@ -86,13 +67,19 @@ void main() {
     seed = WangHash(seed);
 
     // ========================================================================
-    // Subpixel Jittering (Stochastic Sampling)
+    // Subpixel Jittering
     // ========================================================================
-    // Add random offset within pixel for anti-aliasing
-    // Range: [-0.5, 0.5] for uniform distribution within pixel
+    // Where in the pixel this sample lands, in [-0.5, 0.5]^2. Drawn from the
+    // stratified sequence rather than from `seed`: the film plane is the one
+    // dimension every path shares regardless of what it hits, so it is the
+    // dimension stratification helps most, and clumped jitter shows up directly
+    // as ragged edges. This comment used to say "stratified jittering" over two
+    // white-noise draws; now it is true.
     float2 jitter = float2(0.0, 0.0);
     if (pushConsts.totalSamples > 1) {
-        jitter = RandomFloat2(seed) - 0.5;  // Stratified jittering
+        jitter = StratifiedSample2D(pushConsts.sampleIndex, launchID,
+                                    SAMPLE_SLOT_JITTER,
+                                    pushConsts.sequenceSeed) - 0.5;
     }
 
     // Convert to normalized device coordinates [0, 1]

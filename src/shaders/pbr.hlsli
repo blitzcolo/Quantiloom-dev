@@ -594,11 +594,13 @@ float3 EvaluateIBLSpecular(
 // - Fdez-Agüera, "A Multiple-Scattering Microfacet Model for Real-Time IBL", JCGT 2021
 
 // ============================================================================
-// PCG Random + Importance Sampling for IR Monte Carlo Reflection
+// Importance Sampling for Monte Carlo Reflection
 // ============================================================================
-
-uint pcg_hash(uint s) { s = s*747796405u + 2891336453u; s = ((s>>((s>>28)+4))^s)*277803737u; return (s>>22)^s; }
-float pcg_float(inout uint s) { s = pcg_hash(s); return float(s) * (1.0/4294967296.0); }
+// The samplers below take their uniform numbers as arguments rather than
+// drawing them, because where those numbers come from is the caller's business:
+// on the first bounce they are stratified, deeper they are PCG. See
+// sampling.hlsli, which owns both streams.
+// ============================================================================
 
 // Build orthonormal basis around N
 void BuildBasis(float3 N, out float3 T, out float3 B) {
@@ -623,7 +625,7 @@ static const float MIN_BOUNCE_ROUGHNESS = 0.045;
 
 // Smith's masking function for GGX, exact rather than the Schlick fit the
 // shading terms use. This one is the sampling density's, so it has to be the
-// real thing: it is what SampleGGXVNDF_PCG below actually draws from.
+// real thing: it is what SampleGGXVNDF below actually draws from.
 float SmithG1_GGX(float NdotV, float alpha) {
     const float a2 = alpha * alpha;
     const float c  = max(NdotV, 1e-4);
@@ -642,7 +644,7 @@ float SmithG1_GGX(float NdotV, float alpha) {
 // normals instead makes the weight G2/G1, which is at most 1.
 //
 // Returns the reflected direction and its solid-angle density.
-float3 SampleGGXVNDF_PCG(float3 N, float3 V, float alpha, inout uint rng, out float pdf) {
+float3 SampleGGXVNDF(float3 N, float3 V, float alpha, float2 u, out float pdf) {
     float3 T, B;
     BuildBasis(N, T, B);
 
@@ -660,10 +662,8 @@ float3 SampleGGXVNDF_PCG(float3 N, float3 V, float alpha, inout uint rng, out fl
 
     // Section 4.2: a uniform point on the projected disk, squashed to match the
     // visible area.
-    const float u1 = pcg_float(rng);
-    const float u2 = pcg_float(rng);
-    const float r   = sqrt(u1);
-    const float phi = 2.0 * PI * u2;
+    const float r   = sqrt(u.x);
+    const float phi = 2.0 * PI * u.y;
     const float t1 = r * cos(phi);
     float       t2 = r * sin(phi);
     const float s  = 0.5 * (1.0 + Vh.z);
@@ -686,11 +686,10 @@ float3 SampleGGXVNDF_PCG(float3 N, float3 V, float alpha, inout uint rng, out fl
 }
 
 // Cosine-weighted hemisphere sample — for rough/Lambertian surfaces
-float3 CosineSampleHemisphere_PCG(float3 N, inout uint rng, out float pdf) {
-    float u1 = pcg_float(rng), u2 = pcg_float(rng);
-    float r = sqrt(u1);
-    float phi = 2.0 * PI * u2;
-    float3 wi_local = float3(r*cos(phi), r*sin(phi), sqrt(max(1.0-u1, 0.0)));
+float3 CosineSampleHemisphere(float3 N, float2 u, out float pdf) {
+    float r = sqrt(u.x);
+    float phi = 2.0 * PI * u.y;
+    float3 wi_local = float3(r*cos(phi), r*sin(phi), sqrt(max(1.0-u.x, 0.0)));
     float3 T, B;
     BuildBasis(N, T, B);
     float3 wi = normalize(T*wi_local.x + B*wi_local.y + N*wi_local.z);

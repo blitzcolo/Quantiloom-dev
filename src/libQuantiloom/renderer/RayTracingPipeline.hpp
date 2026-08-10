@@ -340,8 +340,13 @@ public:
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
 
-    // Set accumulation sampling parameters (call before TraceRays)
-    void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed);
+    // Set accumulation sampling parameters (call before TraceRays).
+    //
+    // randomSeed is expected to change every sample; sequenceSeed is expected
+    // to stay fixed for a whole accumulation round and to be re-rolled only
+    // when the round restarts. See PushConstantsRayGen for why.
+    void SetSamplingParams(u32 frameIndex, u32 sampleIndex, u32 totalSamples, u32 randomSeed,
+                           u32 sequenceSeed);
 
     // Record trace rays command into provided command buffer.
     // finalDispatch=true inserts a RT->TRANSFER barrier (for readback).

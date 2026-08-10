@@ -173,7 +173,10 @@ struct BatchRenderer::Impl {
             vkBeginCommandBuffer(cmd, &beginInfo);
 
             for (u32 sample = batchStart; sample < batchEnd; ++sample) {
-                pipeline.SetSamplingParams(0, sample, params.spp, randomSeed + sample);
+                // randomSeed advances per sample; the sequence seed does not --
+                // it fixes the Owen scrambles for the whole accumulation, which
+                // is what makes the samples stratified against each other.
+                pipeline.SetSamplingParams(0, sample, params.spp, randomSeed + sample, randomSeed);
                 pipeline.TraceRays(cmd, imageWidth, imageHeight, sample == params.spp - 1);
             }
 

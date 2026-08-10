@@ -1550,11 +1550,12 @@ void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
 }
 
 void RayTracingPipeline::SetSamplingParams(const u32 frameIndex, const u32 sampleIndex, const u32 totalSamples,
-                                           const u32 randomSeed) {
+                                           const u32 randomSeed, const u32 sequenceSeed) {
     m_pushConstants.frameIndex = frameIndex;
     m_pushConstants.sampleIndex = sampleIndex;
     m_pushConstants.totalSamples = totalSamples;
     m_pushConstants.randomSeed = randomSeed;
+    m_pushConstants.sequenceSeed = sequenceSeed;
 }
 
 } // namespace quantiloom

@@ -819,6 +819,13 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         std::mt19937 rng(renderSeed);
         std::uniform_int_distribution<u32> dist(0, std::numeric_limits<u32>::max());
 
+        // Drawn once, before the sample loop, and held for all spp: this seeds
+        // the Owen scrambles that stratify the first bounce, and they have to
+        // agree with each other across the samples they are stratifying. Mixed
+        // with frameIndex so an animation does not reuse one pattern for every
+        // frame.
+        const u32 sequenceSeed = dist(rng) ^ (frameIndex * 0x9e3779b9U);
+
         // Batch samples into groups. Each submit must stay WELL under the
         // Windows TDR limit (~2s): heavy IR scenes run ~500ms/sample, so
         // 2 per batch keeps a submit around 1s with safety margin.
@@ -858,7 +865,7 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
 
             for (u32 sampleIndex = batchStart; sampleIndex < batchEnd; ++sampleIndex) {
                 u32 randomSeed = dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009);
-                pipeline->SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed);
+                pipeline->SetSamplingParams(frameIndex, sampleIndex, spp, randomSeed, sequenceSeed);
 
                 perfLogger->BeginFrame(cmd);
                 bool isFinal = (sampleIndex == spp - 1);

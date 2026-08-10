@@ -49,13 +49,8 @@
 
 [[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
 
-// ============================================================================
-// Push Constants
-// ============================================================================
-// Camera data for accessing spectral mode and wavelength
-// ============================================================================
-
-[[vk::push_constant]] CameraData camera;
+// The push-constant block lives in common.hlsli, shared with raygen and the
+// closest-hit shader. This one reads the camera wavelength out of it.
 
 // ============================================================================
 // Miss Entry Point
@@ -176,7 +171,7 @@ void main(inout Payload payload) {
             // Thermal single wavelength: NN downwelling spectrum (one sample)
             radiance_spectral = SampleAtmosLdown(atmos, atmosNNData, 0);
         } else if (hasSpectralSolarLUT) {
-            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, camera.wavelength_nm);
+            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, pushConsts.camera.wavelength_nm);
             radiance_spectral = sky_irr / PI;
         } else {
             radiance_spectral = lut.skyRadiance_spectral;
