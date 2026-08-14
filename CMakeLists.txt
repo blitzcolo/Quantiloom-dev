@@ -196,6 +196,29 @@ include_directories(SYSTEM "${openexr_SOURCE_DIR}/src/lib")
 include_directories(SYSTEM "${openexr_BINARY_DIR}/src/lib/OpenEXRCore")
 # --- END WORKAROUND ---
 
+# --- WORKAROUND for OpenJPH's header layout ---
+# OpenEXR 3.4's HTJ2K path includes <openjph/ojph_arch.h>, but the OpenJPH it
+# fetches keeps its headers in src/core/common. OpenEXRSetup.cmake bridges the
+# two with a symlink, falling back to a copy if the link cannot be made -- and
+# on this toolchain (Windows CMake driven from WSL2 over DrvFs, developer mode
+# off) the link reports success while creating nothing, so the fallback never
+# runs. OpenEXRCore then fails to compile internal_ht.cpp, and because MSBuild
+# stops at the first failing project the whole build dies there, far from
+# anything this repo owns. Make the directory ourselves when it is missing.
+if(DEFINED FETCHCONTENT_BASE_DIR)
+    set(_ql_fetch_base "${FETCHCONTENT_BASE_DIR}")
+else()
+    set(_ql_fetch_base "${CMAKE_BINARY_DIR}/_deps")
+endif()
+set(_ql_openjph_core "${_ql_fetch_base}/openjph-src/src/core")
+if(EXISTS "${_ql_openjph_core}/common" AND NOT EXISTS "${_ql_openjph_core}/openjph")
+    message(STATUS "OpenJPH: creating ${_ql_openjph_core}/openjph (symlink fallback)")
+    file(COPY "${_ql_openjph_core}/common/" DESTINATION "${_ql_openjph_core}/openjph")
+endif()
+unset(_ql_openjph_core)
+unset(_ql_fetch_base)
+# --- END WORKAROUND ---
+
 # NOTE: HDF5 dependency removed - hyperspectral cube I/O not needed for current use cases
 # If needed in future, re-add with proper static linking configuration
 
