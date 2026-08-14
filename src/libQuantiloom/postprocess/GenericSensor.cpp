@@ -116,14 +116,15 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
         m_impl->m_FPNMapsGenerated = true;
     }
 
-    // Step 1: Apply PSF blur (diffraction-limited optics)
-    // Calculate Airy disk radius (simplified: sigma ~ λ·f# / pixel_pitch)
-    const f32 wavelength_m = params.wavelength_nm * 1e-9f;
-    const f32 airyRadius_um = 1.22f * wavelength_m * 1e6f * params.fNumber;
-    const f32 sigma_pixels = airyRadius_um / params.pixelPitch_um;
+    // Step 1: Apply PSF blur (diffraction-limited optics, or an explicit width)
+    const f32 sigma_pixels = PSFSigmaPixels(params);
 
-    Log::Debug("PSF: σ = {:.2f} pixels (Airy radius = {:.2f} μm)",
-               sigma_pixels, airyRadius_um);
+    if (params.psfSigma_px >= 0.0f) {
+        Log::Debug("PSF: σ = {:.3f} pixels (explicit override)", sigma_pixels);
+    } else {
+        Log::Debug("PSF: σ = {:.3f} pixels (diffraction-limited, {:.3f}·λ·f#)",
+                   sigma_pixels, kAiryGaussianSigmaFactor);
+    }
 
     Image blurred = ApplyPSF(hdr, sigma_pixels);
 
@@ -162,8 +163,8 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
 // ============================================================================
 
 auto ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image {
-    if (sigma_pixels < 0.1f) {
-        // No blur needed
+    if (sigma_pixels < kMinPSFSigmaPixels) {
+        // Narrower than a pixel can express -- the GPU path skips here too.
         return img;
     }
 
@@ -257,8 +258,8 @@ auto RadianceToElectrons(const Image& radiance,
     const f64 wavelength_m = p.wavelength_nm * 1e-9;
     const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
 
-    // Solid angle subtended by lens aperture: Ω = π / (4 × f#²)
-    const f64 solidAngle_sr = std::numbers::pi / (4.0 * p.fNumber * p.fNumber);
+    // Solid angle subtended by lens aperture: Ω = π·sin²θ = π / (1 + 4·f#²)
+    const f64 solidAngle_sr = ApertureSolidAngleSr(p.fNumber);
 
     Log::Debug("Optics: f# = {:.1f}, Ω = {:.6e} sr, pixel area = {:.3e} m²",
                p.fNumber, solidAngle_sr, pixelArea_m2);
@@ -406,8 +407,10 @@ auto ElectronsToRadiance(const Image& electrons,
     const f64 wavelength_m = p.wavelength_nm * 1e-9;
     const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
 
-    // Solid angle subtended by lens aperture: Ω = π / (4 × f#²)
-    const f64 solidAngle_sr = std::numbers::pi / (4.0 * p.fNumber * p.fNumber);
+    // Solid angle subtended by lens aperture: Ω = π·sin²θ = π / (1 + 4·f#²).
+    // Must stay the same call as RadianceToElectrons -- the enhanced-preview
+    // round trip is only lossless while the two are exact inverses.
+    const f64 solidAngle_sr = ApertureSolidAngleSr(p.fNumber);
 
     // Reverse conversion: electrons → radiance
     for (u32 i = 0; i < electrons.TotalElements(); ++i) {

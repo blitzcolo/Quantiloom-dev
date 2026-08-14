@@ -58,6 +58,10 @@ TEST(SensorParamsTest, DefaultConstruction) {
     EXPECT_FLOAT_EQ(p.fNumber, 2.8f);
     EXPECT_FLOAT_EQ(p.pixelPitch_um, 5.0f);
 
+    // PSF width override: negative means "derive from diffraction". It has to
+    // stay negative rather than 0, because 0 is the meaningful value "no blur".
+    EXPECT_LT(p.psfSigma_px, 0.0f);
+
     // Detector
     EXPECT_FLOAT_EQ(p.quantumEfficiency, 0.8f);
     EXPECT_FLOAT_EQ(p.wellCapacity_e, 50000.0f);
@@ -237,4 +241,61 @@ bit_depth = 16
     EXPECT_FLOAT_EQ(p.pixelPitch_um, 5.0f);
     EXPECT_FLOAT_EQ(p.quantumEfficiency, 0.8f);
     EXPECT_FLOAT_EQ(p.prnuSigma, 0.01f);
+}
+
+// ============================================================================
+// PSF Width Override
+// ============================================================================
+
+TEST_F(SensorConfigTest, PSFSigmaOverrideParsed) {
+    auto path = CreateTOML("psf_override.toml", R"(
+[sensor]
+psf_sigma_px = 2.5
+    )");
+
+    auto result = Config::Load(path);
+    ASSERT_TRUE(result.has_value());
+
+    SensorParams p = PostprocessConfig::ParseSensorParams(*result);
+    EXPECT_FLOAT_EQ(p.psfSigma_px, 2.5f);
+
+    // The override replaces the derived width outright, in pixels.
+    EXPECT_FLOAT_EQ(PSFSigmaPixels(p), 2.5f);
+}
+
+TEST_F(SensorConfigTest, PSFSigmaOverrideZeroMeansNoBlur) {
+    // 0 is a real width, not "unset" -- the sentinel is negative for this reason.
+    auto path = CreateTOML("psf_zero.toml", R"(
+[sensor]
+f_number = 11.0
+psf_sigma_px = 0.0
+    )");
+
+    auto result = Config::Load(path);
+    ASSERT_TRUE(result.has_value());
+
+    SensorParams p = PostprocessConfig::ParseSensorParams(*result);
+    EXPECT_FLOAT_EQ(p.psfSigma_px, 0.0f);
+    EXPECT_FLOAT_EQ(PSFSigmaPixels(p), 0.0f);
+    EXPECT_EQ(PSFKernelRadiusPixels(PSFSigmaPixels(p)), 0u);
+}
+
+TEST_F(SensorConfigTest, PSFSigmaOmittedDerivesFromDiffraction) {
+    auto path = CreateTOML("psf_derived.toml", R"(
+[sensor]
+f_number = 11.0
+pixel_pitch_um = 5.0
+
+[spectral]
+wavelength_nm = 550.0
+    )");
+
+    auto result = Config::Load(path);
+    ASSERT_TRUE(result.has_value());
+
+    SensorParams p = PostprocessConfig::ParseSensorParams(*result);
+    ASSERT_LT(p.psfSigma_px, 0.0f) << "omitted key must leave the sentinel";
+
+    const f32 expected = kAiryGaussianSigmaFactor * 550e-9f * 11.0f / 5e-6f;
+    EXPECT_NEAR(PSFSigmaPixels(p), expected, 1e-6f);
 }

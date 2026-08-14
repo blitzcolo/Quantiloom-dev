@@ -7,8 +7,13 @@
  *   - SENSOR_PSF_HORIZONTAL: Horizontal blur
  *   - SENSOR_PSF_VERTICAL: Vertical blur
  *
- * PSF sigma is calculated from f-number and wavelength:
- *   σ_psf ≈ 1.22 × λ × f# / pixel_pitch
+ * Sigma arrives as a push constant. The host derives it in PSFSigmaPixels()
+ * (include/quantiloom/postprocess/SensorModel.hpp) -- either an explicit
+ * override, or the width matched to the diffraction-limited Airy core:
+ *   σ_psf = 0.437 × λ × f# / pixel_pitch
+ * A kernelRadius of 0 means "no blur": the single centre tap has unit weight,
+ * so the pass copies. Sigma is still non-zero there, because the weight below
+ * is 0/0 at x = 0 when sigma = 0.
  *
  * @author blitzcolo
  */

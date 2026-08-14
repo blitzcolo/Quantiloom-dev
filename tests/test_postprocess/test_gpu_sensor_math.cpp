@@ -56,68 +56,120 @@ protected:
 // ============================================================================
 // PSF Sigma Calculation Tests
 // ============================================================================
-// GPU shader uses: σ = 1.22 × λ(m) × f# / pixel_pitch(m)
-// CPU uses: airyRadius_um = 1.22 × λ(m) × 1e6 × f#, then σ = airyRadius / pitch
-// Both are mathematically identical.
+// Both chains call PSFSigmaPixels() / PSFKernelRadiusPixels() from
+// postprocess/SensorModel.hpp, so these tests exercise the production formula
+// rather than a third copy of it -- an earlier version of this file restated
+// the arithmetic inline, which meant a wrong constant in the renderer could be
+// matched by the same wrong constant here and the suite would stay green.
+//
+// The expectations below are pinned to closed forms, not to decimal literals.
 
-TEST_F(GPUSensorMathTest, PSFSigmaFormula) {
-    // σ = 1.22 × λ × f# / pixel_pitch
-    // With λ=550nm, f#=2.8, pitch=5μm:
-    // σ = 1.22 × 550e-9 × 2.8 / (5e-6) = 0.37576 pixels
-    const f32 lambda_m = 550e-9f;
-    const f32 fNumber = 2.8f;
-    const f32 pitch_m = 5e-6f;
+// Half-width at half maximum of the Airy pattern, in units of lambda*fNumber.
+// The intensity is [2*J1(x)/x]^2 with x = pi*r/(lambda*N); bisect for the half
+// maximum, then convert x back to a radius.
+static auto AiryHWHM_LambdaN() -> f64 {
+    const auto airyIntensity = [](f64 x) {
+        const f64 t = 2.0 * std::cyl_bessel_j(1, x) / x;
+        return t * t;
+    };
+    // The central lobe falls from 1 at x -> 0 to its first zero at x = 3.8317.
+    f64 lo = 1.0, hi = 2.0;  // airyIntensity(1) > 1/2 > airyIntensity(2)
+    for (int i = 0; i < 200; ++i) {
+        const f64 mid = 0.5 * (lo + hi);
+        if (airyIntensity(mid) > 0.5) lo = mid; else hi = mid;
+    }
+    return 0.5 * (lo + hi) / std::numbers::pi;
+}
 
-    const f32 expected = 1.22f * lambda_m * fNumber / pitch_m;
+// FWHM of a Gaussian is 2*sqrt(2*ln2) sigma.
+static constexpr f64 kGaussianFWHMPerSigma = 2.3548200450309493;
 
-    // Also compute via CPU path: airyRadius_um then divide by pitch_um
-    const f32 airyRadius_um = 1.22f * lambda_m * 1e6f * fNumber;
-    const f32 sigma_cpu = airyRadius_um / 5.0f;
+TEST_F(GPUSensorMathTest, PSFSigmaMatchesAiryFWHM) {
+    const f64 airyFWHM_lambdaN = 2.0 * AiryHWHM_LambdaN();
 
-    EXPECT_NEAR(expected, sigma_cpu, 1e-6f)
-        << "GPU and CPU PSF sigma formulas must be equivalent";
-    EXPECT_NEAR(expected, 0.37576f, 0.001f);
+    // Sanity: the derivation reproduces the textbook 1.029 lambda*N.
+    EXPECT_NEAR(airyFWHM_lambdaN, 1.02899, 1e-4);
+
+    // The production constant is the Gaussian sigma of that same FWHM.
+    EXPECT_NEAR(static_cast<f64>(kAiryGaussianSigmaFactor),
+                airyFWHM_lambdaN / kGaussianFWHMPerSigma, 5e-4)
+        << "PSF width must be a Gaussian matched to the Airy core's FWHM, not "
+           "the Rayleigh radius 1.22 lambda*N";
+
+    // And the derived sigma, in pixels, carries the relation through.
+    params.wavelength_nm = 550.0f;
+    params.fNumber = 2.8f;
+    params.pixelPitch_um = 5.0f;
+    const f64 lambdaN_px = (550e-9 * 2.8) / 5e-6;
+    EXPECT_NEAR(PSFSigmaPixels(params) * kGaussianFWHMPerSigma,
+                airyFWHM_lambdaN * lambdaN_px, 1e-3);
+}
+
+TEST_F(GPUSensorMathTest, PSFSigmaOverrideReplacesDerivedWidth) {
+    const f32 derived = PSFSigmaPixels(params);
+    ASSERT_GT(derived, 0.0f);
+
+    // A supplied width is used verbatim, in pixels.
+    params.psfSigma_px = 2.5f;
+    EXPECT_FLOAT_EQ(PSFSigmaPixels(params), 2.5f);
+
+    // Zero is a real width -- no blur -- and must not read as "unset".
+    params.psfSigma_px = 0.0f;
+    EXPECT_FLOAT_EQ(PSFSigmaPixels(params), 0.0f);
+    EXPECT_EQ(PSFKernelRadiusPixels(PSFSigmaPixels(params)), 0u);
+
+    // Any negative value falls back to the derived width.
+    params.psfSigma_px = -1.0f;
+    EXPECT_FLOAT_EQ(PSFSigmaPixels(params), derived);
+    EXPECT_FLOAT_EQ(SensorParams{}.psfSigma_px, -1.0f) << "default is the sentinel";
 }
 
 TEST_F(GPUSensorMathTest, PSFSigmaClampRange) {
-    // GPU clamps sigma to [0.1, 10.0]
-    // Test with very small f# → small sigma
-    {
-        f32 sigma = 1.22f * (550e-9f) * 1.0f / (5e-6f);  // f#=1.0
-        sigma = std::max(0.1f, std::min(sigma, 10.0f));
-        EXPECT_GE(sigma, 0.1f);
-        EXPECT_LE(sigma, 10.0f);
-    }
-    // Test with extreme values that would exceed 10
-    {
-        f32 sigma = 1.22f * (2000e-9f) * 22.0f / (1e-6f);  // λ=2μm, f#=22, pitch=1μm
-        sigma = std::max(0.1f, std::min(sigma, 10.0f));
-        EXPECT_FLOAT_EQ(sigma, 10.0f);
-    }
+    // Below the floor, both chains skip the blur: radius 0 is a copy.
+    params.psfSigma_px = kMinPSFSigmaPixels * 0.5f;
+    EXPECT_EQ(PSFKernelRadiusPixels(PSFSigmaPixels(params)), 0u);
+
+    // At the floor it blurs.
+    params.psfSigma_px = kMinPSFSigmaPixels;
+    EXPECT_GT(PSFKernelRadiusPixels(PSFSigmaPixels(params)), 0u);
+
+    // Above the ceiling the kernel stops growing.
+    params.psfSigma_px = 1000.0f;
+    EXPECT_EQ(PSFKernelRadiusPixels(PSFSigmaPixels(params)),
+              PSFKernelRadiusPixels(kMaxPSFSigmaPixels));
 }
 
 TEST_F(GPUSensorMathTest, PSFKernelRadius) {
-    // radius = ceil(3 × σ)
-    f32 sigma = 1.22f * (550e-9f) * 2.8f / (5e-6f);
-    u32 radius = static_cast<u32>(std::ceil(3.0f * sigma));
-    EXPECT_EQ(radius, 2u);  // ceil(3 × 0.376) = ceil(1.128) = 2
+    // radius = ceil(3 sigma), the 99.7% support of the Gaussian.
+    EXPECT_EQ(PSFKernelRadiusPixels(3.5f), 11u);   // ceil(10.5)
+    EXPECT_EQ(PSFKernelRadiusPixels(0.5f), 2u);    // ceil(1.5)
 
-    // Larger sigma
-    sigma = 3.5f;
-    radius = static_cast<u32>(std::ceil(3.0f * sigma));
-    EXPECT_EQ(radius, 11u);  // ceil(10.5) = 11
+    // The fixture (550 nm, f/2.8, 5 um) is a sub-pixel PSF but still blurs.
+    const f32 sigma = PSFSigmaPixels(params);
+    EXPECT_LT(sigma, 1.0f);
+    EXPECT_EQ(PSFKernelRadiusPixels(sigma),
+              static_cast<u32>(std::ceil(3.0f * sigma)));
 }
 
 TEST_F(GPUSensorMathTest, PSFSigmaEdgeCases) {
-    // Very fast lens (f/1.0) with short wavelength
-    f32 sigma1 = 1.22f * (400e-9f) * 1.0f / (5e-6f);
+    // Very fast lens (f/1.0) with short wavelength: well under a pixel.
+    params.wavelength_nm = 400.0f;
+    params.fNumber = 1.0f;
+    params.pixelPitch_um = 5.0f;
+    const f32 sigma1 = PSFSigmaPixels(params);
     EXPECT_GT(sigma1, 0.0f);
     EXPECT_LT(sigma1, 1.0f);
 
-    // Very slow lens (f/22) with long wavelength (SWIR)
-    f32 sigma2 = 1.22f * (1500e-9f) * 22.0f / (5e-6f);
+    // Very slow lens (f/22) with long wavelength (SWIR): several pixels.
+    params.wavelength_nm = 1500.0f;
+    params.fNumber = 22.0f;
+    const f32 sigma2 = PSFSigmaPixels(params);
     EXPECT_GT(sigma2, sigma1);
-    EXPECT_GT(sigma2, 5.0f);
+    EXPECT_GT(sigma2, 2.0f);
+
+    // Sigma is linear in both lambda and f#.
+    params.fNumber = 44.0f;
+    EXPECT_NEAR(PSFSigmaPixels(params), 2.0f * sigma2, 1e-5f);
 }
 
 // ============================================================================
@@ -125,16 +177,31 @@ TEST_F(GPUSensorMathTest, PSFSigmaEdgeCases) {
 // ============================================================================
 
 TEST_F(GPUSensorMathTest, SolidAngleFormula) {
-    // Ω = π / (4 × f#²)
-    const f64 omega_28 = std::numbers::pi / (4.0 * 2.8 * 2.8);
-    EXPECT_NEAR(omega_28, 0.1001, 0.001);
+    // Ω = π·sin²θ for a cone of half-angle θ with tanθ = 1/(2·f#).
+    // Pinned to that relation rather than to a decimal, so the small-angle
+    // form π/(4·f#²) -- which overstates collection by 1 + 1/(4·f#²), i.e.
+    // 6.25% at f/2 -- cannot creep back in unnoticed.
+    // The f-number arrives as f32, so widen theta from the same rounded value --
+    // otherwise this compares the formula against a different aperture and the
+    // ~1e-8 relative difference reads as a formula error.
+    for (const f32 nf : {1.0f, 1.4f, 2.0f, 2.8f, 5.6f, 11.0f}) {
+        const f64 n = static_cast<f64>(nf);
+        const f64 theta = std::atan(1.0 / (2.0 * n));
+        const f64 exact = std::numbers::pi * std::sin(theta) * std::sin(theta);
+        EXPECT_NEAR(ApertureSolidAngleSr(nf), exact, 1e-15) << "at f/" << n;
+    }
 
-    const f64 omega_14 = std::numbers::pi / (4.0 * 1.4 * 1.4);
-    EXPECT_NEAR(omega_14, 0.4006, 0.001);
-
-    // Faster lens → larger solid angle → more light
+    // Faster lens → larger solid angle → more light.
+    const f64 omega_28 = ApertureSolidAngleSr(2.8f);
+    const f64 omega_14 = ApertureSolidAngleSr(1.4f);
     EXPECT_GT(omega_14, omega_28);
-    EXPECT_NEAR(omega_14 / omega_28, 4.0, 0.01);  // f#² ratio = (2.8/1.4)² = 4
+
+    // The exact law is not a pure 1/f#² ratio; the shortfall against 4.0 is the
+    // bias the small-angle form used to hide -- ~8.5% between these two stops.
+    const f64 n28 = static_cast<f64>(2.8f), n14 = static_cast<f64>(1.4f);
+    EXPECT_NEAR(omega_14 / omega_28,
+                (1.0 + 4.0 * n28 * n28) / (1.0 + 4.0 * n14 * n14), 1e-12);
+    EXPECT_LT(omega_14 / omega_28, 4.0);
 }
 
 TEST_F(GPUSensorMathTest, PhotonEnergyFormula) {
@@ -152,7 +219,7 @@ TEST_F(GPUSensorMathTest, RadianceToElectronsFormula) {
     // N_e = L × Ω × A × t × QE / E_photon
     // Use low radiance to avoid well capacity saturation (50000 e-)
     const f64 L = 0.5;  // 0.5 W/m²/sr (below saturation)
-    const f64 omega = std::numbers::pi / (4.0 * 2.8 * 2.8);
+    const f64 omega = ApertureSolidAngleSr(2.8f);
     const f64 A = (5e-6) * (5e-6);  // pixel area m²
     const f64 t = 0.01;  // integration time
     const f64 QE = 0.8;

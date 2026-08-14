@@ -4162,15 +4162,22 @@ void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &initialBarrier, 0, nullptr, 0, nullptr);
 
-    // Calculate PSF sigma from f-number and wavelength
-    // σ_psf ≈ 1.22 × λ × f# / pixel_pitch (result is in pixels)
-    // wavelength_nm * 1e-9 = wavelength in meters
-    // pixelPitch_um * 1e-6 = pixel pitch in meters
-    // Division gives result directly in pixels
-    f32 psfSigma = 1.22f * (params.wavelength_nm * 1e-9f) * params.fNumber / (params.pixelPitch_um * 1e-6f);
-    // Clamp to reasonable range
-    psfSigma = std::max(0.1f, std::min(psfSigma, 10.0f));
-    u32 kernelRadius = static_cast<u32>(std::ceil(3.0f * psfSigma));
+    // PSF sigma in pixels: the explicit override, or the diffraction-limited
+    // width. Same call the CPU chain makes, so the two cannot drift.
+    f32 psfSigma = PSFSigmaPixels(params);
+
+    // Below the floor the blur is a no-op, and the CPU chain returns the image
+    // untouched. The passes still have to run, because pass 3 reads sensorImage
+    // and only the vertical pass writes it -- but a zero radius makes each pass
+    // a single unit-weight tap, i.e. an exact copy. sigma must stay non-zero
+    // even then: the shader's weight is exp(-x^2/sigma^2), which is 0/0 at the
+    // centre tap of a zero-width Gaussian.
+    const u32 kernelRadius = PSFKernelRadiusPixels(psfSigma);
+    if (kernelRadius == 0) {
+        psfSigma = 1.0f;  // unused at radius 0, but must not be 0
+    } else {
+        psfSigma = std::min(psfSigma, kMaxPSFSigmaPixels);
+    }
 
     // ========================================================================
     // Pass 1: PSF Blur Horizontal (on radiance, matching CPU order)

@@ -20,6 +20,10 @@ public:
         p.fNumber = config.Get<f32>("sensor.f_number", 2.8f);
         p.pixelPitch_um = config.Get<f32>("sensor.pixel_pitch_um", 5.0f);
 
+        // PSF width override in pixels. Defaults to the negative sentinel in
+        // SensorParams, meaning "derive from diffraction"; 0 means no blur.
+        p.psfSigma_px = config.Get<f32>("sensor.psf_sigma_px", SensorParams{}.psfSigma_px);
+
         // Detector
         p.quantumEfficiency = config.Get<f32>("sensor.quantum_efficiency", 0.8f);
         p.wellCapacity_e = config.Get<f32>("sensor.well_capacity_e", 50000.0f);

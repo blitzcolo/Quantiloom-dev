@@ -99,8 +99,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float pixelArea_m2 = pow(params.pixelPitch_um * 1e-6, 2.0);
     float3 irradiance = energy_J / (pixelArea_m2 * params.integrationTime_s);
 
-    // 7. Irradiance → Radiance: L = E / Ω
-    float solidAngle_sr = PI / (4.0 * params.fNumber * params.fNumber);
+    // 7. Irradiance → Radiance: L = E / Ω, Ω = π·sin²θ = π / (1 + 4·f#²).
+    // Exact inverse of sensor_radiance_to_electrons.comp.hlsl; both must move
+    // together or the enhanced-preview round trip stops being lossless.
+    float solidAngle_sr = PI / (1.0 + 4.0 * params.fNumber * params.fNumber);
     float3 radiance = irradiance / solidAngle_sr;
 
     // Store result

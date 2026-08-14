@@ -167,20 +167,20 @@
     {
       "id": "SPEC-19",
       "severity": "Info",
-      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
-      "line": 189,
-      "description": "Solid angle formula Ω = π / (4 * f#^2) is the correct approximation for a thin lens aperture as seen from the sensor plane.",
-      "evidence": "For f/2.8: Ω = 0.1002 sr, matches theoretical π/(4*2.8^2) = 0.1002 sr",
-      "recommendation": "No change needed."
+      "file": "include/quantiloom/postprocess/SensorModel.hpp",
+      "line": 137,
+      "description": "Solid angle is now the exact Ω = π·sin²θ with tanθ = 1/(2·f#), i.e. Ω = π / (1 + 4·f#^2), in ApertureSolidAngleSr(). Until 2026-08-15 the code used the small-angle form π / (4·f#^2), which this entry had accepted; it overstates collection by 1 + 1/(4·f#^2), a constant at a fixed aperture but a systematic bias whenever f# is swept.",
+      "evidence": "For f/2.8: exact Ω = 0.09708 sr vs 0.10024 sr under the small-angle form, a 3.2% overestimate; at f/2.0 the overestimate is 6.25%.",
+      "recommendation": "No change needed. Corrected 2026-08-15; renders made before that date are 1 + 1/(4·f#^2) bright in the electron count."
     },
     {
       "id": "SPEC-20",
       "severity": "Info",
-      "file": "src/libQuantiloom/postprocess/GenericSensor.cpp",
-      "line": 50,
-      "description": "Airy disk radius formula r = 1.22 * λ * f# is the Rayleigh criterion for a circular aperture. The factor 1.22 comes from the first zero of J1(x)/x.",
-      "evidence": "At 550nm, f/2.8: r = 1.22 * 0.55e-6 * 2.8 * 1e6 = 1.878 μm, formula is standard optics",
-      "recommendation": "No change needed."
+      "file": "include/quantiloom/postprocess/SensorModel.hpp",
+      "line": 96,
+      "description": "PSF Gaussian sigma is now 0.437·λ·f# / pixel_pitch, a Gaussian matched to the FWHM of the Airy core (Airy FWHM = 1.029·λ·f#, divided by 2·sqrt(2·ln2)). This entry previously verified only that 1.22·λ·f# is the correct Rayleigh radius, which it is -- but the code then used that radius directly as a Gaussian standard deviation, and a radius to the first null is not a standard deviation. Every PSF was 2.79x too wide.",
+      "evidence": "Airy intensity [2·J1(x)/x]^2 = 1/2 at x = 1.6163, so FWHM = 2·1.6163/π = 1.029·λ·f# and sigma = 1.029/2.3548 = 0.437·λ·f#. At 550nm, f/2.8, 5μm pitch: sigma = 0.135 px, where the old constant gave 0.376 px.",
+      "recommendation": "No change needed. Corrected 2026-08-15. Note the audit gap this closes: checking a formula in isolation missed that the quantity it produces was assigned to a variable of a different kind."
     },
     {
       "id": "SPEC-21",

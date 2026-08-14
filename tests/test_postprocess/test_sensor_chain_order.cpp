@@ -67,6 +67,32 @@ TEST_F(SensorChainOrderTest, DeterministicWithNoiseDisabled) {
     }
 }
 
+namespace {
+
+// Variance over the centre region, away from the convolution's edge handling.
+auto CentreVariance(const Image& img) -> f32 {
+    f32 mean = 0.0f;
+    u32 count = 0;
+    for (u32 y = 30; y < 98; ++y) {
+        for (u32 x = 30; x < 98; ++x) {
+            mean += img(x, y, 0);
+            ++count;
+        }
+    }
+    mean /= static_cast<f32>(count);
+
+    f32 var = 0.0f;
+    for (u32 y = 30; y < 98; ++y) {
+        for (u32 x = 30; x < 98; ++x) {
+            const f32 d = img(x, y, 0) - mean;
+            var += d * d;
+        }
+    }
+    return var / static_cast<f32>(count);
+}
+
+} // namespace
+
 TEST_F(SensorChainOrderTest, PSFReducesHighFrequency) {
     // Create checkerboard pattern (high frequency)
     Image hdr(128, 128, 1);
@@ -76,51 +102,22 @@ TEST_F(SensorChainOrderTest, PSFReducesHighFrequency) {
         }
     }
 
-    // Compute variance of input center region
-    f32 inputVar = 0.0f, inputMean = 0.0f;
-    u32 count = 0;
-    for (u32 y = 30; y < 98; ++y) {
-        for (u32 x = 30; x < 98; ++x) {
-            inputMean += hdr(x, y, 0);
-            ++count;
-        }
-    }
-    inputMean /= count;
-    for (u32 y = 30; y < 98; ++y) {
-        for (u32 x = 30; x < 98; ++x) {
-            f32 d = hdr(x, y, 0) - inputMean;
-            inputVar += d * d;
-        }
-    }
-    inputVar /= count;
-
     // Apply sensor chain (PSF will blur the checkerboard)
     params.fNumber = 8.0f;  // Larger f# -> more blur
     GenericSensor sensor;
     auto result = sensor.Apply(hdr, params);
     ASSERT_TRUE(result.has_value());
 
-    // Compute variance of output center region
-    const Image& dn = result.value().rawDN;
-    f32 outVar = 0.0f, outMean = 0.0f;
-    count = 0;
-    for (u32 y = 30; y < 98; ++y) {
-        for (u32 x = 30; x < 98; ++x) {
-            outMean += dn(x, y, 0);
-            ++count;
-        }
-    }
-    outMean /= count;
-    for (u32 y = 30; y < 98; ++y) {
-        for (u32 x = 30; x < 98; ++x) {
-            f32 d = dn(x, y, 0) - outMean;
-            outVar += d * d;
-        }
-    }
-    outVar /= count;
+    // Compare against the enhanced preview, which is radiance on the same scale
+    // as the input -- so this is a statement about blur, not about the DN scale.
+    // The previous version compared radiance variance against DN variance and
+    // absorbed the unit mismatch into a 1e6 factor, which meant it passed for
+    // any PSF width whatsoever, including none.
+    const f32 inputVar = CentreVariance(hdr);
+    const f32 outVar = CentreVariance(result.value().enhancedPreview);
 
-    // PSF blur should reduce variance (smooth out checkerboard)
-    EXPECT_LT(outVar, inputVar * 1e6f);  // Very loose bound
+    ASSERT_GT(inputVar, 0.0f);
+    EXPECT_LT(outVar, inputVar) << "PSF blur must reduce checkerboard contrast";
 }
 
 TEST_F(SensorChainOrderTest, FPNCreatesStructuredNoise) {

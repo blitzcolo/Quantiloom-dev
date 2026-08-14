@@ -334,6 +334,98 @@ TEST_F(GenericSensorTest, PSFBlurReducesSharpness) {
     EXPECT_LT(rightEdge, 0.99f);  // Not pure white (blurred from dark side)
 }
 
+// ----------------------------------------------------------------------------
+// PSF width override (sensor.psf_sigma_px)
+// ----------------------------------------------------------------------------
+// f-number sets two physically distinct things at once -- the PSF width and the
+// collection solid angle -- so a study that sweeps blur has to compensate
+// exposure to hold the photon budget fixed. The override decouples them.
+
+namespace {
+
+// A sharp vertical edge at x = 50, noise disabled so the chain is deterministic.
+auto MakeEdgeImage() -> Image {
+    Image hdr(100, 100, 1);
+    for (u32 y = 0; y < 100; ++y) {
+        for (u32 x = 0; x < 100; ++x) {
+            hdr(x, y, 0) = (x < 50) ? 0.0f : 1.0f;
+        }
+    }
+    return hdr;
+}
+
+// How far the edge has spread: bright signal that leaked into the dark side.
+auto EdgeLeakage(const Image& preview) -> f32 {
+    f32 leak = 0.0f;
+    for (u32 x = 0; x < 50; ++x) {
+        leak += preview(x, 50, 0);
+    }
+    return leak;
+}
+
+} // namespace
+
+TEST_F(GenericSensorTest, PSFSigmaOverrideWidensBlur) {
+    const Image hdr = MakeEdgeImage();
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    auto derived = sensor.Apply(hdr, params);
+    ASSERT_TRUE(derived.has_value());
+
+    params.psfSigma_px = 4.0f;  // far wider than the diffraction-limited width
+    auto overridden = sensor.Apply(hdr, params);
+    ASSERT_TRUE(overridden.has_value());
+
+    EXPECT_GT(EdgeLeakage(overridden.value().enhancedPreview),
+              EdgeLeakage(derived.value().enhancedPreview))
+        << "an explicit sigma must reach the blur, not be ignored";
+}
+
+TEST_F(GenericSensorTest, PSFSigmaOverrideZeroLeavesEdgeSharp) {
+    const Image hdr = MakeEdgeImage();
+    params.fNumber = 11.0f;  // would otherwise blur visibly
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    params.psfSigma_px = 0.0f;
+    auto noBlur = sensor.Apply(hdr, params);
+    ASSERT_TRUE(noBlur.has_value());
+
+    params.psfSigma_px = -1.0f;
+    auto blurred = sensor.Apply(hdr, params);
+    ASSERT_TRUE(blurred.has_value());
+
+    // Zero means no blur, rather than falling back to the derived width.
+    EXPECT_LT(EdgeLeakage(noBlur.value().enhancedPreview), 1e-3f);
+    EXPECT_GT(EdgeLeakage(blurred.value().enhancedPreview), 1e-3f);
+}
+
+TEST_F(GenericSensorTest, PSFSigmaNegativeIsBitIdenticalToDefault) {
+    const Image hdr = MakeEdgeImage();
+    params.fNumber = 11.0f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+
+    ASSERT_LT(params.psfSigma_px, 0.0f) << "fixture leaves the field defaulted";
+    auto byDefault = sensor.Apply(hdr, params);
+    ASSERT_TRUE(byDefault.has_value());
+
+    params.psfSigma_px = -0.5f;  // any negative value is the same sentinel
+    auto explicitlyNegative = sensor.Apply(hdr, params);
+    ASSERT_TRUE(explicitlyNegative.has_value());
+
+    const Image& a = byDefault.value().enhancedPreview;
+    const Image& b = explicitlyNegative.value().enhancedPreview;
+    ASSERT_EQ(a.TotalElements(), b.TotalElements());
+    for (u32 i = 0; i < a.TotalElements(); ++i) {
+        ASSERT_FLOAT_EQ(a.data[i], b.data[i]) << "at element " << i;
+    }
+}
+
 // ============================================================================
 // Integration Tests
 // ============================================================================

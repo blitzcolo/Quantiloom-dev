@@ -88,8 +88,10 @@ void main(uint3 dispatchThreadID : SV_DispatchThreadID) {
     float pixelArea_m2 = pow(params.pixelPitch_um * 1e-6, 2.0);
 
     // 2. Calculate solid angle subtended by lens aperture
-    // Ω = π / (4 × f#²)
-    float solidAngle_sr = PI / (4.0 * params.fNumber * params.fNumber);
+    // Ω = π·sin²θ with tanθ = 1/(2·f#), i.e. Ω = π / (1 + 4·f#²).
+    // Keep in step with ApertureSolidAngleSr() on the host and with the
+    // inverse in sensor_quantize_to_radiance.comp.hlsl.
+    float solidAngle_sr = PI / (1.0 + 4.0 * params.fNumber * params.fNumber);
 
     // 3. Apply vignetting (cos^4 law) if enabled
     float vignetteFactor = 1.0;
