@@ -154,6 +154,21 @@ public:
     /// @return Map of string keys to string values
     [[nodiscard]] std::unordered_map<String, String> GetSection(StringView key) const;
 
+    /// Names of the sub-tables directly under a section
+    ///
+    /// For a section whose entries are themselves tables keyed by something
+    /// the caller does not know in advance -- a material name, say -- this is
+    /// how to find out what is in it. Scalars at the same level are skipped,
+    /// and a missing or non-table key gives an empty list rather than an
+    /// error, since "nothing declared" and "nothing there" mean the same to
+    /// every caller so far.
+    ///
+    /// Sorted, so that whatever the caller does with them happens in the same
+    /// order on every platform: toml++ keeps a table in its own order and a
+    /// render that depends on hash iteration order is a render that differs
+    /// between machines.
+    [[nodiscard]] Vector<String> GetSubtableNames(StringView key) const;
+
     // ========================================================================
     // Merging
     // ========================================================================

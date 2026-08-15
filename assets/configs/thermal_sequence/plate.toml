@@ -1,0 +1,52 @@
+# Base scene for the temperature sequence. Every frame renders this file; the
+# manifest beside it is what makes each one different.
+#
+# The plate is emissivity 0.95 under a 250 K sky, so [thermography] with the
+# same numbers recovers the temperature the manifest set — which is what makes
+# a sequence checkable frame by frame rather than only watchable.
+
+[renderer]
+resolution = [256, 256]
+spp = 16
+output = "plate.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 16.0, 0.001]
+look_at  = [0.0, 0.0, 0.0]
+up       = [0.0, 0.0, -1.0]
+fov_y    = 45.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 250.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.95
+ir_transmittance = 0.0
+ir_temperature_k = 300.0
+
+[thermography]
+enabled = true
+emissivity = 0.95
+reflected_temperature_k = 250.0
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

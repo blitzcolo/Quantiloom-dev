@@ -300,6 +300,16 @@ set(TEST_MAIN_SOURCE
     test_main.cpp
 )
 
+# CLI tests. The manifest parser lives in src/app because deciding what a
+# manifest line means is host business, not library business (see
+# RenderJob.hpp) -- but it is pure text-to-Config with no device behind it, so
+# it is compiled into the suite alongside its test rather than left untested
+# for want of a target.
+set(TEST_APP_SOURCES
+    test_app/test_batch_manifest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/app/BatchManifest.cpp
+)
+
 # Combine all test sources
 set(ALL_TEST_SOURCES
     ${TEST_MAIN_SOURCE}
@@ -311,6 +321,7 @@ set(ALL_TEST_SOURCES
     ${TEST_POSTPROCESS_SOURCES}
     ${TEST_HS_CORE_SOURCES}
     ${TEST_MCP_SOURCES}
+    ${TEST_APP_SOURCES}
 )
 
 # ============================================================================
@@ -333,6 +344,10 @@ else()
 endif()
 target_compile_definitions(libquantiloom_tests
     PRIVATE QUANTILOOM_SOURCE_ROOT="${_ql_source_root}")
+
+# So test_app/ can include "BatchManifest.hpp" the way src/app does.
+target_include_directories(libquantiloom_tests
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/app)
 
 # The compiled shaders, beside the test binary. A test that builds a ray
 # tracing pipeline -- ApplyConfig's do -- loads them by name from the working

@@ -18,6 +18,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <utility>
 #include <cmath>
 #include <filesystem>
 
@@ -832,16 +833,43 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     //
     // This began as a Studio-only reading of the file, which meant a config the
     // GUI honoured rendered without it from the CLI.
-    for (const auto& matTable : config.GetTableArray("materials")) {
-        const auto name = matTable.GetString("name", "");
+    //
+    // [material_overrides] spells the same keys under a table keyed by
+    // material name:
+    //
+    //   [material_overrides.Panel]
+    //   ir_temperature_k = 320.0
+    //
+    // Same vocabulary, different merge behaviour, which is the whole reason it
+    // exists. Config::MergedWith replaces arrays whole -- array elements carry
+    // no identity to pair them up by -- so an override document naming one
+    // material's temperature would delete every other [[materials]] entry.
+    // Tables merge key by key, so the table form survives being layered, which
+    // is what a per-job override in a batch manifest needs.
+    //
+    // Applied after the array, so a manifest line wins over the scene file it
+    // is overriding. Both forms go through the same loop body: two spellings
+    // of one vocabulary, not two vocabularies.
+    Vector<std::pair<String, Config>> materialTables;
+    for (auto& table : config.GetTableArray("materials")) {
+        auto name = table.GetString("name", "");
         if (name.empty()) continue;
+        materialTables.emplace_back(std::move(name), std::move(table));
+    }
+    for (const auto& overrideName : config.GetSubtableNames("material_overrides")) {
+        auto table = config.GetTable("material_overrides." + overrideName);
+        if (table.has_value()) {
+            materialTables.emplace_back(overrideName, std::move(table.value()));
+        }
+    }
 
+    for (const auto& [name, matTable] : materialTables) {
         auto it = std::find_if(scene.materials.begin(), scene.materials.end(),
                                [&name](const Material& m) { return m.name == name; });
         if (it == scene.materials.end()) {
             diag.Warn("materials",
-                      "  [[materials]] names '" + name + "', which the scene has no "
-                      "material by");
+                      "  a material override names '" + name + "', which the scene "
+                      "has no material by");
             continue;
         }
 

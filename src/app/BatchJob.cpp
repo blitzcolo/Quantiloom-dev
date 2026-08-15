@@ -1,5 +1,7 @@
 #include "BatchJob.hpp"
 
+#include "BatchManifest.hpp"
+
 #include "RenderJob.hpp"
 
 #include "core/Config.hpp"
@@ -34,6 +36,10 @@ struct Job {
     /// Why this job never reached a renderer. Empty means it did.
     String preflightError;
 
+    /// What this manifest line overrode, for the dry run to print. Empty when
+    /// the line was a bare path, which most are.
+    String overrideSummary;
+
     /// False for the tail of the list after --fail-fast stopped it, which is not
     /// the same as failing and is not reported as such.
     bool attempted = false;
@@ -66,40 +72,6 @@ String TomlQuote(const String& text) {
     }
     out += '"';
     return out;
-}
-
-/**
- * @brief Read the manifest into absolute config paths
- *
- * Relative paths resolve against the manifest's own directory, so a list can sit
- * next to the configs it names and travel with them.
- */
-Result<std::vector<fs::path>, String> ReadManifest(const fs::path& manifestPath) {
-    using ManifestResult = Result<std::vector<fs::path>, String>;
-
-    std::ifstream in(manifestPath);
-    if (!in) {
-        return ManifestResult::Err("Cannot open manifest: " + manifestPath.string());
-    }
-
-    const fs::path manifestDir = fs::absolute(manifestPath).parent_path();
-
-    std::vector<fs::path> entries;
-    String line;
-    while (std::getline(in, line)) {
-        const String trimmed = Trim(line);
-        if (trimmed.empty() || trimmed[0] == '#') continue;
-
-        fs::path entry(trimmed);
-        if (entry.is_relative()) entry = manifestDir / entry;
-        entries.push_back(entry.lexically_normal());
-    }
-
-    if (entries.empty()) {
-        return ManifestResult::Err("Manifest names no configurations: " +
-                                   manifestPath.string());
-    }
-    return ManifestResult(std::move(entries));
 }
 
 /**
@@ -192,7 +164,7 @@ int RunBatch(const BatchOptions& options) {
     // ========================================================================
     // Pre-flight: everything that can be known before a device exists
     // ========================================================================
-    auto manifest = ReadManifest(fs::path(options.manifestPath));
+    auto manifest = ParseManifest(fs::path(options.manifestPath));
     if (!manifest.has_value()) {
         std::cerr << "Error: " << manifest.error() << "\n";
         QL_LOG_ERROR("{}", manifest.error());
@@ -224,25 +196,39 @@ int RunBatch(const BatchOptions& options) {
     std::vector<Job> jobs;
     jobs.reserve(manifest.value().size());
 
-    for (const fs::path& configPath : manifest.value()) {
+    for (const ManifestEntry& entry : manifest.value()) {
         Job job;
-        job.configPath = configPath;
+        job.configPath = entry.configPath;
 
-        if (!fs::is_regular_file(configPath)) {
+        if (!fs::is_regular_file(entry.configPath)) {
             job.preflightError = "no such configuration file";
             jobs.push_back(std::move(job));
             continue;
         }
 
-        auto loaded = Config::Load(configPath);
+        auto loaded = Config::Load(entry.configPath);
         if (!loaded.has_value()) {
             job.preflightError = loaded.error();
             jobs.push_back(std::move(job));
             continue;
         }
 
-        job.config = options.overridePath.empty() ? loaded.value()
-                                                  : loaded.value().MergedWith(overrides);
+        // Layering order: the config, then the batch-wide --override, then
+        // this line's own. The line is the most specific statement about this
+        // job, so it wins -- and unlike the batch-wide override it MAY set
+        // renderer.output, because naming one file per line is how a sequence
+        // is written rather than a way for every job to overwrite one file.
+        Config config = options.overridePath.empty() ? std::move(loaded.value())
+                                                     : loaded.value().MergedWith(overrides);
+        auto withEntry = ApplyEntryOverrides(config, entry);
+        if (!withEntry.has_value()) {
+            job.preflightError = withEntry.error();
+            jobs.push_back(std::move(job));
+            continue;
+        }
+
+        job.config = std::move(withEntry.value());
+        job.overrideSummary = DescribeEntryOverrides(entry);
         job.outputPath = ResolveOutputPath(job, options.outputDir);
         jobs.push_back(std::move(job));
     }
@@ -283,6 +269,9 @@ int RunBatch(const BatchOptions& options) {
             if (!job.preflightError.empty()) {
                 std::cout << "        SKIPPED: " << job.preflightError << "\n";
             } else {
+                if (!job.overrideSummary.empty()) {
+                    std::cout << "        overrides: " << job.overrideSummary << "\n";
+                }
                 std::cout << "        -> " << job.outputPath.string() << "\n";
             }
         }

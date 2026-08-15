@@ -8,6 +8,8 @@
  */
 
 #include "core/Config.hpp"
+
+#include <algorithm>
 #include "core/Log.hpp"
 
 QL_DISABLE_WARNINGS_PUSH
@@ -344,6 +346,22 @@ Result<Config, String> Config::GetTable(const StringView key) const {
     toml::table clonedTable = *node->as_table();
     auto impl = std::make_unique<Impl>(std::move(clonedTable));
     return Config(std::move(impl));
+}
+
+Vector<String> Config::GetSubtableNames(const StringView key) const {
+    Vector<String> names;
+
+    const toml::node* node = m_impl->Navigate(key);
+    if (!node || !node->is_table()) {
+        return names;
+    }
+    for (const auto& [childKey, childNode] : *node->as_table()) {
+        if (childNode.is_table()) {
+            names.emplace_back(childKey.str());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 Vector<Config> Config::GetTableArray(const StringView key) const {

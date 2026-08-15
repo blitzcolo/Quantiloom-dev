@@ -1,0 +1,17 @@
+# A temperature sequence: one scene, one line per frame.
+#
+# Everything left of the `|` is the configuration, exactly as a manifest has
+# always read. To the right are this frame's own overrides, layered after the
+# batch-wide --override and after the file itself.
+#
+# The temperature goes through [material_overrides] rather than [[materials]]
+# because Config::MergedWith replaces arrays whole -- an inline [[materials]]
+# entry would delete every other material the scene file names. Tables merge
+# key by key, which is what a per-frame override needs.
+#
+# Run it:  Quantiloom.exe batch assets/configs/thermal_sequence/manifest.txt
+
+plate.toml | material_overrides.CheckerGround.ir_temperature_k=280.0 renderer.output="seq_280K.exr"
+plate.toml | material_overrides.CheckerGround.ir_temperature_k=300.0 renderer.output="seq_300K.exr"
+plate.toml | material_overrides.CheckerGround.ir_temperature_k=320.0 renderer.output="seq_320K.exr"
+plate.toml | material_overrides.CheckerGround.ir_temperature_k=340.0 renderer.output="seq_340K.exr"
