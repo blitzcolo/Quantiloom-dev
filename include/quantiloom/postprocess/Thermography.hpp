@@ -113,4 +113,27 @@ struct ThermographyParams {
                                                                f64 lambdaMaxNm,
                                                                f64 sceneTemperatureK);
 
+// ============================================================================
+// Clear sky
+// ============================================================================
+// A thermal camera pointed up does not see the air temperature: it sees a
+// partly transparent atmosphere against a background near 3 K, and how cold
+// that reads depends on the water vapour in the way. These three are what the
+// renderer derives its clear-sky model from, exposed so a host can show the
+// derived numbers rather than reimplement the correlation to display them.
+//
+// Berdahl & Fromberg, "The thermal radiance of clear skies", Solar Energy
+// 29(4), 1982.
+
+/// Dew point in Celsius, Magnus with the WMO coefficients. Exact at RH = 100,
+/// where it returns the air temperature.
+[[nodiscard]] QL_API f64 DewPointC(f64 airTemperatureC, f64 relativeHumidityPercent);
+
+/// Clear-sky emissivity from the dew point:
+/// eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2, clamped to [0, 1].
+[[nodiscard]] QL_API f64 ClearSkyEmissivity(f64 dewPointC);
+
+/// The blackbody that radiates what this sky does: T_air * eps^(1/4).
+[[nodiscard]] QL_API f64 EffectiveSkyTemperatureK(f64 airTemperatureK, f64 emissivity);
+
 }  // namespace quantiloom

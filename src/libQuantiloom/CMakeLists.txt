@@ -42,6 +42,8 @@ add_library(quantiloom_core OBJECT
     core/SpectralColour.cpp
     core/Blackbody.cpp
     core/Blackbody.hpp
+    core/SkyThermal.cpp
+    core/SkyThermal.hpp
     core/D65Illuminant.hpp
     core/NNLS.cpp
     core/NNLS.hpp

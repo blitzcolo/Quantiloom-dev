@@ -6,6 +6,7 @@
 #include "postprocess/Thermography.hpp"
 
 #include "core/Blackbody.hpp"
+#include "core/SkyThermal.hpp"
 
 #include <cmath>
 #include <limits>
@@ -136,6 +137,18 @@ f64 NoiseEquivalentTemperatureDifferenceK(const SensorParams& sensor, const f64 
         return std::numeric_limits<f64>::infinity();
     }
     return noiseRadiance / dRadiance_dT;
+}
+
+f64 DewPointC(const f64 airTemperatureC, const f64 relativeHumidityPercent) {
+    return skythermal::DewPointC(airTemperatureC, relativeHumidityPercent);
+}
+
+f64 ClearSkyEmissivity(const f64 dewPointC) {
+    return skythermal::ClearSkyEmissivity(dewPointC);
+}
+
+f64 EffectiveSkyTemperatureK(const f64 airTemperatureK, const f64 emissivity) {
+    return skythermal::EffectiveSkyTemperatureK(airTemperatureK, emissivity);
 }
 
 }  // namespace quantiloom

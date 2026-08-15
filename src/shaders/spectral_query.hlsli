@@ -133,24 +133,10 @@ float QueryMaterialSpectralAlbedo(StructuredBuffer<SpectralCurveGPU> spectralCur
 }
 
 // ============================================================================
-// Atmospheric Transmittance Query (Future: MODTRAN LUT integration)
+// Atmospheric Transmittance Query -- removed
 // ============================================================================
-
-// TODO: Implement MODTRAN LUT query for wavelength-dependent transmittance
-// Current: Returns scalar transmittance from LightingParams (wavelength-independent)
-// Future: Query LUT(λ, altitude, zenith_angle) → τ(λ)
-//
-// PLACEHOLDER IMPLEMENTATION:
-float QueryAtmosphericTransmittance(StructuredBuffer<LightingParams> lightingParams,
-                                    float lambda_nm,
-                                    float distance_m) {
-    LightingParams lut = lightingParams[0];
-
-    // PLACEHOLDER: Use scalar transmittance (wavelength-independent)
-    // This is a simplification - real implementation should query MODTRAN LUT
-    // with wavelength dependence: τ(λ) varies significantly in IR bands
-    return lut.transmittance;
-
-    // FUTURE (M2+): Implement MODTRAN LUT query
-    // return QueryMODTRANLUT(lambda_nm, altitude, zenith_angle);
-}
+// QueryAtmosphericTransmittance returned LightingParams::transmittance, a
+// single wavelength-independent number, and never had a caller: the view path
+// gets tau(lambda) from the NN atmosphere's baked LUT (SampleAtmosTau), which
+// is what that placeholder was waiting for. Its field has since been reused
+// for the clear-sky emissivity.

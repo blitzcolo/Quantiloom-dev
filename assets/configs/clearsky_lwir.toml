@@ -1,0 +1,78 @@
+# Clear sky — the thermal sky is not one temperature
+#
+# A camera pointed up does not see the air temperature. It sees a partly
+# transparent atmosphere against a background near 3 K, so the zenith reads
+# far colder than the horizon, and how much colder depends on the water vapour
+# in the way. The isotropic blackbody this replaces had no such gradient: it
+# was as warm overhead as at the horizon, which no sky is, and it made every
+# outdoor scene cool too slowly toward the sky.
+#
+# What to look for: the sky's radiance rises from the top of the frame toward
+# the horizon. Set sky_model = "isotropic" and the gradient disappears — the
+# same scene, the same air temperature, and one flat sky.
+#
+# The plate is there to be cooled by it. Its own emission dominates what the
+# camera sees; the sky shows up in the 5% it reflects, and in the temperature
+# a thermal solver would settle it at.
+#
+# Berdahl & Fromberg, Solar Energy 29(4), 1982. At 15 C and 50% relative
+# humidity the dew point is 4.7 C and the zenith emissivity 0.75, which puts
+# the effective sky temperature near 268 K — 20 K below the air.
+
+[renderer]
+resolution = [512, 512]
+spp = 32
+output = "clearsky_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+default_temperature_k = 293.15
+
+[camera]
+# Low and level, so the frame spans the zenith at the top and the horizon at
+# the bottom: the gradient is the point, and a camera looking straight down
+# would see none of it.
+position = [0.0, 1.6, 12.0]
+look_at  = [0.0, 6.0, -8.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 70.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[atmosphere]
+preset = "disabled"
+# The analytic clear sky. Its air temperature replaces
+# lighting.atmosphere_temperature_k, which under this model is the Planck
+# temperature of the air rather than an effective sky temperature.
+sky_model = "clear_sky"
+air_temperature_k = 288.15
+relative_humidity = 50.0
+# sky_emissivity = 0.75   # a measured sky, if there is one, beats the fit
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.95
+ir_transmittance = 0.0
+ir_temperature_k = 293.15
+
+[thermography]
+enabled = true
+emissivity = 1.0
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

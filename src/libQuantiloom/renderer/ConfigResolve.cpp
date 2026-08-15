@@ -7,6 +7,8 @@
 
 #include "renderer/ConfigResolve.hpp"
 
+#include "core/SkyThermal.hpp"
+
 #include "core/Log.hpp"
 #include "io/SpectralBasisLoader.hpp"
 #include "io/SpectralIO.hpp"
@@ -319,9 +321,6 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                           std::to_string(skyRadArray.size()) + " element(s)");
     }
 
-    f32 transmittance = config.Get<f32>("lighting.transmittance", 0.9f);
-    transmittance = std::clamp(transmittance, 0.0f, 1.0f);
-
     f32 atmosphereTemperature_K =
         config.Get<f32>("lighting.atmosphere_temperature_k", 260.0f);
     if (atmosphereTemperature_K < 150.0f || atmosphereTemperature_K > 350.0f) {
@@ -330,13 +329,58 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                     atmosphereTemperature_K);
     }
 
+    // ------------------------------------------------------------------
+    // Clear sky
+    // ------------------------------------------------------------------
+    // Without the NN atmosphere the thermal sky was one isotropic blackbody:
+    // as warm at the zenith as at the horizon, which no sky is. sky_model =
+    // "clear_sky" replaces it with the flat-slab law driven by a
+    // Berdahl-Fromberg emissivity, so a surface facing up cools against a
+    // colder sky than one facing sideways -- the effect that puts frost on a
+    // car roof and not on its doors.
+    //
+    // The correlation and the dew point behind it are evaluated here, once,
+    // and only the zenith emissivity goes to the GPU. sky_emissivity
+    // overrides it for a measured or otherwise known sky.
+    f32 skyEmissivityClear = 0.0f;
+    const auto skyModel = config.GetString("atmosphere.sky_model", "isotropic");
+    if (skyModel == "clear_sky") {
+        const f32 airTemperature_K = config.Get<f32>("atmosphere.air_temperature_k", 288.15f);
+        const f32 relativeHumidity = config.Get<f32>("atmosphere.relative_humidity", 50.0f);
+        const f32 emissivityOverride = config.Get<f32>("atmosphere.sky_emissivity", 0.0f);
+
+        const f64 dewPointC =
+            skythermal::DewPointC(static_cast<f64>(airTemperature_K) - 273.15,
+                                  static_cast<f64>(relativeHumidity));
+        const f64 emissivity = emissivityOverride > 0.0f
+                                   ? static_cast<f64>(emissivityOverride)
+                                   : skythermal::ClearSkyEmissivity(dewPointC);
+        skyEmissivityClear = static_cast<f32>(emissivity);
+
+        // The air temperature IS the sky's Planck temperature under this
+        // model; the emissivity is what makes it read colder. Overriding the
+        // deprecated key rather than reading both is what keeps one number in
+        // charge.
+        atmosphereTemperature_K = airTemperature_K;
+
+        QL_LOG_INFO("  Clear sky: T_air {:.1f} K, RH {:.0f}%, dew point {:.1f} C, "
+                    "zenith emissivity {:.3f}{}, effective sky {:.1f} K",
+                    airTemperature_K, relativeHumidity, dewPointC, emissivity,
+                    emissivityOverride > 0.0f ? " (given)" : "",
+                    skythermal::EffectiveSkyTemperatureK(
+                        static_cast<f64>(airTemperature_K), emissivity));
+    } else if (skyModel != "isotropic") {
+        diag.Warn("atmosphere.sky_model",
+                  "  unknown atmosphere.sky_model '" + skyModel +
+                      "', expected isotropic|clear_sky. Using isotropic.");
+    }
+
     QL_LOG_INFO("  Sun direction: [{:.2f}, {:.2f}, {:.2f}]", out.lighting.sunDirection.x,
                 out.lighting.sunDirection.y, out.lighting.sunDirection.z);
     QL_LOG_INFO("  Sun radiance: [{:.2f}, {:.2f}, {:.2f}]", sunRadiance.r, sunRadiance.g,
                 sunRadiance.b);
     QL_LOG_INFO("  Sky radiance: [{:.2f}, {:.2f}, {:.2f}]", skyRadiance.r, skyRadiance.g,
                 skyRadiance.b);
-    QL_LOG_INFO("  Atmospheric transmittance: {:.3f}", transmittance);
     QL_LOG_INFO("  Atmosphere temperature (IR): {:.1f} K", atmosphereTemperature_K);
     QL_LOG_INFO("  World units to meters: {:.6f}", out.worldUnitsToMeters);
 
@@ -388,7 +432,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     out.lighting.skyRadiance_spectral = skyRadiance_spectral;
     out.lighting.sunRadiance_rgb = sunRadiance;
     out.lighting.skyRadiance_rgb = skyRadiance;
-    out.lighting.transmittance = transmittance;
+    out.lighting.skyEmissivityClear = skyEmissivityClear;
     out.lighting.worldUnitsToMeters = out.worldUnitsToMeters;
     out.lighting.atmosphereTemperature_K = atmosphereTemperature_K;
     out.lighting.chromaR_correction = chromaR;
@@ -618,6 +662,14 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.lighting.atmosphereTemperature_K = static_cast<f32>(out.atmosphere.tGroundK);
         QL_LOG_INFO("  Updated atmosphere temperature from NN config: {:.1f} K",
                     out.lighting.atmosphereTemperature_K);
+        // The network's own zenith downwelling is a measurement of this sky,
+        // spectrally resolved; the analytic correlation is the substitute for
+        // not having one. Two models of the same sky would be one too many.
+        if (out.lighting.skyEmissivityClear > 0.0f) {
+            QL_LOG_INFO("  atmosphere.sky_model is ignored: the NN atmosphere "
+                        "supplies the sky's downwelling directly");
+            out.lighting.skyEmissivityClear = 0.0f;
+        }
     }
     QL_LOG_INFO("  NN atmosphere: {}", out.atmosphere.enabled ? "ENABLED" : "DISABLED");
 

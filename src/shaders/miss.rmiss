@@ -373,6 +373,12 @@ void main(inout Payload payload) {
             if (useNNLdown) {
                 L_sky = AtmosSkyRadianceIR(atmos, atmosNNData, atmosIdx, lambda,
                                            cosZenith, T_atmosphere);
+            } else if (lut.skyEmissivityClear > 0.0) {
+                // Analytic clear sky: colder overhead, warming toward the
+                // horizon. T_atmosphere is the air temperature under this
+                // model, not an effective sky temperature.
+                L_sky = IRClearSkyRadiance(lut.skyEmissivityClear, cosZenith,
+                                           T_atmosphere, lambda);
             } else {
                 L_sky = IRPlanckRadiance(T_atmosphere, lambda);
             }

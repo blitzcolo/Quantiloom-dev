@@ -2,6 +2,9 @@ class std::basic_string<char,struct std::char_traits<char>,class std::allocator<
 const quantiloom::GenericSensor::`vftable'
 double quantiloom::BandRadianceDerivativePerK(double,double,double)
 double quantiloom::BlackbodyBandRadiance(double,double,double)
+double quantiloom::ClearSkyEmissivity(double)
+double quantiloom::DewPointC(double,double)
+double quantiloom::EffectiveSkyTemperatureK(double,double)
 double quantiloom::InvertApparentTemperatureK(double,double,double)
 double quantiloom::InvertSurfaceTemperatureK(double,double,double,struct quantiloom::ThermographyParams const &)
 double quantiloom::NoiseEquivalentTemperatureDifferenceK(struct quantiloom::SensorParams const &,double,double,double)

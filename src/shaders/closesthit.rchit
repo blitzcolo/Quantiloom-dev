@@ -353,6 +353,30 @@ float GetSurfaceTemperatureK(MaterialData material, float2 uv) {
     return T;
 }
 
+// ============================================================================
+// Downwelling Sky Radiance
+// ============================================================================
+// What the whole hemisphere sends back at one wavelength. Every thermal path
+// needs it three times -- as the control variate the bounce ray corrects, as
+// the surface's reflected term, and as the background behind a transmitting
+// surface -- and the three MUST agree: the bounce estimator carries
+// (L_in - L_base), so a base computed one way and a reflected term computed
+// another turns an open scene's exactly-zero correction into a bias.
+//
+// Three skies in order of what the scene asked for: the network's measured
+// downwelling, the analytic clear sky hemispherically averaged, or the
+// isotropic blackbody a scene that named neither has always had.
+float IRDownwellingRadiance(AtmosNNHeader atmos, uint atmosIdx, float lambda_nm,
+                            float T_atmosphere, float skyEmissivityClear) {
+    if (atmos.enabled != 0 && atmos.hasLdown != 0) {
+        return SampleAtmosLdown(atmos, atmosNNData, atmosIdx);
+    }
+    if (skyEmissivityClear > 0.0) {
+        return IRClearSkyHemisphericalRadiance(skyEmissivityClear, T_atmosphere, lambda_nm);
+    }
+    return IRPlanckRadiance(T_atmosphere, lambda_nm);
+}
+
 // Mixed reflectance at one wavelength. The weights are NOT normalised -- a
 // texel darker than every endmember is a legitimately dimmer patch of the same
 // material, which is the whole point -- so the sum is clamped instead.
@@ -2552,9 +2576,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                    NdotV, material.metallicFactor);
         }
 
-        const float L_base_b = (atmos.enabled != 0 && atmos.hasLdown != 0)
-            ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx_b)
-            : IRPlanckRadiance(T_atmosphere, lambda_b);
+        const float L_base_b = IRDownwellingRadiance(atmos, atmosIdx_b, lambda_b,
+                                                    T_atmosphere, lut.skyEmissivityClear);
 
         const float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         float bounceCorr = TraceEnvBounceResidual(
@@ -2612,9 +2635,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // bounce that is killed, or that runs out of depth, leaves this
             // standing, which is why an isothermal cavity still returns its own
             // Planck radiance no matter where the path stops.
-            float L_down = (atmos.enabled != 0 && atmos.hasLdown != 0)
-                ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx)
-                : IRPlanckRadiance(T_atmosphere, lambda);
+            //
+            // Which sky, in order: the network's measured downwelling; the
+            // analytic clear sky, hemispherically averaged because this term
+            // stands for the whole hemisphere rather than one direction; or
+            // the isotropic blackbody, which is what a scene that asked for
+            // neither gets and renders exactly as it always did.
+            float L_down = IRDownwellingRadiance(atmos, atmosIdx, lambda, T_atmosphere,
+                                                lut.skyEmissivityClear);
             float L_reflected_atm = reflectance_l * L_down;
 
             // 3. Reflected solar radiance (P2 fix: MWIR daytime solar contribution)
@@ -2660,9 +2688,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Trace transmission ray to get background radiance
                 // For IR, we approximate background as atmospheric thermal emission
                 // In a full implementation, would trace through and sample far surface
-                float L_background = (atmos.enabled != 0 && atmos.hasLdown != 0)
-                    ? SampleAtmosLdown(atmos, atmosNNData, atmosIdx)
-                    : IRPlanckRadiance(T_atmosphere, lambda);
+                float L_background = IRDownwellingRadiance(atmos, atmosIdx, lambda,
+                                                          T_atmosphere,
+                                                          lut.skyEmissivityClear);
                 L_transmitted = transmittance * L_background;
 
                 // Note: For accurate IR window simulation, should trace recursive ray

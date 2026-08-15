@@ -348,5 +348,50 @@ def flir_surface_temperature(radiance: float, lambda_min_nm: float, lambda_max_n
     return invert_band_average_radiance(b_surface, lambda_min_nm, lambda_max_nm, nodes)
 
 
+def dew_point_c(air_temperature_c: float, relative_humidity_percent: float) -> float:
+    """Dew point in Celsius, Magnus with the WMO coefficients.
+
+    gamma = ln(RH/100) + a T / (b + T),  Tdp = b gamma / (a - gamma)
+
+    Exact at RH = 100, where it returns the air temperature -- which is the
+    property worth checking, since everything else here is a fit.
+    """
+    a, b = 17.62, 243.12
+    rh = min(max(relative_humidity_percent, 1.0), 100.0)
+    gamma = math.log(rh / 100.0) + a * air_temperature_c / (b + air_temperature_c)
+    return b * gamma / (a - gamma)
+
+
+def clear_sky_emissivity(dew_point_c_value: float) -> float:
+    """Berdahl-Fromberg clear-sky emissivity from the dew point.
+
+    eps = 0.711 + 0.56 (Tdp/100) + 0.73 (Tdp/100)^2
+
+    Solar Energy 29(4), 1982. A hemispherical emissivity: it describes the flux
+    onto a horizontal surface. The renderer feeds it to the flat-slab law as a
+    zenith value instead, which overstates the hemispherical flux by a few
+    percent -- the trade is documented in SkyThermal.hpp.
+    """
+    t = dew_point_c_value / 100.0
+    return min(max(0.711 + 0.56 * t + 0.73 * t * t, 0.0), 1.0)
+
+
+def effective_sky_temperature_k(air_temperature_k: float, emissivity: float) -> float:
+    """The blackbody that radiates what this sky does: T_air * eps^(1/4)."""
+    if air_temperature_k <= 0.0 or emissivity <= 0.0:
+        return 0.0
+    return air_temperature_k * min(max(emissivity, 0.0), 1.0) ** 0.25
+
+
+def clear_sky_radiance(eps0: float, cos_zenith: float, t_air: float,
+                       lambda_nm: float) -> float:
+    """Flat-slab clear sky, the analytic twin of flat_atmosphere_sky_radiance.
+
+    Same law; eps0 comes from the Berdahl-Fromberg correlation rather than from
+    the network's baked zenith downwelling.
+    """
+    return flat_atmosphere_sky_radiance(eps0, cos_zenith, t_air, lambda_nm)
+
+
 if __name__ == "__main__":
     run_spot_checks()

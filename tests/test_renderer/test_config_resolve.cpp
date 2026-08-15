@@ -775,6 +775,67 @@ ir_temperature_k = 350.0
     EXPECT_TRUE(scene.materials[1].irEmissivityCurve.empty());
 }
 
+TEST_F(ConfigResolveTest, ClearSkyModelDerivesAZenithEmissivity) {
+    // The thermal sky was one isotropic blackbody without the NN atmosphere:
+    // as warm overhead as at the horizon, which no sky is.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = "model_pack = \"/nonexistent/pack\"\n"
+                                           "preset = \"disabled\"\n"
+                                           "sky_model = \"clear_sky\"\n"
+                                           "air_temperature_k = 293.15\n"
+                                           "relative_humidity = 50.0\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    // 20 C at 50% is a dew point near 9.3 C, which Berdahl-Fromberg puts at
+    // about 0.77.
+    EXPECT_NEAR(resolved.value().lighting.skyEmissivityClear, 0.77f, 0.02f);
+
+    // The air temperature is the sky's Planck temperature under this model;
+    // the emissivity is what makes it read colder.
+    EXPECT_FLOAT_EQ(resolved.value().lighting.atmosphereTemperature_K, 293.15f);
+}
+
+TEST_F(ConfigResolveTest, TheIsotropicSkyIsWhatAConfigGetsByDefault) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FLOAT_EQ(resolved.value().lighting.skyEmissivityClear, 0.0f);
+}
+
+TEST_F(ConfigResolveTest, AGivenSkyEmissivityOverridesTheCorrelation) {
+    // A measured sky beats a fit of somebody else's.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = "model_pack = \"/nonexistent/pack\"\n"
+                                           "preset = \"disabled\"\n"
+                                           "sky_model = \"clear_sky\"\n"
+                                           "air_temperature_k = 293.15\n"
+                                           "relative_humidity = 50.0\n"
+                                           "sky_emissivity = 0.62\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FLOAT_EQ(resolved.value().lighting.skyEmissivityClear, 0.62f);
+}
+
+TEST_F(ConfigResolveTest, AnUnknownSkyModelWarnsRatherThanSilentlyDoingNothing) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = "model_pack = \"/nonexistent/pack\"\n"
+                                           "preset = \"disabled\"\n"
+                                           "sky_model = \"cloudy\"\n"});
+    ConfigApplyReport localReport;
+    ConfigApplyOptions options;
+    options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
+    auto resolved = ResolveRenderConfig(config, options, localReport);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    EXPECT_FLOAT_EQ(resolved.value().lighting.skyEmissivityClear, 0.0f);
+    bool warned = false;
+    for (const auto& m : localReport.messages) {
+        if (m.severity == ConfigApplyMessage::Severity::Warning) warned = true;
+    }
+    EXPECT_TRUE(warned);
+}
+
 TEST_F(ConfigResolveTest, MaterialsTableCarriesATemperatureTexture) {
     // The field reached the GPU long before a config could name the map; only
     // glTF extras and USD attributes could, so a TOML-only scene was stuck

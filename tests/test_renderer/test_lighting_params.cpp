@@ -33,7 +33,7 @@ TEST(LightingParamsTest, FieldOffsets) {
     EXPECT_EQ(offsetof(LightingParams, sunRadiance_rgb), 16u);
     EXPECT_EQ(offsetof(LightingParams, skyRadiance_spectral), 28u);
     EXPECT_EQ(offsetof(LightingParams, skyRadiance_rgb), 32u);
-    EXPECT_EQ(offsetof(LightingParams, transmittance), 44u);
+    EXPECT_EQ(offsetof(LightingParams, skyEmissivityClear), 44u);
     EXPECT_EQ(offsetof(LightingParams, worldUnitsToMeters), 48u);
     EXPECT_EQ(offsetof(LightingParams, atmosphereTemperature_K), 52u);
     EXPECT_EQ(offsetof(LightingParams, chromaR_correction), 56u);
@@ -68,9 +68,11 @@ TEST(LightingParamsTest, CreateDefaultLightingParams) {
     EXPECT_GT(params.sunRadiance_rgb.r, 0.0f);
     EXPECT_GT(params.skyRadiance_rgb.r, 0.0f);
 
-    // Transmittance should be in [0, 1]
-    EXPECT_GE(params.transmittance, 0.0f);
-    EXPECT_LE(params.transmittance, 1.0f);
+    // The clear-sky emissivity is a fraction, and zero by default: the
+    // isotropic blackbody sky is what a host gets before a config says
+    // otherwise, which is what every scene rendered before the analytic model
+    // existed.
+    EXPECT_FLOAT_EQ(params.skyEmissivityClear, 0.0f);
 
     // World units should be positive
     EXPECT_GT(params.worldUnitsToMeters, 0.0f);
@@ -127,12 +129,15 @@ TEST(LightingParamsTest, SkyRadianceLessThanSun) {
     EXPECT_LT(glm::length(params.skyRadiance_rgb), glm::length(params.sunRadiance_rgb));
 }
 
-TEST(LightingParamsTest, TransmittanceTypicalRange) {
+TEST(LightingParamsTest, ClearSkyEmissivityIsOffByDefault) {
     LightingParams params = CreateDefaultLightingParams();
 
-    // Clear sky transmittance typically 0.7-0.95
-    EXPECT_GE(params.transmittance, 0.7f);
-    EXPECT_LE(params.transmittance, 0.95f);
+    // Zero selects the isotropic blackbody sky, which is what the thermal
+    // bands had before the flat-slab model and what a host gets until a
+    // config asks for the analytic one. The slot previously held a scalar
+    // atmospheric transmittance, deprecated when the NN atmosphere took over
+    // the view path.
+    EXPECT_FLOAT_EQ(params.skyEmissivityClear, 0.0f);
 }
 
 TEST(LightingParamsTest, SunDirectionPointingUp) {
@@ -153,7 +158,7 @@ TEST(LightingParamsTest, ZeroInitializationSafe) {
     // All values should be zero (safe default)
     EXPECT_FLOAT_EQ(params.sunRadiance_spectral, 0.0f);
     EXPECT_FLOAT_EQ(params.skyRadiance_spectral, 0.0f);
-    EXPECT_FLOAT_EQ(params.transmittance, 0.0f);
+    EXPECT_FLOAT_EQ(params.skyEmissivityClear, 0.0f);
     EXPECT_FLOAT_EQ(params.worldUnitsToMeters, 0.0f);
     EXPECT_FLOAT_EQ(params.atmosphereTemperature_K, 0.0f);
 }
@@ -202,7 +207,7 @@ TEST(LightingParamsTest, DefaultConstantsConsistency) {
 
     EXPECT_FLOAT_EQ(params.sunRadiance_spectral, LightingDefaults::SUN_RADIANCE_SPECTRAL);
     EXPECT_FLOAT_EQ(params.skyRadiance_spectral, LightingDefaults::SKY_RADIANCE_SPECTRAL);
-    EXPECT_FLOAT_EQ(params.transmittance, LightingDefaults::TRANSMITTANCE);
+    EXPECT_FLOAT_EQ(params.skyEmissivityClear, LightingDefaults::SKY_EMISSIVITY_CLEAR);
     EXPECT_FLOAT_EQ(params.worldUnitsToMeters, LightingDefaults::WORLD_UNITS_TO_METERS);
     EXPECT_FLOAT_EQ(params.atmosphereTemperature_K, LightingDefaults::ATMOSPHERE_TEMPERATURE_K);
     EXPECT_FLOAT_EQ(params.chromaR_correction, LightingDefaults::CHROMA_R_CORRECTION);

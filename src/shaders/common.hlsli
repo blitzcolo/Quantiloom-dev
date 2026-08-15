@@ -828,7 +828,11 @@ struct LightingParams {
     float  skyRadiance_spectral; // Sky spectral radiance at current λ (W·sr⁻¹·m⁻²·nm⁻¹) - fallback
 
     float3 skyRadiance_rgb;      // Sky RGB radiance (W·sr⁻¹·m⁻²) for RGB mode - fallback
-    float  transmittance;        // Atmospheric transmittance τ(λ) [0, 1] (vertical path)
+    // Zenith emissivity of a clear sky, [0, 1]. Zero = the thermal sky is one
+    // isotropic blackbody at atmosphereTemperature_K, which is what it always
+    // was. Above zero the flat-slab law below takes over. Was `transmittance`,
+    // deprecated when the NN atmosphere took the view path.
+    float  skyEmissivityClear;
 
     float  worldUnitsToMeters;   // Conversion factor: world_units × this = meters
     float  atmosphereTemperature_K; // Effective atmosphere temperature (K) for IR downwelling radiation

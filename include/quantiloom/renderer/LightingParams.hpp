@@ -5,7 +5,7 @@
  * Provides LightingParams struct for runtime lighting configuration:
  * - Sun direction and radiance (direct illumination)
  * - Sky radiance (ambient/diffuse illumination)
- * - Atmospheric transmittance and temperature
+ * - Clear-sky emissivity and atmosphere temperature
  * - World unit scaling for physically-correct Beer-Lambert attenuation
  *
  * Dual-mode support:
@@ -55,7 +55,7 @@ namespace quantiloom {
  * @code
  * Offset  0: sunDirection (vec3, 12 bytes) + sunRadiance_spectral (f32, 4 bytes)
  * Offset 16: sunRadiance_rgb (vec3, 12 bytes) + skyRadiance_spectral (f32, 4 bytes)
- * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + transmittance (f32, 4 bytes)
+ * Offset 32: skyRadiance_rgb (vec3, 12 bytes) + skyEmissivityClear (f32, 4 bytes)
  * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
  * Offset 64: enableShadowRays (u32) + enableEnvironmentMap (u32) +
  *            emissiveTriangleCount (u32) + emissiveTotalPower (f32)
@@ -82,7 +82,26 @@ struct LightingParams {
     f32 skyRadiance_spectral;       // Spectral radiance fallback (RGB average), offset 28
 
     glm::vec3 skyRadiance_rgb;      // RGB radiance for RGB mode (fallback), offset 32
-    f32 transmittance;              // Atmospheric transmittance τ(λ) [0, 1], offset 44
+
+    // Zenith emissivity of a clear sky, [0, 1], offset 44.
+    //
+    // Zero means the thermal sky is one isotropic blackbody at
+    // atmosphereTemperature_K, which is what it was before this field carried
+    // anything. Above zero the miss shader takes the flat-slab law instead --
+    // eps(theta) = 1 - (1 - eps0)^sec(theta) -- so the sky is coldest at the
+    // zenith and approaches the air temperature at the horizon, which is what
+    // a thermal camera sees and what drives radiative cooling.
+    //
+    // Held here rather than the air temperature and humidity it comes from:
+    // the Berdahl-Fromberg correlation and the dew point behind it are CPU
+    // arithmetic done once per config, and shipping one number instead of two
+    // keeps this struct at 80 bytes. Whoever sets it also sets
+    // atmosphereTemperature_K to the air temperature.
+    //
+    // This slot was `transmittance`, deprecated when the NN atmosphere took
+    // over the view path; its only reader was a placeholder function with no
+    // callers.
+    f32 skyEmissivityClear;         // offset 44
 
     f32 worldUnitsToMeters;         // Conversion factor: world_units × this = meters, offset 48
     f32 atmosphereTemperature_K;    // Effective atmosphere temperature (K) for IR downwelling, offset 52
@@ -141,8 +160,8 @@ static_assert(offsetof(LightingParams, skyRadiance_spectral) == 28,
     "skyRadiance_spectral offset mismatch");
 static_assert(offsetof(LightingParams, skyRadiance_rgb) == 32,
     "skyRadiance_rgb offset mismatch");
-static_assert(offsetof(LightingParams, transmittance) == 44,
-    "transmittance offset mismatch");
+static_assert(offsetof(LightingParams, skyEmissivityClear) == 44,
+    "skyEmissivityClear offset mismatch");
 static_assert(offsetof(LightingParams, worldUnitsToMeters) == 48,
     "worldUnitsToMeters offset mismatch");
 static_assert(offsetof(LightingParams, atmosphereTemperature_K) == 52,
@@ -176,8 +195,9 @@ namespace LightingDefaults {
     constexpr f32 SKY_RADIANCE_SPECTRAL = 0.1f;
     constexpr glm::vec3 SKY_RADIANCE_RGB = glm::vec3(0.1f, 0.15f, 0.2f);
 
-    // Atmospheric transmittance: clear sky
-    constexpr f32 TRANSMITTANCE = 0.9f;
+    // Clear-sky zenith emissivity: 0 keeps the isotropic blackbody sky, which
+    // is what every scene rendered before the flat-slab model existed.
+    constexpr f32 SKY_EMISSIVITY_CLEAR = 0.0f;
 
     // World units: meters
     constexpr f32 WORLD_UNITS_TO_METERS = 1.0f;
@@ -211,7 +231,7 @@ inline LightingParams CreateDefaultLightingParams() {
     params.sunRadiance_rgb = LightingDefaults::SUN_RADIANCE_RGB;
     params.skyRadiance_spectral = LightingDefaults::SKY_RADIANCE_SPECTRAL;
     params.skyRadiance_rgb = LightingDefaults::SKY_RADIANCE_RGB;
-    params.transmittance = LightingDefaults::TRANSMITTANCE;
+    params.skyEmissivityClear = LightingDefaults::SKY_EMISSIVITY_CLEAR;
     params.worldUnitsToMeters = LightingDefaults::WORLD_UNITS_TO_METERS;
     params.atmosphereTemperature_K = LightingDefaults::ATMOSPHERE_TEMPERATURE_K;
     params.chromaR_correction = LightingDefaults::CHROMA_R_CORRECTION;

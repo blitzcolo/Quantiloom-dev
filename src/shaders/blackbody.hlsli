@@ -217,4 +217,54 @@ float IRGraybodyPower(float temperature_K, float emissivity) {
     return emissivity * IRStefanBoltzmannPower(temperature_K);
 }
 
+// ============================================================================
+// Clear-Sky Thermal Radiance
+// ============================================================================
+// A thermal sky is not a blackbody at the air temperature. It is a partly
+// transparent slab of air in front of a background near 3 K, so looking up --
+// through less air -- reads colder than looking at the horizon. The isotropic
+// blackbody these replace has no such gradient, which is visible in any
+// outdoor thermogram and is what drives radiative cooling: frost forms on a
+// car roof and not on its doors for exactly this reason.
+//
+// Same flat-slab law as AtmosSkyRadianceIR, so the analytic path and the NN
+// path have one shape between them; only where eps0 comes from differs. The
+// host derives it from air temperature and humidity through the
+// Berdahl-Fromberg correlation and ships one number.
+//
+//   eps(theta) = 1 - (1 - eps0)^sec(theta)
+//   L(lambda, theta) = eps(theta) * B(lambda, T_air)
+//
+// Grey in wavelength, as the correlation behind eps0 is: it was fitted to
+// broadband flux, and giving it a spectrum it does not have would be inventing
+// one. A scene that needs the atmospheric window resolved wants the NN
+// atmosphere, which measures it.
+// ============================================================================
+
+float IRClearSkyRadiance(float eps0, float cosZenith, float T_air, float lambda_nm) {
+    const float SEC_MAX = 5.0;  // horizon, where the slab law stops being one
+
+    float B_air = IRPlanckRadiance(T_air, lambda_nm);
+    if (B_air < 1e-30) return 0.0;
+
+    float abscos = max(abs(cosZenith), 0.01);
+    float sec_theta = min(1.0 / abscos, SEC_MAX);
+    float transparency = pow(max(1.0 - eps0, 0.0), sec_theta);
+    return B_air * (1.0 - transparency);
+}
+
+// Hemispherical average of the same law, for a surface that sees the whole sky
+// rather than one direction. sec(53 deg) = 1.66 is the standard diffusivity
+// approximation: the single slant path whose transmission equals a slab's
+// hemispherical average to about a percent.
+float IRClearSkyHemisphericalRadiance(float eps0, float T_air, float lambda_nm) {
+    const float DIFFUSIVITY = 1.66;
+
+    float B_air = IRPlanckRadiance(T_air, lambda_nm);
+    if (B_air < 1e-30) return 0.0;
+
+    float transparency = pow(max(1.0 - eps0, 0.0), DIFFUSIVITY);
+    return B_air * (1.0 - transparency);
+}
+
 #endif // QUANTILOOM_BLACKBODY_HLSLI
