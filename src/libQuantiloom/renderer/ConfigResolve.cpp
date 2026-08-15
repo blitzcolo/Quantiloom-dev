@@ -938,6 +938,21 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             it->irTemperature_K = matTable.GetFloat("ir_temperature_k", 0.0f);
         }
 
+        // Per-texel temperature. The path is stored raw and resolved against
+        // the config directory at mount time, the same split
+        // spectral_weight_texture uses. Scale and offset stand on their own so
+        // a config can retune a glTF-provided map without renaming it.
+        if (matTable.Has("temperature_texture")) {
+            it->temperatureTexturePath = matTable.GetString("temperature_texture", "");
+        }
+        if (matTable.Has("temperature_scale")) {
+            it->temperatureScale = matTable.GetFloat("temperature_scale", it->temperatureScale);
+        }
+        if (matTable.Has("temperature_offset")) {
+            it->temperatureOffset =
+                matTable.GetFloat("temperature_offset", it->temperatureOffset);
+        }
+
         ++out.materialsOverridden;
         QL_LOG_INFO("  Material '{}': IR override e={:.3f} t={:.3f} r={:.3f} T={:.1f} K",
                     name, emissivity, transmittance, std::max(reflectance, 0.0f),

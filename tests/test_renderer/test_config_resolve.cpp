@@ -775,6 +775,59 @@ ir_temperature_k = 350.0
     EXPECT_TRUE(scene.materials[1].irEmissivityCurve.empty());
 }
 
+TEST_F(ConfigResolveTest, MaterialsTableCarriesATemperatureTexture) {
+    // The field reached the GPU long before a config could name the map; only
+    // glTF extras and USD attributes could, so a TOML-only scene was stuck
+    // with one temperature per material.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([[materials]]
+name = "Panel"
+temperature_texture = "maps/panel_temp.png"
+temperature_scale = 60.0
+temperature_offset = 270.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel", "Other"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    // The path is stored raw: it is resolved against the config directory at
+    // mount time, not here.
+    EXPECT_EQ(scene.materials[0].temperatureTexturePath, "maps/panel_temp.png");
+    EXPECT_FLOAT_EQ(scene.materials[0].temperatureScale, 60.0f);
+    EXPECT_FLOAT_EQ(scene.materials[0].temperatureOffset, 270.0f);
+
+    // Untouched materials keep the defaults, which are the full 500 K range.
+    EXPECT_TRUE(scene.materials[1].temperatureTexturePath.empty());
+    EXPECT_FLOAT_EQ(scene.materials[1].temperatureScale, 500.0f);
+    EXPECT_FLOAT_EQ(scene.materials[1].temperatureOffset, 200.0f);
+}
+
+TEST_F(ConfigResolveTest, TemperatureScaleAndOffsetStandOnTheirOwn) {
+    // Retuning the kelvin mapping of a map a scene file already provides is a
+    // legitimate override, so neither key requires temperature_texture.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([[materials]]
+name = "Panel"
+temperature_offset = 250.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel"});
+    scene.materials[0].temperatureTextureIndex = 3;  // as a loader would leave it
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].temperatureOffset, 250.0f);
+    EXPECT_FLOAT_EQ(scene.materials[0].temperatureScale, 500.0f);  // absent key, left alone
+    EXPECT_EQ(scene.materials[0].temperatureTextureIndex, 3);      // and the map survives
+}
+
 TEST_F(ConfigResolveTest, MaterialsTableNamingAnAbsentMaterialWarns) {
     auto config = Parse({.trailing = R"([[materials]]
 name = "NotInThisScene"

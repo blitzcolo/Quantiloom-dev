@@ -11,6 +11,7 @@
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/SpectralUnmixer.hpp"
+#include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/RenderCore.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
@@ -914,6 +915,10 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // AdoptScene's upload releases, and it fills in the weight texture indices
     // the loop below copies onto the materials.
     rendercore::BuildUnmixWeightTextures(loadedScene, spectra, options.baseDir, report);
+
+    // Authored temperature maps, in the same pre-upload window: the mount
+    // appends textures, and AdoptScene's upload fixes the indices.
+    rendercore::MountTemperatureTextures(loadedScene, options.baseDir, report);
 
     // Keep the base colours of curve-bound materials readable. Assigning a new
     // endmember from the library panel re-unmixes them, and by then the only

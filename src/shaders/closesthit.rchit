@@ -332,6 +332,27 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
     return w;
 }
 
+// ============================================================================
+// Surface Temperature
+// ============================================================================
+// One decode for every reader: the emission paths and the debug views must
+// agree on what the surface temperature is, or a temperature map renders hot
+// while its debug view stays flat. The R channel is normalised [0, 1]; the
+// material carries the kelvin mapping.
+float GetSurfaceTemperatureK(MaterialData material, float2 uv) {
+    float T = material.irTemperature_K;
+    if (material.temperatureTextureIndex >= 0) {
+        float texTemp = SampleTexture(
+            material.temperatureTextureIndex,
+            material.temperatureTextureIndex,  // 1:1 texture/sampler mapping
+            uv,
+            float4(0.5, 0, 0, 0)  // mid-range if the texture is missing
+        ).r;
+        T = texTemp * material.temperatureScale + material.temperatureOffset;
+    }
+    return T;
+}
+
 // Mixed reflectance at one wavelength. The weights are NOT normalised -- a
 // texel darker than every endmember is a legitimately dimmer patch of the same
 // material, which is the whole point -- so the sum is clamped instead.
@@ -2097,16 +2118,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV_swir, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface_swir = material.irTemperature_K;
-        if (material.temperatureTextureIndex >= 0) {
-            float texTemp = SampleTexture(
-                material.temperatureTextureIndex,
-                material.temperatureTextureIndex,
-                uv,
-                float4(0.5, 0, 0, 0)
-            ).r;
-            T_surface_swir = texTemp * material.temperatureScale + material.temperatureOffset;
-        }
+        float T_surface_swir = GetSurfaceTemperatureK(material, uv);
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
@@ -2502,18 +2514,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface = material.irTemperature_K;
-        if (material.temperatureTextureIndex >= 0) {
-            // Temperature texture: R channel contains normalized temperature [0,1]
-            // T(K) = texValue * temperatureScale + temperatureOffset
-            float texTemp = SampleTexture(
-                material.temperatureTextureIndex,
-                material.temperatureTextureIndex,  // Use same index for sampler
-                uv,
-                float4(0.5, 0, 0, 0)  // Fallback: mid-range if texture missing
-            ).r;
-            T_surface = texTemp * material.temperatureScale + material.temperatureOffset;
-        }
+        float T_surface = GetSurfaceTemperatureK(material, uv);
 
         // Atmospheric downwelling radiation temperature
         float T_atmosphere = lut.atmosphereTemperature_K;
@@ -2951,8 +2952,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // IR Debug (60-69)
             // ----------------------------------------------------------------
             case DEBUG_MODE_TEMPERATURE: {
-                // Surface temperature (colormap 200K - 500K for visibility)
-                float temp_K = material.irTemperature_K;
+                // Surface temperature (colormap 200K - 500K for visibility).
+                // Same decode as the emission paths, so a temperature map
+                // shows its field here instead of the scalar it overrides.
+                float temp_K = GetSurfaceTemperatureK(material, uv);
                 if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
                 debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
                 break;
@@ -2967,7 +2970,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             case DEBUG_MODE_IR_EMISSION: {
                 // Thermal emission component (grayscale, scaled)
-                float temp_K = material.irTemperature_K;
+                float temp_K = GetSurfaceTemperatureK(material, uv);
                 if (temp_K <= 0.0) temp_K = 300.0;
                 float emission = GetEffectiveIREmissivity(material) * IRPlanckRadiance(temp_K, 10000.0);
                 emission = emission / (1.0 + emission);  // Tone map

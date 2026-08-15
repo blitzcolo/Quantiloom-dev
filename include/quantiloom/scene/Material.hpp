@@ -194,6 +194,13 @@ struct QL_API Material {
     f32 temperatureScale = 500.0f;    // Default: [0,1] -> [200K, 700K]
     f32 temperatureOffset = 200.0f;
 
+    // Authored temperature map, relative to the config, the way
+    // spectralWeightTexturePath is. Mounted into temperatureTextureIndex by
+    // MountTemperatureTextures before texture upload. Stored as UNORM8, so the
+    // resolution is temperatureScale / 255 kelvin per step -- narrow the range
+    // (scale = 60, offset = 270 gives 0.24 K) when the field is subtle.
+    String temperatureTexturePath;
+
     // ========================================================================
     // Transmission Properties (KHR_materials_transmission, KHR_materials_volume)
     // ========================================================================

@@ -116,6 +116,8 @@ add_library(quantiloom_core OBJECT
     renderer/ConfigResolve.hpp
     renderer/SpectralUnmixer.cpp
     renderer/SpectralUnmixer.hpp
+    renderer/TemperatureTextureLoader.cpp
+    renderer/TemperatureTextureLoader.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
     renderer/OfflineRenderer.cpp

@@ -1,0 +1,62 @@
+# Temperature texture — a per-texel temperature field in LWIR
+#
+# A 20 m plate carrying a horizontal temperature ramp instead of one
+# temperature. The map is normalised [0, 1] and u runs along +x, so the plate
+# is 270 K at x = -10 and 330 K at x = +10, in steps of 60/255 = 0.24 K.
+#
+# What to look for: radiance rises monotonically left to right across the
+# plate, by roughly a factor of two (Planck over 8-12 um between 270 K and
+# 330 K). The temperature debug view shows the same ramp — before the config
+# could name a map, that view read the scalar and rendered a flat surface.
+#
+# UNORM8 is the storage, so the resolution is temperature_scale / 255. A subtle
+# field wants a narrow range rather than the 500 K default, which is 1.96 K per
+# step.
+
+[renderer]
+resolution = [512, 512]
+spp = 32
+output = "thermal_texture_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+# Looking straight down, so the ramp reads across the image with no
+# foreshortening to explain away.
+position = [0.0, 16.0, 0.001]
+look_at  = [0.0, 0.0, 0.0]
+up       = [0.0, 0.0, -1.0]
+fov_y    = 45.0
+
+[lighting]
+# No sun and no sky radiance: what reaches the camera is the plate's own
+# emission, which is what makes the ramp legible on its own.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 250.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.95
+ir_transmittance = 0.0
+temperature_texture = "../textures/thermal_gradient.png"
+temperature_scale = 60.0
+temperature_offset = 270.0
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

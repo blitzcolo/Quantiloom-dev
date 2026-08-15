@@ -36,6 +36,7 @@
 #include "io/SpectralIO.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/SpectralUnmixer.hpp"
+#include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/GpuBuffer.hpp"
@@ -212,6 +213,10 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     // is exactly between the two.
     rendercore::BuildUnmixWeightTextures(loadedScene, spectra, configOptions.baseDir,
                                          configReport);
+
+    // Authored temperature maps, in the same pre-upload window: the mount
+    // appends textures, and the upload fixes the indices.
+    rendercore::MountTemperatureTextures(loadedScene, configOptions.baseDir, configReport);
 
     // Merged geometry buffers, one BLAS per primitive, a TLAS over the node
     // instances, and the per-instance offset table the closest-hit shader indexes
