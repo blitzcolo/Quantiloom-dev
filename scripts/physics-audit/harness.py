@@ -275,5 +275,78 @@ def flat_atmosphere_sky_radiance(eps0: float, cos_zenith: float,
     return B_air * (1.0 - transparency)
 
 
+def band_average_radiance(T_K: float, lambda_min_nm: float, lambda_max_nm: float,
+                          nodes: int = 16) -> float:
+    """Band-average spectral radiance on the renderer's own quadrature.
+
+    The fused thermal bands integrate `nodes` wavelengths by the trapezoid rule
+    with half-weight endpoints and divide by the band width (closesthit.rchit,
+    NUM_IR_SAMPLES). Reproduced here rather than integrated exactly, because
+    the number this checks is what the renderer writes -- a finer rule would
+    disagree with the image by the quadrature error and call it a bug.
+    """
+    if nodes < 2 or lambda_max_nm <= lambda_min_nm or T_K <= 0.0:
+        return 0.0
+    step = (lambda_max_nm - lambda_min_nm) / (nodes - 1)
+    total = 0.0
+    for i in range(nodes):
+        lam = lambda_min_nm + i * step
+        weight = 0.5 if i in (0, nodes - 1) else 1.0
+        total += planck_blackbody(T_K, lam) * weight
+    return total / (nodes - 1)
+
+
+def invert_band_average_radiance(radiance: float, lambda_min_nm: float,
+                                 lambda_max_nm: float, nodes: int = 16) -> float:
+    """Temperature whose band average is `radiance`, by bisection.
+
+    Bisection rather than Newton on purpose: the renderer's inversion uses
+    Newton with an analytic derivative, and a reference that shares that
+    derivative would not be checking it. Band radiance is strictly increasing
+    in T, which is what makes bisection sufficient.
+    """
+    if radiance <= 0.0:
+        return 100.0
+    lo, hi = 100.0, 3000.0
+    if radiance <= band_average_radiance(lo, lambda_min_nm, lambda_max_nm, nodes):
+        return lo
+    if radiance >= band_average_radiance(hi, lambda_min_nm, lambda_max_nm, nodes):
+        return hi
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if band_average_radiance(mid, lambda_min_nm, lambda_max_nm, nodes) < radiance:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def flir_surface_temperature(radiance: float, lambda_min_nm: float, lambda_max_nm: float,
+                             emissivity: float = 1.0, reflected_T_K: float = 0.0,
+                             tau_atm: float = 1.0, atm_T_K: float = 0.0,
+                             nodes: int = 16) -> float:
+    """Surface temperature a thermal camera reports, per band.
+
+    Aguerre et al. 2020 eq. 8 with the band average in place of sigma T^4:
+
+        L = tau [eps B(Ts) + (1 - eps) B(Trefl)] + (1 - tau) B(Tatm)
+
+    solved for B(Ts) and inverted. Their whole-spectrum form is the total flux
+    of a blackbody, which is not what a band-limited camera collects; using it
+    would fold the out-of-band tail into every temperature.
+    """
+    if emissivity <= 0.0 or tau_atm <= 0.0:
+        return 100.0
+    b_surface = radiance / tau_atm
+    if emissivity < 1.0 and reflected_T_K > 0.0:
+        b_surface -= (1.0 - emissivity) * band_average_radiance(
+            reflected_T_K, lambda_min_nm, lambda_max_nm, nodes)
+    if tau_atm < 1.0 and atm_T_K > 0.0:
+        b_surface -= ((1.0 - tau_atm) / tau_atm) * band_average_radiance(
+            atm_T_K, lambda_min_nm, lambda_max_nm, nodes)
+    b_surface /= emissivity
+    return invert_band_average_radiance(b_surface, lambda_min_nm, lambda_max_nm, nodes)
+
+
 if __name__ == "__main__":
     run_spot_checks()

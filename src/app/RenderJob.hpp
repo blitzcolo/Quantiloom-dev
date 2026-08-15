@@ -42,6 +42,9 @@ struct RenderOutcome {
     String exrPath;
     /// Empty for modes that write no preview.
     String pngPath;
+    /// The temperature a thermal camera would report, in kelvin. Empty unless
+    /// [thermography] enabled it and the mode carries a band to invert.
+    String tappPath;
     /// The hyperspectral cube streams itself to disk; there is no frame.
     bool wroteItsOwnOutput = false;
 

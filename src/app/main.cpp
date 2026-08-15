@@ -302,6 +302,9 @@ int RunApp(int argc, char* argv[]) {
             QL_LOG_INFO("  Mode: Hyperspectral data cube");
         }
         QL_LOG_INFO("  Output: {}", outcome.exrPath);
+        if (!outcome.tappPath.empty()) {
+            QL_LOG_INFO("  Temperature: {}", outcome.tappPath);
+        }
         QL_LOG_INFO("========================================");
     } catch (const std::exception& e) {
         QL_LOG_ERROR("FATAL ERROR: {}", e.what());

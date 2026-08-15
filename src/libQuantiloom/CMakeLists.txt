@@ -40,6 +40,8 @@ add_library(quantiloom_core OBJECT
     core/Config.cpp
     ${QL_PUBLIC_INC}/core/Config.hpp
     core/SpectralColour.cpp
+    core/Blackbody.cpp
+    core/Blackbody.hpp
     core/D65Illuminant.hpp
     core/NNLS.cpp
     core/NNLS.hpp
@@ -148,6 +150,8 @@ add_library(quantiloom_core OBJECT
     postprocess/MultibandFusion.cpp
     ${QL_PUBLIC_INC}/postprocess/MultibandFusion.hpp
     ${QL_PUBLIC_INC}/postprocess/PostprocessConfig.hpp
+    postprocess/Thermography.cpp
+    ${QL_PUBLIC_INC}/postprocess/Thermography.hpp
 
     # MCP module (agent-facing front end; the protocol is internal, the
     # facade the hosts drive is not)

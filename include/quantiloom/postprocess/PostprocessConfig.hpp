@@ -3,6 +3,7 @@
 #include "../core/Config.hpp"
 #include "SensorModel.hpp"
 #include "MultibandFusion.hpp"
+#include "Thermography.hpp"
 
 namespace quantiloom {
 
@@ -107,6 +108,34 @@ public:
     /// Check if multiband fusion is enabled
     static auto IsFusionEnabled(const Config& config) -> bool {
         return config.Get<bool>("fusion.enabled", false);
+    }
+
+    /// Parse what the virtual camera is told about the surface it looks at.
+    /// The defaults give apparent temperature: emissivity 1, nothing
+    /// reflected, no atmosphere -- the setting a measurement campaign uses
+    /// when it wants a number that does not depend on an assumed emissivity.
+    static auto ParseThermographyParams(const Config& config) -> ThermographyParams {
+        ThermographyParams p;
+        p.emissivity = config.Get<f32>("thermography.emissivity", 1.0f);
+        p.reflectedTemperature_K =
+            config.Get<f32>("thermography.reflected_temperature_k", 0.0f);
+        p.atmosphereTransmittance =
+            config.Get<f32>("thermography.atmosphere_transmittance", 1.0f);
+        p.atmosphereTemperature_K =
+            config.Get<f32>("thermography.atmosphere_temperature_k", 0.0f);
+        return p;
+    }
+
+    /// Check if the temperature map output is enabled
+    static auto IsThermographyEnabled(const Config& config) -> bool {
+        return config.Get<bool>("thermography.enabled", false);
+    }
+
+    /// Whether to work out a noise-equivalent temperature difference for the
+    /// scene and record it. Costs nothing but needs the sensor chain to have
+    /// run, so it is reported rather than assumed.
+    static auto IsNetdReportEnabled(const Config& config) -> bool {
+        return config.Get<bool>("thermography.report_netd", true);
     }
 
     /// Get fusion output paths

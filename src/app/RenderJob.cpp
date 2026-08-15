@@ -4,11 +4,13 @@
 #include "io/ImageIO.hpp"
 #include "postprocess/GenericSensor.hpp"
 #include "postprocess/PostprocessConfig.hpp"
+#include "postprocess/Thermography.hpp"
 #include "renderer/OfflineRenderer.hpp"
 
 #include <algorithm>  // For std::nth_element
 #include <chrono>
 #include <filesystem>
+#include <limits>
 #include <vector>
 
 namespace quantiloom::app {
@@ -93,6 +95,112 @@ void ApplySensorChain(const Config& config, const OfflineRenderOutput& rendered,
         QL_LOG_INFO("  [OK] Saved raw DN image");
     } else {
         QL_LOG_WARN("  [WARN] Failed to save raw DN image");
+    }
+}
+
+/**
+ * @brief Write the temperature a thermal camera would report for each pixel
+ *
+ * A thermogram is not a radiance field: the camera inverts what it measured
+ * against Planck and displays a temperature. Doing the same to a render is
+ * what makes it comparable with a measured thermogram pixel for pixel, which
+ * is the whole point of simulating one (Aguerre et al. 2020, eq. 8-11, taken
+ * per band rather than over the whole spectrum).
+ *
+ * Runs on the traced radiance, before the sensor chain, so the map is a
+ * property of the scene rather than of a detector's calibration. Inverting the
+ * sensor's own output was tried and is not usable: a thermal band carries an
+ * enormous DC term -- everything in view is near 300 K -- and a converter with
+ * no offset subtraction spends its whole range on it. A 14-bit chain
+ * calibrated to hold a 300 K scene left 12 DN for the 60 K the scene actually
+ * varied over, and the quantisation error inverted to nonsense. Real cameras
+ * subtract a reference blackbody before the ADC; this sensor model does not,
+ * and until it does the temperature map belongs upstream of it.
+ *
+ * NETD answers the other half of the question -- how small a difference this
+ * detector could resolve -- and needs the sensor parameters but not its noisy
+ * output, so it is reported here regardless.
+ */
+void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& rendered,
+                              const Image& img, const SpectralMode mode,
+                              const String& outputPath, RenderOutcome& outcome) {
+    const auto band = GetFusedBandInfo(mode);
+    if (!band.has_value() || !IsIRFusedMode(mode)) {
+        QL_LOG_WARN("Thermography is enabled but the render mode is {}, which carries no "
+                    "band radiance to invert -- skipping the temperature map",
+                    outcome.modeName);
+        return;
+    }
+
+    const ThermographyParams params = PostprocessConfig::ParseThermographyParams(config);
+    const f64 lambdaMin = static_cast<f64>(band->lambdaMinNm);
+    const f64 lambdaMax = static_cast<f64>(band->lambdaMaxNm);
+
+    // The EXR is per-nm average spectral radiance, which is what the band
+    // routines take: no scaling on the way in, and the isothermal cavity
+    // therefore comes back at its own temperature.
+    Image temperature(img.width, img.height, 1);
+    temperature.channelNames = {"T"};
+
+    f64 minK = std::numeric_limits<f64>::max();
+    f64 maxK = std::numeric_limits<f64>::lowest();
+    std::vector<f32> values;
+    values.reserve(static_cast<usize>(img.width) * img.height);
+    for (u32 y = 0; y < img.height; ++y) {
+        for (u32 x = 0; x < img.width; ++x) {
+            const f64 T = InvertSurfaceTemperatureK(static_cast<f64>(img(x, y, 0)), lambdaMin,
+                                                    lambdaMax, params);
+            temperature(x, y, 0) = static_cast<f32>(T);
+            values.push_back(static_cast<f32>(T));
+            minK = std::min(minK, T);
+            maxK = std::max(maxK, T);
+        }
+    }
+
+    // The median, not the mean: a thermogram of anything outdoors has sky in
+    // it, tens of kelvin below the surfaces the image is of, and a mean would
+    // report a sensitivity at a temperature nothing in the scene has.
+    const auto middle = values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2);
+    std::nth_element(values.begin(), middle, values.end());
+    const f64 medianK = static_cast<f64>(*middle);
+
+    temperature.metadata["units"] = "K";
+    temperature.metadata["band_nm"] = std::to_string(band->lambdaMinNm) + "-" +
+                                      std::to_string(band->lambdaMaxNm);
+    temperature.metadata["emissivity"] = std::to_string(params.emissivity);
+    temperature.metadata["reflected_temperature_k"] =
+        std::to_string(params.reflectedTemperature_K);
+    temperature.metadata["atmosphere_transmittance"] =
+        std::to_string(params.atmosphereTransmittance);
+    temperature.metadata["inverted_from"] = "scene_radiance";
+
+    // NETD, at the scene's own median temperature: a sensitivity quoted at a
+    // temperature the scene does not contain says nothing about this image.
+    // Needs a sensor to be a sensitivity of something, so it is reported only
+    // when one is configured.
+    if (PostprocessConfig::IsSensorEnabled(config) &&
+        PostprocessConfig::IsNetdReportEnabled(config)) {
+        SensorParams sensorParams = PostprocessConfig::ParseSensorParams(config);
+        if (rendered.sensorWavelengthNm > 0.0f) {
+            sensorParams.wavelength_nm = rendered.sensorWavelengthNm;
+        }
+        const f64 netd =
+            NoiseEquivalentTemperatureDifferenceK(sensorParams, lambdaMin, lambdaMax, medianK);
+        temperature.metadata["netd_mk"] = std::to_string(netd * 1000.0);
+        temperature.metadata["netd_reference_k"] = std::to_string(medianK);
+        QL_LOG_INFO("  NETD at {:.1f} K: {:.1f} mK", medianK, netd * 1000.0);
+    }
+
+    const std::filesystem::path exrPath(outputPath);
+    const String tappPath =
+        (exrPath.parent_path() / (exrPath.stem().string() + "_tapp.exr")).string();
+
+    if (ImageIO::WriteEXR(tappPath, temperature)) {
+        outcome.tappPath = tappPath;
+        QL_LOG_INFO("  [OK] Saved temperature map to {} ({:.1f}-{:.1f} K, median {:.1f} K)",
+                    tappPath, minK, maxK, medianK);
+    } else {
+        QL_LOG_WARN("  [WARN] Failed to save temperature map to {}", tappPath);
     }
 }
 
@@ -195,6 +303,13 @@ RenderOutcome RenderConfigToFiles(const Config& config,
     // frame to save. Everything below is the single-frame output stage.
     if (!rendered.wroteItsOwnOutput) {
         Image& img = rendered.radiance;
+
+        // Before the sensor chain, which overwrites img with its own noisy
+        // preview: the temperature map is of the scene, not of the detector.
+        if (PostprocessConfig::IsThermographyEnabled(config)) {
+            WriteApparentTemperature(config, rendered, img, spectralMode, outcome.exrPath,
+                                     outcome);
+        }
 
         if (PostprocessConfig::IsSensorEnabled(config)) {
             ApplySensorChain(config, rendered, img, outcome.exrPath, outcome.width, outcome.height);

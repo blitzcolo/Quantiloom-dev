@@ -83,6 +83,9 @@ mcp::ToolResult RenderTool(const String& argumentsJson, const String& atmosFallb
     if (!outcome.pngPath.empty()) {
         report["png_path"] = outcome.pngPath;
     }
+    if (!outcome.tappPath.empty()) {
+        report["apparent_temperature_path"] = outcome.tappPath;
+    }
     if (outcome.wroteItsOwnOutput) {
         report["note"] =
             "A hyperspectral cube streams to disk band by band; there is no single frame to show.";

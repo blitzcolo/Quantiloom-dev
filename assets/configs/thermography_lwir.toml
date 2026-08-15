@@ -1,0 +1,73 @@
+# Thermography — what a thermal camera would report, not what the scene emits
+#
+# A thermal camera measures radiance and displays the temperature a blackbody
+# would have needed to send it. Two surfaces at one temperature and two
+# emissivities therefore read differently, and a measured thermogram cannot be
+# compared with a rendered radiance field until the render has been through the
+# same arithmetic. [thermography] does that and writes <output>_tapp.exr in
+# kelvin.
+#
+# This scene is the 20 m plate ramped 270 K to 330 K across its width, with
+# emissivity 0.95 under a 250 K sky. As written the camera is told the
+# emissivity and what is reflected, so the map returns the plate's own
+# temperature to within the angle-dependent emissivity at the edges of frame
+# (about 0.19 K over the central half, 0.00 K at normal incidence).
+#
+# Set emissivity = 1.0 and drop reflected_temperature_k to get apparent
+# temperature instead — the setting a measurement campaign uses when it will
+# not assume an emissivity. That reads about 2 K cold here, which is the error
+# a real camera makes for the same reason.
+
+[renderer]
+resolution = [512, 512]
+spp = 32
+output = "thermography_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 16.0, 0.001]
+look_at  = [0.0, 0.0, 0.0]
+up       = [0.0, 0.0, -1.0]
+fov_y    = 45.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 250.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.95
+ir_transmittance = 0.0
+temperature_texture = "../textures/thermal_gradient.png"
+temperature_scale = 60.0
+temperature_offset = 270.0
+
+[thermography]
+enabled = true
+# What the camera is told. Both are what this scene actually is, so the map
+# comes back at the plate's own temperature.
+emissivity = 0.95
+reflected_temperature_k = 250.0
+# Short measurement distance: nothing between the plate and the lens.
+atmosphere_transmittance = 1.0
+report_netd = true
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

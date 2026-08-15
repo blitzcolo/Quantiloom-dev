@@ -213,6 +213,7 @@ set(TEST_CORE_SOURCES
     test_core/test_endmember_unmix.cpp
     test_core/test_spectral_data.cpp
     test_core/test_blackbody_physics.cpp
+    test_core/test_blackbody.cpp
     test_core/test_ir_energy_conservation.cpp
     test_core/test_config.cpp
     test_core/test_spectral_cube.cpp
@@ -273,6 +274,7 @@ set(TEST_POSTPROCESS_SOURCES
     test_postprocess/test_gpu_sensor_math.cpp
     test_postprocess/test_sensor_config.cpp
     test_postprocess/test_sensor_chain_order.cpp
+    test_postprocess/test_thermography.cpp
 )
 
 # Hyperspectral core tests

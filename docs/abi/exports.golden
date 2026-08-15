@@ -1,5 +1,10 @@
 class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::mcp::EncodeImageContent(struct quantiloom::Image const &,unsigned int)
 const quantiloom::GenericSensor::`vftable'
+double quantiloom::BandRadianceDerivativePerK(double,double,double)
+double quantiloom::BlackbodyBandRadiance(double,double,double)
+double quantiloom::InvertApparentTemperatureK(double,double,double)
+double quantiloom::InvertSurfaceTemperatureK(double,double,double,struct quantiloom::ThermographyParams const &)
+double quantiloom::NoiseEquivalentTemperatureDifferenceK(struct quantiloom::SensorParams const &,double,double,double)
 private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Config::Impl,struct std::default_delete<struct quantiloom::Config::Impl> >)
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
 private: quantiloom::OfflineRenderer::OfflineRenderer(void)
