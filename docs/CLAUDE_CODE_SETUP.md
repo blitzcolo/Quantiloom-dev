@@ -39,13 +39,18 @@ mkdir -p ~/.local/bin
 cat > ~/.local/bin/clangd <<'SH'
 #!/bin/sh
 exec "/mnt/c/Users/<you>/AppData/Local/Programs/CLion/bin/clang/win/x64/bin/clangd.exe" \
-     --path-mappings=/mnt/c=C:/,/mnt/d=D:/ "$@"
+     --path-mappings=/mnt/c=C:/,/mnt/d=D:/,/mnt/h=H:/ "$@"
 SH
 chmod +x ~/.local/bin/clangd
 ```
 
 Both sides of a mapping must be absolute — `/mnt/c=C:` is rejected with
 `Invalid -path-mappings: Path not absolute: C:`.
+
+One entry per drive the checkouts live on. They are on `H:` now (`/mnt/h`); the
+`/mnt/d` entry is kept for older trees. A drive with no entry here makes
+`clangd.exe` reject every LSP URI for it — the symptom is `Failed to resolve path`
+on every file, not a partial failure.
 
 The `clangd-lsp` plugin invokes a bare `clangd`, and Claude Code's process PATH
 does not include `~/.local/bin` (it is a non-login shell, so `~/.profile` is not

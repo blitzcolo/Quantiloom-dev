@@ -10,7 +10,7 @@ The CLI renders one TOML config headlessly: `Quantiloom <config.toml>`. The TOML
 ## Standard verification run
 
 ```bash
-cd /mnt/d/Quantiloom-dev   # MUST run from repo root: configs use relative asset paths,
+cd /mnt/h/Quantiloom-dev   # MUST run from repo root: configs use relative asset paths,
                            # outputs land relative to CWD
 ./build/src/app/Release/Quantiloom.exe assets/configs/gltf_pbr_test.toml
 ```

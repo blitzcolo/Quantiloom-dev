@@ -43,7 +43,8 @@ a Quantiloom-Qt build before (see `GenericSensor`).
 
 ## The consumer is the installed SDK, not this build tree
 
-Quantiloom-Qt links `D:/Quantiloom-SDK/windows_amd64`. After changing public headers
+Quantiloom-Qt links the installed SDK at `../Quantiloom-SDK/windows_amd64` (currently
+`H:/Quantiloom-SDK/windows_amd64`). After changing public headers
 or exported symbols, run `./build_wsl.sh` to reinstall — otherwise a correct core fix
 appears to have no effect in the GUI.
 

@@ -10,7 +10,7 @@
 #
 # Per-developer setup: the clangd-lsp plugin invokes a bare `clangd`, so ~/.local/bin
 # must hold a shim that execs clangd.exe with
-#   --path-mappings=/mnt/c=C:/,/mnt/d=D:/
+#   --path-mappings=/mnt/c=C:/,/mnt/d=D:/,/mnt/h=H:/
 # Without it clangd.exe rejects every LSP URI ("Failed to resolve path /mnt/d/...").
 # See docs/CLAUDE_CODE_SETUP.md.
 #

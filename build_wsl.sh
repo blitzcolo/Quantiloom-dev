@@ -85,8 +85,19 @@ esac
 
 # --- Install (only reached on successful build + green tests + stable ABI) ---
 
-rm -rf /mnt/d/Quantiloom-SDK/windows_amd64
-# Per-file "Installing:" lines go to stdout (dropped); errors go to stderr (kept).
-cmake.exe --install build --prefix D:/Quantiloom-SDK/windows_amd64 --config Release >/dev/null
+# The SDK install prefix is derived from where this repo sits, not hard-coded to
+# a drive. Quantiloom-Qt resolves the SDK as ../Quantiloom-SDK relative to its own
+# checkout, so a literal D:/ here would keep installing to the old drive after the
+# trees are moved -- Studio would then link a stale SDK, or SdkGuard would abort on
+# the hash mismatch. Override with QUANTILOOM_SDK_ROOT if the SDK lives elsewhere.
 
-echo "Build and install OK: D:\\Quantiloom-SDK\\windows_amd64"
+SDK_ROOT_WSL="${QUANTILOOM_SDK_ROOT:-$(cd .. && pwd)/Quantiloom-SDK}"
+SDK_DIR_WSL="${SDK_ROOT_WSL}/windows_amd64"
+SDK_DIR_WIN="$(wslpath -w "${SDK_ROOT_WSL}" 2>/dev/null || printf '%s' "${SDK_ROOT_WSL}")"
+SDK_DIR_WIN="${SDK_DIR_WIN//\\//}/windows_amd64"
+
+rm -rf "${SDK_DIR_WSL}"
+# Per-file "Installing:" lines go to stdout (dropped); errors go to stderr (kept).
+cmake.exe --install build --prefix "${SDK_DIR_WIN}" --config Release >/dev/null
+
+echo "Build and install OK: ${SDK_DIR_WIN}"

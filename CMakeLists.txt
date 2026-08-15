@@ -49,6 +49,27 @@ endif()
 set(CPM_DOWNLOAD_VERSION 0.42.0)
 set(CPM_SOURCE_CACHE "${CMAKE_SOURCE_DIR}/.cpm_cache" CACHE PATH "CPM source cache directory")
 
+# --- Stale CPM cache guard ------------------------------------------------
+# If the project tree is moved/copied to another path (e.g. D:\ -> H:\) while
+# an old build/ directory is kept, CPM_DIRECTORY in CMakeCache.txt still points
+# at the old location. CPM.cmake then early-returns and CPMAddPackage is never
+# defined ("Unknown CMake command \"CPMAddPackage\""). Reset those cache entries.
+get_filename_component(_cpm_expected_dir "${CMAKE_BINARY_DIR}/cmake" REALPATH)
+string(TOLOWER "${_cpm_expected_dir}" _cpm_expected_dir_lc)
+string(TOLOWER "${CPM_DIRECTORY}" _cpm_cached_dir_lc)
+if(DEFINED CPM_DIRECTORY AND NOT _cpm_cached_dir_lc STREQUAL _cpm_expected_dir_lc)
+    message(STATUS "Stale CPM cache detected (${CPM_DIRECTORY}); resetting CPM cache variables")
+    unset(CPM_DIRECTORY CACHE)
+    unset(CPM_FILE CACHE)
+    unset(CPM_VERSION CACHE)
+    unset(CPM_PACKAGES CACHE)
+    unset(CPM_INDENT CACHE)
+endif()
+unset(_cpm_expected_dir)
+unset(_cpm_expected_dir_lc)
+unset(_cpm_cached_dir_lc)
+# --------------------------------------------------------------------------
+
 if(NOT EXISTS "${CMAKE_BINARY_DIR}/cmake/CPM.cmake")
     message(STATUS "Downloading CPM.cmake v${CPM_DOWNLOAD_VERSION}...")
     file(DOWNLOAD

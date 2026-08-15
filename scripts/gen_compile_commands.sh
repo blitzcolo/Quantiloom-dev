@@ -60,11 +60,27 @@ fi
 VCVARS="C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Auxiliary\\Build\\vcvars64.bat"
 NINJA="C:/Program Files/Microsoft Visual Studio/18/Enterprise/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
 
+# The repo path is baked into the generated .bat and into build-cdb's CMakeCache,
+# so it has to come from where this checkout actually lives -- hard-coding a drive
+# breaks the moment the tree is moved. Wipe build-cdb if its cache was written for
+# a different source path.
+REPO_WIN="$(wslpath -w "$PWD" 2>/dev/null || printf '%s' "$PWD")"
+
+if [ -f build-cdb/CMakeCache.txt ]; then
+    cached="$(sed -n 's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' build-cdb/CMakeCache.txt | head -n 1 || true)"
+    repo_fwd="${REPO_WIN//\\//}"; repo_fwd="${repo_fwd%/}"
+    cached="${cached//\\//}"; cached="${cached%/}"
+    if [ -n "$cached" ] && [ "${cached,,}" != "${repo_fwd,,}" ]; then
+        echo "Stale build-cdb cache ($cached != $repo_fwd) -- removing." >&2
+        rm -rf build-cdb
+    fi
+fi
+
 cat > _gen_cdb.bat <<EOF
 @echo off
 call "${VCVARS}" >nul
 if errorlevel 1 exit /b 1
-cd /d D:\\Quantiloom-dev
+cd /d "${REPO_WIN}"
 cmake.exe -B build-cdb -G Ninja ^
   -DCMAKE_MAKE_PROGRAM="${NINJA}" ^
   -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^

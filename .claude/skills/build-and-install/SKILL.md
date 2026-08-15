@@ -1,6 +1,6 @@
 ---
 name: build-and-install
-description: Build the Quantiloom core SDK (libQuantiloom + libSpectraForge + CLI + tools) from WSL2 using the Windows MSVC toolchain, compile HLSL shaders with DXC, and install the SDK to D:/Quantiloom-SDK. Use this whenever the user asks to build, rebuild, compile, install, or "make" this project, after any C++ or shader source change that needs compiling, or when the downstream Quantiloom-Qt GUI needs a fresh SDK. Also covers build failure diagnosis and the Linux portability rules that every code change must respect.
+description: Build the Quantiloom core SDK (libQuantiloom + libSpectraForge + CLI + tools) from WSL2 using the Windows MSVC toolchain, compile HLSL shaders with DXC, and install the SDK to the sibling ../Quantiloom-SDK tree. Use this whenever the user asks to build, rebuild, compile, install, or "make" this project, after any C++ or shader source change that needs compiling, or when the downstream Quantiloom-Qt GUI needs a fresh SDK. Also covers build failure diagnosis and the Linux portability rules that every code change must respect.
 ---
 
 # Build and Install (Quantiloom core)
@@ -8,7 +8,7 @@ description: Build the Quantiloom core SDK (libQuantiloom + libSpectraForge + CL
 ## The one command
 
 ```bash
-cd /mnt/d/Quantiloom-dev && ./build_wsl.sh
+cd /mnt/h/Quantiloom-dev && ./build_wsl.sh
 ```
 
 This is the canonical path. It runs, in order:
@@ -27,7 +27,7 @@ This is the canonical path. It runs, in order:
    an answer known in advance rather than by comparison with a previous run, and
    the only automated check that puts a photon on a surface. Exit 3 means no GPU:
    a warning, not a failure, but that build was checked by nothing that renders.
-6. Install: wipes and repopulates `D:/Quantiloom-SDK/windows_amd64`
+6. Install: wipes and repopulates `../Quantiloom-SDK/windows_amd64` (currently `H:/Quantiloom-SDK/windows_amd64`; the prefix is derived from the repo's location, never hard-coded to a drive)
 
 There is no CI; these three gates are the only automated ones.
 
@@ -47,12 +47,12 @@ Don't re-run the full script when only part changed:
 | HLSL shaders (`src/shaders/*.hlsl*`, `*.hlsli`) | `cmake.exe --build build --config Release -j` — same as C++. CMake tracks every `.hlsli` as a dependency of every shader, and `compile_shaders.bat` is now only a manual fallback |
 | CMakeLists / new files | re-run full `./build_wsl.sh` (configure step included) |
 
-After any change to public headers, exported symbols, or shaders, finish with the **install** step (or full script) — the Qt frontend links the installed SDK at `D:/Quantiloom-SDK/windows_amd64`, not this repo's build tree. A stale SDK is the #1 source of "my core fix doesn't show up in the GUI" confusion. After installing, rebuild Quantiloom-Qt (see its `build-and-run` skill).
+After any change to public headers, exported symbols, or shaders, finish with the **install** step (or full script) — the Qt frontend links the installed SDK at `../Quantiloom-SDK/windows_amd64`, not this repo's build tree. A stale SDK is the #1 source of "my core fix doesn't show up in the GUI" confusion. After installing, rebuild Quantiloom-Qt (see its `build-and-run` skill).
 
 Key outputs:
 - CLI: `build/src/app/Release/Quantiloom.exe`
 - Tools: `build/src/tools/Release/{fusion_tool,QLTrans}.exe`
-- SDK: `D:/Quantiloom-SDK/windows_amd64/{bin,include,lib}` (bin contains `Quantiloom.exe` + compiled `.spv` shaders)
+- SDK: `../Quantiloom-SDK/windows_amd64/{bin,include,lib}`, currently `H:/Quantiloom-SDK/windows_amd64` (bin contains `Quantiloom.exe` + compiled `.spv` shaders)
 
 ## Common failures
 
@@ -69,7 +69,7 @@ Key outputs:
 
 ## Linux portability rules (apply to every code change)
 
-Windows is the primary target, but Linux support (headless CI/batch, `D:/Quantiloom-SDK/linux_amd64` exists) must stay cheap to revive. When writing or reviewing C++ in this repo:
+Windows is the primary target, but Linux support (headless CI/batch, `../Quantiloom-SDK/linux_amd64` exists) must stay cheap to revive. When writing or reviewing C++ in this repo:
 
 - No MSVC-only constructs (`__declspec` outside the existing `QL_API` macro machinery, `#pragma` MSVC extensions, `_s` CRT functions). Compiler must remain MSVC / Clang / GCC.
 - GCC < 14 has a known ICE on this codebase — workaround is `-O1` on affected TUs; don't introduce code that deepens that dependency.

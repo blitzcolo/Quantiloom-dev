@@ -16,7 +16,9 @@ drive the Visual Studio generator. Run everything from the repo root.
 | HLSL only | `cmd.exe /c "src\shaders\compile_shaders.bat" </dev/null` (~1 s), then rebuild |
 | CMakeLists / new file | `./build_wsl.sh` (re-runs configure) |
 
-`./build_wsl.sh` wipes and reinstalls `D:/Quantiloom-SDK/windows_amd64`, which the
+`./build_wsl.sh` wipes and reinstalls `../Quantiloom-SDK/windows_amd64` (currently
+`H:/Quantiloom-SDK/windows_amd64`; derived from this checkout, override with
+`QUANTILOOM_SDK_ROOT`), which the
 Quantiloom-Qt frontend links against. It takes minutes — use a 600000 ms timeout and
 never interrupt it mid-install.
 

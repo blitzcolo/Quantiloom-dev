@@ -72,7 +72,9 @@ cmd.exe /c "src\shaders\compile_shaders.bat" </dev/null   # shaders only, ~1 s
 
 `build_wsl.sh` configures with the `Visual Studio 18 2026` generator — multi-config,
 so `--config` is required on every build — and installs to
-`D:/Quantiloom-SDK/windows_amd64`, which the Quantiloom-Qt frontend links against.
+`../Quantiloom-SDK/windows_amd64` (currently `H:/Quantiloom-SDK/windows_amd64`; the
+prefix is derived from this checkout's location, override with `QUANTILOOM_SDK_ROOT`),
+which the Quantiloom-Qt frontend links against.
 
 Requires the Vulkan SDK with ray tracing support. OpenUSD is optional
 (`-DQUANTILOOM_USE_OPENUSD=ON -DUSD_ROOT=...`; `build_wsl.sh` enables it).

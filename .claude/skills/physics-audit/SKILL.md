@@ -17,7 +17,7 @@ description: Audit Quantiloom physics formulas (Planck blackbody, Wien, Stefan-B
 
 1. **Sanity-check the harness first:**
    ```bash
-   cd /mnt/d/Quantiloom-dev/scripts/physics-audit && python3 test_harness.py
+   cd /mnt/h/Quantiloom-dev/scripts/physics-audit && python3 test_harness.py
    ```
    Expect `All harness spot checks passed.`
 

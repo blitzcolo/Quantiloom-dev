@@ -15,7 +15,7 @@ install — so a successful script run means the suite was green. To iterate on
 tests directly without the full script:
 
 ```bash
-cd /mnt/d/Quantiloom-dev
+cd /mnt/h/Quantiloom-dev
 cmake.exe --build build --target libquantiloom_tests --config Release -j
 ./build/tests/Release/libquantiloom_tests.exe
 ```
