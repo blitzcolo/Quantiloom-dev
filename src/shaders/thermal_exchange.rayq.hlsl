@@ -57,10 +57,11 @@ struct ThermalElementGpu {
 struct ExchangePushConstants {
     float3 sunDirection;   // from surface toward the sun, normalised
     uint   elementCount;
-    uint   rayCount;       // hemisphere rays per element
+    uint   rayCount;       // hemisphere rays per element; 0 = sun-only pass
     uint   sunRayCount;    // rays toward the sun, for a soft shadow edge
     float  sunAngularRadius;  // radians; 0.00465 is the real sun
     float  rayOffset;      // how far off the surface a ray starts
+    uint   sunOutputOffset;   // element offset into sunVisibility for this direction
 };
 [[vk::push_constant]] ExchangePushConstants pc;
 
@@ -140,10 +141,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // A degenerate triangle has no hemisphere to sample. Its rows stay empty
     // and its sun visibility zero, which the solver skips anyway.
     if (element.area <= 0.0) {
-        for (uint r = 0; r < pc.rayCount; ++r) {
-            hitRecords[e * pc.rayCount + r] = 0xFFFFFFFFu;
+        if (pc.rayCount > 0) {
+            for (uint r = 0; r < pc.rayCount; ++r) {
+                hitRecords[e * pc.rayCount + r] = 0xFFFFFFFFu;
+            }
         }
-        sunVisibility[e] = 0.0;
+        sunVisibility[pc.sunOutputOffset + e] = 0.0;
         return;
     }
 
@@ -153,10 +156,14 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // is the only length this shader has.
     const float3 origin = element.centre + element.normal * pc.rayOffset;
 
-    for (uint r = 0; r < pc.rayCount; ++r) {
-        const float2 u = Hammersley(r, pc.rayCount);
-        const float3 direction = SampleCosineHemisphere(u, element.normal);
-        hitRecords[e * pc.rayCount + r] = TraceForElement(origin, direction);
+    // Hemisphere pass: only when rayCount > 0. A sun-only batch pass sets
+    // rayCount to zero and skips the hemisphere entirely.
+    if (pc.rayCount > 0) {
+        for (uint r = 0; r < pc.rayCount; ++r) {
+            const float2 u = Hammersley(r, pc.rayCount);
+            const float3 direction = SampleCosineHemisphere(u, element.normal);
+            hitRecords[e * pc.rayCount + r] = TraceForElement(origin, direction);
+        }
     }
 
     // The sun, if there is one above this element's horizon. Several rays
@@ -181,5 +188,5 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
         visible /= float(pc.sunRayCount);
     }
-    sunVisibility[e] = visible;
+    sunVisibility[pc.sunOutputOffset + e] = visible;
 }

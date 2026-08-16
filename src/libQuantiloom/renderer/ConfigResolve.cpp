@@ -694,7 +694,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // overrides they belong with.
     out.thermal.enabled = config.Get<bool>("thermal.enabled", false);
     if (out.thermal.enabled) {
-        out.thermal.time_h = config.Get<f64>("thermal.time_h", 0.0);
+        out.thermal.time_h = config.Get<f64>("thermal.time_h", 12.0);
         out.thermal.startTime_h = config.Get<f64>("thermal.start_time_h", 0.0);
         out.thermal.timestep_s = config.Get<f64>("thermal.timestep_s", 60.0);
         out.thermal.nodeCount = config.Get<u32>("thermal.layers", 10);

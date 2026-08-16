@@ -47,8 +47,9 @@ struct ExchangePushConstants {
     u32 sunRayCount;
     f32 sunAngularRadius;
     f32 rayOffset;
+    u32 sunOutputOffset;
 };
-static_assert(sizeof(ExchangePushConstants) == 32, "ExchangePushConstants size mismatch");
+static_assert(sizeof(ExchangePushConstants) == 36, "ExchangePushConstants size mismatch");
 
 std::filesystem::path ExecutableDirectory() {
 #if defined(_WIN32)
@@ -318,11 +319,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     pc.rayCount = rays;
     pc.sunRayCount = params.sunRays;
     pc.sunAngularRadius = params.sunAngularRadius;
-    // A ray has to start clear of the triangle it left, and how far that is
-    // depends on how big the scene's triangles are: a fixed epsilon that works
-    // in metres self-intersects in kilometres and floats a surface off itself
-    // in millimetres. The mean element size is the only length available here.
     pc.rayOffset = std::max(1e-5f, std::sqrt(std::max(meanArea, 0.0f)) * 1e-3f);
+    pc.sunOutputOffset = 0;
 
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeline);
@@ -427,6 +425,140 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
                 elementCount, rays, exchange.viewFactors.NonZeros(), meanSky);
 
     return exchange;
+}
+
+Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
+    const VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+    const Vector<u32>& instanceElementBase, std::span<const glm::vec3> directions,
+    const u32 sunRays, const f32 sunAngularRadius) {
+    if (!IsValid() || elements.empty() || tlas == VK_NULL_HANDLE || directions.empty()) {
+        return {};
+    }
+
+    const u32 elementCount = static_cast<u32>(elements.size());
+    const u32 K = static_cast<u32>(directions.size());
+
+    VmaAllocator allocator = m_impl->context.GetAllocator();
+
+    Vector<ThermalElementGpu> gpuElements(elementCount);
+    f32 meanArea = 0.0f;
+    for (u32 e = 0; e < elementCount; ++e) {
+        gpuElements[e].centre = elements[e].centroid;
+        gpuElements[e].area = elements[e].area_m2;
+        gpuElements[e].normal = elements[e].normal;
+        gpuElements[e].materialId = elements[e].materialId;
+        meanArea += elements[e].area_m2;
+    }
+    meanArea /= static_cast<f32>(elementCount);
+
+    GpuBuffer elementBuffer(allocator, gpuElements.size() * sizeof(ThermalElementGpu),
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    elementBuffer.Upload(gpuElements.data(), gpuElements.size() * sizeof(ThermalElementGpu));
+
+    Vector<u32> bases = instanceElementBase;
+    if (bases.empty()) bases.push_back(0);
+    GpuBuffer baseBuffer(allocator, bases.size() * sizeof(u32),
+                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    baseBuffer.Upload(bases.data(), bases.size() * sizeof(u32));
+
+    // Dummy hit record buffer — the sun-only pass sets rayCount=0, so no
+    // hemisphere records are written. The binding still must exist.
+    GpuBuffer recordBuffer(allocator, sizeof(u32),
+                           VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+
+    // Sun visibility: K columns, each elementCount floats, direction-major.
+    const VkDeviceSize sunBytes =
+        static_cast<VkDeviceSize>(K) * elementCount * sizeof(f32);
+    GpuBuffer sunBuffer(allocator, sunBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                        VMA_MEMORY_USAGE_GPU_TO_CPU);
+
+    // Bind descriptors
+    VkWriteDescriptorSetAccelerationStructureKHR tlasInfo{};
+    tlasInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    tlasInfo.accelerationStructureCount = 1;
+    tlasInfo.pAccelerationStructures = &tlas;
+
+    const VkDescriptorBufferInfo bufferInfos[4] = {
+        {elementBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+        {baseBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+        {recordBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+        {sunBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+    };
+
+    Vector<VkWriteDescriptorSet> writes(5);
+    for (u32 i = 0; i < writes.size(); ++i) {
+        writes[i] = {};
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = m_impl->descriptorSet;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        if (i == 0) {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+            writes[i].pNext = &tlasInfo;
+        } else {
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &bufferInfos[i - 1];
+        }
+    }
+    vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()), writes.data(),
+                           0, nullptr);
+
+    const f32 rayOffset =
+        std::max(1e-5f, std::sqrt(std::max(meanArea, 0.0f)) * 1e-3f);
+    const u32 groups = (elementCount + 63) / 64;
+
+    CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                                m_impl->pipelineLayout, 0, 1,
+                                &m_impl->descriptorSet, 0, nullptr);
+
+        for (u32 k = 0; k < K; ++k) {
+            ExchangePushConstants pc{};
+            pc.sunDirection = glm::normalize(directions[k]);
+            pc.elementCount = elementCount;
+            pc.rayCount = 0;  // no hemisphere
+            pc.sunRayCount = sunRays;
+            pc.sunAngularRadius = sunAngularRadius;
+            pc.rayOffset = rayOffset;
+            pc.sunOutputOffset = k * elementCount;
+
+            vkCmdPushConstants(cmd, m_impl->pipelineLayout,
+                               VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+            vkCmdDispatch(cmd, groups, 1, 1);
+
+            if (k + 1 < K) {
+                VkMemoryBarrier barrier{};
+                barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                                     1, &barrier, 0, nullptr, 0, nullptr);
+            }
+        }
+
+        VkBufferMemoryBarrier hostBarrier{};
+        hostBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        hostBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostBarrier.buffer = sunBuffer.GetHandle();
+        hostBarrier.offset = 0;
+        hostBarrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr,
+                             1, &hostBarrier, 0, nullptr);
+    });
+
+    const f32* mapped = static_cast<const f32*>(sunBuffer.Map());
+    Vector<f32> result(mapped, mapped + static_cast<usize>(K) * elementCount);
+    sunBuffer.Unmap();
+
+    QL_LOG_INFO("  Thermal exchange: sun-only batch: {} directions x {} elements x {} rays",
+                K, elementCount, sunRays);
+    return result;
 }
 
 }  // namespace quantiloom::rendercore

@@ -8,6 +8,7 @@
 #include "core/Log.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalMesh.hpp"
+#include "thermal/ThermalTimeline.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -27,42 +28,7 @@ f32 EmissivityOf(const Material& material) {
     if (!material.irEmissivityCurve.empty()) {
         return material.irEmissivityCurve.front().second;
     }
-    // The shader's own fallback for a material with no curve, so a surface
-    // that renders at 0.95 does not cool as though it were 0.9.
     return 0.95f - 0.90f * material.metallicFactor;
-}
-
-/// Steady state, found by stepping with a timestep long enough that the
-/// transient is gone in a few dozen of them. The tridiagonal solve is
-/// unconditionally stable, so a long step is a question of accuracy rather
-/// than of blowing up -- and the answer being converged to does not depend on
-/// how it was reached.
-void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& elements,
-                        const Vector<ThermalMaterial>& materials,
-                        const ExchangeGeometry& exchange, const ThermalForcing& forcing,
-                        IThermalStepper& stepper) {
-    constexpr f64 kRelaxStep_s = 3600.0;
-    constexpr i32 kMaxIterations = 200;
-    constexpr f64 kSettled_K = 0.01;
-
-    Vector<f64> previous(elements.size());
-    for (i32 iteration = 0; iteration < kMaxIterations; ++iteration) {
-        for (usize e = 0; e < elements.size(); ++e) {
-            previous[e] = state.Surface(e);
-        }
-        stepper.Step(state, elements, materials, exchange, forcing, kRelaxStep_s);
-
-        f64 largestMove = 0.0;
-        for (usize e = 0; e < elements.size(); ++e) {
-            largestMove = std::max(largestMove, std::abs(state.Surface(e) - previous[e]));
-        }
-        if (largestMove < kSettled_K) {
-            QL_LOG_INFO("  Thermal: steady state after {} relaxation steps", iteration + 1);
-            return;
-        }
-    }
-    QL_LOG_WARN("  Thermal: steady state did not settle in {} steps; starting from where "
-                "it got to", kMaxIterations);
 }
 
 }  // namespace
@@ -91,8 +57,6 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         ++lineNumber;
         if (line.empty() || line[0] == '#') continue;
 
-        // A header row is the usual first line of a CSV somebody exported, and
-        // refusing to read the file over it would be unhelpful.
         std::replace(line.begin(), line.end(), ',', ' ');
         std::istringstream fields(line);
 
@@ -109,7 +73,6 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         fields >> forcing.airTemperature_K >> forcing.sunIrradiance_W_m2 >> azimuth_deg >>
             elevation_deg >> forcing.skyTemperature_K;
 
-        // Azimuth from north through east, elevation from the horizon; Y is up.
         const f64 az = azimuth_deg * std::numbers::pi / 180.0;
         const f64 el = elevation_deg * std::numbers::pi / 180.0;
         forcing.sunDirection = glm::normalize(glm::vec3(
@@ -144,9 +107,6 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
                 a.sunIrradiance_W_m2 + t * (b.sunIrradiance_W_m2 - a.sunIrradiance_W_m2);
             out.skyTemperature_K =
                 a.skyTemperature_K + t * (b.skyTemperature_K - a.skyTemperature_K);
-            // Directions interpolate as directions: a linear blend of two unit
-            // vectors is not one, and normalising after is close enough at the
-            // step sizes a forcing file uses.
             out.sunDirection = glm::normalize(
                 glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
             return out;
@@ -156,7 +116,8 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
 }
 
 ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
-                              const ExchangeGeometry& exchange) {
+                              const ExchangeGeometry& exchange,
+                              const SunVisibilityTable& sunTable) {
     ThermalResult result;
 
     ThermalMesh mesh = BuildThermalMesh(scene);
@@ -167,10 +128,6 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         return result;
     }
 
-    // Thermal properties per material, matched by name. A material the config
-    // says nothing about gets a conductivity of zero, which means it keeps
-    // whatever temperature it already had rather than being given a default
-    // wall's thermal mass.
     Vector<ThermalMaterial> materials(scene.materials.size());
     u32 named = 0;
     for (usize m = 0; m < scene.materials.size(); ++m) {
@@ -197,8 +154,6 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     }
     result.exchangeNonZeros = static_cast<u32>(exchange.viewFactors.NonZeros());
 
-    // The exchange has to be indexed as the elements are; a mismatch means the
-    // precompute ran on a different scene than this one.
     const ExchangeGeometry openSky = MakeOpenSkyExchange(mesh.elements.size());
     const ExchangeGeometry& geometry =
         exchange.skyFraction.size() == mesh.elements.size() ? exchange : openSky;
@@ -208,13 +163,14 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                     exchange.skyFraction.size(), mesh.elements.size());
     }
 
-    // ------------------------------------------------------------------
-    // Initial state
-    // ------------------------------------------------------------------
-    ThermalState state;
-    state.nodeCount = std::max(2u, config.nodeCount);
-    state.temperature_K.assign(mesh.elements.size() * state.nodeCount,
-                               config.initialTemperature_K);
+    // Synthesise a single-column sun table from the exchange when no table
+    // is provided. This preserves the old behaviour: one sun direction for
+    // the entire run.
+    SunVisibilityTable effectiveTable = sunTable;
+    if (effectiveTable.SampleCount() == 0 && !geometry.sunVisibility.empty()) {
+        effectiveTable.sampleTime_h = {config.startTime_h};
+        effectiveTable.visibility = geometry.sunVisibility;
+    }
 
     const auto forcingSeries = LoadForcingCsv(config.forcingFile);
 
@@ -236,26 +192,19 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                     config.timestep_s, shortest);
     }
 
-    if (config.initial == InitialCondition::Steady) {
-        RelaxToSteadyState(state, mesh.elements, materials, geometry,
-                           SampleForcing(forcingSeries, config.startTime_h, constantForcing),
-                           stepper);
-    }
+    ThermalTimeline::Desc desc;
+    desc.startTime_h = config.startTime_h;
+    desc.timestep_s = config.timestep_s;
+    desc.checkpointStride_h = 1.0;
+    desc.nodeCount = config.nodeCount;
+    desc.initial = config.initial;
+    desc.initialTemperature_K = config.initialTemperature_K;
 
-    // ------------------------------------------------------------------
-    // Step to the hour asked for
-    // ------------------------------------------------------------------
-    const f64 span_s = (config.time_h - config.startTime_h) * 3600.0;
-    if (span_s > 0.0 && config.timestep_s > 0.0) {
-        const u32 steps = static_cast<u32>(std::ceil(span_s / config.timestep_s));
-        const f64 dt = span_s / static_cast<f64>(steps);
-        for (u32 i = 0; i < steps; ++i) {
-            const f64 t_h = config.startTime_h + (i + 0.5) * dt / 3600.0;
-            stepper.Step(state, mesh.elements, materials, geometry,
-                         SampleForcing(forcingSeries, t_h, constantForcing), dt);
-        }
-        result.stepsTaken = steps;
-    }
+    ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
+                             effectiveTable, forcingSeries, constantForcing, stepper);
+
+    const ThermalState& state = timeline.StateAt(config.time_h);
+    result.stepsTaken = timeline.LastStepCount();
 
     // ------------------------------------------------------------------
     // What the renderer reads
@@ -269,9 +218,6 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         const u32 id = mesh.elements[e].materialId;
         const bool solved = mesh.elements[e].area_m2 > 0.0f && id < materials.size() &&
                             materials[id].ParticipatesInSolve();
-        // A surface the solver did not touch reports zero, which the shader
-        // reads as "use the material's own temperature" -- so a scene where
-        // only the ground is thermal keeps whatever the config gave the rest.
         const f64 T = solved ? state.Surface(e) : 0.0;
         result.surfaceTemperature_K[e] = static_cast<f32>(T);
         if (solved) {

@@ -165,4 +165,38 @@ struct ThermalForcing {
     f64 skyTemperature_K = 268.0;
 };
 
+/**
+ * @brief Sun visibility at several times of day, for diurnal interpolation
+ *
+ * Each column is one precomputed sun direction, one visibility fraction per
+ * element; layout is sample-major (column k starts at k * elementCount).
+ * A constant-forcing run has K=1 and a single column equal to the exchange's
+ * own sunVisibility.
+ */
+struct SunVisibilityTable {
+    Vector<f64> sampleTime_h;  ///< sorted, K entries (K >= 1)
+    Vector<f32> visibility;    ///< K * elementCount, sample-major
+
+    [[nodiscard]] usize SampleCount() const { return sampleTime_h.size(); }
+    [[nodiscard]] usize ElementCount() const {
+        return sampleTime_h.empty() ? 0 : visibility.size() / sampleTime_h.size();
+    }
+    [[nodiscard]] const f32* Column(usize k) const {
+        return visibility.data() + k * ElementCount();
+    }
+
+    /// Interpolation indices and blend for time @p t: result is
+    /// (1-blend)*Column(a) + blend*Column(b).
+    void SampleIndices(f64 t, usize& a, usize& b, f64& blend) const;
+};
+
+/// One step in a batch, carrying the forcing and where in the sun table it is.
+struct ThermalBatchStep {
+    ThermalForcing forcing;
+    f64 dt_s = 60.0;
+    usize sunSampleA = 0;
+    usize sunSampleB = 0;
+    f64 sunBlend = 0.0;
+};
+
 }  // namespace quantiloom::thermal

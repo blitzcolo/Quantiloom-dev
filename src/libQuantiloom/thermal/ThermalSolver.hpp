@@ -42,7 +42,7 @@ struct ThermalConfig {
     /// Hour of the simulated day to render, and where the run starts. A
     /// sequence renders one job per time, each starting from startTime_h --
     /// so a frame at 18:00 costs eighteen hours of stepping, not six.
-    f64 time_h = 0.0;
+    f64 time_h = 12.0;
     f64 startTime_h = 0.0;
     f64 timestep_s = 60.0;
 
@@ -101,9 +101,12 @@ struct ThermalResult {
  *                  the sky, which is right for a scene with nothing in it to
  *                  shade anything else and wrong -- conservatively, too cold at
  *                  night -- for a street.
+ * @param sunTable  per-sample sun visibility (empty → synthesised from
+ *                  exchange.sunVisibility as a single column)
  */
 [[nodiscard]] ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
-                                            const ExchangeGeometry& exchange);
+                                            const ExchangeGeometry& exchange,
+                                            const SunVisibilityTable& sunTable = {});
 
 /// The sky-only exchange the fallback uses: every row empty, every sky
 /// fraction 1, every element in full sun. Exposed so a caller can say

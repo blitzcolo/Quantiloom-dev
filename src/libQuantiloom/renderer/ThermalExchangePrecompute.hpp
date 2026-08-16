@@ -27,6 +27,7 @@
 #include <vulkan/vulkan.h>
 
 #include <memory>
+#include <span>
 
 namespace quantiloom::rendercore {
 
@@ -77,6 +78,21 @@ public:
     [[nodiscard]] thermal::ExchangeGeometry Run(
         VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
         const Vector<u32>& instanceElementBase, const Params& params);
+
+    /**
+     * @brief Sun visibility for several directions in one submit
+     *
+     * Each direction gets one dispatch; the output is direction-major:
+     * result[k * elementCount .. (k+1) * elementCount). The hemisphere is
+     * skipped (rayCount=0), so this is much cheaper than a full Run.
+     *
+     * @return K * elementCount floats, or empty on failure
+     */
+    [[nodiscard]] Vector<f32> RunSunVisibility(
+        VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+        const Vector<u32>& instanceElementBase,
+        std::span<const glm::vec3> directions, u32 sunRays = 8,
+        f32 sunAngularRadius = 0.00465f);
 
 private:
     struct Impl;

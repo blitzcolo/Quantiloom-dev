@@ -149,11 +149,15 @@ add_library(quantiloom_core OBJECT
 
     # Thermal module (surface energy balance; the temperatures a thermogram is of)
     thermal/ThermalTypes.hpp
+    thermal/ThermalTypes.cpp
     thermal/ThermalStepper.hpp
+    thermal/ThermalStepper.cpp
     thermal/CpuCrankNicolsonStepper.cpp
     thermal/CpuCrankNicolsonStepper.hpp
     thermal/ThermalMesh.cpp
     thermal/ThermalMesh.hpp
+    thermal/ThermalTimeline.cpp
+    thermal/ThermalTimeline.hpp
     thermal/ThermalSolver.cpp
     thermal/ThermalSolver.hpp
 

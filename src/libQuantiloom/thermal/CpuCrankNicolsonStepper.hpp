@@ -43,7 +43,8 @@ class CpuCrankNicolsonStepper final : public IThermalStepper {
 public:
     void Step(ThermalState& state, const Vector<ThermalElement>& elements,
               const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
-              const ThermalForcing& forcing, f64 dt_s) override;
+              const ThermalForcing& forcing, f64 dt_s,
+              std::span<const f32> sunVisibility) override;
 
     [[nodiscard]] const char* Name() const override { return "CPU Crank-Nicolson"; }
 

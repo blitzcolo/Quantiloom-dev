@@ -87,7 +87,8 @@ TEST(ThermalConductionTest, ALumpedBodyCoolsExponentially) {
     CpuCrankNicolsonStepper stepper;
     const f64 dt = tau / 200.0;
     for (i32 i = 0; i < 400; ++i) {  // two time constants
-        stepper.Step(state, elements, materials, exchange, forcing, dt);
+        stepper.Step(state, elements, materials, exchange, forcing, dt,
+                     exchange.sunVisibility);
     }
 
     const f64 elapsed = 400.0 * dt;
@@ -123,7 +124,8 @@ TEST(ThermalConductionTest, AHeldBackFaceProducesTheLinearSteadyProfile) {
     ThermalState state = MakeState(1, 21, 283.15);
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 4000; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, 60.0);
+        stepper.Step(state, elements, materials, exchange, forcing, 60.0,
+                     exchange.sunVisibility);
     }
 
     const f64 rCond = material.thickness_m / material.conductivity_W_mK;
@@ -156,7 +158,8 @@ TEST(ThermalConductionTest, AnAdiabaticSlabReachesTheAirTemperature) {
     // Ten time constants (tau = rho c d / h = 3200 s), by which the 50 K it
     // started away from the air is down to two thousandths of a kelvin.
     for (i32 i = 0; i < 3200; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, 10.0);
+        stepper.Step(state, elements, materials, exchange, forcing, 10.0,
+                     exchange.sunVisibility);
     }
     EXPECT_NEAR(state.Surface(0), 300.0, 0.01);
 }
@@ -191,7 +194,8 @@ TEST(ThermalConductionTest, TheSchemeIsSecondOrderInTime) {
         CpuCrankNicolsonStepper stepper;
         const f64 dt = elapsed / steps;
         for (i32 i = 0; i < steps; ++i) {
-            stepper.Step(state, elements, materials, exchange, forcing, dt);
+            stepper.Step(state, elements, materials, exchange, forcing, dt,
+                     exchange.sunVisibility);
         }
         return state.Surface(0);
     };
@@ -235,7 +239,8 @@ TEST(ThermalConductionTest, TheLumpedLimitIsApproachedFromAFiniteBiotNumber) {
     ThermalState state = MakeState(1, 16, T0);
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 8192; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, tau / 8192.0);
+        stepper.Step(state, elements, materials, exchange, forcing, tau / 8192.0,
+                     exchange.sunVisibility);
     }
     // Close to the lumped answer, and not exactly it.
     EXPECT_NEAR(state.Surface(0), expected, 0.05);
@@ -266,7 +271,8 @@ TEST(ThermalConductionTest, ASurfaceUnderAColdSkySettlesBelowTheAir) {
     ThermalState state = MakeState(1, 8, 288.15);
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 5000; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, 5.0);
+        stepper.Step(state, elements, materials, exchange, forcing, 5.0,
+                     exchange.sunVisibility);
     }
 
     auto imbalance = [&](const f64 T) {
@@ -322,7 +328,8 @@ TEST(ThermalConductionTest, AnElementSeeingOnlyItsNeighbourExchangesWithIt) {
     // The pair's difference decays with tau/2, tau = rho c d / (4 eps sigma
     // T^3) = 5500 s here, so this is five of them: 50 K down to a hundredth.
     for (i32 i = 0; i < 28000; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, 1.0);
+        stepper.Step(state, elements, materials, exchange, forcing, 1.0,
+                     exchange.sunVisibility);
     }
 
     EXPECT_NEAR(state.Surface(0), state.Surface(1), 0.5)
@@ -350,7 +357,8 @@ TEST(ThermalConductionTest, MaterialsWithNoConductivityAreLeftAlone) {
     ThermalState state = MakeState(1, 8, 300.0);
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 100; ++i) {
-        stepper.Step(state, elements, materials, exchange, forcing, 60.0);
+        stepper.Step(state, elements, materials, exchange, forcing, 60.0,
+                     exchange.sunVisibility);
     }
     EXPECT_DOUBLE_EQ(state.Surface(0), 300.0);
 }

@@ -274,6 +274,7 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // is right for a scene with nothing to shade anything else and too cold at
     // night for a street. It says which one it used.
     thermal::ExchangeGeometry exchange;
+    thermal::SunVisibilityTable sunTable;
     {
         rendercore::ThermalExchangePrecompute precompute(context);
         if (precompute.IsValid() && geometry.IsValid()) {
@@ -283,6 +284,24 @@ void OfflineRenderer::Impl::RunThermalSolver() {
             params.sunDirection = resolved.lighting.sunDirection;
             exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
                                       mesh.instanceElementBase, params);
+
+            // Build a sun visibility table from the forcing file's sun
+            // directions, so the solver tracks shadow changes through the day.
+            // For constant forcing (no CSV) this is a single column equal to
+            // exchange.sunVisibility — RunThermalSolve synthesises that itself.
+            const auto forcingSeries =
+                thermal::LoadForcingCsv(thermalConfig.forcingFile);
+            if (!forcingSeries.empty() && forcingSeries.size() > 1) {
+                Vector<glm::vec3> directions;
+                sunTable.sampleTime_h.reserve(forcingSeries.size());
+                for (const auto& [t, f] : forcingSeries) {
+                    sunTable.sampleTime_h.push_back(t);
+                    directions.push_back(f.sunDirection);
+                }
+                sunTable.visibility = precompute.RunSunVisibility(
+                    geometry.Tlas().GetHandle(), mesh.elements,
+                    mesh.instanceElementBase, directions);
+            }
         }
         if (exchange.skyFraction.empty()) {
             QL_LOG_WARN("  Thermal: no view factors; every surface will be treated as "
@@ -291,7 +310,7 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     }
 
     const thermal::ThermalResult result =
-        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange);
+        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange, sunTable);
     if (!result.error.empty()) {
         QL_LOG_WARN("  Thermal: {}; the scene keeps the temperatures it was given",
                     result.error);

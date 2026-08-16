@@ -46,7 +46,8 @@ void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
 void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElement>& elements,
                                    const Vector<ThermalMaterial>& materials,
                                    const ExchangeGeometry& exchange,
-                                   const ThermalForcing& forcing, const f64 dt_s) {
+                                   const ThermalForcing& forcing, const f64 dt_s,
+                                   std::span<const f32> sunVisibility) {
     const u32 nodes = state.nodeCount;
     if (nodes < 2 || elements.empty() || dt_s <= 0.0) {
         return;
@@ -93,13 +94,13 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
 
         // Sun. cos(theta) against the element's own normal, times the
         // precomputed visibility -- which is what carries the shadow.
-        if (forcing.sunIrradiance_W_m2 > 0.0 && e < exchange.sunVisibility.size()) {
+        if (forcing.sunIrradiance_W_m2 > 0.0 && e < sunVisibility.size()) {
             const f64 cosTheta = static_cast<f64>(
                 glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
             if (cosTheta > 0.0) {
                 surfaceFlux_W_m2 += material.shortwaveAbsorptivity *
                                     forcing.sunIrradiance_W_m2 * cosTheta *
-                                    static_cast<f64>(exchange.sunVisibility[e]);
+                                    static_cast<f64>(sunVisibility[e]);
             }
         }
 
