@@ -124,6 +124,8 @@ add_library(quantiloom_core OBJECT
     renderer/TemperatureTextureLoader.hpp
     renderer/ThermalExchangePrecompute.cpp
     renderer/ThermalExchangePrecompute.hpp
+    renderer/GpuThermalStepper.cpp
+    renderer/GpuThermalStepper.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
     renderer/OfflineRenderer.cpp
