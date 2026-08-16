@@ -29,7 +29,7 @@ has the rule it enforces.
 
 ## Tests
 
-874 tests run in ~3 s, and the binary reruns without rebuilding. They link the
+1125 tests run in ~4 s, and the binary reruns without rebuilding. They link the
 objects, not the DLL, so internal code is testable without being exported.
 
 ```bash
@@ -50,6 +50,7 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 |---|---|
 | `include/quantiloom/` | **Public** headers — the only ones the SDK installs, 7 modules |
 | `src/libQuantiloom/` | Core library sources and **internal** headers |
+| `src/libQuantiloom/thermal/` | Surface energy balance: what sets a temperature, rather than what a config says it is |
 | `src/shaders/` | HLSL → SPIR-V, ray tracing + compute |
 | `src/app/` | CLI: `Quantiloom.exe <config.toml>`, `batch <list.txt>`, `serve` |
 | `src/libSpectraForge/` | IR material generation library |
@@ -58,6 +59,29 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 | `docs/abi/` | Reviewed export baselines — the ABI gate's reference |
 | `assets/configs/` | TOML scene configs — the CLI's only input |
 | `scripts/` | Python/PowerShell tooling (spectral baking, LUT gen, physics audit) |
+
+## Thermography
+
+Four things a thermal scene can now do that it could not, each independent of
+the others and each off by default:
+
+| Section | What it does |
+|---|---|
+| `[[materials]] temperature_texture` | a temperature field per texel instead of one number |
+| `[thermography]` | invert the render into the temperature a camera would report, as `<output>_tapp.exr`, plus a NETD |
+| `[atmosphere] sky_model = "clear_sky"` | a sky that is colder overhead than at the horizon, from air temperature and humidity |
+| `[thermal]` | compute the temperatures from a surface energy balance instead of being told them |
+
+`assets/configs/thermal_*.toml` is one worked example of each. The physics is
+checked against closed forms in `tests/test_core/test_blackbody.cpp`,
+`test_sky_thermal.cpp` and `test_thermal_conduction.cpp`, and against analytic
+view factors in `tests/test_renderer/test_thermal_exchange_gpu.cpp`; the
+reference implementations live in `scripts/physics-audit/harness.py`.
+
+The one invariant worth knowing before touching any of it: a surface
+temperature has exactly one decode, `GetSurfaceTemperatureK` in
+`closesthit.rchit`, and all four sampling sites plus both debug views go
+through it. Solver, then texture, then the material's own scalar.
 
 The core is compiled once into `quantiloom_core` (an OBJECT library) and consumed
 two ways. **A new target links one or the other, never both** — two copies of the
