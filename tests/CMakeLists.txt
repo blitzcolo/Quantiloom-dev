@@ -260,6 +260,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_temperature_texture.cpp
     test_renderer/test_thermal_exchange_gpu.cpp
     test_renderer/test_thermal_step_gpu.cpp
+    test_renderer/test_thermal_preview.cpp
     test_renderer/test_depth_aov.cpp
     test_renderer/test_pick.cpp
     test_renderer/test_config_duplicates.cpp

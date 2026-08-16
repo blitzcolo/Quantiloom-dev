@@ -69,6 +69,7 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromGltf(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetSolarSpectralLUTFromSpec(struct quantiloom::SolarLutSpec const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalTime(double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::RegisterTool(struct quantiloom::mcp::ToolDef const &)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
@@ -179,6 +180,7 @@ public: struct quantiloom::Material & quantiloom::Material::operator=(struct qua
 public: struct quantiloom::OfflineRenderOutput quantiloom::OfflineRenderer::Render(void)
 public: struct quantiloom::OfflineRenderParams const & quantiloom::OfflineRenderer::Params(void)const
 public: struct quantiloom::SensorParams const & quantiloom::ExternalRenderContext::GetGPUSensorParams(void)const
+public: struct quantiloom::ThermalSolveStatus quantiloom::ExternalRenderContext::GetThermalSolveStatus(void)const
 public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
 public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const
 public: unsigned __int64 quantiloom::Config::GetUInt64(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64)const
@@ -198,6 +200,7 @@ public: virtual class quantiloom::Result<struct quantiloom::SensorOutput,class s
 public: virtual quantiloom::GenericSensor::~GenericSensor(void)
 public: void quantiloom::Config::Print(void)const
 public: void quantiloom::ExternalRenderContext::BlitDepthTo(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
+public: void quantiloom::ExternalRenderContext::ClearThermalMaterials(void)
 public: void quantiloom::ExternalRenderContext::RebuildAccelerationStructure(void)
 public: void quantiloom::ExternalRenderContext::RefitAccelerationStructure(void)
 public: void quantiloom::ExternalRenderContext::RenderFrame(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
@@ -222,6 +225,9 @@ public: void quantiloom::ExternalRenderContext::SetSolarSpectralLUT(struct quant
 public: void quantiloom::ExternalRenderContext::SetSpectralMode(enum quantiloom::SpectralMode)
 public: void quantiloom::ExternalRenderContext::SetSunDirection(struct glm::vec<3,float,0> const &)
 public: void quantiloom::ExternalRenderContext::SetSunRadiance(struct glm::vec<3,float,0> const &)
+public: void quantiloom::ExternalRenderContext::SetThermalMaterial(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::ThermalMaterialParams const &)
+public: void quantiloom::ExternalRenderContext::SetThermalSolveEnabled(bool)
+public: void quantiloom::ExternalRenderContext::SetThermalSolveParams(struct quantiloom::ThermalSolveParams const &)
 public: void quantiloom::ExternalRenderContext::SetWavelength(float)
 public: void quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int,struct quantiloom::Material const &)
 public: void quantiloom::Material::ComputeSpectralAlbedo(void)

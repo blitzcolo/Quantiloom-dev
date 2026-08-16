@@ -44,6 +44,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "renderer/ConfigApply.hpp"
+#include "renderer/ThermalControl.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/Pick.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
@@ -797,6 +798,57 @@ public:
      * @return Current sensor parameters
      */
     [[nodiscard]] const SensorParams& GetGPUSensorParams() const;
+
+    // ========================================================================
+    // Thermal Solve (interactive surface energy balance)
+    // ========================================================================
+
+    /**
+     * @brief Set the global parameters for the thermal solve
+     * @param params Solve parameters (timestep, layers, forcing, etc.)
+     */
+    void SetThermalSolveParams(const ThermalSolveParams& params);
+
+    /**
+     * @brief Set thermal properties for a material by name
+     *
+     * A material the config says nothing about keeps whatever temperature it
+     * already had rather than being solved. Naming a conductivity of zero
+     * explicitly has the same effect.
+     */
+    void SetThermalMaterial(const String& materialName, const ThermalMaterialParams& params);
+
+    /// Remove all thermal material associations.
+    void ClearThermalMaterials();
+
+    /**
+     * @brief Enable or disable the thermal solve
+     *
+     * When disabled the viewport reverts to the per-material scalar
+     * temperature. Enabling again does not discard the cached exchange or
+     * checkpoints — only a geometry change does.
+     */
+    void SetThermalSolveEnabled(bool enabled);
+
+    /**
+     * @brief Set the simulated hour and update the temperature field
+     *
+     * Steps from the nearest checkpoint, uploads the result, and resets
+     * accumulation. The exchange is recomputed only when geometry or rays/topK
+     * changed since the last call — scrubbing time alone never reruns it.
+     *
+     * Must not be called from within a host command buffer recording (it
+     * submits its own work via ExecuteImmediate).
+     *
+     * @return An error string when the solve cannot run (no participating
+     *         materials, nodeCount > 32 on a GPU without fallback, etc.)
+     */
+    Result<void, String> SetThermalTime(f64 time_h);
+
+    /**
+     * @brief Status snapshot for the panel
+     */
+    [[nodiscard]] ThermalSolveStatus GetThermalSolveStatus() const;
 
     // ========================================================================
     // Scene Editing (Phase 2)

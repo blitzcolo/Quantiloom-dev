@@ -326,13 +326,14 @@ struct GpuThermalStepper::Impl {
         }
         stateBuffer = std::make_unique<GpuBuffer>(
             alloc, stateSize * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
         stateBuffer->Upload(stateF32.data(), stateSize * sizeof(f32));
 
         // Surface ping-pong: 2 * n floats
         surfaceBuffer = std::make_unique<GpuBuffer>(
             alloc, 2u * n * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
         // Seed both halves from the initial surface temperatures
         Vector<f32> surfInit(2u * n);
         for (u32 e = 0; e < n; ++e) {

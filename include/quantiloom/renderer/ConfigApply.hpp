@@ -117,6 +117,8 @@ struct ConfigApplyReport {
     u32 nodesTransformed = 0;             ///< From [[nodes]] transform overrides.
     u32 nodesDuplicated = 0;              ///< From [[duplicates]] entries.
     u32 nodesRemoved = 0;                 ///< From scene.removed_nodes.
+    bool thermalSolveEnabled = false;
+    u32 thermalMaterialsApplied = 0;
 
     /// @name Keys a windowed context cannot honour, echoed for the host
     /// @{

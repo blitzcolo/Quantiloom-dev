@@ -26,6 +26,7 @@
 #include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 
+#include "renderer/ThermalPreview.hpp"
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
 #include "core/SpectralData.hpp"
@@ -201,6 +202,7 @@ struct ExternalRenderContext::Impl {
     /// shader from reading. Bound because an unbound descriptor is not a valid
     /// one, and reading one is a device loss rather than a wrong colour.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
+    std::unique_ptr<rendercore::ThermalPreview> thermalPreview;
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -395,6 +397,7 @@ struct ExternalRenderContext::Impl {
         atmosDataBuffer.reset();
         cieCmfBuffer.reset();
         emissiveTriangleBuffer.reset();
+        thermalPreview.reset();
         thermalTemperatureBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
@@ -1037,6 +1040,62 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     SetGPUSensorParams(resolved.sensor);
     SetGPUSensorEnabled(resolved.sensorEnabled);
 
+    // Thermal solve. A failing solve is a report message, not a failed apply.
+    if (resolved.thermal.enabled && m_impl->thermalPreview) {
+        try {
+            ThermalSolveParams tp;
+            tp.startTime_h = resolved.thermal.startTime_h;
+            tp.timestep_s = resolved.thermal.timestep_s;
+            tp.layerCount = resolved.thermal.nodeCount;
+            tp.initial = resolved.thermal.initial == thermal::InitialCondition::Steady
+                ? ThermalInitialCondition::Steady : ThermalInitialCondition::Uniform;
+            tp.initialTemperature_K = resolved.thermal.initialTemperature_K;
+            tp.exchangeRays = resolved.thermal.exchangeRays;
+            tp.exchangeTopK = resolved.thermal.exchangeTopK;
+            tp.airTemperature_K = resolved.thermal.airTemperature_K;
+            tp.sunIrradiance_W_m2 = resolved.thermal.sunIrradiance_W_m2;
+            tp.skyTemperature_K = resolved.thermal.skyTemperature_K;
+            tp.forcingFile = resolved.thermal.forcingFile;
+            SetThermalSolveParams(tp);
+
+            ClearThermalMaterials();
+            for (const auto& [name, mat] : spectra.thermalMaterials) {
+                ThermalMaterialParams tmp;
+                tmp.conductivity_W_mK = mat.conductivity_W_mK;
+                tmp.density_kg_m3 = mat.density_kg_m3;
+                tmp.specificHeat_J_kgK = mat.specificHeat_J_kgK;
+                tmp.thickness_m = mat.thickness_m;
+                tmp.convection_W_m2K = mat.convection_W_m2K;
+                tmp.shortwaveAbsorptivity = mat.shortwaveAbsorptivity;
+                tmp.interiorFixedTemperature =
+                    mat.interiorBoundary == thermal::InteriorBoundary::FixedTemperature;
+                tmp.interiorTemperature_K = mat.interiorTemperature_K;
+                SetThermalMaterial(name, tmp);
+                ++report.thermalMaterialsApplied;
+            }
+
+            if (m_impl->thermalPreview) {
+                m_impl->thermalPreview->SetFallbackSunDirection(resolved.lighting.sunDirection);
+            }
+            SetThermalSolveEnabled(true);
+            report.thermalSolveEnabled = true;
+
+            if (auto thermalResult = SetThermalTime(resolved.thermal.time_h);
+                !thermalResult.has_value()) {
+                report.messages.push_back({ConfigApplyMessage::Severity::Warning,
+                                           "thermal", thermalResult.error()});
+                QL_LOG_WARN("ApplyConfig: thermal solve: {}", thermalResult.error());
+            }
+        } catch (const std::exception& ex) {
+            report.messages.push_back({ConfigApplyMessage::Severity::Warning,
+                                       "thermal", ex.what()});
+            QL_LOG_WARN("ApplyConfig: thermal solve failed: {}", ex.what());
+            SetThermalSolveEnabled(false);
+        }
+    } else {
+        SetThermalSolveEnabled(false);
+    }
+
     if (resolved.hasHyperspectralSection) {
         report.messages.push_back(
             {ConfigApplyMessage::Severity::Info, "hyperspectral",
@@ -1082,6 +1141,8 @@ void ExternalRenderContext::Impl::AdoptScene(Scene&& loaded) {
     // Setup camera from scene
     camera = scene->camera;
     camera.SetAspectRatio(static_cast<f32>(width) / static_cast<f32>(height));
+
+    if (thermalPreview) thermalPreview->InvalidateGeometry();
 
     RebuildSceneGpuResources();
 
@@ -2010,12 +2071,18 @@ void ExternalRenderContext::SetLightingParams(const LightingParams& params) {
     m_impl->lightingParams.emissiveTotalPower = emissivePower;
 
     m_impl->UploadLightingParams();
+    if (m_impl->thermalPreview) {
+        m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
+    }
     ResetAccumulation();
 }
 
 void ExternalRenderContext::SetSunDirection(const glm::vec3& direction) {
     m_impl->lightingParams.sunDirection = glm::normalize(direction);
     m_impl->UploadLightingParams();
+    if (m_impl->thermalPreview) {
+        m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
+    }
     ResetAccumulation();
 }
 
@@ -2150,6 +2217,8 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
 
     // 4. Reset accumulation (visual feedback)
     ResetAccumulation();
+
+    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateMaterialEmissivity();
 
     QL_LOG_DEBUG("UpdateMaterial: Updated material {} ('{}')", materialIndex, material.name);
 }
@@ -2364,6 +2433,95 @@ Result<void, String> ExternalRenderContext::SetSolarSpectralLUTFromSpec(
     return Result<void, String>();
 }
 
+// ============================================================================
+// Thermal Solve
+// ============================================================================
+
+void ExternalRenderContext::SetThermalSolveParams(const ThermalSolveParams& params) {
+    if (m_impl->thermalPreview) m_impl->thermalPreview->SetParams(params);
+}
+
+void ExternalRenderContext::SetThermalMaterial(const String& materialName,
+                                               const ThermalMaterialParams& params) {
+    if (m_impl->thermalPreview) m_impl->thermalPreview->SetMaterial(materialName, params);
+}
+
+void ExternalRenderContext::ClearThermalMaterials() {
+    if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
+}
+
+void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
+    if (!m_impl->thermalPreview) return;
+    m_impl->thermalPreview->SetEnabled(enabled);
+
+    if (!enabled && m_impl->thermalTemperatureBuffer) {
+        try {
+            vkDeviceWaitIdle(m_impl->device);
+            const f32 zero = 0.0f;
+            m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+                m_impl->contextAdapter->GetAllocator(), sizeof(f32),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
+            if (m_impl->pipeline) {
+                m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
+            }
+            m_impl->geometry.SetThermalElementBases({});
+            ResetAccumulation();
+        } catch (const std::exception& ex) {
+            QL_LOG_WARN("SetThermalSolveEnabled: failed to restore dummy buffer: {}", ex.what());
+        }
+    }
+}
+
+Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
+    if (!m_impl->thermalPreview || !m_impl->scene || !m_impl->geometry.IsValid()) {
+        return Result<void, String>::Err("no scene loaded");
+    }
+
+    const VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
+    rendercore::ThermalPreview::SolveResult result;
+    try {
+        result = m_impl->thermalPreview->SolveAt(time_h, *m_impl->scene, tlas);
+    } catch (const std::exception& ex) {
+        return Result<void, String>::Err(String("thermal solve failed: ") + ex.what());
+    }
+    if (!result.error.empty()) {
+        return Result<void, String>::Err(result.error);
+    }
+
+    if (result.elementCountChanged || result.surfaceTemperature_K.size() * sizeof(f32) !=
+            (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
+        vkDeviceWaitIdle(m_impl->device);
+        m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+            m_impl->contextAdapter->GetAllocator(),
+            result.surfaceTemperature_K.size() * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_impl->thermalTemperatureBuffer->Upload(
+            result.surfaceTemperature_K.data(),
+            result.surfaceTemperature_K.size() * sizeof(f32));
+        if (m_impl->pipeline) {
+            m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
+        }
+        m_impl->geometry.SetThermalElementBases(result.instanceElementBase);
+    } else {
+        m_impl->thermalTemperatureBuffer->Upload(
+            result.surfaceTemperature_K.data(),
+            result.surfaceTemperature_K.size() * sizeof(f32));
+    }
+
+    ResetAccumulation();
+    return Result<void, String>::Ok();
+}
+
+ThermalSolveStatus ExternalRenderContext::GetThermalSolveStatus() const {
+    if (!m_impl->thermalPreview) return {};
+    try {
+        return m_impl->thermalPreview->Status();
+    } catch (...) {
+        return {};
+    }
+}
+
 void ExternalRenderContext::RebuildAccelerationStructure() {
     if (!m_impl->scene || !m_impl->geometry.IsValid()) {
         QL_LOG_WARN("RebuildAccelerationStructure: No scene or geometry available");
@@ -2387,6 +2545,8 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     // World-space emitters, so a topology or transform edit invalidates them
     // exactly as it does the TLAS.
     m_impl->RebuildEmissiveGeometry();
+
+    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateGeometry();
 }
 
 void ExternalRenderContext::RefitAccelerationStructure() {
@@ -2408,6 +2568,8 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     // is correct, so the light renders in its new place while being sampled at
     // its old one, which reads as a light that has stopped illuminating.
     m_impl->RebuildEmissiveGeometry();
+
+    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateGeometry();
 }
 
 // ============================================================================
@@ -2980,6 +3142,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
+    thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {
