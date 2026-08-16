@@ -214,9 +214,13 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
     exchange.skyFraction = {0.7f, 0.7f, 1.0f};
     exchange.sunVisibility = {1.0f, 0.5f, 1.0f};
 
+    // Baked short-wave gains, so the diffuse and one-bounce paths are compared
+    // too rather than only the direct disc.
     SunVisibilityTable sunTable;
     sunTable.sampleTime_h = {0.0};
     sunTable.visibility = exchange.sunVisibility;
+    sunTable.reflectedGain = {0.2f, 0.1f, 0.0f};
+    sunTable.diffuseGain = {0.8f, 0.75f, 1.0f};
 
     const u32 nodeCount = 10;
     const f64 dt = 60.0;
@@ -229,12 +233,14 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
     ThermalForcing forcing;
     forcing.airTemperature_K = 293.15;
     forcing.sunIrradiance_W_m2 = 900.0;
+    forcing.diffuseIrradiance_W_m2 = 150.0;
     forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
     forcing.skyTemperature_K = 268.0;
 
     for (i32 i = 0; i < steps; ++i) {
         cpuStepper.Step(cpuState, elements, materials, exchange, forcing, dt,
-                        {exchange.sunVisibility});
+                        {exchange.sunVisibility, sunTable.reflectedGain,
+                         sunTable.diffuseGain});
     }
 
     // GPU run
@@ -258,6 +264,81 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
 
     // Non-participating element must not have been touched by the GPU
     EXPECT_DOUBLE_EQ(gpuState.Surface(2), T0);
+}
+
+TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {
+    // Evaporation is the one term with an exponential in it, so it is the one
+    // where f32 and f64 could plausibly part company. Magnus over a day, on a
+    // surface wet enough that the latent flux dominates the balance.
+    GpuThermalStepper gpuStepper(Device());
+    if (!gpuStepper.IsValid()) {
+        GTEST_SKIP() << "thermal_step.spv unavailable";
+    }
+
+    ThermalElement element;
+    element.area_m2 = 1.0f;
+    element.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    element.materialId = 0;
+    const Vector<ThermalElement> elements{element};
+
+    ThermalMaterial soil;
+    soil.conductivity_W_mK = 0.8f;
+    soil.density_kg_m3 = 1600.0f;
+    soil.specificHeat_J_kgK = 1000.0f;
+    soil.thickness_m = 0.15f;
+    soil.convection_W_m2K = 12.0f;
+    soil.shortwaveAbsorptivity = 0.75f;
+    soil.longwaveEmissivity = 0.95f;
+    soil.wetnessFactor = 0.8f;
+    const Vector<ThermalMaterial> materials{soil};
+
+    const auto exchange = MakeOpenSkyExchange(1);
+    SunVisibilityTable sunTable;
+    sunTable.sampleTime_h = {0.0};
+    sunTable.visibility = exchange.sunVisibility;
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 301.0;
+    forcing.sunIrradiance_W_m2 = 800.0;
+    forcing.diffuseIrradiance_W_m2 = 120.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+    forcing.skyTemperature_K = 280.0;
+    forcing.relativeHumidity = 25.0;
+
+    const u32 nodeCount = 12;
+    const f64 dt = 60.0;
+    const i32 steps = 1440;
+    const f64 T0 = 295.0;
+
+    ThermalState cpuState = MakeState(1, nodeCount, T0);
+    CpuCrankNicolsonStepper cpuStepper;
+    for (i32 i = 0; i < steps; ++i) {
+        cpuStepper.Step(cpuState, elements, materials, exchange, forcing, dt,
+                        {exchange.sunVisibility});
+    }
+
+    ThermalState gpuState = MakeState(1, nodeCount, T0);
+    Vector<ThermalBatchStep> batch(steps);
+    for (auto& b : batch) {
+        b.forcing = forcing;
+        b.dt_s = dt;
+    }
+    gpuStepper.StepMany(gpuState, elements, materials, exchange, sunTable, batch);
+
+    EXPECT_NEAR(gpuState.Surface(0), cpuState.Surface(0), 0.05);
+
+    // And the term is actually doing something: the same surface run dry ends
+    // up markedly hotter, so a parity that held by both sides ignoring it
+    // would not pass here.
+    ThermalMaterial dry = soil;
+    dry.wetnessFactor = 0.0f;
+    const Vector<ThermalMaterial> dryMaterials{dry};
+    ThermalState dryState = MakeState(1, nodeCount, T0);
+    for (i32 i = 0; i < steps; ++i) {
+        cpuStepper.Step(dryState, elements, dryMaterials, exchange, forcing, dt,
+                        {exchange.sunVisibility});
+    }
+    EXPECT_GT(dryState.Surface(0), cpuState.Surface(0) + 5.0);
 }
 
 TEST_F(ThermalStepGpuTest, MaterialsWithNoConductivityAreNeverWritten) {

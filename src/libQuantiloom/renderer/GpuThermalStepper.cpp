@@ -43,7 +43,7 @@ struct ThermalMaterialGpu {
     f32 longwaveEmissivity;
     u32 interiorBcFixed;
     f32 interiorTemperature;
-    f32 pad;
+    f32 wetnessFactor;
 };
 static_assert(sizeof(ThermalMaterialGpu) == 40);
 
@@ -59,11 +59,16 @@ struct StepPushConstants {
     u32 parity;
     u32 sunSampleA;
     u32 sunSampleB;
-    u32 pad0;
-    u32 pad1;
-    u32 pad2;
+    f32 diffuseIrradiance;
+    f32 relativeHumidity;
+    u32 hasReflectedGain;
 };
 static_assert(sizeof(StepPushConstants) == 64);
+
+/// Bindings the compute shader declares. Buffers 9 and 10 are the baked
+/// short-wave gains; both are always bound, with placeholders when there is
+/// nothing to bake -- Vulkan has no notion of an optional descriptor here.
+constexpr u32 kBindingCount = 11;
 
 std::filesystem::path ExecutableDirectory() {
 #if defined(_WIN32)
@@ -127,11 +132,16 @@ struct GpuThermalStepper::Impl {
     std::unique_ptr<GpuBuffer> csrValueBuffer;
     std::unique_ptr<GpuBuffer> skyFractionBuffer;
     std::unique_ptr<GpuBuffer> sunVisBuffer;
+    std::unique_ptr<GpuBuffer> reflectedGainBuffer;
+    std::unique_ptr<GpuBuffer> diffuseGainBuffer;
     std::unique_ptr<GpuBuffer> stateBuffer;
     std::unique_ptr<GpuBuffer> surfaceBuffer;
 
     u32 lastElementCount = 0;
     u32 lastNodeCount = 0;
+    /// False when binding 9 holds a placeholder, which the shader must not
+    /// index past its first element.
+    bool hasReflectedGain = false;
 
     explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
 
@@ -160,9 +170,9 @@ struct GpuThermalStepper::Impl {
             return false;
         }
 
-        // 9 bindings: 0-6 SRV/SRV/SRV/SRV/SRV/SRV/SRV, 7-8 UAV
-        Vector<VkDescriptorSetLayoutBinding> bindings(9);
-        for (u32 i = 0; i < 9; ++i) {
+        // Bindings 0-6 and 9-10 read-only, 7-8 read-write
+        Vector<VkDescriptorSetLayoutBinding> bindings(kBindingCount);
+        for (u32 i = 0; i < kBindingCount; ++i) {
             bindings[i] = {};
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -172,7 +182,7 @@ struct GpuThermalStepper::Impl {
 
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 9;
+        layoutInfo.bindingCount = kBindingCount;
         layoutInfo.pBindings = bindings.data();
         if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr,
                                         &descriptorSetLayout) != VK_SUCCESS) {
@@ -211,7 +221,7 @@ struct GpuThermalStepper::Impl {
             return false;
         }
 
-        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 9};
+        VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kBindingCount};
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.poolSizeCount = 1;
@@ -270,7 +280,7 @@ struct GpuThermalStepper::Impl {
             gpuMats[m].interiorBcFixed =
                 materials[m].interiorBoundary == thermal::InteriorBoundary::FixedTemperature ? 1u : 0u;
             gpuMats[m].interiorTemperature = materials[m].interiorTemperature_K;
-            gpuMats[m].pad = 0.0f;
+            gpuMats[m].wetnessFactor = materials[m].wetnessFactor;
         }
         materialBuffer = std::make_unique<GpuBuffer>(
             alloc, gpuMats.size() * sizeof(ThermalMaterialGpu),
@@ -318,6 +328,38 @@ struct GpuThermalStepper::Impl {
             sunVisBuffer->Upload(exchange.sunVisibility.data(), n * sizeof(f32));
         }
 
+        // Reflected gain: same K-column layout as the visibility. Nothing baked
+        // means a one-float placeholder and a flag the shader checks, rather
+        // than a K*n buffer of zeros nobody reads.
+        hasReflectedGain = sunTable.reflectedGain.size() == sunTable.visibility.size() &&
+                           !sunTable.reflectedGain.empty();
+        const usize reflectedSize = hasReflectedGain ? sunTable.reflectedGain.size() : 1;
+        reflectedGainBuffer = std::make_unique<GpuBuffer>(
+            alloc, reflectedSize * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        if (hasReflectedGain) {
+            reflectedGainBuffer->Upload(sunTable.reflectedGain.data(),
+                                        reflectedSize * sizeof(f32));
+        } else {
+            const f32 zero = 0.0f;
+            reflectedGainBuffer->Upload(&zero, sizeof(f32));
+        }
+
+        // Diffuse gain: one column. With nothing baked the fallback is the bare
+        // sky fraction, which is what the CPU stepper falls back to -- uploaded
+        // rather than branched on, so the shader has one path.
+        diffuseGainBuffer = std::make_unique<GpuBuffer>(
+            alloc, n * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        if (sunTable.diffuseGain.size() == n) {
+            diffuseGainBuffer->Upload(sunTable.diffuseGain.data(), n * sizeof(f32));
+        } else if (exchange.skyFraction.size() >= n) {
+            diffuseGainBuffer->Upload(exchange.skyFraction.data(), n * sizeof(f32));
+        } else {
+            const Vector<f32> zeros(n, 0.0f);
+            diffuseGainBuffer->Upload(zeros.data(), n * sizeof(f32));
+        }
+
         // State: f64 → f32 upload
         const usize stateSize = static_cast<usize>(n) * nodes;
         Vector<f32> stateF32(stateSize);
@@ -343,7 +385,7 @@ struct GpuThermalStepper::Impl {
         surfaceBuffer->Upload(surfInit.data(), surfInit.size() * sizeof(f32));
 
         // Bind descriptors
-        const VkDescriptorBufferInfo infos[9] = {
+        const VkDescriptorBufferInfo infos[kBindingCount] = {
             {elementBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {materialBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {csrRowStartBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
@@ -353,9 +395,11 @@ struct GpuThermalStepper::Impl {
             {sunVisBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {stateBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {surfaceBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+            {reflectedGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+            {diffuseGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
         };
-        Vector<VkWriteDescriptorSet> writes(9);
-        for (u32 i = 0; i < 9; ++i) {
+        Vector<VkWriteDescriptorSet> writes(kBindingCount);
+        for (u32 i = 0; i < kBindingCount; ++i) {
             writes[i] = {};
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = descriptorSet;
@@ -364,7 +408,7 @@ struct GpuThermalStepper::Impl {
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &infos[i];
         }
-        vkUpdateDescriptorSets(device, 9, writes.data(), 0, nullptr);
+        vkUpdateDescriptorSets(device, kBindingCount, writes.data(), 0, nullptr);
     }
 
     void ReadBack(thermal::ThermalState& state,
@@ -477,6 +521,10 @@ void GpuThermalStepper::StepMany(thermal::ThermalState& state,
                 pc.parity = parity;
                 pc.sunSampleA = static_cast<u32>(step.sunSampleA);
                 pc.sunSampleB = static_cast<u32>(step.sunSampleB);
+                pc.diffuseIrradiance =
+                    static_cast<f32>(step.forcing.diffuseIrradiance_W_m2);
+                pc.relativeHumidity = static_cast<f32>(step.forcing.relativeHumidity);
+                pc.hasReflectedGain = m_impl->hasReflectedGain ? 1u : 0u;
 
                 vkCmdPushConstants(cmd, m_impl->pipelineLayout,
                                    VK_SHADER_STAGE_COMPUTE_BIT, 0,

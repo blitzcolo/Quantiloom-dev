@@ -33,7 +33,7 @@ struct ThermalMaterialGpu {
     float longwaveEmissivity;
     uint  interiorBcFixed;   // 0 = adiabatic, 1 = fixed temperature
     float interiorTemperature;
-    float pad;
+    float wetnessFactor;     // 0 = dry, 1 = open water
 };
 
 [[vk::binding(0, 0)]] StructuredBuffer<ThermalElementGpu>   elements;
@@ -45,6 +45,11 @@ struct ThermalMaterialGpu {
 [[vk::binding(6, 0)]] StructuredBuffer<float>               sunVisTable;
 [[vk::binding(7, 0)]] RWStructuredBuffer<float>             state;
 [[vk::binding(8, 0)]] RWStructuredBuffer<float>             surface;
+// Baked short wave: what reached the element off something else. The reflected
+// table has the same K-column layout as sunVisTable and is read on the same
+// indices; the diffuse gain does not depend on the sun, so it is one column.
+[[vk::binding(9, 0)]] StructuredBuffer<float>               reflectedGainTable;
+[[vk::binding(10, 0)]] StructuredBuffer<float>              diffuseGain;
 
 struct StepPushConstants {
     float3 sunDirection;
@@ -58,13 +63,38 @@ struct StepPushConstants {
     uint   parity;
     uint   sunSampleA;
     uint   sunSampleB;
-    uint   pad0;
-    uint   pad1;
-    uint   pad2;
+    float  diffuseIrradiance;
+    float  relativeHumidity;   // percent
+    uint   hasReflectedGain;   // 0 when the table is a placeholder
 };
 [[vk::push_constant]] StepPushConstants pc;
 
 static const float kStefanBoltzmann = 5.670374419e-8;
+
+// Air at the surface, for the latent term. Mirrors the CPU constants.
+static const float kAirPressure_Pa = 101325.0;
+static const float kAirSpecificHeat_J_kgK = 1005.0;
+static const float kLatentHeatVaporisation_J_kg = 2.45e6;
+
+// Saturation specific humidity, kg/kg, by Magnus-Tetens.
+float SaturationHumidity(float temperature_K) {
+    const float tC = temperature_K - 273.15;
+    const float e = 610.94 * exp(17.625 * tC / (tC + 243.04));
+    return 0.622 * e / (kAirPressure_Pa - 0.378 * e);
+}
+
+// The same, and its slope in temperature -- the reason the latent term is
+// linearised into the matrix rather than left explicit.
+void SaturationHumidityAndSlope(float temperature_K, out float q, out float dq_dT) {
+    const float tC = temperature_K - 273.15;
+    const float denominator = tC + 243.04;
+    const float e = 610.94 * exp(17.625 * tC / denominator);
+    const float de_dT = e * (17.625 * 243.04) / (denominator * denominator);
+
+    const float mixed = kAirPressure_Pa - 0.378 * e;
+    q = 0.622 * e / mixed;
+    dq_dT = 0.622 * kAirPressure_Pa * de_dT / (mixed * mixed);
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 tid : SV_DispatchThreadID) {
@@ -129,6 +159,25 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     }
 
+    // Sun off a neighbour, read on the same indices as the visibility it was
+    // baked from. A gather over the whole hemisphere, so no cos(theta) here --
+    // that went into the surfaces that did the reflecting.
+    if (pc.sunIrradiance > 0.0 && pc.hasReflectedGain != 0) {
+        float reflected = reflectedGainTable[pc.sunSampleA * pc.elementCount + e];
+        if (pc.sunSampleA != pc.sunSampleB) {
+            const float rB = reflectedGainTable[pc.sunSampleB * pc.elementCount + e];
+            reflected = reflected + pc.sunBlend * (rB - reflected);
+        }
+        surfaceFlux += mat.shortwaveAbsorptivity * pc.sunIrradiance * reflected;
+    }
+
+    // Sky, diffuse. Binding 10 is the baked gain, or the bare sky fraction
+    // when nothing was baked -- the host binds one or the other, so there is
+    // no fallback branch here.
+    if (pc.diffuseIrradiance > 0.0) {
+        surfaceFlux += mat.shortwaveAbsorptivity * pc.diffuseIrradiance * diffuseGain[e];
+    }
+
     // Long-wave exchange
     float incoming = 0.0;
     const uint rowBegin = csrRowStart[e];
@@ -147,6 +196,24 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float h = mat.convection;
     const float halfCell = rhoC * dx / (2.0 * pc.dt_s);
 
+    // Evaporation, linearised about the previous surface temperature and split
+    // half-and-half like the convection.
+    float latentAdmittance = 0.0;
+    float latentFlux = 0.0;
+    if (mat.wetnessFactor > 0.0) {
+        float qSurface;
+        float dq_dT;
+        SaturationHumidityAndSlope(Ti, qSurface, dq_dT);
+        const float qAir = SaturationHumidity(pc.airTemperature_K);
+
+        const float humidity = clamp(pc.relativeHumidity, 0.0, 100.0) / 100.0;
+        const float coefficient = mat.wetnessFactor *
+                                  (h / kAirSpecificHeat_J_kgK) *
+                                  kLatentHeatVaporisation_J_kg;
+        latentFlux = coefficient * (qSurface - humidity * qAir);
+        latentAdmittance = coefficient * dq_dT;
+    }
+
     // Build tridiagonal system in thread-local arrays
     float lower[QL_THERMAL_MAX_NODES];
     float diag[QL_THERMAL_MAX_NODES];
@@ -155,10 +222,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
 
     // Row 0: exposed face
     lower[0] = 0.0;
-    diag[0] = halfCell + 0.5 * (k / dx + h);
+    diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance);
     upper[0] = -0.5 * (k / dx);
     rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
-             0.5 * h * (2.0 * pc.airTemperature_K - T[0]) + surfaceFlux;
+             0.5 * h * (2.0 * pc.airTemperature_K - T[0]) + surfaceFlux -
+             latentFlux + 0.5 * latentAdmittance * T[0];
 
     // Interior nodes
     for (uint i = 1; i + 1 < nodes; ++i) {
