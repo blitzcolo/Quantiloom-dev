@@ -83,6 +83,54 @@ temperature has exactly one decode, `GetSurfaceTemperatureK` in
 `closesthit.rchit`, and all four sampling sites plus both debug views go
 through it. Solver, then texture, then the material's own scalar.
 
+### Interactive thermal path
+
+The solver runs in the viewport, not only offline. The architecture:
+
+**ThermalTimeline** (`thermal/ThermalTimeline.hpp`) is a fixed-grid trajectory:
+`t_k = startTime_h + k * timestep_s / 3600`. The timestep does not depend on
+the end time, so every step taken for an earlier query is reused for a later
+one. Checkpoints (full `ThermalState` snapshots) are stored every
+`checkpointStride_h` simulated hours; scrubbing backwards replays from the
+nearest checkpoint, not from t=0. The steady-state initial condition is
+computed once at construction.
+
+**GpuThermalStepper** (`renderer/GpuThermalStepper.hpp`) mirrors the CPU
+Crank-Nicolson math in f32 via `thermal_step.comp.hlsl`. Each element is one
+thread; the Thomas solve is thread-local (max 32 nodes); inter-element
+radiative coupling reads from a ping-pong surface buffer. `StepMany`
+dispatches entire batches in a single `ExecuteImmediate`. Falls back to the
+CPU stepper when no GPU is available or `nodeCount > 32`.
+
+**ThermalPreview** (`renderer/ThermalPreview.hpp`) is the internal subsystem
+class owned by `ExternalRenderContext::Impl`. It holds the mesh, exchange
+geometry, sun visibility table, timeline and stepper, plus dirty flags. It
+never touches the pipeline or descriptors — the facade owns binding 24.
+
+**SunVisibilityTable** (`thermal/ThermalTypes.hpp`) holds K columns of per-
+element sun visibility at different times of day. Built by
+`ThermalExchangePrecompute::RunSunVisibility` (K dispatches in one submit).
+Each solver step interpolates between the two nearest columns.
+
+### Invalidation rules
+
+Changing time (`SetThermalTime`) does NOT invalidate anything — it steps
+forward from (or replays from) a checkpoint. These events set dirty flags
+that the next `SetThermalTime` resolves lazily:
+
+| Event | Exchange | Sun table | Materials | Timeline |
+|---|---|---|---|---|
+| Geometry change (Adopt/Rebuild/Refit) | dirty | dirty | — | dirty |
+| Material IR curve edit | — | — | dirty | dirty |
+| SetThermalMaterial / ClearThermalMaterials | — | — | dirty | dirty |
+| SetParams (rays/topK changed) | dirty | dirty | — | dirty |
+| SetParams (forcing/sun fields changed) | — | dirty | — | dirty |
+| SetParams (timestep/layers/initial changed) | — | — | — | dirty |
+| SetLighting/SetSunDirection (no forcing file) | — | dirty | — | dirty |
+
+A `RefitAccelerationStructure` during a gizmo drag only sets the flag (O(1)
+per frame). The cost is deferred to the first scrub after the drag finalizes.
+
 The core is compiled once into `quantiloom_core` (an OBJECT library) and consumed
 two ways. **A new target links one or the other, never both** — two copies of the
 library's global state (the spdlog logger, static caches) in one process is a
