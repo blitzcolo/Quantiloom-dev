@@ -4,7 +4,7 @@ REM Quantiloom M1 - Shader Compilation Script (Windows)
 REM ============================================================================
 REM Compiles all HLSL ray tracing shaders to SPIR-V using DXC
 REM ============================================================================
-REM MANUAL FALLBACK. CMake compiles these same 13 shaders as part of a normal
+REM MANUAL FALLBACK. CMake compiles these same 15 shaders as part of a normal
 REM build (src/shaders/CMakeLists.txt), with the same flags, and tracks .hlsli
 REM dependencies -- so an ordinary build picks up shader edits on its own.
 REM Use this only when building without CMake, or to force a recompile.
@@ -159,7 +159,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_fpn.spv created
 
-echo [14/14] Compiling pick.rayq...
+echo [14/15] Compiling pick.rayq...
 dxc %RQ_FLAGS% -E main -Fo src/shaders/pick.spv src/shaders/pick.rayq.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile pick
@@ -167,6 +167,15 @@ if %ERRORLEVEL% NEQ 0 (
     exit /b 1
 )
 echo       OK src/shaders/pick.spv created
+
+echo [15/15] Compiling thermal_exchange.rayq...
+dxc %RQ_FLAGS% -E main -Fo src/shaders/thermal_exchange.spv src/shaders/thermal_exchange.rayq.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile thermal_exchange
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/thermal_exchange.spv created
 
 echo.
 echo =========================================

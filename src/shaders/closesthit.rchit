@@ -100,6 +100,12 @@
 
 [[vk::binding(23, 0)]] StructuredBuffer<EmissiveTriangleGPU> emissiveTriangles;
 
+// Per-element surface temperatures from the thermal solver (binding 24). One
+// float per triangle, indexed by the instance's thermalElementBase plus
+// PrimitiveIndex(). A scene with no solve binds a single zero and every
+// instance carries the sentinel, so nothing reads it.
+[[vk::binding(24, 0)]] StructuredBuffer<float> thermalTemperatures;
+
 // ============================================================================
 // Path Depth
 // ============================================================================
@@ -337,9 +343,28 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
 // ============================================================================
 // One decode for every reader: the emission paths and the debug views must
 // agree on what the surface temperature is, or a temperature map renders hot
-// while its debug view stays flat. The R channel is normalised [0, 1]; the
-// material carries the kelvin mapping.
-float GetSurfaceTemperatureK(MaterialData material, float2 uv) {
+// while its debug view stays flat.
+//
+// Three sources, most specific first:
+//
+//   the thermal solver, per triangle -- an energy balance decided this, and
+//     nothing a config says should override it
+//   a temperature texture, per texel -- R channel normalised [0, 1], the
+//     material carrying the kelvin mapping
+//   the material's own scalar
+//
+// A solved element of exactly zero means the solver ran but skipped this
+// surface (no thermal properties, or a degenerate triangle), which falls
+// through to the two below it.
+float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo,
+                             uint primitiveIndex, float2 uv) {
+    if (geoInfo.thermalElementBase != 0xFFFFFFFFu) {
+        const float solved = thermalTemperatures[geoInfo.thermalElementBase + primitiveIndex];
+        if (solved > 0.0) {
+            return solved;
+        }
+    }
+
     float T = material.irTemperature_K;
     if (material.temperatureTextureIndex >= 0) {
         float texTemp = SampleTexture(
@@ -2142,7 +2167,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV_swir, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface_swir = GetSurfaceTemperatureK(material, uv);
+        float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
@@ -2538,7 +2563,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface = GetSurfaceTemperatureK(material, uv);
+        float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
 
         // Atmospheric downwelling radiation temperature
         float T_atmosphere = lut.atmosphereTemperature_K;
@@ -2983,7 +3008,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Surface temperature (colormap 200K - 500K for visibility).
                 // Same decode as the emission paths, so a temperature map
                 // shows its field here instead of the scalar it overrides.
-                float temp_K = GetSurfaceTemperatureK(material, uv);
+                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
                 if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
                 debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
                 break;
@@ -2998,7 +3023,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             case DEBUG_MODE_IR_EMISSION: {
                 // Thermal emission component (grayscale, scaled)
-                float temp_K = GetSurfaceTemperatureK(material, uv);
+                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
                 if (temp_K <= 0.0) temp_K = 300.0;
                 float emission = GetEffectiveIREmissivity(material) * IRPlanckRadiance(temp_K, 10000.0);
                 emission = emission / (1.0 + emission);  // Tone map

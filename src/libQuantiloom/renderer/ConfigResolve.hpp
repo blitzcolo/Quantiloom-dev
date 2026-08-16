@@ -53,6 +53,7 @@
 #pragma once
 
 #include "atmos/AtmosphereNNConfig.hpp"
+#include "thermal/ThermalSolver.hpp"
 #include "core/Config.hpp"
 #include "core/SpectralData.hpp"
 #include "core/Types.hpp"
@@ -142,6 +143,11 @@ struct ResolvedRenderConfig {
     bool sensorEnabled = false;
     SensorParams sensor{};
 
+    /// [thermal] -- the surface energy balance, when a scene asks for one. Its
+    /// per-material properties come from the same [[materials]] entries the IR
+    /// overrides do, matched by name.
+    thermal::ThermalConfig thermal;
+
     // [quality]
     bool failOnSrgbUpsample = false;
     bool logMaterialSources = false;
@@ -192,6 +198,12 @@ struct ResolvedMaterialSpectra {
 
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
+
+    /// Thermal properties by material name, from the [[materials]] entries
+    /// that named a conductivity. Keyed by name rather than written onto the
+    /// Material: that header is a layout contract, and these are solver inputs
+    /// nothing in the shader reads.
+    std::unordered_map<String, thermal::ThermalMaterial> thermalMaterials;
 
     u32 temperatureBackfilled = 0;
     u32 materialsOverridden = 0;

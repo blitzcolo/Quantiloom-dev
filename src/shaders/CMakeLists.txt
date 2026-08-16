@@ -118,6 +118,7 @@ if(DXC_EXECUTABLE)
 
     # Viewport pick (inline ray query, cs_6_5)
     quantiloom_compile_hlsl(pick pick.rayq.hlsl)
+    quantiloom_compile_hlsl(thermal_exchange thermal_exchange.rayq.hlsl)
 endif()
 
 # Create custom target that depends on all compiled shaders

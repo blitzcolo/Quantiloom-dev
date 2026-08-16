@@ -682,6 +682,66 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // without rereading the file.
     out.sensor = PostprocessConfig::ParseSensorParams(config);
 
+    // ------------------------------------------------------------------
+    // [thermal]
+    // ------------------------------------------------------------------
+    // The surface energy balance. What it produces is a temperature per
+    // triangle, which the renderer uploads and the closest-hit shader reads in
+    // place of the material's own -- so a scene that enables this stops
+    // needing a temperature typed into it at all.
+    //
+    // Per-material properties are read from [[materials]] below, beside the IR
+    // overrides they belong with.
+    out.thermal.enabled = config.Get<bool>("thermal.enabled", false);
+    if (out.thermal.enabled) {
+        out.thermal.time_h = config.Get<f64>("thermal.time_h", 0.0);
+        out.thermal.startTime_h = config.Get<f64>("thermal.start_time_h", 0.0);
+        out.thermal.timestep_s = config.Get<f64>("thermal.timestep_s", 60.0);
+        out.thermal.nodeCount = config.Get<u32>("thermal.layers", 10);
+        out.thermal.initialTemperature_K =
+            config.Get<f64>("thermal.initial_temperature_k", 288.15);
+        out.thermal.exchangeRays = config.Get<u32>("thermal.exchange_rays", 256);
+        out.thermal.exchangeTopK = config.Get<u32>("thermal.exchange_top_k", 32);
+        out.thermal.sunIrradiance_W_m2 = config.Get<f64>("thermal.sun_irradiance_w_m2", 0.0);
+        out.thermal.forcingFile =
+            ResolveConfigPath(config.GetString("thermal.forcing_file", ""), options.baseDir);
+
+        const auto initial = config.GetString("thermal.initial", "steady");
+        if (initial == "uniform") {
+            out.thermal.initial = thermal::InitialCondition::Uniform;
+        } else if (initial == "steady") {
+            out.thermal.initial = thermal::InitialCondition::Steady;
+        } else {
+            diag.Warn("thermal.initial",
+                      "  unknown thermal.initial '" + initial +
+                          "', expected steady|uniform. Using steady.");
+        }
+
+        // The air the surfaces exchange with is the air the sky model uses --
+        // one atmosphere per scene. Same for the sun: the balance is lit by
+        // whatever lights the render.
+        out.thermal.airTemperature_K = config.Get<f64>(
+            "thermal.air_temperature_k", static_cast<f64>(out.lighting.atmosphereTemperature_K));
+        out.thermal.sunDirection = out.lighting.sunDirection;
+
+        // The sky the surfaces radiate against. With the clear-sky model on,
+        // that is the effective temperature its emissivity implies rather than
+        // the air temperature -- which is the whole difference between a
+        // surface that frosts overnight and one that does not.
+        out.thermal.skyTemperature_K =
+            out.lighting.skyEmissivityClear > 0.0f
+                ? skythermal::EffectiveSkyTemperatureK(
+                      out.thermal.airTemperature_K,
+                      static_cast<f64>(out.lighting.skyEmissivityClear))
+                : static_cast<f64>(out.lighting.atmosphereTemperature_K);
+
+        QL_LOG_INFO("  Thermal: {:.1f} h to {:.1f} h at {:.0f} s, {} layers, air {:.1f} K, "
+                    "sky {:.1f} K",
+                    out.thermal.startTime_h, out.thermal.time_h, out.thermal.timestep_s,
+                    out.thermal.nodeCount, out.thermal.airTemperature_K,
+                    out.thermal.skyTemperature_K);
+    }
+
     if (diag.failed()) {
         return ResolveResult::Err(diag.firstError());
     }
@@ -1031,6 +1091,42 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         if (matTable.Has("temperature_offset")) {
             it->temperatureOffset =
                 matTable.GetFloat("temperature_offset", it->temperatureOffset);
+        }
+
+        // Thermal properties, for the surface energy balance. Read into a
+        // side table keyed by name rather than onto the Material, which is a
+        // layout contract Quantiloom-Qt reads by offset and has no business
+        // carrying solver inputs. Naming a conductivity is what opts a
+        // material in; everything else has a default that describes masonry.
+        if (matTable.Has("thermal_conductivity_w_mk")) {
+            thermal::ThermalMaterial props;
+            props.conductivity_W_mK = matTable.GetFloat("thermal_conductivity_w_mk", 0.0f);
+            props.density_kg_m3 = matTable.GetFloat("density_kg_m3", 2000.0f);
+            props.specificHeat_J_kgK = matTable.GetFloat("specific_heat_j_kgk", 900.0f);
+            props.thickness_m = matTable.GetFloat("thickness_m", 0.2f);
+            props.convection_W_m2K = matTable.GetFloat("convection_h_w_m2k", 5.0f);
+            props.shortwaveAbsorptivity =
+                matTable.GetFloat("shortwave_absorptivity", 0.7f);
+            props.interiorTemperature_K =
+                matTable.GetFloat("interior_temperature_k", 293.15f);
+
+            const auto boundary = matTable.GetString("interior_bc", "adiabatic");
+            if (boundary == "fixed") {
+                props.interiorBoundary = thermal::InteriorBoundary::FixedTemperature;
+            } else if (boundary == "adiabatic") {
+                props.interiorBoundary = thermal::InteriorBoundary::Adiabatic;
+            } else {
+                diag.Warn("materials.interior_bc",
+                          "  Material '" + name + "': unknown interior_bc '" + boundary +
+                              "', expected adiabatic|fixed. Using adiabatic.");
+            }
+
+            out.thermalMaterials[name] = props;
+            QL_LOG_INFO("  Material '{}': thermal k={:.2f} W/mK, rho c={:.0f} J/m3K, "
+                        "d={:.3f} m, h={:.1f} W/m2K",
+                        name, props.conductivity_W_mK,
+                        props.density_kg_m3 * props.specificHeat_J_kgK, props.thickness_m,
+                        props.convection_W_m2K);
         }
 
         ++out.materialsOverridden;

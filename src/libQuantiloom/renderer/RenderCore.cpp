@@ -668,6 +668,10 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
             offset.uvOffset = nUVs;
             offset.tangentOffset = nTangents;
             offset.materialId = prim.materialId;
+            // No solver until one says otherwise. Zero would be a valid base,
+            // so the sentinel has to be set rather than left to the value
+            // initialisation above.
+            offset.thermalElementBase = 0xFFFFFFFFu;
             primitiveOffsets.push_back(offset);
 
             const auto vcount = static_cast<u32>(prim.positions.size());
@@ -848,6 +852,19 @@ void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
     m_instances = std::move(instances);
     m_instanceToNode = std::move(instanceToNode);
     m_instanceCount = newCount;
+}
+
+void SceneGeometry::SetThermalElementBases(const Vector<u32>& bases) {
+    if (!m_instanceInfo || m_instances.empty()) {
+        return;
+    }
+    for (usize i = 0; i < m_instances.size(); ++i) {
+        m_instances[i].thermalElementBase = i < bases.size() ? bases[i] : 0xFFFFFFFFu;
+    }
+    // Same buffer, rewritten in place: the descriptor still points at it, so
+    // nothing has to be rebound.
+    m_instanceInfo->Upload(m_instances.data(),
+                           m_instances.size() * sizeof(InstanceGeometryInfo));
 }
 
 bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
@@ -1045,6 +1062,9 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     pipeline->BindAtmosphereNN(bindings.atmosphereHeader,
                                bindings.atmosphereData);             // 17, 20
 
+    if (bindings.thermalTemperatures) {
+        pipeline->BindThermalTemperatureBuffer(*bindings.thermalTemperatures);  // 24
+    }
     if (bindings.emissiveTriangles) {
         pipeline->BindEmissiveTriangleBuffer(*bindings.emissiveTriangles);  // 23
     }

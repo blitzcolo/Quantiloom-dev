@@ -245,7 +245,11 @@ struct InstanceGeometryInfo {
     u32 uvOffset;       // Offset into the merged UV buffer, in UVs
     u32 tangentOffset;  // Offset into the merged tangent buffer, in tangents
     u32 materialId;     // Index into Scene::materials
-    u32 pad[2];         // Pad to 32 bytes
+    /// First thermal element of this instance, or 0xFFFFFFFF where no solve
+    /// ran. The closest-hit shader adds PrimitiveIndex() to it, which is the
+    /// whole of how a triangle finds the temperature the balance gave it.
+    u32 thermalElementBase;
+    u32 pad;            // Pad to 32 bytes
 };
 
 static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mismatch");
@@ -351,6 +355,14 @@ public:
     [[nodiscard]] const GpuBuffer& UVs() const { return *m_uvs; }
     [[nodiscard]] const GpuBuffer& Tangents() const { return *m_tangents; }
     [[nodiscard]] const GpuBuffer& InstanceInfo() const { return *m_instanceInfo; }
+
+    /// Point each instance at its first thermal element and re-upload.
+    ///
+    /// Separate from Build() because the solver runs after the geometry does:
+    /// it needs the acceleration structure this built in order to find out who
+    /// sees whom. Passing fewer bases than there are instances leaves the rest
+    /// at the sentinel, which the shader reads as "no solver here".
+    void SetThermalElementBases(const Vector<u32>& bases);
 
     /// One per TLAS instance -- node count times primitives per mesh, not BLAS count.
     [[nodiscard]] u32 InstanceCount() const { return m_instanceCount; }
@@ -496,6 +508,9 @@ struct PipelineBindings {
     const GpuBuffer* atmosphereData = nullptr;
     const GpuBuffer* cieColourMatching = nullptr;
     const GpuBuffer* emissiveTriangles = nullptr;
+    /// Per-element surface temperatures from the thermal solver. Always bound;
+    /// a scene with no solve gets a single zero entry.
+    const GpuBuffer* thermalTemperatures = nullptr;
 };
 
 /**

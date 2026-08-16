@@ -37,6 +37,9 @@
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
+#include "renderer/ThermalExchangePrecompute.hpp"
+#include "thermal/ThermalMesh.hpp"
+#include "thermal/ThermalSolver.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/GpuBuffer.hpp"
@@ -120,6 +123,10 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<GpuBuffer> atmosDataBuffer;
     std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
     std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;
+    /// Per-element surface temperatures from the thermal solver. Always
+    /// created -- an unbound descriptor is not a valid one -- with a single
+    /// zero entry when no solve ran.
+    std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
@@ -161,6 +168,11 @@ struct OfflineRenderer::Impl {
     SetupResult BuildScene();
     SetupResult BuildIlluminants();
     SetupResult BuildPipeline();
+    /// Run the surface energy balance, if the scene asked for one, and leave
+    /// its temperatures in thermalTemperatureBuffer. Always leaves a valid
+    /// buffer behind -- a single zero entry when there was no solve -- because
+    /// an unbound descriptor is not a valid one.
+    void RunThermalSolver();
 
     OfflineRenderOutput RenderHyperspectral();
     OfflineRenderOutput RenderSingleFrame();
@@ -230,6 +242,72 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     outputImage = rendercore::CreateRenderTarget(context, params.width, params.height);
 
     return SetupResult::Ok();
+}
+
+void OfflineRenderer::Impl::RunThermalSolver() {
+    VulkanContext& context = *contextRef;
+
+    auto bindEmpty = [&] {
+        const f32 zero = 0.0f;
+        thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(), sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
+    };
+
+    if (!resolved.thermal.enabled) {
+        bindEmpty();
+        return;
+    }
+
+    QL_LOG_INFO("Running the thermal solver...");
+
+    thermal::ThermalConfig thermalConfig = resolved.thermal;
+    thermalConfig.materials = spectra.thermalMaterials;
+
+    const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(loadedScene);
+
+    // The view factors. On the GPU where there is one to run them on: the same
+    // rays Aguerre et al. cast with Embree, against the acceleration structure
+    // the render already built. A failure here is not a failed render -- the
+    // solver falls back to treating every surface as seeing open sky, which
+    // is right for a scene with nothing to shade anything else and too cold at
+    // night for a street. It says which one it used.
+    thermal::ExchangeGeometry exchange;
+    {
+        rendercore::ThermalExchangePrecompute precompute(context);
+        if (precompute.IsValid() && geometry.IsValid()) {
+            rendercore::ThermalExchangePrecompute::Params params;
+            params.hemisphereRays = resolved.thermal.exchangeRays;
+            params.topK = resolved.thermal.exchangeTopK;
+            params.sunDirection = resolved.lighting.sunDirection;
+            exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+                                      mesh.instanceElementBase, params);
+        }
+        if (exchange.skyFraction.empty()) {
+            QL_LOG_WARN("  Thermal: no view factors; every surface will be treated as "
+                        "seeing open sky");
+        }
+    }
+
+    const thermal::ThermalResult result =
+        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange);
+    if (!result.error.empty()) {
+        QL_LOG_WARN("  Thermal: {}; the scene keeps the temperatures it was given",
+                    result.error);
+        bindEmpty();
+        return;
+    }
+
+    thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+        context.GetAllocator(), result.surfaceTemperature_K.size() * sizeof(f32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    thermalTemperatureBuffer->Upload(result.surfaceTemperature_K.data(),
+                                     result.surfaceTemperature_K.size() * sizeof(f32));
+
+    // Point the instances at their elements. This is the whole of how a
+    // triangle in the shader finds the temperature the balance gave it.
+    geometry.SetThermalElementBases(result.instanceElementBase);
 }
 
 SetupResult OfflineRenderer::Impl::BuildIlluminants() {
@@ -528,6 +606,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCMF_LUTRef;
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
+    bindings.thermalTemperatures = thermalTemperatureBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
 
@@ -651,6 +730,12 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
         impl.lightingParams.emissiveTotalPower =
             emissiveTris.empty() ? 0.0f : emissiveTris.back().cumulativePower;
     }
+
+    // The surface energy balance, if the scene asked for one. After the
+    // geometry, because the view factors are cast against the acceleration
+    // structure it built; before the pipeline, because what comes out is a
+    // buffer the pipeline binds.
+    impl.RunThermalSolver();
 
     impl.lightingParamsBuffer = std::make_unique<GpuBuffer>(
         impl.contextRef->GetAllocator(),

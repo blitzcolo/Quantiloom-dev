@@ -1,0 +1,101 @@
+# Thermal solver — the temperatures come from an energy balance, not a config
+#
+# Every thermal scene so far has been told what temperature its surfaces are.
+# This one is not: [thermal] runs a surface energy balance from midnight to the
+# hour named, and what the camera sees is what that balance settled on.
+#
+# The plate is 0.2 m of concrete, adiabatic behind, under a clear sky with the
+# sun overhead. What decides its temperature is the balance between absorbed
+# sunlight, radiative cooling to a sky 20 K below the air, and convection --
+# and, because concrete has thermal inertia, when in the day it is asked.
+#
+# Try it at several hours. With [[thermal]] time_h = 6 the plate is still cold
+# from the night; at 12 it is well above the air; at 20 it is falling but has
+# not caught up with the air yet, which is thermal inertia doing the thing that
+# makes a thermogram of a street interesting.
+#
+# A sequence of hours is what the batch manifest is for:
+#
+#   plate.toml | thermal.time_h=6.0  renderer.output="06h.exr"
+#   plate.toml | thermal.time_h=12.0 renderer.output="12h.exr"
+
+[renderer]
+resolution = [384, 384]
+spp = 16
+output = "thermal_solver_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/endmember_checker.glb"
+world_units_to_meters = 1.0
+# Only a starting point: the solver overwrites it for every surface it owns.
+default_temperature_k = 288.15
+
+[camera]
+position = [0.0, 14.0, 6.0]
+look_at  = [0.0, 0.0, 0.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 50.0
+
+[lighting]
+# Overhead: the plate faces up, so this is the sun at its most effective.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[atmosphere]
+preset = "disabled"
+# The sky the plate radiates against. Its effective temperature — about 20 K
+# below the air here — is what the balance cools toward at night.
+sky_model = "clear_sky"
+air_temperature_k = 293.15
+relative_humidity = 50.0
+
+[thermal]
+enabled = true
+# Noon, from a midnight start. The 12 hours between are stepped a minute at a
+# time, which is well inside concrete's own time constant.
+time_h = 12.0
+start_time_h = 0.0
+timestep_s = 60.0
+layers = 10
+# Start from the temperature the plate would settle at under the starting
+# forcing, rather than from a number nobody chose.
+initial = "steady"
+initial_temperature_k = 288.15
+# Direct normal irradiance. A clear noon is around 900 W/m^2.
+sun_irradiance_w_m2 = 900.0
+exchange_rays = 256
+exchange_top_k = 32
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.92
+ir_transmittance = 0.0
+# Naming a conductivity is what opts a material into the solve. Concrete:
+# 1.4 W/mK, 2300 kg/m^3, 880 J/kgK — the combination that gives it enough
+# thermal mass to still be warm after sunset.
+thermal_conductivity_w_mk = 1.4
+density_kg_m3 = 2300.0
+specific_heat_j_kgk = 880.0
+thickness_m = 0.2
+convection_h_w_m2k = 10.0
+shortwave_absorptivity = 0.6
+interior_bc = "adiabatic"
+
+[thermography]
+enabled = true
+emissivity = 0.92
+reflected_temperature_k = 273.0
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

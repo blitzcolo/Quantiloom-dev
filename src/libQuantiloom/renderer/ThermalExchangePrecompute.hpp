@@ -1,0 +1,86 @@
+/**
+ * @file ThermalExchangePrecompute.hpp
+ * @brief Who sees whom, on the GPU, once per scene
+ *
+ * The view factors the energy balance needs are a geometry question -- what
+ * fraction of each surface's hemisphere every other surface fills, and whether
+ * the sun reaches it -- and they do not change while the geometry does not.
+ * So they are computed once, before any stepping, by casting a hemisphere of
+ * rays per element against the acceleration structure the renderer already
+ * built.
+ *
+ * Aguerre et al. compute the same matrix with Embree on the CPU and report
+ * eleven minutes for a hundred thousand elements. This is the same algorithm
+ * against hardware ray tracing.
+ *
+ * Self-contained: its own pipeline, descriptor set and buffers, in the manner
+ * of GpuSpectralReconstructor rather than as another method on
+ * ExternalRenderContext. The offline renderer has no compute infrastructure of
+ * its own, and this is the first thing to need any.
+ */
+
+#pragma once
+
+#include "renderer/VulkanContext.hpp"
+#include "thermal/ThermalTypes.hpp"
+
+#include <vulkan/vulkan.h>
+
+#include <memory>
+
+namespace quantiloom::rendercore {
+
+/**
+ * @brief One run of the exchange precompute
+ */
+class ThermalExchangePrecompute {
+public:
+    struct Params {
+        /// Rays per element. The estimator's error goes as 1/sqrt(N), and a
+        /// view factor wrong by a few percent moves a temperature by a
+        /// fraction of a kelvin, so a few hundred is enough.
+        u32 hemisphereRays = 256;
+        /// Rays across the sun's disc. Several rather than one so an element at
+        /// the edge of a shadow gets a fraction, which is what makes the
+        /// shadow boundary in the temperature field as soft as the geometry.
+        u32 sunRays = 8;
+        /// Entries kept per row. Past the largest few a row is mostly the
+        /// noise floor of the estimator, and keeping it would make the matrix
+        /// dense for no accuracy.
+        u32 topK = 32;
+        /// From surface toward the sun, normalised.
+        glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+        /// Angular radius of the sun, radians. The real one is 0.00465.
+        f32 sunAngularRadius = 0.00465f;
+    };
+
+    ThermalExchangePrecompute(VulkanContext& context);
+    ~ThermalExchangePrecompute();
+
+    ThermalExchangePrecompute(const ThermalExchangePrecompute&) = delete;
+    ThermalExchangePrecompute& operator=(const ThermalExchangePrecompute&) = delete;
+
+    /// True when the pipeline came up. False means the shader could not be
+    /// found or the device refused it, and the caller should fall back to the
+    /// analytic open-sky exchange rather than failing the render.
+    [[nodiscard]] bool IsValid() const;
+
+    /**
+     * @brief Cast the rays and reduce them into sparse rows
+     *
+     * @param tlas      the scene's top-level acceleration structure
+     * @param elements  surface elements, in BuildThermalMesh order
+     * @param instanceElementBase  first element of each TLAS instance
+     * @param params    ray counts and the sun
+     * @return the exchange geometry, or an empty one on failure
+     */
+    [[nodiscard]] thermal::ExchangeGeometry Run(
+        VkAccelerationStructureKHR tlas, const Vector<thermal::ThermalElement>& elements,
+        const Vector<u32>& instanceElementBase, const Params& params);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
+
+}  // namespace quantiloom::rendercore

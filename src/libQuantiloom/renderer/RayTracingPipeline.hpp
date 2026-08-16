@@ -329,6 +329,10 @@ public:
 
     // Bind emissive triangle buffer (binding 23)
     void BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const;
+    /// Per-element surface temperatures from the thermal solver (binding 24).
+    /// Always bound; a scene with no solve gets a single zero entry, and the
+    /// shader reads it only where InstanceGeometryInfo says there is one.
+    void BindThermalTemperatureBuffer(const GpuBuffer& buffer) const;
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();

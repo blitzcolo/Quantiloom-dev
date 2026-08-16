@@ -194,6 +194,13 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
     std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
+    /// Per-element surface temperatures (binding 24). The interactive path
+    /// runs no thermal solve -- a solve is an offline step, and its output is
+    /// a state the viewport would have to be told about rather than compute --
+    /// so this is one zero entry, which every instance's sentinel keeps the
+    /// shader from reading. Bound because an unbound descriptor is not a valid
+    /// one, and reading one is a device loss rather than a wrong colour.
+    std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -388,6 +395,7 @@ struct ExternalRenderContext::Impl {
         atmosDataBuffer.reset();
         cieCmfBuffer.reset();
         emissiveTriangleBuffer.reset();
+        thermalTemperatureBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -2965,6 +2973,13 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     // No scene yet, so no emitters -- but the descriptor still has to be
     // written, and CreatePipeline can run before any scene is loaded.
     emissiveTriangleBuffer = rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, {});
+    {
+        const f32 zero = 0.0f;
+        thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
+    }
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {
@@ -2997,6 +3012,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCmfBuffer.get();
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
+    bindings.thermalTemperatures = thermalTemperatureBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);

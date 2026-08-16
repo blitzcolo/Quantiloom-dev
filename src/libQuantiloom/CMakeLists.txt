@@ -122,6 +122,8 @@ add_library(quantiloom_core OBJECT
     renderer/SpectralUnmixer.hpp
     renderer/TemperatureTextureLoader.cpp
     renderer/TemperatureTextureLoader.hpp
+    renderer/ThermalExchangePrecompute.cpp
+    renderer/ThermalExchangePrecompute.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
     renderer/OfflineRenderer.cpp
@@ -144,6 +146,16 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/scene/Texture.hpp
     scene/Scene.cpp
     ${QL_PUBLIC_INC}/scene/Scene.hpp
+
+    # Thermal module (surface energy balance; the temperatures a thermogram is of)
+    thermal/ThermalTypes.hpp
+    thermal/ThermalStepper.hpp
+    thermal/CpuCrankNicolsonStepper.cpp
+    thermal/CpuCrankNicolsonStepper.hpp
+    thermal/ThermalMesh.cpp
+    thermal/ThermalMesh.hpp
+    thermal/ThermalSolver.cpp
+    thermal/ThermalSolver.hpp
 
     # Postprocess module
     ${QL_PUBLIC_INC}/postprocess/SensorModel.hpp

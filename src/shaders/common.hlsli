@@ -1207,7 +1207,11 @@ struct InstanceGeometryInfo {
     uint uvOffset;        // Offset into global UV buffer (UV count)
     uint tangentOffset;   // Offset into global tangent buffer (tangent count)
     uint materialId;      // Material index (used instead of InstanceID for material lookup)
-    uint pad[2];          // Padding for 32-byte alignment
+    // First thermal element of this instance, or 0xFFFFFFFF where the solver
+    // did not run. Add PrimitiveIndex() to it and the triangle has the
+    // temperature the surface energy balance gave it.
+    uint thermalElementBase;
+    uint pad;             // Padding for 32-byte alignment
 };
 
 // ============================================================================

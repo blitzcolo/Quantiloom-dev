@@ -215,6 +215,7 @@ set(TEST_CORE_SOURCES
     test_core/test_blackbody_physics.cpp
     test_core/test_blackbody.cpp
     test_core/test_sky_thermal.cpp
+    test_core/test_thermal_conduction.cpp
     test_core/test_ir_energy_conservation.cpp
     test_core/test_config.cpp
     test_core/test_spectral_cube.cpp
@@ -256,6 +257,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_material_conversion.cpp
     test_renderer/test_spectral_unmixer.cpp
     test_renderer/test_temperature_texture.cpp
+    test_renderer/test_thermal_exchange_gpu.cpp
     test_renderer/test_depth_aov.cpp
     test_renderer/test_pick.cpp
     test_renderer/test_config_duplicates.cpp
