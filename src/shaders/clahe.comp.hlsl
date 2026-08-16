@@ -502,9 +502,14 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
         float normalizedLum = NormalizeValue(luminance, globalMin, globalMax);
         float mappedLum = ToneMap(luminance, globalMin, globalMax, pixelCenter);
 
-        // Scale RGB by luminance ratio
-        // Output is normalized to [0, 1] for display (not HDR physical values)
-        if (normalizedLum > 1e-6f) {
+        if (pixel.r == pixel.g && pixel.g == pixel.b) {
+            // No colour to preserve, so the ratio below has nothing to do --
+            // and it is not neutral: RGBToLuminance of a grey pixel is not
+            // that pixel to the last bit, so dividing by it wobbles the result
+            // around each of the CDF's plateaus and breaks the ordering the
+            // whole mode exists to keep. Every infrared render lands here.
+            result.rgb = mappedLum.xxx;
+        } else if (normalizedLum > 1e-6f) {
             float scale = mappedLum / normalizedLum;
             result.rgb = saturate(float3(
                 NormalizeValue(pixel.r, globalMin, globalMax) * scale,
