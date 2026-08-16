@@ -118,6 +118,52 @@ diffuse_irradiance_w_m2` and `[atmosphere] relative_humidity` — the humidity
 is deliberately *not* duplicated into `[thermal]`, since a scene with two of
 them would be a scene with two atmospheres.
 
+### Getting a thermogram onto a screen
+
+`BlitToTarget` is a bare format conversion — there is no tone mapping in the
+present path. An LWIR render's radiance sits around 1e-2, two orders below 1.0,
+so **display enhancement is not a beautifier; it is the only reason an infrared
+scene is visible at all**. `clahe.comp.hlsl` (three passes, driven by
+`DisplayEnhancementParams` in `include/quantiloom/renderer/DisplayControl.hpp`)
+is two independent stages:
+
+| Stage | What it decides | Modes |
+|---|---|---|
+| **Tone** | contrast: a scalar → [0,1] | `Linear`, `Equalize`, `Clahe` |
+| **Palette** | colour: that scalar → RGB, changing no contrast | `Grey`, `GreyInverted`, `Ironbow`, `Rainbow`, `Viridis` |
+
+They are separate fields because they compose; enumerating the product would be
+a dozen names for two decisions.
+
+The property that separates the tone operators is not sharpness, it is whether
+the whole image is mapped the same way. Measured on `thermal_solver_lwir` at
+3.16M pixels, sorting display value by raw radiance and counting inverted pairs:
+
+| | inverted pairs | worst drop |
+|---|---:|---:|
+| `Linear` | 0.000% | 0 |
+| `Equalize` | 0.000% | 0 |
+| `Clahe` | 50.6% | 0.176 — 45 display levels |
+
+So **do not read a temperature off a `Clahe` view**: two pixels at one
+temperature in different tiles come out as different greys. It is for finding an
+edge. `Linear` is the default and is what a thermal camera calls linear AGC.
+
+Two traps worth knowing before touching any of it:
+
+- `Equalize` needed no new pipeline. Pass 2 sums every tile's histogram, so all
+  tiles end up with one CDF, and pass 3's bilinear blend between four identical
+  CDFs is that CDF. `Linear` skips passes 1 and 2 entirely — which is why pass 3
+  binds the descriptor set again rather than relying on pass 1 having done it.
+- The luminance-preserving path divides by the pixel's own luminance, and
+  `RGBToLuminance(v,v,v)` is not `v` to the last bit. That ratio used to wobble
+  grey pixels around each CDF plateau — 12.9% inverted pairs. Achromatic pixels
+  now bypass it, which is every infrared render.
+
+`CaptureDisplayImage()` reads this image and `CaptureScreenshot()` reads the raw
+accumulation, deliberately: Studio's "Save Screenshot" gives the false-colour
+view, "Export Image" gives physical values. Neither is a bug to be tidied.
+
 ### Interactive thermal path
 
 The solver runs in the viewport, not only offline. The architecture:
