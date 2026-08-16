@@ -44,6 +44,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Camera.hpp"
 #include "renderer/ConfigApply.hpp"
+#include "renderer/DisplayControl.hpp"
 #include "renderer/ThermalControl.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/Pick.hpp"
@@ -712,37 +713,28 @@ public:
     // ========================================================================
 
     /**
-     * @struct CLAHEParams
-     * @brief Parameters for GPU CLAHE display enhancement
+     * @brief Set the tone operator and palette the viewport is displayed with
      *
-     * Controls Contrast Limited Adaptive Histogram Equalization for
-     * improving visibility of low-contrast images (especially IR bands).
-     */
-    struct CLAHEParams {
-        bool enabled = false;           ///< Enable CLAHE processing
-        f32 clipLimit = 2.0f;           ///< Contrast limit (1.0 = no limit, typical 2.0-4.0)
-        i32 tileSize = 8;              ///< Tile grid size (4, 8, 16, or 32)
-        bool luminanceOnly = true;     ///< Apply only to luminance channel (preserve color)
-        bool normalizeOutput = true;   ///< Normalize output to [0,1] range
-    };
-
-    /**
-     * @brief Set CLAHE display enhancement parameters
+     * When enabled, a display image is maintained separately from the raw
+     * output image. The display image carries the tone mapping and the palette
+     * and is what the target is blitted from; the raw output image is
+     * untouched and is what CaptureScreenshot() and every export read.
+     * CaptureDisplayImage() reads the other one, which is how a false-colour
+     * thermogram gets saved.
      *
-     * When enabled, a display image is maintained separately from the
-     * raw output image. The display image has CLAHE applied and is used
-     * for screen presentation. The raw output image is preserved for
-     * export/analysis via CaptureScreenshot().
+     * See DisplayControl.hpp for what the modes mean -- in particular that
+     * only Linear and Equalize keep "brighter is hotter" true across the whole
+     * image.
      *
-     * @param params CLAHE parameters
+     * @param params tone mode, palette and their parameters
      * @note Takes effect on the next RenderFrame() call
      */
-    void SetCLAHEParams(const CLAHEParams& params);
+    void SetDisplayEnhancementParams(const DisplayEnhancementParams& params);
 
     /**
-     * @brief Get current CLAHE parameters
+     * @brief Get the current display enhancement parameters
      */
-    [[nodiscard]] const CLAHEParams& GetCLAHEParams() const;
+    [[nodiscard]] const DisplayEnhancementParams& GetDisplayEnhancementParams() const;
 
     /**
      * @brief Capture display image (with CLAHE applied if enabled)

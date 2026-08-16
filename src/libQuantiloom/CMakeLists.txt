@@ -130,6 +130,7 @@ add_library(quantiloom_core OBJECT
     renderer/ThermalPreview.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
+    ${QL_PUBLIC_INC}/renderer/DisplayControl.hpp
     ${QL_PUBLIC_INC}/renderer/ThermalControl.hpp
     renderer/OfflineRenderer.cpp
     ${QL_PUBLIC_INC}/renderer/OfflineRenderer.hpp

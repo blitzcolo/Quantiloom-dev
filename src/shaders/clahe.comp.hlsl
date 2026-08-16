@@ -1,14 +1,39 @@
 ﻿/**
  * @file clahe.comp.hlsl
- * @brief CLAHE (Contrast Limited Adaptive Histogram Equalization) compute shaders
+ * @brief The display path: a tone operator, then a palette
  *
- * GPU implementation of CLAHE for real-time display enhancement.
- * Three passes:
+ * This is the only tone mapping the viewport has. The blit to the swapchain is
+ * a bare format conversion, so an image whose radiance sits at 1e-2 -- every
+ * LWIR render -- is black on screen until something here maps it into [0,1].
+ *
+ * Two stages, deliberately independent:
+ *
+ *   1. TONE: a scalar to [0,1]. This is the contrast stretch.
+ *   2. PALETTE: that scalar to a colour. This changes no contrast at all.
+ *
+ * The three tone operators differ in one property that matters more than
+ * sharpness for a thermogram -- whether the mapping is the same everywhere in
+ * the image:
+ *
+ *   TONE_LINEAR    stretch [inputMin, inputMax] (a percentile window computed
+ *                  on the host). Globally monotone: brighter is hotter,
+ *                  everywhere. What a thermal camera calls linear AGC. Passes
+ *                  1 and 2 are skipped for it entirely.
+ *   TONE_EQUALIZE  histogram equalisation over the WHOLE image, clipped at
+ *                  clipLimit. Also globally monotone; more contrast where the
+ *                  pixels actually are. Thermal cameras call this plateau AGC.
+ *                  Shares the three passes below -- pass 2 simply sums every
+ *                  tile's histogram, so all tiles end up with one CDF.
+ *   TONE_CLAHE     per-tile equalisation, bilinearly blended. The best local
+ *                  detail and the worst radiometry: two pixels at the same
+ *                  temperature in different tiles map to different greys, so
+ *                  "brighter is hotter" stops holding. Good for finding an
+ *                  edge, wrong for reading a temperature off the screen.
+ *
+ * Three passes, selected by #define at compile time:
  *   Pass 1 (CLAHE_PASS_HISTOGRAM): Build per-tile histograms
  *   Pass 2 (CLAHE_PASS_CDF): Clip, redistribute, compute CDFs
- *   Pass 3 (CLAHE_PASS_APPLY): Apply interpolated mapping
- *
- * Designed for HDR images - handles floating point input with auto-normalization.
+ *   Pass 3 (CLAHE_PASS_APPLY): Apply the mapping, then the palette
  *
  * @author blitzcolo
  */
@@ -26,6 +51,19 @@
 #define MAX_TILES_X 64
 #define MAX_TILES_Y 64
 
+// Tone operators. See the file header for what separates them.
+#define TONE_LINEAR   0
+#define TONE_EQUALIZE 1
+#define TONE_CLAHE    2
+
+// Palettes. Grey is the identity and the only one that leaves a colour image
+// alone; everything else replaces the colour with the scalar's own.
+#define PALETTE_GREY          0
+#define PALETTE_GREY_INVERTED 1
+#define PALETTE_IRONBOW       2
+#define PALETTE_RAINBOW       3
+#define PALETTE_VIRIDIS       4
+
 // Push constants for all passes
 struct CLAHEPushConstants {
     uint imageWidth;
@@ -37,7 +75,9 @@ struct CLAHEPushConstants {
     float inputMin;            // Pre-computed min value for normalization
     float inputMax;            // Pre-computed max value for normalization
     uint passIndex;            // Which pass is executing (0, 1, or 2)
-    uint padding[3];
+    uint toneMode;             // TONE_*
+    uint palette;              // PALETTE_*
+    uint padding;
 };
 
 [[vk::push_constant]] CLAHEPushConstants params;
@@ -94,6 +134,77 @@ uint2 GetTileIndex(uint2 pixelCoord) {
     uint tileWidth = (params.imageWidth + params.tileCountX - 1) / params.tileCountX;
     uint tileHeight = (params.imageHeight + params.tileCountY - 1) / params.tileCountY;
     return uint2(pixelCoord.x / tileWidth, pixelCoord.y / tileHeight);
+}
+
+// ============================================================================
+// Palettes
+// ============================================================================
+// Evenly spaced control points, linearly interpolated. A ramp rather than a
+// polynomial fit because the control points are the specification -- someone
+// checking a palette against a reference reads numbers, not coefficients.
+
+float3 IronbowPalette(float t) {
+    // The classic thermal ramp: black through violet and red into white.
+    static const float3 c[8] = {
+        float3(0.000f, 0.000f, 0.000f),
+        float3(0.110f, 0.020f, 0.260f),
+        float3(0.300f, 0.030f, 0.430f),
+        float3(0.510f, 0.060f, 0.430f),
+        float3(0.730f, 0.170f, 0.310f),
+        float3(0.900f, 0.350f, 0.130f),
+        float3(0.990f, 0.640f, 0.010f),
+        float3(1.000f, 1.000f, 0.850f)
+    };
+    float x = saturate(t) * 7.0f;
+    uint i = min((uint)x, 6u);
+    return lerp(c[i], c[i + 1], x - (float)i);
+}
+
+float3 RainbowPalette(float t) {
+    // Blue through cyan and green to red. High apparent contrast and no
+    // perceptual order to speak of, which is exactly why it is not the
+    // default -- but it is what "false colour" means to most people.
+    static const float3 c[6] = {
+        float3(0.0f, 0.0f, 0.5f),
+        float3(0.0f, 0.0f, 1.0f),
+        float3(0.0f, 1.0f, 1.0f),
+        float3(1.0f, 1.0f, 0.0f),
+        float3(1.0f, 0.0f, 0.0f),
+        float3(0.5f, 0.0f, 0.0f)
+    };
+    float x = saturate(t) * 5.0f;
+    uint i = min((uint)x, 4u);
+    return lerp(c[i], c[i + 1], x - (float)i);
+}
+
+float3 ViridisPalette(float t) {
+    // Perceptually uniform and monotone in lightness, so a difference in
+    // colour is a difference in value rather than an artefact of the ramp.
+    // The one to reach for when the picture is going into a paper.
+    static const float3 c[11] = {
+        float3(0.267f, 0.005f, 0.329f),
+        float3(0.283f, 0.141f, 0.458f),
+        float3(0.254f, 0.265f, 0.530f),
+        float3(0.207f, 0.372f, 0.553f),
+        float3(0.164f, 0.471f, 0.558f),
+        float3(0.128f, 0.567f, 0.551f),
+        float3(0.135f, 0.659f, 0.518f),
+        float3(0.267f, 0.749f, 0.441f),
+        float3(0.478f, 0.821f, 0.318f),
+        float3(0.741f, 0.873f, 0.150f),
+        float3(0.993f, 0.906f, 0.144f)
+    };
+    float x = saturate(t) * 10.0f;
+    uint i = min((uint)x, 9u);
+    return lerp(c[i], c[i + 1], x - (float)i);
+}
+
+float3 ApplyPalette(float t, uint palette) {
+    if (palette == PALETTE_IRONBOW) return IronbowPalette(t);
+    if (palette == PALETTE_RAINBOW) return RainbowPalette(t);
+    if (palette == PALETTE_VIRIDIS) return ViridisPalette(t);
+    if (palette == PALETTE_GREY_INVERTED) return (1.0f - saturate(t)).xxx;
+    return saturate(t).xxx;
 }
 
 // Get tile bounds
@@ -183,7 +294,28 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID, uint loc
 #ifdef CLAHE_PASS_CDF
 
 groupshared uint histogram[HISTOGRAM_BINS];
+// The counts as they were loaded. The working copy above is clipped in place,
+// and both the pixel total and the clipped excess have to be read from the
+// unclipped ones -- this used to be a second pass over global memory.
+groupshared uint rawHistogram[HISTOGRAM_BINS];
 groupshared float cdf[HISTOGRAM_BINS];
+
+/// One bin's count for this workgroup's tile, or for the whole image when the
+/// tone operator is global. Summing every tile here is what makes equalisation
+/// global without a second pipeline: every workgroup then computes the same
+/// CDF, and pass 3's bilinear blend between four identical CDFs is that CDF.
+uint LoadBin(uint tileX, uint tileY, uint bin) {
+    if (params.toneMode != TONE_EQUALIZE) {
+        return histogramBuffer[GetHistogramIndex(tileX, tileY, bin)];
+    }
+    uint total = 0;
+    for (uint ty = 0; ty < params.tileCountY; ++ty) {
+        for (uint tx = 0; tx < params.tileCountX; ++tx) {
+            total += histogramBuffer[GetHistogramIndex(tx, ty, bin)];
+        }
+    }
+    return total;
+}
 
 [numthreads(256, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex) {
@@ -192,8 +324,8 @@ void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex) {
 
     // Load histogram to shared memory
     if (localIndex < HISTOGRAM_BINS) {
-        uint idx = GetHistogramIndex(tileX, tileY, localIndex);
-        histogram[localIndex] = histogramBuffer[idx];
+        rawHistogram[localIndex] = LoadBin(tileX, tileY, localIndex);
+        histogram[localIndex] = rawHistogram[localIndex];
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -201,7 +333,7 @@ void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex) {
     uint totalPixels = 0;
     if (localIndex == 0) {
         for (uint i = 0; i < HISTOGRAM_BINS; ++i) {
-            totalPixels += histogram[i];
+            totalPixels += rawHistogram[i];
         }
     }
     GroupMemoryBarrierWithGroupSync();
@@ -219,10 +351,8 @@ void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex) {
     if (clipThreshold == 0) clipThreshold = 1;
 
     // Clip and count excess
-    uint excess = 0;
     if (localIndex < HISTOGRAM_BINS) {
         if (histogram[localIndex] > clipThreshold) {
-            excess = histogram[localIndex] - clipThreshold;
             histogram[localIndex] = clipThreshold;
         }
     }
@@ -232,8 +362,8 @@ void main(uint3 groupId : SV_GroupID, uint localIndex : SV_GroupIndex) {
     if (localIndex == 0) {
         uint totalExcess = 0;
         for (uint i = 0; i < HISTOGRAM_BINS; ++i) {
-            if (histogramBuffer[GetHistogramIndex(tileX, tileY, i)] > clipThreshold) {
-                totalExcess += histogramBuffer[GetHistogramIndex(tileX, tileY, i)] - clipThreshold;
+            if (rawHistogram[i] > clipThreshold) {
+                totalExcess += rawHistogram[i] - clipThreshold;
             }
         }
         cdf[1] = (float)totalExcess;  // Store for redistribution
@@ -325,6 +455,17 @@ float InterpolateCDF(float2 pixelCenter, uint bin) {
     return lerp(cdf0, cdf1, fy);
 }
 
+/// One value to [0,1]. The linear operator is the window and nothing else, so
+/// it reads no CDF at all -- which is why the host skips the two passes that
+/// would have built one.
+float ToneMap(float value, float minValue, float maxValue, float2 pixelCenter) {
+    float normalized = NormalizeValue(value, minValue, maxValue);
+    if (params.toneMode == TONE_LINEAR) {
+        return normalized;
+    }
+    return InterpolateCDF(pixelCenter, ValueToBin(normalized));
+}
+
 [numthreads(16, 16, 1)]
 void main(uint3 dispatchId : SV_DispatchThreadID) {
     uint2 pixelCoord = dispatchId.xy;
@@ -347,14 +488,19 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
     float globalMax = params.inputMax;
     float2 pixelCenter = float2(pixelCoord) + 0.5f;
 
-    if (params.luminanceOnly) {
+    if (params.palette != PALETTE_GREY) {
+        // The colour is the palette's, so there is nothing for luminanceOnly to
+        // preserve: the scalar is the luminance and the palette decides the
+        // rest. Infrared renders are grey to begin with, so nothing is lost
+        // there; on a visible render this deliberately discards the colour,
+        // which is what asking for false colour means.
+        float t = ToneMap(RGBToLuminance(pixel.rgb), globalMin, globalMax, pixelCenter);
+        result.rgb = ApplyPalette(t, params.palette);
+    } else if (params.luminanceOnly) {
         // Process luminance only, preserve colors
         float luminance = RGBToLuminance(pixel.rgb);
         float normalizedLum = NormalizeValue(luminance, globalMin, globalMax);
-        uint bin = ValueToBin(normalizedLum);
-
-        // Get interpolated CDF value (already in [0, 1] range)
-        float mappedLum = InterpolateCDF(pixelCenter, bin);
+        float mappedLum = ToneMap(luminance, globalMin, globalMax, pixelCenter);
 
         // Scale RGB by luminance ratio
         // Output is normalized to [0, 1] for display (not HDR physical values)
@@ -370,23 +516,9 @@ void main(uint3 dispatchId : SV_DispatchThreadID) {
         }
     } else {
         // Process each channel independently
-        float3 normalizedRGB = float3(
-            NormalizeValue(pixel.r, globalMin, globalMax),
-            NormalizeValue(pixel.g, globalMin, globalMax),
-            NormalizeValue(pixel.b, globalMin, globalMax)
-        );
-
-        uint3 bins = uint3(
-            ValueToBin(normalizedRGB.r),
-            ValueToBin(normalizedRGB.g),
-            ValueToBin(normalizedRGB.b)
-        );
-
-        // Get interpolated CDF values for each channel
-        // Output is directly in [0, 1] range for display
-        result.r = InterpolateCDF(pixelCenter, bins.r);
-        result.g = InterpolateCDF(pixelCenter, bins.g);
-        result.b = InterpolateCDF(pixelCenter, bins.b);
+        result.r = ToneMap(pixel.r, globalMin, globalMax, pixelCenter);
+        result.g = ToneMap(pixel.g, globalMin, globalMax, pixelCenter);
+        result.b = ToneMap(pixel.b, globalMin, globalMax, pixelCenter);
     }
 
     result.a = pixel.a;

@@ -300,9 +300,10 @@ struct ExternalRenderContext::Impl {
     // Pixel readback buffer (for debug hover display)
     std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
 
-    // CLAHE display enhancement resources
-    ExternalRenderContext::CLAHEParams claheParams;
-    std::unique_ptr<GpuImage> displayImage;           // CLAHE-processed output for display
+    // Display enhancement resources. The pipeline is still the three CLAHE
+    // passes -- Linear skips the first two and Equalize sums across tiles.
+    DisplayEnhancementParams displayParams;
+    std::unique_ptr<GpuImage> displayImage;           // tone-mapped output for display
     std::unique_ptr<GpuBuffer> claheHistogramBuffer;  // Per-tile histograms
     std::unique_ptr<GpuBuffer> claheCdfBuffer;        // Per-tile CDFs
     std::unique_ptr<GpuBuffer> claheMinMaxBuffer;     // Per-tile min/max for normalization
@@ -1353,7 +1354,7 @@ void ExternalRenderContext::RenderFrame(
     // Only update every N frames to reduce readback overhead, but always update
     // on frame 1 (after first render) and whenever cache is invalid
     constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized &&
+    if (m_impl->displayParams.enabled && m_impl->claheInitialized &&
         m_impl->accumulatedSamples > 0 &&
         (!m_impl->hasCachedMinMax ||
          m_impl->accumulatedSamples == 1 ||  // Always update after first frame
@@ -1432,7 +1433,7 @@ void ExternalRenderContext::RenderFrame(
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
         m_impl->ExecuteGPUSensorChain(cmd, renderW, renderH);
     }
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
         // Note: ExecuteCLAHE reads from outputImage by default (TODO: make it
         // read from the sensor output when that is enabled).
         m_impl->ExecuteCLAHE(cmd, renderW, renderH);
@@ -1453,7 +1454,7 @@ void ExternalRenderContext::RenderFrame(
 
 VkImage ExternalRenderContext::Impl::CurrentDisplaySource() const {
     // Priority: GPU sensor -> CLAHE -> raw accumulation.
-    if (claheParams.enabled && claheInitialized && displayImage) {
+    if (displayParams.enabled && claheInitialized && displayImage) {
         return displayImage->GetImage();
     }
     if (gpuSensorEnabled && sensorInitialized && sensorImage) {
@@ -1629,7 +1630,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
     // changes -- so a filled cache is still right, whatever display setting
     // prompted the reprocess. Only a cache that has never been filled needs
     // computing: CLAHE enabled for the first time after the trace stopped.
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized &&
+    if (m_impl->displayParams.enabled && m_impl->claheInitialized &&
         !m_impl->hasCachedMinMax) {
         m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
@@ -1640,7 +1641,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
     if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
         m_impl->ExecuteGPUSensorChain(cmd, m_impl->width, m_impl->height);
     }
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
         m_impl->ExecuteCLAHE(cmd, m_impl->width, m_impl->height);
     }
 
@@ -2918,21 +2919,34 @@ Result<Image, String> ExternalRenderContext::CaptureScreenshot() {
 // CLAHE Display Enhancement
 // ============================================================================
 
-void ExternalRenderContext::SetCLAHEParams(const CLAHEParams& params) {
-    bool wasEnabled = m_impl->claheParams.enabled;
-    m_impl->claheParams = params;
+void ExternalRenderContext::SetDisplayEnhancementParams(
+    const DisplayEnhancementParams& params) {
+    const bool wasEnabled = m_impl->displayParams.enabled;
+    // The percentile window is computed on the host and cached; moving it has
+    // to invalidate that cache or the new window takes effect ten frames late,
+    // or never once the trace has stopped.
+    const bool windowMoved = params.percentileLow != m_impl->displayParams.percentileLow ||
+                             params.percentileHigh != m_impl->displayParams.percentileHigh;
+    m_impl->displayParams = params;
 
-    // Initialize CLAHE resources if enabling for the first time
+    if (windowMoved) {
+        m_impl->hasCachedMinMax = false;
+    }
+
+    // Initialize the pipeline if enabling for the first time
     if (params.enabled && !wasEnabled && !m_impl->claheInitialized) {
         m_impl->CreateCLAHEPipeline();
     }
 
-    QL_LOG_DEBUG("CLAHE params: enabled={}, clipLimit={}, tileSize={}, luminanceOnly={}",
-                 params.enabled, params.clipLimit, params.tileSize, params.luminanceOnly);
+    QL_LOG_DEBUG("Display enhancement: enabled={}, tone={}, palette={}, clipLimit={}, "
+                 "tileSize={}, window=[{}, {}]",
+                 params.enabled, static_cast<u32>(params.toneMode),
+                 static_cast<u32>(params.palette), params.clipLimit, params.tileSize,
+                 params.percentileLow, params.percentileHigh);
 }
 
-const ExternalRenderContext::CLAHEParams& ExternalRenderContext::GetCLAHEParams() const {
-    return m_impl->claheParams;
+const DisplayEnhancementParams& ExternalRenderContext::GetDisplayEnhancementParams() const {
+    return m_impl->displayParams;
 }
 
 // ============================================================================
@@ -2991,7 +3005,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     VkImage sourceImage = m_impl->outputImage->GetImage();
 
     // Priority 1: CLAHE output (includes all effects)
-    if (m_impl->claheParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
+    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
         sourceImage = m_impl->displayImage->GetImage();
         QL_LOG_DEBUG("CaptureDisplayImage: Using displayImage (CLAHE enabled)");
     }
@@ -3024,10 +3038,27 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     displayImage.metadata["wavelength_nm"] = std::to_string(m_impl->wavelength_nm);
     displayImage.metadata["accumulated_samples"] = std::to_string(m_impl->accumulatedSamples);
     displayImage.metadata["spp_target"] = std::to_string(m_impl->spp);
-    displayImage.metadata["clahe_applied"] = m_impl->claheParams.enabled ? "true" : "false";
-    if (m_impl->claheParams.enabled) {
-        displayImage.metadata["clahe_clip_limit"] = std::to_string(m_impl->claheParams.clipLimit);
-        displayImage.metadata["clahe_tile_size"] = std::to_string(m_impl->claheParams.tileSize);
+    // What was done to the pixels, recorded beside them: a display capture is
+    // not radiometric, and the metadata is where that is admitted.
+    displayImage.metadata["display_enhancement"] =
+        m_impl->displayParams.enabled ? "true" : "false";
+    if (m_impl->displayParams.enabled) {
+        static constexpr const char* kToneNames[] = {"linear", "equalize", "clahe"};
+        static constexpr const char* kPaletteNames[] = {"grey", "grey_inverted", "ironbow",
+                                                        "rainbow", "viridis"};
+        displayImage.metadata["display_tone_mode"] =
+            kToneNames[std::min<usize>(static_cast<usize>(m_impl->displayParams.toneMode),
+                                       std::size(kToneNames) - 1)];
+        displayImage.metadata["display_palette"] =
+            kPaletteNames[std::min<usize>(static_cast<usize>(m_impl->displayParams.palette),
+                                          std::size(kPaletteNames) - 1)];
+        displayImage.metadata["display_clip_limit"] =
+            std::to_string(m_impl->displayParams.clipLimit);
+        displayImage.metadata["display_tile_size"] =
+            std::to_string(m_impl->displayParams.tileSize);
+        displayImage.metadata["display_percentile_window"] =
+            std::to_string(m_impl->displayParams.percentileLow) + ", " +
+            std::to_string(m_impl->displayParams.percentileHigh);
     }
     displayImage.metadata["gpu_sensor_applied"] = m_impl->gpuSensorEnabled ? "true" : "false";
     if (m_impl->gpuSensorEnabled) {
@@ -4768,18 +4799,14 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
         return;
     }
 
-    // Check if range is "narrow" enough to not need percentile clipping
-    // If max/min ratio < 100, use absolute min/max (like SWIR/MWIR)
-    f32 ratio = (absMin > 1e-10f) ? (absMax / absMin) : (absMax - absMin + 1.0f);
-    if (ratio < 100.0f) {
-        outMin = absMin;
-        outMax = absMax;
-        //QL_LOG_DEBUG("CLAHE: Using absolute min/max (ratio {:.1f}x)", ratio);
-        return;
-    }
-
-    // Wide range detected - use percentile-based normalization
-    // Build histogram for percentile calculation (more efficient than sorting)
+    // The display window is a percentile window, always. This used to be
+    // gated on the max/min ratio exceeding 100, which reads as "only clip when
+    // the range is wide" -- but an infrared render's ratio is 1.01 to 3, so
+    // the guard held for exactly the images that need it least protected: the
+    // whole window was then set by one hot pixel and one cold one, and the
+    // scene got whatever contrast they left over.
+    //
+    // Build a histogram rather than sorting: same percentile, one pass.
     constexpr size_t histBins = 65536;
     std::vector<u32> histogram(histBins, 0);
 
@@ -4792,37 +4819,44 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     }
 
     // Find 1st and 99th percentile bins
-    size_t totalPixels = luminances.size();
-    size_t target01 = static_cast<size_t>(totalPixels * 0.01f);
-    size_t target99 = static_cast<size_t>(totalPixels * 0.99f);
+    const f64 lowFraction =
+        std::clamp(static_cast<f64>(displayParams.percentileLow), 0.0, 100.0) / 100.0;
+    const f64 highFraction =
+        std::clamp(static_cast<f64>(displayParams.percentileHigh), 0.0, 100.0) / 100.0;
+
+    const size_t totalPixels = luminances.size();
+    const auto targetLow = static_cast<size_t>(static_cast<f64>(totalPixels) * lowFraction);
+    const auto targetHigh = static_cast<size_t>(static_cast<f64>(totalPixels) * highFraction);
 
     size_t cumulative = 0;
-    size_t bin01 = 0, bin99 = histBins - 1;
+    size_t binLow = 0;
+    size_t binHigh = histBins - 1;
+    bool haveLow = false;
 
     for (size_t i = 0; i < histBins; ++i) {
         cumulative += histogram[i];
-        if (cumulative >= target01 && bin01 == 0) {
-            bin01 = i;
+        if (!haveLow && cumulative >= targetLow) {
+            binLow = i;
+            haveLow = true;
         }
-        if (cumulative >= target99) {
-            bin99 = i;
+        if (cumulative >= targetHigh) {
+            binHigh = i;
             break;
         }
     }
 
     // Convert bins back to luminance values
-    f32 invScale = (absMax - absMin) / (histBins - 1);
-    outMin = absMin + bin01 * invScale;
-    outMax = absMin + bin99 * invScale;
+    const f32 invScale = (absMax - absMin) / (histBins - 1);
+    outMin = absMin + static_cast<f32>(binLow) * invScale;
+    outMax = absMin + static_cast<f32>(binHigh) * invScale;
 
-    // Ensure valid range
-    if (outMin >= outMax) {
+    // A window the percentiles collapsed to nothing is an image with no
+    // contrast in it -- an isothermal cavity, most often -- and stretching it
+    // would turn rounding noise into a picture. Fall back to what there is.
+    if (!(outMax - outMin > (absMax - absMin) * 1e-3f)) {
         outMin = absMin;
         outMax = absMax;
     }
-
-    //QL_LOG_DEBUG("CLAHE: Using 1st/99th percentile (ratio {:.1f}x, clipped [{:.6g}, {:.6g}] -> [{:.6g}, {:.6g}])",
-    //             ratio, absMin, absMax, outMin, outMax);
 }
 
 void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
@@ -4858,8 +4892,8 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
 
     // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
     // NOT pixels per tile
-    u32 tileCountX = static_cast<u32>(claheParams.tileSize);
-    u32 tileCountY = static_cast<u32>(claheParams.tileSize);
+    u32 tileCountX = static_cast<u32>(displayParams.tileSize);
+    u32 tileCountY = static_cast<u32>(displayParams.tileSize);
 
     // Clamp to max tiles (matching buffer allocation)
     tileCountX = std::min(tileCountX, 64u);
@@ -4889,7 +4923,9 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
         f32 inputMin;
         f32 inputMax;
         u32 passIndex;
-        u32 padding[3];
+        u32 toneMode;
+        u32 palette;
+        u32 padding;
     };
 
     CLAHEPushConstants pushConstants{};
@@ -4897,26 +4933,40 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     pushConstants.imageHeight = height;
     pushConstants.tileCountX = tileCountX;
     pushConstants.tileCountY = tileCountY;
-    pushConstants.clipLimit = claheParams.clipLimit;
-    pushConstants.luminanceOnly = claheParams.luminanceOnly ? 1 : 0;
+    pushConstants.clipLimit = displayParams.clipLimit;
+    pushConstants.luminanceOnly = displayParams.luminanceOnly ? 1 : 0;
+    pushConstants.toneMode = static_cast<u32>(displayParams.toneMode);
+    pushConstants.palette = static_cast<u32>(displayParams.palette);
     pushConstants.inputMin = inputMin;
     pushConstants.inputMax = inputMax;
 
-    // Memory barrier: wait for ray tracing to finish
+    // A linear stretch is the window and nothing else, so the two passes that
+    // exist to build a CDF have nothing to contribute -- and skipping them
+    // makes the cheapest tone operator also the cheapest to run.
+    const bool needsHistogram = displayParams.toneMode != DisplayToneMode::Linear;
+
     VkMemoryBarrier memBarrier{};
     memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+
+    // Memory barrier: wait for ray tracing to finish. Without the histogram
+    // passes the next reader is pass 3's compute, not the buffer fill.
     memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    memBarrier.dstAccessMask = needsHistogram
+                                   ? VK_ACCESS_TRANSFER_WRITE_BIT
+                                   : (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
     vkCmdPipelineBarrier(
         cmd,
         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
+        needsHistogram ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                       : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0,
         1, &memBarrier,
         0, nullptr,
         0, nullptr
     );
+
+    if (needsHistogram) {
 
     // Clear histogram buffer to zero before Pass 1
     // Without this, garbage data from uninitialized GPU memory causes
@@ -4988,9 +5038,15 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
         0, nullptr
     );
 
-    // Pass 3: Apply interpolated mapping
+    }  // needsHistogram
+
+    // Pass 3: Apply the mapping, then the palette
     pushConstants.passIndex = 2;
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, claheApplyPipeline);
+    // Bound here as well as in pass 1, because pass 1 does not always run.
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            clahePipelineLayout, 0, 1,
+                            &claheDescriptorSet, 0, nullptr);
     vkCmdPushConstants(cmd, clahePipelineLayout,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0,
                        sizeof(pushConstants), &pushConstants);
