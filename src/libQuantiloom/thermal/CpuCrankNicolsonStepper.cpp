@@ -24,8 +24,17 @@ constexpr f64 kLatentHeatVaporisation_J_kg = 2.45e6;
 /// Saturation vapour pressure, Pa, by Magnus-Tetens. Good to a few tenths of a
 /// percent between -40 and +50 C, which is the whole range a surface balance
 /// visits outside a fire.
+///
+/// The clamp is not about accuracy, it is about not making things worse: the
+/// state clamp lets a diverging element reach 5000 K, and Magnus at 5000 K
+/// returns a vapour pressure of 1e10 Pa, which drives the mixing-ratio
+/// denominator negative and turns the whole latent term into a NaN. A NaN
+/// spreads through the radiative coupling to every element that can see the
+/// one that produced it, so a single bad element takes the scene with it --
+/// the divergence should stay visible as a wrong temperature, not become a
+/// blank image.
 f64 SaturationVapourPressure(const f64 temperature_K) {
-    const f64 tC = temperature_K - 273.15;
+    const f64 tC = std::clamp(temperature_K - 273.15, -80.0, 80.0);
     return 610.94 * std::exp(17.625 * tC / (tC + 243.04));
 }
 
@@ -40,7 +49,8 @@ f64 SaturationHumidity(const f64 temperature_K) {
 /// degrees, so a wet surface's latent admittance at 300 K is several times its
 /// radiative one.
 void SaturationHumidity(const f64 temperature_K, f64& q, f64& dq_dT) {
-    const f64 tC = temperature_K - 273.15;
+    // Same clamp as the vapour pressure, and for the same reason.
+    const f64 tC = std::clamp(temperature_K - 273.15, -80.0, 80.0);
     const f64 denominator = tC + 243.04;
     const f64 e = SaturationVapourPressure(temperature_K);
     const f64 de_dT = e * (17.625 * 243.04) / (denominator * denominator);

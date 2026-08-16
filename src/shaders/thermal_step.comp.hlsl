@@ -76,9 +76,12 @@ static const float kAirPressure_Pa = 101325.0;
 static const float kAirSpecificHeat_J_kgK = 1005.0;
 static const float kLatentHeatVaporisation_J_kg = 2.45e6;
 
-// Saturation specific humidity, kg/kg, by Magnus-Tetens.
+// Saturation specific humidity, kg/kg, by Magnus-Tetens. The clamp mirrors the
+// CPU stepper's: the state clamp lets a diverging element reach 5000 K, where
+// Magnus returns 1e10 Pa, drives the mixing-ratio denominator negative and
+// hands back a NaN that then spreads down every view factor.
 float SaturationHumidity(float temperature_K) {
-    const float tC = temperature_K - 273.15;
+    const float tC = clamp(temperature_K - 273.15, -80.0, 80.0);
     const float e = 610.94 * exp(17.625 * tC / (tC + 243.04));
     return 0.622 * e / (kAirPressure_Pa - 0.378 * e);
 }
@@ -86,7 +89,7 @@ float SaturationHumidity(float temperature_K) {
 // The same, and its slope in temperature -- the reason the latent term is
 // linearised into the matrix rather than left explicit.
 void SaturationHumidityAndSlope(float temperature_K, out float q, out float dq_dT) {
-    const float tC = temperature_K - 273.15;
+    const float tC = clamp(temperature_K - 273.15, -80.0, 80.0);
     const float denominator = tC + 243.04;
     const float e = 610.94 * exp(17.625 * tC / denominator);
     const float de_dT = e * (17.625 * 243.04) / (denominator * denominator);
