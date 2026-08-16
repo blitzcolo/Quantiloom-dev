@@ -83,6 +83,41 @@ temperature has exactly one decode, `GetSurfaceTemperatureK` in
 `closesthit.rchit`, and all four sampling sites plus both debug views go
 through it. Solver, then texture, then the material's own scalar.
 
+### What the balance is made of
+
+Six fluxes at the exposed face, three of which no config asks for directly —
+they are geometry, computed once per trajectory:
+
+| Flux | Where it comes from | Off when |
+|---|---|---|
+| Direct sun | `α_s E_dni cosθ v_i`, `v_i` from the shadow dispatch | no sun |
+| **Diffuse sky** | `α_s E_diff G_i`, `G_i` the sky fraction plus one bounce | `diffuse_irradiance_w_m2 = 0` |
+| **Reflected sun** | `α_s E_dni R_ik`, baked per sun column | scene is a single plane |
+| Long wave | `ε σ (Σ F_ij T_j⁴ + s_i T_sky⁴ − T_i⁴)` | `ir_emissivity = 0` |
+| Convection | `h (T_air − T_i)`, half implicit | `convection_h_w_m2k = 0` |
+| **Evaporation** | `f_wet (h/c_p) L_v (q_sat(T_i) − RH q_sat(T_air))`, Magnus | `wetness_factor = 0` (the default) |
+
+`R` and `G` come from `thermal/ShortwaveGains.hpp`, gathered with the **same
+CSR view factors as the long wave** — radiosity and radiative exchange are one
+integral over one hemisphere, in two bands — so they cost a matrix pass rather
+than a second precompute. Neither depends on temperature, so both are baked
+into the `SunVisibilityTable` when the timeline is built and a step just reads
+them. `R` has a column per sun sample and is interpolated on the same indices
+as the visibility it was baked from; `G` is one column.
+
+Evaporation is the only term that is **not** explicit. Its slope in
+temperature is several times the linearised radiative one, so it is Newton-
+linearised into `diag[0]` and `rhs[0]` beside the convection. Left explicit it
+oscillates at a minute per step.
+
+The forcing CSV is eight columns, the last two optional and defaulted:
+`time_h, air_k, dni, sun_azimuth_deg, sun_elevation_deg, sky_k,
+diffuse_w_m2, relative_humidity`. A file written before those existed keeps
+its meaning exactly. A constant-forcing run reads `[thermal]
+diffuse_irradiance_w_m2` and `[atmosphere] relative_humidity` — the humidity
+is deliberately *not* duplicated into `[thermal]`, since a scene with two of
+them would be a scene with two atmospheres.
+
 ### Interactive thermal path
 
 The solver runs in the viewport, not only offline. The architecture:
@@ -106,11 +141,17 @@ CPU stepper when no GPU is available or `nodeCount > 32`.
 class owned by `ExternalRenderContext::Impl`. It holds the mesh, exchange
 geometry, sun visibility table, timeline and stepper, plus dirty flags. It
 never touches the pipeline or descriptors — the facade owns binding 24.
+Everything the timeline is constructed with except the `Desc` is **held by
+reference for its lifetime**, so all of it has to be a member — a local copy
+is read after it goes out of scope.
 
 **SunVisibilityTable** (`thermal/ThermalTypes.hpp`) holds K columns of per-
-element sun visibility at different times of day. Built by
-`ThermalExchangePrecompute::RunSunVisibility` (K dispatches in one submit).
-Each solver step interpolates between the two nearest columns.
+element sun visibility at different times of day, the sun direction each was
+taken at, and the short-wave gains baked from them. Built by
+`ThermalExchangePrecompute::RunSunVisibility` (K dispatches in one submit,
+hemisphere rays skipped) whenever the forcing file has more than one row;
+constant forcing gets a single column from the exchange. Each solver step
+interpolates between the two nearest columns.
 
 ### Invalidation rules
 
@@ -130,6 +171,11 @@ that the next `SetThermalTime` resolves lazily:
 
 A `RefitAccelerationStructure` during a gizmo drag only sets the flag (O(1)
 per frame). The cost is deferred to the first scrub after the drag finalizes.
+
+The short-wave gains have **no flag of their own**. They depend on the
+geometry, the sun columns and the absorptivities, and every event that
+changes one of those already marks the timeline dirty — so they are re-baked
+in `RebuildTimeline` and are fresh by construction.
 
 The core is compiled once into `quantiloom_core` (an OBJECT library) and consumed
 two ways. **A new target links one or the other, never both** — two copies of the
