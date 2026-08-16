@@ -25,9 +25,13 @@ namespace quantiloom::thermal {
  *
  * At the exposed face:
  *
- *   -k dT/dx = alpha_s E_sun v_i max(cos theta, 0)
+ *   -k dT/dx = alpha_s (E_sun v_i max(cos theta, 0) + E_sun R_i + E_diff G_i)
  *              + eps sigma (sum_j F_ij T_j^4 + s_i T_sky^4 - T_i^4)
  *              + h (T_air - T_i)
+ *              - f_wet (h / c_p) L_v (q_sat(T_i) - RH q_sat(T_air))
+ *
+ * where R_i and G_i are the baked short-wave gains -- sunlight and skylight
+ * that reached the element off a neighbour, which the direct term cannot see.
  *
  * The radiative term uses the PREVIOUS step's temperatures for every T on the
  * right, including the element's own. That is the linearisation Aguerre et al.
@@ -37,6 +41,12 @@ namespace quantiloom::thermal {
  * might. The scale to compare against is rho c d / (h + 4 eps sigma T^3),
  * which the solver logs.
  *
+ * The latent term does not get that treatment. Its slope in T is several times
+ * the radiative one -- saturation humidity roughly doubles every eleven
+ * degrees -- so it is linearised into the matrix beside the convection
+ * instead, half implicit as Crank-Nicolson wants. Left explicit it oscillates
+ * at the timesteps this runs at.
+ *
  * The back face is adiabatic or held, per material.
  */
 class CpuCrankNicolsonStepper final : public IThermalStepper {
@@ -44,12 +54,12 @@ public:
     void Step(ThermalState& state, const Vector<ThermalElement>& elements,
               const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
               const ThermalForcing& forcing, f64 dt_s,
-              std::span<const f32> sunVisibility) override;
+              const ShortwaveSample& shortwave) override;
 
     [[nodiscard]] const char* Name() const override { return "CPU Crank-Nicolson"; }
 
     /// Shortest time constant across the participating materials, in seconds:
-    /// rho c d / (h + 4 eps sigma T^3), the scale a timestep should stay under
+    /// rho c d / (h + 4 eps sigma T^3 + latent), the scale a timestep should stay under
     /// for the explicit radiative coupling to hold. Reported rather than
     /// enforced -- a step twice this is inaccurate rather than unstable, and
     /// which one matters is the caller's judgement.

@@ -301,6 +301,9 @@ void OfflineRenderer::Impl::RunThermalSolver() {
                 sunTable.visibility = precompute.RunSunVisibility(
                     geometry.Tlas().GetHandle(), mesh.elements,
                     mesh.instanceElementBase, directions);
+                // Kept beside the columns because the one-bounce bake needs to
+                // know where the sun was to work out what was lit.
+                sunTable.sampleDirection = std::move(directions);
             }
         }
         if (exchange.skyFraction.empty()) {

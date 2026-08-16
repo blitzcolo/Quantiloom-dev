@@ -7,6 +7,7 @@
 
 #include "core/Log.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
+#include "thermal/ShortwaveGains.hpp"
 #include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalTimeline.hpp"
 
@@ -73,6 +74,16 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         fields >> forcing.airTemperature_K >> forcing.sunIrradiance_W_m2 >> azimuth_deg >>
             elevation_deg >> forcing.skyTemperature_K;
 
+        // Diffuse irradiance and humidity are optional trailing columns: a
+        // file written before they existed keeps its meaning, with no diffuse
+        // light and average humidity. Read through locals so a row that stops
+        // early leaves the defaults alone rather than being handed whatever a
+        // failed extraction wrote.
+        f64 diffuse_W_m2 = 0.0;
+        if (fields >> diffuse_W_m2) forcing.diffuseIrradiance_W_m2 = diffuse_W_m2;
+        f64 relativeHumidity = 0.0;
+        if (fields >> relativeHumidity) forcing.relativeHumidity = relativeHumidity;
+
         const f64 az = azimuth_deg * std::numbers::pi / 180.0;
         const f64 el = elevation_deg * std::numbers::pi / 180.0;
         forcing.sunDirection = glm::normalize(glm::vec3(
@@ -105,8 +116,13 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
             out.airTemperature_K = a.airTemperature_K + t * (b.airTemperature_K - a.airTemperature_K);
             out.sunIrradiance_W_m2 =
                 a.sunIrradiance_W_m2 + t * (b.sunIrradiance_W_m2 - a.sunIrradiance_W_m2);
+            out.diffuseIrradiance_W_m2 =
+                a.diffuseIrradiance_W_m2 +
+                t * (b.diffuseIrradiance_W_m2 - a.diffuseIrradiance_W_m2);
             out.skyTemperature_K =
                 a.skyTemperature_K + t * (b.skyTemperature_K - a.skyTemperature_K);
+            out.relativeHumidity =
+                a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
             out.sunDirection = glm::normalize(
                 glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
             return out;
@@ -170,15 +186,23 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     if (effectiveTable.SampleCount() == 0 && !geometry.sunVisibility.empty()) {
         effectiveTable.sampleTime_h = {config.startTime_h};
         effectiveTable.visibility = geometry.sunVisibility;
+        effectiveTable.sampleDirection = {config.sunDirection};
     }
+
+    // What the short wave does off the other surfaces, per sun column. Depends
+    // on geometry and absorptivity and nothing else, so it is baked once here
+    // rather than gathered again on every step.
+    BakeShortwaveGains(geometry, mesh.elements, materials, effectiveTable);
 
     const auto forcingSeries = LoadForcingCsv(config.forcingFile);
 
     ThermalForcing constantForcing;
     constantForcing.airTemperature_K = config.airTemperature_K;
     constantForcing.sunIrradiance_W_m2 = config.sunIrradiance_W_m2;
+    constantForcing.diffuseIrradiance_W_m2 = config.diffuseIrradiance_W_m2;
     constantForcing.sunDirection = config.sunDirection;
     constantForcing.skyTemperature_K = config.skyTemperature_K;
+    constantForcing.relativeHumidity = config.relativeHumidity;
 
     CpuCrankNicolsonStepper stepper;
 
@@ -195,7 +219,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     ThermalTimeline::Desc desc;
     desc.startTime_h = config.startTime_h;
     desc.timestep_s = config.timestep_s;
-    desc.checkpointStride_h = 1.0;
+    desc.checkpointStride_h = config.checkpointStride_h;
     desc.nodeCount = config.nodeCount;
     desc.initial = config.initial;
     desc.initialTemperature_K = config.initialTemperature_K;

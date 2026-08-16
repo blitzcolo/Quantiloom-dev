@@ -41,24 +41,25 @@ public:
     /**
      * @brief Advance every element by @p dt seconds, in place
      *
-     * @param state          node temperatures, updated
-     * @param elements       the surface elements, indexed as the state is
-     * @param materials      thermal properties, indexed by ThermalElement::materialId
-     * @param exchange       who sees whom (view factors and sky fraction)
-     * @param forcing        the outside world for this step
-     * @param dt_s           timestep
-     * @param sunVisibility  per-element sun fraction for this step, interpolated
-     *                       from the sun table rather than read from the exchange
+     * @param state      node temperatures, updated
+     * @param elements   the surface elements, indexed as the state is
+     * @param materials  thermal properties, indexed by ThermalElement::materialId
+     * @param exchange   who sees whom (view factors and sky fraction)
+     * @param forcing    the outside world for this step
+     * @param dt_s       timestep
+     * @param shortwave  per-element sun visibility and the baked gains for this
+     *                   step, interpolated out of the sun table rather than
+     *                   read from the exchange
      */
     virtual void Step(ThermalState& state, const Vector<ThermalElement>& elements,
                       const Vector<ThermalMaterial>& materials,
                       const ExchangeGeometry& exchange, const ThermalForcing& forcing,
-                      f64 dt_s, std::span<const f32> sunVisibility) = 0;
+                      f64 dt_s, const ShortwaveSample& shortwave) = 0;
 
     /**
      * @brief Run a batch of steps without per-step host readback
      *
-     * The default implementation loops Step with sun visibility interpolated
+     * The default implementation loops Step with the sun column interpolated
      * from the table into a scratch buffer. A GPU implementation dispatches
      * the whole batch in one submit.
      */

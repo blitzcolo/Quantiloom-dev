@@ -28,6 +28,8 @@
 
 #include <glm/glm.hpp>
 
+#include <span>
+
 namespace quantiloom::thermal {
 
 /// How a surface's back face is held. A wall has room behind it at a known
@@ -67,6 +69,13 @@ struct ThermalMaterial {
     /// render have to agree about it, or a surface radiates one amount into
     /// the solver and another into the camera.
     f32 longwaveEmissivity = 0.9f;
+    /// How much of the surface evaporates, 0 for dry and 1 for open water.
+    /// Latent heat is what makes a lawn ten degrees cooler than the pavement
+    /// beside it under the same sun, and no combination of the properties
+    /// above can say so -- they all describe a surface that only conducts,
+    /// convects and radiates. Zero by default, which is exactly the old
+    /// balance.
+    f32 wetnessFactor = 0.0f;
 
     InteriorBoundary interiorBoundary = InteriorBoundary::Adiabatic;
     f32 interiorTemperature_K = 293.15f;
@@ -158,24 +167,52 @@ struct ThermalForcing {
     /// Direct normal irradiance, W/m^2. The element's own cos(theta) and its
     /// precomputed sun visibility are what turn it into an absorbed flux.
     f64 sunIrradiance_W_m2 = 0.0;
+    /// Diffuse horizontal irradiance, W/m^2 -- the part of the sunlight that
+    /// arrives from the sky dome rather than from the disc. Under overcast it
+    /// is the whole of it, which is why a run without this term has no solar
+    /// input at all on a cloudy day.
+    f64 diffuseIrradiance_W_m2 = 0.0;
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};  ///< from surface toward the sun
     /// Effective sky temperature: the blackbody radiating what the sky does.
     /// SkyThermal derives it from the air temperature and humidity, or the NN
     /// atmosphere's own downwelling gives it directly.
     f64 skyTemperature_K = 268.0;
+    /// Relative humidity of the air, percent. Read only by the latent term:
+    /// what a wet surface can evaporate is set by how far the air is from
+    /// saturated. Same quantity the clear-sky model reads.
+    f64 relativeHumidity = 50.0;
 };
 
 /**
- * @brief Sun visibility at several times of day, for diurnal interpolation
+ * @brief What the short wave does, sampled at several times of day
  *
  * Each column is one precomputed sun direction, one visibility fraction per
  * element; layout is sample-major (column k starts at k * elementCount).
  * A constant-forcing run has K=1 and a single column equal to the exchange's
  * own sunVisibility.
+ *
+ * The two gain fields are baked beside it by BakeShortwaveGains. They carry
+ * the light that reached an element off something else, which the direct term
+ * cannot: a north wall in a street sees no sun at any hour and is still warm,
+ * because the road in front of it is bright.
  */
 struct SunVisibilityTable {
     Vector<f64> sampleTime_h;  ///< sorted, K entries (K >= 1)
     Vector<f32> visibility;    ///< K * elementCount, sample-major
+    /// Where the sun was for each column, from surface toward it. K entries
+    /// when the builder recorded them; only the bounce bake reads it, and it
+    /// leaves the reflected gain empty when it is missing.
+    Vector<glm::vec3> sampleDirection;
+    /// R_ik: direct sunlight reaching element i after one bounce off the other
+    /// elements, per unit direct normal irradiance, for sun column k. Same
+    /// K * elementCount sample-major layout as the visibility. Empty means no
+    /// bounce was baked, which is the same answer as all zeros.
+    Vector<f32> reflectedGain;
+    /// G_i: the sky's own diffuse light reaching element i, per unit diffuse
+    /// horizontal irradiance -- its sky fraction plus what one bounce off the
+    /// other elements adds. Time-invariant, so one column rather than K.
+    /// Empty means fall back to the exchange's bare sky fraction.
+    Vector<f32> diffuseGain;
 
     [[nodiscard]] usize SampleCount() const { return sampleTime_h.size(); }
     [[nodiscard]] usize ElementCount() const {
@@ -184,10 +221,30 @@ struct SunVisibilityTable {
     [[nodiscard]] const f32* Column(usize k) const {
         return visibility.data() + k * ElementCount();
     }
+    /// The reflected-gain column matching Column(k), or nullptr when none was
+    /// baked.
+    [[nodiscard]] const f32* ReflectedColumn(usize k) const {
+        return reflectedGain.empty() ? nullptr : reflectedGain.data() + k * ElementCount();
+    }
 
     /// Interpolation indices and blend for time @p t: result is
     /// (1-blend)*Column(a) + blend*Column(b).
     void SampleIndices(f64 t, usize& a, usize& b, f64& blend) const;
+};
+
+/**
+ * @brief The short-wave geometry one step needs, already interpolated
+ *
+ * Three per-element spans rather than three parameters, because they are one
+ * thing: what fraction of each of the sun, its bounce, and the sky dome this
+ * element receives right now. An empty span means that path contributes
+ * nothing -- except diffuseGain, where empty falls back to the exchange's sky
+ * fraction, the answer with no bounce.
+ */
+struct ShortwaveSample {
+    std::span<const f32> sunVisibility;
+    std::span<const f32> reflectedGain;
+    std::span<const f32> diffuseGain;
 };
 
 /// One step in a batch, carrying the forcing and where in the sun table it is.

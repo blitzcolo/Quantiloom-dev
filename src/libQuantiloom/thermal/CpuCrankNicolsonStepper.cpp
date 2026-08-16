@@ -15,6 +15,50 @@ namespace {
 
 constexpr f64 kStefanBoltzmann = 5.670374419e-8;  // W m^-2 K^-4
 
+// Air at the surface, for the latent term. One atmosphere and dry-air values:
+// the balance is not sensitive to either at the precision the rest of it has.
+constexpr f64 kAirPressure_Pa = 101325.0;
+constexpr f64 kAirSpecificHeat_J_kgK = 1005.0;
+constexpr f64 kLatentHeatVaporisation_J_kg = 2.45e6;
+
+/// Saturation vapour pressure, Pa, by Magnus-Tetens. Good to a few tenths of a
+/// percent between -40 and +50 C, which is the whole range a surface balance
+/// visits outside a fire.
+f64 SaturationVapourPressure(const f64 temperature_K) {
+    const f64 tC = temperature_K - 273.15;
+    return 610.94 * std::exp(17.625 * tC / (tC + 243.04));
+}
+
+/// Saturation specific humidity, kg/kg.
+f64 SaturationHumidity(const f64 temperature_K) {
+    const f64 e = SaturationVapourPressure(temperature_K);
+    return 0.622 * e / (kAirPressure_Pa - 0.378 * e);
+}
+
+/// The same, with its slope in temperature. The slope is what makes
+/// evaporation stiff: saturation humidity roughly doubles every eleven
+/// degrees, so a wet surface's latent admittance at 300 K is several times its
+/// radiative one.
+void SaturationHumidity(const f64 temperature_K, f64& q, f64& dq_dT) {
+    const f64 tC = temperature_K - 273.15;
+    const f64 denominator = tC + 243.04;
+    const f64 e = SaturationVapourPressure(temperature_K);
+    const f64 de_dT = e * (17.625 * 243.04) / (denominator * denominator);
+
+    const f64 mixed = kAirPressure_Pa - 0.378 * e;
+    q = 0.622 * e / mixed;
+    dq_dT = 0.622 * kAirPressure_Pa * de_dT / (mixed * mixed);
+}
+
+/// The coefficient the latent flux and its slope in temperature share:
+/// f_wet (h / c_p) L_v. Lewis analogy -- the same eddies that carry heat carry
+/// vapour, so the mass transfer coefficient is the convective one over the
+/// heat capacity of air, and nobody has to supply a second one.
+f64 LatentCoefficient(const f64 wetnessFactor, const f64 convection_W_m2K) {
+    return wetnessFactor * (convection_W_m2K / kAirSpecificHeat_J_kgK) *
+           kLatentHeatVaporisation_J_kg;
+}
+
 /// Solve a tridiagonal system in place by Thomas elimination.
 ///
 /// Exact rather than iterative, and O(n) rather than O(n^3): the matrix a
@@ -47,7 +91,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                    const Vector<ThermalMaterial>& materials,
                                    const ExchangeGeometry& exchange,
                                    const ThermalForcing& forcing, const f64 dt_s,
-                                   std::span<const f32> sunVisibility) {
+                                   const ShortwaveSample& shortwave) {
+    const std::span<const f32> sunVisibility = shortwave.sunVisibility;
     const u32 nodes = state.nodeCount;
     if (nodes < 2 || elements.empty() || dt_s <= 0.0) {
         return;
@@ -92,16 +137,43 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
         f64 surfaceFlux_W_m2 = 0.0;
 
-        // Sun. cos(theta) against the element's own normal, times the
+        const f64 absorptivity = material.shortwaveAbsorptivity;
+
+        // Sun, direct. cos(theta) against the element's own normal, times the
         // precomputed visibility -- which is what carries the shadow.
         if (forcing.sunIrradiance_W_m2 > 0.0 && e < sunVisibility.size()) {
             const f64 cosTheta = static_cast<f64>(
                 glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
             if (cosTheta > 0.0) {
-                surfaceFlux_W_m2 += material.shortwaveAbsorptivity *
+                surfaceFlux_W_m2 += absorptivity *
                                     forcing.sunIrradiance_W_m2 * cosTheta *
                                     static_cast<f64>(sunVisibility[e]);
             }
+        }
+
+        // Sun, off a neighbour. This is where a north wall gets its afternoon:
+        // it is never in the sun, and the road in front of it is. The gain is
+        // a gather over the whole hemisphere, so it carries no cos(theta) of
+        // its own -- that was applied to the surfaces doing the reflecting,
+        // when it was baked.
+        if (forcing.sunIrradiance_W_m2 > 0.0 && e < shortwave.reflectedGain.size()) {
+            surfaceFlux_W_m2 += absorptivity * forcing.sunIrradiance_W_m2 *
+                                static_cast<f64>(shortwave.reflectedGain[e]);
+        }
+
+        // Sky, diffuse. For an isotropic dome the geometric factor is the
+        // element's own sky fraction, plus whatever one bounce adds; that sum
+        // is the baked gain, and the bare sky fraction is what it degrades to.
+        // Under overcast this term is the entire solar input, which is why a
+        // run without it has a cloudy day with no sunlight in it at all.
+        if (forcing.diffuseIrradiance_W_m2 > 0.0) {
+            f64 diffuseGain = 0.0;
+            if (e < shortwave.diffuseGain.size()) {
+                diffuseGain = static_cast<f64>(shortwave.diffuseGain[e]);
+            } else if (e < exchange.skyFraction.size()) {
+                diffuseGain = static_cast<f64>(exchange.skyFraction[e]);
+            }
+            surfaceFlux_W_m2 += absorptivity * forcing.diffuseIrradiance_W_m2 * diffuseGain;
         }
 
         // Long wave: what the hemisphere sends back, minus what this element
@@ -131,15 +203,37 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // the matrix rather than into the flux.
         const f64 h = material.convection_W_m2K;
 
+        // Evaporation. Non-linear in the unknown like the radiation, but with
+        // several times its slope, so this one goes into the matrix as well:
+        // linearised about the previous surface temperature and split
+        // half-and-half the way Crank-Nicolson splits everything else. A wet
+        // element under dry air can shed hundreds of watts per square metre,
+        // and leaving that explicit oscillates at a minute per step.
+        f64 latentAdmittance_W_m2K = 0.0;
+        f64 latentFlux_W_m2 = 0.0;
+        if (material.wetnessFactor > 0.0f) {
+            f64 qSurface = 0.0;
+            f64 dq_dT = 0.0;
+            SaturationHumidity(Ti, qSurface, dq_dT);
+            const f64 qAir = SaturationHumidity(forcing.airTemperature_K);
+
+            const f64 humidity = std::clamp(forcing.relativeHumidity, 0.0, 100.0) / 100.0;
+            const f64 coefficient =
+                LatentCoefficient(static_cast<f64>(material.wetnessFactor), h);
+            latentFlux_W_m2 = coefficient * (qSurface - humidity * qAir);
+            latentAdmittance_W_m2K = coefficient * dq_dT;
+        }
+
         // Crank-Nicolson on the half-cell at the face. The half cell has
         // capacity rho c dx/2 and exchanges with node 1 by conduction and with
-        // the outside by h and the flux above.
+        // the outside by h, by evaporation, and by the flux above.
         const f64 halfCell = rhoC * dx / (2.0 * dt_s);
         lower[0] = 0.0;
-        diag[0] = halfCell + 0.5 * (k / dx + h);
+        diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance_W_m2K);
         upper[0] = -0.5 * (k / dx);
         rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
-                 0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2;
+                 0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2 -
+                 latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0];
 
         // ----------------------------------------------------------------
         // The interior
@@ -197,7 +291,21 @@ f64 CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
         const f64 eps = static_cast<f64>(material.longwaveEmissivity);
         const f64 radiative = 4.0 * eps * kStefanBoltzmann * referenceTemperature_K *
                               referenceTemperature_K * referenceTemperature_K;
-        const f64 loss = material.convection_W_m2K + radiative;
+
+        // A wet surface responds faster than a dry one of the same mass: the
+        // latent path is another way for it to shed a departure from
+        // equilibrium, and at 300 K it is the largest of the three.
+        f64 latent = 0.0;
+        if (material.wetnessFactor > 0.0f) {
+            f64 q = 0.0;
+            f64 dq_dT = 0.0;
+            SaturationHumidity(referenceTemperature_K, q, dq_dT);
+            latent = LatentCoefficient(static_cast<f64>(material.wetnessFactor),
+                                       material.convection_W_m2K) *
+                     dq_dT;
+        }
+
+        const f64 loss = material.convection_W_m2K + radiative + latent;
         if (loss > 0.0) {
             shortest = std::min(shortest, capacity / loss);
         }

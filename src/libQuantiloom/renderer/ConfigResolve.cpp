@@ -703,6 +703,9 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.exchangeRays = config.Get<u32>("thermal.exchange_rays", 256);
         out.thermal.exchangeTopK = config.Get<u32>("thermal.exchange_top_k", 32);
         out.thermal.sunIrradiance_W_m2 = config.Get<f64>("thermal.sun_irradiance_w_m2", 0.0);
+        out.thermal.diffuseIrradiance_W_m2 =
+            config.Get<f64>("thermal.diffuse_irradiance_w_m2", 0.0);
+        out.thermal.checkpointStride_h = config.Get<f64>("thermal.checkpoint_stride_h", 1.0);
         out.thermal.forcingFile =
             ResolveConfigPath(config.GetString("thermal.forcing_file", ""), options.baseDir);
 
@@ -723,6 +726,12 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.airTemperature_K = config.Get<f64>(
             "thermal.air_temperature_k", static_cast<f64>(out.lighting.atmosphereTemperature_K));
         out.thermal.sunDirection = out.lighting.sunDirection;
+
+        // How wet the air is, which decides how much a wet surface can
+        // evaporate. Read from [atmosphere] rather than duplicated here: it is
+        // the same humidity the clear-sky model derives its dew point from,
+        // and a scene with two of them would be a scene with two atmospheres.
+        out.thermal.relativeHumidity = config.Get<f64>("atmosphere.relative_humidity", 50.0);
 
         // The sky the surfaces radiate against. With the clear-sky model on,
         // that is the effective temperature its emissivity implies rather than
@@ -1107,6 +1116,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             props.convection_W_m2K = matTable.GetFloat("convection_h_w_m2k", 5.0f);
             props.shortwaveAbsorptivity =
                 matTable.GetFloat("shortwave_absorptivity", 0.7f);
+            props.wetnessFactor = matTable.GetFloat("wetness_factor", 0.0f);
             props.interiorTemperature_K =
                 matTable.GetFloat("interior_temperature_k", 293.15f);
 

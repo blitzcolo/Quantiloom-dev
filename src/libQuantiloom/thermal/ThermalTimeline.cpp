@@ -15,10 +15,47 @@ namespace quantiloom::thermal {
 
 namespace {
 
+/// The sun table interpolated at one time, into caller-owned scratch. The
+/// reflected column comes along on the same indices as the visibility it was
+/// baked from, so the two never disagree about where the sun is. With no table
+/// this falls back to the exchange's single sun column, and with neither to
+/// full sun -- which is what a scene with no shadowing precompute is.
+void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& exchange,
+                       const f64 time_h, const usize n, Vector<f32>& visibility,
+                       Vector<f32>& reflected) {
+    visibility.assign(n, 1.0f);
+    reflected.clear();
+
+    if (table.SampleCount() > 0 && table.ElementCount() == n) {
+        usize a = 0;
+        usize b = 0;
+        f64 blend = 0.0;
+        table.SampleIndices(time_h, a, b, blend);
+        const f32 bf = static_cast<f32>(blend);
+
+        const f32* colA = table.Column(a);
+        const f32* colB = table.Column(b);
+        for (usize e = 0; e < n; ++e) {
+            visibility[e] = colA[e] + bf * (colB[e] - colA[e]);
+        }
+
+        const f32* reflectedA = table.ReflectedColumn(a);
+        const f32* reflectedB = table.ReflectedColumn(b);
+        if (reflectedA != nullptr && reflectedB != nullptr) {
+            reflected.resize(n);
+            for (usize e = 0; e < n; ++e) {
+                reflected[e] = reflectedA[e] + bf * (reflectedB[e] - reflectedA[e]);
+            }
+        }
+    } else if (exchange.sunVisibility.size() == n) {
+        visibility = exchange.sunVisibility;
+    }
+}
+
 void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& elements,
                         const Vector<ThermalMaterial>& materials,
                         const ExchangeGeometry& exchange,
-                        std::span<const f32> sunVisibility,
+                        const ShortwaveSample& shortwave,
                         const ThermalForcing& forcing, IThermalStepper& stepper) {
     constexpr f64 kRelaxStep_s = 3600.0;
     constexpr i32 kMaxIterations = 200;
@@ -34,7 +71,7 @@ void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& eleme
             previous[e] = state.Surface(e);
         }
         stepper.Step(state, elements, materials, exchange, forcing,
-                     kRelaxStep_s, sunVisibility);
+                     kRelaxStep_s, shortwave);
 
         f64 largestMove = 0.0;
         for (usize e = 0; e < elements.size(); ++e) {
@@ -101,27 +138,14 @@ ThermalTimeline::ThermalTimeline(const Desc& desc,
         const ThermalForcing startForcing =
             SampleForcing(forcingSeries, desc.startTime_h, constantForcing);
 
-        // Sun visibility at start time
         Vector<f32> startSunVis;
-        if (sunTable.SampleCount() > 0) {
-            usize a, b;
-            f64 blend;
-            sunTable.SampleIndices(desc.startTime_h, a, b, blend);
-            startSunVis.resize(elements.size());
-            const f32* colA = sunTable.Column(a);
-            const f32* colB = sunTable.Column(b);
-            const f32 bf = static_cast<f32>(blend);
-            for (usize e = 0; e < elements.size(); ++e) {
-                startSunVis[e] = colA[e] + bf * (colB[e] - colA[e]);
-            }
-        } else if (!exchange.sunVisibility.empty()) {
-            startSunVis = exchange.sunVisibility;
-        } else {
-            startSunVis.assign(elements.size(), 1.0f);
-        }
+        Vector<f32> startReflected;
+        SampleShortwaveAt(sunTable, exchange, desc.startTime_h, elements.size(),
+                          startSunVis, startReflected);
 
         RelaxToSteadyState(initial, elements, materials, exchange,
-                           startSunVis, startForcing, stepper);
+                           {startSunVis, startReflected, sunTable.diffuseGain},
+                           startForcing, stepper);
     }
 
     m_checkpoints[0] = std::move(initial);
@@ -160,24 +184,12 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
         const f64 t_mid = gridTime + 0.5 * remainder_s / 3600.0;
         const ThermalForcing forcing =
             SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
-        Vector<f32> sunVis(m_elements.size());
-        if (m_sunTable.SampleCount() > 0) {
-            usize a, b;
-            f64 blend;
-            m_sunTable.SampleIndices(t_mid, a, b, blend);
-            const f32* colA = m_sunTable.Column(a);
-            const f32* colB = m_sunTable.Column(b);
-            const f32 bf = static_cast<f32>(blend);
-            for (usize e = 0; e < m_elements.size(); ++e) {
-                sunVis[e] = colA[e] + bf * (colB[e] - colA[e]);
-            }
-        } else if (!m_exchange.sunVisibility.empty()) {
-            sunVis = m_exchange.sunVisibility;
-        } else {
-            std::fill(sunVis.begin(), sunVis.end(), 1.0f);
-        }
-        m_stepper.Step(m_scratch, m_elements, m_materials, m_exchange,
-                       forcing, remainder_s, sunVis);
+        Vector<f32> sunVis;
+        Vector<f32> reflected;
+        SampleShortwaveAt(m_sunTable, m_exchange, t_mid, m_elements.size(), sunVis,
+                          reflected);
+        m_stepper.Step(m_scratch, m_elements, m_materials, m_exchange, forcing,
+                       remainder_s, {sunVis, reflected, m_sunTable.diffuseGain});
         ++m_lastStepCount;
     }
 

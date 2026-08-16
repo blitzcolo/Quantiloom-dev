@@ -49,6 +49,10 @@ struct ThermalConfig {
     u32 nodeCount = 10;
     InitialCondition initial = InitialCondition::Steady;
     f64 initialTemperature_K = 288.15;
+    /// How often the trajectory stores a full state, in simulated hours.
+    /// Only the interactive path scrubs, but the offline one pays for the
+    /// setting too -- a shorter stride is more memory and a cheaper replay.
+    f64 checkpointStride_h = 1.0;
 
     /// Rays per element for the view-factor precompute, and how many of the
     /// resulting entries to keep. A row past the top few is mostly noise, and
@@ -59,12 +63,16 @@ struct ThermalConfig {
     /// Constant forcing, used when no forcing file is given.
     f64 airTemperature_K = 288.15;
     f64 sunIrradiance_W_m2 = 0.0;
+    f64 diffuseIrradiance_W_m2 = 0.0;
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
     f64 skyTemperature_K = 268.0;
+    f64 relativeHumidity = 50.0;
 
     /// CSV of time-varying forcing: time_h, air_temperature_k,
     /// sun_irradiance_w_m2, sun_azimuth_deg, sun_elevation_deg,
-    /// sky_temperature_k. Linearly interpolated, held flat outside its range.
+    /// sky_temperature_k, and optionally diffuse_irradiance_w_m2 and
+    /// relative_humidity. Linearly interpolated, held flat outside its range;
+    /// a row that stops early keeps the defaults for what it did not say.
     String forcingFile;
 
     /// Thermal properties by material name, from [[materials]].

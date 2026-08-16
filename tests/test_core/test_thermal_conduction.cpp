@@ -17,9 +17,11 @@
 
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 
+#include "thermal/ShortwaveGains.hpp"
 #include "thermal/ThermalSolver.hpp"  // MakeOpenSkyExchange
 
 #include <cmath>
+#include <span>
 
 using namespace quantiloom;
 using namespace quantiloom::thermal;
@@ -60,6 +62,31 @@ ThermalState MakeState(const usize elements, const u32 nodes, const f64 temperat
     return state;
 }
 
+/// Saturation specific humidity, kg/kg. Written out again rather than shared
+/// with the stepper: a test that calls the code it is checking checks nothing
+/// about the formula, only about the plumbing.
+f64 SaturationHumidity(const f64 temperature_K) {
+    const f64 tC = temperature_K - 273.15;
+    const f64 e = 610.94 * std::exp(17.625 * tC / (tC + 243.04));
+    return 0.622 * e / (101325.0 - 0.378 * e);
+}
+
+/// The root of @p imbalance between @p low and @p high, to a millikelvin.
+/// Bisection rather than Newton because the balances here are monotone and the
+/// bracket is known, and a test should not need a derivative to be right.
+template <typename F>
+f64 BalanceTemperature(F&& imbalance, f64 low, f64 high) {
+    for (i32 i = 0; i < 200; ++i) {
+        const f64 mid = 0.5 * (low + high);
+        if (imbalance(low) * imbalance(mid) <= 0.0) {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    return 0.5 * (low + high);
+}
+
 }  // namespace
 
 // ============================================================================
@@ -88,7 +115,7 @@ TEST(ThermalConductionTest, ALumpedBodyCoolsExponentially) {
     const f64 dt = tau / 200.0;
     for (i32 i = 0; i < 400; ++i) {  // two time constants
         stepper.Step(state, elements, materials, exchange, forcing, dt,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
 
     const f64 elapsed = 400.0 * dt;
@@ -125,7 +152,7 @@ TEST(ThermalConductionTest, AHeldBackFaceProducesTheLinearSteadyProfile) {
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 4000; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, 60.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
 
     const f64 rCond = material.thickness_m / material.conductivity_W_mK;
@@ -159,7 +186,7 @@ TEST(ThermalConductionTest, AnAdiabaticSlabReachesTheAirTemperature) {
     // started away from the air is down to two thousandths of a kelvin.
     for (i32 i = 0; i < 3200; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, 10.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
     EXPECT_NEAR(state.Surface(0), 300.0, 0.01);
 }
@@ -195,7 +222,7 @@ TEST(ThermalConductionTest, TheSchemeIsSecondOrderInTime) {
         const f64 dt = elapsed / steps;
         for (i32 i = 0; i < steps; ++i) {
             stepper.Step(state, elements, materials, exchange, forcing, dt,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
         }
         return state.Surface(0);
     };
@@ -240,7 +267,7 @@ TEST(ThermalConductionTest, TheLumpedLimitIsApproachedFromAFiniteBiotNumber) {
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 8192; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, tau / 8192.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
     // Close to the lumped answer, and not exactly it.
     EXPECT_NEAR(state.Surface(0), expected, 0.05);
@@ -272,7 +299,7 @@ TEST(ThermalConductionTest, ASurfaceUnderAColdSkySettlesBelowTheAir) {
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 5000; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, 5.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
 
     auto imbalance = [&](const f64 T) {
@@ -329,7 +356,7 @@ TEST(ThermalConductionTest, AnElementSeeingOnlyItsNeighbourExchangesWithIt) {
     // T^3) = 5500 s here, so this is five of them: 50 K down to a hundredth.
     for (i32 i = 0; i < 28000; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, 1.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
 
     EXPECT_NEAR(state.Surface(0), state.Surface(1), 0.5)
@@ -358,9 +385,240 @@ TEST(ThermalConductionTest, MaterialsWithNoConductivityAreLeftAlone) {
     CpuCrankNicolsonStepper stepper;
     for (i32 i = 0; i < 100; ++i) {
         stepper.Step(state, elements, materials, exchange, forcing, 60.0,
-                     exchange.sunVisibility);
+                     {exchange.sunVisibility});
     }
     EXPECT_DOUBLE_EQ(state.Surface(0), 300.0);
+}
+
+// ============================================================================
+// Short wave that did not come straight from the disc
+// ============================================================================
+
+TEST(ThermalConductionTest, DiffuseSkyWarmsAShadedSurfaceInProportionToItsSkyView) {
+    // No direct sun at all -- the overcast case, which before this term had no
+    // solar input whatsoever. With the radiation off, the balance is
+    // alpha E_diff s = h (T - T_air) and the sky fraction is the whole of the
+    // geometry: the element that sees half the sky warms by half as much.
+    ThermalMaterial material = LumpedMaterial();
+    material.shortwaveAbsorptivity = 0.7f;
+
+    Vector<ThermalElement> elements = OneElement();
+    elements.push_back(elements[0]);
+    const Vector<ThermalMaterial> materials{material};
+
+    ExchangeGeometry exchange = MakeOpenSkyExchange(2);
+    exchange.skyFraction = {1.0f, 0.5f};
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+    forcing.sunIrradiance_W_m2 = 0.0;
+    forcing.diffuseIrradiance_W_m2 = 400.0;
+
+    ThermalState state = MakeState(2, 8, 290.0);
+    CpuCrankNicolsonStepper stepper;
+    for (i32 i = 0; i < 3000; ++i) {  // ~19 time constants
+        stepper.Step(state, elements, materials, exchange, forcing, 20.0,
+                     {exchange.sunVisibility});
+    }
+
+    const f64 open = forcing.airTemperature_K +
+                     material.shortwaveAbsorptivity * forcing.diffuseIrradiance_W_m2 /
+                         material.convection_W_m2K;
+    EXPECT_NEAR(state.Surface(0), open, 0.05);
+    EXPECT_NEAR(state.Surface(1), forcing.airTemperature_K + 0.5 * (open - forcing.airTemperature_K),
+                0.05);
+}
+
+TEST(ThermalConductionTest, AReflectedBounceHeatsThePlateFacingAway) {
+    // Two plates facing each other, half of each other's hemisphere. One is in
+    // the sun; the other faces away from it and is never lit directly. Without
+    // the bounce it sits at air temperature and the scene is wrong in the
+    // obvious way -- a north wall that never warms.
+    ThermalMaterial dark = LumpedMaterial();
+    dark.shortwaveAbsorptivity = 0.7f;
+    ThermalMaterial bright = LumpedMaterial();
+    bright.shortwaveAbsorptivity = 0.2f;  // reflects 0.8
+    const Vector<ThermalMaterial> materials{dark, bright};
+
+    Vector<ThermalElement> elements = OneElement();
+    elements.push_back(elements[0]);
+    elements[0].normal = glm::vec3(0.0f, -1.0f, 0.0f);  // faces away from the sun
+    elements[1].normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    elements[1].materialId = 1;
+
+    ExchangeGeometry exchange;
+    exchange.viewFactors.rowStart = {0, 1, 2};
+    exchange.viewFactors.column = {1, 0};
+    exchange.viewFactors.value = {0.5f, 0.5f};
+    exchange.skyFraction = {0.5f, 0.5f};
+    exchange.sunVisibility = {1.0f, 1.0f};
+
+    SunVisibilityTable table;
+    table.sampleTime_h = {0.0};
+    table.visibility = {1.0f, 1.0f};
+    table.sampleDirection = {glm::vec3(0.0f, 1.0f, 0.0f)};
+    BakeShortwaveGains(exchange, elements, materials, table);
+
+    ASSERT_EQ(table.reflectedGain.size(), 2u);
+    EXPECT_NEAR(table.reflectedGain[0], 0.5f * 0.8f, 1e-6f);
+    EXPECT_NEAR(table.reflectedGain[1], 0.0f, 1e-6f);
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+    forcing.sunIrradiance_W_m2 = 1000.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    auto runTo = [&](const std::span<const f32> reflected) {
+        ThermalState state = MakeState(2, 8, 290.0);
+        CpuCrankNicolsonStepper stepper;
+        for (i32 i = 0; i < 3000; ++i) {
+            stepper.Step(state, elements, materials, exchange, forcing, 20.0,
+                         {exchange.sunVisibility, reflected, {}});
+        }
+        return state;
+    };
+
+    const ThermalState lit = runTo(table.reflectedGain);
+    EXPECT_NEAR(lit.Surface(0),
+                forcing.airTemperature_K + 0.7 * 1000.0 * 0.4 / dark.convection_W_m2K, 0.05);
+    EXPECT_NEAR(lit.Surface(1),
+                forcing.airTemperature_K + 0.2 * 1000.0 / bright.convection_W_m2K, 0.05);
+
+    // And the control: with no gain the shaded plate has nothing at all.
+    const ThermalState unlit = runTo({});
+    EXPECT_NEAR(unlit.Surface(0), forcing.airTemperature_K, 0.05);
+}
+
+TEST(ThermalConductionTest, TheReflectedGainInterpolatesWithTheSunColumns) {
+    // A batch step lands between two sun samples. The bounce has to be read on
+    // the same indices as the visibility it was baked from -- a gain sampled
+    // from one hour with a shadow mask from another is a surface lit by a sun
+    // that is in two places.
+    ThermalMaterial material = LumpedMaterial();
+    material.shortwaveAbsorptivity = 0.7f;
+
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{material};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+    forcing.sunIrradiance_W_m2 = 1000.0;
+    forcing.sunDirection = glm::vec3(0.0f, -1.0f, 0.0f);  // the disc misses it
+
+    SunVisibilityTable table;
+    table.sampleTime_h = {0.0, 2.0};
+    table.visibility = {1.0f, 1.0f};
+    table.reflectedGain = {0.0f, 0.4f};
+
+    ThermalBatchStep step;
+    step.forcing = forcing;
+    step.dt_s = 30.0;
+    step.sunSampleA = 0;
+    step.sunSampleB = 1;
+    step.sunBlend = 0.5;
+
+    CpuCrankNicolsonStepper stepper;
+    ThermalState blended = MakeState(1, 8, 290.0);
+    const Vector<ThermalBatchStep> batch(400, step);
+    stepper.StepMany(blended, elements, materials, exchange, table, batch);
+
+    // Half of the second column's gain, applied directly, must land in the
+    // same place.
+    ThermalState direct = MakeState(1, 8, 290.0);
+    const Vector<f32> halfGain{0.2f};
+    for (i32 i = 0; i < 400; ++i) {
+        stepper.Step(direct, elements, materials, exchange, forcing, 30.0,
+                     {table.visibility, halfGain, {}});
+    }
+    EXPECT_DOUBLE_EQ(blended.Surface(0), direct.Surface(0));
+}
+
+// ============================================================================
+// Evaporation
+// ============================================================================
+
+TEST(ThermalConductionTest, AWetSurfaceSettlesBelowTheAirItSitsIn) {
+    // The reason a lawn is cooler than the pavement beside it. With the
+    // radiation and the sun off, the balance is
+    // h (T_air - T) = f_wet (h/c_p) L_v (q_sat(T) - RH q_sat(T_air)),
+    // and it has no closed form -- so the expected value is bisected out of
+    // the same balance, written independently.
+    ThermalMaterial material = LumpedMaterial();
+    material.wetnessFactor = 1.0f;
+
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{material};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 300.0;
+    forcing.relativeHumidity = 30.0;
+
+    ThermalState state = MakeState(1, 8, 300.0);
+    CpuCrankNicolsonStepper stepper;
+    for (i32 i = 0; i < 4000; ++i) {
+        stepper.Step(state, elements, materials, exchange, forcing, 10.0,
+                     {exchange.sunVisibility});
+    }
+
+    const f64 h = material.convection_W_m2K;
+    const f64 coefficient = (h / 1005.0) * 2.45e6;
+    const f64 qAir = SaturationHumidity(forcing.airTemperature_K);
+    const f64 expected = BalanceTemperature(
+        [&](const f64 T) {
+            return h * (forcing.airTemperature_K - T) -
+                   coefficient * (SaturationHumidity(T) - 0.30 * qAir);
+        },
+        250.0, forcing.airTemperature_K);
+
+    EXPECT_NEAR(state.Surface(0), expected, 0.1);
+    EXPECT_LT(state.Surface(0), forcing.airTemperature_K - 5.0)
+        << "evaporation into dry air has to cool the surface, not warm it";
+}
+
+TEST(ThermalConductionTest, ADrySurfaceIgnoresHumidityEntirely) {
+    // A wetness of zero is not "a little evaporation": it is the balance as it
+    // was before the term existed, to the last bit.
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{LumpedMaterial()};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    auto runAtHumidity = [&](const f64 relativeHumidity) {
+        ThermalForcing forcing;
+        forcing.airTemperature_K = 300.0;
+        forcing.relativeHumidity = relativeHumidity;
+
+        ThermalState state = MakeState(1, 8, 320.0);
+        CpuCrankNicolsonStepper stepper;
+        for (i32 i = 0; i < 200; ++i) {
+            stepper.Step(state, elements, materials, exchange, forcing, 30.0,
+                         {exchange.sunVisibility});
+        }
+        return state.Surface(0);
+    };
+
+    EXPECT_DOUBLE_EQ(runAtHumidity(10.0), runAtHumidity(90.0));
+}
+
+TEST(ThermalConductionTest, AWetSurfaceRespondsFasterThanADryOne) {
+    // Evaporation is a third way to shed a departure from equilibrium, so it
+    // belongs in the time constant the solver warns against -- otherwise the
+    // warning passes a timestep that the wettest surface in the scene cannot
+    // resolve.
+    const auto elements = OneElement();
+    ThermalMaterial wet = LumpedMaterial();
+    wet.wetnessFactor = 0.5f;
+
+    const Vector<ThermalMaterial> dryMaterials{LumpedMaterial()};
+    const Vector<ThermalMaterial> wetMaterials{wet};
+
+    const f64 dry =
+        CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(elements, dryMaterials, 300.0);
+    const f64 damp =
+        CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(elements, wetMaterials, 300.0);
+    EXPECT_LT(damp, dry);
+    EXPECT_GT(damp, 0.2 * dry) << "half-wet should not be an order of magnitude faster";
 }
 
 TEST(ThermalConductionTest, TheTimeConstantIsWhatTheSchemeIsJudgedAgainst) {

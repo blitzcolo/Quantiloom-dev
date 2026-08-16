@@ -215,6 +215,7 @@ set(TEST_CORE_SOURCES
     test_core/test_blackbody_physics.cpp
     test_core/test_blackbody.cpp
     test_core/test_sky_thermal.cpp
+    test_core/test_shortwave_gains.cpp
     test_core/test_thermal_conduction.cpp
     test_core/test_thermal_timeline.cpp
     test_core/test_ir_energy_conservation.cpp

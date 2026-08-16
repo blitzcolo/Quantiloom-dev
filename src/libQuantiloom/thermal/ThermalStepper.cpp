@@ -1,11 +1,38 @@
 /**
  * @file ThermalStepper.cpp
- * @brief Default StepMany: loop Step with sun visibility interpolation
+ * @brief Default StepMany: loop Step with the sun column interpolated
  */
 
 #include "thermal/ThermalStepper.hpp"
 
+#include <algorithm>
+
 namespace quantiloom::thermal {
+
+namespace {
+
+/// Interpolate one sample-major column pair into @p out. @p columnA and
+/// @p columnB may be null, which is how a table with no baked gain says so.
+void BlendColumn(const f32* columnA, const f32* columnB, const f32 blend, const usize n,
+                 Vector<f32>& out) {
+    if (columnA == nullptr) {
+        std::fill(out.begin(), out.end(), 0.0f);
+        return;
+    }
+    if (columnB == nullptr || columnA == columnB || blend <= 0.0f) {
+        std::copy(columnA, columnA + n, out.begin());
+        return;
+    }
+    if (blend >= 1.0f) {
+        std::copy(columnB, columnB + n, out.begin());
+        return;
+    }
+    for (usize e = 0; e < n; ++e) {
+        out[e] = columnA[e] + blend * (columnB[e] - columnA[e]);
+    }
+}
+
+}  // namespace
 
 void IThermalStepper::StepMany(ThermalState& state,
                                const Vector<ThermalElement>& elements,
@@ -15,25 +42,29 @@ void IThermalStepper::StepMany(ThermalState& state,
                                std::span<const ThermalBatchStep> steps) {
     const usize n = elements.size();
     Vector<f32> sunVis(n);
+    Vector<f32> reflected;
+    if (!sunTable.reflectedGain.empty()) reflected.resize(n);
 
     for (const ThermalBatchStep& step : steps) {
-        if (sunTable.SampleCount() == 0) {
+        const bool haveTable = sunTable.SampleCount() > 0 && sunTable.ElementCount() == n;
+        const f32 blend = static_cast<f32>(step.sunBlend);
+
+        if (!haveTable) {
             std::fill(sunVis.begin(), sunVis.end(), 0.0f);
-        } else if (step.sunSampleA == step.sunSampleB || step.sunBlend <= 0.0) {
-            const f32* col = sunTable.Column(step.sunSampleA);
-            std::copy(col, col + n, sunVis.begin());
-        } else if (step.sunBlend >= 1.0) {
-            const f32* col = sunTable.Column(step.sunSampleB);
-            std::copy(col, col + n, sunVis.begin());
         } else {
-            const f32* colA = sunTable.Column(step.sunSampleA);
-            const f32* colB = sunTable.Column(step.sunSampleB);
-            const f32 b = static_cast<f32>(step.sunBlend);
-            for (usize e = 0; e < n; ++e) {
-                sunVis[e] = colA[e] + b * (colB[e] - colA[e]);
-            }
+            BlendColumn(sunTable.Column(step.sunSampleA), sunTable.Column(step.sunSampleB),
+                        blend, n, sunVis);
         }
-        Step(state, elements, materials, exchange, step.forcing, step.dt_s, sunVis);
+        // The bounce is interpolated on the same indices as the visibility it
+        // was baked from, so the two never disagree about where the sun is.
+        if (!reflected.empty()) {
+            BlendColumn(haveTable ? sunTable.ReflectedColumn(step.sunSampleA) : nullptr,
+                        haveTable ? sunTable.ReflectedColumn(step.sunSampleB) : nullptr,
+                        blend, n, reflected);
+        }
+
+        Step(state, elements, materials, exchange, step.forcing, step.dt_s,
+             {sunVis, reflected, sunTable.diffuseGain});
     }
 }
 

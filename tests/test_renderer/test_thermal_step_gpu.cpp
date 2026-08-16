@@ -234,7 +234,7 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
 
     for (i32 i = 0; i < steps; ++i) {
         cpuStepper.Step(cpuState, elements, materials, exchange, forcing, dt,
-                        exchange.sunVisibility);
+                        {exchange.sunVisibility});
     }
 
     // GPU run

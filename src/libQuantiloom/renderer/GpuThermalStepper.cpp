@@ -407,15 +407,21 @@ void GpuThermalStepper::Step(thermal::ThermalState& state,
                              const Vector<thermal::ThermalMaterial>& materials,
                              const thermal::ExchangeGeometry& exchange,
                              const thermal::ThermalForcing& forcing, const f64 dt_s,
-                             std::span<const f32> sunVisibility) {
+                             const thermal::ShortwaveSample& shortwave) {
     if (!IsValid() || state.nodeCount > kMaxNodes) {
         return;
     }
 
-    // Wrap in a single-column sun table and single-step batch
+    // Wrap in a single-column sun table and single-step batch. The gains are
+    // already interpolated, so the column is them verbatim.
     thermal::SunVisibilityTable sunTable;
     sunTable.sampleTime_h = {0.0};
-    sunTable.visibility.assign(sunVisibility.begin(), sunVisibility.end());
+    sunTable.visibility.assign(shortwave.sunVisibility.begin(),
+                               shortwave.sunVisibility.end());
+    sunTable.reflectedGain.assign(shortwave.reflectedGain.begin(),
+                                  shortwave.reflectedGain.end());
+    sunTable.diffuseGain.assign(shortwave.diffuseGain.begin(),
+                                shortwave.diffuseGain.end());
 
     thermal::ThermalBatchStep bs;
     bs.forcing = forcing;

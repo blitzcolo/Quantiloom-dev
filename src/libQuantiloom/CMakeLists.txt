@@ -161,6 +161,8 @@ add_library(quantiloom_core OBJECT
     thermal/CpuCrankNicolsonStepper.hpp
     thermal/ThermalMesh.cpp
     thermal/ThermalMesh.hpp
+    thermal/ShortwaveGains.cpp
+    thermal/ShortwaveGains.hpp
     thermal/ThermalTimeline.cpp
     thermal/ThermalTimeline.hpp
     thermal/ThermalSolver.cpp

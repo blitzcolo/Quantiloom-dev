@@ -35,7 +35,7 @@ public:
     void Step(thermal::ThermalState& state, const Vector<thermal::ThermalElement>& elements,
               const Vector<thermal::ThermalMaterial>& materials,
               const thermal::ExchangeGeometry& exchange, const thermal::ThermalForcing& forcing,
-              f64 dt_s, std::span<const f32> sunVisibility) override;
+              f64 dt_s, const thermal::ShortwaveSample& shortwave) override;
 
     void StepMany(thermal::ThermalState& state,
                   const Vector<thermal::ThermalElement>& elements,
