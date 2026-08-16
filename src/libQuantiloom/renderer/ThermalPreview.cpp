@@ -10,6 +10,7 @@
 #include "renderer/ThermalExchangePrecompute.hpp"
 #include "scene/Scene.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
+#include "thermal/ShortwaveGains.hpp"
 #include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalSolver.hpp"
 #include "thermal/ThermalTimeline.hpp"
@@ -92,6 +93,7 @@ struct ThermalPreview::Impl {
                 materials[m].thickness_m = it->second.thickness_m;
                 materials[m].convection_W_m2K = it->second.convection_W_m2K;
                 materials[m].shortwaveAbsorptivity = it->second.shortwaveAbsorptivity;
+                materials[m].wetnessFactor = it->second.wetnessFactor;
                 materials[m].longwaveEmissivity = emissivity;
                 materials[m].interiorBoundary = it->second.interiorFixedTemperature
                     ? thermal::InteriorBoundary::FixedTemperature
@@ -117,30 +119,62 @@ struct ThermalPreview::Impl {
             exchange = thermal::MakeOpenSkyExchange(mesh.elements.size());
         }
         exchangeDirty = false;
-        sunTableDirty = false;
+        // The sun visibility the exchange carries is one direction's worth,
+        // and the table is built from it, so it has to follow.
+        sunTableDirty = true;
+    }
 
-        // Single-column sun table from the exchange
+    /// Where the sun is, at every hour the forcing file names. A run with a
+    /// diurnal CSV gets one column per row, so the shadows move through the
+    /// day the way they do offline; a run with constant forcing gets the
+    /// single column the exchange already computed.
+    void RebuildSunTable(VkAccelerationStructureKHR tlas) {
+        forcingSeries = thermal::LoadForcingCsv(params.forcingFile);
         sunTable = {};
-        if (!exchange.sunVisibility.empty()) {
+
+        if (forcingSeries.size() > 1 && tlas != VK_NULL_HANDLE) {
+            Vector<glm::vec3> directions;
+            directions.reserve(forcingSeries.size());
+            sunTable.sampleTime_h.reserve(forcingSeries.size());
+            for (const auto& [t, forcing] : forcingSeries) {
+                sunTable.sampleTime_h.push_back(t);
+                directions.push_back(forcing.sunDirection);
+            }
+
+            ThermalExchangePrecompute precompute(context);
+            if (precompute.IsValid()) {
+                sunTable.visibility = precompute.RunSunVisibility(
+                    tlas, mesh.elements, mesh.instanceElementBase, directions);
+            }
+            if (sunTable.visibility.size() == directions.size() * mesh.elements.size()) {
+                sunTable.sampleDirection = std::move(directions);
+            } else {
+                sunTable = {};  // the dispatch failed; fall through to one column
+            }
+        }
+
+        if (sunTable.SampleCount() == 0 && !exchange.sunVisibility.empty()) {
             sunTable.sampleTime_h = {params.startTime_h};
             sunTable.visibility = exchange.sunVisibility;
+            sunTable.sampleDirection = {fallbackSunDirection};
         }
+        sunTableDirty = false;
     }
 
     void RebuildTimeline() {
-        forcingSeries = thermal::LoadForcingCsv(params.forcingFile);
-
         constantForcing = {};
         constantForcing.airTemperature_K = params.airTemperature_K;
         constantForcing.sunIrradiance_W_m2 = params.sunIrradiance_W_m2;
+        constantForcing.diffuseIrradiance_W_m2 = params.diffuseIrradiance_W_m2;
         constantForcing.sunDirection = glm::vec3(fallbackSunDirection);
         constantForcing.skyTemperature_K = params.skyTemperature_K;
+        constantForcing.relativeHumidity = params.relativeHumidity;
 
-        thermal::SunVisibilityTable effectiveTable = sunTable;
-        if (effectiveTable.SampleCount() == 0 && !exchange.sunVisibility.empty()) {
-            effectiveTable.sampleTime_h = {params.startTime_h};
-            effectiveTable.visibility = exchange.sunVisibility;
-        }
+        // The short-wave gains depend on the geometry, the sun columns and the
+        // absorptivities, and every one of those sets timelineDirty on its way
+        // through -- so baking here keeps them fresh without a flag of their
+        // own.
+        thermal::BakeShortwaveGains(exchange, mesh.elements, materials, sunTable);
 
         thermal::ThermalTimeline::Desc desc;
         desc.startTime_h = params.startTime_h;
@@ -152,10 +186,13 @@ struct ThermalPreview::Impl {
             : thermal::InitialCondition::Uniform;
         desc.initialTemperature_K = params.initialTemperature_K;
 
+        // Every argument but the desc is held by reference for the timeline's
+        // lifetime, so all of them are members -- a local would be read after
+        // it went out of scope.
         auto& stepper = ChooseStepper();
         timeline = std::make_unique<thermal::ThermalTimeline>(
             desc, mesh.elements, materials, exchange,
-            effectiveTable, forcingSeries, constantForcing, stepper);
+            sunTable, forcingSeries, constantForcing, stepper);
 
         timelineDirty = false;
     }
@@ -217,6 +254,14 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     const f64 time_h, const Scene& scene, const VkAccelerationStructureKHR tlas) {
     SolveResult result;
 
+    // Whatever stops the solve is what Status() reports, so the panel says why
+    // it is showing nothing rather than only that it is.
+    const auto fail = [&](const char* reason) {
+        result.error = reason;
+        m_impl->lastError = reason;
+        return result;
+    };
+
     if (!m_impl->enabled) {
         result.error = "thermal solve is disabled";
         return result;
@@ -228,8 +273,7 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     }
 
     if (m_impl->mesh.elements.empty()) {
-        result.error = "the scene has no triangles to solve on";
-        return result;
+        return fail("the scene has no triangles to solve on");
     }
 
     // Rebuild material table if materials changed
@@ -247,13 +291,20 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
         }
     }
     if (!anyParticipating) {
-        result.error = "no material in the scene has thermal properties";
-        return result;
+        return fail("no material in the scene has thermal properties");
     }
 
     // Rebuild exchange if geometry changed
     if (m_impl->exchangeDirty) {
         m_impl->RebuildExchange(tlas);
+    }
+
+    // Rebuild the sun columns if the geometry, the forcing file or the sun
+    // moved. Cheap next to the exchange -- no hemisphere rays, one dispatch
+    // per column -- which is why it is worth having its own flag.
+    if (m_impl->sunTableDirty) {
+        m_impl->RebuildSunTable(tlas);
+        m_impl->timelineDirty = true;
     }
 
     // Rebuild timeline if anything changed
@@ -314,6 +365,7 @@ ThermalSolveStatus ThermalPreview::Status() const {
     status.elementCount = static_cast<u32>(m_impl->mesh.elements.size());
     status.exchangeNonZeros = static_cast<u32>(m_impl->exchange.viewFactors.NonZeros());
     status.exchangeRunCount = m_impl->exchangeRunCount;
+    status.sunSampleCount = static_cast<u32>(m_impl->sunTable.SampleCount());
     status.currentTime_h = m_impl->currentTime_h;
     status.stepperName = m_impl->gpuStepper && m_impl->gpuStepper->IsValid() &&
                          m_impl->params.layerCount <= GpuThermalStepper::kMaxNodes

@@ -203,6 +203,11 @@ struct ExternalRenderContext::Impl {
     /// one, and reading one is a device loss rather than a wrong colour.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
     std::unique_ptr<rendercore::ThermalPreview> thermalPreview;
+    /// Why the last SetThermalTime did not produce temperatures. Held here
+    /// rather than only in the preview because the reasons the facade rejects
+    /// a solve -- no scene, no acceleration structure -- never reach it, and a
+    /// panel that can only say "no result" leaves the user guessing.
+    String thermalLastError;
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -1054,8 +1059,11 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.exchangeTopK = resolved.thermal.exchangeTopK;
             tp.airTemperature_K = resolved.thermal.airTemperature_K;
             tp.sunIrradiance_W_m2 = resolved.thermal.sunIrradiance_W_m2;
+            tp.diffuseIrradiance_W_m2 = resolved.thermal.diffuseIrradiance_W_m2;
             tp.skyTemperature_K = resolved.thermal.skyTemperature_K;
+            tp.relativeHumidity = resolved.thermal.relativeHumidity;
             tp.forcingFile = resolved.thermal.forcingFile;
+            tp.checkpointStride_h = resolved.thermal.checkpointStride_h;
             SetThermalSolveParams(tp);
 
             ClearThermalMaterials();
@@ -1067,6 +1075,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 tmp.thickness_m = mat.thickness_m;
                 tmp.convection_W_m2K = mat.convection_W_m2K;
                 tmp.shortwaveAbsorptivity = mat.shortwaveAbsorptivity;
+                tmp.wetnessFactor = mat.wetnessFactor;
                 tmp.interiorFixedTemperature =
                     mat.interiorBoundary == thermal::InteriorBoundary::FixedTemperature;
                 tmp.interiorTemperature_K = mat.interiorTemperature_K;
@@ -2474,8 +2483,13 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
 }
 
 Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
+    const auto fail = [&](String reason) {
+        m_impl->thermalLastError = reason;
+        return Result<void, String>::Err(std::move(reason));
+    };
+
     if (!m_impl->thermalPreview || !m_impl->scene || !m_impl->geometry.IsValid()) {
-        return Result<void, String>::Err("no scene loaded");
+        return fail("no scene loaded");
     }
 
     const VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
@@ -2483,11 +2497,12 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     try {
         result = m_impl->thermalPreview->SolveAt(time_h, *m_impl->scene, tlas);
     } catch (const std::exception& ex) {
-        return Result<void, String>::Err(String("thermal solve failed: ") + ex.what());
+        return fail(String("thermal solve failed: ") + ex.what());
     }
     if (!result.error.empty()) {
-        return Result<void, String>::Err(result.error);
+        return fail(result.error);
     }
+    m_impl->thermalLastError.clear();
 
     if (result.elementCountChanged || result.surfaceTemperature_K.size() * sizeof(f32) !=
             (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
@@ -2514,12 +2529,19 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
 }
 
 ThermalSolveStatus ExternalRenderContext::GetThermalSolveStatus() const {
-    if (!m_impl->thermalPreview) return {};
-    try {
-        return m_impl->thermalPreview->Status();
-    } catch (...) {
-        return {};
+    ThermalSolveStatus status;
+    if (m_impl->thermalPreview) {
+        try {
+            status = m_impl->thermalPreview->Status();
+        } catch (...) {
+            status = {};
+        }
     }
+    if (!m_impl->thermalLastError.empty()) {
+        status.error = m_impl->thermalLastError;
+        status.solveValid = false;
+    }
+    return status;
 }
 
 void ExternalRenderContext::RebuildAccelerationStructure() {
