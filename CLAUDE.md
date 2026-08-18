@@ -60,6 +60,53 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 | `assets/configs/` | TOML scene configs — the CLI's only input |
 | `scripts/` | Python/PowerShell tooling (spectral baking, LUT gen, physics audit) |
 
+## Environment maps light RGB previews, and nothing else
+
+An environment map is an RGB image in arbitrary units. That is fine for a
+preview and wrong for a measurement, so exactly one mode samples one.
+
+**The invariant.** `LightingParams::enableEnvironmentMap` is 1 on the GPU if and
+only if all four hold: the config did not turn it off, it **names** a map, the
+map **loaded**, and the mode is **RGB**. Anything less and the shader must not
+sample binding 10.
+
+- *Names one*, because there is no image-based lighting without an image. The
+  flag used to follow `renderer.environment_map_enabled` alone, which defaults
+  to true, so a scene naming no map was lit by the fallback cubemap — 256×256 of
+  sky blue. In `paper-exp`'s 15 scenes that invented sky was 46–84% of the
+  signal. The key still defaults to true; it is intent, one of four conditions,
+  not the switch.
+- *RGB*, because `closesthit.rchit`'s VIS_FUSED and SINGLE branches push the
+  sampled RGB through `ConvertLinearRGBToIlluminantSpectrum` and use the result
+  as spectral radiance density per nanometre — roughly 12× an ASTM G-173 sky.
+  The same branches zero the traced specular residual (`qSpec`) when the flag is
+  set. SWIR/NIR/MWIR/LWIR never referenced the cubemap at all; they take
+  `TraceEnvBounceResidual` against the analytic sky or Planck downwelling, and
+  are correct as they stand. A spectral scene is lit by `lighting.solar_lut` and
+  the analytic sky, and naming a map in one earns a warning rather than a
+  silently mis-lit render.
+
+**The placeholder is not a sky.** `EnvironmentCubemap::Fallback` builds one black
+texel (`kFallbackParams{1, 1}`). It exists only because the pipeline declares
+binding 10 with `descriptorCount 1` and no partially-bound flag, so *something*
+valid must be written there even for a scene with no environment. Black means a
+bug that samples it anyway darkens visibly instead of quietly adding light to a
+measurement.
+
+**Load failure corrects the flag; it does not substitute a sky.** Both hosts
+assume at resolve time that a named map will load, so both fix it where the
+placeholder is actually chosen:
+
+| Path | Where |
+|---|---|
+| CLI / offline | `OfflineRenderer::Impl::BuildPipeline`, in the `useFallback` lambda — zeroes the flag and re-uploads the lighting buffer, which was uploaded before `BuildPipeline` ran |
+| Interactive | `ExternalRenderContext::LoadEnvironmentMap` — sets the flag on success, clears it plus `hasCustomEnvMap` on failure, uploads either way |
+
+`Impl::UploadLightingParams` is the single writer of that buffer and masks the
+flag with `hasCustomEnvMap`, so a host raising it through `SetLightingParams`
+with nothing loaded cannot reach the shader. `HasEnvironmentMap()` reports load
+state, not lighting state — a map can be loaded with IBL turned off.
+
 ## Thermography
 
 Four things a thermal scene can now do that it could not, each independent of
