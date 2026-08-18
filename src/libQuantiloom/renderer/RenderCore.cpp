@@ -511,10 +511,13 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
 
 EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params& requested) {
     const Params params = ClampToFaceSize(requested);
-    QL_LOG_INFO("Creating fallback sky-blue environment map ({}x{} per face)...",
+    QL_LOG_INFO("Creating placeholder environment map ({}x{} per face, black)...",
                 params.faceSize, params.faceSize);
 
-    constexpr f32 kSky[4] = {0.5f, 0.7f, 1.0f, 1.0f};
+    // Black, so that a bug which samples this anyway darkens visibly rather than
+    // quietly adding an invented sky to a measurement. Alpha is along for the
+    // ride -- the shader reads .rgb only.
+    constexpr f32 kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
     EnvironmentCubemap result;
     result.m_device = ctx.GetDevice();
@@ -530,10 +533,10 @@ EnvironmentCubemap EnvironmentCubemap::Fallback(VulkanContext& ctx, const Params
 
         std::vector<f32> level(static_cast<size_t>(mipSize) * mipSize * 4);
         for (size_t i = 0; i < static_cast<size_t>(mipSize) * mipSize; ++i) {
-            level[i * 4 + 0] = kSky[0];
-            level[i * 4 + 1] = kSky[1];
-            level[i * 4 + 2] = kSky[2];
-            level[i * 4 + 3] = kSky[3];
+            level[i * 4 + 0] = kBlack[0];
+            level[i * 4 + 1] = kBlack[1];
+            level[i * 4 + 2] = kBlack[2];
+            level[i * 4 + 3] = kBlack[3];
         }
 
         for (u32 face = 0; face < 6; ++face) {

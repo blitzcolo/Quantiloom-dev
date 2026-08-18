@@ -93,12 +93,20 @@ struct ResolvedRenderConfig {
     u32 seed = constants::DEFAULT_SAMPLING_SEED;
     String outputPath = "spectral_output.exr";
     String environmentMap;
-    /// `renderer.environment_map_enabled`. False means the map lights nothing --
-    /// not that it is replaced by a substitute sky. The path is still carried so
-    /// a host can keep showing it and turn it back on without re-reading the
-    /// file. A host that honours this skips loading the map entirely; the
-    /// cubemap binding stays valid because the fallback is bound instead, and
-    /// the shader does not sample it either way.
+    /// `renderer.environment_map_enabled`. Configuration *intent*, and only that:
+    /// it is one of three conditions on image-based lighting, not the switch.
+    /// The GPU flag `lighting.enableEnvironmentMap` is 1 only when this is true
+    /// AND `environmentMap` names a file AND the mode is RGB (see the resolver;
+    /// the spectral branches read a map's RGB as spectral radiance density and
+    /// get it wrong by about 12x, so they never sample one). A host applies a
+    /// fourth: the map has to actually load.
+    ///
+    /// False means the map lights nothing -- not that it is replaced by a
+    /// substitute sky. The path is still carried so a host can keep showing it
+    /// and turn it back on without re-reading the file. A host that honours this
+    /// skips loading the map entirely; the cubemap binding stays valid because
+    /// the black placeholder is bound instead, and the shader does not sample it
+    /// either way.
     bool environmentMapEnabled = true;
     i32 debugMode = 0;
 

@@ -106,6 +106,22 @@ TEST_F(VulkanDeviceTest, EnvironmentCubemapDefaultsMatchTheShippedConfiguration)
     EXPECT_EQ(defaults.faceSize, 512u);
     EXPECT_EQ(defaults.mipLevels, 8u);
 
-    EXPECT_EQ(rendercore::EnvironmentCubemap::kFallbackParams.faceSize, 256u);
-    EXPECT_EQ(rendercore::EnvironmentCubemap::kFallbackParams.mipLevels, 5u);
+    // One black texel, because nothing is meant to sample it -- it exists so
+    // binding 10 holds a valid descriptor for a scene with no environment. It
+    // was 256x256x5 of sky blue, and a scene naming no map was lit by it.
+    EXPECT_EQ(rendercore::EnvironmentCubemap::kFallbackParams.faceSize, 1u);
+    EXPECT_EQ(rendercore::EnvironmentCubemap::kFallbackParams.mipLevels, 1u);
+}
+
+// The placeholder's own shape is the degenerate one, so build it exactly as
+// shipped rather than trusting that the clamp handles 1x1 the way 8x1 is handled
+// above: a single texel is where an off-by-one in the mip chain would land.
+TEST_F(VulkanDeviceTest, EnvironmentCubemapBuildsTheShippedPlaceholder) {
+    auto env = rendercore::EnvironmentCubemap::Fallback(
+        Device(), rendercore::EnvironmentCubemap::kFallbackParams);
+
+    EXPECT_TRUE(env.IsValid());
+    EXPECT_NE(env.View(), VK_NULL_HANDLE);
+    EXPECT_EQ(env.FaceSize(), 1u);
+    EXPECT_EQ(env.MipLevels(), 1u);
 }

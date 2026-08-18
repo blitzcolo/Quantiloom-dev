@@ -690,21 +690,40 @@ public:
     // ========================================================================
 
     /**
-     * @brief Load HDR environment map for IBL
+     * @brief Load an HDR environment map and light the scene with it
      * @param hdrPath Path to equirectangular HDR image (.exr, .hdr)
      * @return Result indicating success or error
      *
      * Loads the HDR image, converts equirectangular to cubemap, and generates
-     * prefiltered mip chain for specular IBL.
+     * the prefiltered mip chain for specular IBL.
      *
-     * @note Replaces the fallback sky-blue environment map
-     * @note Resets accumulation when environment changes
+     * @note On success the map becomes a light source: this raises
+     *       LightingParams::enableEnvironmentMap and uploads it. Nothing else
+     *       needs to be called.
+     * @note On failure the previously bound cubemap stays bound -- the binding
+     *       has to hold something -- but image-based lighting is switched off,
+     *       so a failed load renders without an environment rather than with a
+     *       stale or invented one. GetLightingParams() reports the 0.
+     * @note A context with no map loaded binds a black 1x1 placeholder and never
+     *       samples it. There is no substitute sky.
+     * @note Only meaningful in SpectralMode::RGB. The spectral modes read a
+     *       map's RGB as spectral radiance density, which overstates a real sky
+     *       by roughly 12x, so they do not sample one; ApplyConfig does not even
+     *       load a map for them.
+     * @note Resets accumulation, on both the success and failure paths.
      */
     Result<void, String> LoadEnvironmentMap(const String& hdrPath);
 
     /**
-     * @brief Check if custom environment map is loaded
-     * @return true if LoadEnvironmentMap() succeeded, false if using fallback
+     * @brief Whether a real environment map is loaded
+     * @return true if a LoadEnvironmentMap() call succeeded and its map is still
+     *         bound; false if the black placeholder is bound instead
+     *
+     * @note This is load state, not lighting state. A map can be loaded while
+     *       image-based lighting is off (a config that sets
+     *       renderer.environment_map_enabled = false keeps the path and the
+     *       map). Ask GetLightingParams().enableEnvironmentMap for whether it
+     *       lights anything.
      */
     [[nodiscard]] bool HasEnvironmentMap() const;
 

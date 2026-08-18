@@ -79,6 +79,12 @@ TEST(LightingParamsTest, CreateDefaultLightingParams) {
 
     // Atmosphere temperature should be in valid range
     EXPECT_TRUE(IsAtmosphereTemperatureValid(params.atmosphereTemperature_K));
+
+    // Off, because a context built from these defaults has no environment map in
+    // it yet -- the flag means "a real map is bound and may be sampled", not
+    // "this scene would like image-based lighting". It defaulted on, so a fresh
+    // context lit every scene with the placeholder cubemap.
+    EXPECT_EQ(params.enableEnvironmentMap, 0u);
 }
 
 TEST(LightingParamsTest, DefaultAtmosphereTemperature) {

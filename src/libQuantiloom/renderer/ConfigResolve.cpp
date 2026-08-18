@@ -218,10 +218,11 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     if (!out.environmentMap.empty()) {
         out.environmentMap = ResolveConfigPath(out.environmentMap, options.baseDir);
     }
-    // Whether image-based lighting contributes at all. Independent of whether a
-    // map is named: with no path the fallback cubemap is what lights the scene,
-    // and that has always contributed -- turning this off by default would
-    // silently change every scene that does not name a map.
+    // Intent, not the switch. Still defaults on, and that is harmless now: a
+    // scene that names no map gets no image-based lighting regardless, because
+    // the GPU flag below also requires a named map. Keeping the default true is
+    // what lets "name a map and it lights the scene" stay a one-key operation
+    // instead of needing this one turned on as well.
     //
     // The key exists so a scene can keep its path while lighting from something
     // else, which is how you compare the two without editing the path out and
@@ -445,21 +446,51 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     }
 
     out.lighting.enableShadowRays = enableShadowRays ? 1u : 0u;
-    out.lighting.enableEnvironmentMap = out.environmentMapEnabled ? 1u : 0u;
+
+    // The GPU flag is narrower than the config key, on two counts.
+    //
+    // A named map, because there is no such thing as image-based lighting with
+    // no image. What used to stand in was the fallback cubemap, 256x256 of
+    // sky blue, and the flag did not distinguish it from a real HDRI -- so every
+    // scene that named no map was lit by an invented sky. In a preview that is a
+    // look; in a quantitative render it was 46-84% of the signal.
+    //
+    // RGB only, because the map has no honest interpretation in the other modes.
+    // The spectral branches take the sampled RGB through
+    // ConvertLinearRGBToIlluminantSpectrum and use the result as spectral
+    // radiance density per nanometre, which is about 12x an ASTM G-173 sky --
+    // the numbers are not in the units the code treats them as. A spectral scene
+    // is lit by lighting.solar_lut and the analytic sky, which are; the map is
+    // preview data, and a scene that names one in a spectral mode is warned
+    // below rather than silently mis-lit.
+    const bool mapNamed = out.environmentMapEnabled && !out.environmentMap.empty();
+    out.lighting.enableEnvironmentMap = (mapNamed && out.mode == SpectralMode::RGB) ? 1u : 0u;
 
     const auto nonZero = [](const glm::vec3& c) {
         return c.r > 0.0f || c.g > 0.0f || c.b > 0.0f;
     };
 
-    // An environment map is a light source, and a sky HDRI has a sun painted
-    // into it. Adding an analytic sun on top of one is counting the same
-    // illumination twice, and because nothing aligns the two directions the
-    // usual symptom is two specular highlights on the same surface, in
-    // different places. Both hosts warn about it because neither can tell
-    // whether it was meant: a synthetic HDRI with no sun in it plus an analytic
-    // sun is a legitimate way to light a scene.
-    if (!out.environmentMap.empty() && out.environmentMapEnabled &&
-        (nonZero(sunRadiance) || nonZero(skyRadiance))) {
+    if (mapNamed && out.mode != SpectralMode::RGB) {
+        diag.Warn("renderer.environment_map",
+                  "  Scene names an environment map in a spectral mode, where it "
+                  "is preview data only and is ignored. A map is an RGB image in "
+                  "arbitrary units; reading it as spectral radiance density "
+                  "would overstate a real sky by roughly 12x, so the spectral "
+                  "modes do not sample one. This scene is lit by "
+                  "lighting.solar_lut and the analytic sky. The path is kept, so "
+                  "the same file still lights an RGB preview of this scene.");
+    } else if (mapNamed && (nonZero(sunRadiance) || nonZero(skyRadiance))) {
+        // An environment map is a light source, and a sky HDRI has a sun painted
+        // into it. Adding an analytic sun on top of one is counting the same
+        // illumination twice, and because nothing aligns the two directions the
+        // usual symptom is two specular highlights on the same surface, in
+        // different places. Both hosts warn about it because neither can tell
+        // whether it was meant: a synthetic HDRI with no sun in it plus an
+        // analytic sun is a legitimate way to light a scene.
+        //
+        // Only reachable in RGB now -- in the spectral modes the map contributes
+        // nothing, so there is nothing to double-count and the branch above has
+        // the more useful thing to say.
         diag.Warn("renderer.environment_map",
                   "  Scene has both an environment map and a non-zero analytic "
                   "sun or sky. An HDRI sky already carries its own illumination, "

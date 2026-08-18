@@ -566,15 +566,16 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     // ====================================================================
     QL_LOG_INFO("Creating prefiltered environment map for IBL...");
 
-    // Falls back to sky blue when the config names no map, or names one that
-    // will not load. Load() reads through ImageIO::ReadImage, so .hdr and the
-    // LDR formats work as well as .exr -- this used to call ReadEXR directly
-    // and take the fallback for anything else.
-    // A disabled map is not loaded at all: the binding still has to be valid, so
-    // the fallback is bound and the shader skips it on the lighting flag. Off
-    // means it contributes nothing, not that it is replaced by a sky.
-    // The fallback is uniform sky blue and identical for every scene, so a shared
+    // Binding 10 has to hold a valid descriptor whether or not this scene has an
+    // environment, so something is always bound. When that something is the
+    // placeholder -- no map named, map disabled, spectral mode, or a load that
+    // failed -- the lighting flag is 0 and the shader never reads it. The
+    // placeholder is one black texel, identical for every scene, so a shared
     // device supplies one. A map the config *names* is this render's own.
+    //
+    // Load() reads through ImageIO::ReadImage, so .hdr and the LDR formats work
+    // as well as .exr -- this used to call ReadEXR directly and take the
+    // fallback for anything else.
     const auto useFallback = [&] {
         if (fallbackEnvMapRef) {
             envMapRef = fallbackEnvMapRef;
@@ -582,11 +583,27 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
             envMap = rendercore::EnvironmentCubemap::Fallback(context);
             envMapRef = &envMap;
         }
+        // Resolve assumed a map it can see named would load. The lighting buffer
+        // was filled and uploaded from that assumption before this function ran,
+        // so the correction belongs here, where the placeholder is actually
+        // chosen -- anything else leaves the shader sampling a black cubemap as
+        // if it were sky. For the paths that reach here with the flag already 0
+        // (no map, disabled, spectral) this re-upload is a no-op that costs one
+        // memcpy at startup.
+        lightingParams.enableEnvironmentMap = 0u;
+        lightingParamsBuffer->Upload(&lightingParams, sizeof(LightingParams));
     };
 
-    const String envMapPath = resolved.environmentMapEnabled ? resolved.environmentMap : String{};
+    // The mode gate mirrors the resolver, which sets the flag to 0 outside RGB:
+    // without it we would convert an equirect to a cubemap that no shader branch
+    // will ever sample. ApplyConfig gates the interactive path the same way.
+    const String envMapPath =
+        (resolved.environmentMapEnabled && resolved.mode == SpectralMode::RGB)
+            ? resolved.environmentMap
+            : String{};
     if (envMapPath.empty()) {
-        QL_LOG_INFO("  No environment map specified in config, using fallback");
+        QL_LOG_INFO("  No environment map for this render, binding the placeholder "
+                    "-- image-based lighting is off");
         useFallback();
     } else {
         auto loaded = rendercore::EnvironmentCubemap::Load(context, envMapPath);
@@ -594,7 +611,8 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
             envMap = std::move(loaded.value());
             envMapRef = &envMap;
         } else {
-            QL_LOG_WARN("  {}, using fallback", loaded.error());
+            QL_LOG_WARN("  {} -- binding the placeholder and rendering without "
+                        "image-based lighting", loaded.error());
             useFallback();
         }
     }

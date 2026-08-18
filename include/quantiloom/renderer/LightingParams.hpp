@@ -243,9 +243,14 @@ inline LightingParams CreateDefaultLightingParams() {
     // with shadows. The comment here used to cite a driver crash; the escape
     // hatch for that is the config key, which still turns them off.
     params.enableShadowRays = 1u;
-    // On, so a context handed an environment map lights with it. A scene that
-    // wants none says so, and gets none -- not a substitute sky.
-    params.enableEnvironmentMap = 1u;
+    // Off, because a context that has just been constructed has no environment
+    // map in it. This flag does not mean "the scene would like image-based
+    // lighting"; it means "there is a real map bound at binding 10 and the
+    // shader may sample it as a light source". Defaulting it on made a fresh
+    // context light every scene with the fallback cubemap, which is a
+    // placeholder, not sky. LoadEnvironmentMap raises it when a map actually
+    // loads, and ConfigResolve computes it from the config.
+    params.enableEnvironmentMap = 0u;
     // No scene yet, so no emitters. Filled in when one is built.
     params.emissiveTriangleCount = 0u;
     params.emissiveTotalPower = 0.0f;

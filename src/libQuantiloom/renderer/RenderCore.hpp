@@ -186,8 +186,16 @@ public:
         u32 mipLevels = 8;
     };
 
-    /// What a scene with no environment map configured gets: uniform sky blue.
-    static constexpr Params kFallbackParams{256, 5};
+    /// A placeholder, not an environment. The ray tracing pipeline declares
+    /// binding 10 with descriptorCount 1 and no partially-bound flag, so a
+    /// descriptor must be written there before the pipeline can be used, even
+    /// for a scene that has no environment map at all. One black texel is the
+    /// smallest thing that satisfies that. It used to be 256x256x5 mips of sky
+    /// blue, which meant a scene that named no map was lit by an invented sky --
+    /// visible in a preview, and a 46-84% contribution to the signal in a
+    /// quantitative render. Nothing should ever sample this: the lighting flag
+    /// enableEnvironmentMap is 0 whenever this is what is bound.
+    static constexpr Params kFallbackParams{1, 1};
 
     EnvironmentCubemap() = default;
     // Out of line: GpuImage is only forward declared here, so the destructor cannot
@@ -209,7 +217,8 @@ public:
                                                    const String& path,
                                                    const Params& requested = {});
 
-    /// Uniform sky blue, for a scene that configures no environment map.
+    /// A black placeholder to keep binding 10 valid for a scene that configures
+    /// no environment map. See kFallbackParams for why it is not a sky.
     static EnvironmentCubemap Fallback(VulkanContext& ctx,
                                        const Params& requested = kFallbackParams);
 

@@ -257,8 +257,11 @@ struct ExternalRenderContext::Impl {
     // while a bake is active. Every write to lightingParams goes through it.
     void UploadLightingParams();
 
-    // Environment map state
-    bool hasCustomEnvMap = false;         // True if LoadEnvironmentMap succeeded
+    // Environment map state. True exactly while `envMap` holds a real map that
+    // loaded, false while it holds the black placeholder. UploadLightingParams
+    // masks enableEnvironmentMap with it, so this is what stops a host raising
+    // the flag on a context that has nothing to sample.
+    bool hasCustomEnvMap = false;
 
     // Accumulation
     u32 accumulatedSamples = 0;
@@ -398,6 +401,10 @@ struct ExternalRenderContext::Impl {
         brdfLut = {};
 
         envMap = {};
+        // The map is gone, so the load state that describes it has to go too --
+        // otherwise a re-initialised context reports a custom map it no longer
+        // has, and UploadLightingParams stops masking.
+        hasCustomEnvMap = false;
 
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
@@ -1032,9 +1039,27 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     m_impl->camera.SetAspectRatio(static_cast<f32>(m_impl->targetWidth) /
                                   static_cast<f32>(m_impl->targetHeight));
 
-    // Skipped when the config turned it off: the fallback stays bound and the
-    // lighting flag keeps the shader from sampling it either way.
-    if (resolved.environmentMapEnabled) {
+    // Three conditions, and only the first was here before. Skipping leaves the
+    // placeholder bound with the lighting flag at 0, which is what a scene
+    // without an environment should render with.
+    //
+    // A named path, because calling LoadEnvironmentMap("") was never going to
+    // load anything -- it just produced a warning about a missing map on every
+    // config that has none, which is most of them. An absent map is not an error.
+    //
+    // RGB, because no spectral branch of closesthit.rchit samples the cubemap
+    // (they read solar_lut and the analytic sky instead), so converting an
+    // equirect into a cubemap for one is work whose result nothing reads. The
+    // resolver has already set the flag to 0 for those modes and warned; this
+    // gate has to be here rather than inside LoadEnvironmentMap, because a
+    // successful load raises the flag and would otherwise overwrite that 0.
+    //
+    // One consequence worth naming: a multispectral config is previewed in RGB
+    // further down, but the mode is still Multispectral here, so a map it names
+    // does not light the preview. That is the invariant working as intended --
+    // multispectral is a quantitative mode -- but it is a visible change.
+    if (resolved.environmentMapEnabled && !resolved.environmentMap.empty() &&
+        resolved.mode == SpectralMode::RGB) {
         if (auto envResult = LoadEnvironmentMap(resolved.environmentMap);
             !envResult.has_value()) {
             report.messages.push_back({ConfigApplyMessage::Severity::Warning,
@@ -1236,12 +1261,24 @@ const Scene* ExternalRenderContext::GetScene() const {
 // differently. The host's own value is left intact in lightingParams so it
 // returns when the atmosphere is switched off, and so GetLightingParams keeps
 // reporting what the host set.
+//
+// It also masks enableEnvironmentMap with whether a map is actually loaded, for
+// the same reason and in the same way. The flag says the shader may sample
+// binding 10 as a light source, and binding 10 holds a black placeholder
+// whenever no map loaded -- so an unmasked 1 there does not brighten the scene,
+// it darkens it: the shader takes the split-sum path, adds black, and zeroes the
+// traced specular residual (qSpec) that would otherwise have carried the
+// reflection. A host can raise the flag through SetLightingParams at any time
+// and this is the one place every upload passes through, so the check lives here
+// rather than at each of the nine call sites.
 void ExternalRenderContext::Impl::UploadLightingParams() {
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
         effective.atmosphereTemperature_K =
             static_cast<f32>(atmosphereConfig.tGroundK);
     }
+    effective.enableEnvironmentMap =
+        (lightingParams.enableEnvironmentMap != 0 && hasCustomEnvMap) ? 1u : 0u;
     lightingParamsBuffer->Upload(&effective, sizeof(LightingParams));
 }
 
@@ -5172,6 +5209,16 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
 
     auto loaded = rendercore::EnvironmentCubemap::Load(*m_impl->contextAdapter, hdrPath);
     if (!loaded.has_value()) {
+        // Whatever was bound stays bound -- freeing it would leave binding 10
+        // dangling -- but it is no longer what the host asked for, so it stops
+        // being a light source. Lowering the flag rather than leaving the old
+        // map lighting the scene is what keeps a failed load from looking like a
+        // successful one, and it is what GetLightingParams reports afterwards.
+        // Accumulated frames were integrated under the old lighting, so they go.
+        m_impl->hasCustomEnvMap = false;
+        m_impl->lightingParams.enableEnvironmentMap = 0u;
+        m_impl->UploadLightingParams();
+        ResetAccumulation();
         return Result<void, String>::Err(loaded.error());
     }
     m_impl->envMap = std::move(loaded.value());
@@ -5179,7 +5226,12 @@ Result<void, String> ExternalRenderContext::LoadEnvironmentMap(const String& hdr
     if (m_impl->pipeline) {
         m_impl->pipeline->BindPrefilteredEnvMap(m_impl->envMap.View(), m_impl->envMap.Sampler());
     }
+    // A map that loaded is a map that lights: raising the flag here is what makes
+    // a bare LoadEnvironmentMap call work on its own, instead of depending on
+    // whatever the flag happened to be already.
     m_impl->hasCustomEnvMap = true;
+    m_impl->lightingParams.enableEnvironmentMap = 1u;
+    m_impl->UploadLightingParams();
     ResetAccumulation();
     return Result<void, String>::Ok();
 }

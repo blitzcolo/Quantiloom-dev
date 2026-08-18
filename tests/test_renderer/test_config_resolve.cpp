@@ -359,14 +359,77 @@ TEST_F(ConfigResolveTest, ADisabledMapDoesNotDoubleCountAndDoesNotWarn) {
     }
 }
 
-TEST_F(ConfigResolveTest, ImageBasedLightingIsOnByDefaultEvenWithNoMapNamed) {
-    // With no path the fallback cubemap is what lights the scene, and it always
-    // has. Defaulting this off would silently darken every config without a map.
+TEST_F(ConfigResolveTest, NoMapNamedMeansNoImageBasedLighting) {
+    // This used to assert the opposite -- that the flag was on with no map named
+    // -- on the reasoning that the fallback cubemap had always lit such scenes
+    // and turning it off would darken them. That reasoning had the bug in it: the
+    // fallback was 256x256 of sky blue, so every scene naming no map was lit by
+    // an invented sky, which is a look in a preview and a measurement error in a
+    // quantitative render. There is no image-based lighting without an image.
+    //
+    // The intent key still defaults on, and is still true here. It is one of
+    // three conditions, not the switch.
     auto config = Parse({});
     auto resolved = ResolveStrict(config);
     ASSERT_TRUE(resolved.has_value()) << resolved.error();
     EXPECT_TRUE(resolved.value().environmentMapEnabled);
+    EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 0u);
+}
+
+TEST_F(ConfigResolveTest, ANamedMapInRgbModeSetsTheGpuFlag) {
+    // The fixture emits no spectral.mode, so this resolves as RGB -- the one
+    // mode whose shader branch samples a cubemap.
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_EQ(resolved.value().mode, SpectralMode::RGB);
     EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 1u);
+}
+
+TEST_F(ConfigResolveTest, ANamedMapInASpectralModeIsPreviewOnlyAndWarns) {
+    // A map is an RGB image in arbitrary units. The spectral branches would read
+    // it as spectral radiance density per nanometre -- about 12x an ASTM G-173
+    // sky -- so they do not sample one at all, and a scene that names one is
+    // told rather than silently mis-lit. Sun and sky are zero (the fixture
+    // default), so this needs no solar_lut to resolve strictly.
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n",
+                         .spectralKeys = "mode = \"lwir_fused\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 0u);
+    // The path survives, so the same file still lights an RGB preview.
+    EXPECT_FALSE(resolved.value().environmentMap.empty());
+
+    bool warned = false;
+    for (const auto& m : report.messages) {
+        if (m.key == "renderer.environment_map" &&
+            m.severity == ConfigApplyMessage::Severity::Warning) {
+            warned = true;
+        }
+    }
+    EXPECT_TRUE(warned);
+}
+
+TEST_F(ConfigResolveTest, ANamedMapInVisFusedIsPreviewOnlyAndWarns) {
+    // Worth pinning separately from the thermal case: vis_fused is where the
+    // unit error actually bit. It is a visible-band spectral mode, so a sky HDRI
+    // looks like it belongs, and its shader branch converted the sampled RGB
+    // into an illuminant spectrum -- 46-84% of the signal in the scenes this was
+    // measured on.
+    auto config = Parse({.rendererKeys = "environment_map = \"sky.exr\"\n",
+                         .spectralKeys = "mode = \"vis_fused\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_EQ(resolved.value().lighting.enableEnvironmentMap, 0u);
+
+    bool warned = false;
+    for (const auto& m : report.messages) {
+        if (m.key == "renderer.environment_map" &&
+            m.severity == ConfigApplyMessage::Severity::Warning) {
+            warned = true;
+        }
+    }
+    EXPECT_TRUE(warned);
 }
 
 // ============================================================================

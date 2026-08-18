@@ -63,14 +63,15 @@ protected:
     /// Extra keys go inside the sections the fixture already writes rather than
     /// being appended as text: TOML will not let a table be opened twice.
     Config WriteConfig(const std::string& spectralKeys = "",
-                       const std::string& lightingKeys = "") {
+                       const std::string& lightingKeys = "",
+                       const std::string& rendererKeys = "") {
         const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
         const auto gltf = (root / "assets" / "models" / "cornell_box" / "cornell_box.gltf");
 
         const auto path = testDir / "scene.toml";
         {
             std::ofstream file(path);
-            file << "[renderer]\nresolution = [64, 64]\n"
+            file << "[renderer]\nresolution = [64, 64]\n" << rendererKeys
                  << "[camera]\nposition = [0.0, 1.0, 3.0]\nlook_at = [0.0, 1.0, 0.0]\n"
                  << "[spectral]\n" << spectralKeys
                  << "[lighting]\nsun_direction = [0.0, 1.0, 0.0]\n"
@@ -171,6 +172,53 @@ TEST_F(ApplyConfigTest, MultispectralWarnsAndPreviewsInRgb) {
         }
     }
     EXPECT_TRUE(warned);
+}
+
+// ============================================================================
+// Environment map
+// ============================================================================
+
+TEST_F(ApplyConfigTest, AMissingEnvironmentMapDisablesIblRatherThanFakingASky) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+
+    auto config = WriteConfig("", "", "environment_map = \"no_such_map.exr\"\n");
+    const auto report = context->ApplyConfig(config);
+    // A map that will not load is a warning, not a failed apply: the rest of the
+    // document still describes a renderable scene.
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+
+    bool warned = false;
+    for (const auto& m : report.messages) {
+        if (m.key == "renderer.environment_map" &&
+            m.severity == ConfigApplyMessage::Severity::Warning) {
+            warned = true;
+        }
+    }
+    EXPECT_TRUE(warned);
+
+    // The point of the fix. The resolver set the flag to 1 for this config --
+    // a map is named, in RGB -- and the load then failed, so the correction has
+    // to come from the load path. Left at 1 the shader would take the split-sum
+    // branch against a black placeholder and zero the traced specular residual
+    // with it, which darkens rather than brightens.
+    EXPECT_EQ(context->GetLightingParams().enableEnvironmentMap, 0u);
+    EXPECT_FALSE(context->HasEnvironmentMap());
+}
+
+TEST_F(ApplyConfigTest, AConfigWithoutAMapDoesNotWarnAboutOne) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+
+    // renderer.environment_map_enabled defaults to true, and this used to mean
+    // every config naming no map called LoadEnvironmentMap("") and collected a
+    // warning about the empty path. An absent map is not an error.
+    const auto report = context->ApplyConfig(WriteConfig());
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+
+    for (const auto& m : report.messages) {
+        EXPECT_NE(m.key, "renderer.environment_map") << m.text;
+    }
+    EXPECT_EQ(context->GetLightingParams().enableEnvironmentMap, 0u);
+    EXPECT_FALSE(context->HasEnvironmentMap());
 }
 
 TEST_F(ApplyConfigTest, ApplyingTwiceIsHowADocumentIsReplayed) {
