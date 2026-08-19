@@ -268,6 +268,17 @@ float3 SafeNormalize(float3 v) {
 // The 2D case, for the anisotropy direction a texture encodes. A distinct name
 // rather than an overload: this file's Fresnel header records what a same-named
 // sibling with a different vector width cost the last time.
+// The coat's lobe toward one light direction. Every dot product is against the
+// coat's own normal, which a clearcoatNormalTexture may have tilted away from
+// the base's -- reusing the base's NdotV here is the easy mistake.
+float ClearcoatDirect(float3 ccNormal, float3 V, float3 L, float ccRoughness) {
+    const float3 H = SafeHalfVector(V, L, ccNormal);
+    return ClearcoatBRDF(max(dot(ccNormal, H), 0.0),
+                         max(dot(ccNormal, V), 0.0),
+                         max(dot(ccNormal, L), 0.0),
+                         ccRoughness);
+}
+
 float2 SafeNormalize2(float2 v, float2 fallback) {
     float lenSq = dot(v, v);
     if (lenSq < 1e-8) {
@@ -1416,6 +1427,80 @@ void main(inout Payload payload, in HitAttributes attribs) {
         aniso.active = anisoStrength > 0.0;
     }
 
+    // ========================================================================
+    // Clearcoat (KHR_materials_clearcoat)
+    // ========================================================================
+    // The factor is in the RED channel of its texture and the roughness in the
+    // GREEN of another, both multiplying their factors.
+    //
+    // The coat's normal is its own. Where clearcoatNormalTexture is absent the
+    // coat follows the INTERPOLATED VERTEX normal -- not the base's mapped one,
+    // even where the base has a normal map. "No normal texture" means "no
+    // normal mapping on the coat", and ClearCoatTest's BaseNorm_Coated is
+    // authored to catch an implementation that borrows the base's instead.
+    float clearcoat = material.clearcoatFactor;
+    float ccRoughness = material.clearcoatRoughnessFactor;
+    if (material.clearcoatTextureIndex >= 0) {
+        clearcoat *= SampleTexture(
+            material.clearcoatTextureIndex,
+            material.clearcoatTextureIndex,
+            TransformUV(material, UV_SLOT_CLEARCOAT, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).r;
+    }
+    if (material.clearcoatRoughnessTextureIndex >= 0) {
+        ccRoughness *= SampleTexture(
+            material.clearcoatRoughnessTextureIndex,
+            material.clearcoatRoughnessTextureIndex,
+            TransformUV(material, UV_SLOT_CLEARCOAT_ROUGHNESS, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).g;
+    }
+
+    // As with sheen: a factor to show, or a measured curve to read. The curve
+    // is what carries the coat into MWIR and LWIR, where its visible 0.04 does
+    // not apply -- real lacquers absorb strongly at those wavelengths.
+    const bool hasClearcoat = (clearcoat > 0.0) ||
+                              (material.clearcoatReflectanceCurveIndex >= 0);
+
+    float3 ccNormal = worldNormal;
+    float ccNdotV = 0.0;
+    float ccWeight = 0.0;   // clearcoat * F_c: what the coat takes from the base
+    float ccE = 0.0;        // the coat lobe's directional albedo, for hemispheres
+    if (hasClearcoat) {
+        if (material.clearcoatNormalTextureIndex >= 0) {
+            float3 ccTangentNormal = SampleTexture(
+                material.clearcoatNormalTextureIndex,
+                material.clearcoatNormalTextureIndex,
+                TransformUV(material, UV_SLOT_CLEARCOAT_NORMAL, uv),
+                float4(0.5, 0.5, 1.0, 1.0)
+            ).xyz * 2.0 - 1.0;
+            ccTangentNormal.xy *= clamp(material.clearcoatNormalScale, 0.0, 10.0);
+            ccNormal = ApplyNormalMap(ccTangentNormal, worldNormal, worldTangent,
+                                      worldHandedness);
+        }
+        if (dot(ccNormal, WorldRayDirection()) > 0.0) {
+            ccNormal = -ccNormal;
+        }
+
+        const float3 viewDir = SafeNormalize(-WorldRayDirection(), float3(0.0, 0.0, 1.0));
+        ccNdotV = max(dot(ccNormal, viewDir), 0.0);
+        ccWeight = saturate(clearcoat * ClearcoatFresnel(ccNdotV));
+
+        // The hemisphere integral of the coat lobe, from the split-sum LUT the
+        // IBL path already uses. F0 = 1 and F90 = 1 here on purpose: the coat's
+        // Fresnel is the ccWeight above, applied outside the lobe by the
+        // specification's operator, so pulling it in again would apply it twice.
+        const float2 ccBrdf = brdfLUT.SampleLevel(
+            iblSampler, float2(clamp(ccNdotV, 0.0, 1.0), clamp(ccRoughness, 0.0, 1.0)),
+            0.0).rg;
+        ccE = saturate(ccBrdf.x + ccBrdf.y);
+    }
+
+    // What survives the coat. Exactly 1 without a coat -- no rounding on the
+    // path -- which is what keeps an uncoated scene rendering bit-identically.
+    const float ccBase = 1.0 - ccWeight;
+
     // If a BSDF-sampled bounce landed here and this surface emits, the vertex
     // that sent the ray also sampled the emitters explicitly, and both would
     // report the same light. Keep the share the power heuristic gives this
@@ -1515,6 +1600,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                        max(dot(normal, L), 0.0), sheenRoughness);
         brdf = brdf * SheenAlbedoScaling(sheenMax, sheenNdotV, sheenRoughness) +
                sheenColor * sheenF;
+    }
+
+    // The coat goes over everything the base does, sheen included, and the base
+    // pays for it with the same scalar in every band below.
+    if (hasClearcoat) {
+        brdf = brdf * ccBase + ccWeight * ClearcoatDirect(ccNormal, V, L, ccRoughness);
     }
 
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
@@ -1655,6 +1746,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                      sheenColor * sheenE * skyRadiance;
     }
 
+    // Against the dome the coat contributes its directional albedo rather than
+    // its lobe, exactly as sheen does one line above.
+    if (hasClearcoat) {
+        skyAmbient = skyAmbient * ccBase + ccWeight * ccE * skyRadiance;
+    }
+
     // ========================================================================
     // Image-Based Lighting (IBL) Specular Reflection
     // ========================================================================
@@ -1746,7 +1843,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // Total outgoing radiance: direct sun + sky ambient + IBL specular + emissive
-    float3 radiance = directSun + skyAmbient + iblSpecular + emissive;
+    //
+    // The IBL and the emission are the two terms the coat has not touched yet.
+    // Emission is dimmed because a coat sits OVER the emitter, not under it --
+    // the specification is explicit, and it is the difference between a coated
+    // tail light and a glowing one.
+    float3 radiance = directSun + skyAmbient + iblSpecular * ccBase + emissive * ccBase;
 
     // ========================================================================
     // Spectral Mode Selection: Choose rendering pipeline based on mode
@@ -1972,7 +2074,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             const float  corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                kD_b * rho_b * sheenScale_b + wSheen_b, F_b * sheenScale_b, rrSurvive_b,
+                (kD_b * rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE,
+                F_b * sheenScale_b * ccBase, rrSurvive_b,
                 sky_b, lambda_b, aniso, payload);
 
             if (heroRay) {
@@ -2079,6 +2182,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                SheenBRDF(max(dot(normal, H_s), 0.0), sheenNdotV,
                                          max(dot(normal, L), 0.0), sheenRoughness);
             }
+            if (hasClearcoat) {
+                brdf_lambda = brdf_lambda * ccBase +
+                              ccWeight * ClearcoatDirect(ccNormal, V, L, ccRoughness);
+            }
 
             // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) × shadow + kD × ρ(λ)/π × L_sky(λ)
             // shadowFactor is computed in RGB mode block and reused here for consistency
@@ -2111,11 +2218,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // the residual L_in - L_base is a difference of two different bases.
             float L_ambient = kD_lambda * rho_lambda * sheenScale_lambda * sky_radiance_lambda +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
+            if (hasClearcoat) {
+                L_ambient = L_ambient * ccBase + ccWeight * ccE * sky_radiance_lambda;
+            }
 
             // 4. Emissive contribution (spectrally integrated)
             // Convert emissive RGB to spectral radiance at this wavelength
             // Use illuminant function (no clamp) to preserve HDR emissive intensity
-            float L_emissive = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda);
+            // Dimmed by the coat: it sits over the emitter, not under it.
+            float L_emissive = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda) * ccBase;
 
             // 5. IBL specular contribution (spectrally integrated)
             // Apply Fresnel × BRDF in RGB space first, then convert to spectrum
@@ -2137,6 +2248,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Specular is part of the base, so it pays the same toll.
                 L_ibl *= sheenScale_lambda;
             }
+            L_ibl *= ccBase;
 
             // 4b. Light sampled directly on an emitter, at this wavelength.
             // f * L_e * cos * w / p_omega -- the geometry term and the area-to-
@@ -2148,8 +2260,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // the bounce folded it into.
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
-                    visKD * rho_lambda * sheenScale_lambda + sheenE * rhoSheen_lambda,
-                    visF * sheenScale_lambda, aniso);
+                    (visKD * rho_lambda * sheenScale_lambda +
+                     sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
+                    visF * sheenScale_lambda * ccBase, aniso);
                 L_nee = brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(visLight.emissive, lambda) *
                         visNeeScale;
@@ -2363,6 +2476,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                            SheenBRDF(max(dot(normal, H_s1), 0.0), sheenNdotV,
                                      max(dot(normal, L), 0.0), sheenRoughness);
         }
+        if (hasClearcoat) {
+            brdf_scalar = brdf_scalar * ccBase +
+                          ccWeight * ClearcoatDirect(ccNormal, V, L, ccRoughness);
+        }
 
         // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L) * shadow
         //    Use spectral sun radiance at wavelength λ
@@ -2386,6 +2503,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // folds it into -- the two have to describe one base.
         float skyAmbient_scalar = kD_scalar * spectralAlbedo * sheenScale_s * skyRadiance_lambda +
                                   wSheen_s * skyRadiance_lambda;
+        if (hasClearcoat) {
+            skyAmbient_scalar = skyAmbient_scalar * ccBase +
+                                ccWeight * ccE * skyRadiance_lambda;
+        }
 
         // 5. IBL specular contribution, matching VIS_FUSED.
         //    Was absent entirely, so every specular or metallic surface lost its
@@ -2405,6 +2526,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                              (F0_scalar.r * envBRDF.x + specularF90 * envBRDF.y);
             }
             ibl_scalar *= sheenScale_s;  // specular is base, and pays the toll
+            ibl_scalar *= ccBase;
         }
 
         // 6. Total spectral radiance (scalar)
@@ -2412,7 +2534,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    having its red channel read off as a spectral value, which is what
         //    `emissive.r` did. An emissive colour is a colour; at a wavelength
         //    it has to be evaluated, not indexed.
-        float emissive_scalar = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda);
+        float emissive_scalar =
+            ConvertLinearRGBToIlluminantSpectrum(emissive, lambda) * ccBase;
         float radiance_spectral = directSun_scalar + skyAmbient_scalar +
                                   emissive_scalar + ibl_scalar;
 
@@ -2451,8 +2574,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s, aniso);
                     const float brdf_at_light = EvalBounceBrdf(
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
-                        kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
-                        F_scalar.r * sheenScale_s, aniso);
+                        (kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s) * ccBase +
+                            ccWeight * ccE,
+                        F_scalar.r * sheenScale_s * ccBase, aniso);
                     radiance_spectral +=
                         brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(s.emissive, lambda) *
@@ -2462,8 +2586,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             radiance_spectral += TraceEnvBounceResidual(
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
-                kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
-                F_scalar.r * sheenScale_s, rrSurvive_s,
+                (kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s) * ccBase +
+                    ccWeight * ccE,
+                F_scalar.r * sheenScale_s * ccBase, rrSurvive_s,
                 skyRadiance_lambda, 0.0, aniso, payload);
         }
 
@@ -2577,7 +2702,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // lobe returns, which is added rather than carved out because this is a
         // reflective band with no emission to keep in step with it.
         const float3 swirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        const float wTotal_b = rho_b * sheenScale_b + wSheen_b;
+        const float wTotal_b = (rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
@@ -2660,12 +2785,27 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                   (sun_radiance_lambda * PI) * NdotL * shadowFactor +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
             }
+            // The coat is achromatic here, so unlike sheen it needs no measured
+            // curve to mean something: a dielectric interface still reflects
+            // about 4% at 2 microns. The x PI undoes the Lambertian
+            // normalisation folded into sun_radiance_lambda, which a real BRDF
+            // lobe does not want.
+            if (hasClearcoat) {
+                L_reflected = L_reflected * ccBase +
+                              ccWeight * ClearcoatDirect(ccNormal, V, L, ccRoughness) *
+                                  (sun_radiance_lambda * PI) * NdotL * shadowFactor +
+                              ccWeight * ccE * sky_radiance_lambda;
+            }
 
             // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
             if (T_surface_swir > SWIR_EMISSION_MIN_TEMP_K) {
                 float L_blackbody = IRPlanckRadiance(T_surface_swir, lambda);
-                L_emission = emissivity * L_blackbody;
+                // Under the coat, which transmits 1 - clearcoat*F_c of it. A
+                // non-absorbing dielectric does not emit, so attenuating what
+                // passes through it is the whole of the coat's thermal effect
+                // in this band.
+                L_emission = emissivity * L_blackbody * ccBase;
             }
 
             // 5. Total spectral radiance
@@ -2799,7 +2939,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float wSheen_b = sheenE * rhoSheen_b;
 
         const float3 nirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        const float wTotal_b = rho_b * sheenScale_b + wSheen_b;
+        const float wTotal_b = (rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
@@ -2871,6 +3011,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                             max(dot(normal, L), 0.0), sheenRoughness) *
                                   (sun_radiance_lambda * PI) * NdotL * shadowFactor +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
+            }
+            // The coat is achromatic here, so unlike sheen it needs no measured
+            // curve to mean something: a dielectric interface still reflects
+            // about 4% at 2 microns. The x PI undoes the Lambertian
+            // normalisation folded into sun_radiance_lambda, which a real BRDF
+            // lobe does not want.
+            if (hasClearcoat) {
+                L_reflected = L_reflected * ccBase +
+                              ccWeight * ClearcoatDirect(ccNormal, V, L, ccRoughness) *
+                                  (sun_radiance_lambda * PI) * NdotL * shadowFactor +
+                              ccWeight * ccE * sky_radiance_lambda;
             }
 
             // Note: Thermal emission is negligible in NIR for T < 600K
@@ -3170,19 +3321,44 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // A measured curve only: an RGB factor upsampled through the
                 // visible basis says nothing at 4 microns, and a fibre that size
                 // is comparable to the wavelength anyway.
-                if (hasSheen) {
-                    const float rhoSheen_l = EvaluateSheenReflectance(
-                        spectralCurves, material, sheenColor, lambda, false);
+                //
+                // The clearcoat carves out of the same budget, after sheen and
+                // from what sheen left, so the three shares still sum to
+                // reflectance_l exactly. It is gated on a measured curve and
+                // NOT on clearcoatFactor: the ~4% a dielectric coat reflects in
+                // the visible is the one number that certainly does not hold at
+                // 10 microns, where real lacquers absorb strongly. A scene that
+                // authored a coat for its VIS render therefore gets no thermal
+                // lobe from it, which is the honest answer rather than a
+                // plausible-looking invention.
+                const float rhoSheen_l = hasSheen
+                    ? EvaluateSheenReflectance(spectralCurves, material, sheenColor,
+                                               lambda, false)
+                    : 0.0;
+                const float rhoCc_l = (material.clearcoatReflectanceCurveIndex >= 0)
+                    ? saturate(EvaluateSpectralCurve(
+                          spectralCurves, material.clearcoatReflectanceCurveIndex, lambda))
+                    : 0.0;
+
+                if (rhoSheen_l > 0.0 || rhoCc_l > 0.0) {
+                    const float a_sheen = min(sheenE * rhoSheen_l, reflectance_l);
+                    const float a_cc = min(ccE * rhoCc_l, reflectance_l - a_sheen);
+                    const float rho_lamb = reflectance_l - a_sheen - a_cc;
+
+                    L_reflected_sun = rho_lamb * sun_radiance_lambda * NdotL * shadowFactor;
+
                     if (rhoSheen_l > 0.0) {
-                        const float a_sheen = min(sheenE * rhoSheen_l, reflectance_l);
-                        const float rho_lamb = reflectance_l - a_sheen;
                         const float3 H_ir = SafeHalfVector(V, L, normal);
-                        L_reflected_sun =
-                            rho_lamb * sun_radiance_lambda * NdotL * shadowFactor +
+                        L_reflected_sun +=
                             rhoSheen_l *
-                                SheenBRDF(max(dot(normal, H_ir), 0.0), NdotV,
-                                          max(dot(normal, L), 0.0), sheenRoughness) *
-                                sun_irr_lambda * NdotL * shadowFactor;
+                            SheenBRDF(max(dot(normal, H_ir), 0.0), NdotV,
+                                      max(dot(normal, L), 0.0), sheenRoughness) *
+                            sun_irr_lambda * NdotL * shadowFactor;
+                    }
+                    if (rhoCc_l > 0.0) {
+                        L_reflected_sun +=
+                            rhoCc_l * ClearcoatDirect(ccNormal, V, L, ccRoughness) *
+                            sun_irr_lambda * NdotL * shadowFactor;
                     }
                 }
             }

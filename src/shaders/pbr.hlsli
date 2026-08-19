@@ -373,6 +373,46 @@ float SmithG1_GGXAniso(float TdotV, float BdotV, float NdotV,
 }
 
 // ============================================================================
+// KHR_materials_clearcoat: an infinitely thin dielectric coat
+// ============================================================================
+// The specification layers it with a single scalar weight:
+//
+//   coated = mix(base, clearcoat_brdf, clearcoat * F_c)
+//   F_c    = 0.04 + 0.96 (1 - |N_c . V|)^5
+//
+// Two things about that are easy to get wrong and both are deliberate in the
+// specification.
+//
+// F_c is taken at N.V, not at V.H. Every other Fresnel in this file uses the
+// half vector; this one does not, because the layering operator above is a
+// plain lerp and only a view-dependent (not light-dependent) weight keeps it
+// energy conserving as the light direction sweeps the hemisphere.
+//
+// The weight multiplies the WHOLE base, emission included. A coat is over the
+// emitter, not under it, so an emissive surface under a coat is dimmed by
+// exactly what the coat reflects away.
+//
+// The lobe itself is colourless -- F is the weight above, not something inside
+// the lobe -- so this returns D * Vis and the caller supplies the rest. In the
+// thermal bands the 0.04 is replaced by a measured curve, since a dielectric
+// coat's visible reflectance is fiction at 10 microns.
+// ============================================================================
+
+float ClearcoatFresnel(float ccNdotV) {
+    const float f = pow(saturate(1.0 - ccNdotV), 5.0);
+    return 0.04 + 0.96 * f;
+}
+
+float ClearcoatBRDF(float ccNdotH, float ccNdotV, float ccNdotL, float ccRoughness) {
+    const float r = max(ccRoughness, 0.045);
+    const float alpha = r * r;
+    const float D = DistributionGGX(ccNdotH, alpha);
+    const float Vis = VisibilitySmithGGXCorrelated(max(ccNdotV, EPSILON),
+                                                   max(ccNdotL, EPSILON), r);
+    return D * Vis;
+}
+
+// ============================================================================
 // Refraction Index at a Wavelength
 // ============================================================================
 // The n that Snell's law and the dielectric Fresnel term should use, in
