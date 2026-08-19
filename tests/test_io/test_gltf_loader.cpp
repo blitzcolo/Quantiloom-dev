@@ -496,3 +496,103 @@ TEST_F(GltfLoaderTest, SceneResourceCounts) {
     EXPECT_GT(materialCount, 0) << "Should have at least one material";
     // Textures are optional, so we don't check texture count
 }
+
+// ============================================================================
+// KHR_materials_sheen and KHR_texture_transform
+// ============================================================================
+// No extension had a parsing test before these -- not transmission, not ior,
+// not volume, not dispersion. These two get one because the sample assets pin
+// down exactly the cases that are easy to get wrong: two texture slots sharing
+// one image, and two slots of one material disagreeing about their transform.
+// ============================================================================
+
+TEST_F(GltfLoaderTest, ParsesSheenFactorsFromGlamVelvetSofa) {
+    auto modelPath = GetModelPath("GlamVelvetSofa");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "GlamVelvetSofa model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+
+    // The champagne fabric carries sheenColorFactor [0.9, 0.7, 0.6] and
+    // sheenRoughnessFactor 0.6, and no sheen texture at all -- the factor-only
+    // path, which is what most authored sheen looks like.
+    const Material* champagne = nullptr;
+    for (const auto& mat : scene.materials) {
+        if (mat.name.find("champagne") != std::string::npos) {
+            champagne = &mat;
+            break;
+        }
+    }
+    ASSERT_NE(champagne, nullptr) << "expected a champagne fabric material";
+
+    EXPECT_NEAR(champagne->sheenColorFactor.r, 0.9f, 1e-3f);
+    EXPECT_NEAR(champagne->sheenColorFactor.g, 0.7f, 1e-3f);
+    EXPECT_NEAR(champagne->sheenColorFactor.b, 0.6f, 1e-3f);
+    EXPECT_NEAR(champagne->sheenRoughnessFactor, 0.6f, 1e-3f);
+    EXPECT_EQ(champagne->sheenColorTextureIndex, -1);
+    EXPECT_EQ(champagne->sheenRoughnessTextureIndex, -1);
+    EXPECT_TRUE(champagne->HasSheen());
+
+    // Its normal map is scaled and rotated, and nothing else in the material
+    // is -- the per-slot case, in the asset the user actually asked for.
+    EXPECT_NEAR(champagne->normalUv.scale.x, 5.0f, 1e-3f);
+    EXPECT_NEAR(champagne->normalUv.scale.y, 5.0f, 1e-3f);
+    EXPECT_TRUE(champagne->baseColorUv.IsIdentity())
+        << "base colour has no transform in this asset";
+}
+
+TEST_F(GltfLoaderTest, ParsesSheenTexturesAndTilingFromSheenCloth) {
+    auto modelPath = GetModelPath("SheenCloth");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "SheenCloth model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    const Material& cloth = scene.materials[0];
+
+    // Both sheen slots point at the same image: RGB carries the colour and
+    // ALPHA the roughness, which is the packing the specification recommends.
+    EXPECT_GE(cloth.sheenColorTextureIndex, 0);
+    EXPECT_EQ(cloth.sheenColorTextureIndex, cloth.sheenRoughnessTextureIndex);
+
+    // That shared image must still be marked sRGB. It is safe because sRGB
+    // decoding leaves alpha alone, and this is the assertion that says so.
+    ASSERT_LT(static_cast<size_t>(cloth.sheenColorTextureIndex), scene.textures.size());
+    EXPECT_TRUE(scene.textures[cloth.sheenColorTextureIndex].isSRGB);
+
+    // Every slot tiles 30x. Without KHR_texture_transform the weave renders as
+    // one enormous smear, which is the whole reason it is supported here.
+    EXPECT_NEAR(cloth.sheenColorUv.scale.x, 30.0f, 1e-3f);
+    EXPECT_NEAR(cloth.sheenRoughnessUv.scale.x, 30.0f, 1e-3f);
+    EXPECT_NEAR(cloth.baseColorUv.scale.x, 30.0f, 1e-3f);
+    EXPECT_NEAR(cloth.normalUv.scale.x, 30.0f, 1e-3f);
+}
+
+// A material with no sheen extension must come back with the glTF defaults,
+// which are also the values every sheen term in the shader folds away on.
+TEST_F(GltfLoaderTest, MaterialWithoutSheenKeepsTheDefaults) {
+    auto modelPath = GetModelPath("BoxTextured");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "BoxTextured model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    for (const auto& mat : scene.materials) {
+        EXPECT_EQ(mat.sheenColorFactor, glm::vec3(0.0f));
+        EXPECT_EQ(mat.sheenRoughnessFactor, 0.0f);
+        EXPECT_FALSE(mat.HasSheen());
+        EXPECT_TRUE(mat.baseColorUv.IsIdentity());
+        EXPECT_TRUE(mat.normalUv.IsIdentity());
+    }
+}

@@ -13,6 +13,8 @@
 
 #include "renderer/RenderCore.hpp"
 
+#include <glm/gtc/constants.hpp>
+
 using namespace quantiloom;
 
 namespace {
@@ -124,6 +126,7 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     mat.endmemberCurveIndex2 = 4;
     mat.endmemberCurveIndex3 = 5;
     mat.weightTextureIndex = 6;
+    mat.sheenReflectanceCurveIndex = 7;
 
     const auto gpu = rendercore::ConvertMaterial(mat, 550.0f,
                                                  rendercore::IndicesFromMaterial(mat));
@@ -134,6 +137,88 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     EXPECT_EQ(gpu.endmemberCurveIndex2, 4);
     EXPECT_EQ(gpu.endmemberCurveIndex3, 5);
     EXPECT_EQ(gpu.weightTextureIndex, 6);
+    EXPECT_EQ(gpu.sheenReflectanceCurveIndex, 7);
+}
+
+// ============================================================================
+// Sheen and UV transforms
+// ============================================================================
+
+TEST(RenderCoreConvertMaterial, CarriesSheenThrough) {
+    Material mat;
+    mat.sheenColorFactor = glm::vec3(0.9f, 0.7f, 0.6f);
+    mat.sheenRoughnessFactor = 0.6f;
+    mat.sheenColorTextureIndex = 3;
+    mat.sheenRoughnessTextureIndex = 3;
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
+
+    EXPECT_FLOAT_EQ(gpu.sheenColorFactor.r, 0.9f);
+    EXPECT_FLOAT_EQ(gpu.sheenColorFactor.g, 0.7f);
+    EXPECT_FLOAT_EQ(gpu.sheenColorFactor.b, 0.6f);
+    EXPECT_FLOAT_EQ(gpu.sheenRoughnessFactor, 0.6f);
+    EXPECT_EQ(gpu.sheenColorTextureIndex, 3);
+    EXPECT_EQ(gpu.sheenRoughnessTextureIndex, 3);
+}
+
+// The default has to be the exact identity, not a rounded one: every scene
+// without KHR_texture_transform goes through this path, and the guarantee that
+// those render bit-identically is only worth as much as this assertion.
+TEST(RenderCoreConvertMaterial, DefaultUvTransformIsExactlyIdentity) {
+    const auto gpu = rendercore::ConvertMaterial(Material{}, 550.0f);
+
+    for (int slot = 0; slot < UV_SLOT_COUNT; ++slot) {
+        EXPECT_EQ(gpu.uvTransformMat[slot].x, 1.0f) << "slot " << slot;
+        EXPECT_EQ(gpu.uvTransformMat[slot].y, 0.0f) << "slot " << slot;
+        EXPECT_EQ(gpu.uvTransformMat[slot].z, 0.0f) << "slot " << slot;
+        EXPECT_EQ(gpu.uvTransformMat[slot].w, 1.0f) << "slot " << slot;
+        EXPECT_EQ(gpu.uvTransformOffset[slot].x, 0.0f) << "slot " << slot;
+        EXPECT_EQ(gpu.uvTransformOffset[slot].y, 0.0f) << "slot " << slot;
+    }
+}
+
+TEST(RenderCoreConvertMaterial, UvTransformScaleAndOffsetReachTheRightSlot) {
+    Material mat;
+    mat.baseColorUv.scale = glm::vec2(30.0f, 30.0f);   // SheenCloth
+    mat.normalUv.offset = glm::vec2(0.5f, 0.25f);
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
+
+    EXPECT_FLOAT_EQ(gpu.uvTransformMat[UV_SLOT_BASE_COLOR].x, 30.0f);
+    EXPECT_FLOAT_EQ(gpu.uvTransformMat[UV_SLOT_BASE_COLOR].w, 30.0f);
+    EXPECT_FLOAT_EQ(gpu.uvTransformOffset[UV_SLOT_NORMAL].x, 0.5f);
+    EXPECT_FLOAT_EQ(gpu.uvTransformOffset[UV_SLOT_NORMAL].y, 0.25f);
+
+    // A transform on one slot must not leak into another. SheenChair's fabric
+    // is the case: base colour at scale 7, normal map at scale 2, one material.
+    EXPECT_FLOAT_EQ(gpu.uvTransformMat[UV_SLOT_NORMAL].x, 1.0f);
+    EXPECT_FLOAT_EQ(gpu.uvTransformOffset[UV_SLOT_BASE_COLOR].x, 0.0f);
+}
+
+// KHR_texture_transform composes translation * rotation * scale, and the
+// rotation is clockwise in UV space because the second axis points down.
+// Getting the sign backwards mirrors a rotated texture about the diagonal,
+// which reads as a bad asset rather than as a bug here.
+TEST(RenderCoreConvertMaterial, UvTransformRotationMatchesTheExtension) {
+    Material mat;
+    mat.baseColorUv.rotation = glm::half_pi<f32>();  // 90 degrees
+    mat.baseColorUv.scale = glm::vec2(2.0f, 3.0f);
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
+    const glm::vec4 m = gpu.uvTransformMat[UV_SLOT_BASE_COLOR];
+
+    // cos = 0, sin = 1  =>  (c*sx, s*sy, -s*sx, c*sy) = (0, 3, -2, 0)
+    EXPECT_NEAR(m.x, 0.0f, 1e-6f);
+    EXPECT_NEAR(m.y, 3.0f, 1e-6f);
+    EXPECT_NEAR(m.z, -2.0f, 1e-6f);
+    EXPECT_NEAR(m.w, 0.0f, 1e-6f);
+
+    // The point of the sign, stated as the mapping it produces: u turns into
+    // -v's direction, not +v's.
+    const glm::vec2 uv{1.0f, 0.0f};
+    const glm::vec2 mapped{m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y};
+    EXPECT_NEAR(mapped.x, 0.0f, 1e-6f);
+    EXPECT_NEAR(mapped.y, -2.0f, 1e-6f);
 }
 
 TEST(RenderCoreConvertMaterial, CarriesThePbrFactorsThrough) {

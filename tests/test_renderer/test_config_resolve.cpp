@@ -1158,3 +1158,82 @@ TEST_F(ConfigResolveTest, OrthoHeightDefaultsToWhatThePerspectiveCameraFramed) {
     // 2 * 10 * tan(30 deg) = 11.547
     EXPECT_NEAR(resolved.value().camera.GetOrthoHeight(), 11.547f, 0.01f);
 }
+
+// ============================================================================
+// Sheen (KHR_materials_sheen)
+// ============================================================================
+
+TEST_F(ConfigResolveTest, MaterialsTableAppliesSheenOverrides) {
+    // Sheen reaches the GPU from glTF either way. These keys exist so a USD or
+    // procedural surface can be velvet too, which is the same argument the
+    // transmission keys were added under.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Cushion"
+sheen_color = [0.05, 0.17, 0.5]
+sheen_roughness = 0.6
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Cushion", "Other"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenColorFactor.r, 0.05f);
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenColorFactor.g, 0.17f);
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenColorFactor.b, 0.5f);
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenRoughnessFactor, 0.6f);
+    EXPECT_TRUE(scene.materials[0].HasSheen());
+
+    // Named materials only. A key that leaked onto every surface would turn a
+    // whole scene to velvet.
+    EXPECT_FALSE(scene.materials[1].HasSheen());
+}
+
+TEST_F(ConfigResolveTest, AMaterialWithoutSheenKeysIsLeftAlone) {
+    // The absent-key rule, which every override in this loop follows: a
+    // [[materials]] entry that only sets a roughness must not reset the sheen
+    // a glTF loaded.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Cushion"
+roughness = 0.4
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Cushion"});
+    scene.materials[0].sheenColorFactor = glm::vec3(0.9f, 0.7f, 0.6f);
+    scene.materials[0].sheenRoughnessFactor = 0.6f;
+
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].roughnessFactor, 0.4f);
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenColorFactor.r, 0.9f);
+    EXPECT_FLOAT_EQ(scene.materials[0].sheenRoughnessFactor, 0.6f);
+}
+
+TEST_F(ConfigResolveTest, SheenSpectralRefIsRecordedForCurveResolution) {
+    // The reference is read here and turned into a curve index by the NMF block
+    // further down, which needs a spectral library this test has no business
+    // loading. What is pinned is that the key reaches the material at all --
+    // without it the infrared bands have no sheen, since they refuse to
+    // upsample an RGB factor.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Cushion"
+sheen_spectral_material_ref = "Nylon fibre"
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Cushion"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(scene.materials[0].quantiloomSheenRef, "Nylon fibre");
+    EXPECT_TRUE(scene.materials[0].HasSheen())
+        << "a bound sheen reference is sheen even with a zero colour factor";
+}
