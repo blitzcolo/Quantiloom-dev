@@ -382,6 +382,87 @@ Texture GltfLoader::ParseTexture(const void* gltfModelPtr, int textureIndex) {
 }
 
 // ============================================================================
+// KHR_texture_transform
+// ============================================================================
+// Per texture slot, not per material: SheenChair's fabric puts its base colour
+// at scale 7 and its normal map at scale 2 inside one material, so a single
+// per-material transform renders it visibly wrong.
+// ============================================================================
+
+/// Read one KHR_texture_transform object into a UvTransform.
+///
+/// A property the extension omits keeps the identity value it was constructed
+/// with, so a transform that only scales does not silently zero the offset.
+static void ReadUvTransformObject(const tinygltf::Value& xform, UvTransform& out,
+                                  const String& materialName, const char* slotName) {
+    if (xform.Has("offset")) {
+        if (const auto& v = xform.Get("offset"); v.IsArray() && v.ArrayLen() >= 2) {
+            out.offset = glm::vec2(static_cast<f32>(v.Get(0).GetNumberAsDouble()),
+                                   static_cast<f32>(v.Get(1).GetNumberAsDouble()));
+        }
+    }
+    if (xform.Has("rotation")) {
+        out.rotation = static_cast<f32>(xform.Get("rotation").GetNumberAsDouble());
+    }
+    if (xform.Has("scale")) {
+        if (const auto& v = xform.Get("scale"); v.IsArray() && v.ArrayLen() >= 2) {
+            out.scale = glm::vec2(static_cast<f32>(v.Get(0).GetNumberAsDouble()),
+                                  static_cast<f32>(v.Get(1).GetNumberAsDouble()));
+        }
+    }
+
+    // The extension may also redirect the slot to a different UV set. Only
+    // TEXCOORD_0 is loaded (see ParseMesh), so say so rather than transforming
+    // set 0 as though it were set 1.
+    if (xform.Has("texCoord")) {
+        if (const int texCoord = xform.Get("texCoord").GetNumberAsInt(); texCoord != 0) {
+            QL_LOG_WARN("    {} on '{}': KHR_texture_transform selects TEXCOORD_{}, "
+                        "but only TEXCOORD_0 is loaded -- the transform is applied to set 0",
+                        slotName, materialName, texCoord);
+        }
+    }
+
+    QL_LOG_INFO("    {}: KHR_texture_transform offset [{:.4f}, {:.4f}], "
+                "rotation {:.4f} rad, scale [{:.4f}, {:.4f}]",
+                slotName, out.offset.x, out.offset.y, out.rotation, out.scale.x, out.scale.y);
+}
+
+/// KHR_texture_transform on a core textureInfo, which tinygltf has already
+/// parsed into a TextureInfo or NormalTextureInfo. Templated because those are
+/// distinct types that happen to share the two members this reads.
+template <typename TexInfoT>
+static void ParseUvTransform(const TexInfoT& texInfo, UvTransform& out,
+                             const String& materialName, const char* slotName) {
+    if (texInfo.texCoord != 0) {
+        QL_LOG_WARN("    {} on '{}' uses TEXCOORD_{}; only TEXCOORD_0 is loaded",
+                    slotName, materialName, texInfo.texCoord);
+    }
+    if (auto it = texInfo.extensions.find("KHR_texture_transform");
+        it != texInfo.extensions.end()) {
+        ReadUvTransformObject(it->second, out, materialName, slotName);
+    }
+}
+
+/// KHR_texture_transform on a textureInfo nested inside another extension.
+/// tinygltf hands those back as a raw Value rather than a TextureInfo, so the
+/// walk down to the transform object has to be spelled out.
+static void ParseNestedUvTransform(const tinygltf::Value& texInfo, UvTransform& out,
+                                   const String& materialName, const char* slotName) {
+    if (texInfo.Has("texCoord")) {
+        if (const int texCoord = texInfo.Get("texCoord").GetNumberAsInt(); texCoord != 0) {
+            QL_LOG_WARN("    {} on '{}' uses TEXCOORD_{}; only TEXCOORD_0 is loaded",
+                        slotName, materialName, texCoord);
+        }
+    }
+    if (!texInfo.Has("extensions")) {
+        return;
+    }
+    if (const auto& exts = texInfo.Get("extensions"); exts.Has("KHR_texture_transform")) {
+        ReadUvTransformObject(exts.Get("KHR_texture_transform"), out, materialName, slotName);
+    }
+}
+
+// ============================================================================
 // ParseMaterial
 // ============================================================================
 
@@ -420,6 +501,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
     if (pbr.baseColorTexture.index >= 0) {
         mat.baseColorTextureIndex = pbr.baseColorTexture.index;
+        ParseUvTransform(pbr.baseColorTexture, mat.baseColorUv, mat.name, "baseColorTexture");
     }
 
     // Metallic-roughness
@@ -428,12 +510,15 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
     if (pbr.metallicRoughnessTexture.index >= 0) {
         mat.metallicRoughnessTextureIndex = pbr.metallicRoughnessTexture.index;
+        ParseUvTransform(pbr.metallicRoughnessTexture, mat.metallicRoughnessUv, mat.name,
+                         "metallicRoughnessTexture");
     }
 
     // Normal map
     if (gltfMaterial.normalTexture.index >= 0) {
         mat.normalTextureIndex = gltfMaterial.normalTexture.index;
         mat.normalScale = static_cast<float>(gltfMaterial.normalTexture.scale);
+        ParseUvTransform(gltfMaterial.normalTexture, mat.normalUv, mat.name, "normalTexture");
     }
 
     // Emissive
@@ -450,6 +535,7 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 
     if (gltfMaterial.emissiveTexture.index >= 0) {
         mat.emissiveTextureIndex = gltfMaterial.emissiveTexture.index;
+        ParseUvTransform(gltfMaterial.emissiveTexture, mat.emissiveUv, mat.name, "emissiveTexture");
     }
 
     // Alpha mode
@@ -764,6 +850,75 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         }
     }
 
+    // ========================================================================
+    // KHR_materials_sheen extension (velvet, felt, brushed cloth)
+    // ========================================================================
+    // glTF extension format:
+    //   "extensions": {
+    //     "KHR_materials_sheen": {
+    //       "sheenColorFactor": [0.9, 0.7, 0.6],
+    //       "sheenColorTexture": { "index": 3 },
+    //       "sheenRoughnessFactor": 0.6,
+    //       "sheenRoughnessTexture": { "index": 3 }
+    //     }
+    //   }
+    //
+    // The two textures routinely share one image -- RGB carries the colour and
+    // ALPHA the roughness, which is what the specification recommends and what
+    // SheenCloth does. That is why the sRGB pass below marks only the colour
+    // slot: sRGB decoding never touches the alpha channel, so one image can
+    // serve both without the roughness being gamma-mangled.
+    // ========================================================================
+    if (auto sheenExtIt = gltfMaterial.extensions.find("KHR_materials_sheen");
+        sheenExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_sheen extension for material '{}'", mat.name);
+
+        const tinygltf::Value& sheenExt = sheenExtIt->second;
+
+        // Sheen colour factor (glTF default [0,0,0], i.e. no sheen)
+        if (sheenExt.Has("sheenColorFactor")) {
+            if (const auto& colorVal = sheenExt.Get("sheenColorFactor");
+                colorVal.IsArray() && colorVal.ArrayLen() >= 3) {
+                mat.sheenColorFactor = glm::vec3(
+                    static_cast<f32>(colorVal.Get(0).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(1).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(2).GetNumberAsDouble())
+                );
+                QL_LOG_INFO("    sheenColorFactor: [{:.3f}, {:.3f}, {:.3f}]",
+                            mat.sheenColorFactor.r, mat.sheenColorFactor.g,
+                            mat.sheenColorFactor.b);
+            }
+        }
+
+        // Sheen roughness factor (glTF default 0)
+        if (sheenExt.Has("sheenRoughnessFactor")) {
+            mat.sheenRoughnessFactor =
+                static_cast<f32>(sheenExt.Get("sheenRoughnessFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    sheenRoughnessFactor: {:.3f}", mat.sheenRoughnessFactor);
+        }
+
+        // Sheen colour texture (RGB channels), optional
+        if (sheenExt.Has("sheenColorTexture")) {
+            const auto& texInfo = sheenExt.Get("sheenColorTexture");
+            if (texInfo.Has("index")) {
+                mat.sheenColorTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    sheenColorTexture: index {}", mat.sheenColorTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.sheenColorUv, mat.name, "sheenColorTexture");
+        }
+
+        // Sheen roughness texture (ALPHA channel), optional
+        if (sheenExt.Has("sheenRoughnessTexture")) {
+            const auto& texInfo = sheenExt.Get("sheenRoughnessTexture");
+            if (texInfo.Has("index")) {
+                mat.sheenRoughnessTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    sheenRoughnessTexture: index {}", mat.sheenRoughnessTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.sheenRoughnessUv, mat.name,
+                                   "sheenRoughnessTexture");
+        }
+    }
+
     QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
                 mat.name, mat.metallicFactor, mat.roughnessFactor);
 
@@ -990,8 +1145,15 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
     }
 
     // Mark textures as sRGB based on usage (glTF 2.0 color space spec)
-    // - baseColor and emissive textures: sRGB (gamma-encoded)
-    // - metallic/roughness, normal, occlusion: Linear
+    // - baseColor, emissive and sheenColor textures: sRGB (gamma-encoded)
+    // - metallic/roughness, normal, occlusion, sheenRoughness: Linear
+    //
+    // isSRGB is per texture rather than per usage, so a texture used two ways
+    // would have to pick one. Sheen is the case where that would bite -- the
+    // specification recommends packing sheenColour in RGB and sheenRoughness in
+    // ALPHA of one image, and SheenCloth does exactly that -- but it does not,
+    // because sRGB decoding applies to the colour channels only and leaves
+    // alpha linear. One image, both usages, both correct.
     for (const auto& mat : scene.materials) {
         if (mat.baseColorTextureIndex >= 0 && mat.baseColorTextureIndex < static_cast<int>(scene.textures.size())) {
             scene.textures[mat.baseColorTextureIndex].isSRGB = true;
@@ -1000,6 +1162,10 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
         if (mat.emissiveTextureIndex >= 0 && mat.emissiveTextureIndex < static_cast<int>(scene.textures.size())) {
             scene.textures[mat.emissiveTextureIndex].isSRGB = true;
             QL_LOG_DEBUG("  [DEBUG] Marked texture {} (emissive) as sRGB", mat.emissiveTextureIndex);
+        }
+        if (mat.sheenColorTextureIndex >= 0 && mat.sheenColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.sheenColorTextureIndex].isSRGB = true;
+            QL_LOG_DEBUG("  [DEBUG] Marked texture {} (sheenColor) as sRGB", mat.sheenColorTextureIndex);
         }
     }
 

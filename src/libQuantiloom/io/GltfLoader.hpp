@@ -19,10 +19,20 @@
  * - Scene graph hierarchies (flattened to world-space transforms)
  * - Transform nodes (translation, rotation, scale, matrix)
  *
+ * Supported extensions:
+ * - KHR_materials_transmission, KHR_materials_ior, KHR_materials_volume
+ * - KHR_materials_dispersion (and the QUANTILOOM_materials_dispersion original)
+ * - KHR_materials_sheen (factors and textures)
+ * - KHR_texture_transform (per texture slot)
+ * - QUANTILOOM_material_ir (measured IR curves, temperature field)
+ *
  * NOT supported:
  * - Animations/skinning/morph targets
  * - Cameras/lights (use Quantiloom config instead)
- * - Extensions (KHR_materials_*, KHR_lights_punctual, etc.)
+ * - A second UV set: only TEXCOORD_0 is read, so a textureInfo naming
+ *   texCoord 1 is warned about and sampled against set 0
+ * - Other KHR_materials_* extensions (specular, clearcoat, variants, ...),
+ *   which are ignored silently
  *
  * Uses tinygltf library for glTF parsing.
  *
