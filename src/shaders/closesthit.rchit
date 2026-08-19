@@ -299,6 +299,23 @@ float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallb
 }
 
 // ============================================================================
+// KHR_texture_transform
+// ============================================================================
+// One slot's UV transform, pre-multiplied by ConvertMaterial into the 2x3
+// affine this applies. The identity is (1,0,0,1) and (0,0), so a slot with no
+// transform returns its argument exactly -- no arithmetic that could round.
+//
+// Applied per slot rather than once to the interpolated UV because glTF puts
+// the transform on the textureInfo, not on the material: SheenChair's fabric
+// scales its base colour by 7 and its normal map by 2 in one material.
+// ============================================================================
+float2 TransformUV(MaterialData mat, int slot, float2 uv) {
+    const float4 m = mat.uvTransformMat[slot];
+    const float2 t = mat.uvTransformOffset[slot];
+    return float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + t;
+}
+
+// ============================================================================
 // Endmember Mixing
 // ============================================================================
 // rho(lambda, uv) = sum_i w_i(uv) * rho_i(lambda)
@@ -431,6 +448,31 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
                                    MaterialData material, float2 uv, float lambda) {
     return EvaluateEndmemberReflectanceW(curves, material,
                                          SampleEndmemberWeights(material, uv), lambda);
+}
+
+// Sheen reflectance at one wavelength, by the same priority base colour uses:
+// a bound curve is the quantitative answer, and the RGB factor is the fallback.
+//
+// Sheen takes no part in the endmember mixture. Those weights are unmixed from
+// the base-colour texture and describe what the base is made of; the fibres
+// standing over it are a different material, and multiplying them by the base's
+// mixture would be an error that happens to typecheck.
+//
+// `allowRgbUpsample` is false in the infrared bands. ConvertLinearRGBToSpectrum
+// is three Gaussians on the visible primaries, so past about 1400nm it returns
+// whatever its tail happens to be -- a number with no relationship to how a
+// fibre scatters at 10 microns. Those bands take a measured curve or no sheen.
+float EvaluateSheenReflectance(StructuredBuffer<SpectralCurveGPU> curves,
+                               MaterialData material, float3 sheenColor,
+                               float lambda, bool allowRgbUpsample) {
+    if (material.sheenReflectanceCurveIndex >= 0) {
+        return saturate(EvaluateSpectralCurve(curves, material.sheenReflectanceCurveIndex,
+                                              lambda));
+    }
+    if (allowRgbUpsample) {
+        return ConvertLinearRGBToSpectrum(sheenColor, lambda);
+    }
+    return 0.0;
 }
 
 // Compute TBN matrix for normal mapping (Gram-Schmidt orthogonalization)
@@ -1023,6 +1065,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 uv2 = uvBuffer[geoInfo.uvOffset + idx2];
     float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
 
+    // Per-slot UV, from KHR_texture_transform. `uv` itself stays untransformed:
+    // it is what the debug UV view shows, and it is what the temperature slot
+    // samples with -- that slot is Quantiloom-authored and has no textureInfo
+    // to carry a transform.
+    const float2 uvBaseColor = TransformUV(material, UV_SLOT_BASE_COLOR, uv);
+    const float2 uvMetallicRoughness = TransformUV(material, UV_SLOT_METALLIC_ROUGHNESS, uv);
+    const float2 uvNormal = TransformUV(material, UV_SLOT_NORMAL, uv);
+    const float2 uvEmissive = TransformUV(material, UV_SLOT_EMISSIVE, uv);
+
     // Read tangent from buffer with offset (or fallback to fake tangent)
     float3 worldTangent;
     float worldHandedness = 1.0;  // Default handedness (right-handed)
@@ -1068,7 +1119,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float4 baseColor = SampleTexture(
         material.baseColorTextureIndex,
         material.baseColorTextureIndex,  // Use same index for sampler (1:1 mapping)
-        uv,
+        uvBaseColor,
         float4(1.0, 1.0, 1.0, 1.0)  // White fallback for correct factor multiplication
     );
 
@@ -1079,7 +1130,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float4 metallicRoughness = SampleTexture(
         material.metallicRoughnessTextureIndex,
         material.metallicRoughnessTextureIndex,
-        uv,
+        uvMetallicRoughness,
         float4(1.0, material.roughnessFactor, material.metallicFactor, 1.0)
     );
 
@@ -1092,7 +1143,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 tangentNormal = SampleTexture(
             material.normalTextureIndex,
             material.normalTextureIndex,
-            uv,
+            uvNormal,
             float4(0.5, 0.5, 1.0, 1.0)  // Default: pointing up in tangent space
         ).xyz;
 
@@ -1126,17 +1177,67 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // The final radiance will be clamped in the validation step to prevent NaN/Inf
     // The endmember mixture weights, fetched once. They do not vary with
     // wavelength, and every band below loops over 16 or 32 of those.
-    const float4 endmemberW = SampleEndmemberWeights(material, uv);
+    //
+    // Sampled with the base colour's transform, not its own: the weight texture
+    // is unmixed from the base-colour texture's texels, so reading it under a
+    // different transform would pair each texel with the wrong spectrum.
+    const float4 endmemberW = SampleEndmemberWeights(material, uvBaseColor);
 
     float3 emissive = material.emissiveFactor;
     if (material.emissiveTextureIndex >= 0) {
         emissive *= SampleTexture(
             material.emissiveTextureIndex,
             material.emissiveTextureIndex,
-            uv,
+            uvEmissive,
             float4(1.0, 1.0, 1.0, 1.0)
         ).rgb;
     }
+
+    // ========================================================================
+    // Sheen (KHR_materials_sheen)
+    // ========================================================================
+    // glTF multiplies factor by texture, so a zero factor means no sheen no
+    // matter what the texture holds. The roughness lives in the ALPHA channel
+    // of its texture, which is what lets one image carry the colour in RGB and
+    // the roughness in A -- the packing the specification recommends.
+    float3 sheenColor = material.sheenColorFactor;
+    if (material.sheenColorTextureIndex >= 0) {
+        sheenColor *= SampleTexture(
+            material.sheenColorTextureIndex,
+            material.sheenColorTextureIndex,
+            TransformUV(material, UV_SLOT_SHEEN_COLOR, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).rgb;
+    }
+
+    float sheenRoughness = material.sheenRoughnessFactor;
+    if (material.sheenRoughnessTextureIndex >= 0) {
+        sheenRoughness *= SampleTexture(
+            material.sheenRoughnessTextureIndex,
+            material.sheenRoughnessTextureIndex,
+            TransformUV(material, UV_SLOT_SHEEN_ROUGHNESS, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).a;
+    }
+
+    // The largest component drives the albedo scaling, per the specification.
+    // Exactly 0 for a material with no sheen, which is what makes every sheen
+    // term below fold away rather than round.
+    const float sheenMax = max(max(sheenColor.r, sheenColor.g), sheenColor.b);
+
+    // A material has sheen if it has a colour to show or a measured curve to
+    // read. Both are checked because either alone can carry it: a glTF asset
+    // brings a factor and no curve, and a config binding a sheen reference to
+    // an infrared render brings a curve whose factor is never consulted.
+    const bool hasSheen = (sheenMax > 0.0) || (material.sheenReflectanceCurveIndex >= 0);
+
+    // The sheen lobe's directional albedo. Neither argument varies with
+    // wavelength, so this comes out of every per-lambda loop below. The view
+    // vector is the ray's, negated -- the same one V is built from further
+    // down, hoisted here because the bands below all want sheenE.
+    const float sheenNdotV = max(dot(normal, SafeNormalize(-WorldRayDirection(),
+                                                           float3(0.0, 0.0, 1.0))), 0.0);
+    const float sheenE = hasSheen ? SheenAlbedo(sheenNdotV, sheenRoughness) : 0.0;
 
     // If a BSDF-sampled bounce landed here and this surface emits, the vertex
     // that sent the ray also sampled the emitters explicitly, and both would
@@ -1226,6 +1327,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
     float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm);
+
+    // Sheen, layered over the base and paid for by scaling it down. The
+    // specification drives the scaling from the largest colour component; the
+    // spectral branches below do it per wavelength instead, which they can and
+    // this preview cannot. Folds to brdf unchanged when there is no sheen.
+    if (hasSheen) {
+        const float3 H_sheen = SafeHalfVector(V, L, normal);
+        const float sheenF = SheenBRDF(max(dot(normal, H_sheen), 0.0), sheenNdotV,
+                                       max(dot(normal, L), 0.0), sheenRoughness);
+        brdf = brdf * SheenAlbedoScaling(sheenMax, sheenNdotV, sheenRoughness) +
+               sheenColor * sheenF;
+    }
 
     // Direct sun lighting with atmospheric attenuation (Beer-Lambert law)
     // L_out = BRDF * L_sun * τ(λ, d) * (N · L)
@@ -1356,6 +1469,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Hemispherical integration with Lambertian BRDF
     // Factor of π from hemisphere integral cancels with π in BRDF denominator
     float3 skyAmbient = kD * albedo * skyRadiance;
+
+    // Sheen against the same dome. The lobe's response to uniform radiance is
+    // its directional albedo by definition, so this needs no cancelling π of
+    // its own -- E already is the hemisphere integral of f cos.
+    if (hasSheen) {
+        skyAmbient = skyAmbient * SheenAlbedoScaling(sheenMax, sheenNdotV, sheenRoughness) +
+                     sheenColor * sheenE * skyRadiance;
+    }
 
     // ========================================================================
     // Image-Based Lighting (IBL) Specular Reflection
@@ -1603,6 +1724,24 @@ void main(inout Payload payload, in HitAttributes attribs) {
             const float F_b     = FresnelSchlick(NdotV_b, F0_b);
             const float kD_b    = (1.0 - F_b) * (1.0 - metallic);
 
+            // Sheen at lambda_b, folded into the cosine lobe rather than given
+            // a lobe of its own.
+            //
+            // The bounce's two lobes are selected by one scalar, and the f that
+            // NEE evaluates is derived by inverting the bounce's own weights --
+            // so a third lobe would have to be added to the selection, the pdf
+            // and that inversion together, or the two strategies stop estimating
+            // the same integral. What is added instead is a cosine lobe whose
+            // directional albedo is exactly the sheen lobe's, which keeps the
+            // energy right and costs the angular shape of the sheen response to
+            // indirect light. The sun, which is where the velvet rim actually
+            // comes from, is a delta light outside MIS and gets the real lobe.
+            const float rhoSheen_b = hasSheen
+                ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, true)
+                : 0.0;
+            const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_b, sheenRoughness);
+            const float wSheen_b = sheenE * rhoSheen_b;
+
             // Pick the specular lobe about as often as it carries energy. The
             // floor keeps a rough dielectric's specular reachable; metals go to
             // 1 because their diffuse term is identically zero.
@@ -1660,7 +1799,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             const float  corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                kD_b * rho_b, F_b, rrSurvive_b,
+                kD_b * rho_b * sheenScale_b + wSheen_b, F_b * sheenScale_b, rrSurvive_b,
                 sky_b, lambda_b, payload);
 
             if (heroRay) {
@@ -1744,8 +1883,28 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
             }
 
+            // 1b. Sheen reflectance at this wavelength, and what the base owes
+            // for it. Per wavelength rather than from the largest RGB component
+            // the specification names: the energy sheen returns at lambda is
+            // what the base should give up at lambda, and this mode has the
+            // spectrum to say so.
+            const float rhoSheen_lambda = hasSheen
+                ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda, true)
+                : 0.0;
+            const float sheenScale_lambda =
+                SheenAlbedoScaling(rhoSheen_lambda, sheenNdotV, sheenRoughness);
+
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda);
+            brdf_lambda *= sheenScale_lambda;
+            if (hasSheen) {
+                // The real Charlie lobe: the sun is a delta light and is not
+                // MIS'd, so nothing here has to agree with a sampling density.
+                const float3 H_s = SafeHalfVector(V, L, normal);
+                brdf_lambda += rhoSheen_lambda *
+                               SheenBRDF(max(dot(normal, H_s), 0.0), sheenNdotV,
+                                         max(dot(normal, L), 0.0), sheenRoughness);
+            }
 
             // 3. Compute spectral radiance: L(λ) = BRDF(λ) × L_sun(λ) × (N·L) × shadow + kD × ρ(λ)/π × L_sky(λ)
             // shadowFactor is computed in RGB mode block and reused here for consistency
@@ -1788,7 +1947,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float kD_lambda = (1.0 - F_ambient) * (1.0 - metallic);
             // Lambertian BRDF = ρ/π, hemisphere integral = π, so π cancels
             // sky_radiance_lambda is already radiance (W·sr⁻¹·m⁻²·nm⁻¹)
-            float L_ambient = kD_lambda * rho_lambda * sky_radiance_lambda;
+            // Sheen rides the same dome. Its directional albedo IS the
+            // hemisphere integral of f cos, so like the Lambertian term above it
+            // needs no π. This must match the wDiffuse the bounce was given, or
+            // the residual L_in - L_base is a difference of two different bases.
+            float L_ambient = kD_lambda * rho_lambda * sheenScale_lambda * sky_radiance_lambda +
+                              sheenE * rhoSheen_lambda * sky_radiance_lambda;
 
             // 4. Emissive contribution (spectrally integrated)
             // Convert emissive RGB to spectral radiance at this wavelength
@@ -1812,6 +1976,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     L_ibl = sky_radiance_lambda *
                             (F0_at_lambda * envBRDF.x + envBRDF.y);
                 }
+                // Specular is part of the base, so it pays the same toll.
+                L_ibl *= sheenScale_lambda;
             }
 
             // 4b. Light sampled directly on an emitter, at this wavelength.
@@ -1819,9 +1985,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // solid-angle conversion are both already inside pdfSolid.
             float L_nee = 0.0;
             if (visNeeScale > 0.0) {
+                // The same weights the bounce was given, so both strategies
+                // estimate one integral -- including sheen as the cosine lobe
+                // the bounce folded it into.
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
-                    visKD * rho_lambda, visF);
+                    visKD * rho_lambda * sheenScale_lambda + sheenE * rhoSheen_lambda,
+                    visF * sheenScale_lambda);
                 L_nee = brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(visLight.emissive, lambda) *
                         visNeeScale;
@@ -2001,6 +2171,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
             );
         }
 
+        // 1b. Sheen at this wavelength. This mode renders at whatever wavelength
+        // it is pointed at, so the RGB factor is only admitted inside the
+        // visible range -- past it the upsampling basis has nothing to say.
+        const float rhoSheen_s = hasSheen
+            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda,
+                                       lambda <= SPECTRAL_VIS_LAMBDA_MAX)
+            : 0.0;
+        const float sheenScale_s = SheenAlbedoScaling(rhoSheen_s, sheenNdotV, sheenRoughness);
+        const float wSheen_s = sheenE * rhoSheen_s;
+
         // 2. Compute scalar PBR BRDF with spectral albedo
         //    Uses the same Cook-Torrance model, but with scalar reflectance
         float brdf_scalar = CookTorranceBRDF_Spectral(
@@ -2013,6 +2193,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             material.complexRefractiveIndexIndex,
             lambda
         );
+
+        brdf_scalar *= sheenScale_s;
+        if (rhoSheen_s > 0.0) {
+            // The sun is a delta light outside MIS, so the real lobe goes here.
+            const float3 H_s1 = SafeHalfVector(V, L, normal);
+            brdf_scalar += rhoSheen_s *
+                           SheenBRDF(max(dot(normal, H_s1), 0.0), sheenNdotV,
+                                     max(dot(normal, L), 0.0), sheenRoughness);
+        }
 
         // 3. Direct sun lighting: L_out = BRDF * L_sun(λ) * (N · L) * shadow
         //    Use spectral sun radiance at wavelength λ
@@ -2032,7 +2221,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // dark. VIS_FUSED does not, and the RGB branch spells the cancellation
         // out: the hemisphere integral's PI cancels the one in the BRDF
         // denominator.
-        float skyAmbient_scalar = kD_scalar * spectralAlbedo * skyRadiance_lambda;
+        // Sheen against the same dome, as the cosine lobe the bounce below
+        // folds it into -- the two have to describe one base.
+        float skyAmbient_scalar = kD_scalar * spectralAlbedo * sheenScale_s * skyRadiance_lambda +
+                                  wSheen_s * skyRadiance_lambda;
 
         // 5. IBL specular contribution, matching VIS_FUSED.
         //    Was absent entirely, so every specular or metallic surface lost its
@@ -2051,6 +2243,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 ibl_scalar = skyRadiance_lambda *
                              (F0_scalar.r * envBRDF.x + envBRDF.y);
             }
+            ibl_scalar *= sheenScale_s;  // specular is base, and pays the toll
         }
 
         // 6. Total spectral radiance (scalar)
@@ -2097,7 +2290,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s);
                     const float brdf_at_light = EvalBounceBrdf(
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
-                        kD_scalar * spectralAlbedo, F_scalar.r);
+                        kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
+                        F_scalar.r * sheenScale_s);
                     radiance_spectral +=
                         brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(s.emissive, lambda) *
@@ -2107,7 +2301,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             radiance_spectral += TraceEnvBounceResidual(
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
-                kD_scalar * spectralAlbedo, F_scalar.r, rrSurvive_s,
+                kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
+                F_scalar.r * sheenScale_s, rrSurvive_s,
                 skyRadiance_lambda, 0.0, payload);
         }
 
