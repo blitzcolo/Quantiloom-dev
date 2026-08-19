@@ -2267,6 +2267,14 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
         return;
     }
 
+    // Whether this material's geometry may skip the any-hit shader is baked
+    // into the acceleration structure, so an edit that crosses that line needs
+    // the BLAS rebuilt -- otherwise turning a surface into a cut-out updates the
+    // material and leaves the geometry solid. Compared before the write, and
+    // acted on after it, because the classifier reads the scene.
+    const bool wasOpaque =
+        rendercore::IsOpaqueForRayTracing(*m_impl->scene, materialIndex);
+
     // 1. Update CPU-side scene data
     m_impl->scene->materials[materialIndex] = material;
 
@@ -2278,7 +2286,25 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
     m_impl->materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
 
-    // 4. Reset accumulation (visual feedback)
+    // 4. Rebuild the geometry only when the opacity classification actually
+    //    moved. Doing it on every edit would put an acceleration-structure
+    //    rebuild behind a roughness slider.
+    if (m_impl->geometry.IsValid() &&
+        rendercore::IsOpaqueForRayTracing(*m_impl->scene, materialIndex) != wasOpaque) {
+        // A frame the host submitted may still be tracing the structures being
+        // replaced, as RebuildAccelerationStructure has to assume too.
+        vkDeviceWaitIdle(m_impl->device);
+        if (m_impl->geometry.RefreshMaterialOpacity(*m_impl->contextAdapter,
+                                                    *m_impl->scene) &&
+            m_impl->pipeline) {
+            m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().GetHandle());
+            if (m_impl->geometry.InstanceCount() > 0) {
+                m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo());
+            }
+        }
+    }
+
+    // 5. Reset accumulation (visual feedback)
     ResetAccumulation();
 
     if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateMaterialEmissivity();

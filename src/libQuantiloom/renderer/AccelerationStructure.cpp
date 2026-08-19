@@ -45,8 +45,9 @@ void WarnIfMisaligned(const char* what, VkDeviceAddress address, VkDeviceSize al
 // BLAS Implementation
 // ============================================================================
 
-BLAS::BLAS(VulkanContext& context, const GeometryPrimitive& primitive)
+BLAS::BLAS(VulkanContext& context, const GeometryPrimitive& primitive, bool opaque)
     : m_context(context)
+    , m_opaque(opaque)
     , m_primitive(primitive)
 {
     if (primitive.positions.empty()) {
@@ -388,7 +389,11 @@ void BLAS::Build(VkCommandBuffer cmd) {
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;  // M1: all geometry is opaque
+    // The one flag that decides whether an any-hit shader runs at all: set, the
+    // traversal is free to skip the stage entirely -- which is what we want for
+    // the overwhelming majority of geometry and what would silently disable
+    // alpha coverage on the rest.
+    geometry.flags = m_opaque ? VK_GEOMETRY_OPAQUE_BIT_KHR : 0;
 
     geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
     geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
@@ -631,7 +636,14 @@ void TLAS::Build(VkCommandBuffer cmd) {
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    // Deliberately not set. Opacity is decided by the BLAS triangle geometry,
+    // then the instance flags, then the ray flags; a top-level geometry of type
+    // INSTANCES is not a thing that can be hit, so its own flag plays no part.
+    // It was set here inertly, and is cleared rather than left because the risk
+    // is asymmetric: clearing it cannot make opaque geometry non-opaque, while
+    // leaving it could silently disable alpha coverage on a driver that reads
+    // it.
+    geometry.flags = 0;
 
     geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     geometry.geometry.instances.arrayOfPointers = VK_FALSE;
@@ -767,7 +779,14 @@ void TLAS::Update(VkCommandBuffer cmd) {
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
     geometry.geometryType = VK_GEOMETRY_TYPE_INSTANCES_KHR;
-    geometry.flags = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    // Deliberately not set. Opacity is decided by the BLAS triangle geometry,
+    // then the instance flags, then the ray flags; a top-level geometry of type
+    // INSTANCES is not a thing that can be hit, so its own flag plays no part.
+    // It was set here inertly, and is cleared rather than left because the risk
+    // is asymmetric: clearing it cannot make opaque geometry non-opaque, while
+    // leaving it could silently disable alpha coverage on a driver that reads
+    // it.
+    geometry.flags = 0;
     geometry.geometry.instances.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_INSTANCES_DATA_KHR;
     geometry.geometry.instances.arrayOfPointers = VK_FALSE;
     geometry.geometry.instances.data.deviceAddress = m_instanceBuffer->GetDeviceAddress(device);

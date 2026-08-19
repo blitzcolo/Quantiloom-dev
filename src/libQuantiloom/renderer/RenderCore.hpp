@@ -117,6 +117,20 @@ String ResolveConfigPath(const String& path, const String& baseDir);
 Vector<Image> EquirectToCubemap(const Image& equirect, u32 faceSize);
 
 /**
+ * @brief Whether traversal may skip the any-hit shader for a material
+ *
+ * Opaque geometry keeps the hardware fast path; alphaMode MASK and BLEND give
+ * it up so a per-texel coverage test can run. A transmissive material counts as
+ * opaque here on purpose -- KHR_materials_transmission is refractive
+ * transparency, alpha is coverage, and running both removes the surface twice.
+ *
+ * Public because the answer is baked into the acceleration structure at build
+ * time, so the interactive host has to ask it again after a material edit to
+ * know whether the geometry went stale. Out of range means opaque.
+ */
+[[nodiscard]] bool IsOpaqueForRayTracing(const Scene& scene, u32 materialId);
+
+/**
  * @brief The split-sum BRDF integration LUT for image-based lighting, on the GPU
  *
  * Owns the image and its sampler together, because they are bound together and
@@ -347,6 +361,21 @@ public:
     /// structures and the merged buffers are geometry, not placement, and
     /// are never redone.
     void RebuildTlas(VulkanContext& ctx, const Scene& scene);
+
+    /**
+     * @brief Rebuild any BLAS whose material changed its ray-tracing opacity
+     *
+     * VK_GEOMETRY_OPAQUE_BIT_KHR is baked into the acceleration structure at
+     * build time, so flipping a material between OPAQUE and MASK/BLEND -- or
+     * switching transmission on -- leaves the geometry behaving as it was
+     * built until the structure is rebuilt. This finds the primitives that
+     * disagree with their material, rebuilds those, and regenerates the TLAS.
+     *
+     * Returns true if anything was rebuilt, so a caller can skip resetting
+     * accumulation when nothing moved. Cheap when nothing changed: one
+     * comparison per primitive and no GPU work.
+     */
+    bool RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scene);
 
     /// Refit the TLAS in place for transform-only edits: no allocation, no
     /// teardown, same handle -- cheap enough to run per mouse-move during a

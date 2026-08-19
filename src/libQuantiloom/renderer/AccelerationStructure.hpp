@@ -96,7 +96,11 @@ namespace quantiloom {
  */
 class BLAS {
 public:
-    BLAS(VulkanContext& context, const GeometryPrimitive& primitive);
+    /// @param opaque  Whether the traversal may skip the any-hit shader for this
+    ///                geometry. False for a material with alphaMode MASK or BLEND,
+    ///                whose coverage is decided per texel. Frozen at build time --
+    ///                see IsOpaque() and SceneGeometry::RefreshMaterialOpacity.
+    BLAS(VulkanContext& context, const GeometryPrimitive& primitive, bool opaque = true);
     ~BLAS();
 
     // Non-copyable, movable
@@ -147,8 +151,18 @@ private:
     // Build state
     bool m_built = false;
 
+    // What VK_GEOMETRY_OPAQUE_BIT_KHR was set to when this was built. Opacity
+    // is baked into the acceleration structure, so changing a material's
+    // alphaMode means rebuilding, and this is what says whether we have to.
+    bool m_opaque = true;
+
     // Cached geometry info
     const GeometryPrimitive& m_primitive;
+
+public:
+    /// Whether this was built opaque. Compare against the material's current
+    /// classification to find out whether the structure is stale.
+    [[nodiscard]] bool IsOpaque() const { return m_opaque; }
 };
 
 // ============================================================================

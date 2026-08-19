@@ -644,6 +644,7 @@ bool IsDoubleSided(const Scene& scene, u32 materialId) {
                                                : true;
 }
 
+
 std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VmaAllocator allocator,
                                                 const void* data, size_t bytes) {
     auto buffer = std::make_unique<GpuBuffer>(
@@ -755,7 +756,8 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     // One BLAS per primitive, shared by every node that instances the mesh.
     for (const auto& mesh : scene.meshes) {
         for (const auto& prim : mesh.primitives) {
-            result.m_blas.emplace_back(std::make_unique<BLAS>(ctx, prim));
+            result.m_blas.emplace_back(
+                std::make_unique<BLAS>(ctx, prim, IsOpaqueForRayTracing(scene, prim.materialId)));
         }
     }
 
@@ -805,6 +807,41 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     QL_LOG_INFO("  Built {} BLAS, 1 TLAS, {} instance(s)",
                 result.m_blas.size(), result.m_instanceCount);
     return result;
+}
+
+bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scene) {
+    if (m_blas.empty()) {
+        return false;
+    }
+
+    // Walk the primitives in the same order Build did, so index i of m_blas is
+    // the i'th primitive of the scene.
+    bool changed = false;
+    size_t globalPrim = 0;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& prim : mesh.primitives) {
+            if (globalPrim >= m_blas.size()) {
+                break;
+            }
+            const bool wanted = IsOpaqueForRayTracing(scene, prim.materialId);
+            if (m_blas[globalPrim]->IsOpaque() != wanted) {
+                QL_LOG_INFO("  Rebuilding BLAS {} as {}", globalPrim,
+                            wanted ? "opaque" : "alpha-tested");
+                m_blas[globalPrim] = std::make_unique<BLAS>(ctx, prim, wanted);
+                changed = true;
+            }
+            ++globalPrim;
+        }
+    }
+
+    if (!changed) {
+        return false;
+    }
+
+    // Every instance references a BLAS by address, so replacing one invalidates
+    // the TLAS whether or not the instance list itself changed.
+    RebuildTlas(ctx, scene);
+    return true;
 }
 
 void SceneGeometry::RebuildTlas(VulkanContext& ctx, const Scene& scene) {
@@ -1075,6 +1112,30 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
                     cpuMat.uvTransformOffset[UV_SLOT_DIFFUSE_TRANSMISSION_COLOR]);
 
     return cpuMat;
+}
+
+// Whether the traversal may skip the any-hit shader for this material.
+//
+// Opaque geometry keeps the hardware fast path; MASK and BLEND give it up so a
+// per-texel coverage test can run. A transmissive material counts as opaque
+// here on purpose: KHR_materials_transmission is refractive transparency -- the
+// ray bends, Fresnel splits it, the medium attenuates -- while alpha is
+// coverage, where the ray continues straight and unattenuated. Running both
+// removes the surface twice, and glTF's own guidance is that a transmissive
+// material should be authored alphaMode OPAQUE. Keeping such geometry out of
+// the any-hit path entirely is cheaper and less ambiguous than branching inside
+// it.
+//
+// Out of range means opaque, matching the conservative default everywhere else.
+bool IsOpaqueForRayTracing(const Scene& scene, u32 materialId) {
+    if (materialId >= scene.materials.size()) {
+        return true;
+    }
+    const Material& mat = scene.materials[materialId];
+    if (mat.transmission > 0.0f) {
+        return true;
+    }
+    return mat.alphaMode == Material::AlphaMode::Opaque;
 }
 
 std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
