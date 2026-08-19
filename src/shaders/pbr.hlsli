@@ -286,6 +286,93 @@ float3 FresnelSchlickF90RGB(float cosTheta, float3 F0, float F90) {
 }
 
 // ============================================================================
+// KHR_materials_anisotropy: a stretched GGX lobe
+// ============================================================================
+// The extension does not add a lobe, it reshapes the one already there:
+//
+//   alpha_t = lerp(alpha, 1, strength^2)   along the anisotropy direction
+//   alpha_b = alpha                        across it
+//
+// so alpha_t >= alpha_b always. This only ever roughens one axis; it never
+// sharpens the other, which is why no energy bookkeeping is needed -- the lobe
+// is redistributed, not enlarged.
+//
+// Unlike sheen, this cannot be folded into a cosine lobe with a matching
+// directional albedo, because what changes IS the angular shape. So the whole
+// MIS quartet -- the sampler, the mixture density, the NEE evaluation and the
+// bounce weight -- takes the frame below and stretches together. Getting one of
+// the four wrong does not look like a wrong highlight; it looks like a scene
+// that is uniformly too bright or too dark at grazing angles, which is the
+// failure EvalBounceBrdf's header records.
+//
+// active == false is not "strength 0" -- it routes every consumer back to the
+// original isotropic expressions, bit for bit. Algebraic equality is not enough
+// here: the anisotropic D and V are written in a different (better conditioned)
+// form, and a scene with no anisotropy has to render exactly as it did.
+// ============================================================================
+
+struct AnisoFrame {
+    float3 T;       // the direction highlights stretch along, world space
+    float3 B;       // across it, world space
+    float  alphaT;
+    float  alphaB;
+    bool   active;
+};
+
+AnisoFrame IsotropicFrame() {
+    AnisoFrame f;
+    f.T = float3(1.0, 0.0, 0.0);
+    f.B = float3(0.0, 1.0, 0.0);
+    f.alphaT = 0.0;
+    f.alphaB = 0.0;
+    f.active = false;
+    return f;
+}
+
+/// The two alphas, from a roughness already floored by the caller.
+void AnisotropyAlphas(float alpha, float strength, out float alphaT, out float alphaB) {
+    alphaT = lerp(alpha, 1.0, strength * strength);
+    alphaB = alpha;
+}
+
+// Burley's anisotropic GGX, in the sample viewer's algebraically equivalent but
+// better conditioned arrangement:
+//
+//   D = 1 / (pi a_t a_b ((h.t)^2/a_t^2 + (h.b)^2/a_b^2 + (h.n)^2)^2)
+float DistributionGGXAniso(float TdotH, float BdotH, float NdotH,
+                           float alphaT, float alphaB) {
+    const float a2 = alphaT * alphaB;
+    const float3 f = float3(alphaB * TdotH, alphaT * BdotH, a2 * NdotH);
+    const float  d = dot(f, f);
+    if (d <= 0.0) {
+        return 0.0;
+    }
+    const float w2 = a2 / d;
+    return a2 * w2 * w2 / PI;
+}
+
+// Height-correlated Smith visibility, anisotropic. Already carries the
+// 1/(4 NdotV NdotL) the specular denominator would otherwise need, exactly as
+// VisibilitySmithGGXCorrelated does for the isotropic case.
+float VisibilitySmithGGXCorrelatedAniso(float TdotV, float BdotV, float NdotV,
+                                        float TdotL, float BdotL, float NdotL,
+                                        float alphaT, float alphaB) {
+    const float lambdaV = NdotL * length(float3(alphaT * TdotV, alphaB * BdotV, NdotV));
+    const float lambdaL = NdotV * length(float3(alphaT * TdotL, alphaB * BdotL, NdotL));
+    const float v = lambdaV + lambdaL;
+    return (v > 0.0) ? (0.5 / v) : 0.0;
+}
+
+// Smith's masking for one direction, anisotropic. This is the density's G1 --
+// what SampleGGXVNDFAniso actually draws from -- so like its isotropic sibling
+// it is the exact form and not a fit.
+float SmithG1_GGXAniso(float TdotV, float BdotV, float NdotV,
+                       float alphaT, float alphaB) {
+    const float c = max(NdotV, 1e-4);
+    return 2.0 * c / (c + length(float3(alphaT * TdotV, alphaB * BdotV, c)));
+}
+
+// ============================================================================
 // Refraction Index at a Wavelength
 // ============================================================================
 // The n that Snell's law and the dielectric Fresnel term should use, in
@@ -517,7 +604,8 @@ float3 CookTorranceBRDF(
     int complexRefractiveIndexIndex,
     float wavelength_nm,
     float3 dielectricF0,
-    float F90
+    float F90,
+    AnisoFrame aniso
 ) {
     // OPTIMIZATION: Clamp minimum roughness to prevent numerical instability
     // Perfectly smooth surfaces (roughness=0) lead to Dirac delta distribution
@@ -559,13 +647,24 @@ float3 CookTorranceBRDF(
         F = FresnelSchlickF90RGB(VdotH, F0, F90);
     }
 
-    // Normal distribution function (GGX)
+    // Normal distribution function (GGX), stretched along the material tangent
+    // when KHR_materials_anisotropy is in play. The inactive branch is the
+    // original expression untouched, so a scene without the extension renders
+    // bit for bit as it did.
     float alpha = roughness * roughness;  // Perceptually linear roughness
-    float D = DistributionGGX(NdotH, alpha);
-
-    // OPTIMIZATION: Use combined visibility term instead of G/(4*NdotV*NdotL)
-    // This eliminates NdotV/NdotL divisions, improving performance and stability
-    float Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
+    float D, Vis;
+    if (aniso.active) {
+        D = DistributionGGXAniso(dot(aniso.T, H), dot(aniso.B, H), NdotH,
+                                 aniso.alphaT, aniso.alphaB);
+        Vis = VisibilitySmithGGXCorrelatedAniso(dot(aniso.T, V), dot(aniso.B, V), NdotV,
+                                                dot(aniso.T, L), dot(aniso.B, L), NdotL,
+                                                aniso.alphaT, aniso.alphaB);
+    } else {
+        D = DistributionGGX(NdotH, alpha);
+        // OPTIMIZATION: Use combined visibility term instead of G/(4*NdotV*NdotL)
+        // This eliminates NdotV/NdotL divisions, improving performance and stability
+        Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
+    }
 
     // Cook-Torrance specular BRDF: D * F * Vis
     // Note: Vis already includes the 1/(4*NdotV*NdotL) term
@@ -616,7 +715,8 @@ float CookTorranceBRDF_Spectral(
     int complexRefractiveIndexIndex,
     float wavelength_nm,
     float dielectricF0,
-    float F90
+    float F90,
+    AnisoFrame aniso
 ) {
     const float MIN_ROUGHNESS = 0.045;
     roughness = max(roughness, MIN_ROUGHNESS);
@@ -641,8 +741,17 @@ float CookTorranceBRDF_Spectral(
     }
 
     float alpha = roughness * roughness;
-    float D = DistributionGGX(NdotH, alpha);
-    float Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
+    float D, Vis;
+    if (aniso.active) {
+        D = DistributionGGXAniso(dot(aniso.T, H), dot(aniso.B, H), NdotH,
+                                 aniso.alphaT, aniso.alphaB);
+        Vis = VisibilitySmithGGXCorrelatedAniso(dot(aniso.T, V), dot(aniso.B, V), NdotV,
+                                                dot(aniso.T, L), dot(aniso.B, L), NdotL,
+                                                aniso.alphaT, aniso.alphaB);
+    } else {
+        D = DistributionGGX(NdotH, alpha);
+        Vis = VisibilitySmithGGXCorrelated(NdotV, NdotL, roughness);
+    }
 
     float specular = D * F * Vis;
 
@@ -905,6 +1014,46 @@ float3 SampleGGXVNDF(float3 N, float3 V, float alpha, float2 u, out float pdf) {
     const float NdotV = max(dot(N, V), 1e-4);
     const float NdotH = max(dot(N, H), 0.0);
     pdf = SmithG1_GGX(NdotV, alpha) * DistributionGGX(NdotH, alpha) / (4.0 * NdotV);
+    return wi;
+}
+
+// The same sampler with two alphas and the material's own tangent frame.
+//
+// Heitz's derivation stretches the view direction by alpha before working on
+// the hemisphere and unstretches the result afterwards; nothing in it assumes
+// the two axes stretch equally, so the anisotropic case is the same algorithm
+// with (alphaT, alphaB) in place of (alpha, alpha) -- and with the frame coming
+// from the material rather than from BuildBasis, since which way the lobe
+// stretches is now observable.
+float3 SampleGGXVNDFAniso(float3 N, float3 T, float3 B, float3 V,
+                          float alphaT, float alphaB, float2 u, out float pdf) {
+    const float3 Ve = float3(dot(V, T), dot(V, B), dot(V, N));
+
+    const float3 Vh = normalize(float3(alphaT * Ve.x, alphaB * Ve.y, max(Ve.z, 1e-6)));
+
+    const float lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+    const float3 T1 = lensq > 0.0 ? float3(-Vh.y, Vh.x, 0.0) * rsqrt(lensq)
+                                  : float3(1.0, 0.0, 0.0);
+    const float3 T2 = cross(Vh, T1);
+
+    const float r   = sqrt(u.x);
+    const float phi = 2.0 * PI * u.y;
+    const float t1 = r * cos(phi);
+    float       t2 = r * sin(phi);
+    const float s  = 0.5 * (1.0 + Vh.z);
+    t2 = (1.0 - s) * sqrt(max(1.0 - t1 * t1, 0.0)) + s * t2;
+
+    const float3 Nh = t1 * T1 + t2 * T2 +
+                      sqrt(max(1.0 - t1 * t1 - t2 * t2, 0.0)) * Vh;
+    const float3 Ne = normalize(float3(alphaT * Nh.x, alphaB * Nh.y, max(Nh.z, 0.0)));
+
+    const float3 H  = normalize(T * Ne.x + B * Ne.y + N * Ne.z);
+    const float3 wi = reflect(-V, H);
+
+    const float NdotV = max(dot(N, V), 1e-4);
+    pdf = SmithG1_GGXAniso(dot(T, V), dot(B, V), NdotV, alphaT, alphaB) *
+          DistributionGGXAniso(dot(T, H), dot(B, H), max(dot(N, H), 0.0), alphaT, alphaB) /
+          (4.0 * NdotV);
     return wi;
 }
 

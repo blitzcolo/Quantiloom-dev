@@ -265,6 +265,17 @@ float3 SafeNormalize(float3 v) {
     return SafeNormalize(v, float3(0.0, 1.0, 0.0));
 }
 
+// The 2D case, for the anisotropy direction a texture encodes. A distinct name
+// rather than an overload: this file's Fresnel header records what a same-named
+// sibling with a different vector width cost the last time.
+float2 SafeNormalize2(float2 v, float2 fallback) {
+    float lenSq = dot(v, v);
+    if (lenSq < 1e-8) {
+        return fallback;
+    }
+    return v * rsqrt(lenSq);
+}
+
 // Maximum valid texture index (must match MAX_TEXTURES in RayTracingPipeline.cpp)
 // CRITICAL: This bounds check prevents GPU hangs from invalid descriptor access
 static const int MAX_TEXTURE_INDEX = 1024;
@@ -677,7 +688,8 @@ struct LightSample {
 // The MIXTURE over both lobes, not the chosen one's: this is compared against
 // the light's density on both sides of the weight, and both sides have to be
 // evaluating the same function of direction.
-float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float qSpec) {
+float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float qSpec,
+                     AnisoFrame aniso) {
     roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0) {
@@ -690,9 +702,17 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
         const float  NdotV = max(dot(normal, V), 1e-4);
-        const float  alpha = roughness * roughness;
-        pdf += qSpec * SmithG1_GGX(NdotV, alpha) *
-               DistributionGGX(NdotH, alpha) / (4.0 * NdotV);
+        if (aniso.active) {
+            pdf += qSpec *
+                   SmithG1_GGXAniso(dot(aniso.T, V), dot(aniso.B, V), NdotV,
+                                    aniso.alphaT, aniso.alphaB) *
+                   DistributionGGXAniso(dot(aniso.T, H), dot(aniso.B, H), NdotH,
+                                        aniso.alphaT, aniso.alphaB) / (4.0 * NdotV);
+        } else {
+            const float alpha = roughness * roughness;
+            pdf += qSpec * SmithG1_GGX(NdotV, alpha) *
+                   DistributionGGX(NdotH, alpha) / (4.0 * NdotV);
+        }
     }
     return pdf;
 }
@@ -723,7 +743,7 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
 // not be part of what the light sampler estimates either.
 float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
                      float roughness, float qSpec,
-                     float wDiffuse, float wSpecular) {
+                     float wDiffuse, float wSpecular, AnisoFrame aniso) {
     roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0) {
@@ -733,10 +753,24 @@ float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
     if (qSpec > 0.0) {
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
-        const float  alpha = roughness * roughness;
-        const float  D     = DistributionGGX(NdotH, alpha);
-        const float  G     = GeometrySmith_IBL(NdotV, NdotWi, roughness);
-        f += wSpecular * D * G / (4.0 * max(NdotV, 1e-4) * NdotWi);
+        if (aniso.active) {
+            // The anisotropic visibility already carries the 1/(4 NdotV NdotWi),
+            // so it takes the place of BOTH G and that denominator. The bounce
+            // weight below is derived from this same pair -- change one and the
+            // other stops describing the lobe MIS thinks it is partitioning.
+            const float D = DistributionGGXAniso(dot(aniso.T, H), dot(aniso.B, H), NdotH,
+                                                 aniso.alphaT, aniso.alphaB);
+            const float Vis = VisibilitySmithGGXCorrelatedAniso(
+                dot(aniso.T, V), dot(aniso.B, V), max(NdotV, 1e-4),
+                dot(aniso.T, wi), dot(aniso.B, wi), NdotWi,
+                aniso.alphaT, aniso.alphaB);
+            f += wSpecular * D * Vis;
+        } else {
+            const float alpha = roughness * roughness;
+            const float D     = DistributionGGX(NdotH, alpha);
+            const float G     = GeometrySmith_IBL(NdotV, NdotWi, roughness);
+            f += wSpecular * D * G / (4.0 * max(NdotV, 1e-4) * NdotWi);
+        }
     }
     return f;
 }
@@ -889,7 +923,8 @@ float EmissiveMisWeight(float3 emissive, int emissiveTextureIndex,
 float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
                              float roughness, float qSpec,
                              float wDiffuse, float wSpecular, float rrSurvive,
-                             float L_base_b, float lambda_b, inout Payload payload)
+                             float L_base_b, float lambda_b, AnisoFrame aniso,
+                             inout Payload payload)
 {
     if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
         return 0.0;
@@ -930,9 +965,15 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     const float2 uDir = PathSample2D(payload, SAMPLE_SLOT_DIRECTION);
 
     float pdf_dir;
-    const float3 wi = specularLobe
-        ? SampleGGXVNDF(normal, V, roughness * roughness, uDir, pdf_dir)
-        : CosineSampleHemisphere(normal, uDir, pdf_dir);
+    float3 wi;
+    if (specularLobe) {
+        wi = aniso.active
+            ? SampleGGXVNDFAniso(normal, aniso.T, aniso.B, V, aniso.alphaT, aniso.alphaB,
+                                 uDir, pdf_dir)
+            : SampleGGXVNDF(normal, V, roughness * roughness, uDir, pdf_dir);
+    } else {
+        wi = CosineSampleHemisphere(normal, uDir, pdf_dir);
+    }
 
     const float NdotWi = dot(normal, wi);
     // Negated comparisons, so that a NaN fails them. Written the other way a
@@ -960,9 +1001,24 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // the sampler actually drew from. They are deliberately not the same
     // function: one belongs to the BRDF, the other to the density.
     if (specularLobe) {
-        const float alpha = roughness * roughness;
-        weight *= GeometrySmith_IBL(NdotV, NdotWi, roughness) /
-                  max(SmithG1_GGX(NdotV, alpha), 1e-4);
+        if (aniso.active) {
+            // The same f cos / pdf, written from the anisotropic pair:
+            //   f cos = wSpec D Vis NdotWi,  pdf = G1 D / (4 NdotV)
+            // so D cancels and what is left is 4 Vis NdotWi NdotV / G1 -- which
+            // reduces to G2/G1 exactly as the isotropic branch does, because
+            // Vis IS G2/(4 NdotV NdotWi).
+            const float Vis = VisibilitySmithGGXCorrelatedAniso(
+                dot(aniso.T, V), dot(aniso.B, V), max(NdotV, 1e-4),
+                dot(aniso.T, wi), dot(aniso.B, wi), NdotWi,
+                aniso.alphaT, aniso.alphaB);
+            const float G1 = SmithG1_GGXAniso(dot(aniso.T, V), dot(aniso.B, V),
+                                              max(NdotV, 1e-4), aniso.alphaT, aniso.alphaB);
+            weight *= 4.0 * Vis * NdotWi * max(NdotV, 1e-4) / max(G1, 1e-4);
+        } else {
+            const float alpha = roughness * roughness;
+            weight *= GeometrySmith_IBL(NdotV, NdotWi, roughness) /
+                      max(SmithG1_GGX(NdotV, alpha), 1e-4);
+        }
     }
 
     RayDesc bounceRay;
@@ -982,7 +1038,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // BSDF was to have sent a ray its way, so it can weigh its emission against
     // the light sampling the same vertex did. The mixture density, evaluated at
     // the direction actually taken -- see BsdfMixturePdf.
-    child.bsdfPdf     = BsdfMixturePdf(normal, V, wi, roughness, qSpec);
+    child.bsdfPdf     = BsdfMixturePdf(normal, V, wi, roughness, qSpec, aniso);
     TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, bounceRay, child);
 
     // Carry the child's consumption forward, or the parent's later draws
@@ -1101,7 +1157,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Read tangent from buffer with offset (or fallback to fake tangent)
     float3 worldTangent;
     float worldHandedness = 1.0;  // Default handedness (right-handed)
-    if (material.normalTextureIndex >= 0) {  // Only compute tangent if normal map is used
+    // Anisotropy and a clearcoat normal map need the real tangent too, not just
+    // a normal map -- and for anisotropy it is the tangent DIRECTION that is
+    // observable, so the arbitrary fallback below is visibly wrong rather than
+    // merely unused. The loader warns when a primitive hits that case.
+    if (material.normalTextureIndex >= 0 || material.anisotropyStrength > 0.0 ||
+        material.clearcoatNormalTextureIndex >= 0) {
         // Read tangents with offset into global tangent buffer
         float4 tangent4_0 = tangentBuffer[geoInfo.tangentOffset + idx0];
         float4 tangent4_1 = tangentBuffer[geoInfo.tangentOffset + idx1];
@@ -1129,7 +1190,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             worldHandedness = 1.0;  // Reset to default for fallback
         }
     } else {
-        // No normal map: use fake tangent (doesn't matter since it won't be used)
+        // Nothing reads a tangent on this material, so any frame will do.
         float3 refVector = abs(worldNormal.y) > 0.9 ? float3(1, 0, 0) : float3(0, 1, 0);
         worldTangent = SafeNormalize(cross(worldNormal, refVector), float3(1.0, 0.0, 0.0));
     }
@@ -1306,6 +1367,55 @@ void main(inout Payload payload, in HitAttributes attribs) {
     const float3 dielectricF0 = DielectricF0RGB(material.ior, specularColor, specularWeight);
     const float specularF90 = lerp(specularWeight, 1.0, metallic);
 
+    // ========================================================================
+    // Anisotropy (KHR_materials_anisotropy)
+    // ========================================================================
+    // The texture carries a direction in RG (dequantised x2-1) and a strength
+    // in B, and the specification MULTIPLIES that strength by the factor -- so
+    // a zero factor turns the extension off outright no matter what the texture
+    // holds. The sample viewer's GLSL snippet assigns instead of multiplying;
+    // it is non-normative, and following it would make the factor useless as
+    // the activation test every branch below depends on.
+    //
+    // Absent texture means the default dequantised texel (1, 0.5, 1): direction
+    // +T, full strength. The JSON rotation applies either way, which is what
+    // AnisotropyRotationTest checks by authoring 20 degrees of it against a
+    // texture holding 10 and expecting 30.
+    AnisoFrame aniso = IsotropicFrame();
+    if (material.anisotropyStrength > 0.0) {
+        float2 anisoDir = float2(1.0, 0.0);
+        float anisoStrength = material.anisotropyStrength;
+        if (material.anisotropyTextureIndex >= 0) {
+            const float3 anisoTex = SampleTexture(
+                material.anisotropyTextureIndex,
+                material.anisotropyTextureIndex,
+                TransformUV(material, UV_SLOT_ANISOTROPY, uv),
+                float4(1.0, 0.5, 1.0, 1.0)
+            ).rgb;
+            anisoDir = SafeNormalize2(anisoTex.rg * 2.0 - 1.0, float2(1.0, 0.0));
+            anisoStrength *= anisoTex.b;
+        }
+
+        const float ca = cos(material.anisotropyRotation);
+        const float sa = sin(material.anisotropyRotation);
+        anisoDir = float2(ca * anisoDir.x - sa * anisoDir.y,
+                          sa * anisoDir.x + ca * anisoDir.y);
+
+        // Into world space through the shading frame, then re-orthogonalised
+        // against the shading normal -- which is the one every lobe below uses,
+        // and which a normal map may have tilted away from the geometric one.
+        const float3x3 tbn = ComputeTBN(normal, worldTangent, worldHandedness);
+        const float3 anisoT = SafeNormalize(tbn[0] * anisoDir.x + tbn[1] * anisoDir.y,
+                                            float3(1.0, 0.0, 0.0));
+
+        aniso.T = SafeNormalize(anisoT - normal * dot(normal, anisoT), anisoT);
+        aniso.B = SafeNormalize(cross(normal, aniso.T), float3(0.0, 1.0, 0.0));
+        AnisotropyAlphas(max(roughness, MIN_BOUNCE_ROUGHNESS) *
+                             max(roughness, MIN_BOUNCE_ROUGHNESS),
+                         saturate(anisoStrength), aniso.alphaT, aniso.alphaB);
+        aniso.active = anisoStrength > 0.0;
+    }
+
     // If a BSDF-sampled bounce landed here and this surface emits, the vertex
     // that sent the ray also sampled the emitters explicitly, and both would
     // report the same light. Keep the share the power heuristic gives this
@@ -1393,7 +1503,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm, dielectricF0, specularF90);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm, dielectricF0, specularF90, aniso);
 
     // Sheen, layered over the base and paid for by scaling it down. The
     // specification drives the scaling from the largest colour component; the
@@ -1849,7 +1959,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 const float NdotWl = dot(normal, visLight.wi);
                 if (NdotWl > 0.0 && LightSampleVisible(visHitPos, normal, visLight)) {
                     const float pdfBsdfAtLight =
-                        BsdfMixturePdf(normal, V, visLight.wi, roughness, qSpec_b);
+                        BsdfMixturePdf(normal, V, visLight.wi, roughness, qSpec_b, aniso);
                     visNeeScale = NdotWl *
                                   PowerHeuristic(visLight.pdfSolid, pdfBsdfAtLight) /
                                   visLight.pdfSolid;
@@ -1863,7 +1973,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             const float  corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
                 kD_b * rho_b * sheenScale_b + wSheen_b, F_b * sheenScale_b, rrSurvive_b,
-                sky_b, lambda_b, payload);
+                sky_b, lambda_b, aniso, payload);
 
             if (heroRay) {
                 // Scalar: the surface that sampled lambda_h owns the weighting.
@@ -1959,7 +2069,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda,
-                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90);
+                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90, aniso);
             brdf_lambda *= sheenScale_lambda;
             if (hasSheen) {
                 // The real Charlie lobe: the sun is a delta light and is not
@@ -2039,7 +2149,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
                     visKD * rho_lambda * sheenScale_lambda + sheenE * rhoSheen_lambda,
-                    visF * sheenScale_lambda);
+                    visF * sheenScale_lambda, aniso);
                 L_nee = brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(visLight.emissive, lambda) *
                         visNeeScale;
@@ -2241,7 +2351,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             material.complexRefractiveIndexIndex,
             lambda,
             InterpolateRgbToWavelength(dielectricF0, lambda),
-            specularF90
+            specularF90,
+            aniso
         );
 
         brdf_scalar *= sheenScale_s;
@@ -2337,11 +2448,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 const float NdotWl = dot(normal, s.wi);
                 if (NdotWl > 0.0 && LightSampleVisible(singleHitPos, normal, s)) {
                     const float pdfBsdfAtLight =
-                        BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s);
+                        BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s, aniso);
                     const float brdf_at_light = EvalBounceBrdf(
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
                         kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
-                        F_scalar.r * sheenScale_s);
+                        F_scalar.r * sheenScale_s, aniso);
                     radiance_spectral +=
                         brdf_at_light *
                         ConvertLinearRGBToIlluminantSpectrum(s.emissive, lambda) *
@@ -2353,7 +2464,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
                 kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s,
                 F_scalar.r * sheenScale_s, rrSurvive_s,
-                skyRadiance_lambda, 0.0, payload);
+                skyRadiance_lambda, 0.0, aniso, payload);
         }
 
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
@@ -2470,7 +2581,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, payload);
+            L_base_b, lambda_b, aniso, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -2692,7 +2803,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, payload);
+            L_base_b, lambda_b, aniso, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -2940,7 +3051,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             irHitPos, normal, V, NdotV, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
-            L_base_b, lambda_b, payload);
+            L_base_b, lambda_b, aniso, payload);
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
         // A hero ray runs one iteration at its own wavelength and reports a
