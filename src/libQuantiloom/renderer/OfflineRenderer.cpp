@@ -531,6 +531,11 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             slots.endmemberCurve3 = slotsIn.curves[3];
             slots.weightTexture = slotsIn.weightTextureIndex;
         }
+        if (auto it = spectra.materialNameToSheenCurve.find(mat.name);
+            it != spectra.materialNameToSheenCurve.end()) {
+            slots.sheenReflectanceCurve = it->second;
+            QL_LOG_INFO("  Material '{}': using sheen curve index {}", mat.name, it->second);
+        }
 
         materialIndices.push_back(slots);
     }

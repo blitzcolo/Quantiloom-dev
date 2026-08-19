@@ -204,6 +204,14 @@ struct ResolvedMaterialSpectra {
     /// in both: the first map is endmember 0, this one is the whole mixture.
     std::unordered_map<String, EndmemberSlots> materialNameToEndmembers;
 
+    /// Measured sheen reflectance, keyed like materialNameToCurve and pointing
+    /// into the same `curves`. Separate from the endmember mixture: sheen is
+    /// one curve with no weight texture, because the mixture's weights are
+    /// unmixed from the base-colour texture and describe the base, not the
+    /// fibres over it. A material may appear here without appearing in
+    /// materialNameToCurve -- velvet over an RGB base colour.
+    std::unordered_map<String, i32> materialNameToSheenCurve;
+
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
 

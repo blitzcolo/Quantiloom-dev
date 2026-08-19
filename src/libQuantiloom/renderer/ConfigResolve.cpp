@@ -1030,6 +1030,28 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             it->phaseG = matTable.GetFloat("phase_g", it->phaseG);
         }
 
+        // Sheen (KHR_materials_sheen), for the same reason transmission is
+        // here: the fields reach the GPU either way, but without these keys
+        // only a glTF could set them, and a USD or procedural surface could
+        // not be velvet. Absent keys leave the loaded value alone.
+        if (const auto sheen = matTable.GetFloatArray("sheen_color"); sheen.size() >= 3) {
+            it->sheenColorFactor = glm::vec3(sheen[0], sheen[1], sheen[2]);
+        }
+        if (matTable.Has("sheen_roughness")) {
+            it->sheenRoughnessFactor =
+                matTable.GetFloat("sheen_roughness", it->sheenRoughnessFactor);
+        }
+
+        // The measured sheen reflectance, resolved below alongside the base
+        // colour's. This key is the only way sheen reaches NIR/SWIR/MWIR/LWIR:
+        // sheen_color is an RGB factor, and upsampling one through the visible
+        // Gaussian basis says nothing past ~1400nm, so the infrared bands read
+        // the curve or they read no sheen at all.
+        if (matTable.Has("sheen_spectral_material_ref")) {
+            it->quantiloomSheenRef =
+                matTable.GetString("sheen_spectral_material_ref", it->quantiloomSheenRef);
+        }
+
         // The measured-material database entry this surface stands for. Set
         // here rather than only from glTF extras, so an assignment made in
         // Studio survives being saved: the NMF reconstruction loop below runs
@@ -1547,6 +1569,23 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                                     mat.name, eps, static_cast<i32>(kSolverT),
                                     static_cast<i32>(kLwirMinNm), static_cast<i32>(kLwirMaxNm));
                     }
+                }
+            }
+
+            // Measured sheen reflectance, in its own pass because a material
+            // may name one without naming a base reference at all -- velvet
+            // over an RGB base colour is a reasonable thing to author, and the
+            // loop above skips anything without HasQuantiloomRef(). Shares
+            // resolveRef, so a sheen reference that names the same library
+            // entry as some base reference resolves to the same curve index
+            // rather than uploading it twice.
+            for (const auto& mat : scene.materials) {
+                if (mat.quantiloomSheenRef.empty()) continue;
+
+                if (const ResolvedRef* sheen = resolveRef(mat.quantiloomSheenRef, mat.name)) {
+                    out.materialNameToSheenCurve[mat.name] = sheen->curveIndex;
+                    QL_LOG_INFO("  Sheen curve for '{}': '{}' → index {}",
+                                mat.name, mat.quantiloomSheenRef, sheen->curveIndex);
                 }
             }
         } else {
