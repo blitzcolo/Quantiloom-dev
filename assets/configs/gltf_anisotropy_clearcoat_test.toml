@@ -1,0 +1,97 @@
+# ============================================================================
+# Quantiloom - KHR_materials_anisotropy + KHR_materials_clearcoat test scene
+# ============================================================================
+# AnisotropyBarnLamp carries both on one material, which is the case worth
+# rendering: its "Lamp Metal" has anisotropyStrength 1 with a direction texture,
+# and a clearcoat at factor 0.25 whose normal map is the SAME texture as the
+# base's. A per-slot parse that collapsed the two would look almost right.
+#
+# What to look for:
+#
+#   Anisotropy   the highlight on the brushed metal stretched into a band
+#                perpendicular to the brush grooves, instead of a round spot.
+#                It is the one material feature whose appearance depends on the
+#                tangent DIRECTION rather than on merely having a frame, so a
+#                primitive without a TANGENT attribute gets an arbitrary
+#                orientation -- the loader warns when it sees that, because
+#                nothing further down the pipeline can.
+#
+#   Clearcoat    a second, sharper reflection over the top, and the base dimmed
+#                by exactly what the coat takes. At grazing angles the coat's
+#                Fresnel climbs toward 1 and the base almost vanishes under it.
+#
+# DEBUG_MODE_TANGENT renders the tangent frame directly, which is the quickest
+# way to tell an arbitrary frame from an authored one before blaming the lobe.
+#
+# Two other assets worth pointing this at:
+#
+#   AnisotropyStrengthTest   a 7x7 grid of roughness against strength, the
+#                            fastest way to see alpha_t = mix(alpha, 1, s^2).
+#   AnisotropyRotationTest   20 degrees of JSON rotation against a texture
+#                            holding 10, which must compose to 30.
+#   ClearCoatTest            Base/Coated/Coating triplets that are authored to
+#                            validate each other, including a coat with no
+#                            normal map over a base that has one -- that coat
+#                            must render flat, not borrow the base's.
+#
+# ============================================================================
+# The coat in the infrared
+# ============================================================================
+# NIR and SWIR act on the factor: a dielectric interface really does reflect
+# about 4% out to a few microns. MWIR and LWIR act on a measured curve and
+# nothing else, because that 4% is the one number that certainly does not hold
+# at 10 microns, where real lacquers absorb strongly:
+#
+#   [[materials]]
+#   name = "Lamp Metal"
+#   clearcoat_spectral_material_ref = "<entry in the materials JSON>"
+#
+# Where a curve is bound, those bands CARVE the coat out of the reflectance
+# already there rather than adding to it -- emissivity is derived from the same
+# reflectance by eps = 1 - rho - tau, so adding would make an isothermal cavity
+# emit. Anisotropy has no infrared path at all: it reshapes a lobe those bands
+# do not have, since their reflectance is one measured total.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 96
+output = "gltf_anisotropy_clearcoat_output.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/AnisotropyBarnLamp/glTF/AnisotropyBarnLamp.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.18, 0.10, 0.22]
+look_at = [0.0, 0.05, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 40.0
+
+[lighting]
+# Off to one side, so the stretched highlight sweeps across the metal rather
+# than sitting behind the camera.
+sun_direction = [0.45, 0.55, 0.70]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.4, 0.4, 0.4]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

@@ -1,0 +1,86 @@
+# ============================================================================
+# Quantiloom - KHR_materials_diffuse_transmission test scene
+# ============================================================================
+# Renders DiffuseTransmissionTeacup with the sun BEHIND it, which is the only
+# arrangement that shows what this extension does: light entering the far face
+# of the porcelain and leaving diffusely from the near one.
+#
+# What to look for: the cup and saucer glowing where they are thinnest and most
+# backlit, warmed toward the diffuseTransmissionColorFactor of [0.84, 0.8,
+# 0.74] rather than toward their own base colour. Turn the sun round to the
+# front and the effect does not merely weaken -- the surfaces go DARKER than an
+# opaque cup would, because this asset authors diffuseTransmissionFactor = 1
+# and the specification hands the entire diffuse reflection over to the
+# transmission at that value.
+#
+# The asset is also the reason the sRGB pass marks only the colour slot. One
+# image named *_ormt is bound to occlusion, metallicRoughness AND diffuse
+# transmission at once: R is occlusion, G roughness, B metallic, A the
+# transmission factor. Marking it sRGB would leave the alpha alone but gamma-
+# mangle the roughness and metallic beside it.
+#
+# Note also that the materials omit metallicFactor, so glTF's default of 1
+# applies and the ORM texture's blue channel is the only thing keeping the
+# porcelain from rendering as metal.
+#
+# ============================================================================
+# Diffuse transmission in the infrared
+# ============================================================================
+# NIR and SWIR read a measured curve and nothing else -- an RGB colour pushed
+# through the visible Gaussian basis says nothing at 2 microns:
+#
+#   [[materials]]
+#   name = "tea_cup"
+#   diffuse_transmission_spectral_material_ref = "<entry in the materials JSON>"
+#
+# MWIR and LWIR ignore the extension entirely, and that is deliberate rather
+# than unfinished. Thermal transmittance is already ir_transmittance, which
+# enters Kirchhoff's law as eps = 1 - rho - tau; a surface carrying two
+# transmittances would carry two emissivities, and the furnace gate would say
+# so.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 96                        # the glow is an indirect effect; noise shows
+output = "gltf_diffuse_transmission_output.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/DiffuseTransmissionTeacup/glTF/DiffuseTransmissionTeacup.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.09, 0.22]
+look_at = [0.0, 0.04, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 35.0
+
+[lighting]
+# Behind the cup and a little above. A front-lit camera sees the one thing this
+# extension does not do.
+sun_direction = [0.0, 0.35, -0.94]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.08, 0.08, 0.08]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+# The transmission colour arrives as an RGB factor, so it is upsampled rather
+# than measured. That is a preview, not a measurement, and this says so.
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false                 # raw radiance, so the glow is not a sensor artefact

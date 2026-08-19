@@ -22,10 +22,23 @@
 #   SheenTestGrid    a grid sweeping sheen colour against sheen roughness,
 #                    which is the quickest way to see the lobe change shape.
 #
-# The sofa also declares KHR_materials_specular, KHR_materials_variants and
-# KHR_lights_punctual, none of which this renderer reads. The variants matter:
-# the fabrics are variant materials, so what renders is whichever the file
-# names by default, and the config lights the scene itself.
+# The sofa also declares KHR_materials_specular and KHR_materials_variants,
+# both of which this renderer now reads, and KHR_lights_punctual, which it does
+# not (the config lights the scene itself).
+#
+# The specular matters more than it looks: champagne and gray author
+# specularColorFactor [0,0,0], which removes their normal-incidence highlight
+# entirely while leaving the grazing rim, since F90 is the weight rather than
+# the colour. Before the extension landed those two fabrics carried an
+# unauthorised 4% highlight -- so this render legitimately changed, and got
+# closer to the reference.
+#
+# The variants matter because the fabrics are variant materials. With no
+# [scene] variant key each primitive keeps its own material, which is one
+# particular fabric; add one to pick another:
+#
+#   [scene]
+#   variant = "Champagne" | "Navy" | "Gray" | "Black" | "Pale Pink" 
 # ============================================================================
 
 [renderer]

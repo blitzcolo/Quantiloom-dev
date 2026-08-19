@@ -1,0 +1,67 @@
+# ============================================================================
+# Quantiloom - KHR_materials_variants test scene
+# ============================================================================
+# MaterialsVariantsShoe declares three variants at the document root and maps
+# each to a different material on one primitive. Change the key below and the
+# shoe changes colour; nothing else about the scene moves.
+#
+#   variant = "midnight" | "beach" | "street"
+#
+# Omit the key and the renderer uses each primitive's own material, which is
+# what the specification calls vanilla glTF behaviour -- there is no "default
+# variant" field in the format, so the choice belongs to whoever is loading.
+# The loader logs the names a file offers whenever it has some and none was
+# picked. A name the file does not declare warns and renders vanilla rather
+# than failing: a typo in a batch config should cost one obviously wrong render
+# instead of the batch.
+#
+# This asset is also why variants resolve by INDEX and never by name: all three
+# of its materials are called "phong1SG". A name-keyed lookup would find the
+# first one every time and render the same shoe three times, looking like it
+# had worked.
+#
+# GlamVelvetSofa is the other case worth trying, at
+# assets/configs/gltf_sheen_test.toml -- five fabric variants, each with its own
+# sheen colour, specular colour and normal-map rotation.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+output = "gltf_variants_output.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/MaterialsVariantsShoe/glTF/MaterialsVariantsShoe.gltf"
+variant = "beach"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.28, 0.16, 0.34]
+look_at = [0.0, 0.05, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 40.0
+
+[lighting]
+sun_direction = [0.45, 0.6, 0.65]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.35, 0.35, 0.35]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
