@@ -300,6 +300,160 @@ float3 SafeHalfVector(float3 V, float3 L, float3 N) {
     return sum * rsqrt(lenSq);
 }
 
+// ============================================================================
+// Sheen (KHR_materials_sheen): the Charlie microfibre lobe
+// ============================================================================
+// Velvet, felt and brushed cloth do not look like a rough dielectric because
+// the scattering happens off fibres standing away from the surface rather than
+// off facets lying in it. The resulting lobe peaks at grazing angles instead of
+// around the mirror direction -- the bright rim on a velvet cushion -- which is
+// not a shape any roughness setting on GGX can produce.
+//
+// D is the Charlie distribution and V is the Estevez-Kulla shadowing fit, which
+// is what the glTF specification's reference implementation pairs it with. The
+// simpler Ashikhmin visibility the specification also permits was measured
+// against numerical integration here and is not energy conserving: its
+// directional albedo reaches 1.74 at grazing incidence for roughness 0.1, which
+// this renderer's furnace gate would report as a surface emitting light.
+//
+// Sheen layers on top of the base BRDF and the base pays for it through
+// SheenAlbedoScaling. The caller does the layering, so that the site which
+// knows whether the band has a diffuse/specular split at all is the site that
+// decides how the two combine.
+// ============================================================================
+
+// The glTF reference implementation clamps sheen roughness up off zero for the
+// same reason MIN_ROUGHNESS exists above: alpha = 0 is a Dirac delta.
+static const float MIN_SHEEN_ROUGHNESS = 0.07;
+
+/// Charlie distribution (Estevez & Kulla 2017), normalised over the hemisphere.
+float SheenD_Charlie(float NdotH, float sheenRoughness) {
+    const float alphaG = max(sheenRoughness * sheenRoughness,
+                             MIN_SHEEN_ROUGHNESS * MIN_SHEEN_ROUGHNESS);
+    const float invAlpha = 1.0 / alphaG;
+    const float cos2h = NdotH * NdotH;
+    const float sin2h = max(1.0 - cos2h, 1e-7);
+    return (2.0 + invAlpha) * pow(sin2h, invAlpha * 0.5) / (2.0 * PI);
+}
+
+/// Estevez-Kulla shadowing helper: their analytic fit to the sheen lambda term.
+float SheenLambdaHelper(float x, float alphaG) {
+    const float oneMinusAlphaSq = (1.0 - alphaG) * (1.0 - alphaG);
+    const float a = lerp(21.5473, 25.3245, oneMinusAlphaSq);
+    const float b = lerp(3.82987, 3.32435, oneMinusAlphaSq);
+    const float c = lerp(0.19823, 0.16801, oneMinusAlphaSq);
+    const float d = lerp(-1.97760, -1.27393, oneMinusAlphaSq);
+    const float e = lerp(-4.32054, -4.85967, oneMinusAlphaSq);
+    return a / (1.0 + b * pow(max(x, 1e-7), c)) + d * x + e;
+}
+
+float SheenLambda(float cosTheta, float alphaG) {
+    // The fit is stated for cos < 0.5 and mirrored above it; evaluating the
+    // raw form past 0.5 diverges.
+    const float x = abs(cosTheta);
+    if (x < 0.5) {
+        return exp(SheenLambdaHelper(x, alphaG));
+    }
+    return exp(2.0 * SheenLambdaHelper(0.5, alphaG) - SheenLambdaHelper(1.0 - x, alphaG));
+}
+
+/// Sheen visibility: G / (4 NdotV NdotL), already carrying the 1/4 and the
+/// cosine denominators the way VisibilitySmithGGXCorrelated does.
+float SheenV_Charlie(float NdotV, float NdotL, float sheenRoughness) {
+    const float alphaG = max(sheenRoughness * sheenRoughness,
+                             MIN_SHEEN_ROUGHNESS * MIN_SHEEN_ROUGHNESS);
+    const float lambdaV = SheenLambda(NdotV, alphaG);
+    const float lambdaL = SheenLambda(NdotL, alphaG);
+    return clamp(1.0 / ((1.0 + lambdaV + lambdaL) * (4.0 * NdotV * NdotL)), 0.0, 1.0);
+}
+
+// ----------------------------------------------------------------------------
+// Sheen directional albedo
+// ----------------------------------------------------------------------------
+//   E(mu_v, r) = integral over the hemisphere of D * V * mu_l dw_l
+//
+// There is no usable closed form and no usable polynomial fit: the surface has
+// a ridge along low roughness at grazing incidence that a degree-6 polynomial
+// misses by 0.18. Everyone who ships this ships a table, and this is the table,
+// integrated offline at 600x600 quadrature.
+//
+// Both axes are warped by a square so the nodes crowd where the ridge is:
+//   mu = (i/15)^2                     i = 0..15
+//   r  = 0.07 + 0.93 * (j/15)^2       j = 0..15
+// Worst bilinear error against the reference is 0.036, and that is at
+// mu = 0.001 -- a surface seen exactly edge-on, whose projected area is zero.
+// Away from the last row it is under 0.005.
+//
+// THE CLAMP IS BAKED IN, not applied at the call sites. Charlie x Estevez-Kulla
+// integrates to 1.63 as mu_v approaches zero, which is a surface returning more
+// light than reached it. Clamping here makes "E <= 1" a property of the data,
+// so every consumer -- the albedo scaling, the infrared carve-out, the bounce
+// throughput -- inherits it without having to remember to ask for it.
+static const int SHEEN_E_DIM = 16;
+static const float SHEEN_E_TABLE[256] = {
+    1.00000, 1.00000, 1.00000, 1.00000, 1.00000, 0.91543, 0.78780, 0.69201, 0.62572, 0.58558, 0.56855, 0.57188, 0.59194, 0.62177, 0.64739, 0.64483,
+    1.00000, 1.00000, 1.00000, 1.00000, 1.00000, 1.00000, 0.91403, 0.81368, 0.74378, 0.70179, 0.68456, 0.68844, 0.70837, 0.73590, 0.75692, 0.74993,
+    1.00000, 1.00000, 1.00000, 1.00000, 1.00000, 0.98863, 0.87956, 0.79424, 0.73482, 0.70039, 0.68876, 0.69671, 0.71924, 0.74784, 0.76880, 0.76186,
+    1.00000, 1.00000, 1.00000, 0.99803, 0.93358, 0.85528, 0.78041, 0.71952, 0.67724, 0.65476, 0.65138, 0.66486, 0.69082, 0.72129, 0.74334, 0.73796,
+    0.64751, 0.66550, 0.70145, 0.72310, 0.71628, 0.68795, 0.65202, 0.61975, 0.59789, 0.58974, 0.59627, 0.61645, 0.64674, 0.67990, 0.70391, 0.70097,
+    0.33029, 0.35220, 0.40523, 0.46112, 0.49833, 0.51325, 0.51366, 0.50942, 0.50820, 0.51484, 0.53178, 0.55915, 0.59428, 0.63069, 0.65724, 0.65739,
+    0.12880, 0.14562, 0.19215, 0.25397, 0.31165, 0.35401, 0.38137, 0.39990, 0.41639, 0.43617, 0.46257, 0.49664, 0.53645, 0.57622, 0.60561, 0.60926,
+    0.03811, 0.04686, 0.07501, 0.12174, 0.17682, 0.22779, 0.26897, 0.30167, 0.33030, 0.35948, 0.39281, 0.43187, 0.47527, 0.51782, 0.54992, 0.55725,
+    0.00801, 0.01108, 0.02314, 0.04952, 0.08970, 0.13569, 0.17963, 0.21874, 0.25436, 0.28946, 0.32689, 0.36833, 0.41316, 0.45707, 0.49112, 0.50201,
+    0.00106, 0.00173, 0.00522, 0.01625, 0.03942, 0.07331, 0.11204, 0.15096, 0.18883, 0.22667, 0.26623, 0.30863, 0.35324, 0.39655, 0.43117, 0.44513,
+    0.00007, 0.00015, 0.00077, 0.00400, 0.01433, 0.03487, 0.06397, 0.09777, 0.13372, 0.17123, 0.21081, 0.25287, 0.29653, 0.33861, 0.37280, 0.38912,
+    0.00000, 0.00001, 0.00006, 0.00066, 0.00401, 0.01396, 0.03247, 0.05824, 0.08906, 0.12351, 0.16109, 0.20146, 0.24340, 0.28390, 0.31753, 0.33593,
+    0.00000, 0.00000, 0.00000, 0.00006, 0.00077, 0.00438, 0.01404, 0.03114, 0.05506, 0.08458, 0.11871, 0.15647, 0.19626, 0.23510, 0.26821, 0.28857,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00008, 0.00092, 0.00466, 0.01392, 0.03006, 0.05306, 0.08219, 0.11623, 0.15327, 0.19026, 0.22285, 0.24507,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000, 0.00009, 0.00091, 0.00436, 0.01283, 0.02802, 0.05043, 0.07933, 0.11278, 0.14761, 0.17964, 0.20361,
+    0.00000, 0.00000, 0.00000, 0.00000, 0.00000, 0.00000, 0.00002, 0.00036, 0.00249, 0.00922, 0.02321, 0.04532, 0.07418, 0.10657, 0.13810, 0.16377,
+};
+
+/// Fraction of incident light the sheen lobe alone returns, for a view at
+/// NdotV. Always in [0, 1]; exactly 0 is not guaranteed, so callers gate on the
+/// sheen colour rather than on this.
+float SheenAlbedo(float NdotV, float sheenRoughness) {
+    const float r = clamp(sheenRoughness, MIN_SHEEN_ROUGHNESS, 1.0);
+
+    // Invert the node warps. Both are squares, so the inverse is a sqrt.
+    const float fi = sqrt(saturate(NdotV)) * float(SHEEN_E_DIM - 1);
+    const float fj = sqrt((r - MIN_SHEEN_ROUGHNESS) / (1.0 - MIN_SHEEN_ROUGHNESS))
+                     * float(SHEEN_E_DIM - 1);
+
+    const int i0 = clamp(int(floor(fi)), 0, SHEEN_E_DIM - 2);
+    const int j0 = clamp(int(floor(fj)), 0, SHEEN_E_DIM - 2);
+    const float a = saturate(fi - float(i0));
+    const float b = saturate(fj - float(j0));
+
+    const float e00 = SHEEN_E_TABLE[i0 * SHEEN_E_DIM + j0];
+    const float e10 = SHEEN_E_TABLE[(i0 + 1) * SHEEN_E_DIM + j0];
+    const float e01 = SHEEN_E_TABLE[i0 * SHEEN_E_DIM + j0 + 1];
+    const float e11 = SHEEN_E_TABLE[(i0 + 1) * SHEEN_E_DIM + j0 + 1];
+
+    return lerp(lerp(e00, e10, a), lerp(e01, e11, a), b);
+}
+
+/// What the base BRDF must be multiplied by to pay for the sheen layered over
+/// it -- the albedo-scaling approximation the glTF specification prescribes.
+///
+/// `sheenReflectance` is the largest component of the sheen colour in RGB, or
+/// the scalar sheen reflectance in a spectral band. Returns exactly 1.0 when
+/// that is 0, with no rounding on the path, which is what keeps a scene with no
+/// sheen rendering bit-identically.
+float SheenAlbedoScaling(float sheenReflectance, float NdotV, float sheenRoughness) {
+    if (sheenReflectance <= 0.0) {
+        return 1.0;
+    }
+    return max(1.0 - sheenReflectance * SheenAlbedo(NdotV, sheenRoughness), 0.0);
+}
+
+/// The sheen BRDF without its colour: D * V, to be multiplied by the sheen
+/// reflectance (RGB or per-wavelength scalar) by the caller.
+float SheenBRDF(float NdotH, float NdotV, float NdotL, float sheenRoughness) {
+    return SheenD_Charlie(NdotH, sheenRoughness) *
+           SheenV_Charlie(NdotV, NdotL, sheenRoughness);
+}
+
 float3 CookTorranceBRDF(
     float3 N,
     float3 V,
