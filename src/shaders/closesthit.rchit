@@ -218,16 +218,6 @@ float2 PathSample2D(inout Payload payload, uint slot) {
 }
 
 // ============================================================================
-// Hit Attributes
-// ============================================================================
-// Barycentric coordinates of hit point within triangle
-// ============================================================================
-
-struct HitAttributes {
-    [[vk::location(0)]] float2 bary : SV_Barycentrics;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
-};
-
-// ============================================================================
 // Helper Functions
 // ============================================================================
 

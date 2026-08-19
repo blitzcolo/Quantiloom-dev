@@ -1164,6 +1164,15 @@ struct MaterialData {
 // transform or the spectral mixture reads the wrong texels. The temperature
 // texture has none either -- it is Quantiloom-authored, with no glTF
 // textureInfo to carry the extension, so it is always identity.
+// glTF alphaMode, mirroring Material::AlphaMode. Read by the any-hit shader,
+// which is the only stage that can act on coverage: deciding a hit did not
+// happen is the one construction that is correct in every band at once, since
+// zeroing a masked hit's radiance would report 0 W/sr/m^2 through the hole --
+// colder than deep space -- instead of whatever is behind it.
+#define ALPHA_MODE_OPAQUE 0u
+#define ALPHA_MODE_MASK   1u
+#define ALPHA_MODE_BLEND  2u
+
 #define UV_SLOT_BASE_COLOR          0
 #define UV_SLOT_METALLIC_ROUGHNESS  1
 #define UV_SLOT_NORMAL              2

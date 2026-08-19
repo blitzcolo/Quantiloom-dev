@@ -30,8 +30,37 @@
 #include "hit_common.hlsli"
 
 [shader("anyhit")]
-void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attribs) {
-    // Accept. The alpha test arrives in the next commit; wiring the stage on
-    // its own first is what makes a regression here attributable to the
-    // pipeline change rather than to the shading decision.
+void main(inout Payload payload, in HitAttributes attribs) {
+    const InstanceGeometryInfo geoInfo = instanceGeometryInfo[InstanceIndex()];
+    const MaterialData material = materials[geoInfo.materialId];
+
+    // Gated, and this gate is what keeps every physics gate in the suite
+    // bit-identical: the furnace cavities and the open-sky scene are all
+    // alphaMode OPAQUE with an alpha of 1, and an ungated test would put a
+    // texture fetch and a compare on their critical path for no reason.
+    if (material.alphaMode == ALPHA_MODE_OPAQUE) {
+        return;
+    }
+
+    // Barycentric UV. Ten lines rather than a call into closest-hit's version,
+    // which is interleaved with normals, tangents and geometric-normal
+    // construction that four band branches depend on -- none of which an
+    // any-hit has any use for.
+    const uint base = geoInfo.indexOffset + PrimitiveIndex() * 3u;
+    const float2 uv0 = uvBuffer[geoInfo.uvOffset + indexBuffer[base + 0u]];
+    const float2 uv1 = uvBuffer[geoInfo.uvOffset + indexBuffer[base + 1u]];
+    const float2 uv2 = uvBuffer[geoInfo.uvOffset + indexBuffer[base + 2u]];
+    const float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) +
+                      uv1 * attribs.bary.x + uv2 * attribs.bary.y;
+
+    const float alpha = SurfaceAlpha(material, uv);
+
+    if (material.alphaMode == ALPHA_MODE_MASK) {
+        // A hole, decided per texel. Not a fade: glTF is explicit that MASK is
+        // binary, so a leaf edge is either there or it is not, and the cutoff
+        // is where the author put the boundary.
+        if (alpha < material.alphaCutoff) {
+            IgnoreHit();
+        }
+    }
 }

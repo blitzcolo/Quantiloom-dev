@@ -50,6 +50,19 @@
 [[vk::binding(18, 0)]] StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo;
 
 // ============================================================================
+// Hit Attributes
+// ============================================================================
+// Barycentric coordinates of hit point within triangle.
+//
+// Shared because both stages of one hit group must agree on the attribute
+// type: the closest hit and the any-hit are handed the same record.
+// ============================================================================
+
+struct HitAttributes {
+    [[vk::location(0)]] float2 bary : SV_Barycentrics;  // Barycentric coordinates (b1, b2), where b0 = 1 - b1 - b2
+};
+
+// ============================================================================
 // Texture sampling
 // ============================================================================
 
@@ -101,6 +114,27 @@ float2 TransformUV(MaterialData mat, int slot, float2 uv) {
     const float4 m = mat.uvTransformMat[slot];
     const float2 t = mat.uvTransformOffset[slot];
     return float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + t;
+}
+
+// ============================================================================
+// glTF alphaMode
+// ============================================================================
+// The coverage of a surface at one texel: baseColorFactor's alpha times the
+// base colour texture's, with that slot's KHR_texture_transform applied. The
+// fallback's alpha of 1 is what lets an untextured material fall through
+// unchanged.
+//
+// Note this reads the same texel the closest-hit shader's baseColor does, and
+// the sRGB transfer applies to RGB only -- alpha stays linear, so the two agree
+// on what the author wrote. BC7 is off in this build (build_wsl.sh passes
+// -DQUANTILOOM_USE_BC7ENC=OFF); if it is ever turned back on, its per-block
+// alpha loss would land exactly on a MASK cutoff and want a look.
+// ============================================================================
+float SurfaceAlpha(MaterialData mat, float2 uv) {
+    return mat.baseColorFactor.a *
+           SampleTexture(mat.baseColorTextureIndex, mat.baseColorTextureIndex,
+                         TransformUV(mat, UV_SLOT_BASE_COLOR, uv),
+                         float4(1.0, 1.0, 1.0, 1.0)).a;
 }
 
 #endif // QUANTILOOM_HIT_COMMON_HLSLI
