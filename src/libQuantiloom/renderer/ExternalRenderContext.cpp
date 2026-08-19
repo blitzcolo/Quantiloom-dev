@@ -976,6 +976,14 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             it != spectra.materialNameToSheenCurve.end()) {
             mat.sheenReflectanceCurveIndex = it->second;
         }
+        if (auto it = spectra.materialNameToClearcoatCurve.find(mat.name);
+            it != spectra.materialNameToClearcoatCurve.end()) {
+            mat.clearcoatReflectanceCurveIndex = it->second;
+        }
+        if (auto it = spectra.materialNameToDiffuseTransmissionCurve.find(mat.name);
+            it != spectra.materialNameToDiffuseTransmissionCurve.end()) {
+            mat.diffuseTransmissionColorCurveIndex = it->second;
+        }
         if (auto it = spectra.bandAveragedIREmissivity.find(mat.name);
             it != spectra.bandAveragedIREmissivity.end()) {
             mat.bandAveragedIREmissivity = it->second;

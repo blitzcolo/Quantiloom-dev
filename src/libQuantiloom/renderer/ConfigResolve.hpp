@@ -212,6 +212,17 @@ struct ResolvedMaterialSpectra {
     /// materialNameToCurve -- velvet over an RGB base colour.
     std::unordered_map<String, i32> materialNameToSheenCurve;
 
+    /// Measured clearcoat reflectance, resolved exactly as the sheen curve is.
+    /// The only path by which a coat reaches MWIR or LWIR, where the dielectric
+    /// 0.04 the visible bands assume does not hold.
+    std::unordered_map<String, i32> materialNameToClearcoatCurve;
+
+    /// Measured diffuse transmission colour, resolved exactly as the sheen
+    /// curve is. The only path by which it reaches NIR or SWIR; MWIR and LWIR
+    /// do not read it at all, since thermal transmittance is already
+    /// irTransmittance and a surface cannot have two.
+    std::unordered_map<String, i32> materialNameToDiffuseTransmissionCurve;
+
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
 

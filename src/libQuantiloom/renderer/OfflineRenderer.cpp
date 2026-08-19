@@ -536,6 +536,17 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             slots.sheenReflectanceCurve = it->second;
             QL_LOG_INFO("  Material '{}': using sheen curve index {}", mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToClearcoatCurve.find(mat.name);
+            it != spectra.materialNameToClearcoatCurve.end()) {
+            slots.clearcoatReflectanceCurve = it->second;
+            QL_LOG_INFO("  Material '{}': using clearcoat curve index {}", mat.name, it->second);
+        }
+        if (auto it = spectra.materialNameToDiffuseTransmissionCurve.find(mat.name);
+            it != spectra.materialNameToDiffuseTransmissionCurve.end()) {
+            slots.diffuseTransmissionColorCurve = it->second;
+            QL_LOG_INFO("  Material '{}': using diffuse transmission curve index {}",
+                        mat.name, it->second);
+        }
 
         materialIndices.push_back(slots);
     }

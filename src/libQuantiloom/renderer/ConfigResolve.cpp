@@ -1052,6 +1052,68 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 matTable.GetString("sheen_spectral_material_ref", it->quantiloomSheenRef);
         }
 
+        // Specular (KHR_materials_specular). Note the neutral element is 1, not
+        // 0: omitting these keys must leave the material exactly as loaded, and
+        // writing specular = 0 is a real instruction to remove the dielectric
+        // highlight rather than a way of saying "no opinion".
+        if (matTable.Has("specular")) {
+            it->specularFactor = matTable.GetFloat("specular", it->specularFactor);
+        }
+        if (const auto specColor = matTable.GetFloatArray("specular_color");
+            specColor.size() >= 3) {
+            it->specularColorFactor = glm::vec3(specColor[0], specColor[1], specColor[2]);
+        }
+
+        // Anisotropy (KHR_materials_anisotropy).
+        if (matTable.Has("anisotropy_strength")) {
+            it->anisotropyStrength =
+                matTable.GetFloat("anisotropy_strength", it->anisotropyStrength);
+        }
+        if (matTable.Has("anisotropy_rotation")) {
+            it->anisotropyRotation =
+                matTable.GetFloat("anisotropy_rotation", it->anisotropyRotation);
+        }
+
+        // Clearcoat (KHR_materials_clearcoat).
+        if (matTable.Has("clearcoat")) {
+            it->clearcoatFactor = matTable.GetFloat("clearcoat", it->clearcoatFactor);
+        }
+        if (matTable.Has("clearcoat_roughness")) {
+            it->clearcoatRoughnessFactor =
+                matTable.GetFloat("clearcoat_roughness", it->clearcoatRoughnessFactor);
+        }
+
+        // The measured coat reflectance, resolved below beside the sheen one.
+        // This key is the only way a clearcoat reaches MWIR or LWIR: the 0.04 a
+        // dielectric coat reflects in the visible is a fiction at 10 microns,
+        // where real lacquers absorb strongly, so those bands act on a measured
+        // curve or on nothing.
+        if (matTable.Has("clearcoat_spectral_material_ref")) {
+            it->quantiloomClearcoatRef =
+                matTable.GetString("clearcoat_spectral_material_ref", it->quantiloomClearcoatRef);
+        }
+
+        // Diffuse transmission (KHR_materials_diffuse_transmission).
+        if (matTable.Has("diffuse_transmission")) {
+            it->diffuseTransmissionFactor =
+                matTable.GetFloat("diffuse_transmission", it->diffuseTransmissionFactor);
+        }
+        if (const auto dtColor = matTable.GetFloatArray("diffuse_transmission_color");
+            dtColor.size() >= 3) {
+            it->diffuseTransmissionColorFactor = glm::vec3(dtColor[0], dtColor[1], dtColor[2]);
+        }
+
+        // The measured transmission colour, and the only way diffuse
+        // transmission reaches NIR or SWIR -- same reasoning as sheen's curve.
+        // It does not reach MWIR or LWIR at all: those bands already have
+        // ir_transmittance, which enters Kirchhoff's law as eps = 1 - rho - tau,
+        // and a surface with two transmittances would have two emissivities.
+        if (matTable.Has("diffuse_transmission_spectral_material_ref")) {
+            it->quantiloomDiffuseTransmissionRef =
+                matTable.GetString("diffuse_transmission_spectral_material_ref",
+                                   it->quantiloomDiffuseTransmissionRef);
+        }
+
         // The measured-material database entry this surface stands for. Set
         // here rather than only from glTF extras, so an assignment made in
         // Studio survives being saved: the NMF reconstruction loop below runs
@@ -1586,6 +1648,30 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                     out.materialNameToSheenCurve[mat.name] = sheen->curveIndex;
                     QL_LOG_INFO("  Sheen curve for '{}': '{}' → index {}",
                                 mat.name, mat.quantiloomSheenRef, sheen->curveIndex);
+                }
+            }
+
+            // Clearcoat and diffuse transmission resolve the same way, through
+            // the same cache, so a coat and a base naming one library entry
+            // upload one curve.
+            for (const auto& mat : scene.materials) {
+                if (mat.quantiloomClearcoatRef.empty()) continue;
+
+                if (const ResolvedRef* coat = resolveRef(mat.quantiloomClearcoatRef, mat.name)) {
+                    out.materialNameToClearcoatCurve[mat.name] = coat->curveIndex;
+                    QL_LOG_INFO("  Clearcoat curve for '{}': '{}' → index {}",
+                                mat.name, mat.quantiloomClearcoatRef, coat->curveIndex);
+                }
+            }
+
+            for (const auto& mat : scene.materials) {
+                if (mat.quantiloomDiffuseTransmissionRef.empty()) continue;
+
+                if (const ResolvedRef* dt =
+                        resolveRef(mat.quantiloomDiffuseTransmissionRef, mat.name)) {
+                    out.materialNameToDiffuseTransmissionCurve[mat.name] = dt->curveIndex;
+                    QL_LOG_INFO("  Diffuse transmission curve for '{}': '{}' → index {}",
+                                mat.name, mat.quantiloomDiffuseTransmissionRef, dt->curveIndex);
                 }
             }
         } else {

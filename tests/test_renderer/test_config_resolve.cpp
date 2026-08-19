@@ -1237,3 +1237,125 @@ sheen_spectral_material_ref = "Nylon fibre"
     EXPECT_TRUE(scene.materials[0].HasSheen())
         << "a bound sheen reference is sheen even with a zero colour factor";
 }
+
+// ============================================================================
+// Specular, anisotropy, clearcoat, diffuse transmission
+// ============================================================================
+
+TEST_F(ConfigResolveTest, MaterialsTableAppliesTheFourExtensionOverrides) {
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Hood"
+specular = 0.5
+specular_color = [10.0, 0.6, 0.0]
+anisotropy_strength = 0.75
+anisotropy_rotation = 0.5236
+clearcoat = 1.0
+clearcoat_roughness = 0.03
+diffuse_transmission = 0.1
+diffuse_transmission_color = [0.84, 0.8, 0.74]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Hood", "Other"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const Material& hood = scene.materials[0];
+    EXPECT_FLOAT_EQ(hood.specularFactor, 0.5f);
+    EXPECT_FLOAT_EQ(hood.specularColorFactor.r, 10.0f) << "an HDR specular colour is legal";
+    EXPECT_FLOAT_EQ(hood.specularColorFactor.b, 0.0f);
+    EXPECT_FLOAT_EQ(hood.anisotropyStrength, 0.75f);
+    EXPECT_FLOAT_EQ(hood.anisotropyRotation, 0.5236f);
+    EXPECT_FLOAT_EQ(hood.clearcoatFactor, 1.0f);
+    EXPECT_FLOAT_EQ(hood.clearcoatRoughnessFactor, 0.03f);
+    EXPECT_FLOAT_EQ(hood.diffuseTransmissionFactor, 0.1f);
+    EXPECT_FLOAT_EQ(hood.diffuseTransmissionColorFactor.r, 0.84f);
+
+    EXPECT_TRUE(hood.HasSpecular());
+    EXPECT_TRUE(hood.HasAnisotropy());
+    EXPECT_TRUE(hood.HasClearcoat());
+    EXPECT_TRUE(hood.HasDiffuseTransmission());
+
+    // Named materials only.
+    EXPECT_FALSE(scene.materials[1].HasSpecular());
+    EXPECT_FALSE(scene.materials[1].HasAnisotropy());
+    EXPECT_FALSE(scene.materials[1].HasClearcoat());
+    EXPECT_FALSE(scene.materials[1].HasDiffuseTransmission());
+}
+
+// The absent-key rule again, and specular is where it bites hardest: its
+// neutral element is 1, so a loop that wrote a default instead of leaving the
+// field alone would silently reset an authored specular to full.
+TEST_F(ConfigResolveTest, AMaterialWithoutTheNewKeysIsLeftAlone) {
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Hood"
+roughness = 0.4
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Hood"});
+    scene.materials[0].specularFactor = 0.5f;
+    scene.materials[0].specularColorFactor = glm::vec3(0.1f, 0.34f, 1.0f);
+    scene.materials[0].anisotropyStrength = 1.0f;
+    scene.materials[0].clearcoatFactor = 0.25f;
+    scene.materials[0].diffuseTransmissionFactor = 1.0f;
+
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].roughnessFactor, 0.4f);
+    EXPECT_FLOAT_EQ(scene.materials[0].specularFactor, 0.5f);
+    EXPECT_FLOAT_EQ(scene.materials[0].specularColorFactor.g, 0.34f);
+    EXPECT_FLOAT_EQ(scene.materials[0].anisotropyStrength, 1.0f);
+    EXPECT_FLOAT_EQ(scene.materials[0].clearcoatFactor, 0.25f);
+    EXPECT_FLOAT_EQ(scene.materials[0].diffuseTransmissionFactor, 1.0f);
+}
+
+// Writing zero must remain a real instruction rather than reading as "no
+// opinion" -- specular = 0 removes the dielectric highlight, which is what
+// GlamVelvetSofa's champagne fabric authors through the extension.
+TEST_F(ConfigResolveTest, AZeroSpecularOverrideIsAnInstructionNotAnAbsence) {
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Hood"
+specular = 0.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Hood"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_FLOAT_EQ(scene.materials[0].specularFactor, 0.0f);
+    EXPECT_TRUE(scene.materials[0].HasSpecular());
+}
+
+TEST_F(ConfigResolveTest, ClearcoatAndDiffuseTransmissionRefsAreRecorded) {
+    // As with sheen, the reference becomes a curve index in the NMF block,
+    // which needs a spectral library this test does not load. What is pinned is
+    // that the keys reach the material -- without them a clearcoat has no MWIR
+    // or LWIR presence at all, and diffuse transmission has no NIR or SWIR one.
+    auto config = Parse({.trailing = R"([[materials]]
+name = "Hood"
+clearcoat_spectral_material_ref = "Acrylic lacquer"
+diffuse_transmission_spectral_material_ref = "Leaf cuticle"
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Hood"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(scene.materials[0].quantiloomClearcoatRef, "Acrylic lacquer");
+    EXPECT_EQ(scene.materials[0].quantiloomDiffuseTransmissionRef, "Leaf cuticle");
+    EXPECT_TRUE(scene.materials[0].HasClearcoat())
+        << "a bound coat reference is a coat even with a zero factor";
+    EXPECT_TRUE(scene.materials[0].HasDiffuseTransmission());
+}
