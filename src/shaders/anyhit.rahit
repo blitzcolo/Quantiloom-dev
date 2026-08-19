@@ -62,5 +62,44 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (alpha < material.alphaCutoff) {
             IgnoreHit();
         }
+        return;
+    }
+
+    // BLEND is partial coverage, which a path tracer resolves by being present
+    // for a fraction of samples equal to alpha. Unbiased, and it needs no
+    // sorting -- which is the reason a rasteriser needs alphaMode BLEND to be a
+    // separate pass and this renderer does not.
+    //
+    // The draw is a STATELESS hash and touches no payload state, for three
+    // reasons any one of which would be enough. An any-hit fires in an order
+    // and a number of times traversal does not promise, so consuming
+    // payload.rngState would desynchronise the parent path's later draws frame
+    // to frame -- worse than the correlation TraceEnvBounceResidual goes out of
+    // its way to avoid. Two of the shadow-ray payloads never initialise
+    // rngState at all, and one visibility ray sets it to a constant zero. And
+    // the refraction block already draws from rngState and writes it back, so
+    // a second consumer here would move its reflect-or-refract coin.
+    //
+    // Hashing the pixel, the sample and the triangle gives each triangle ONE
+    // coverage realisation per pixel per sample, shared by every ray of that
+    // sample. That is the estimator working as intended rather than a
+    // correlation to apologise for: an independent draw per ray would let one
+    // leaf be visible to the camera and transparent to the shadow ray at the
+    // same instant, which is both noisier and physically incoherent. What
+    // decorrelates, and therefore what makes it converge, is sampleIndex.
+    //
+    // payload.depth is deliberately absent, so a bounce at depth 3 sees the
+    // same realisation the camera ray did. That costs a little convergence on
+    // multi-layer foliage and is the price of needing no payload state at all.
+    if (material.alphaMode == ALPHA_MODE_BLEND) {
+        const uint2 pixel = DispatchRaysIndex().xy;
+        const uint seed = pcg_hash(pixel.x * 73856093u ^ pixel.y * 19349663u ^
+                                   pushConsts.sampleIndex * 83492791u ^
+                                   InstanceIndex() * 2654435761u ^
+                                   PrimitiveIndex() * 40503u);
+        const float xi = float(seed) * (1.0 / 4294967296.0);
+        if (xi >= alpha) {
+            IgnoreHit();
+        }
     }
 }
