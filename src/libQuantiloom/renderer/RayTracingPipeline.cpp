@@ -174,11 +174,13 @@ RayTracingPipeline::RayTracingPipeline(
     const std::string& raygenPath,
     const std::string& closestHitPath,
     const std::string& missPath,
+    const std::string& anyHitPath,
     VkPipelineCache pipelineCache)
     : m_context(context)
     , m_raygenPath(raygenPath)
     , m_closestHitPath(closestHitPath)
     , m_missPath(missPath)
+    , m_anyHitPath(anyHitPath)
     , m_pipelineCache(pipelineCache)
 {
     QL_LOG_INFO("Creating Ray Tracing pipeline...");
@@ -324,14 +326,14 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[4].binding = 4;
     bindings[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[4].descriptorCount = 1;
-    bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[4].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[4].pImmutableSamplers = nullptr;
 
     // Binding 5: Material buffer (StructuredBuffer<MaterialData>)
     bindings[5].binding = 5;
     bindings[5].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[5].descriptorCount = 1;
-    bindings[5].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[5].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[5].pImmutableSamplers = nullptr;
 
     // Binding 6: Texture array (Texture2D[])
@@ -340,21 +342,21 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[6].binding = 6;
     bindings[6].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     bindings[6].descriptorCount = m_maxTextures;
-    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[6].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[6].pImmutableSamplers = nullptr;
 
     // Binding 7: Sampler array (SamplerState[])
     bindings[7].binding = 7;
     bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
     bindings[7].descriptorCount = m_maxTextures;
-    bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[7].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[7].pImmutableSamplers = nullptr;
 
     // Binding 8: UV buffer (StructuredBuffer<float2>) - Optional
     bindings[8].binding = 8;
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[8].descriptorCount = 1;
-    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[8].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[8].pImmutableSamplers = nullptr;
 
     // Binding 9: Tangent buffer (StructuredBuffer<float4>) - Optional
@@ -480,7 +482,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[18].binding = 18;
     bindings[18].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[18].descriptorCount = 1;
-    bindings[18].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[18].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[18].pImmutableSamplers = nullptr;
 
     // ========================================================================
@@ -628,7 +630,8 @@ void RayTracingPipeline::CreatePipelineLayout() {
     VkPushConstantRange pushConstantRange{};
     pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                                     VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-                                    VK_SHADER_STAGE_MISS_BIT_KHR;
+                                    VK_SHADER_STAGE_MISS_BIT_KHR |
+                                    VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(PushConstantsRayGen);
 
@@ -654,7 +657,7 @@ void RayTracingPipeline::CreatePipelineLayout() {
 void RayTracingPipeline::LoadShaders() {
     QL_LOG_INFO("  [LoadShaders] Loading SPIR-V shaders...");
 
-    m_spirvData.resize(4);
+    m_spirvData.resize(5);
     m_spirvData[0] = LoadSPIRV(m_raygenPath);
     QL_LOG_INFO("  [LoadShaders] Raygen loaded: {} words", m_spirvData[0].size());
 
@@ -666,6 +669,9 @@ void RayTracingPipeline::LoadShaders() {
 
     m_spirvData[3] = LoadSPIRV(m_shadowMissPath);
     QL_LOG_INFO("  [LoadShaders] ShadowMiss loaded: {} words", m_spirvData[3].size());
+
+    m_spirvData[4] = LoadSPIRV(m_anyHitPath);
+    QL_LOG_INFO("  [LoadShaders] AnyHit loaded: {} words", m_spirvData[4].size());
 
     QL_LOG_INFO("  Shaders loaded: {} / {} / {} / {}", m_raygenPath, m_closestHitPath, m_missPath, m_shadowMissPath);
     Log::Flush();
@@ -731,8 +737,8 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     VkDevice device = m_context.GetDevice();
 
     // Create temporary shader modules from stored SPIR-V
-    std::vector<VkShaderModule> modules(4);
-    for (int i = 0; i < 4; ++i) {
+    std::vector<VkShaderModule> modules(5);
+    for (int i = 0; i < 5; ++i) {
         modules[i] = CreateShaderModule(m_spirvData[i]);
     }
 
@@ -751,7 +757,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     specInfo.dataSize = sizeof(SpecConstants);
     specInfo.pData = &spec;
 
-    std::vector<VkPipelineShaderStageCreateInfo> stages(4, VkPipelineShaderStageCreateInfo{});
+    std::vector<VkPipelineShaderStageCreateInfo> stages(5, VkPipelineShaderStageCreateInfo{});
     stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = modules[0];
@@ -774,6 +780,18 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     stages[3].module = modules[3];
     stages[3].pName = "main";
 
+    // No specialization info, as the shadow miss above has none: an any-hit
+    // decides whether a surface is present, which is a coverage question with
+    // no wavelength in it. It has no use for the spectral mode.
+    stages[4].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[4].stage = VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+    stages[4].module = modules[4];
+    stages[4].pName = "main";
+
+    // Still four groups. The any-hit joins the one triangles hit group rather
+    // than forming its own, so the shader binding table below is unchanged --
+    // one hit record, two miss records, and every TraceRay's sbtRecordOffset
+    // and missIndex keep the meaning they had.
     std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups(4, VkRayTracingShaderGroupCreateInfoKHR{});
     groups[0].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
     groups[0].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
@@ -786,7 +804,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     groups[1].type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
     groups[1].generalShader = VK_SHADER_UNUSED_KHR;
     groups[1].closestHitShader = 1;
-    groups[1].anyHitShader = VK_SHADER_UNUSED_KHR;
+    groups[1].anyHitShader = 4;
     groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
 
     groups[2].sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
@@ -1541,7 +1559,8 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
     vkCmdPushConstants(
         cmd,
         m_pipelineLayout,
-        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR,
+        VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+            VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
         0,
         sizeof(PushConstantsRayGen),
         &m_pushConstants

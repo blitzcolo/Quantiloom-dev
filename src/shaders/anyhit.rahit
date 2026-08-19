@@ -1,0 +1,37 @@
+// ============================================================================
+// Quantiloom - Any-Hit Shader
+// ============================================================================
+// Answers one question about an intersection the traversal has found: is the
+// surface actually there at that texel?
+//
+// glTF's alphaMode gives two ways it might not be. MASK is a hole -- the texel
+// is either present or absent, decided against alphaCutoff. BLEND is partial
+// coverage, which a path tracer resolves stochastically: the surface is present
+// for a fraction of samples equal to its alpha.
+//
+// Why this belongs here and not in the closest-hit shader. Zeroing the radiance
+// of a masked hit would look plausible in the visible bands and is badly wrong
+// in the thermal ones: a hole in a leaf should show the 300 K wall behind it,
+// and zero radiance reports 0 W/sr/m^2 -- colder than deep space. IgnoreHit()
+// is the only construction that makes the intersection never have happened, so
+// the ray continues to whatever is genuinely behind. That is why all seven
+// bands are correct here with no per-band code: alpha is coverage, and coverage
+// has no wavelength.
+//
+// This stage runs only for geometry whose BLAS was built without
+// VK_GEOMETRY_OPAQUE_BIT_KHR -- see IsOpaqueForRayTracing in RenderCore.cpp.
+// Opaque materials never reach it, and neither do transmissive ones: a
+// refracting surface bends the ray and splits it by Fresnel, which is a
+// different physics from coverage, and running both would remove the surface
+// twice.
+// ============================================================================
+
+#include "common.hlsli"
+#include "hit_common.hlsli"
+
+[shader("anyhit")]
+void main(inout Payload payload, in BuiltInTriangleIntersectionAttributes attribs) {
+    // Accept. The alpha test arrives in the next commit; wiring the stage on
+    // its own first is what makes a regression here attributable to the
+    // pipeline change rather than to the shading decision.
+}

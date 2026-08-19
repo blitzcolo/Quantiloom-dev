@@ -187,6 +187,7 @@ public:
         const std::string& raygenPath,
         const std::string& closestHitPath,
         const std::string& missPath,
+        const std::string& anyHitPath,
         VkPipelineCache pipelineCache = VK_NULL_HANDLE
     );
 
@@ -401,6 +402,7 @@ private:
     std::string m_closestHitPath;
     std::string m_missPath;
     std::string m_shadowMissPath;  // Auto-derived from missPath or explicitly set
+    std::string m_anyHitPath;      // Named explicitly, unlike the shadow miss above
 
     // Pipeline objects
     VkDescriptorSetLayout m_descriptorSetLayout = VK_NULL_HANDLE;
@@ -420,7 +422,7 @@ private:
     VkStridedDeviceAddressRegionKHR m_callableRegion{};
 
     // SPIR-V bytecode (kept for lazy pipeline variant creation)
-    std::vector<std::vector<u32>> m_spirvData;  // [raygen, chit, miss, shadow_miss]
+    std::vector<std::vector<u32>> m_spirvData;  // [raygen, chit, miss, shadow_miss, anyhit]
 
     // Ray Tracing properties (cached from context)
     VkPhysicalDeviceRayTracingPipelinePropertiesKHR m_rtProperties{};

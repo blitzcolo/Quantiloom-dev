@@ -1136,7 +1136,7 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     QL_LOG_INFO("Creating ray tracing pipeline...");
 
     auto pipeline = std::make_unique<RayTracingPipeline>(
-        ctx, "raygen.spv", "closesthit.spv", "miss.spv", cache);
+        ctx, "raygen.spv", "closesthit.spv", "miss.spv", "anyhit.spv", cache);
 
     if (bindings.outputImage) {
         pipeline->BindOutputImage(*bindings.outputImage);            // 0

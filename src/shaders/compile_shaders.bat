@@ -37,7 +37,7 @@ set COMP_FLAGS=-spirv -T cs_6_0 -fspv-target-env="vulkan1.2"
 set RQ_FLAGS=-spirv -T cs_6_5 -fspv-target-env="vulkan1.2"
 
 REM Compile raygen shader
-echo [1/16] Compiling raygen.rgen...
+echo [1/17] Compiling raygen.rgen...
 dxc %FLAGS% -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile raygen.rgen
@@ -47,7 +47,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/raygen.spv created
 
 REM Compile closesthit shader
-echo [2/16] Compiling closesthit.rchit...
+echo [2/17] Compiling closesthit.rchit...
 dxc %FLAGS% -Fo src/shaders/closesthit.spv src/shaders/closesthit.rchit
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile closesthit.rchit
@@ -57,7 +57,16 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/closesthit.spv created
 
 REM Compile miss shader
-echo [3/16] Compiling miss.rmiss...
+echo [3/17] Compiling anyhit.rahit...
+dxc %FLAGS% -Fo src/shaders/anyhit.spv src/shaders/anyhit.rahit
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile anyhit.rahit
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/anyhit.spv created
+
+echo [4/17] Compiling miss.rmiss...
 dxc %FLAGS% -Fo src/shaders/miss.spv src/shaders/miss.rmiss
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile miss.rmiss
@@ -67,7 +76,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/miss.spv created
 
 REM Compile shadow_miss shader
-echo [4/16] Compiling shadow_miss.rmiss...
+echo [5/17] Compiling shadow_miss.rmiss...
 dxc %FLAGS% -Fo src/shaders/shadow_miss.spv src/shaders/shadow_miss.rmiss
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile shadow_miss.rmiss
@@ -77,7 +86,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/shadow_miss.spv created
 
 REM Compile CLAHE compute shaders (3 passes)
-echo [5/16] Compiling clahe_histogram.comp...
+echo [6/17] Compiling clahe_histogram.comp...
 dxc %COMP_FLAGS% -E main -D CLAHE_PASS_HISTOGRAM -Fo src/shaders/clahe_histogram.spv src/shaders/clahe.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile clahe_histogram
@@ -86,7 +95,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/clahe_histogram.spv created
 
-echo [6/16] Compiling clahe_cdf.comp...
+echo [7/17] Compiling clahe_cdf.comp...
 dxc %COMP_FLAGS% -E main -D CLAHE_PASS_CDF -Fo src/shaders/clahe_cdf.spv src/shaders/clahe.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile clahe_cdf
@@ -95,7 +104,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/clahe_cdf.spv created
 
-echo [7/16] Compiling clahe_apply.comp...
+echo [8/17] Compiling clahe_apply.comp...
 dxc %COMP_FLAGS% -E main -D CLAHE_PASS_APPLY -Fo src/shaders/clahe_apply.spv src/shaders/clahe.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile clahe_apply
@@ -105,7 +114,7 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/clahe_apply.spv created
 
 REM Compile GPU Sensor compute shaders (5 passes)
-echo [8/16] Compiling sensor_radiance_to_electrons.comp...
+echo [9/17] Compiling sensor_radiance_to_electrons.comp...
 dxc %COMP_FLAGS% -E main -Fo src/shaders/sensor_radiance_to_electrons.spv src/shaders/sensor_radiance_to_electrons.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_radiance_to_electrons
@@ -114,7 +123,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_radiance_to_electrons.spv created
 
-echo [9/16] Compiling sensor_poisson_noise.comp...
+echo [10/17] Compiling sensor_poisson_noise.comp...
 dxc %COMP_FLAGS% -E main -Fo src/shaders/sensor_poisson_noise.spv src/shaders/sensor_poisson_noise.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_poisson_noise
@@ -123,7 +132,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_poisson_noise.spv created
 
-echo [10/16] Compiling sensor_psf_blur_horizontal.comp...
+echo [11/17] Compiling sensor_psf_blur_horizontal.comp...
 dxc %COMP_FLAGS% -E main -D SENSOR_PSF_HORIZONTAL -Fo src/shaders/sensor_psf_blur_horizontal.spv src/shaders/sensor_psf_blur.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_psf_blur_horizontal
@@ -132,7 +141,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_psf_blur_horizontal.spv created
 
-echo [11/16] Compiling sensor_psf_blur_vertical.comp...
+echo [12/17] Compiling sensor_psf_blur_vertical.comp...
 dxc %COMP_FLAGS% -E main -D SENSOR_PSF_VERTICAL -Fo src/shaders/sensor_psf_blur_vertical.spv src/shaders/sensor_psf_blur.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_psf_blur_vertical
@@ -141,7 +150,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_psf_blur_vertical.spv created
 
-echo [12/16] Compiling sensor_quantize_to_radiance.comp...
+echo [13/17] Compiling sensor_quantize_to_radiance.comp...
 dxc %COMP_FLAGS% -E main -Fo src/shaders/sensor_quantize_to_radiance.spv src/shaders/sensor_quantize_to_radiance.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_quantize_to_radiance
@@ -150,7 +159,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_quantize_to_radiance.spv created
 
-echo [13/16] Compiling sensor_fpn.comp...
+echo [14/17] Compiling sensor_fpn.comp...
 dxc %COMP_FLAGS% -E main -Fo src/shaders/sensor_fpn.spv src/shaders/sensor_fpn.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile sensor_fpn
@@ -159,7 +168,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/sensor_fpn.spv created
 
-echo [14/16] Compiling pick.rayq...
+echo [15/17] Compiling pick.rayq...
 dxc %RQ_FLAGS% -E main -Fo src/shaders/pick.spv src/shaders/pick.rayq.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile pick
@@ -168,7 +177,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/pick.spv created
 
-echo [15/16] Compiling thermal_exchange.rayq...
+echo [16/17] Compiling thermal_exchange.rayq...
 dxc %RQ_FLAGS% -E main -Fo src/shaders/thermal_exchange.spv src/shaders/thermal_exchange.rayq.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile thermal_exchange
@@ -177,7 +186,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/thermal_exchange.spv created
 
-echo [16/16] Compiling thermal_step.comp...
+echo [17/17] Compiling thermal_step.comp...
 dxc %COMP_FLAGS% -E main -Fo src/shaders/thermal_step.spv src/shaders/thermal_step.comp.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile thermal_step

@@ -100,6 +100,7 @@ if(DXC_EXECUTABLE)
     # Ray tracing shaders
     quantiloom_compile_hlsl(raygen       raygen.rgen)
     quantiloom_compile_hlsl(closesthit   closesthit.rchit)
+    quantiloom_compile_hlsl(anyhit       anyhit.rahit)
     quantiloom_compile_hlsl(miss         miss.rmiss)
     quantiloom_compile_hlsl(shadow_miss  shadow_miss.rmiss)
 

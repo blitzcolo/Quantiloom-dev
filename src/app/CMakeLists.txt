@@ -109,6 +109,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
