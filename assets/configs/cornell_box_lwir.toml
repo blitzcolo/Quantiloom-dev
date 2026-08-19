@@ -17,7 +17,7 @@ mode = "lwir_fused"
 band = "LWIR"
 
 [scene]
-gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+gltf = "H:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
 world_units_to_meters = 0.001
 default_temperature_k = 300.0
 

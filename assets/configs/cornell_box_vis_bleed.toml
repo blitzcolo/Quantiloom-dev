@@ -23,12 +23,12 @@ output = "cornell_box_vis_bleed_output.exr"
 
 [spectral]
 mode = "vis_fused"
-basis_file = "D:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
-materials_json = "D:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+basis_file = "H:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "H:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
 band = "VIS"
 
 [scene]
-gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+gltf = "H:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
 world_units_to_meters = 0.001
 
 [camera]

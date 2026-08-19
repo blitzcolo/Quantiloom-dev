@@ -12,7 +12,7 @@ mode = "mwir_fused"
 band = "MWIR"
 
 [scene]
-gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_e05.gltf"
+gltf = "H:/Quantiloom-dev/assets/models/furnace/furnace_e05.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 300.0
 

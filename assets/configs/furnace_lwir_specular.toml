@@ -31,7 +31,7 @@ basis_file = "assets/spectral/quantiloom_basis_v3_ecostress.qlbin"
 materials_json = "assets/spectral/quantiloom_materials_ecostress.json"
 
 [scene]
-gltf = "D:/Quantiloom-dev/assets/models/furnace/furnace_spectral_smooth.gltf"
+gltf = "H:/Quantiloom-dev/assets/models/furnace/furnace_spectral_smooth.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 300.0
 

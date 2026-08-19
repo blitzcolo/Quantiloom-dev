@@ -8,7 +8,7 @@
 resolution = [1280, 1280]      # Output resolution
 spp = 16                        # Samples per pixel (M1: single sample)
 output = "gltf_pbr_output.exr" # Output file path (OpenEXR format)
-environment_map = "D:/Quantiloom-dev/assets/maps/qwantani_noon_puresky_4k.exr"  # EXR environment map
+environment_map = "H:/Quantiloom-dev/assets/maps/qwantani_noon_puresky_4k.exr"  # EXR environment map
 
 [spectral]
 # ============================================================================
@@ -40,8 +40,8 @@ mode = "rgb"                         # RGB mode for full color rendering
 # Available materials files:
 #   - "quantiloom_materials_usgs.json" : USGS data source, VIS/NIR/SWIR only
 #   - "quantiloom_materials_rii.json" : RefractiveIndex.info data source, VIS/NIR/SWIR/MWIR/LWIR included
-basis_file = "D:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
-materials_json = "D:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+basis_file = "H:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "H:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
 band = "VIS"  # or "NIR", "SWIR", "MWIR", "LWIR"
 
 [scene]
@@ -54,7 +54,7 @@ band = "VIS"  # or "NIR", "SWIR", "MWIR", "LWIR"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
 # ============================================================================
-gltf = "D:/Quantiloom-Qt/assets/models/cube.glb"
+gltf = "H:/Quantiloom-Qt/assets/models/cube.glb"
 world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 
 # ============================================================================

@@ -16,7 +16,7 @@ mode = "swir_fused"
 band = "SWIR"
 
 [scene]
-gltf = "D:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene.gltf"
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 300.0
 

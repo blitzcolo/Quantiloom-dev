@@ -54,7 +54,7 @@ band = "VIS"  # or "NIR", "SWIR", "MWIR", "LWIR"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/MetalRoughSpheres/glTF-Embedded/MetalRoughSpheres.gltf"
 #   gltf = "assets/models/glTF-Sample-Assets/Models/BoxTextured/glTF-Embedded/BoxTextured.gltf"
 # ============================================================================
-usd = "D:/Quantiloom-Qt/assets/models/cube.usdc"
+usd = "H:/Quantiloom-Qt/assets/models/cube.usdc"
 world_units_to_meters = 1.0  # 1.0=m, 0.01=cm, 0.001=mm
 
 # ============================================================================
