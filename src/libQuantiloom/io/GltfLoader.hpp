@@ -23,6 +23,7 @@
  * - KHR_materials_transmission, KHR_materials_ior, KHR_materials_volume
  * - KHR_materials_dispersion (and the QUANTILOOM_materials_dispersion original)
  * - KHR_materials_sheen (factors and textures)
+ * - KHR_materials_variants (selected by name at load time, see GltfLoadOptions)
  * - KHR_texture_transform (per texture slot)
  * - QUANTILOOM_material_ir (measured IR curves, temperature field)
  *
@@ -31,7 +32,7 @@
  * - Cameras/lights (use Quantiloom config instead)
  * - A second UV set: only TEXCOORD_0 is read, so a textureInfo naming
  *   texCoord 1 is warned about and sampled against set 0
- * - Other KHR_materials_* extensions (specular, clearcoat, variants, ...),
+ * - Other KHR_materials_* extensions (specular, clearcoat, ...),
  *   which are ignored silently
  *
  * Uses tinygltf library for glTF parsing.
@@ -58,6 +59,28 @@
 // ============================================================================
 
 namespace quantiloom {
+
+/**
+ * @struct GltfLoadOptions
+ * @brief What the file alone does not decide
+ *
+ * glTF leaves one thing genuinely open: which KHR_materials_variants variant is
+ * active. The format declares the names and the per-primitive mappings but has
+ * no "default variant" field, so the choice belongs to whoever is loading --
+ * here, the `[scene] variant` key of the render config.
+ */
+struct GltfLoadOptions {
+    /**
+     * @brief Name of the KHR_materials_variants variant to apply
+     *
+     * Empty selects nothing, which is what the specification calls vanilla glTF
+     * behaviour: every primitive keeps its own `material`. A name the file does
+     * not declare is warned about and treated the same way, because a typo in a
+     * config should cost a render that looks wrong in an obvious way rather
+     * than a load that fails minutes into a batch.
+     */
+    String variant;
+};
 
 /**
  * @class GltfLoader
@@ -119,7 +142,17 @@ public:
 
     // Load glTF file (.gltf or .glb)
     // Returns Scene with meshes, materials, textures, and nodes
-    static Result<Scene, String> LoadFromFile(const String& path);
+    static Result<Scene, String> LoadFromFile(const String& path,
+                                              const GltfLoadOptions& options = {});
+
+    /**
+     * @brief The variant names a file declares, in the order it declares them
+     *
+     * Empty when the file has no KHR_materials_variants, which is the common
+     * case. Parses the JSON without decoding any image, so it is cheap enough
+     * to call while populating a menu.
+     */
+    static Vector<String> ListVariants(const String& path);
 
 private:
     // ========================================================================
@@ -128,8 +161,11 @@ private:
 
     // Parse glTF mesh to Quantiloom Mesh
     // Each glTF primitive becomes a GeometryPrimitive
-    static Mesh ParseMesh(const void* gltfModel, int meshIndex,
-                          const std::vector<Material>& materials);
+    //
+    // activeVariant is an index into the file's KHR_materials_variants list, or
+    // -1 for none. A primitive whose mappings name it takes that material
+    // instead of its own.
+    static Mesh ParseMesh(const void* gltfModel, int meshIndex, int activeVariant);
 
     // Parse glTF material to Quantiloom Material
     // Converts PBR metallic-roughness to our format

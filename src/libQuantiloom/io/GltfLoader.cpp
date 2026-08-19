@@ -926,11 +926,85 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
 }
 
 // ============================================================================
+// KHR_materials_variants
+// ============================================================================
+// The names live once at the document root and the mappings live on every mesh
+// primitive that participates:
+//
+//   "extensions": { "KHR_materials_variants": {
+//       "variants": [ {"name": "Champagne"}, {"name": "Navy"} ] } }
+//
+//   "primitives": [ { "material": 2, "extensions": {
+//       "KHR_materials_variants": { "mappings": [
+//           {"material": 2, "variants": [0]},
+//           {"material": 3, "variants": [1]} ] } } } ]
+//
+// Everything resolves by index, never by name. MaterialsVariantsShoe gives all
+// three of its materials the same name ("phong1SG"), so a name-keyed lookup
+// would pick whichever came first and silently render the wrong shoe.
+// ============================================================================
+
+/// Variant names in declaration order; empty when the file declares none.
+static Vector<String> ReadVariantNames(const tinygltf::Model& model) {
+    Vector<String> names;
+
+    const auto extIt = model.extensions.find("KHR_materials_variants");
+    if (extIt == model.extensions.end()) {
+        return names;
+    }
+
+    const tinygltf::Value& variants = extIt->second.Get("variants");
+    if (!variants.IsArray()) {
+        return names;
+    }
+
+    names.reserve(variants.ArrayLen());
+    for (size_t i = 0; i < variants.ArrayLen(); ++i) {
+        const tinygltf::Value& name = variants.Get(static_cast<int>(i)).Get("name");
+        names.push_back(name.IsString() ? name.Get<std::string>()
+                                        : ("Variant_" + std::to_string(i)));
+    }
+    return names;
+}
+
+/// The material this primitive takes for @p activeVariant, or -1 for "not
+/// mapped", which the specification says means falling back to the primitive's
+/// own `material`.
+static int VariantMaterialFor(const tinygltf::Primitive& primitive, int activeVariant) {
+    if (activeVariant < 0) {
+        return -1;
+    }
+
+    const auto extIt = primitive.extensions.find("KHR_materials_variants");
+    if (extIt == primitive.extensions.end()) {
+        return -1;
+    }
+
+    const tinygltf::Value& mappings = extIt->second.Get("mappings");
+    if (!mappings.IsArray()) {
+        return -1;
+    }
+
+    for (size_t m = 0; m < mappings.ArrayLen(); ++m) {
+        const tinygltf::Value& mapping = mappings.Get(static_cast<int>(m));
+        const tinygltf::Value& variants = mapping.Get("variants");
+        if (!variants.IsArray()) {
+            continue;
+        }
+        for (size_t v = 0; v < variants.ArrayLen(); ++v) {
+            if (variants.Get(static_cast<int>(v)).GetNumberAsInt() == activeVariant) {
+                return mapping.Has("material") ? mapping.Get("material").GetNumberAsInt() : -1;
+            }
+        }
+    }
+    return -1;
+}
+
+// ============================================================================
 // ParseMesh
 // ============================================================================
 
-Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
-                            const std::vector<Material>& materials) {
+Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVariant) {
     const auto& model = *static_cast<const tinygltf::Model*>(gltfModelPtr);
 
     if (meshIndex < 0 || meshIndex >= static_cast<int>(model.meshes.size())) {
@@ -949,8 +1023,16 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex,
 
         GeometryPrimitive primitive;
 
-        // Material ID
-        primitive.materialId = (gltfPrimitive.material >= 0) ? gltfPrimitive.material : 0;
+        // Material ID -- the active variant's mapping wins over the primitive's
+        // own material, and the absence of a mapping is not an error.
+        const int variantMaterial = VariantMaterialFor(gltfPrimitive, activeVariant);
+        if (variantMaterial >= 0) {
+            primitive.materialId = static_cast<u32>(variantMaterial);
+            QL_LOG_DEBUG("    Primitive {}: variant material {} (was {})", primIdx,
+                         variantMaterial, gltfPrimitive.material);
+        } else {
+            primitive.materialId = (gltfPrimitive.material >= 0) ? gltfPrimitive.material : 0;
+        }
 
         // Positions (required)
         if (auto posIt = gltfPrimitive.attributes.find("POSITION"); posIt != gltfPrimitive.attributes.end()) {
@@ -1091,7 +1173,41 @@ std::vector<SceneNode> GltfLoader::FlattenSceneGraph(const void* gltfModelPtr) {
 // LoadFromFile
 // ============================================================================
 
-Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
+Vector<String> GltfLoader::ListVariants(const String& path) {
+    if (!std::filesystem::exists(path)) {
+        return {};
+    }
+
+    tinygltf::Model model;
+    tinygltf::TinyGLTF loader;
+    String error, warning;
+
+    // The variant names are JSON at the document root, so decoding images would
+    // be pure cost -- this runs to fill a menu, against files that may carry
+    // hundreds of megabytes of texture.
+    loader.SetImageLoader(
+        [](tinygltf::Image*, const int, std::string*, std::string*, int, int,
+           const unsigned char*, int, void*) { return true; },
+        nullptr);
+
+    const std::filesystem::path filePath(path);
+    const String ext = filePath.extension().string();
+    const bool isBinary = (ext == ".glb" || ext == ".GLB");
+
+    const bool success = isBinary
+        ? loader.LoadBinaryFromFile(&model, &error, &warning, path)
+        : loader.LoadASCIIFromFile(&model, &error, &warning, path);
+
+    if (!success) {
+        QL_LOG_WARN("Could not read variants from '{}': {}", path, error);
+        return {};
+    }
+
+    return ReadVariantNames(model);
+}
+
+Result<Scene, String> GltfLoader::LoadFromFile(const String& path,
+                                              const GltfLoadOptions& options) {
     QL_LOG_INFO("Loading glTF model from: {}", path);
 
     if (!std::filesystem::exists(path)) {
@@ -1175,10 +1291,49 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path) {
         TextureCompressor::ParallelCompressTextures(scene.textures, false /* fast mode */);
     }
 
+    // Resolve the requested KHR_materials_variants variant to an index before
+    // any mesh is parsed. A name the file does not declare warns and renders
+    // vanilla rather than failing: a typo in a batch config should be visible,
+    // not fatal.
+    int activeVariant = -1;
+    if (const Vector<String> variantNames = ReadVariantNames(model); !variantNames.empty()) {
+        String available;
+        for (const auto& name : variantNames) {
+            if (!available.empty()) {
+                available += ", ";
+            }
+            available += '\'' + name + '\'';
+        }
+
+        if (options.variant.empty()) {
+            QL_LOG_INFO("  File declares {} material variant(s); none selected, "
+                        "rendering each primitive's own material. Available: {}",
+                        variantNames.size(), available);
+        } else {
+            for (size_t i = 0; i < variantNames.size(); ++i) {
+                if (variantNames[i] == options.variant) {
+                    activeVariant = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (activeVariant >= 0) {
+                QL_LOG_INFO("  Material variant '{}' selected (index {})", options.variant,
+                            activeVariant);
+            } else {
+                QL_LOG_WARN("  Material variant '{}' is not declared by this file; "
+                            "rendering each primitive's own material. Available: {}",
+                            options.variant, available);
+            }
+        }
+    } else if (!options.variant.empty()) {
+        QL_LOG_WARN("  Material variant '{}' requested, but this file declares no "
+                    "KHR_materials_variants", options.variant);
+    }
+
     // Load meshes
     scene.meshes.reserve(model.meshes.size());
     for (size_t i = 0; i < model.meshes.size(); ++i) {
-        scene.meshes.push_back(ParseMesh(&model, static_cast<int>(i), scene.materials));
+        scene.meshes.push_back(ParseMesh(&model, static_cast<int>(i), activeVariant));
     }
 
     // Flatten scene graph to nodes

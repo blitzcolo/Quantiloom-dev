@@ -596,3 +596,161 @@ TEST_F(GltfLoaderTest, MaterialWithoutSheenKeepsTheDefaults) {
         EXPECT_TRUE(mat.normalUv.IsIdentity());
     }
 }
+
+// ============================================================================
+// KHR_materials_variants
+// ============================================================================
+// Everything about this extension resolves by index. MaterialsVariantsShoe is
+// the asset that punishes anything else: all three of its materials are named
+// "phong1SG", so a name-keyed lookup picks the first one and renders the same
+// shoe three times while looking like it worked.
+// ============================================================================
+
+TEST_F(GltfLoaderTest, ListsVariantNamesInDeclarationOrder) {
+    auto modelPath = GetModelPath("MaterialsVariantsShoe");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "MaterialsVariantsShoe model not found";
+    }
+
+    const auto names = GltfLoader::ListVariants(modelPath.string());
+    ASSERT_EQ(names.size(), 3u);
+    EXPECT_EQ(names[0], "midnight");
+    EXPECT_EQ(names[1], "beach");
+    EXPECT_EQ(names[2], "street");
+}
+
+TEST_F(GltfLoaderTest, ListVariantsIsEmptyForAFileWithout) {
+    auto modelPath = GetModelPath("BoxTextured");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "BoxTextured model not found";
+    }
+
+    EXPECT_TRUE(GltfLoader::ListVariants(modelPath.string()).empty());
+}
+
+TEST_F(GltfLoaderTest, SelectingAVariantChangesWhichMaterialPrimitivesUse) {
+    auto modelPath = GetModelPath("MaterialsVariantsShoe");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "MaterialsVariantsShoe model not found";
+    }
+
+    // Every variant maps to a different material index, so the material each
+    // primitive resolves to is the whole observable effect of the extension.
+    const auto materialIdsFor = [&](const char* variant) {
+        GltfLoadOptions options;
+        options.variant = variant;
+        auto result = GltfLoader::LoadFromFile(modelPath.string(), options);
+        EXPECT_TRUE(result.has_value());
+        std::vector<u32> ids;
+        if (result.has_value()) {
+            Scene& scene = *result;
+            for (const auto& mesh : scene.meshes) {
+                for (const auto& prim : mesh.primitives) {
+                    ids.push_back(prim.materialId);
+                }
+            }
+        }
+        return ids;
+    };
+
+    const auto midnight = materialIdsFor("midnight");
+    const auto beach = materialIdsFor("beach");
+    const auto street = materialIdsFor("street");
+
+    ASSERT_FALSE(midnight.empty());
+    ASSERT_EQ(midnight.size(), beach.size());
+    ASSERT_EQ(midnight.size(), street.size());
+    EXPECT_NE(midnight, beach);
+    EXPECT_NE(beach, street);
+    EXPECT_NE(midnight, street);
+}
+
+// A name the file does not declare renders vanilla rather than failing: a typo
+// in a batch config should cost one obviously wrong render, not the batch.
+TEST_F(GltfLoaderTest, AnUnknownVariantFallsBackToTheAuthoredMaterials) {
+    auto modelPath = GetModelPath("MaterialsVariantsShoe");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "MaterialsVariantsShoe model not found";
+    }
+
+    GltfLoadOptions options;
+    options.variant = "no such variant";
+    auto misnamedResult = GltfLoader::LoadFromFile(modelPath.string(), options);
+    ASSERT_TRUE(misnamedResult.has_value());
+    Scene& misnamed = *misnamedResult;
+
+    auto vanillaResult = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(vanillaResult.has_value());
+    Scene& vanilla = *vanillaResult;
+
+    ASSERT_EQ(misnamed.meshes.size(), vanilla.meshes.size());
+    for (size_t m = 0; m < misnamed.meshes.size(); ++m) {
+        ASSERT_EQ(misnamed.meshes[m].primitives.size(), vanilla.meshes[m].primitives.size());
+        for (size_t p = 0; p < misnamed.meshes[m].primitives.size(); ++p) {
+            EXPECT_EQ(misnamed.meshes[m].primitives[p].materialId,
+                      vanilla.meshes[m].primitives[p].materialId);
+        }
+    }
+}
+
+// GlamVelvetSofa is the case the sheen work already renders: its five fabrics
+// are variants on one primitive, and its legs and feet carry no mapping at all.
+// The comparison is between two variants rather than against the unselected
+// load, because one of the five IS what the primitive names by default -- so
+// selecting that one is legitimately a no-op and would make a
+// compare-against-vanilla test fail for the wrong reason.
+TEST_F(GltfLoaderTest, VariantOnlyRemapsPrimitivesThatDeclareAMapping) {
+    auto modelPath = GetModelPath("GlamVelvetSofa");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "GlamVelvetSofa model not found";
+    }
+
+    const auto load = [&](const char* variant) {
+        GltfLoadOptions options;
+        options.variant = variant;
+        return GltfLoader::LoadFromFile(modelPath.string(), options);
+    };
+
+    auto navyResult = load("Navy");
+    ASSERT_TRUE(navyResult.has_value());
+    Scene& navy = *navyResult;
+
+    auto pinkResult = load("Pale Pink");
+    ASSERT_TRUE(pinkResult.has_value());
+    Scene& pink = *pinkResult;
+
+    size_t remapped = 0, unchanged = 0;
+    ASSERT_EQ(navy.meshes.size(), pink.meshes.size());
+    for (size_t m = 0; m < navy.meshes.size(); ++m) {
+        ASSERT_EQ(navy.meshes[m].primitives.size(), pink.meshes[m].primitives.size());
+        for (size_t p = 0; p < navy.meshes[m].primitives.size(); ++p) {
+            if (navy.meshes[m].primitives[p].materialId ==
+                pink.meshes[m].primitives[p].materialId) {
+                ++unchanged;
+            } else {
+                ++remapped;
+            }
+        }
+    }
+
+    EXPECT_GT(remapped, 0u) << "the fabric primitive should differ between two fabrics";
+    EXPECT_GT(unchanged, 0u) << "legs and feet declare no mapping and must not move";
+
+    // And each landed on the fabric it names. The names are distinct in this
+    // asset, so this is legible where an index comparison would not be.
+    const auto resolvesToAMaterialNamed = [](const Scene& scene, const char* needle) {
+        for (const auto& mesh : scene.meshes) {
+            for (const auto& prim : mesh.primitives) {
+                if (scene.materials[prim.materialId].name.find(needle) != std::string::npos) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    EXPECT_TRUE(resolvesToAMaterialNamed(navy, "navy"));
+    EXPECT_TRUE(resolvesToAMaterialNamed(pink, "palepink"));
+    EXPECT_FALSE(resolvesToAMaterialNamed(navy, "palepink"))
+        << "only one fabric may be active at a time";
+}

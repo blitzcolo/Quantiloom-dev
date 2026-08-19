@@ -36,7 +36,15 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         const auto gltfPath = ResolveConfigPath(config.Get<String>("scene.gltf"), baseDir);
         QL_LOG_INFO("Loading glTF model: {}", gltfPath);
 
-        auto result = GltfLoader::LoadFromFile(gltfPath);
+        // The one place both the CLI and Studio pass through, which is why the
+        // variant is read here rather than in ResolveRenderConfig (that runs
+        // before the scene exists) or ResolveMaterialSpectra (after it loaded).
+        GltfLoadOptions options;
+        if (config.Has("scene.variant")) {
+            options.variant = config.Get<String>("scene.variant");
+        }
+
+        auto result = GltfLoader::LoadFromFile(gltfPath, options);
         if (!result.has_value()) {
             return Result<Scene, String>::Err("Failed to load glTF: " + result.error());
         }
