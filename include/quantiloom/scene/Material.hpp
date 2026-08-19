@@ -412,6 +412,114 @@ struct QL_API Material {
     UvTransform sheenRoughnessUv;
 
     // ========================================================================
+    // KHR_materials_specular
+    // ========================================================================
+    // Appended for the same reason the sheen block above was: this header is a
+    // layout contract, and appending leaves every existing offset alone.
+    //
+    // These do not add a lobe; they reshape the dielectric Fresnel the base
+    // already has. F0 becomes
+    //   min(f0_ior * specularColorFactor, 1) * specularFactor
+    // and F90 becomes specularFactor, where f0_ior = ((ior-1)/(ior+1))^2 -- 0.04
+    // at the default ior of 1.5, which is the constant that was hardcoded
+    // before. The clamp happens before the factor multiply, not after:
+    // SpecularSilkPouf authors specularColorFactor [10, 0.6, 0], and clamping
+    // the product instead lets the red channel out at more than it should be.
+    //
+    // Both defaults are the neutral element, so a material without the
+    // extension produces exactly the F0 and F90 it produced before.
+    //
+    // There is no measured-curve path here and there will not be one: F0/F90
+    // machinery exists only in the bands that split a BRDF into diffuse and
+    // specular. NIR, SWIR, MWIR and LWIR take their reflectance from a curve or
+    // the config directly, so there is nothing for specular to modulate.
+    f32 specularFactor = 1.0f;                        // [0,1] (glTF default 1)
+    glm::vec3 specularColorFactor{1.0f, 1.0f, 1.0f};  // linear, may exceed 1 (HDR)
+    i32 specularTextureIndex = -1;                    // ALPHA channel, linear
+    i32 specularColorTextureIndex = -1;               // RGB channels, sRGB-encoded
+
+    // ========================================================================
+    // KHR_materials_anisotropy
+    // ========================================================================
+    // Stretches the existing GGX lobe along a tangent direction rather than
+    // adding anything: alpha_t = mix(alpha, 1, strength^2) along the direction,
+    // alpha_b = alpha across it. Note alpha_t >= alpha_b always -- this
+    // extension only ever roughens one axis, it never sharpens the other.
+    //
+    // The direction is the material tangent rotated by anisotropyRotation, and
+    // rotated again by the texture's RG when one is bound. A primitive with no
+    // TANGENT attribute gets an arbitrary (though continuous) frame, which
+    // makes the highlight orientation arbitrary -- the loader warns when it
+    // sees that combination, because nothing downstream can detect it.
+    f32 anisotropyStrength = 0.0f;   // [0,1]; 0 = isotropic (glTF default)
+    f32 anisotropyRotation = 0.0f;   // radians, CCW from the tangent
+    i32 anisotropyTextureIndex = -1; // RG = direction (x2-1), B = strength, linear
+
+    // ========================================================================
+    // KHR_materials_clearcoat
+    // ========================================================================
+    // An infinitely thin dielectric coat over everything else, with its own
+    // normal and roughness. The coat's Fresnel is taken at N.V rather than V.H
+    // -- deliberate in the specification, for energy conservation with the
+    // simple layering operator -- and the base, including emission, is weighted
+    // by 1 - clearcoat * F_c to pay for it.
+    //
+    // clearcoatNormalTextureIndex absent means the coat is NOT normal mapped,
+    // even where the base is: the coat then follows the interpolated vertex
+    // normal. ClearCoatTest's BaseNorm_Coated is the case that checks it.
+    //
+    // MWIR and LWIR act on clearcoatReflectanceCurveIndex alone. The 0.04 a
+    // dielectric coat reflects in the visible is a fiction at 10 microns, where
+    // real lacquers are strongly absorbing, so a factor is not enough to earn a
+    // thermal lobe. Where a curve is bound, those bands carve the coat out of
+    // the reflectance that is already there rather than adding to it -- see the
+    // sheen carve-out in closesthit.rchit for why adding would make an
+    // isothermal cavity emit.
+    f32 clearcoatFactor = 0.0f;              // [0,1]; 0 = no coat (glTF default)
+    f32 clearcoatRoughnessFactor = 0.0f;     // [0,1] (glTF default)
+    f32 clearcoatNormalScale = 1.0f;         // normalTextureInfo.scale on the coat
+    i32 clearcoatTextureIndex = -1;          // R channel, linear
+    i32 clearcoatRoughnessTextureIndex = -1; // G channel, linear
+    i32 clearcoatNormalTextureIndex = -1;    // tangent-space normal map
+    i32 clearcoatReflectanceCurveIndex = -1; // measured, the only IR path
+    String quantiloomClearcoatRef;           // database name, resolved into the index
+
+    // ========================================================================
+    // KHR_materials_diffuse_transmission
+    // ========================================================================
+    // A Lambertian BTDF on a thin surface: light scattered through into the
+    // back hemisphere. The specification mixes it against the diffuse BRDF
+    // *inside* the Fresnel mix, so the diffuse reflection is scaled by
+    // (1 - diffuseTransmission) and the specular lobe and its Fresnel weight
+    // are untouched -- energy moves between the two diffuse halves rather than
+    // appearing.
+    //
+    // This is not the same quantity as irTransmittance, and neither is derived
+    // from the other. irTransmittance is a thermal-band property that enters
+    // Kirchhoff's law as eps = 1 - rho - tau; feeding a visible-band diffuse
+    // transmission into it would give a surface two transmittances and move its
+    // emissivity. MWIR and LWIR therefore ignore these fields entirely.
+    f32 diffuseTransmissionFactor = 0.0f;                        // [0,1] (glTF default 0)
+    glm::vec3 diffuseTransmissionColorFactor{1.0f, 1.0f, 1.0f};  // [0,1] (glTF default)
+    i32 diffuseTransmissionTextureIndex = -1;                    // ALPHA channel, linear
+    i32 diffuseTransmissionColorTextureIndex = -1;               // RGB channels, sRGB
+    i32 diffuseTransmissionColorCurveIndex = -1;                 // measured, the NIR/SWIR path
+    String quantiloomDiffuseTransmissionRef;  // database name, resolved into the index
+
+    // Per-slot UV transforms for the eight new texture slots, same rules as the
+    // six above: identity by default, so an asset without KHR_texture_transform
+    // is unaffected. Order must stay parallel to the UV_SLOT_* constants in
+    // MaterialGpuData.hpp and common.hlsli.
+    UvTransform specularUv;
+    UvTransform specularColorUv;
+    UvTransform anisotropyUv;
+    UvTransform clearcoatUv;
+    UvTransform clearcoatRoughnessUv;
+    UvTransform clearcoatNormalUv;
+    UvTransform diffuseTransmissionUv;
+    UvTransform diffuseTransmissionColorUv;
+
+    // ========================================================================
     // Utilities
     // ========================================================================
 
@@ -458,6 +566,42 @@ struct QL_API Material {
         return sheenColorFactor.r > 0.0f || sheenColorFactor.g > 0.0f ||
                sheenColorFactor.b > 0.0f || sheenReflectanceCurveIndex >= 0 ||
                !quantiloomSheenRef.empty();
+    }
+
+    // Whether specular deviates from the neutral element. Unlike the other
+    // three this one is not "greater than zero": glTF defaults specularFactor
+    // to 1 and specularColorFactor to white, and those values reproduce exactly
+    // the F0 and F90 the renderer used before the extension existed. A texture
+    // counts, since it can only scale these down.
+    [[nodiscard]] bool HasSpecular() const {
+        return specularFactor != 1.0f || specularColorFactor.r != 1.0f ||
+               specularColorFactor.g != 1.0f || specularColorFactor.b != 1.0f ||
+               specularTextureIndex >= 0 || specularColorTextureIndex >= 0;
+    }
+
+    // Whether the GGX lobe is stretched. The factor alone decides: the
+    // specification multiplies it by the texture's blue channel, so a texture
+    // cannot rescue a zero factor, and a rotation of a lobe that is not
+    // stretched is not observable.
+    [[nodiscard]] bool HasAnisotropy() const {
+        return anisotropyStrength > 0.0f;
+    }
+
+    // Whether a clearcoat lobe can be non-zero. The factor alone decides in the
+    // reflective bands; a bound curve counts because MWIR and LWIR read it
+    // instead of assuming a dielectric 0.04 that does not hold there.
+    [[nodiscard]] bool HasClearcoat() const {
+        return clearcoatFactor > 0.0f || clearcoatReflectanceCurveIndex >= 0 ||
+               !quantiloomClearcoatRef.empty();
+    }
+
+    // Whether light is scattered through the surface. The colour factor
+    // defaults to white and only tints what the factor lets through, so the
+    // factor alone decides; a bound curve counts because NIR and SWIR act on it
+    // rather than on a visible-basis colour.
+    [[nodiscard]] bool HasDiffuseTransmission() const {
+        return diffuseTransmissionFactor > 0.0f || diffuseTransmissionColorCurveIndex >= 0 ||
+               !quantiloomDiffuseTransmissionRef.empty();
     }
 
     // ========================================================================

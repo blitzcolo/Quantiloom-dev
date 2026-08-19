@@ -29,9 +29,13 @@ public: bool quantiloom::ExternalRenderContext::PresentAccumulated(struct VkComm
 public: bool quantiloom::ExternalRenderContext::RemoveNode(unsigned int)
 public: bool quantiloom::ExternalRenderContext::ReprocessAccumulated(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
 public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
+public: bool quantiloom::Material::HasAnisotropy(void)const
+public: bool quantiloom::Material::HasClearcoat(void)const
+public: bool quantiloom::Material::HasDiffuseTransmission(void)const
 public: bool quantiloom::Material::HasIRData(void)const
 public: bool quantiloom::Material::HasQuantiloomRef(void)const
 public: bool quantiloom::Material::HasSheen(void)const
+public: bool quantiloom::Material::HasSpecular(void)const
 public: bool quantiloom::Material::HasTextures(void)const
 public: bool quantiloom::Material::IsValid(void)const
 public: bool quantiloom::Material::ValidateIRKirchhoffLaw(void)const

@@ -1025,13 +1025,32 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
 
         // Material ID -- the active variant's mapping wins over the primitive's
         // own material, and the absence of a mapping is not an error.
+        //
+        // Both indices are checked against the material count because both come
+        // straight out of the file, and neither tinygltf nor anything
+        // downstream re-checks: materialId reaches the GPU through
+        // InstanceGeometryInfo and indexes the material buffer directly, so an
+        // out-of-range value in a malformed file would be an out-of-bounds read
+        // on the device rather than a visibly wrong material.
+        const int materialCount = static_cast<int>(model.materials.size());
+        const auto inRange = [materialCount](int index) {
+            return index >= 0 && index < materialCount;
+        };
+
         const int variantMaterial = VariantMaterialFor(gltfPrimitive, activeVariant);
-        if (variantMaterial >= 0) {
+        if (inRange(variantMaterial)) {
             primitive.materialId = static_cast<u32>(variantMaterial);
             QL_LOG_DEBUG("    Primitive {}: variant material {} (was {})", primIdx,
                          variantMaterial, gltfPrimitive.material);
         } else {
-            primitive.materialId = (gltfPrimitive.material >= 0) ? gltfPrimitive.material : 0;
+            if (variantMaterial >= materialCount) {
+                QL_LOG_WARN("    Primitive {}: variant mapping names material {}, but the "
+                            "file has {}; using the authored material",
+                            primIdx, variantMaterial, materialCount);
+            }
+            primitive.materialId = inRange(gltfPrimitive.material)
+                ? static_cast<u32>(gltfPrimitive.material)
+                : 0u;
         }
 
         // Positions (required)

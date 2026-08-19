@@ -998,8 +998,37 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.sheenColorTextureIndex = material.sheenColorTextureIndex;
     cpuMat.sheenRoughnessTextureIndex = material.sheenRoughnessTextureIndex;
     cpuMat.sheenReflectanceCurveIndex = indices.sheenReflectanceCurve;
+
+    // Specular (KHR_materials_specular)
+    cpuMat.specularFactor = material.specularFactor;
+    cpuMat.specularColorFactor = material.specularColorFactor;
+    cpuMat.specularTextureIndex = material.specularTextureIndex;
+    cpuMat.specularColorTextureIndex = material.specularColorTextureIndex;
+
+    // Anisotropy (KHR_materials_anisotropy)
+    cpuMat.anisotropyStrength = material.anisotropyStrength;
+    cpuMat.anisotropyRotation = material.anisotropyRotation;
+    cpuMat.anisotropyTextureIndex = material.anisotropyTextureIndex;
+
+    // Clearcoat (KHR_materials_clearcoat)
+    cpuMat.clearcoatFactor = material.clearcoatFactor;
+    cpuMat.clearcoatRoughnessFactor = material.clearcoatRoughnessFactor;
+    cpuMat.clearcoatNormalScale = material.clearcoatNormalScale;
+    cpuMat.clearcoatTextureIndex = material.clearcoatTextureIndex;
+    cpuMat.clearcoatRoughnessTextureIndex = material.clearcoatRoughnessTextureIndex;
+    cpuMat.clearcoatNormalTextureIndex = material.clearcoatNormalTextureIndex;
+    cpuMat.clearcoatReflectanceCurveIndex = indices.clearcoatReflectanceCurve;
+
+    // Diffuse transmission (KHR_materials_diffuse_transmission)
+    cpuMat.diffuseTransmissionFactor = material.diffuseTransmissionFactor;
+    cpuMat.diffuseTransmissionColorFactor = material.diffuseTransmissionColorFactor;
+    cpuMat.diffuseTransmissionTextureIndex = material.diffuseTransmissionTextureIndex;
+    cpuMat.diffuseTransmissionColorTextureIndex = material.diffuseTransmissionColorTextureIndex;
+    cpuMat.diffuseTransmissionColorCurveIndex = indices.diffuseTransmissionColorCurve;
+
     cpuMat._padding2 = 0.0f;
     cpuMat._padding3 = 0.0f;
+    cpuMat._padding4 = 0.0f;
 
     // UV transforms (KHR_texture_transform), one per glTF texture slot
     PackUvTransform(material.baseColorUv,
@@ -1020,6 +1049,30 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     PackUvTransform(material.sheenRoughnessUv,
                     cpuMat.uvTransformMat[UV_SLOT_SHEEN_ROUGHNESS],
                     cpuMat.uvTransformOffset[UV_SLOT_SHEEN_ROUGHNESS]);
+    PackUvTransform(material.specularUv,
+                    cpuMat.uvTransformMat[UV_SLOT_SPECULAR],
+                    cpuMat.uvTransformOffset[UV_SLOT_SPECULAR]);
+    PackUvTransform(material.specularColorUv,
+                    cpuMat.uvTransformMat[UV_SLOT_SPECULAR_COLOR],
+                    cpuMat.uvTransformOffset[UV_SLOT_SPECULAR_COLOR]);
+    PackUvTransform(material.anisotropyUv,
+                    cpuMat.uvTransformMat[UV_SLOT_ANISOTROPY],
+                    cpuMat.uvTransformOffset[UV_SLOT_ANISOTROPY]);
+    PackUvTransform(material.clearcoatUv,
+                    cpuMat.uvTransformMat[UV_SLOT_CLEARCOAT],
+                    cpuMat.uvTransformOffset[UV_SLOT_CLEARCOAT]);
+    PackUvTransform(material.clearcoatRoughnessUv,
+                    cpuMat.uvTransformMat[UV_SLOT_CLEARCOAT_ROUGHNESS],
+                    cpuMat.uvTransformOffset[UV_SLOT_CLEARCOAT_ROUGHNESS]);
+    PackUvTransform(material.clearcoatNormalUv,
+                    cpuMat.uvTransformMat[UV_SLOT_CLEARCOAT_NORMAL],
+                    cpuMat.uvTransformOffset[UV_SLOT_CLEARCOAT_NORMAL]);
+    PackUvTransform(material.diffuseTransmissionUv,
+                    cpuMat.uvTransformMat[UV_SLOT_DIFFUSE_TRANSMISSION],
+                    cpuMat.uvTransformOffset[UV_SLOT_DIFFUSE_TRANSMISSION]);
+    PackUvTransform(material.diffuseTransmissionColorUv,
+                    cpuMat.uvTransformMat[UV_SLOT_DIFFUSE_TRANSMISSION_COLOR],
+                    cpuMat.uvTransformOffset[UV_SLOT_DIFFUSE_TRANSMISSION_COLOR]);
 
     return cpuMat;
 }

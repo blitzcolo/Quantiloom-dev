@@ -71,8 +71,40 @@ struct MaterialDataCPU {
     f32 sheenRoughnessFactor;                // offset 204,  4
     i32 sheenColorTextureIndex;              // offset 208,  4
     i32 sheenRoughnessTextureIndex;          // offset 212,  4
-    f32 _padding2;                           // offset 216,  4
-    f32 _padding3;                           // offset 220,  4
+
+    // Anisotropy (KHR_materials_anisotropy). These two took the padding that
+    // used to sit here, which is why they are separated from the texture index
+    // down at 248 -- everything before offset 224 keeps the offset it had.
+    f32 anisotropyStrength;                  // offset 216,  4  (was _padding2)
+    f32 anisotropyRotation;                  // offset 220,  4  (was _padding3)
+
+    // Specular (KHR_materials_specular). Reshapes the dielectric F0/F90; adds
+    // no lobe. Both factors default to the neutral element.
+    glm::vec3 specularColorFactor;           // offset 224, 12
+    f32 specularFactor;                      // offset 236,  4
+    i32 specularTextureIndex;                // offset 240,  4
+    i32 specularColorTextureIndex;           // offset 244,  4
+    i32 anisotropyTextureIndex;              // offset 248,  4
+
+    // Clearcoat (KHR_materials_clearcoat).
+    f32 clearcoatFactor;                     // offset 252,  4
+    f32 clearcoatRoughnessFactor;            // offset 256,  4
+    f32 clearcoatNormalScale;                // offset 260,  4
+    i32 clearcoatTextureIndex;               // offset 264,  4
+    i32 clearcoatRoughnessTextureIndex;      // offset 268,  4
+    i32 clearcoatNormalTextureIndex;         // offset 272,  4
+    i32 clearcoatReflectanceCurveIndex;      // offset 276,  4
+
+    // Diffuse transmission (KHR_materials_diffuse_transmission).
+    f32 diffuseTransmissionFactor;           // offset 280,  4
+    i32 diffuseTransmissionTextureIndex;     // offset 284,  4
+    glm::vec3 diffuseTransmissionColorFactor;// offset 288, 12
+    i32 diffuseTransmissionColorTextureIndex;// offset 300,  4
+    i32 diffuseTransmissionColorCurveIndex;  // offset 304,  4
+
+    f32 _padding2;                           // offset 308,  4
+    f32 _padding3;                           // offset 312,  4
+    f32 _padding4;                           // offset 316,  4
 
     // Per-slot UV transforms (KHR_texture_transform), pre-multiplied by
     // ConvertMaterial into a 2x3 affine:  uv' = M * uv + offset,  with M packed
@@ -80,12 +112,14 @@ struct MaterialDataCPU {
     // common.hlsli mirrors.
     //
     // The matrices and the offsets are two arrays rather than one array of a
-    // {float4, float2} pair because that pair is 24 bytes, and a float4 at
-    // offset 248 would not be 16-byte aligned -- HLSL would pad the element and
-    // the two layouts would silently disagree.
-    glm::vec4 uvTransformMat[6];             // offset 224, 96
-    glm::vec2 uvTransformOffset[6];          // offset 320, 48
-};  // 368 bytes total
+    // {float4, float2} pair because that pair is 24 bytes, and a float4 at an
+    // odd multiple of 8 would not be 16-byte aligned -- HLSL would pad the
+    // element and the two layouts would silently disagree. Which is also why
+    // the three words of padding above are there: they carry the array start
+    // from 308 up to 320.
+    glm::vec4 uvTransformMat[14];            // offset 320, 224
+    glm::vec2 uvTransformOffset[14];         // offset 544, 112
+};  // 656 bytes total
 
 // UV transform slots. The weight texture deliberately has no slot of its own:
 // it is unmixed from the base-colour texture's texels, so it must be sampled
@@ -99,10 +133,18 @@ enum : i32 {
     UV_SLOT_EMISSIVE = 3,
     UV_SLOT_SHEEN_COLOR = 4,
     UV_SLOT_SHEEN_ROUGHNESS = 5,
-    UV_SLOT_COUNT = 6,
+    UV_SLOT_SPECULAR = 6,
+    UV_SLOT_SPECULAR_COLOR = 7,
+    UV_SLOT_ANISOTROPY = 8,
+    UV_SLOT_CLEARCOAT = 9,
+    UV_SLOT_CLEARCOAT_ROUGHNESS = 10,
+    UV_SLOT_CLEARCOAT_NORMAL = 11,
+    UV_SLOT_DIFFUSE_TRANSMISSION = 12,
+    UV_SLOT_DIFFUSE_TRANSMISSION_COLOR = 13,
+    UV_SLOT_COUNT = 14,
 };
 
-static_assert(sizeof(MaterialDataCPU) == 368);
+static_assert(sizeof(MaterialDataCPU) == 656);
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex)       ==  16);
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex)          ==  32);
 static_assert(offsetof(MaterialDataCPU, doubleSided)                 ==  40);
@@ -134,7 +176,26 @@ static_assert(offsetof(MaterialDataCPU, sheenColorFactor)            == 192);
 static_assert(offsetof(MaterialDataCPU, sheenRoughnessFactor)        == 204);
 static_assert(offsetof(MaterialDataCPU, sheenColorTextureIndex)      == 208);
 static_assert(offsetof(MaterialDataCPU, sheenRoughnessTextureIndex)  == 212);
-static_assert(offsetof(MaterialDataCPU, uvTransformMat)              == 224);
-static_assert(offsetof(MaterialDataCPU, uvTransformOffset)           == 320);
+static_assert(offsetof(MaterialDataCPU, anisotropyStrength)          == 216);
+static_assert(offsetof(MaterialDataCPU, anisotropyRotation)          == 220);
+static_assert(offsetof(MaterialDataCPU, specularColorFactor)         == 224);
+static_assert(offsetof(MaterialDataCPU, specularFactor)              == 236);
+static_assert(offsetof(MaterialDataCPU, specularTextureIndex)        == 240);
+static_assert(offsetof(MaterialDataCPU, specularColorTextureIndex)   == 244);
+static_assert(offsetof(MaterialDataCPU, anisotropyTextureIndex)      == 248);
+static_assert(offsetof(MaterialDataCPU, clearcoatFactor)             == 252);
+static_assert(offsetof(MaterialDataCPU, clearcoatRoughnessFactor)    == 256);
+static_assert(offsetof(MaterialDataCPU, clearcoatNormalScale)        == 260);
+static_assert(offsetof(MaterialDataCPU, clearcoatTextureIndex)       == 264);
+static_assert(offsetof(MaterialDataCPU, clearcoatRoughnessTextureIndex) == 268);
+static_assert(offsetof(MaterialDataCPU, clearcoatNormalTextureIndex) == 272);
+static_assert(offsetof(MaterialDataCPU, clearcoatReflectanceCurveIndex) == 276);
+static_assert(offsetof(MaterialDataCPU, diffuseTransmissionFactor)   == 280);
+static_assert(offsetof(MaterialDataCPU, diffuseTransmissionTextureIndex) == 284);
+static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorFactor) == 288);
+static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorTextureIndex) == 300);
+static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorCurveIndex) == 304);
+static_assert(offsetof(MaterialDataCPU, uvTransformMat)              == 320);
+static_assert(offsetof(MaterialDataCPU, uvTransformOffset)           == 544);
 
 } // namespace quantiloom

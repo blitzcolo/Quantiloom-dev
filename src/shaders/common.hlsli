@@ -1044,8 +1044,93 @@ struct MaterialData {
     float  sheenRoughnessFactor;         // [0,1] (glTF default 0)                                  // Offset: 204-208
     int    sheenColorTextureIndex;       // RGB channels, sRGB-encoded (-1 = no texture)           // Offset: 208-212
     int    sheenRoughnessTextureIndex;   // ALPHA channel, linear (-1 = no texture)                // Offset: 212-216
-    float  _padding2;                    // Padding for alignment                                   // Offset: 216-220
-    float  _padding3;                    // Padding for alignment                                   // Offset: 220-224
+
+    // ========================================================================
+    // Anisotropy (KHR_materials_anisotropy)
+    // ========================================================================
+    // Stretches the existing GGX lobe along a tangent direction; adds nothing.
+    //   alpha_t = lerp(alpha, 1, strength^2)   along the direction
+    //   alpha_b = alpha                        across it
+    // so alpha_t >= alpha_b always: this only ever roughens one axis.
+    //
+    // The direction is the material tangent rotated by anisotropyRotation, and
+    // rotated again by the texture's RG where one is bound. These two took the
+    // padding that used to sit here, which is why the texture index is further
+    // down at 248 -- every offset before 224 had to stay where it was.
+
+    float  anisotropyStrength;           // [0,1], 0 = isotropic (glTF default)                     // Offset: 216-220
+    float  anisotropyRotation;           // radians, CCW from the tangent                           // Offset: 220-224
+
+    // ========================================================================
+    // Specular (KHR_materials_specular)
+    // ========================================================================
+    // Reshapes the dielectric Fresnel rather than adding a lobe:
+    //   F0  = min(f0_ior * specularColorFactor, 1) * specularFactor
+    //   F90 = specularFactor
+    // with f0_ior = ((ior-1)/(ior+1))^2, which is 0.04 at the default ior of
+    // 1.5 -- the constant that used to be hardcoded. The clamp is applied
+    // before the factor multiply, not after: SpecularSilkPouf authors
+    // specularColorFactor [10, 0.6, 0] and the order is visible there.
+    //
+    // Both defaults are the neutral element, so a material without the
+    // extension yields exactly the F0 and F90 it did before. There is no curve
+    // index because F0/F90 exist only in the bands that split a BRDF into
+    // diffuse and specular; the infrared bands take reflectance directly.
+
+    float3 specularColorFactor;          // linear, may exceed 1 (HDR) (glTF default [1,1,1])       // Offset: 224-236
+    float  specularFactor;               // [0,1] (glTF default 1)                                  // Offset: 236-240
+    int    specularTextureIndex;         // ALPHA channel, linear (-1 = no texture)                // Offset: 240-244
+    int    specularColorTextureIndex;    // RGB channels, sRGB-encoded (-1 = no texture)           // Offset: 244-248
+    int    anisotropyTextureIndex;       // RG = direction (x2-1), B = strength, linear            // Offset: 248-252
+
+    // ========================================================================
+    // Clearcoat (KHR_materials_clearcoat)
+    // ========================================================================
+    // An infinitely thin dielectric coat with its own normal and roughness.
+    // Its Fresnel is taken at N.V, not V.H -- deliberate in the specification,
+    // for energy conservation with the simple layering operator -- and the base
+    // including emission is weighted by 1 - clearcoat * F_c to pay for it.
+    //
+    // clearcoatNormalTextureIndex < 0 means the coat is NOT normal mapped even
+    // where the base is; it then follows the interpolated vertex normal.
+    //
+    // MWIR and LWIR act on clearcoatReflectanceCurveIndex alone: the 0.04 a
+    // dielectric coat reflects in the visible is a fiction at 10 microns. Where
+    // a curve is bound, those bands carve the coat out of the reflectance
+    // already there rather than adding to it -- adding would make an isothermal
+    // cavity emit.
+
+    float  clearcoatFactor;              // [0,1], 0 = no coat (glTF default)                       // Offset: 252-256
+    float  clearcoatRoughnessFactor;     // [0,1] (glTF default 0)                                  // Offset: 256-260
+    float  clearcoatNormalScale;         // normalTextureInfo.scale on the coat                     // Offset: 260-264
+    int    clearcoatTextureIndex;        // R channel, linear (-1 = no texture)                     // Offset: 264-268
+    int    clearcoatRoughnessTextureIndex; // G channel, linear (-1 = no texture)                   // Offset: 268-272
+    int    clearcoatNormalTextureIndex;  // tangent-space normal map (-1 = coat is flat)            // Offset: 272-276
+    int    clearcoatReflectanceCurveIndex; // measured, the only infrared path (-1 = none)          // Offset: 276-280
+
+    // ========================================================================
+    // Diffuse transmission (KHR_materials_diffuse_transmission)
+    // ========================================================================
+    // A Lambertian BTDF on a thin surface. The specification mixes it against
+    // the diffuse BRDF inside the Fresnel mix, so the diffuse reflection is
+    // scaled by (1 - diffuseTransmission) and the specular lobe and its Fresnel
+    // weight are untouched -- energy moves between the two diffuse halves
+    // rather than appearing.
+    //
+    // Not the same quantity as irTransmittance, and not derived from it.
+    // irTransmittance enters Kirchhoff's law as eps = 1 - rho - tau; feeding a
+    // visible-band diffuse transmission into it would give a surface two
+    // transmittances and move its emissivity. MWIR and LWIR ignore these.
+
+    float  diffuseTransmissionFactor;    // [0,1] (glTF default 0)                                  // Offset: 280-284
+    int    diffuseTransmissionTextureIndex; // ALPHA channel, linear (-1 = no texture)              // Offset: 284-288
+    float3 diffuseTransmissionColorFactor;  // [0,1] linear (glTF default [1,1,1])                  // Offset: 288-300
+    int    diffuseTransmissionColorTextureIndex; // RGB, sRGB-encoded (-1 = no texture)             // Offset: 300-304
+    int    diffuseTransmissionColorCurveIndex;   // measured, the NIR/SWIR path (-1 = none)         // Offset: 304-308
+
+    float  _padding2;                    // Padding for alignment                                   // Offset: 308-312
+    float  _padding3;                    // Padding for alignment                                   // Offset: 312-316
+    float  _padding4;                    // Padding for alignment                                   // Offset: 316-320
 
     // ========================================================================
     // Per-slot UV transforms (KHR_texture_transform)
@@ -1060,11 +1145,13 @@ struct MaterialData {
     // its normal map at scale 2 within one material.
     //
     // Two arrays rather than one array of a {float4, float2} pair: that pair is
-    // 24 bytes, so its float4 would land at offset 248 and lose 16-byte
-    // alignment, and HLSL would pad the element out of step with the CPU.
+    // 24 bytes, so its float4 would lose 16-byte alignment every other element
+    // and HLSL would pad it out of step with the CPU. That alignment is also
+    // what the three padding words above are for -- they carry the array start
+    // from 308 up to 320.
 
-    float4 uvTransformMat[6];            // (m00, m01, m10, m11) per slot                          // Offset: 224-320
-    float2 uvTransformOffset[6];         // translation per slot                                    // Offset: 320-368
+    float4 uvTransformMat[14];           // (m00, m01, m10, m11) per slot                          // Offset: 320-544
+    float2 uvTransformOffset[14];        // translation per slot                                    // Offset: 544-656
 
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity
@@ -1083,6 +1170,14 @@ struct MaterialData {
 #define UV_SLOT_EMISSIVE            3
 #define UV_SLOT_SHEEN_COLOR         4
 #define UV_SLOT_SHEEN_ROUGHNESS     5
+#define UV_SLOT_SPECULAR            6
+#define UV_SLOT_SPECULAR_COLOR      7
+#define UV_SLOT_ANISOTROPY          8
+#define UV_SLOT_CLEARCOAT           9
+#define UV_SLOT_CLEARCOAT_ROUGHNESS 10
+#define UV_SLOT_CLEARCOAT_NORMAL    11
+#define UV_SLOT_DIFFUSE_TRANSMISSION       12
+#define UV_SLOT_DIFFUSE_TRANSMISSION_COLOR 13
 
 // ============================================================================
 // Helper: Compute IR Reflectance from Energy Conservation

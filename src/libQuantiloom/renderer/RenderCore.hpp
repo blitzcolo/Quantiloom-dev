@@ -432,6 +432,15 @@ struct MaterialGpuIndices {
     // (visible bands only). Append new slots at the end -- IndicesFromMaterial
     // initialises this aggregate positionally.
     i32 sheenReflectanceCurve = -1;
+
+    // Measured clearcoat reflectance. The only path by which a coat reaches
+    // MWIR or LWIR, where a dielectric 0.04 would be fiction.
+    i32 clearcoatReflectanceCurve = -1;
+
+    // Measured diffuse transmission colour. The only path by which it reaches
+    // NIR or SWIR, for the same reason sheen's curve is: a visible-basis RGB
+    // factor says nothing past ~1400nm.
+    i32 diffuseTransmissionColorCurve = -1;
 };
 
 /**
@@ -449,7 +458,9 @@ struct MaterialGpuIndices {
                               material.endmemberCurveIndex2,
                               material.endmemberCurveIndex3,
                               material.weightTextureIndex,
-                              material.sheenReflectanceCurveIndex};
+                              material.sheenReflectanceCurveIndex,
+                              material.clearcoatReflectanceCurveIndex,
+                              material.diffuseTransmissionColorCurveIndex};
 }
 
 /**

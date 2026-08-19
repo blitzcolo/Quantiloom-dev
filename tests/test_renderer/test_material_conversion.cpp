@@ -127,6 +127,8 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     mat.endmemberCurveIndex3 = 5;
     mat.weightTextureIndex = 6;
     mat.sheenReflectanceCurveIndex = 7;
+    mat.clearcoatReflectanceCurveIndex = 8;
+    mat.diffuseTransmissionColorCurveIndex = 9;
 
     const auto gpu = rendercore::ConvertMaterial(mat, 550.0f,
                                                  rendercore::IndicesFromMaterial(mat));
@@ -138,6 +140,150 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     EXPECT_EQ(gpu.endmemberCurveIndex3, 5);
     EXPECT_EQ(gpu.weightTextureIndex, 6);
     EXPECT_EQ(gpu.sheenReflectanceCurveIndex, 7);
+    EXPECT_EQ(gpu.clearcoatReflectanceCurveIndex, 8);
+    EXPECT_EQ(gpu.diffuseTransmissionColorCurveIndex, 9);
+}
+
+// ============================================================================
+// Specular, anisotropy, clearcoat, diffuse transmission
+// ============================================================================
+
+// A default-constructed Material must produce the GPU struct the renderer
+// behaved as if it had before these fields existed. Specular is the one that
+// is easy to get wrong: its neutral element is 1, not 0.
+TEST(RenderCoreConvertMaterial, DefaultsAreTheNeutralElementForEveryNewExtension) {
+    const auto gpu = rendercore::ConvertMaterial(Material{}, 550.0f);
+
+    EXPECT_EQ(gpu.specularFactor, 1.0f);
+    EXPECT_EQ(gpu.specularColorFactor, glm::vec3(1.0f));
+    EXPECT_EQ(gpu.specularTextureIndex, -1);
+    EXPECT_EQ(gpu.specularColorTextureIndex, -1);
+
+    EXPECT_EQ(gpu.anisotropyStrength, 0.0f);
+    EXPECT_EQ(gpu.anisotropyRotation, 0.0f);
+    EXPECT_EQ(gpu.anisotropyTextureIndex, -1);
+
+    EXPECT_EQ(gpu.clearcoatFactor, 0.0f);
+    EXPECT_EQ(gpu.clearcoatRoughnessFactor, 0.0f);
+    EXPECT_EQ(gpu.clearcoatNormalScale, 1.0f);
+    EXPECT_EQ(gpu.clearcoatTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatRoughnessTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatNormalTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatReflectanceCurveIndex, -1);
+
+    EXPECT_EQ(gpu.diffuseTransmissionFactor, 0.0f);
+    EXPECT_EQ(gpu.diffuseTransmissionColorFactor, glm::vec3(1.0f));
+    EXPECT_EQ(gpu.diffuseTransmissionTextureIndex, -1);
+    EXPECT_EQ(gpu.diffuseTransmissionColorTextureIndex, -1);
+    EXPECT_EQ(gpu.diffuseTransmissionColorCurveIndex, -1);
+}
+
+TEST(RenderCoreConvertMaterial, CarriesTheFourMaterialExtensionsThrough) {
+    Material mat;
+    // AnisotropyBarnLamp's Lamp Metal carries anisotropy and clearcoat on one
+    // material, with the coat's normal map sharing the base's texture.
+    mat.specularFactor = 0.5f;
+    mat.specularColorFactor = glm::vec3(10.0f, 0.6f, 0.0f);  // SpecularSilkPouf
+    mat.specularTextureIndex = 1;
+    mat.specularColorTextureIndex = 2;
+    mat.anisotropyStrength = 1.0f;
+    mat.anisotropyRotation = 0.5235988f;
+    mat.anisotropyTextureIndex = 3;
+    mat.clearcoatFactor = 0.25f;
+    mat.clearcoatRoughnessFactor = 0.15f;
+    mat.clearcoatNormalScale = 0.2f;
+    mat.clearcoatTextureIndex = 4;
+    mat.clearcoatRoughnessTextureIndex = 5;
+    mat.clearcoatNormalTextureIndex = 0;
+    mat.diffuseTransmissionFactor = 1.0f;
+    mat.diffuseTransmissionColorFactor = glm::vec3(0.84f, 0.8f, 0.74f);  // the teacup
+    mat.diffuseTransmissionTextureIndex = 6;
+    mat.diffuseTransmissionColorTextureIndex = 7;
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
+
+    EXPECT_FLOAT_EQ(gpu.specularFactor, 0.5f);
+    EXPECT_FLOAT_EQ(gpu.specularColorFactor.r, 10.0f) << "an HDR specular colour is legal";
+    EXPECT_FLOAT_EQ(gpu.specularColorFactor.g, 0.6f);
+    EXPECT_FLOAT_EQ(gpu.specularColorFactor.b, 0.0f);
+    EXPECT_EQ(gpu.specularTextureIndex, 1);
+    EXPECT_EQ(gpu.specularColorTextureIndex, 2);
+
+    EXPECT_FLOAT_EQ(gpu.anisotropyStrength, 1.0f);
+    EXPECT_FLOAT_EQ(gpu.anisotropyRotation, 0.5235988f);
+    EXPECT_EQ(gpu.anisotropyTextureIndex, 3);
+
+    EXPECT_FLOAT_EQ(gpu.clearcoatFactor, 0.25f);
+    EXPECT_FLOAT_EQ(gpu.clearcoatRoughnessFactor, 0.15f);
+    EXPECT_FLOAT_EQ(gpu.clearcoatNormalScale, 0.2f);
+    EXPECT_EQ(gpu.clearcoatTextureIndex, 4);
+    EXPECT_EQ(gpu.clearcoatRoughnessTextureIndex, 5);
+    EXPECT_EQ(gpu.clearcoatNormalTextureIndex, 0);
+
+    EXPECT_FLOAT_EQ(gpu.diffuseTransmissionFactor, 1.0f);
+    EXPECT_FLOAT_EQ(gpu.diffuseTransmissionColorFactor.r, 0.84f);
+    EXPECT_FLOAT_EQ(gpu.diffuseTransmissionColorFactor.g, 0.8f);
+    EXPECT_FLOAT_EQ(gpu.diffuseTransmissionColorFactor.b, 0.74f);
+    EXPECT_EQ(gpu.diffuseTransmissionTextureIndex, 6);
+    EXPECT_EQ(gpu.diffuseTransmissionColorTextureIndex, 7);
+}
+
+// The predicates gate whole blocks of shader work and drive the Studio panel's
+// auto-expand, so what counts as "present" has to be exactly the deviation from
+// glTF's default -- especially for specular, whose default is not zero.
+TEST(MaterialExtensionPredicates, ReportAbsenceOnADefaultMaterial) {
+    const Material mat;
+    EXPECT_FALSE(mat.HasSpecular());
+    EXPECT_FALSE(mat.HasAnisotropy());
+    EXPECT_FALSE(mat.HasClearcoat());
+    EXPECT_FALSE(mat.HasDiffuseTransmission());
+}
+
+TEST(MaterialExtensionPredicates, SpecularCountsAsAbsentAtItsNeutralElement) {
+    Material mat;
+    mat.specularFactor = 1.0f;
+    mat.specularColorFactor = glm::vec3(1.0f);
+    EXPECT_FALSE(mat.HasSpecular()) << "these are exactly the pre-extension F0 and F90";
+
+    mat.specularColorFactor = glm::vec3(0.0f, 0.0f, 0.0f);  // GlamVelvetSofa champagne
+    EXPECT_TRUE(mat.HasSpecular()) << "zero specular colour is a real, authored choice";
+
+    mat.specularColorFactor = glm::vec3(1.0f);
+    mat.specularFactor = 0.5f;
+    EXPECT_TRUE(mat.HasSpecular());
+}
+
+TEST(MaterialExtensionPredicates, ReportPresenceFromFactorsAndCurves) {
+    Material aniso;
+    aniso.anisotropyStrength = 0.5f;
+    EXPECT_TRUE(aniso.HasAnisotropy());
+
+    // A rotation without strength rotates a lobe that is not stretched, and a
+    // texture cannot rescue a zero factor -- the spec multiplies the two.
+    Material rotationOnly;
+    rotationOnly.anisotropyRotation = 1.0f;
+    rotationOnly.anisotropyTextureIndex = 3;
+    EXPECT_FALSE(rotationOnly.HasAnisotropy());
+
+    Material coat;
+    coat.clearcoatFactor = 0.25f;
+    EXPECT_TRUE(coat.HasClearcoat());
+
+    // The infrared bands read the curve instead of assuming a dielectric 0.04,
+    // so a bound curve counts on its own.
+    Material coatCurve;
+    coatCurve.clearcoatReflectanceCurveIndex = 2;
+    EXPECT_TRUE(coatCurve.HasClearcoat());
+
+    Material dt;
+    dt.diffuseTransmissionFactor = 0.1f;
+    EXPECT_TRUE(dt.HasDiffuseTransmission());
+
+    // The colour factor defaults to white and only tints what the factor lets
+    // through, so on its own it is not presence.
+    Material dtColorOnly;
+    dtColorOnly.diffuseTransmissionColorFactor = glm::vec3(0.84f, 0.8f, 0.74f);
+    EXPECT_FALSE(dtColorOnly.HasDiffuseTransmission());
 }
 
 // ============================================================================
