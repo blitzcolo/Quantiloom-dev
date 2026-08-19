@@ -645,7 +645,8 @@ float3 CookTorranceBRDF(
     float wavelength_nm,
     float3 dielectricF0,
     float F90,
-    AnisoFrame aniso
+    AnisoFrame aniso,
+    float diffuseScale
 ) {
     // OPTIMIZATION: Clamp minimum roughness to prevent numerical instability
     // Perfectly smooth surfaces (roughness=0) lead to Dirac delta distribution
@@ -726,7 +727,14 @@ float3 CookTorranceBRDF(
     float3 kD = (1.0 - F) * (1.0 - metallic);
 
     // Lambertian diffuse BRDF: albedo / π
-    float3 diffuse = kD * albedo / PI;
+    //
+    // diffuseScale is what KHR_materials_diffuse_transmission leaves behind:
+    // the specification mixes the diffuse BRDF against a diffuse BTDF inside
+    // the Fresnel mix, so the reflected half keeps (1 - diffuseTransmission)
+    // and the transmitted half is added by the caller, which is the only site
+    // that knows whether the light is in front of the surface or behind it.
+    // Exactly 1 without the extension.
+    float3 diffuse = kD * albedo * diffuseScale / PI;
 
     // ========================================================================
     // Combined BRDF (diffuse + specular)
@@ -756,7 +764,8 @@ float CookTorranceBRDF_Spectral(
     float wavelength_nm,
     float dielectricF0,
     float F90,
-    AnisoFrame aniso
+    AnisoFrame aniso,
+    float diffuseScale
 ) {
     const float MIN_ROUGHNESS = 0.045;
     roughness = max(roughness, MIN_ROUGHNESS);
@@ -797,7 +806,7 @@ float CookTorranceBRDF_Spectral(
 
     // Diffuse term
     float kD = (1.0 - F) * (1.0 - metallic);
-    float diffuse = kD * spectralAlbedo / PI;
+    float diffuse = kD * spectralAlbedo * diffuseScale / PI;
 
     return diffuse + specular;
 }

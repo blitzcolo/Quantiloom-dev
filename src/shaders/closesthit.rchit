@@ -484,6 +484,25 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
 // is three Gaussians on the visible primaries, so past about 1400nm it returns
 // whatever its tail happens to be -- a number with no relationship to how a
 // fibre scatters at 10 microns. Those bands take a measured curve or no sheen.
+// The diffuse transmission colour at one wavelength. Same priority and same
+// reasoning as sheen's: a measured curve first, then an RGB upsample where that
+// still means something. NIR and SWIR pass allowRgbUpsample = false, because a
+// colour pushed through the visible Gaussian basis says nothing at 2 microns;
+// MWIR and LWIR never call this at all, since thermal transmittance is already
+// irTransmittance and a surface cannot have two of them.
+float EvaluateDiffuseTransmissionColor(StructuredBuffer<SpectralCurveGPU> curves,
+                                       MaterialData material, float3 dtColor,
+                                       float lambda, bool allowRgbUpsample) {
+    if (material.diffuseTransmissionColorCurveIndex >= 0) {
+        return saturate(EvaluateSpectralCurve(
+            curves, material.diffuseTransmissionColorCurveIndex, lambda));
+    }
+    if (allowRgbUpsample) {
+        return ConvertLinearRGBToSpectrum(dtColor, lambda);
+    }
+    return 0.0;
+}
+
 float EvaluateSheenReflectance(StructuredBuffer<SpectralCurveGPU> curves,
                                MaterialData material, float3 sheenColor,
                                float lambda, bool allowRgbUpsample) {
@@ -1501,6 +1520,45 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // path -- which is what keeps an uncoated scene rendering bit-identically.
     const float ccBase = 1.0 - ccWeight;
 
+    // ========================================================================
+    // Diffuse transmission (KHR_materials_diffuse_transmission)
+    // ========================================================================
+    // A Lambertian BTDF on a thin surface: light entering the front and leaving
+    // diffusely from the back. The specification mixes it against the diffuse
+    // BRDF *inside* the Fresnel mix, so the diffuse REFLECTION is scaled by
+    // (1 - dt) and the specular lobe and its Fresnel weight are untouched --
+    // energy moves between the two diffuse halves rather than appearing.
+    //
+    // The factor is in the ALPHA channel of its texture, which is what lets
+    // DiffuseTransmissionTeacup bind one image to occlusion, metallicRoughness
+    // and this at once (R=occlusion, G=roughness, B=metallic, A=transmission).
+    // The colour is a separate sRGB image.
+    float dt = material.diffuseTransmissionFactor;
+    if (material.diffuseTransmissionTextureIndex >= 0) {
+        dt *= SampleTexture(
+            material.diffuseTransmissionTextureIndex,
+            material.diffuseTransmissionTextureIndex,
+            TransformUV(material, UV_SLOT_DIFFUSE_TRANSMISSION, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).a;
+    }
+    dt = saturate(dt);
+
+    float3 dtColor = material.diffuseTransmissionColorFactor;
+    if (material.diffuseTransmissionColorTextureIndex >= 0) {
+        dtColor *= SampleTexture(
+            material.diffuseTransmissionColorTextureIndex,
+            material.diffuseTransmissionColorTextureIndex,
+            TransformUV(material, UV_SLOT_DIFFUSE_TRANSMISSION_COLOR, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).rgb;
+    }
+
+    const bool hasDT = (dt > 0.0);
+    // What the diffuse reflection keeps. Exactly 1 without the extension.
+    const float dtBase = 1.0 - dt;
+
+
     // If a BSDF-sampled bounce landed here and this surface emits, the vertex
     // that sent the ray also sampled the emitters explicitly, and both would
     // report the same light. Keep the share the power heuristic gives this
@@ -1588,7 +1646,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm, dielectricF0, specularF90, aniso);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm, dielectricF0, specularF90, aniso, dtBase);
 
     // Sheen, layered over the base and paid for by scaling it down. The
     // specification drives the scaling from the largest colour component; the
@@ -1686,6 +1744,44 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowFactor = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
     }
 
+    // Whether the sun is behind this surface, and whether anything stands
+    // between it and the back face. The existing shadowFactor cannot answer
+    // that: it is forced to zero the moment the geometric normal turns away
+    // from the light, which is precisely the configuration diffuse transmission
+    // exists for. So the back face gets its own trace, from an origin offset to
+    // the BACK side -- offsetting to the front would have the surface occlude
+    // itself immediately.
+    float dtNdotL = 0.0;
+    float dtShadow = 0.0;
+    if (hasDT) {
+        dtNdotL = max(-dot(normal, L), 0.0);
+        const float backNdotL_geom = -dot(worldGeometricNormal, L);
+        if (dtNdotL > 0.0 && backNdotL_geom > 0.0) {
+            dtShadow = 1.0;
+            if ((lut.enableShadowRays != 0) &&
+                (SPEC_SPECTRAL_MODE != SPECTRAL_MODE_LWIR_FUSED)) {
+                const float3 dtHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+                RayDesc dtRay;
+                dtRay.Origin = dtHitPos - worldGeometricNormal * 0.001;
+                dtRay.Direction = L;
+                dtRay.TMin = 0.0;
+                dtRay.TMax = 1e10;
+
+                Payload dtPayload;
+                dtPayload.radiance = float3(0.0, 0.0, 0.0);
+                dtPayload.isShadowed = 1;
+                dtPayload.heroLambda = payload.heroLambda;
+                dtPayload.bsdfPdf = 0.0;
+
+                TraceRay(scene,
+                         RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
+                         RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                         0xFF, 0, 0, 1, dtRay, dtPayload);
+                dtShadow = (dtPayload.isShadowed == 0) ? 1.0 : 0.0;
+            }
+        }
+    }
+
     // Apply shadow factor to direct sun lighting
     float3 directSun = brdf * sunRadiance * NdotL * shadowFactor;
 
@@ -1736,7 +1832,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Hemispherical integration with Lambertian BRDF
     // Factor of π from hemisphere integral cancels with π in BRDF denominator
-    float3 skyAmbient = kD * albedo * skyRadiance;
+    float3 skyAmbient = kD * albedo * dtBase * skyRadiance;
 
     // Sheen against the same dome. The lobe's response to uniform radiance is
     // its directional albedo by definition, so this needs no cancelling π of
@@ -1848,7 +1944,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Emission is dimmed because a coat sits OVER the emitter, not under it --
     // the specification is explicit, and it is the difference between a coated
     // tail light and a glowing one.
-    float3 radiance = directSun + skyAmbient + iblSpecular * ccBase + emissive * ccBase;
+    // What the back of the surface sends toward the camera: the sun behind it,
+    // and the half of the dome behind it. Both ride the same kD the reflected
+    // diffuse does -- the specification puts the BTDF inside the Fresnel mix,
+    // beside the BRDF, not outside it. skyRadiance is already E/PI, so the
+    // Lambertian identity is complete without a second division.
+    float3 dtRadiance = float3(0.0, 0.0, 0.0);
+    if (hasDT) {
+        dtRadiance = kD * dt * dtColor *
+                     (sunRadiance * dtNdotL * dtShadow / PI + skyRadiance);
+    }
+
+    float3 radiance = directSun + skyAmbient + (iblSpecular + emissive + dtRadiance) * ccBase;
 
     // ========================================================================
     // Spectral Mode Selection: Choose rendering pipeline based on mode
@@ -2074,9 +2181,34 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             const float  corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                (kD_b * rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE,
+                (kD_b * rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE,
                 F_b * sheenScale_b * ccBase, rrSurvive_b,
                 sky_b, lambda_b, aniso, payload);
+
+            // The transmitted half, traced into the BACK hemisphere. Reusing
+            // the residual machinery with a flipped normal gets the cosine
+            // sample, the origin offset and the child's mixture density all
+            // pointing the right way for free, and keeps the property the whole
+            // architecture rests on: in an open scene the ray escapes, the miss
+            // shader returns the base it is subtracted from, and the correction
+            // is zero to the bit. A recursive ray of its own would instead ADD
+            // sky on a miss and double-count against the analytic back-dome
+            // term below.
+            //
+            // qSpec = 0 because there is no specular transmission lobe here --
+            // this is Lambertian by definition -- which also makes V, NdotV and
+            // roughness inert in the call.
+            float corr_dt = 0.0;
+            if (hasDT) {
+                const float rhoDt_b = EvaluateDiffuseTransmissionColor(
+                    spectralCurves, material, dtColor, lambda_b, true);
+                const float wDt_b = kD_b * dt * rhoDt_b * ccBase;
+                if (wDt_b > 0.0) {
+                    corr_dt = TraceEnvBounceResidual(
+                        visHitPos, -normal, V, NdotV_b, roughness, 0.0,
+                        wDt_b, 0.0, wDt_b, sky_b, lambda_b, IsotropicFrame(), payload);
+                }
+            }
 
             if (heroRay) {
                 // Scalar: the surface that sampled lambda_h owns the weighting.
@@ -2094,7 +2226,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         0.0, float(NUM_WAVELENGTH_SAMPLES - 1));
                     tau_b = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
                 }
-                XYZ_bounce = corr_b * tau_b / VisibleWavelengthPDF(lambda_b) *
+                XYZ_bounce = (corr_b + corr_dt) * tau_b / VisibleWavelengthPDF(lambda_b) *
                              SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
             }
         }
@@ -2172,7 +2304,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda,
-                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90, aniso);
+                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90, aniso, dtBase);
             brdf_lambda *= sheenScale_lambda;
             if (hasSheen) {
                 // The real Charlie lobe: the sun is a delta light and is not
@@ -2216,8 +2348,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // hemisphere integral of f cos, so like the Lambertian term above it
             // needs no π. This must match the wDiffuse the bounce was given, or
             // the residual L_in - L_base is a difference of two different bases.
-            float L_ambient = kD_lambda * rho_lambda * sheenScale_lambda * sky_radiance_lambda +
+            float L_ambient = kD_lambda * rho_lambda * dtBase * sheenScale_lambda * sky_radiance_lambda +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
+
+            // The transmitted half: the dome behind the surface, and the sun
+            // behind it. This must match the wDt the bounce above was given, or
+            // the residual is a difference of two different bases.
+            if (hasDT) {
+                const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
+                    spectralCurves, material, dtColor, lambda, true);
+                L_ambient += kD_lambda * dt * rhoDt_lambda *
+                             (sky_radiance_lambda +
+                              sun_radiance_lambda * dtNdotL * dtShadow);
+            }
             if (hasClearcoat) {
                 L_ambient = L_ambient * ccBase + ccWeight * ccE * sky_radiance_lambda;
             }
@@ -2260,7 +2403,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // the bounce folded it into.
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
-                    (visKD * rho_lambda * sheenScale_lambda +
+                    (visKD * rho_lambda * dtBase * sheenScale_lambda +
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
                     visF * sheenScale_lambda * ccBase, aniso);
                 L_nee = brdf_at_light *
@@ -2465,7 +2608,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             lambda,
             InterpolateRgbToWavelength(dielectricF0, lambda),
             specularF90,
-            aniso
+            aniso,
+            dtBase
         );
 
         brdf_scalar *= sheenScale_s;
@@ -2501,8 +2645,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // denominator.
         // Sheen against the same dome, as the cosine lobe the bounce below
         // folds it into -- the two have to describe one base.
-        float skyAmbient_scalar = kD_scalar * spectralAlbedo * sheenScale_s * skyRadiance_lambda +
+        float skyAmbient_scalar = kD_scalar * spectralAlbedo * dtBase * sheenScale_s * skyRadiance_lambda +
                                   wSheen_s * skyRadiance_lambda;
+        const float rhoDt_s = hasDT
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor, lambda,
+                                               lambda <= SPECTRAL_VIS_LAMBDA_MAX)
+            : 0.0;
+        const float wDt_s = kD_scalar * dt * rhoDt_s;
+        if (hasDT) {
+            skyAmbient_scalar += wDt_s * (skyRadiance_lambda +
+                                          sunRadiance_lambda * dtNdotL * dtShadow);
+        }
         if (hasClearcoat) {
             skyAmbient_scalar = skyAmbient_scalar * ccBase +
                                 ccWeight * ccE * skyRadiance_lambda;
@@ -2574,7 +2727,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         BsdfMixturePdf(normal, V, s.wi, roughness, qSpec_s, aniso);
                     const float brdf_at_light = EvalBounceBrdf(
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
-                        (kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s) * ccBase +
+                        (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                             ccWeight * ccE,
                         F_scalar.r * sheenScale_s * ccBase, aniso);
                     radiance_spectral +=
@@ -2586,10 +2739,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             radiance_spectral += TraceEnvBounceResidual(
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
-                (kD_scalar * spectralAlbedo * sheenScale_s + wSheen_s) * ccBase +
+                (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                     ccWeight * ccE,
                 F_scalar.r * sheenScale_s * ccBase, rrSurvive_s,
                 skyRadiance_lambda, 0.0, aniso, payload);
+
+            // The transmitted half against the back hemisphere, as VIS_FUSED.
+            if (wDt_s > 0.0) {
+                radiance_spectral += TraceEnvBounceResidual(
+                    singleHitPos, -normal, V, NdotV_s, roughness, 0.0,
+                    wDt_s * ccBase, 0.0, wDt_s * ccBase,
+                    skyRadiance_lambda, 0.0, IsotropicFrame(), payload);
+            }
         }
 
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
@@ -2702,11 +2863,25 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // lobe returns, which is added rather than carved out because this is a
         // reflective band with no emission to keep in step with it.
         const float3 swirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        const float wTotal_b = (rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
+        // Diffuse transmission here is measured-curve only, for the same
+        // reason sheen is: an RGB colour upsampled through the visible basis
+        // says nothing at 2 microns.
+        const float rhoDt_b = hasDT
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor,
+                                               lambda_b, false)
+            : 0.0;
+        const float wDt_b = dt * rhoDt_b * ccBase;
+        const float wTotal_b =
+            (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload);
+        if (wDt_b > 0.0) {
+            bounceCorr += TraceEnvBounceResidual(
+                swirHitPos, -normal, V, NdotV_swir, roughness, 0.0,
+                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload);
+        }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -2759,7 +2934,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // shadow ray's cost was already paid and its answer thrown away.
             // The sky term stays unoccluded here; the traced bounce is what
             // will occlude it.
-            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
+            float L_reflected = rho_lambda * dtBase * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
 
             // 3b. Sheen, layered on and paid for by scaling the Lambertian term
@@ -2785,6 +2960,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                   (sun_radiance_lambda * PI) * NdotL * shadowFactor +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
             }
+            // The transmitted half, curve-gated. sun_radiance_lambda is already
+            // E/PI here, so the Lambertian identity completes without a second
+            // division -- the same convention the reflected term above uses.
+            if (hasDT) {
+                const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
+                    spectralCurves, material, dtColor, lambda, false);
+                L_reflected += dt * rhoDt_lambda *
+                               (sky_radiance_lambda +
+                                sun_radiance_lambda * dtNdotL * dtShadow);
+            }
+
             // The coat is achromatic here, so unlike sheen it needs no measured
             // curve to mean something: a dielectric interface still reflects
             // about 4% at 2 microns. The x PI undoes the Lambertian
@@ -2939,11 +3125,25 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float wSheen_b = sheenE * rhoSheen_b;
 
         const float3 nirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
-        const float wTotal_b = (rho_b * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
+        // Diffuse transmission here is measured-curve only, for the same
+        // reason sheen is: an RGB colour upsampled through the visible basis
+        // says nothing at 2 microns.
+        const float rhoDt_b = hasDT
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor,
+                                               lambda_b, false)
+            : 0.0;
+        const float wDt_b = dt * rhoDt_b * ccBase;
+        const float wTotal_b =
+            (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload);
+        if (wDt_b > 0.0) {
+            bounceCorr += TraceEnvBounceResidual(
+                nirHitPos, -normal, V, NdotV_nir, roughness, 0.0,
+                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload);
+        }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
@@ -2993,7 +3193,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // shadowFactor as in the SWIR branch: traced for every mode, read
             // by three of them. NIR is the band where losing it is least
             // defensible -- reflected solar is the entire signal here.
-            float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
+            float L_reflected = rho_lambda * dtBase * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
 
             // 3b. Sheen, exactly as in SWIR: layered on, the Lambertian term
@@ -3012,6 +3212,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                   (sun_radiance_lambda * PI) * NdotL * shadowFactor +
                               sheenE * rhoSheen_lambda * sky_radiance_lambda;
             }
+            // The transmitted half, curve-gated. sun_radiance_lambda is already
+            // E/PI here, so the Lambertian identity completes without a second
+            // division -- the same convention the reflected term above uses.
+            if (hasDT) {
+                const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
+                    spectralCurves, material, dtColor, lambda, false);
+                L_reflected += dt * rhoDt_lambda *
+                               (sky_radiance_lambda +
+                                sun_radiance_lambda * dtNdotL * dtShadow);
+            }
+
             // The coat is achromatic here, so unlike sheen it needs no measured
             // curve to mean something: a dielectric interface still reflects
             // about 4% at 2 microns. The x PI undoes the Lambertian
