@@ -2401,12 +2401,25 @@ void main(inout Payload payload, in HitAttributes attribs) {
             ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
             : 0.0;
 
+        // Sheen at lambda_b. Only ever from a measured curve here: an RGB sheen
+        // factor upsampled through the visible Gaussian basis is meaningless at
+        // 2 microns, so a glTF asset carrying only a factor has no sheen in this
+        // band and the terms below fold away exactly.
+        const float rhoSheen_b = hasSheen
+            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, false)
+            : 0.0;
+        const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_swir, sheenRoughness);
+        const float wSheen_b = sheenE * rhoSheen_b;
+
         // One total reflectance, so the lobe is only a sampling shape for it:
-        // qSpec is 0 or 1 and both weights are rho_b.
+        // qSpec is 0 or 1 and both weights are rho_b -- plus whatever the sheen
+        // lobe returns, which is added rather than carved out because this is a
+        // reflective band with no emission to keep in step with it.
         const float3 swirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        const float wTotal_b = rho_b * sheenScale_b + wSheen_b;
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -2462,6 +2475,30 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // will occlude it.
             float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
+
+            // 3b. Sheen, layered on and paid for by scaling the Lambertian term
+            // down. This band has no diffuse/specular split to layer onto -- one
+            // total reflectance, sampled through whichever lobe shape -- so the
+            // sheen lobe is the first directional BRDF the sun sees here.
+            if (rhoSheen_b > 0.0) {
+                const float rhoSheen_lambda = EvaluateSheenReflectance(
+                    spectralCurves, material, sheenColor, lambda, false);
+                const float sheenScale_lambda =
+                    SheenAlbedoScaling(rhoSheen_lambda, NdotV_swir, sheenRoughness);
+                const float3 H_sw = SafeHalfVector(V, L, normal);
+
+                // sun_radiance_lambda is E_sun/PI: the Lambertian 1/PI folded in
+                // at the source, since nothing above it is a BRDF. The sheen
+                // lobe carries its own normalisation and wants the irradiance
+                // back. The sky term needs no such correction -- a directional
+                // albedo against uniform radiance is already the integral.
+                L_reflected = L_reflected * sheenScale_lambda +
+                              rhoSheen_lambda *
+                                  SheenBRDF(max(dot(normal, H_sw), 0.0), NdotV_swir,
+                                            max(dot(normal, L), 0.0), sheenRoughness) *
+                                  (sun_radiance_lambda * PI) * NdotL * shadowFactor +
+                              sheenE * rhoSheen_lambda * sky_radiance_lambda;
+            }
 
             // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
@@ -2593,10 +2630,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
             ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
             : 0.0;
 
+        // Sheen at lambda_b, from a measured curve only -- see the SWIR branch.
+        const float rhoSheen_b = hasSheen
+            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, false)
+            : 0.0;
+        const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_nir, sheenRoughness);
+        const float wSheen_b = sheenE * rhoSheen_b;
+
         const float3 nirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        const float wTotal_b = rho_b * sheenScale_b + wSheen_b;
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, payload);
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -2649,6 +2694,23 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // defensible -- reflected solar is the entire signal here.
             float L_reflected = rho_lambda * (sun_radiance_lambda * NdotL * shadowFactor
                                               + sky_radiance_lambda);
+
+            // 3b. Sheen, exactly as in SWIR: layered on, the Lambertian term
+            // scaled down to pay for it, and the sun term needing its irradiance
+            // back because sun_radiance_lambda already carries a folded 1/PI.
+            if (rhoSheen_b > 0.0) {
+                const float rhoSheen_lambda = EvaluateSheenReflectance(
+                    spectralCurves, material, sheenColor, lambda, false);
+                const float sheenScale_lambda =
+                    SheenAlbedoScaling(rhoSheen_lambda, NdotV_nir, sheenRoughness);
+                const float3 H_ni = SafeHalfVector(V, L, normal);
+                L_reflected = L_reflected * sheenScale_lambda +
+                              rhoSheen_lambda *
+                                  SheenBRDF(max(dot(normal, H_ni), 0.0), NdotV_nir,
+                                            max(dot(normal, L), 0.0), sheenRoughness) *
+                                  (sun_radiance_lambda * PI) * NdotL * shadowFactor +
+                              sheenE * rhoSheen_lambda * sky_radiance_lambda;
+            }
 
             // Note: Thermal emission is negligible in NIR for T < 600K
             // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
@@ -2925,6 +2987,43 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // sun-path attenuation is folded into the illumination source.
                 float sun_radiance_lambda = sun_irr_lambda / PI;
                 L_reflected_sun = reflectance_l * sun_radiance_lambda * NdotL * shadowFactor;
+
+                // Sheen, CARVED OUT of the total reflectance rather than added
+                // to it.
+                //
+                // The reflective bands can layer a sheen lobe on top and scale
+                // the base down to pay for it. This band cannot: emissivity here
+                // is derived from the same reflectance the sun term uses, by
+                // eps = 1 - rho - tau, and the furnace gate checks that the two
+                // still sum to a blackbody at 0.2 percent. Adding reflectance
+                // would make the cavity emit.
+                //
+                // So the reflectance is redistributed, not increased. The sheen
+                // lobe claims a_sheen of it -- its directional albedo times its
+                // reflectance, capped at what is there -- and the Lambertian
+                // remainder keeps the rest. rho_lamb + a_sheen is exactly
+                // reflectance_l, which is why the emission term above and the
+                // downwelling term below need no changes at all, and why an
+                // isothermal cavity (which has no sun) is untouched to the bit.
+                //
+                // A measured curve only: an RGB factor upsampled through the
+                // visible basis says nothing at 4 microns, and a fibre that size
+                // is comparable to the wavelength anyway.
+                if (hasSheen) {
+                    const float rhoSheen_l = EvaluateSheenReflectance(
+                        spectralCurves, material, sheenColor, lambda, false);
+                    if (rhoSheen_l > 0.0) {
+                        const float a_sheen = min(sheenE * rhoSheen_l, reflectance_l);
+                        const float rho_lamb = reflectance_l - a_sheen;
+                        const float3 H_ir = SafeHalfVector(V, L, normal);
+                        L_reflected_sun =
+                            rho_lamb * sun_radiance_lambda * NdotL * shadowFactor +
+                            rhoSheen_l *
+                                SheenBRDF(max(dot(normal, H_ir), 0.0), NdotV,
+                                          max(dot(normal, L), 0.0), sheenRoughness) *
+                                sun_irr_lambda * NdotL * shadowFactor;
+                    }
+                }
             }
 
             // 4. IR Transmittance: Background radiation through transparent materials
