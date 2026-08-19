@@ -348,7 +348,15 @@ float DistributionGGXAniso(float TdotH, float BdotH, float NdotH,
         return 0.0;
     }
     const float w2 = a2 / d;
-    return a2 * w2 * w2 / PI;
+    // Written as a division rather than as a2 * w2 * w2 / PI so the guard is
+    // the same one DistributionGGX applies. That guard is a numerical floor,
+    // not physics -- it caps the NDF peak at alpha^2 / EPSILON, which for a
+    // smooth surface is well below the true value -- but the isotropic branch
+    // has always had it, and without a match here a material at strength 0.001
+    // would jump several orders of magnitude in peak brightness the instant the
+    // anisotropic branch took over. In the isotropic limit 1/w2 is exactly the
+    // denominator DistributionGGX squares, so the two agree to the last bit.
+    return a2 / max(PI / max(w2 * w2, EPSILON), EPSILON);
 }
 
 // Height-correlated Smith visibility, anisotropic. Already carries the
