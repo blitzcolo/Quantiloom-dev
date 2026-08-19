@@ -426,6 +426,12 @@ struct MaterialGpuIndices {
     i32 endmemberCurve2 = -1;
     i32 endmemberCurve3 = -1;
     i32 weightTexture = -1;
+
+    // Measured sheen reflectance, resolved from the same curve buffer as the
+    // rest. -1: no curve, and the shader falls back to the RGB sheen factor
+    // (visible bands only). Append new slots at the end -- IndicesFromMaterial
+    // initialises this aggregate positionally.
+    i32 sheenReflectanceCurve = -1;
 };
 
 /**
@@ -442,7 +448,8 @@ struct MaterialGpuIndices {
                               material.endmemberCurveIndex1,
                               material.endmemberCurveIndex2,
                               material.endmemberCurveIndex3,
-                              material.weightTextureIndex};
+                              material.weightTextureIndex,
+                              material.sheenReflectanceCurveIndex};
 }
 
 /**

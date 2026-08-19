@@ -50,7 +50,7 @@ struct MaterialDataCPU {
     f32 thicknessFactor;                     // offset 144,  4
     i32 thicknessTextureIndex;               // offset 148,  4
     f32 dispersion;                          // offset 152,  4
-    f32 _padding2;                           // offset 156,  4
+    i32 sheenReflectanceCurveIndex;          // offset 156,  4  (was _padding2)
 
     f32 volumeDensity;                       // offset 160,  4
     f32 scatteringCoeff;                     // offset 164,  4
@@ -64,9 +64,45 @@ struct MaterialDataCPU {
     i32 endmemberCurveIndex2;                // offset 180,  4
     i32 endmemberCurveIndex3;                // offset 184,  4
     i32 weightTextureIndex;                  // offset 188,  4
-};  // 192 bytes total
 
-static_assert(sizeof(MaterialDataCPU) == 192);
+    // Sheen (KHR_materials_sheen). sheenReflectanceCurveIndex is up at 156,
+    // in what used to be padding.
+    glm::vec3 sheenColorFactor;              // offset 192, 12
+    f32 sheenRoughnessFactor;                // offset 204,  4
+    i32 sheenColorTextureIndex;              // offset 208,  4
+    i32 sheenRoughnessTextureIndex;          // offset 212,  4
+    f32 _padding2;                           // offset 216,  4
+    f32 _padding3;                           // offset 220,  4
+
+    // Per-slot UV transforms (KHR_texture_transform), pre-multiplied by
+    // ConvertMaterial into a 2x3 affine:  uv' = M * uv + offset,  with M packed
+    // as (m00, m01, m10, m11).  Indexed by the UV_SLOT_* constants below, which
+    // common.hlsli mirrors.
+    //
+    // The matrices and the offsets are two arrays rather than one array of a
+    // {float4, float2} pair because that pair is 24 bytes, and a float4 at
+    // offset 248 would not be 16-byte aligned -- HLSL would pad the element and
+    // the two layouts would silently disagree.
+    glm::vec4 uvTransformMat[6];             // offset 224, 96
+    glm::vec2 uvTransformOffset[6];          // offset 320, 48
+};  // 368 bytes total
+
+// UV transform slots. The weight texture deliberately has no slot of its own:
+// it is unmixed from the base-colour texture's texels, so it must be sampled
+// with the base colour's transform or the mixture reads the wrong texels.
+// The temperature texture has none either -- it is a Quantiloom-authored slot
+// with no glTF textureInfo to carry the extension, so it is always identity.
+enum : i32 {
+    UV_SLOT_BASE_COLOR = 0,
+    UV_SLOT_METALLIC_ROUGHNESS = 1,
+    UV_SLOT_NORMAL = 2,
+    UV_SLOT_EMISSIVE = 3,
+    UV_SLOT_SHEEN_COLOR = 4,
+    UV_SLOT_SHEEN_ROUGHNESS = 5,
+    UV_SLOT_COUNT = 6,
+};
+
+static_assert(sizeof(MaterialDataCPU) == 368);
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex)       ==  16);
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex)          ==  32);
 static_assert(offsetof(MaterialDataCPU, doubleSided)                 ==  40);
@@ -88,9 +124,17 @@ static_assert(offsetof(MaterialDataCPU, transmission)                == 116);
 static_assert(offsetof(MaterialDataCPU, transmissionTextureIndex)    == 120);
 static_assert(offsetof(MaterialDataCPU, irTransmittanceCurveIndex)   == 124);
 static_assert(offsetof(MaterialDataCPU, attenuationColor)            == 128);
+static_assert(offsetof(MaterialDataCPU, dispersion)                  == 152);
+static_assert(offsetof(MaterialDataCPU, sheenReflectanceCurveIndex)  == 156);
 static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex1)        == 176);
 static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex2)        == 180);
 static_assert(offsetof(MaterialDataCPU, endmemberCurveIndex3)        == 184);
 static_assert(offsetof(MaterialDataCPU, weightTextureIndex)          == 188);
+static_assert(offsetof(MaterialDataCPU, sheenColorFactor)            == 192);
+static_assert(offsetof(MaterialDataCPU, sheenRoughnessFactor)        == 204);
+static_assert(offsetof(MaterialDataCPU, sheenColorTextureIndex)      == 208);
+static_assert(offsetof(MaterialDataCPU, sheenRoughnessTextureIndex)  == 212);
+static_assert(offsetof(MaterialDataCPU, uvTransformMat)              == 224);
+static_assert(offsetof(MaterialDataCPU, uvTransformOffset)           == 320);
 
 } // namespace quantiloom

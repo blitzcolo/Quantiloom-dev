@@ -49,6 +49,29 @@
 namespace quantiloom {
 
 /**
+ * @struct UvTransform
+ * @brief One texture slot's UV transform (glTF KHR_texture_transform)
+ *
+ * Applied as uv' = Translate(offset) * Rotate(rotation) * Scale(scale) * uv,
+ * in that order, which is what the extension specifies. The default is the
+ * identity, so a slot whose glTF carried no extension is untouched.
+ *
+ * Held in the authored form rather than pre-multiplied because that is what a
+ * config or an editor sets; ConvertMaterial folds it into a 2x3 affine once,
+ * on the way to the GPU.
+ */
+struct UvTransform {
+    glm::vec2 offset{0.0f, 0.0f};
+    f32 rotation = 0.0f;  // radians, counter-clockwise about the UV origin
+    glm::vec2 scale{1.0f, 1.0f};
+
+    [[nodiscard]] bool IsIdentity() const {
+        return offset.x == 0.0f && offset.y == 0.0f && rotation == 0.0f &&
+               scale.x == 1.0f && scale.y == 1.0f;
+    }
+};
+
+/**
  * @struct Material
  * @brief Physically-based material with glTF 2.0 PBR and spectral/IR extensions
  *
@@ -342,6 +365,53 @@ struct QL_API Material {
     String name;  // Material name (for debugging)
 
     // ========================================================================
+    // Sheen (KHR_materials_sheen) and per-slot UV transforms
+    // (KHR_texture_transform)
+    // ========================================================================
+    // Appended here rather than beside the other KHR extensions above because
+    // this header is a layout contract Quantiloom-Qt reads by offset, and an
+    // append leaves every field that already existed where it was.
+    //
+    // PHYSICS:
+    // Sheen is the lobe of a microfibre surface -- velvet, felt, brushed cloth.
+    // Light scatters off fibres standing away from the surface, so the lobe
+    // peaks at grazing angles instead of around the mirror direction, which is
+    // the opposite of what a GGX specular does and why no roughness setting on
+    // the base lobe reproduces it. Evaluated with the Charlie distribution the
+    // glTF specification names.
+    //
+    // ENERGY:
+    // Sheen layers on top of the base BRDF, and the base is scaled by
+    //   1 - max(sheenColor) * E_sheen(cos theta_v)
+    // to pay for it (the albedo-scaling approximation from the spec). With
+    // sheenColorFactor at its default of zero that scale is exactly 1 and every
+    // sheen term is exactly 0, so an existing scene renders bit-identically.
+
+    glm::vec3 sheenColorFactor{0.0f, 0.0f, 0.0f};  // [0,1]; 0 = no sheen (glTF default)
+    f32 sheenRoughnessFactor = 0.0f;               // [0,1] (glTF default)
+    i32 sheenColorTextureIndex = -1;               // RGB channels, sRGB-encoded
+    i32 sheenRoughnessTextureIndex = -1;           // ALPHA channel, linear
+
+    // Measured sheen reflectance, resolved by ResolveMaterialSpectra exactly as
+    // spectralReflectanceCurveIndex is. This is also the only way sheen reaches
+    // the infrared bands: an RGB factor upsampled through the visible Gaussian
+    // basis carries no meaning past ~1400nm, so NIR/SWIR/MWIR/LWIR ignore the
+    // factor and act only on a bound curve.
+    i32 sheenReflectanceCurveIndex = -1;
+    String quantiloomSheenRef;  // database name, resolved into the index above
+
+    // Per-slot UV transforms. Per slot rather than per material because the
+    // sample assets require it: SheenChair's fabric puts its base colour at
+    // scale 7 and its normal map at scale 2 within one material. Identity by
+    // default, so an asset without the extension is unaffected.
+    UvTransform baseColorUv;
+    UvTransform metallicRoughnessUv;
+    UvTransform normalUv;
+    UvTransform emissiveUv;
+    UvTransform sheenColorUv;
+    UvTransform sheenRoughnessUv;
+
+    // ========================================================================
     // Utilities
     // ========================================================================
 
@@ -378,6 +448,16 @@ struct QL_API Material {
                metallicRoughnessTextureIndex != -1 ||
                normalTextureIndex != -1 ||
                emissiveTextureIndex != -1;
+    }
+
+    // Whether any sheen term can be non-zero. A sheen texture with a zero
+    // factor still yields nothing -- glTF multiplies the two -- so the factor
+    // alone decides, and a bound curve counts because the infrared bands read
+    // it instead of the factor.
+    [[nodiscard]] bool HasSheen() const {
+        return sheenColorFactor.r > 0.0f || sheenColorFactor.g > 0.0f ||
+               sheenColorFactor.b > 0.0f || sheenReflectanceCurveIndex >= 0 ||
+               !quantiloomSheenRef.empty();
     }
 
     // ========================================================================

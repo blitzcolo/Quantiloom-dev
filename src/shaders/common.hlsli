@@ -990,7 +990,7 @@ struct MaterialData {
     float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 144-148
     int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 148-152
     float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 152-156
-    float  _padding2;                    // Padding for alignment                                    // Offset: 156-160
+    int    sheenReflectanceCurveIndex;   // Index into spectralCurves (-1 = use sheenColorFactor)   // Offset: 156-160
 
     // ========================================================================
     // Participating Media Properties (fog, smoke, SSS)
@@ -1025,9 +1025,64 @@ struct MaterialData {
     int    endmemberCurveIndex3;         // Index into spectralCurves (-1 = unused)                 // Offset: 184-188
     int    weightTextureIndex;           // Index into texture array (-1 = single endmember)        // Offset: 188-192
 
+    // ========================================================================
+    // Sheen (KHR_materials_sheen)
+    // ========================================================================
+    // The retroreflective lobe of a microfibre surface -- velvet, felt, cloth.
+    // Fibres standing away from the surface scatter light into a lobe that
+    // peaks at grazing angles instead of around the mirror direction, which no
+    // roughness setting on a GGX lobe reproduces.
+    //
+    // sheenReflectanceCurveIndex is up at offset 156, in what was padding.
+    // Priority, matching how base colour resolves its reflectance:
+    //   curve bound  -> EvaluateSpectralCurve, quantitative, every band
+    //   otherwise    -> sheenColorFactor upsampled, visible bands only
+    // The infrared bands read the curve alone: an RGB factor pushed through the
+    // visible Gaussian basis says nothing past ~1400nm.
+
+    float3 sheenColorFactor;             // RGB [0,1], 0 = no sheen (glTF default)                 // Offset: 192-204
+    float  sheenRoughnessFactor;         // [0,1] (glTF default 0)                                  // Offset: 204-208
+    int    sheenColorTextureIndex;       // RGB channels, sRGB-encoded (-1 = no texture)           // Offset: 208-212
+    int    sheenRoughnessTextureIndex;   // ALPHA channel, linear (-1 = no texture)                // Offset: 212-216
+    float  _padding2;                    // Padding for alignment                                   // Offset: 216-220
+    float  _padding3;                    // Padding for alignment                                   // Offset: 220-224
+
+    // ========================================================================
+    // Per-slot UV transforms (KHR_texture_transform)
+    // ========================================================================
+    // Pre-multiplied by ConvertMaterial into a 2x3 affine, applied by
+    // TransformUV in closesthit.rchit:
+    //
+    //   uv' = float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + offset
+    //
+    // Indexed by the UV_SLOT_* constants below. Per slot rather than per
+    // material because SheenChair's fabric puts its base colour at scale 7 and
+    // its normal map at scale 2 within one material.
+    //
+    // Two arrays rather than one array of a {float4, float2} pair: that pair is
+    // 24 bytes, so its float4 would land at offset 248 and lose 16-byte
+    // alignment, and HLSL would pad the element out of step with the CPU.
+
+    float4 uvTransformMat[6];            // (m00, m01, m10, m11) per slot                          // Offset: 224-320
+    float2 uvTransformOffset[6];         // translation per slot                                    // Offset: 320-368
+
     // Note: irReflectance removed - can be computed as: 1.0 - irEmissivity - irTransmittance
     // For opaque materials: irTransmittance = 0, so irReflectance = 1.0 - irEmissivity
 };
+
+// UV transform slots, mirroring MaterialGpuData.hpp.
+//
+// The weight texture has no slot of its own on purpose: it is unmixed from the
+// base-colour texture's texels, so it has to be sampled with the base colour's
+// transform or the spectral mixture reads the wrong texels. The temperature
+// texture has none either -- it is Quantiloom-authored, with no glTF
+// textureInfo to carry the extension, so it is always identity.
+#define UV_SLOT_BASE_COLOR          0
+#define UV_SLOT_METALLIC_ROUGHNESS  1
+#define UV_SLOT_NORMAL              2
+#define UV_SLOT_EMISSIVE            3
+#define UV_SLOT_SHEEN_COLOR         4
+#define UV_SLOT_SHEEN_ROUGHNESS     5
 
 // ============================================================================
 // Helper: Compute IR Reflectance from Energy Conservation

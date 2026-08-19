@@ -902,6 +902,33 @@ bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
 // Materials
 // ============================================================================
 
+namespace {
+
+/// Fold a KHR_texture_transform into the 2x3 affine the shader applies.
+///
+/// The extension composes translation * rotation * scale, in that order, so
+///
+///   uv'.x =  cos*sx * uv.x + sin*sy * uv.y + offset.x
+///   uv'.y = -sin*sx * uv.x + cos*sy * uv.y + offset.y
+///
+/// Note the sign: the rotation is clockwise in UV space, because UV's second
+/// axis points down. Getting it backwards mirrors a rotated texture about the
+/// diagonal, which reads as "the artist authored it wrong" rather than as a
+/// bug here, so it is worth stating.
+///
+/// The identity transform yields exactly (1,0,0,1) and (0,0) -- no rounding
+/// anywhere on the path -- which is what lets an asset with no extension
+/// render bit-identically to before.
+void PackUvTransform(const UvTransform& src, glm::vec4& outMat, glm::vec2& outOffset) {
+    const f32 c = std::cos(src.rotation);
+    const f32 s = std::sin(src.rotation);
+    outMat = glm::vec4(c * src.scale.x, s * src.scale.y,
+                       -s * src.scale.x, c * src.scale.y);
+    outOffset = src.offset;
+}
+
+} // namespace
+
 MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm,
                                 const MaterialGpuIndices& indices) {
     MaterialDataCPU cpuMat{};
@@ -944,7 +971,6 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.thicknessFactor = material.thicknessFactor;
     cpuMat.thicknessTextureIndex = material.thicknessTextureIndex;
     cpuMat.dispersion = material.dispersion;
-    cpuMat._padding2 = 0.0f;
 
     // Volume properties (fog, smoke, SSS)
     cpuMat.volumeDensity = material.volumeDensity;
@@ -957,6 +983,35 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.endmemberCurveIndex2 = indices.endmemberCurve2;
     cpuMat.endmemberCurveIndex3 = indices.endmemberCurve3;
     cpuMat.weightTextureIndex = indices.weightTexture;
+
+    // Sheen (KHR_materials_sheen)
+    cpuMat.sheenColorFactor = material.sheenColorFactor;
+    cpuMat.sheenRoughnessFactor = material.sheenRoughnessFactor;
+    cpuMat.sheenColorTextureIndex = material.sheenColorTextureIndex;
+    cpuMat.sheenRoughnessTextureIndex = material.sheenRoughnessTextureIndex;
+    cpuMat.sheenReflectanceCurveIndex = indices.sheenReflectanceCurve;
+    cpuMat._padding2 = 0.0f;
+    cpuMat._padding3 = 0.0f;
+
+    // UV transforms (KHR_texture_transform), one per glTF texture slot
+    PackUvTransform(material.baseColorUv,
+                    cpuMat.uvTransformMat[UV_SLOT_BASE_COLOR],
+                    cpuMat.uvTransformOffset[UV_SLOT_BASE_COLOR]);
+    PackUvTransform(material.metallicRoughnessUv,
+                    cpuMat.uvTransformMat[UV_SLOT_METALLIC_ROUGHNESS],
+                    cpuMat.uvTransformOffset[UV_SLOT_METALLIC_ROUGHNESS]);
+    PackUvTransform(material.normalUv,
+                    cpuMat.uvTransformMat[UV_SLOT_NORMAL],
+                    cpuMat.uvTransformOffset[UV_SLOT_NORMAL]);
+    PackUvTransform(material.emissiveUv,
+                    cpuMat.uvTransformMat[UV_SLOT_EMISSIVE],
+                    cpuMat.uvTransformOffset[UV_SLOT_EMISSIVE]);
+    PackUvTransform(material.sheenColorUv,
+                    cpuMat.uvTransformMat[UV_SLOT_SHEEN_COLOR],
+                    cpuMat.uvTransformOffset[UV_SLOT_SHEEN_COLOR]);
+    PackUvTransform(material.sheenRoughnessUv,
+                    cpuMat.uvTransformMat[UV_SLOT_SHEEN_ROUGHNESS],
+                    cpuMat.uvTransformOffset[UV_SLOT_SHEEN_ROUGHNESS]);
 
     return cpuMat;
 }
