@@ -1575,6 +1575,16 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path,
             QL_LOG_DEBUG("  [DEBUG] Marked texture {} (diffuseTransmissionColor) as sRGB",
                          mat.diffuseTransmissionColorTextureIndex);
         }
+        // A masked or blended material's base colour texture keeps its CPU
+        // pixels. The thermal view-factor precompute averages their alpha into
+        // a per-material coverage, and it runs after the upload that would
+        // otherwise free them. Only non-opaque materials pay the memory, which
+        // in a scene of any size is a handful of foliage atlases.
+        if (mat.alphaMode != Material::AlphaMode::Opaque &&
+            mat.baseColorTextureIndex >= 0 &&
+            mat.baseColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.baseColorTextureIndex].retainCpuPixels = true;
+        }
         // Deliberately absent: specularTexture, diffuseTransmissionTexture,
         // clearcoat*, anisotropyTexture. All linear, and two of them routinely
         // share an image with a slot that is not -- DiffuseTransmissionTeacup

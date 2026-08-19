@@ -51,6 +51,10 @@ struct ThermalPreview::Impl {
     // Cached state
     thermal::ThermalMesh mesh;
     Vector<thermal::ThermalMaterial> materials;
+
+    /// Per material, the fraction of its area that is actually there. Built
+    /// beside the material table, from CPU texels the loader retained.
+    Vector<f32> materialCoverage;
     thermal::ExchangeGeometry exchange;
     thermal::SunVisibilityTable sunTable;
     std::unique_ptr<thermal::ThermalTimeline> timeline;
@@ -81,7 +85,67 @@ struct ThermalPreview::Impl {
         return cpuStepper;
     }
 
+    /// Per material, the fraction of its area that is actually there.
+    ///
+    /// Opaque is 1. MASK counts the texels at or above the cutoff, which is the
+    /// binary test the any-hit shader applies; BLEND averages the alpha itself,
+    /// which is the probability it is committed with. Both are then multiplied
+    /// by baseColorFactor's alpha, exactly as the shader multiplies them.
+    ///
+    /// Reads CPU pixels, which the loader retains for precisely these
+    /// materials -- the upload frees everyone else's.
+    static Vector<f32> ComputeMaterialCoverage(const Scene& scene) {
+        Vector<f32> coverage(scene.materials.size(), 1.0f);
+        for (usize m = 0; m < scene.materials.size(); ++m) {
+            const Material& mat = scene.materials[m];
+            if (mat.alphaMode == Material::AlphaMode::Opaque) {
+                continue;
+            }
+
+            f32 textureMean = 1.0f;
+            const int texIdx = mat.baseColorTextureIndex;
+            if (texIdx >= 0 && texIdx < static_cast<int>(scene.textures.size())) {
+                const Texture& tex = scene.textures[texIdx];
+                if (tex.channels == 4 && !tex.pixels.empty()) {
+                    const usize texels = tex.pixels.size() / 4;
+                    f64 sum = 0.0;
+                    for (usize t = 0; t < texels; ++t) {
+                        const f32 a = static_cast<f32>(tex.pixels[t * 4 + 3]) / 255.0f;
+                        sum += (mat.alphaMode == Material::AlphaMode::Mask)
+                                   ? (a >= mat.alphaCutoff ? 1.0 : 0.0)
+                                   : static_cast<f64>(a);
+                    }
+                    textureMean = texels > 0 ? static_cast<f32>(sum / static_cast<f64>(texels))
+                                             : 1.0f;
+                } else if (!tex.pixels.empty()) {
+                    // Fewer than four channels means no alpha to read, so the
+                    // texture cannot mask anything.
+                    textureMean = 1.0f;
+                } else {
+                    // Pixels already freed -- only reachable for a material
+                    // that became non-opaque after load, where assuming solid
+                    // is the conservative answer for an occluder.
+                    QL_LOG_WARN("Thermal coverage: material '{}' is alpha-tested but its "
+                                "base colour texture has no CPU pixels; treating it as solid",
+                                mat.name);
+                    textureMean = 1.0f;
+                }
+            }
+
+            f32 factorAlpha = mat.baseColorFactor.a;
+            if (mat.alphaMode == Material::AlphaMode::Mask) {
+                factorAlpha = (factorAlpha >= mat.alphaCutoff) ? 1.0f : 0.0f;
+            }
+            coverage[m] = std::clamp(textureMean * factorAlpha, 0.0f, 1.0f);
+        }
+        return coverage;
+    }
+
     void RebuildMaterialTable(const Scene& scene) {
+        // Computed here rather than in the precompute because this is where the
+        // Scene is, and it has to happen while the textures still have their
+        // CPU pixels.
+        materialCoverage = ComputeMaterialCoverage(scene);
         materials.resize(scene.materials.size());
         u32 named = 0;
         for (usize m = 0; m < scene.materials.size(); ++m) {
@@ -110,6 +174,7 @@ struct ThermalPreview::Impl {
 
     void RebuildExchange(VkAccelerationStructureKHR tlas) {
         ThermalExchangePrecompute precompute(context);
+        precompute.SetMaterialCoverage(materialCoverage);
         if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
             ThermalExchangePrecompute::Params ep;
             ep.hemisphereRays = params.exchangeRays;
@@ -145,6 +210,7 @@ struct ThermalPreview::Impl {
             }
 
             ThermalExchangePrecompute precompute(context);
+            precompute.SetMaterialCoverage(materialCoverage);
             if (precompute.IsValid()) {
                 sunTable.visibility = precompute.RunSunVisibility(
                     tlas, mesh.elements, mesh.instanceElementBase, directions);

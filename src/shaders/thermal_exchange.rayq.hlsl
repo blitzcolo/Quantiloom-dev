@@ -54,6 +54,21 @@ struct ThermalElementGpu {
 // One per element: the fraction of the sun disc samples that reached it.
 [[vk::binding(4, 0)]] RWStructuredBuffer<float> sunVisibility;
 
+// Per material, the fraction of its area that is actually there: 1 for an
+// opaque surface, and for alphaMode MASK or BLEND the mean of its base colour
+// alpha, computed on the CPU where the texels still live.
+//
+// A mean rather than a per-texel test, which is a deliberate choice and not a
+// shortcut. A view factor is an area integral -- what fraction of element i's
+// hemisphere element j subtends -- estimated here by a histogram of a few
+// hundred cosine-weighted rays. Resolving each ray against its own texel would
+// need this pass to carry the whole bindless texture set of the render
+// pipeline, and would answer a question finer than the estimator can hear: over
+// many rays the hit points are spread across the occluder, so their expectation
+// is exactly this mean. What it cannot represent is a leaf whose holes are all
+// on one side, which no view factor at this resolution distinguishes anyway.
+[[vk::binding(5, 0)]] StructuredBuffer<float> materialCoverage;
+
 struct ExchangePushConstants {
     float3 sunDirection;   // from surface toward the sun, normalised
     uint   elementCount;
@@ -107,17 +122,57 @@ float3 SampleCosineHemisphere(float2 u, float3 n) {
     return normalize(t * (r * cos(phi)) + b * (r * sin(phi)) + n * z);
 }
 
-uint TraceForElement(float3 origin, float3 direction) {
+// A hash with no state to carry, for the coverage coin below. The candidate
+// order along a ray is not promised, so the seed is built from things that do
+// not depend on it: which element is casting, which of its rays this is, and
+// which triangle is being considered.
+uint CoverageHash(uint element, uint rayIndex, uint instance, uint primitive) {
+    uint s = element * 73856093u ^ rayIndex * 19349663u ^
+             instance * 2654435761u ^ primitive * 40503u;
+    s = s * 747796405u + 2891336453u;
+    s = ((s >> ((s >> 28) + 4u)) ^ s) * 277803737u;
+    return (s >> 22) ^ s;
+}
+
+uint TraceForElement(float3 origin, float3 direction, uint element, uint rayIndex) {
     RayDesc ray;
     ray.Origin = origin;
     ray.Direction = direction;
     ray.TMin = 0.0;
     ray.TMax = 1e6;
 
-    RayQuery<RAY_FLAG_FORCE_OPAQUE> query;
+    // Not FORCE_OPAQUE any more: geometry whose material is alphaMode MASK or
+    // BLEND is built non-opaque, and a leaf with holes in it should let
+    // radiation through them exactly as it lets light through.
+    RayQuery<RAY_FLAG_NONE> query;
     query.TraceRayInline(sceneTlas, RAY_FLAG_NONE, 0xFF, ray);
     while (query.Proceed()) {
-        // FORCE_OPAQUE commits every triangle; nothing to resolve here
+        if (query.CandidateType() != CANDIDATE_NON_OPAQUE_TRIANGLE) {
+            continue;
+        }
+
+        // The occluder's material, by the same instance-plus-primitive mapping
+        // a committed hit uses below.
+        float coverage = 1.0;
+        const uint candidateBase = instanceElementBase[query.CandidateInstanceIndex()];
+        if (candidateBase != 0xFFFFFFFFu) {
+            const uint candidateElement = candidateBase + query.CandidatePrimitiveIndex();
+            if (candidateElement < pc.elementCount) {
+                coverage = materialCoverage[elements[candidateElement].materialId];
+            }
+        }
+
+        if (coverage >= 1.0) {
+            query.CommitNonOpaqueTriangleHit();
+            continue;
+        }
+        const float xi = float(CoverageHash(element, rayIndex,
+                                            query.CandidateInstanceIndex(),
+                                            query.CandidatePrimitiveIndex())) *
+                         (1.0 / 4294967296.0);
+        if (xi < coverage) {
+            query.CommitNonOpaqueTriangleHit();
+        }
     }
 
     if (query.CommittedStatus() != COMMITTED_TRIANGLE_HIT) {
@@ -162,7 +217,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
         for (uint r = 0; r < pc.rayCount; ++r) {
             const float2 u = Hammersley(r, pc.rayCount);
             const float3 direction = SampleCosineHemisphere(u, element.normal);
-            hitRecords[e * pc.rayCount + r] = TraceForElement(origin, direction);
+            hitRecords[e * pc.rayCount + r] = TraceForElement(origin, direction, e, r);
         }
     }
 
@@ -182,7 +237,9 @@ void main(uint3 tid : SV_DispatchThreadID) {
             const float3 direction = normalize(pc.sunDirection +
                                                t * (radius * cos(phi)) +
                                                b * (radius * sin(phi)));
-            if (TraceForElement(origin, direction) == 0xFFFFFFFFu) {
+            // Offset the ray index past the hemisphere's, so a sun ray and a
+            // hemisphere ray never draw the same coin for the same occluder.
+            if (TraceForElement(origin, direction, e, pc.rayCount + s) == 0xFFFFFFFFu) {
                 visible += 1.0;
             }
         }

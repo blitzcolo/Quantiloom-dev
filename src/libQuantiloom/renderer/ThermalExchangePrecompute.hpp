@@ -61,6 +61,25 @@ public:
     ThermalExchangePrecompute(const ThermalExchangePrecompute&) = delete;
     ThermalExchangePrecompute& operator=(const ThermalExchangePrecompute&) = delete;
 
+    /**
+     * @brief Per material, the fraction of its area that is actually there
+     *
+     * 1 for an opaque surface; for alphaMode MASK or BLEND, the mean of its
+     * base colour alpha. An occluder is committed with that probability, so a
+     * leaf with holes lets radiation through them as it lets light through.
+     *
+     * A mean rather than a per-texel test, deliberately. A view factor is an
+     * area integral estimated by a histogram of a few hundred rays; over that
+     * many the hit points spread across the occluder, so their expectation is
+     * exactly this mean, and resolving each ray against its own texel would
+     * make this pass carry the render pipeline's whole bindless texture set to
+     * answer a question finer than the estimator can hear.
+     *
+     * Empty -- the default -- means every material is opaque, which is what a
+     * scene with no alpha coverage wants. Set before either Run; it feeds both.
+     */
+    void SetMaterialCoverage(Vector<f32> coverage);
+
     /// True when the pipeline came up. False means the shader could not be
     /// found or the device refused it, and the caller should fall back to the
     /// analytic open-sky exchange rather than failing the render.

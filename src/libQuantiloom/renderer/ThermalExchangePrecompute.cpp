@@ -100,6 +100,7 @@ Vector<u32> LoadSpirv(const String& name) {
 }  // namespace
 
 struct ThermalExchangePrecompute::Impl {
+    Vector<f32> materialCoverage;
     VulkanContext& context;
     VkDevice device = VK_NULL_HANDLE;
 
@@ -140,7 +141,7 @@ struct ThermalExchangePrecompute::Impl {
         }
 
         // 0 TLAS, 1 elements, 2 instance bases, 3 hit records, 4 sun visibility
-        Vector<VkDescriptorSetLayoutBinding> bindings(5);
+        Vector<VkDescriptorSetLayoutBinding> bindings(6);
         for (u32 i = 0; i < bindings.size(); ++i) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -195,7 +196,7 @@ struct ThermalExchangePrecompute::Impl {
 
         Vector<VkDescriptorPoolSize> poolSizes = {
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 5},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -229,6 +230,12 @@ ThermalExchangePrecompute::ThermalExchangePrecompute(VulkanContext& context)
 }
 
 ThermalExchangePrecompute::~ThermalExchangePrecompute() = default;
+
+void ThermalExchangePrecompute::SetMaterialCoverage(Vector<f32> coverage) {
+    if (m_impl) {
+        m_impl->materialCoverage = std::move(coverage);
+    }
+}
 
 bool ThermalExchangePrecompute::IsValid() const {
     return m_impl && m_impl->pipeline != VK_NULL_HANDLE &&
@@ -280,6 +287,15 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     GpuBuffer sunBuffer(allocator, elementCount * sizeof(f32),
                         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
 
+    // Empty means every material is opaque, which the shader's own bounds
+    // check would fall back to anyway -- but a zero-sized buffer is not a
+    // legal descriptor, so it gets one entry.
+    Vector<f32> coverage = m_impl->materialCoverage;
+    if (coverage.empty()) coverage.push_back(1.0f);
+    GpuBuffer coverageBuffer(allocator, coverage.size() * sizeof(f32),
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    coverageBuffer.Upload(coverage.data(), coverage.size() * sizeof(f32));
+
     // ------------------------------------------------------------------
     // Bind and dispatch
     // ------------------------------------------------------------------
@@ -288,14 +304,15 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     tlasInfo.accelerationStructureCount = 1;
     tlasInfo.pAccelerationStructures = &tlas;
 
-    const VkDescriptorBufferInfo bufferInfos[4] = {
+    const VkDescriptorBufferInfo bufferInfos[5] = {
         {elementBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {baseBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {recordBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {sunBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+        {coverageBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
     };
 
-    Vector<VkWriteDescriptorSet> writes(5);
+    Vector<VkWriteDescriptorSet> writes(6);
     for (u32 i = 0; i < writes.size(); ++i) {
         writes[i] = {};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -472,20 +489,27 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
     GpuBuffer sunBuffer(allocator, sunBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                         VMA_MEMORY_USAGE_GPU_TO_CPU);
 
+    Vector<f32> coverage = m_impl->materialCoverage;
+    if (coverage.empty()) coverage.push_back(1.0f);
+    GpuBuffer coverageBuffer(allocator, coverage.size() * sizeof(f32),
+                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    coverageBuffer.Upload(coverage.data(), coverage.size() * sizeof(f32));
+
     // Bind descriptors
     VkWriteDescriptorSetAccelerationStructureKHR tlasInfo{};
     tlasInfo.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     tlasInfo.accelerationStructureCount = 1;
     tlasInfo.pAccelerationStructures = &tlas;
 
-    const VkDescriptorBufferInfo bufferInfos[4] = {
+    const VkDescriptorBufferInfo bufferInfos[5] = {
         {elementBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {baseBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {recordBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
         {sunBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
+        {coverageBuffer.GetHandle(), 0, VK_WHOLE_SIZE},
     };
 
-    Vector<VkWriteDescriptorSet> writes(5);
+    Vector<VkWriteDescriptorSet> writes(6);
     for (u32 i = 0; i < writes.size(); ++i) {
         writes[i] = {};
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
