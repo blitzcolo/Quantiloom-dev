@@ -928,9 +928,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         params.mode == SpectralMode::SWIR_Fused) {
         QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm with {} samples per pixel...",
                     params.wavelengthNm, spp);
-        QL_LOG_WARN("  ⚠️  PREVIEW MODE: Using RGB-averaged spectral albedo.");
-        QL_LOG_WARN("  ⚠️  NOT suitable for quantitative analysis.");
-        QL_LOG_WARN("  ⚠️  For quantitative results, provide measured spectral curves.");
+        QL_LOG_WARN("  PREVIEW MODE: Using RGB-averaged spectral albedo.");
+        QL_LOG_WARN("  NOT suitable for quantitative analysis.");
+        QL_LOG_WARN("  For quantitative results, provide measured spectral curves.");
     } else {
         QL_LOG_INFO("Rendering frame in RGB mode with {} samples per pixel...", spp);
     }

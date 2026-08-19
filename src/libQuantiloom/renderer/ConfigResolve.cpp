@@ -1314,57 +1314,6 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     }
     report.nodesTransformed = out.nodesTransformed;
 
-    // ------------------------------------------------------------------
-    // sRGB upsampling gate
-    // ------------------------------------------------------------------
-    const bool requireQuantitative = (resolved.mode == SpectralMode::Multispectral ||
-                                      resolved.mode == SpectralMode::MWIR_Fused ||
-                                      resolved.mode == SpectralMode::LWIR_Fused ||
-                                      resolved.mode == SpectralMode::SWIR_Fused);
-
-    if (requireQuantitative && (resolved.failOnSrgbUpsample || resolved.logMaterialSources)) {
-        QL_LOG_INFO("Validating material spectral sources for quantitative mode...");
-
-        bool hasInvalidMaterials = false;
-        for (const auto& mat : scene.materials) {
-            const char* sourceStr = "Unknown";
-            switch (mat.spectralSource) {
-                case Material::SpectralSource::Measured:
-                    sourceStr = "Measured (quantitative)";
-                    break;
-                case Material::SpectralSource::RGBUpsampled:
-                    sourceStr = "RGB-upsampled (NOT quantitative)";
-                    hasInvalidMaterials = true;
-                    break;
-                case Material::SpectralSource::Procedural:
-                    sourceStr = "Procedural";
-                    break;
-                default:
-                    sourceStr = "Unknown";
-                    break;
-            }
-
-            if (resolved.logMaterialSources) {
-                QL_LOG_INFO("  Material '{}': source = {}", mat.name, sourceStr);
-            }
-            if (mat.spectralSource == Material::SpectralSource::RGBUpsampled) {
-                QL_LOG_WARN("  ⚠️  Material '{}' uses RGB-upsampled spectra (not quantitative)",
-                            mat.name);
-            }
-        }
-
-        if (hasInvalidMaterials && resolved.failOnSrgbUpsample) {
-            return SpectraResult::Err(
-                "ABORTED: RGB-upsampled materials detected. They are NOT suitable "
-                "for quantitative analysis. To proceed with a non-quantitative "
-                "preview, set quality.fail_on_srgb_upsample = false; for "
-                "quantitative results, provide measured spectral material data.");
-        }
-        if (hasInvalidMaterials && !resolved.failOnSrgbUpsample) {
-            QL_LOG_WARN("⚠️  WARNING: Proceeding with RGB-upsampled materials "
-                        "(non-quantitative preview).");
-        }
-    }
 
     // ------------------------------------------------------------------
     // [spectral_curves]: material name -> reflectance CSV
@@ -1612,6 +1561,74 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
     QL_LOG_INFO("  Total spectral curves (CSV + SpectralBaker): {}", out.curves.size());
     report.spectralCurvesLoaded = static_cast<u32>(out.curves.size());
+
+    // ------------------------------------------------------------------
+    // sRGB upsampling gate
+    // ------------------------------------------------------------------
+    // After the assignments above, not before them. Material::spectralSource
+    // is written by the loaders and by nothing else -- a glTF that carries its
+    // own curve in extras comes out Measured, everything else RGBUpsampled --
+    // so it never learns about a curve bound here through
+    // [material_overrides] spectral_material_ref, which is how every
+    // assignment in a config is made. Run ahead of them, this reported every
+    // such material as non-quantitative moments before handing it a measured
+    // spectrum, and `fail_on_srgb_upsample` aborted renders whose materials
+    // were in fact measured. What was bound is out.materialNameToCurve, so
+    // that is what this asks.
+    const bool requireQuantitative = (resolved.mode == SpectralMode::Multispectral ||
+                                      resolved.mode == SpectralMode::MWIR_Fused ||
+                                      resolved.mode == SpectralMode::LWIR_Fused ||
+                                      resolved.mode == SpectralMode::SWIR_Fused);
+
+    if (requireQuantitative && (resolved.failOnSrgbUpsample || resolved.logMaterialSources)) {
+        QL_LOG_INFO("Validating material spectral sources for quantitative mode...");
+
+        bool hasInvalidMaterials = false;
+        for (const auto& mat : scene.materials) {
+            const bool bound = out.materialNameToCurve.count(mat.name) > 0;
+
+            const char* sourceStr = "Unknown";
+            if (bound) {
+                sourceStr = "Measured (assigned in config)";
+            } else {
+                switch (mat.spectralSource) {
+                    case Material::SpectralSource::Measured:
+                        sourceStr = "Measured (from the scene file)";
+                        break;
+                    case Material::SpectralSource::RGBUpsampled:
+                        sourceStr = "RGB-upsampled (NOT quantitative)";
+                        hasInvalidMaterials = true;
+                        break;
+                    case Material::SpectralSource::Procedural:
+                        sourceStr = "Procedural";
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            if (resolved.logMaterialSources) {
+                QL_LOG_INFO("  Material '{}': source = {}", mat.name, sourceStr);
+            }
+            if (!bound && mat.spectralSource == Material::SpectralSource::RGBUpsampled) {
+                QL_LOG_WARN("  Material '{}' uses RGB-upsampled spectra (not quantitative)",
+                            mat.name);
+            }
+        }
+
+        if (hasInvalidMaterials && resolved.failOnSrgbUpsample) {
+            return SpectraResult::Err(
+                "ABORTED: RGB-upsampled materials detected. They are NOT suitable "
+                "for quantitative analysis. To proceed with a non-quantitative "
+                "preview, set quality.fail_on_srgb_upsample = false; for "
+                "quantitative results, provide measured spectral material data.");
+        }
+        if (hasInvalidMaterials && !resolved.failOnSrgbUpsample) {
+            QL_LOG_WARN("Proceeding with RGB-upsampled materials "
+                        "(non-quantitative preview).");
+        }
+    }
+
 
     // ------------------------------------------------------------------
     // [refractive_index]: material name -> RefractiveIndex.INFO YAML
