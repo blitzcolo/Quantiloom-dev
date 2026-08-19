@@ -31,6 +31,7 @@ public: bool quantiloom::ExternalRenderContext::ReprocessAccumulated(struct VkCo
 public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
 public: bool quantiloom::Material::HasIRData(void)const
 public: bool quantiloom::Material::HasQuantiloomRef(void)const
+public: bool quantiloom::Material::HasSheen(void)const
 public: bool quantiloom::Material::HasTextures(void)const
 public: bool quantiloom::Material::IsValid(void)const
 public: bool quantiloom::Material::ValidateIRKirchhoffLaw(void)const

@@ -1,0 +1,103 @@
+# ============================================================================
+# Quantiloom - KHR_materials_sheen test scene
+# ============================================================================
+# Renders GlamVelvetSofa, whose fabrics carry sheenColorFactor and
+# sheenRoughnessFactor and nothing else -- the factor-only path, which is what
+# most authored sheen looks like. Its normal map also carries a
+# KHR_texture_transform with a rotation, and no other slot in the material
+# does, so the render exercises the per-slot transform at the same time.
+#
+# What to look for: a bright rim where the fabric turns away from the camera,
+# strongest at grazing angles, tinted by sheenColorFactor rather than by the
+# base colour. That rim is the whole point of the extension -- no roughness
+# setting on a GGX lobe produces it. Compare against the reference render in
+# assets/models/glTF-Sample-Assets/Models/GlamVelvetSofa/screenshot/.
+#
+# Two other assets worth pointing this at:
+#
+#   SheenCloth       both sheen textures on one image plus 30x tiling on every
+#                    slot -- the textured path and the transform path together.
+#                    Without KHR_texture_transform its weave renders as one
+#                    smear, so it is also the regression case for that.
+#   SheenTestGrid    a grid sweeping sheen colour against sheen roughness,
+#                    which is the quickest way to see the lobe change shape.
+#
+# The sofa also declares KHR_materials_specular, KHR_materials_variants and
+# KHR_lights_punctual, none of which this renderer reads. The variants matter:
+# the fabrics are variant materials, so what renders is whichever the file
+# names by default, and the config lights the scene itself.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64                        # sheen is a grazing-angle effect; noise shows
+output = "gltf_sheen_output.exr"
+
+[spectral]
+# vis_fused rather than rgb: the sheen colour is upsampled per wavelength here,
+# and the base is scaled down per wavelength to pay for it, which is the path
+# worth exercising. Switch to "rgb" for a fast look.
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/GlamVelvetSofa/glTF/GlamVelvetSofa.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+# Low and off to one side: sheen is a function of the view angle, so a
+# head-on camera is the one view that shows least of it.
+position = [2.2, 0.7, 2.6]
+look_at = [0.0, 0.45, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 40.0
+
+[lighting]
+sun_direction = [0.45, 0.55, 0.70]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.6, 0.6, 0.6]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+# The sheen colour arrives as an RGB factor here, so it is upsampled rather
+# than measured. That is a preview, not a measurement, and this says so.
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false                 # raw radiance, so the rim is not a sensor artefact
+
+# ============================================================================
+# Sheen in the infrared
+# ============================================================================
+# The infrared bands ignore sheen_color entirely: an RGB factor pushed through
+# three Gaussians on the visible primaries has nothing to say at 2 or 10
+# microns. They read a measured curve or they render no sheen.
+#
+# To see sheen in SWIR, bind one and switch the band with it -- the curve is
+# reconstructed for whichever band [spectral] band names:
+#
+#   [spectral]
+#   mode = "swir_fused"
+#   band = "SWIR"
+#
+#   [[materials]]
+#   name = "GlamVelvetSofa_fabric_champagne"
+#   sheen_spectral_material_ref = "<an entry in quantiloom_materials_usgs.json>"
+#
+# In MWIR and LWIR the same key behaves differently by design. Those bands
+# derive emissivity from reflectance through eps = 1 - rho - tau, so sheen is
+# carved out of the reflectance that is already there rather than added on
+# top; the surface redistributes what it reflects instead of reflecting more.
+# An isothermal cavity is therefore unchanged, which is what keeps the furnace
+# gate passing.
+# ============================================================================
