@@ -25,6 +25,7 @@
 #include "spectral_query.hlsli"
 #include "atmosphere_nn.hlsli"
 #include "volumetric.hlsli"
+#include "hit_common.hlsli"  // bindings 4/5/6/7/8/18, SampleTexture, TransformUV
 
 // ============================================================================
 // Bindings
@@ -37,11 +38,8 @@
 // Use ByteAddressBuffer for vertex/normal to avoid float3 stride alignment issues
 // StructuredBuffer<float3> may use 16-byte stride on some drivers, causing out-of-bounds reads
 [[vk::binding(3, 0)]] ByteAddressBuffer vertexBuffer;    // Vertex positions (12 bytes each)
-[[vk::binding(4, 0)]] StructuredBuffer<uint> indexBuffer;       // Triangle indices
-[[vk::binding(5, 0)]] StructuredBuffer<MaterialData> materials; // Material properties
-[[vk::binding(6, 0)]] Texture2D textures[];                     // Bindless texture array
-[[vk::binding(7, 0)]] SamplerState samplers[];                  // Bindless sampler array
-[[vk::binding(8, 0)]] StructuredBuffer<float2> uvBuffer;        // UV coordinates (optional)
+// Bindings 4/5/6/7/8 (indices, materials, textures, samplers, UVs) live in
+// hit_common.hlsli, shared with the any-hit stage.
 [[vk::binding(9, 0)]] StructuredBuffer<float4> tangentBuffer;   // Tangent vectors (optional)
 [[vk::binding(16, 0)]] ByteAddressBuffer normalBuffer;   // Normal vectors (12 bytes each)
 
@@ -143,23 +141,6 @@ static const uint BOUNCE_DEPTH_DETERMINISTIC = 2;
 static const float WAVELENGTH_R_NM = 650.0;  // Red channel representative wavelength
 static const float WAVELENGTH_G_NM = 550.0;  // Green channel representative wavelength
 static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wavelength
-
-// ============================================================================
-// Instance Geometry Info Buffer (Binding 18)
-// ============================================================================
-// Per-TLAS-instance geometry offset information for multi-BLAS support.
-// When scene has multiple BLAS, each instance's geometry data is merged into
-// global buffers. This buffer tells us where each instance's data starts.
-//
-// USAGE:
-//   uint instIdx = InstanceIndex();
-//   InstanceGeometryInfo geo = instanceGeometryInfo[instIdx];
-//   uint idx = indexBuffer[geo.indexOffset + PrimitiveIndex() * 3 + i];
-//   float3 pos = vertexBuffer[geo.vertexOffset + idx];
-//   float3 nrm = normalBuffer[geo.normalOffset + idx];
-// ============================================================================
-
-[[vk::binding(18, 0)]] StructuredBuffer<InstanceGeometryInfo> instanceGeometryInfo;
 
 // ============================================================================
 // CIE 1931 Color Matching Functions LUT (Binding 19)
@@ -285,56 +266,6 @@ float2 SafeNormalize2(float2 v, float2 fallback) {
         return fallback;
     }
     return v * rsqrt(lenSq);
-}
-
-// Maximum valid texture index (must match MAX_TEXTURES in RayTracingPipeline.cpp)
-// CRITICAL: This bounds check prevents GPU hangs from invalid descriptor access
-static const int MAX_TEXTURE_INDEX = 1024;
-
-// Ray tracing has no screen-space derivatives, so the mip level has to be
-// stated rather than inferred -- and every fetch here states 0.
-//
-// There used to be a ray-differential LOD path: the payload carried dD/dx and
-// dD/dy, and ComputeUVDifferentialX/Y turned them into a UV footprint. It never
-// worked and never ran. Both of those functions returned a hardcoded heuristic
-// (`float2(t * length(dDdx), 0) * 0.001`) rather than an actual UV gradient,
-// neither had a single caller, and the only path into the LOD computation passed
-// literal zeros -- whose log2 is -inf, so the clamp handed back LOD 0 anyway.
-// 24 of the payload's 56 bytes existed to feed it.
-//
-// Filtering the indirect bounces would want this back, and would want it
-// computed rather than guessed. Until then LOD 0 is what the renderer does, said
-// once, in one place.
-float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
-    // Check both lower AND upper bounds to prevent invalid descriptor access
-    // Invalid indices (negative or out-of-range) can cause GPU hangs with PARTIALLY_BOUND descriptors
-    if (textureIndex < 0 || textureIndex >= MAX_TEXTURE_INDEX) {
-        return fallback;
-    }
-    // Ensure sampler index is also valid (use same index as texture for 1:1 mapping)
-    if (samplerIndex < 0 || samplerIndex >= MAX_TEXTURE_INDEX) {
-        return fallback;
-    }
-    return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(
-        samplers[NonUniformResourceIndex(samplerIndex)], uv, 0.0
-    );
-}
-
-// ============================================================================
-// KHR_texture_transform
-// ============================================================================
-// One slot's UV transform, pre-multiplied by ConvertMaterial into the 2x3
-// affine this applies. The identity is (1,0,0,1) and (0,0), so a slot with no
-// transform returns its argument exactly -- no arithmetic that could round.
-//
-// Applied per slot rather than once to the interpolated UV because glTF puts
-// the transform on the textureInfo, not on the material: SheenChair's fabric
-// scales its base colour by 7 and its normal map by 2 in one material.
-// ============================================================================
-float2 TransformUV(MaterialData mat, int slot, float2 uv) {
-    const float4 m = mat.uvTransformMat[slot];
-    const float2 t = mat.uvTransformOffset[slot];
-    return float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + t;
 }
 
 // ============================================================================
