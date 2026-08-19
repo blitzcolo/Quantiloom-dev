@@ -23,6 +23,8 @@
  * - KHR_materials_transmission, KHR_materials_ior, KHR_materials_volume
  * - KHR_materials_dispersion (and the QUANTILOOM_materials_dispersion original)
  * - KHR_materials_sheen (factors and textures)
+ * - KHR_materials_specular, KHR_materials_anisotropy,
+ *   KHR_materials_clearcoat, KHR_materials_diffuse_transmission
  * - KHR_materials_variants (selected by name at load time, see GltfLoadOptions)
  * - KHR_texture_transform (per texture slot)
  * - QUANTILOOM_material_ir (measured IR curves, temperature field)
@@ -32,8 +34,10 @@
  * - Cameras/lights (use Quantiloom config instead)
  * - A second UV set: only TEXCOORD_0 is read, so a textureInfo naming
  *   texCoord 1 is warned about and sampled against set 0
- * - Other KHR_materials_* extensions (specular, clearcoat, ...),
- *   which are ignored silently
+ * - alphaMode MASK and BLEND, which parse but are not shaded -- there is no
+ *   any-hit stage, so a masked leaf renders as an opaque quad
+ * - Other KHR_materials_* extensions (iridescence, emissive_strength,
+ *   pbrSpecularGlossiness, ...), which are ignored silently
  *
  * Uses tinygltf library for glTF parsing.
  *

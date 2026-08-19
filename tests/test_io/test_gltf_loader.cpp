@@ -598,6 +598,231 @@ TEST_F(GltfLoaderTest, MaterialWithoutSheenKeepsTheDefaults) {
 }
 
 // ============================================================================
+// KHR_materials_specular / anisotropy / clearcoat / diffuse_transmission
+// ============================================================================
+
+// The user's cited target, and the asset that pins down channel packing: one
+// *_ormt image is bound to occlusion, metallicRoughness AND diffuse
+// transmission at once, so whether it may be marked sRGB is not a matter of
+// taste.
+TEST_F(GltfLoaderTest, ParsesDiffuseTransmissionFromTheTeacup) {
+    auto modelPath = GetModelPath("DiffuseTransmissionTeacup");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "DiffuseTransmissionTeacup model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    for (const auto& mat : scene.materials) {
+        EXPECT_FLOAT_EQ(mat.diffuseTransmissionFactor, 1.0f) << mat.name;
+        EXPECT_NEAR(mat.diffuseTransmissionColorFactor.r, 0.84f, 1e-3f) << mat.name;
+        EXPECT_NEAR(mat.diffuseTransmissionColorFactor.g, 0.80f, 1e-3f) << mat.name;
+        EXPECT_NEAR(mat.diffuseTransmissionColorFactor.b, 0.74f, 1e-3f) << mat.name;
+        EXPECT_TRUE(mat.HasDiffuseTransmission()) << mat.name;
+
+        // The factor texture is the ORM image, shared with metallicRoughness.
+        ASSERT_GE(mat.diffuseTransmissionTextureIndex, 0) << mat.name;
+        EXPECT_EQ(mat.diffuseTransmissionTextureIndex, mat.metallicRoughnessTextureIndex)
+            << "the teacup packs occlusion, roughness, metallic and transmission in one image";
+
+        // And it must NOT be sRGB. The transmission lives in alpha, which sRGB
+        // decoding would leave alone -- but roughness and metallic are in G and
+        // B of the same image, and those it would not.
+        ASSERT_LT(static_cast<size_t>(mat.diffuseTransmissionTextureIndex), scene.textures.size());
+        EXPECT_FALSE(scene.textures[mat.diffuseTransmissionTextureIndex].isSRGB)
+            << "marking the ORM image sRGB would gamma-mangle its roughness";
+
+        // No colour texture in this asset -- the factor-only tint path.
+        EXPECT_EQ(mat.diffuseTransmissionColorTextureIndex, -1) << mat.name;
+    }
+}
+
+// The complement of the teacup: a colour texture and no factor texture, at a
+// low factor, on a material that is also alphaMode MASK and doubleSided.
+TEST_F(GltfLoaderTest, ParsesDiffuseTransmissionColorTextureFromThePlant) {
+    auto modelPath = GetModelPath("DiffuseTransmissionPlant");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "DiffuseTransmissionPlant model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+
+    const Material* leaves = nullptr;
+    for (const auto& mat : scene.materials) {
+        if (mat.HasDiffuseTransmission()) {
+            leaves = &mat;
+            break;
+        }
+    }
+    ASSERT_NE(leaves, nullptr) << "expected one material with diffuse transmission";
+
+    EXPECT_NEAR(leaves->diffuseTransmissionFactor, 0.1f, 1e-3f);
+    EXPECT_EQ(leaves->diffuseTransmissionTextureIndex, -1);
+    ASSERT_GE(leaves->diffuseTransmissionColorTextureIndex, 0);
+
+    // The colour slot is the one that IS sRGB.
+    ASSERT_LT(static_cast<size_t>(leaves->diffuseTransmissionColorTextureIndex),
+              scene.textures.size());
+    EXPECT_TRUE(scene.textures[leaves->diffuseTransmissionColorTextureIndex].isSRGB);
+}
+
+// specularColorFactor may exceed 1, and SpecularSilkPouf authors [10, 0.6, 0].
+// The loader must carry it through unclamped -- the clamp belongs in the shader,
+// applied to f0_ior * specularColor before the specularFactor multiply, and
+// clamping here would make that ordering unobservable.
+TEST_F(GltfLoaderTest, ParsesAnHdrSpecularColorUnclamped) {
+    auto modelPath = GetModelPath("SpecularSilkPouf");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "SpecularSilkPouf model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    const Material& silk = scene.materials[0];
+    EXPECT_NEAR(silk.specularColorFactor.r, 10.0f, 1e-3f);
+    EXPECT_NEAR(silk.specularColorFactor.g, 0.6f, 1e-3f);
+    EXPECT_NEAR(silk.specularColorFactor.b, 0.0f, 1e-3f);
+    EXPECT_NEAR(silk.specularFactor, 0.5f, 1e-3f);
+    EXPECT_TRUE(silk.HasSpecular());
+}
+
+// GlamVelvetSofa's fabrics name specularColorFactor and nothing else, so this
+// is the case where the unnamed specularFactor must stay at its default of 1
+// rather than falling to zero -- and where an authored [0,0,0] colour has to
+// register as present.
+TEST_F(GltfLoaderTest, AnOmittedSpecularFactorKeepsTheGltfDefaultOfOne) {
+    auto modelPath = GetModelPath("GlamVelvetSofa");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "GlamVelvetSofa model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+
+    const Material* champagne = nullptr;
+    for (const auto& mat : scene.materials) {
+        if (mat.name.find("champagne") != std::string::npos) {
+            champagne = &mat;
+            break;
+        }
+    }
+    ASSERT_NE(champagne, nullptr);
+
+    EXPECT_FLOAT_EQ(champagne->specularFactor, 1.0f) << "not named by the asset, so still default";
+    EXPECT_FLOAT_EQ(champagne->specularColorFactor.r, 0.0f);
+    EXPECT_FLOAT_EQ(champagne->specularColorFactor.g, 0.0f);
+    EXPECT_FLOAT_EQ(champagne->specularColorFactor.b, 0.0f);
+    EXPECT_TRUE(champagne->HasSpecular()) << "zero specular colour is authored, not absent";
+}
+
+// AnisotropyBarnLamp puts anisotropy and clearcoat on one material, and points
+// the coat's normal map at the same texture as the base's -- which the
+// specification allows and which a per-slot parse has to keep separate.
+TEST_F(GltfLoaderTest, ParsesAnisotropyAndClearcoatTogetherFromTheBarnLamp) {
+    auto modelPath = GetModelPath("AnisotropyBarnLamp");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "AnisotropyBarnLamp model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+
+    const Material* metal = nullptr;
+    for (const auto& mat : scene.materials) {
+        if (mat.HasAnisotropy()) {
+            metal = &mat;
+            break;
+        }
+    }
+    ASSERT_NE(metal, nullptr) << "expected an anisotropic material";
+
+    EXPECT_FLOAT_EQ(metal->anisotropyStrength, 1.0f);
+    EXPECT_FLOAT_EQ(metal->anisotropyRotation, 0.0f);
+    EXPECT_GE(metal->anisotropyTextureIndex, 0);
+
+    EXPECT_NEAR(metal->clearcoatFactor, 0.25f, 1e-3f);
+    EXPECT_NEAR(metal->clearcoatRoughnessFactor, 0.15f, 1e-3f);
+    EXPECT_TRUE(metal->HasClearcoat());
+    EXPECT_EQ(metal->clearcoatNormalTextureIndex, metal->normalTextureIndex)
+        << "the coat shares the base's normal map in this asset";
+
+    // The anisotropy texture is linear: its RG carry a direction and its B a
+    // strength, none of which is a colour.
+    ASSERT_LT(static_cast<size_t>(metal->anisotropyTextureIndex), scene.textures.size());
+    EXPECT_FALSE(scene.textures[metal->anisotropyTextureIndex].isSRGB);
+}
+
+// ClearCoatTest authors three normal-map arrangements side by side. The one
+// that matters is a coat with no normal texture over a base that has one: the
+// coat must stay flat, so the absence has to survive parsing as -1.
+TEST_F(GltfLoaderTest, AClearcoatWithoutItsOwnNormalMapDoesNotInheritTheBases) {
+    auto modelPath = GetModelPath("ClearCoatTest");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "ClearCoatTest model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+
+    const Material* baseNorm = nullptr;
+    for (const auto& mat : scene.materials) {
+        if (mat.name.find("BaseNorm_Coated") != std::string::npos) {
+            baseNorm = &mat;
+            break;
+        }
+    }
+    ASSERT_NE(baseNorm, nullptr) << "expected the BaseNorm_Coated material";
+
+    EXPECT_GE(baseNorm->normalTextureIndex, 0) << "the base is normal mapped";
+    EXPECT_EQ(baseNorm->clearcoatNormalTextureIndex, -1)
+        << "the coat is not, and must not borrow the base's";
+    EXPECT_TRUE(baseNorm->HasClearcoat());
+}
+
+// A material with none of the four extensions must come back with the defaults
+// every shader term folds away on -- and specular's default is 1, not 0.
+TEST_F(GltfLoaderTest, MaterialWithoutTheNewExtensionsKeepsTheDefaults) {
+    auto modelPath = GetModelPath("BoxTextured");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "BoxTextured model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    for (const auto& mat : scene.materials) {
+        EXPECT_FLOAT_EQ(mat.specularFactor, 1.0f);
+        EXPECT_EQ(mat.specularColorFactor, glm::vec3(1.0f));
+        EXPECT_FLOAT_EQ(mat.anisotropyStrength, 0.0f);
+        EXPECT_FLOAT_EQ(mat.clearcoatFactor, 0.0f);
+        EXPECT_FLOAT_EQ(mat.clearcoatNormalScale, 1.0f);
+        EXPECT_FLOAT_EQ(mat.diffuseTransmissionFactor, 0.0f);
+        EXPECT_EQ(mat.diffuseTransmissionColorFactor, glm::vec3(1.0f));
+
+        EXPECT_FALSE(mat.HasSpecular());
+        EXPECT_FALSE(mat.HasAnisotropy());
+        EXPECT_FALSE(mat.HasClearcoat());
+        EXPECT_FALSE(mat.HasDiffuseTransmission());
+
+        EXPECT_TRUE(mat.clearcoatNormalUv.IsIdentity());
+        EXPECT_TRUE(mat.diffuseTransmissionColorUv.IsIdentity());
+    }
+}
+
+// ============================================================================
 // KHR_materials_variants
 // ============================================================================
 // Everything about this extension resolves by index. MaterialsVariantsShoe is

@@ -919,6 +919,255 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
         }
     }
 
+    // ========================================================================
+    // KHR_materials_specular (reshapes the dielectric Fresnel)
+    // ========================================================================
+    // glTF extension format:
+    //   "KHR_materials_specular": {
+    //     "specularFactor": 0.5,
+    //     "specularTexture": { "index": 1 },        // ALPHA channel
+    //     "specularColorFactor": [10, 0.6, 0.0],    // linear, MAY exceed 1
+    //     "specularColorTexture": { "index": 2 }    // RGB, sRGB-encoded
+    //   }
+    //
+    // Both factors default to their neutral element rather than to zero, and
+    // the defaults set in Material.hpp are those -- so an extension object that
+    // names only one of them leaves the other neutral, which is exactly what
+    // GlamVelvetSofa's fabrics rely on (specularColorFactor only, no factor).
+    // ========================================================================
+    if (auto specExtIt = gltfMaterial.extensions.find("KHR_materials_specular");
+        specExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_specular extension for material '{}'", mat.name);
+
+        const tinygltf::Value& specExt = specExtIt->second;
+
+        if (specExt.Has("specularFactor")) {
+            mat.specularFactor = static_cast<f32>(specExt.Get("specularFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    specularFactor: {:.3f}", mat.specularFactor);
+        }
+
+        if (specExt.Has("specularColorFactor")) {
+            if (const auto& colorVal = specExt.Get("specularColorFactor");
+                colorVal.IsArray() && colorVal.ArrayLen() >= 3) {
+                mat.specularColorFactor = glm::vec3(
+                    static_cast<f32>(colorVal.Get(0).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(1).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(2).GetNumberAsDouble())
+                );
+                QL_LOG_INFO("    specularColorFactor: [{:.3f}, {:.3f}, {:.3f}]",
+                            mat.specularColorFactor.r, mat.specularColorFactor.g,
+                            mat.specularColorFactor.b);
+            }
+        }
+
+        if (specExt.Has("specularTexture")) {
+            const auto& texInfo = specExt.Get("specularTexture");
+            if (texInfo.Has("index")) {
+                mat.specularTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    specularTexture: index {}", mat.specularTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.specularUv, mat.name, "specularTexture");
+        }
+
+        if (specExt.Has("specularColorTexture")) {
+            const auto& texInfo = specExt.Get("specularColorTexture");
+            if (texInfo.Has("index")) {
+                mat.specularColorTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    specularColorTexture: index {}", mat.specularColorTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.specularColorUv, mat.name,
+                                   "specularColorTexture");
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_anisotropy (stretches the GGX lobe along a tangent)
+    // ========================================================================
+    // glTF extension format:
+    //   "KHR_materials_anisotropy": {
+    //     "anisotropyStrength": 1.0,
+    //     "anisotropyRotation": 0.5236,             // radians, CCW
+    //     "anisotropyTexture": { "index": 3 }       // RG = direction, B = strength
+    //   }
+    //
+    // The specification's property table says the texture's blue channel is
+    // MULTIPLIED by anisotropyStrength. The sample viewer's GLSL snippet
+    // assigns it instead, and that snippet is non-normative -- following the
+    // table means a zero factor disables the extension outright, which is what
+    // the shader's activation test relies on.
+    // ========================================================================
+    if (auto anisoExtIt = gltfMaterial.extensions.find("KHR_materials_anisotropy");
+        anisoExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_anisotropy extension for material '{}'", mat.name);
+
+        const tinygltf::Value& anisoExt = anisoExtIt->second;
+
+        if (anisoExt.Has("anisotropyStrength")) {
+            mat.anisotropyStrength =
+                static_cast<f32>(anisoExt.Get("anisotropyStrength").GetNumberAsDouble());
+            QL_LOG_INFO("    anisotropyStrength: {:.3f}", mat.anisotropyStrength);
+        }
+
+        if (anisoExt.Has("anisotropyRotation")) {
+            mat.anisotropyRotation =
+                static_cast<f32>(anisoExt.Get("anisotropyRotation").GetNumberAsDouble());
+            QL_LOG_INFO("    anisotropyRotation: {:.4f} rad", mat.anisotropyRotation);
+        }
+
+        if (anisoExt.Has("anisotropyTexture")) {
+            const auto& texInfo = anisoExt.Get("anisotropyTexture");
+            if (texInfo.Has("index")) {
+                mat.anisotropyTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    anisotropyTexture: index {}", mat.anisotropyTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.anisotropyUv, mat.name, "anisotropyTexture");
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_clearcoat (a thin dielectric coat with its own normal)
+    // ========================================================================
+    // glTF extension format:
+    //   "KHR_materials_clearcoat": {
+    //     "clearcoatFactor": 0.25,
+    //     "clearcoatTexture": { "index": 4 },              // R channel
+    //     "clearcoatRoughnessFactor": 0.15,
+    //     "clearcoatRoughnessTexture": { "index": 5 },     // G channel
+    //     "clearcoatNormalTexture": { "index": 0, "scale": 0.2 }
+    //   }
+    //
+    // clearcoatNormalTexture is a normalTextureInfo, but it arrives nested
+    // inside an extension object, so tinygltf hands it over as a raw Value
+    // rather than as a NormalTextureInfo -- its `scale` has to be read by hand,
+    // defaulting to 1 rather than to 0.
+    //
+    // Its absence is meaningful: the coat is then NOT normal mapped, even where
+    // the base material is. ClearCoatTest's BaseNorm_Coated is authored to
+    // catch an implementation that reuses the base's normal map here.
+    // ========================================================================
+    if (auto coatExtIt = gltfMaterial.extensions.find("KHR_materials_clearcoat");
+        coatExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_clearcoat extension for material '{}'", mat.name);
+
+        const tinygltf::Value& coatExt = coatExtIt->second;
+
+        if (coatExt.Has("clearcoatFactor")) {
+            mat.clearcoatFactor =
+                static_cast<f32>(coatExt.Get("clearcoatFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    clearcoatFactor: {:.3f}", mat.clearcoatFactor);
+        }
+
+        if (coatExt.Has("clearcoatRoughnessFactor")) {
+            mat.clearcoatRoughnessFactor =
+                static_cast<f32>(coatExt.Get("clearcoatRoughnessFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    clearcoatRoughnessFactor: {:.3f}", mat.clearcoatRoughnessFactor);
+        }
+
+        if (coatExt.Has("clearcoatTexture")) {
+            const auto& texInfo = coatExt.Get("clearcoatTexture");
+            if (texInfo.Has("index")) {
+                mat.clearcoatTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    clearcoatTexture: index {}", mat.clearcoatTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.clearcoatUv, mat.name, "clearcoatTexture");
+        }
+
+        if (coatExt.Has("clearcoatRoughnessTexture")) {
+            const auto& texInfo = coatExt.Get("clearcoatRoughnessTexture");
+            if (texInfo.Has("index")) {
+                mat.clearcoatRoughnessTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    clearcoatRoughnessTexture: index {}",
+                            mat.clearcoatRoughnessTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.clearcoatRoughnessUv, mat.name,
+                                   "clearcoatRoughnessTexture");
+        }
+
+        if (coatExt.Has("clearcoatNormalTexture")) {
+            const auto& texInfo = coatExt.Get("clearcoatNormalTexture");
+            if (texInfo.Has("index")) {
+                mat.clearcoatNormalTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    clearcoatNormalTexture: index {}",
+                            mat.clearcoatNormalTextureIndex);
+            }
+            if (texInfo.Has("scale")) {
+                mat.clearcoatNormalScale =
+                    static_cast<f32>(texInfo.Get("scale").GetNumberAsDouble());
+                QL_LOG_INFO("    clearcoatNormalTexture scale: {:.3f}", mat.clearcoatNormalScale);
+            }
+            ParseNestedUvTransform(texInfo, mat.clearcoatNormalUv, mat.name,
+                                   "clearcoatNormalTexture");
+        }
+    }
+
+    // ========================================================================
+    // KHR_materials_diffuse_transmission (a Lambertian BTDF on a thin surface)
+    // ========================================================================
+    // glTF extension format:
+    //   "KHR_materials_diffuse_transmission": {
+    //     "diffuseTransmissionFactor": 1.0,
+    //     "diffuseTransmissionTexture": { "index": 2 },        // ALPHA channel
+    //     "diffuseTransmissionColorFactor": [0.84, 0.8, 0.74],
+    //     "diffuseTransmissionColorTexture": { "index": 5 }    // RGB, sRGB
+    //   }
+    //
+    // DiffuseTransmissionTeacup binds one image -- named *_ormt -- to the
+    // occlusion, metallicRoughness AND diffuseTransmission slots at once: R is
+    // occlusion, G roughness, B metallic, A the transmission. That is why the
+    // sRGB pass below marks the COLOUR slot only. Marking this one would gamma-
+    // mangle the roughness and metallic the same image carries.
+    // ========================================================================
+    if (auto dtExtIt = gltfMaterial.extensions.find("KHR_materials_diffuse_transmission");
+        dtExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_diffuse_transmission extension for material '{}'",
+                    mat.name);
+
+        const tinygltf::Value& dtExt = dtExtIt->second;
+
+        if (dtExt.Has("diffuseTransmissionFactor")) {
+            mat.diffuseTransmissionFactor =
+                static_cast<f32>(dtExt.Get("diffuseTransmissionFactor").GetNumberAsDouble());
+            QL_LOG_INFO("    diffuseTransmissionFactor: {:.3f}", mat.diffuseTransmissionFactor);
+        }
+
+        if (dtExt.Has("diffuseTransmissionColorFactor")) {
+            if (const auto& colorVal = dtExt.Get("diffuseTransmissionColorFactor");
+                colorVal.IsArray() && colorVal.ArrayLen() >= 3) {
+                mat.diffuseTransmissionColorFactor = glm::vec3(
+                    static_cast<f32>(colorVal.Get(0).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(1).GetNumberAsDouble()),
+                    static_cast<f32>(colorVal.Get(2).GetNumberAsDouble())
+                );
+                QL_LOG_INFO("    diffuseTransmissionColorFactor: [{:.3f}, {:.3f}, {:.3f}]",
+                            mat.diffuseTransmissionColorFactor.r,
+                            mat.diffuseTransmissionColorFactor.g,
+                            mat.diffuseTransmissionColorFactor.b);
+            }
+        }
+
+        if (dtExt.Has("diffuseTransmissionTexture")) {
+            const auto& texInfo = dtExt.Get("diffuseTransmissionTexture");
+            if (texInfo.Has("index")) {
+                mat.diffuseTransmissionTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    diffuseTransmissionTexture: index {}",
+                            mat.diffuseTransmissionTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.diffuseTransmissionUv, mat.name,
+                                   "diffuseTransmissionTexture");
+        }
+
+        if (dtExt.Has("diffuseTransmissionColorTexture")) {
+            const auto& texInfo = dtExt.Get("diffuseTransmissionColorTexture");
+            if (texInfo.Has("index")) {
+                mat.diffuseTransmissionColorTextureIndex = texInfo.Get("index").GetNumberAsInt();
+                QL_LOG_INFO("    diffuseTransmissionColorTexture: index {}",
+                            mat.diffuseTransmissionColorTextureIndex);
+            }
+            ParseNestedUvTransform(texInfo, mat.diffuseTransmissionColorUv, mat.name,
+                                   "diffuseTransmissionColorTexture");
+        }
+    }
+
     QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
                 mat.name, mat.metallicFactor, mat.roughnessFactor);
 
@@ -1082,6 +1331,21 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
                 primitive.tangents = ReadAccessor<glm::vec4>(gltfModelPtr, tangIt->second);
                 QL_LOG_INFO("    Loaded {} tangents", primitive.tangents.size());
             }
+        }
+
+        // Anisotropy is the one material feature whose appearance depends on
+        // the tangent DIRECTION rather than just on having a frame. Without a
+        // TANGENT attribute the renderer synthesises one per vertex; it is
+        // continuous, which is enough for a normal map, but its rotation within
+        // the surface is arbitrary, so the highlight points somewhere the
+        // author did not choose. Nothing downstream can detect that, which is
+        // why it is said here.
+        if (primitive.tangents.empty() && inRange(static_cast<int>(primitive.materialId)) &&
+            model.materials[primitive.materialId].extensions.count(
+                "KHR_materials_anisotropy") > 0) {
+            QL_LOG_WARN("    Primitive {} of mesh '{}' uses an anisotropic material but has no "
+                        "TANGENT attribute; the highlight direction will be arbitrary",
+                        primIdx, mesh.name);
         }
 
         // Indices (required for indexed geometry)
@@ -1302,6 +1566,20 @@ Result<Scene, String> GltfLoader::LoadFromFile(const String& path,
             scene.textures[mat.sheenColorTextureIndex].isSRGB = true;
             QL_LOG_DEBUG("  [DEBUG] Marked texture {} (sheenColor) as sRGB", mat.sheenColorTextureIndex);
         }
+        if (mat.specularColorTextureIndex >= 0 && mat.specularColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.specularColorTextureIndex].isSRGB = true;
+            QL_LOG_DEBUG("  [DEBUG] Marked texture {} (specularColor) as sRGB", mat.specularColorTextureIndex);
+        }
+        if (mat.diffuseTransmissionColorTextureIndex >= 0 && mat.diffuseTransmissionColorTextureIndex < static_cast<int>(scene.textures.size())) {
+            scene.textures[mat.diffuseTransmissionColorTextureIndex].isSRGB = true;
+            QL_LOG_DEBUG("  [DEBUG] Marked texture {} (diffuseTransmissionColor) as sRGB",
+                         mat.diffuseTransmissionColorTextureIndex);
+        }
+        // Deliberately absent: specularTexture, diffuseTransmissionTexture,
+        // clearcoat*, anisotropyTexture. All linear, and two of them routinely
+        // share an image with a slot that is not -- DiffuseTransmissionTeacup
+        // binds one *_ormt image to occlusion, metallicRoughness AND diffuse
+        // transmission, so marking it here would gamma-mangle its roughness.
     }
 
     // Parallel BC7 compression (if available)
