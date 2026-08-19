@@ -365,3 +365,94 @@ TEST(DiffuseTransmission, SplitsTheDiffuseWithoutCreatingEnergy) {
 TEST(DiffuseTransmission, AZeroFactorLeavesTheDiffuseExactlyUntouched) {
     EXPECT_EQ(1.0 - 0.0, 1.0);
 }
+
+// ============================================================================
+// glTF alphaMode
+// ============================================================================
+// The any-hit shader's decision, re-derived here. It cannot be run from a unit
+// test -- it is a ray-tracing stage -- so what this pins is the arithmetic
+// either side of IgnoreHit(): what counts as coverage, and what the thermal
+// view-factor pass averages that coverage into.
+
+namespace {
+
+/// SurfaceAlpha in hit_common.hlsli: the factor's alpha times the texture's.
+double SurfaceAlpha(double factorAlpha, double textureAlpha) {
+    return factorAlpha * textureAlpha;
+}
+
+/// The mean coverage ComputeMaterialCoverage builds for the thermal pass.
+/// MASK counts texels at or above the cutoff -- the binary test the any-hit
+/// applies -- while BLEND averages the alpha, which is the probability it is
+/// committed with.
+double MeanCoverage(const std::vector<double>& texelAlpha, bool mask, double cutoff) {
+    if (texelAlpha.empty()) {
+        return 1.0;
+    }
+    double sum = 0.0;
+    for (const double a : texelAlpha) {
+        sum += mask ? (a >= cutoff ? 1.0 : 0.0) : a;
+    }
+    return sum / static_cast<double>(texelAlpha.size());
+}
+
+}  // namespace
+
+// An untextured material must fall through unchanged, which is what the
+// sampler's alpha-1 fallback is for: without it every material with no base
+// colour texture would read as fully transparent.
+TEST(AlphaMode, AnUntexturedSurfaceIsFullyCovered) {
+    EXPECT_EQ(SurfaceAlpha(1.0, 1.0), 1.0);
+    // And a factor below the cutoff removes the whole surface, texture or not.
+    EXPECT_LT(SurfaceAlpha(0.25, 1.0), 0.5);
+}
+
+// MASK is binary at the cutoff, not a fade across it. glTF is explicit, and it
+// is the difference between a crisp leaf edge and a smeared one.
+TEST(AlphaMode, MaskIsBinaryAtTheCutoff) {
+    const double cutoff = 0.5;
+    EXPECT_TRUE(SurfaceAlpha(1.0, 0.4999) < cutoff);
+    EXPECT_FALSE(SurfaceAlpha(1.0, 0.5000) < cutoff);
+    EXPECT_FALSE(SurfaceAlpha(1.0, 0.9) < cutoff);
+}
+
+// The stochastic BLEND test keeps a surface with probability alpha, so its
+// expectation over samples is alpha itself. That is what makes raising the
+// sample count reduce variance without moving the mean.
+TEST(AlphaMode, BlendKeepsASurfaceWithProbabilityAlpha) {
+    for (const double alpha : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+        // Sweeping xi uniformly over [0,1) and counting `xi < alpha` is the
+        // estimator's expectation, evaluated exactly.
+        constexpr int kSteps = 100000;
+        int kept = 0;
+        for (int i = 0; i < kSteps; ++i) {
+            const double xi = (i + 0.5) / kSteps;
+            if (xi < alpha) {
+                ++kept;
+            }
+        }
+        EXPECT_NEAR(static_cast<double>(kept) / kSteps, alpha, 1e-4) << "alpha " << alpha;
+    }
+}
+
+// The thermal view-factor pass averages coverage per material rather than
+// testing per texel. For MASK that average is the fraction of texels that
+// survive the cutoff, which is the fraction of the leaf that is actually there.
+TEST(AlphaMode, MeanCoverageCountsWhatSurvivesTheCutoff) {
+    // Six texels, four of them above a cutoff of 0.5.
+    const std::vector<double> texels{0.9, 0.8, 0.6, 0.51, 0.2, 0.0};
+    EXPECT_NEAR(MeanCoverage(texels, /*mask=*/true, 0.5), 4.0 / 6.0, 1e-12);
+
+    // The same texels under BLEND average their alpha instead, because that is
+    // the probability each is committed with.
+    const double blended = (0.9 + 0.8 + 0.6 + 0.51 + 0.2 + 0.0) / 6.0;
+    EXPECT_NEAR(MeanCoverage(texels, /*mask=*/false, 0.5), blended, 1e-12);
+}
+
+// A material with no texture is solid, and an occluder the pass knows nothing
+// about must not become invisible by default -- treating it as fully covered is
+// the conservative answer.
+TEST(AlphaMode, MeanCoverageDefaultsToSolid) {
+    EXPECT_EQ(MeanCoverage({}, true, 0.5), 1.0);
+    EXPECT_EQ(MeanCoverage({}, false, 0.5), 1.0);
+}

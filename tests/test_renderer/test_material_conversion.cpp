@@ -373,6 +373,7 @@ TEST(RenderCoreConvertMaterial, CarriesThePbrFactorsThrough) {
     mat.roughnessFactor = 0.75f;
     mat.doubleSided = true;
     mat.alphaCutoff = 0.3f;
+    mat.alphaMode = Material::AlphaMode::Mask;
 
     const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
 
@@ -380,6 +381,9 @@ TEST(RenderCoreConvertMaterial, CarriesThePbrFactorsThrough) {
     EXPECT_FLOAT_EQ(gpu.roughnessFactor, 0.75f);
     EXPECT_EQ(gpu.doubleSided, 1u);
     EXPECT_FLOAT_EQ(gpu.alphaCutoff, 0.3f);
+    // The field the any-hit shader branches on. It was uploaded and never
+    // checked until the shader started reading it.
+    EXPECT_EQ(gpu.alphaMode, static_cast<u32>(Material::AlphaMode::Mask));
 }
 
 // ============================================================================

@@ -661,6 +661,13 @@ TEST_F(GltfLoaderTest, ParsesDiffuseTransmissionColorTextureFromThePlant) {
     }
     ASSERT_NE(leaves, nullptr) << "expected one material with diffuse transmission";
 
+    // The leaves are also the repo's only checked-in alphaMode MASK material,
+    // which is what gives the any-hit stage something to cut holes in.
+    EXPECT_EQ(leaves->alphaMode, Material::AlphaMode::Mask)
+        << "alphaMode came back as " << static_cast<int>(leaves->alphaMode);
+    EXPECT_GT(leaves->alphaCutoff, 0.0f);
+    EXPECT_TRUE(leaves->doubleSided) << "masked foliage is authored double-sided";
+
     EXPECT_NEAR(leaves->diffuseTransmissionFactor, 0.1f, 1e-3f);
     EXPECT_EQ(leaves->diffuseTransmissionTextureIndex, -1);
     ASSERT_GE(leaves->diffuseTransmissionColorTextureIndex, 0);
