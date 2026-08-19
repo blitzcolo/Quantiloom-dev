@@ -972,6 +972,10 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             mat.endmemberCurveIndex3 = it->second.curves[3];
             mat.weightTextureIndex = it->second.weightTextureIndex;
         }
+        if (auto it = spectra.bandAveragedIREmissivity.find(mat.name);
+            it != spectra.bandAveragedIREmissivity.end()) {
+            mat.bandAveragedIREmissivity = it->second;
+        }
     }
 
     // 4. Render state before the scene, so the one rebuild AdoptScene triggers

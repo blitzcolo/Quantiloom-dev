@@ -24,6 +24,9 @@ namespace quantiloom::rendercore {
 namespace {
 
 f32 EmissivityOf(const Material& material) {
+    if (material.bandAveragedIREmissivity >= 0.0f) {
+        return material.bandAveragedIREmissivity;
+    }
     if (!material.irEmissivityCurve.empty()) {
         return material.irEmissivityCurve.front().second;
     }

@@ -26,6 +26,9 @@ namespace {
 /// uses. Taken rather than typed again so the balance and the camera agree
 /// about what a surface radiates.
 f32 EmissivityOf(const Material& material) {
+    if (material.bandAveragedIREmissivity >= 0.0f) {
+        return material.bandAveragedIREmissivity;
+    }
     if (!material.irEmissivityCurve.empty()) {
         return material.irEmissivityCurve.front().second;
     }

@@ -213,6 +213,12 @@ struct ResolvedMaterialSpectra {
     /// nothing in the shader reads.
     std::unordered_map<String, thermal::ThermalMaterial> thermalMaterials;
 
+    /// Band-averaged LWIR emissivity per material, Planck-weighted at 300 K.
+    /// Computed during ref resolution from the reconstructed LWIR reflectance
+    /// curve. Written onto Material::bandAveragedIREmissivity by whoever
+    /// adopts the scene so both ThermalSolver and ThermalPreview see it.
+    std::unordered_map<String, f32> bandAveragedIREmissivity;
+
     u32 temperatureBackfilled = 0;
     u32 materialsOverridden = 0;
     u32 nodesTransformed = 0;

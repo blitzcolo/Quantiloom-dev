@@ -7,6 +7,7 @@
 
 #include "renderer/ConfigResolve.hpp"
 
+#include "core/Blackbody.hpp"
 #include "core/SkyThermal.hpp"
 
 #include "core/Log.hpp"
@@ -1557,6 +1558,47 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 if (slots.count > 1) {
                     QL_LOG_INFO("    Mixture of {} endmembers", slots.count);
                 }
+
+                // Compute Planck-weighted band-averaged LWIR emissivity for the
+                // thermal solver.  For a single endmember the curve IS the surface;
+                // for a mixture we weight the endmembers equally (the area-anchored
+                // mean unmix weight is 1/count by construction).
+                {
+                    constexpr f64 kLwirMinNm = 8000.0;
+                    constexpr f64 kLwirMaxNm = 12000.0;
+                    constexpr f64 kSolverT = 300.0;
+
+                    f64 rhoSum = 0.0;
+                    i32 rhoCount = 0;
+
+                    // Collect all endmember refs (primary + extras)
+                    Vector<String> allRefs;
+                    allRefs.push_back(mat.quantiloomMaterialRef);
+                    for (const auto& r : mat.quantiloomExtraRefs)
+                        allRefs.push_back(r);
+
+                    for (const auto& ref : allRefs) {
+                        SpectralCurve lwirCurve = basisLoader.ReconstructCurve(ref, "LWIR");
+                        if (!lwirCurve.samples.empty()) {
+                            rhoSum += blackbody::PlanckWeightedBandAverage(
+                                lwirCurve, kLwirMinNm, kLwirMaxNm, kSolverT);
+                            ++rhoCount;
+                        }
+                    }
+
+                    if (rhoCount > 0) {
+                        const f64 meanRho = rhoSum / rhoCount;
+                        const f64 tau = mat.irTransmittanceCurve.empty()
+                            ? 0.0
+                            : static_cast<f64>(mat.GetIRTransmittance(10000.0f));
+                        const f32 eps = static_cast<f32>(
+                            std::clamp(1.0 - meanRho - tau, 0.0, 1.0));
+                        out.bandAveragedIREmissivity[mat.name] = eps;
+                        QL_LOG_INFO("    Solver band emissivity '{}' = {:.4f} (Planck {}K, {}-{}nm)",
+                                    mat.name, eps, static_cast<i32>(kSolverT),
+                                    static_cast<i32>(kLwirMinNm), static_cast<i32>(kLwirMaxNm));
+                    }
+                }
             }
         } else {
             diag.Warn("spectral.basis_file",
@@ -1577,7 +1619,20 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     QL_LOG_INFO("Loading complex refractive index data...");
 
     if (config.HasSection("refractive_index")) {
+        // Band edges for the active spectral mode, used to resample n,k to
+        // the render band and to validate source coverage.
+        struct BandRange { f32 minNm; f32 maxNm; };
+        const auto activeBandCRI = config.Get<String>("spectral.band", "VIS");
+        BandRange activeBandRange{400.0f, 780.0f};
+        if (activeBandCRI == "LWIR") activeBandRange = {8000.0f, 12000.0f};
+        else if (activeBandCRI == "MWIR") activeBandRange = {3000.0f, 5000.0f};
+        else if (activeBandCRI == "SWIR") activeBandRange = {1400.0f, 2400.0f};
+        else if (activeBandCRI == "NIR")  activeBandRange = {930.0f, 1200.0f};
+
+        const bool allowPartialNK = config.Get<bool>("refractive_index.allow_partial_nk", false);
+
         for (const auto& [materialName, yamlPath] : config.GetSection("refractive_index")) {
+            if (materialName == "allow_partial_nk") continue;
             QL_LOG_INFO("  Loading n,k data for '{}' from '{}'", materialName, yamlPath);
 
             auto result =
@@ -1588,17 +1643,40 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             }
 
             ComplexRefractiveIndex cri = result.value();
-            ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
+            const auto [lambda_min, lambda_max] = cri.GetWavelengthRange();
+
+            // Coverage validation: source must span the active render band
+            if (lambda_min > activeBandRange.minNm || lambda_max < activeBandRange.maxNm) {
+                String msg = "    n,k '" + materialName + "' covers [" +
+                    std::to_string(static_cast<int>(lambda_min)) + ", " +
+                    std::to_string(static_cast<int>(lambda_max)) + "] nm but the active band " +
+                    activeBandCRI + " requires [" +
+                    std::to_string(static_cast<int>(activeBandRange.minNm)) + ", " +
+                    std::to_string(static_cast<int>(activeBandRange.maxNm)) + "] nm";
+                if (allowPartialNK) {
+                    diag.Warn("refractive_index", msg + " -- allowed by allow_partial_nk");
+                } else {
+                    diag.Fatal("refractive_index", msg);
+                    continue;
+                }
+            }
+
+            // Resample to the active band's range for maximum resolution
+            ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPUBand(
+                cri, activeBandRange.minNm, activeBandRange.maxNm);
+            if (gpuCRI.numSamples == 0) {
+                gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
+            }
 
             const i32 criIndex = static_cast<i32>(out.refractiveIndices.size());
             out.materialNameToRefractiveIndex[materialName] = criIndex;
             out.refractiveIndices.push_back(gpuCRI);
 
-            const auto [lambda_min, lambda_max] = cri.GetWavelengthRange();
             const f32 F0_550 = cri.FresnelR0(550.0f);
             QL_LOG_INFO("    Loaded: {} samples, λ=[{:.1f}, {:.1f}] nm, F0@550nm={:.3f} "
                         "→ CRI index {}",
-                        gpuCRI.numSamples, lambda_min, lambda_max, F0_550, criIndex);
+                        gpuCRI.numSamples, gpuCRI.startWavelength_nm,
+                        gpuCRI.GetWavelength(gpuCRI.numSamples - 1), F0_550, criIndex);
         }
     }
 

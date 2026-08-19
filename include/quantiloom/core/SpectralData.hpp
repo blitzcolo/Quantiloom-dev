@@ -413,7 +413,7 @@ struct ComplexRefractiveIndexGPU {
         return numerator / denominator;
     }
 
-    // Convert from CPU ComplexRefractiveIndex
+    // Convert from CPU ComplexRefractiveIndex (full source range)
     static ComplexRefractiveIndexGPU FromCPU(const ComplexRefractiveIndex& cri,
                                               u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
         ComplexRefractiveIndexGPU gpu;
@@ -432,6 +432,36 @@ struct ComplexRefractiveIndexGPU {
 
         for (u32 i = 0; i < targetSamples; ++i) {
             const f32 lambda = lambda_min + static_cast<f32>(i) * gpu.stepSize_nm;
+            auto [n_val, k_val] = cri.Evaluate(lambda);
+            gpu.n[i] = n_val;
+            gpu.k[i] = k_val;
+        }
+
+        return gpu;
+    }
+
+    // Convert from CPU ComplexRefractiveIndex, resampled to a specific band
+    // Returns a table with numSamples=0 if the source does not cover the band
+    static ComplexRefractiveIndexGPU FromCPUBand(const ComplexRefractiveIndex& cri,
+                                                 f32 bandMinNm, f32 bandMaxNm,
+                                                 u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
+        ComplexRefractiveIndexGPU gpu;
+
+        if (cri.wavelengths_nm.empty()) return gpu;
+        auto [srcMin, srcMax] = cri.GetWavelengthRange();
+
+        if (srcMax < bandMinNm || srcMin > bandMaxNm) return gpu;
+        if (srcMin > bandMinNm || srcMax < bandMaxNm) return gpu;
+
+        targetSamples = std::min(targetSamples, MAX_SPECTRAL_SAMPLES);
+        if (targetSamples < 2) targetSamples = 2;
+
+        gpu.startWavelength_nm = bandMinNm;
+        gpu.stepSize_nm = (bandMaxNm - bandMinNm) / static_cast<f32>(targetSamples - 1);
+        gpu.numSamples = targetSamples;
+
+        for (u32 i = 0; i < targetSamples; ++i) {
+            const f32 lambda = bandMinNm + static_cast<f32>(i) * gpu.stepSize_nm;
             auto [n_val, k_val] = cri.Evaluate(lambda);
             gpu.n[i] = n_val;
             gpu.k[i] = k_val;

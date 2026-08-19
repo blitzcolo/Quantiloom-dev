@@ -219,6 +219,13 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     }
     spectra = std::move(spectraResult.value());
 
+    for (auto& mat : loadedScene.materials) {
+        if (auto it = spectra.bandAveragedIREmissivity.find(mat.name);
+            it != spectra.bandAveragedIREmissivity.end()) {
+            mat.bandAveragedIREmissivity = it->second;
+        }
+    }
+
     // Endmember weight maps, unmixed out of the base colours. Here because it
     // needs both what the resolve just produced (the endmember colours) and
     // what the upload is about to destroy (the base-colour pixels): the window

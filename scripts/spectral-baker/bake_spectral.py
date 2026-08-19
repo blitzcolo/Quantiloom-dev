@@ -53,6 +53,9 @@ from refractiveindex_loader import (
 from ecostress_loader import (
     discover_ecostress_materials
 )
+from slum_loader import (
+    load_slum_materials
+)
 from spectral_processor import (
     BandConfig,
     NMFConfig,
@@ -172,8 +175,49 @@ def load_materials_from_config(config: dict, args, config_dir: Optional[Path] = 
         if args.max_materials and len(materials) > args.max_materials:
             materials = materials[:args.max_materials]
 
+    elif source_type == 'slum':
+        slum_dir = input_cfg.get('slum_data_dir', 'data/slum')
+        if config_dir:
+            slum_dir = str(config_dir / slum_dir)
+
+        logger.info(f"Loading materials from SLUM: {slum_dir}")
+        materials = load_slum_materials(slum_dir)
+        if args.max_materials and len(materials) > args.max_materials:
+            materials = materials[:args.max_materials]
+
+    elif source_type == 'merged':
+        sources = input_cfg.get('sources', [])
+        if not sources:
+            raise ValueError("source_type='merged' requires [input.sources] list")
+
+        materials = []
+        for src in sources:
+            sub_cfg = {'input': src}
+            sub_mats = load_materials_from_config(sub_cfg, args, config_dir)
+            logger.info(f"  Sub-source '{src.get('source_type', '?')}': {len(sub_mats)} materials")
+            materials.extend(sub_mats)
+
+        # Check for cross-source name collisions.  Within-source duplicates
+        # (e.g. ECOSTRESS has multiple spectra for Quercus agrifolia) are
+        # handled by the exporter's suffix logic (exporter.py:213-220) and
+        # are not a merge bug.  What we catch here is an ECOSTRESS name that
+        # matches a SLUM name, which would mean the namespace prefix failed.
+        seen_by_source: dict = {}
+        cross_dupes = []
+        for mat in materials:
+            src_key = mat.instrument
+            prev_src = seen_by_source.get(mat.name)
+            if prev_src is not None and prev_src != src_key:
+                cross_dupes.append(mat.name)
+            if prev_src is None:
+                seen_by_source[mat.name] = src_key
+        if cross_dupes:
+            raise ValueError(
+                f"Cross-source name collision — namespace prefixes should prevent this: {cross_dupes[:5]}"
+            )
+
     else:
-        raise ValueError(f"Unknown source_type: {source_type}. Must be 'usgs', 'refractiveindex', or 'ecostress'")
+        raise ValueError(f"Unknown source_type: {source_type}. Must be 'usgs', 'refractiveindex', 'ecostress', 'slum', or 'merged'")
 
     logger.info(f"Loaded {len(materials)} materials from {source_type}")
 
@@ -286,9 +330,26 @@ def cmd_scan(args, config: dict):
             hi = max(m.wavelength_range[1] for m in materials)
             print(f"\nWavelength coverage (union): {lo:.3f} - {hi:.3f} µm")
 
+    elif source_type in ('slum', 'merged'):
+        materials = load_materials_from_config(config, args, config_dir)
+
+        chapter_counts = {}
+        for mat in materials:
+            chapter_counts[mat.chapter] = chapter_counts.get(mat.chapter, 0) + 1
+
+        print(f"\nUsable spectra: {len(materials)}")
+        print(f"\nBy Category:")
+        for chapter in sorted(chapter_counts.keys()):
+            print(f"  {chapter or '(none)'}: {chapter_counts[chapter]}")
+
+        if materials:
+            lo = min(m.wavelength_range[0] for m in materials)
+            hi = max(m.wavelength_range[1] for m in materials)
+            print(f"\nWavelength coverage (union): {lo:.3f} - {hi:.3f} µm")
+
     else:
         logger.error(f"Unknown source_type: {source_type}. "
-                     f"Must be 'usgs', 'refractiveindex', or 'ecostress'")
+                     f"Must be 'usgs', 'refractiveindex', 'ecostress', 'slum', or 'merged'")
         return 1
 
     print("=" * 60 + "\n")

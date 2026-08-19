@@ -2193,6 +2193,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float rho_b = reflectance;
         if (material.spectralReflectanceCurveIndex >= 0) {
             rho_b = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
+        } else if (material.complexRefractiveIndexIndex >= 0) {
+            float2 nk = SampleComplexRefractiveIndex(
+                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
+            rho_b = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                  / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
         }
 
         // The base is the loop's own sky radiance, at lambda_b. Continuous in
@@ -2243,8 +2248,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
+            } else if (material.complexRefractiveIndexIndex >= 0) {
+                float2 nk = SampleComplexRefractiveIndex(
+                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
+                rho_lambda = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                           / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
             } else {
-                // Fallback: use IR reflectance from energy conservation
                 rho_lambda = reflectance;
             }
 
@@ -2373,10 +2382,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - NIR_LAMBDA_MIN) / lambda_step),
                                             0.0, float(NUM_NIR_SAMPLES - 1));
 
-        // Reflectance at lambda_b, by the same rule the loop uses.
-        const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
-            ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
-            : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
+        float rho_b;
+        if (material.spectralReflectanceCurveIndex >= 0) {
+            rho_b = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
+        } else if (material.complexRefractiveIndexIndex >= 0) {
+            float2 nk = SampleComplexRefractiveIndex(
+                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
+            rho_b = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                  / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
+        } else {
+            rho_b = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
+        }
 
         const float L_base_b = hasSpectralSolarLUT
             ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
@@ -2421,11 +2437,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 2. Get spectral reflectance at this wavelength
             float rho_lambda;
             if (material.spectralReflectanceCurveIndex >= 0) {
-                // Quantitative path: use measured spectral curve
                 rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
+            } else if (material.complexRefractiveIndexIndex >= 0) {
+                float2 nk = SampleComplexRefractiveIndex(
+                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
+                rho_lambda = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                           / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
             } else {
-                // Fallback: RGB upsampling (NIR is close enough to visible for this to be reasonable)
-                // This uses Gaussian basis functions centered at R/G/B wavelengths
                 rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
             }
 
@@ -2592,11 +2610,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
                                             0.0, float(NUM_IR_SAMPLES - 1));
 
-        // Reflectance at lambda_b, by the same rule the loop uses.
         float rho_b = reflectance;
         if (material.spectralReflectanceCurveIndex >= 0) {
             float rho_curve = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
             float eps_b = saturate(1.0 - rho_curve - material.irTransmittance);
+            rho_b = GetAngleDependentIRReflectance(eps_b, material.irTransmittance,
+                                                   NdotV, material.metallicFactor);
+        } else if (material.complexRefractiveIndexIndex >= 0) {
+            float2 nk = SampleComplexRefractiveIndex(
+                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
+            float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                     / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
+            float eps_b = saturate(1.0 - R0 - material.irTransmittance);
             rho_b = GetAngleDependentIRReflectance(eps_b, material.irTransmittance,
                                                    NdotV, material.metallicFactor);
         }
@@ -2636,6 +2661,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (material.spectralReflectanceCurveIndex >= 0) {
                 float rho_l = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
                 float eps_l = saturate(1.0 - rho_l - material.irTransmittance);
+                emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
+                reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
+                                                              NdotV, material.metallicFactor);
+            } else if (material.complexRefractiveIndexIndex >= 0) {
+                float2 nk = SampleComplexRefractiveIndex(
+                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
+                float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
+                         / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
+                float eps_l = saturate(1.0 - R0 - material.irTransmittance);
                 emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
                 reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
                                                               NdotV, material.metallicFactor);

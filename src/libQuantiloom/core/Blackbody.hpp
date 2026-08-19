@@ -95,4 +95,50 @@ inline constexpr f64 kMaxInvertibleK = 3000.0;
 [[nodiscard]] f64 InvertBandAverageRadiance(f64 bandAverageRadiance, f64 lambdaMinNm,
                                             f64 lambdaMaxNm, i32 nodes = kBandNodes);
 
+/**
+ * @brief Planck-weighted band-averaged reflectance of a spectral curve
+ *
+ * <rho>_B = integral(rho(lambda) * B(lambda, T)) / integral(B(lambda, T))
+ *
+ * Uses the same trapezoid quadrature as BandAverageRadiance (matching the
+ * shader's integration) and evaluates the curve via linear interpolation.
+ * T0 = 300 K is representative of surface temperatures in this experiment
+ * (260-320 K); the normalised Planck weight changes shape slowly over that
+ * range, making the result insensitive to T within ~0.005 for realistic
+ * urban-surface curves.
+ *
+ * @tparam Curve  Anything with an `f32 Evaluate(f32 lambda_nm) const` method
+ *                (e.g. SpectralCurve)
+ * @param curve          Reflectance curve
+ * @param lambdaMinNm    Lower edge of the integration band (nm)
+ * @param lambdaMaxNm    Upper edge of the integration band (nm)
+ * @param temperatureK   Planck weighting temperature (default 300 K)
+ * @param nodes          Quadrature node count (default kBandNodes = 16)
+ * @return Band-averaged reflectance in [0, 1]
+ */
+template <typename Curve>
+[[nodiscard]] f64 PlanckWeightedBandAverage(
+    const Curve& curve,
+    f64 lambdaMinNm, f64 lambdaMaxNm,
+    f64 temperatureK = 300.0, i32 nodes = kBandNodes)
+{
+    if (nodes < 2) return static_cast<f64>(curve.Evaluate(static_cast<f32>(0.5 * (lambdaMinNm + lambdaMaxNm))));
+
+    const f64 step = (lambdaMaxNm - lambdaMinNm) / (nodes - 1);
+    f64 sumRhoB = 0.0;
+    f64 sumB = 0.0;
+
+    for (i32 i = 0; i < nodes; ++i) {
+        const f64 lambda = lambdaMinNm + i * step;
+        const f64 B = SpectralRadiancePerNm(lambda, temperatureK);
+        const f64 rho = static_cast<f64>(curve.Evaluate(static_cast<f32>(lambda)));
+        const f64 w = (i == 0 || i == nodes - 1) ? 0.5 : 1.0;
+        sumRhoB += w * rho * B;
+        sumB += w * B;
+    }
+
+    if (sumB <= 0.0) return 0.0;
+    return sumRhoB / sumB;
+}
+
 }  // namespace quantiloom::blackbody

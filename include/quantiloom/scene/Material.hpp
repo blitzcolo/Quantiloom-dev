@@ -316,6 +316,12 @@ struct QL_API Material {
     i32 endmemberCurveIndex3 = -1;
     i32 weightTextureIndex = -1;
 
+    // Planck-weighted band-averaged emissivity for the LWIR thermal solver.
+    // Computed by ConfigResolve from the material's spectral ref (if bound):
+    //   eps = 1 - <rho>_Planck(8-12um, 300K) - tau
+    // Sentinel -1 means "not computed; fall back to the heuristic".
+    f32 bandAveragedIREmissivity = -1.0f;
+
     // ========================================================================
     // BRDF Model Selection (CPU-side analytical evaluation)
     // ========================================================================
