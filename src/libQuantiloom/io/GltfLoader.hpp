@@ -27,6 +27,12 @@
  *   KHR_materials_clearcoat, KHR_materials_diffuse_transmission
  * - KHR_materials_variants (selected by name at load time, see GltfLoadOptions)
  * - KHR_texture_transform (per texture slot)
+ * - alphaMode MASK and BLEND, through an any-hit stage. MASK is a binary test
+ *   against alphaCutoff; BLEND is stochastic, so it is noisy at low sample
+ *   counts and unbiased. A material with KHR_materials_transmission keeps its
+ *   refraction and is treated as opaque by the alpha path -- coverage and
+ *   refraction are different physics and applying both removes the surface
+ *   twice.
  * - QUANTILOOM_material_ir (measured IR curves, temperature field)
  *
  * NOT supported:
@@ -34,12 +40,20 @@
  * - Cameras/lights (use Quantiloom config instead)
  * - A second UV set: only TEXCOORD_0 is read, so a textureInfo naming
  *   texCoord 1 is warned about and sampled against set 0
- * - alphaMode MASK and BLEND, which parse but are not shaded -- there is no
- *   any-hit stage, so a masked leaf renders as an opaque quad
  * - Other KHR_materials_* extensions (iridescence, emissive_strength,
  *   pbrSpecularGlossiness, ...), which are ignored silently
  *
  * Uses tinygltf library for glTF parsing.
+ *
+ * Two things about alpha are worth knowing before relying on it:
+ *
+ * - Whether a surface may be alpha-tested is baked into its acceleration
+ *   structure, so a host that flips alphaMode at runtime has to rebuild the
+ *   geometry. ExternalRenderContext::UpdateMaterial does this for you when the
+ *   classification actually changes.
+ * - The base colour texture of a non-opaque material keeps its CPU pixels after
+ *   upload, because the thermal view-factor precompute averages their alpha
+ *   into a per-material coverage. Only non-opaque materials pay that memory.
  *
  * @note Returns Result<Scene, String> for explicit error handling
  * @note Scene graph flattened to world space (no hierarchy preserved)

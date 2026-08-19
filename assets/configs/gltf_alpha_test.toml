@@ -1,0 +1,81 @@
+# ============================================================================
+# Quantiloom - glTF alphaMode MASK and BLEND test scene
+# ============================================================================
+# AlphaBlendModeTest is the canonical grid: a ladder of alpha values across
+# both modes, so the two failure shapes are visible side by side.
+#
+# What to look for:
+#
+#   MASK    a crisp boundary at alphaCutoff, with nothing in between. It is
+#           binary by specification, and an implementation that faded across
+#           the cutoff would look softer and be wrong.
+#   BLEND   partial coverage, resolved by being present for a fraction of the
+#           samples equal to alpha. So it is NOISY at low sample counts and the
+#           noise falls as spp rises, without the mean moving. If raising spp
+#           changes the brightness rather than the grain, the estimator is
+#           biased.
+#
+# Two other assets worth pointing this at:
+#
+#   DiffuseTransmissionPlant  the repo's masked-foliage case, and the one
+#                             worth rendering in MWIR: a hole must show what is
+#                             behind it at that thing's own temperature, not
+#                             black. Frame it from about [0, 0.5, 1.2].
+#   GlassBrokenWindow         transmission and MASK on one asset, which is the
+#                             regression for the rule below.
+#
+# ============================================================================
+# Coverage is not transmission
+# ============================================================================
+# A material with KHR_materials_transmission is treated as opaque by the alpha
+# path and keeps its refraction. The two are different physics: transmission
+# bends the ray, splits it by Fresnel and attenuates it through the medium,
+# while alpha coverage lets the ray continue straight, unbent and
+# unattenuated. Running both would remove the surface twice, and glTF's own
+# guidance is that a transmissive material should be authored alphaMode
+# OPAQUE.
+#
+# Alpha has no wavelength -- it is coverage, not a spectrum -- so this behaves
+# identically in every band. That is why there is no per-band note here, unlike
+# every other material extension in this directory.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 128                       # BLEND is stochastic; the grain is the point
+output = "gltf_alpha_output.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/AlphaBlendModeTest/glTF/AlphaBlendModeTest.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 0.0, 6.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 30.0
+
+[lighting]
+sun_direction = [0.3, 0.5, 0.8]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.3, 0.3, 0.3]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 260.0
+
+[material]
+albedo = [0.8, 0.8, 0.8]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
