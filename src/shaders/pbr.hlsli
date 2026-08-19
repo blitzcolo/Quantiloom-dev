@@ -214,22 +214,75 @@ float VisibilitySmithGGXCorrelatedIBL(float NdotV, float NdotL, float roughness)
 // ============================================================================
 
 float3 ComputeF0(float3 albedo, float metallic,
-                 int complexRefractiveIndexIndex, float wavelength_nm) {
+                 int complexRefractiveIndexIndex, float wavelength_nm,
+                 float3 dielectricF0) {
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         float F0_physical = FresnelF0(nk.x, nk.y);
         return float3(F0_physical, F0_physical, F0_physical);
     }
-    return lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    return lerp(dielectricF0, albedo, metallic);
 }
 
 float ComputeF0_Scalar(float spectralAlbedo, float metallic,
-                       int complexRefractiveIndexIndex, float wavelength_nm) {
+                       int complexRefractiveIndexIndex, float wavelength_nm,
+                       float dielectricF0) {
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         return FresnelF0(nk.x, nk.y);
     }
-    return lerp(0.04, spectralAlbedo, metallic);
+    return lerp(dielectricF0, spectralAlbedo, metallic);
+}
+
+// ============================================================================
+// KHR_materials_specular: the dielectric F0 and F90
+// ============================================================================
+// What used to be the hardcoded 0.04 above. The specification composes it as
+//
+//   f0_ior = ((ior - 1) / (ior + 1))^2          -- exactly 0.04 at ior 1.5
+//   F0     = min(f0_ior * specularColor, 1) * specularWeight
+//   F90    = specularWeight
+//
+// Two things about that expression are load-bearing.
+//
+// The clamp comes BEFORE the specularWeight multiply. specularColor is allowed
+// to exceed 1 and assets use it -- SpecularSilkPouf authors [10, 0.6, 0] to
+// saturate the red channel's F0 while leaving green at 0.024 and blue at zero.
+// Clamping the product instead lets red out at more than a mirror.
+//
+// F90 is separate because specular scales the whole Fresnel curve rather than
+// just its normal-incidence end. A surface with specularWeight 0 reflects
+// nothing even at grazing, where the usual Schlick form would still go to 1.
+// That is why FresnelSchlickF90 exists as a distinct function rather than as an
+// overload of FresnelSchlick -- pbr.hlsli's own header records what happened
+// the last time a same-named Fresnel overload was added.
+//
+// Also note this is the first time material.ior reaches the reflective F0 at
+// all. It used to drive only refraction, so a glass with ior 1.33 reflected as
+// if it were 1.5. At the default ior these agree to within a bit.
+// ============================================================================
+
+float3 DielectricF0RGB(float ior, float3 specularColor, float specularWeight) {
+    float f = (ior - 1.0) / (ior + 1.0);
+    return min(f * f * specularColor, 1.0) * specularWeight;
+}
+
+float DielectricF0Scalar(float ior, float specularColor, float specularWeight) {
+    float f = (ior - 1.0) / (ior + 1.0);
+    return min(f * f * specularColor, 1.0) * specularWeight;
+}
+
+// Schlick with an explicit F90. Deliberately NOT an overload of FresnelSchlick:
+// that one takes (cosTheta, F0) and a same-named three-argument sibling is
+// exactly the shape that silently bound the wrong way once already.
+float FresnelSchlickF90(float cosTheta, float F0, float F90) {
+    float f = pow(saturate(1.0 - cosTheta), 5.0);
+    return F0 + (F90 - F0) * f;
+}
+
+float3 FresnelSchlickF90RGB(float cosTheta, float3 F0, float F90) {
+    float f = pow(saturate(1.0 - cosTheta), 5.0);
+    return F0 + (F90.xxx - F0) * f;
 }
 
 // ============================================================================
@@ -462,7 +515,9 @@ float3 CookTorranceBRDF(
     float metallic,
     float roughness,
     int complexRefractiveIndexIndex,
-    float wavelength_nm
+    float wavelength_nm,
+    float3 dielectricF0,
+    float F90
 ) {
     // OPTIMIZATION: Clamp minimum roughness to prevent numerical instability
     // Perfectly smooth surfaces (roughness=0) lead to Dirac delta distribution
@@ -483,13 +538,17 @@ float3 CookTorranceBRDF(
 
     // Compute F0 (reflectance at normal incidence)
     // Uses physical n,k data when available for wavelength-accurate metals
-    float3 F0 = ComputeF0(albedo, metallic, complexRefractiveIndexIndex, wavelength_nm);
+    float3 F0 = ComputeF0(albedo, metallic, complexRefractiveIndexIndex, wavelength_nm,
+                          dielectricF0);
 
     // ========================================================================
     // Specular Term (Cook-Torrance microfacet BRDF) - OPTIMIZED
     // ========================================================================
 
-    // Fresnel term: use exact conductor Fresnel when n,k data is available
+    // Fresnel term: use exact conductor Fresnel when n,k data is available.
+    // A measured n,k wins over the specular extension outright -- the extension
+    // is an authoring control over a fitted dielectric, and there is nothing to
+    // fit when the material carries a measurement.
     float3 F;
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
@@ -497,7 +556,7 @@ float3 CookTorranceBRDF(
                    FresnelConductor(VdotH, nk.x, nk.y),
                    FresnelConductor(VdotH, nk.x, nk.y));
     } else {
-        F = FresnelSchlickRGB(VdotH, F0);
+        F = FresnelSchlickF90RGB(VdotH, F0, F90);
     }
 
     // Normal distribution function (GGX)
@@ -518,6 +577,13 @@ float3 CookTorranceBRDF(
 
     // Energy conservation: kD = 1 - kS (where kS = F)
     // For metals, diffuse contribution is zero (kD = 0)
+    //
+    // Per channel, where the glTF specular specification says
+    // 1 - max_value(fresnel). That max exists so an RGB engine does not shift
+    // hue when specularColor is chromatic; this renderer's authoritative paths
+    // are per-wavelength scalars, where per-channel IS the physical answer and
+    // a max over three primaries would be the approximation. Keeping it per
+    // channel also leaves every existing render untouched.
     float3 kD = (1.0 - F) * (1.0 - metallic);
 
     // Lambertian diffuse BRDF: albedo / π
@@ -548,7 +614,9 @@ float CookTorranceBRDF_Spectral(
     float metallic,
     float roughness,
     int complexRefractiveIndexIndex,
-    float wavelength_nm
+    float wavelength_nm,
+    float dielectricF0,
+    float F90
 ) {
     const float MIN_ROUGHNESS = 0.045;
     roughness = max(roughness, MIN_ROUGHNESS);
@@ -561,14 +629,15 @@ float CookTorranceBRDF_Spectral(
     float VdotH = max(dot(V, H), 0.0);
 
     // Compute F0 and Fresnel term
-    float F0 = ComputeF0_Scalar(spectralAlbedo, metallic, complexRefractiveIndexIndex, wavelength_nm);
+    float F0 = ComputeF0_Scalar(spectralAlbedo, metallic, complexRefractiveIndexIndex,
+                                wavelength_nm, dielectricF0);
 
     float F;
     if (complexRefractiveIndexIndex >= 0 && wavelength_nm > 0.0) {
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, complexRefractiveIndexIndex, wavelength_nm);
         F = FresnelConductor(VdotH, nk.x, nk.y);
     } else {
-        F = FresnelSchlick(VdotH, F0);
+        F = FresnelSchlickF90(VdotH, F0, F90);
     }
 
     float alpha = roughness * roughness;

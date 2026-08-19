@@ -542,7 +542,30 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 //   float3 F0 - normal incidence reflectance (replicated to RGB for non-spectral)
 // ============================================================================
 
-float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic, float wavelength_nm) {
+// An RGB reflectance quantity read at one wavelength, by treating its channels
+// as samples at the sRGB primaries (450 / 550 / 650 nm) and interpolating.
+//
+// Crude, and deliberately so: it is only ever applied to F0, which is a fitted
+// dielectric constant or a metal's albedo -- neither of which is a measurement
+// this renderer could reconstruct instead. A material that has measured n,k
+// never reaches here. Shared so the two sites that need it cannot drift apart,
+// and so the specular extension's F0 crosses wavelength the same way the base
+// F0 already did.
+float InterpolateRgbToWavelength(float3 rgb, float lambda) {
+    if (lambda < 450.0) {
+        return rgb.b;
+    }
+    if (lambda < 500.0) {
+        return lerp(rgb.b, rgb.g, (lambda - 450.0) / 50.0);
+    }
+    if (lambda < 600.0) {
+        return lerp(rgb.g, rgb.r, (lambda - 500.0) / 100.0);
+    }
+    return rgb.r;
+}
+
+float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic,
+                         float wavelength_nm, float3 dielectricF0) {
     if (material.complexRefractiveIndexIndex >= 0) {
         // PHYSICAL PATH: Use measured n,k data from RefractiveIndex.INFO
         float2 nk = SampleComplexRefractiveIndex(complexRefractiveIndices, material.complexRefractiveIndexIndex, wavelength_nm);
@@ -558,9 +581,10 @@ float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic, f
     }
 
     // PBR PATH: Standard approximation
-    // Dielectrics: F0 ≈ 0.04 (glass, plastic, water)
+    // Dielectrics: F0 from the ior and KHR_materials_specular (0.04 at the
+    //              default ior of 1.5 with the extension's neutral factors)
     // Metals: F0 = albedo (color tinting from base color)
-    return lerp(float3(0.04, 0.04, 0.04), albedo, metallic);
+    return lerp(dielectricF0, albedo, metallic);
 }
 
 // Compute full Fresnel reflectance at arbitrary angle using physical n,k data
@@ -1239,6 +1263,49 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            float3(0.0, 0.0, 1.0))), 0.0);
     const float sheenE = hasSheen ? SheenAlbedo(sheenNdotV, sheenRoughness) : 0.0;
 
+    // ========================================================================
+    // Specular (KHR_materials_specular)
+    // ========================================================================
+    // Not a lobe -- the dielectric F0 and F90 every band below builds its
+    // Fresnel from. The weight lives in the ALPHA channel of its texture and
+    // the colour in the RGB of another, both multiplying their factors.
+    //
+    // The defaults are 1 and white, which reproduce the 0.04 that was hardcoded
+    // here before, so a material without the extension is unchanged.
+    float3 specularColor = material.specularColorFactor;
+    if (material.specularColorTextureIndex >= 0) {
+        specularColor *= SampleTexture(
+            material.specularColorTextureIndex,
+            material.specularColorTextureIndex,
+            TransformUV(material, UV_SLOT_SPECULAR_COLOR, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).rgb;
+    }
+
+    float specularWeight = material.specularFactor;
+    if (material.specularTextureIndex >= 0) {
+        specularWeight *= SampleTexture(
+            material.specularTextureIndex,
+            material.specularTextureIndex,
+            TransformUV(material, UV_SLOT_SPECULAR, uv),
+            float4(1.0, 1.0, 1.0, 1.0)
+        ).a;
+    }
+
+    // F0 for a dielectric, and the F90 that goes with it. Every Fresnel below
+    // takes these two rather than a literal, so the extension reaches the
+    // direct lobe, the diffuse weight kD, the bounce's lobe selection and the
+    // split-sum ambient together -- which is the only way they stay consistent.
+    //
+    // Both are mixed toward the metal by `metallic`, because the specification
+    // applies this extension to the dielectric BRDF only and then mixes the two
+    // BRDFs by that same factor. F0 gets it from the lerp toward albedo inside
+    // ComputeF0; F90 needs it spelled out, or a gold surface with an authored
+    // specularWeight of 0.5 would lose half its grazing reflectance -- and gold
+    // is not what the author was describing.
+    const float3 dielectricF0 = DielectricF0RGB(material.ior, specularColor, specularWeight);
+    const float specularF90 = lerp(specularWeight, 1.0, metallic);
+
     // If a BSDF-sampled bounce landed here and this surface emits, the vertex
     // that sent the ray also sampled the emitters explicitly, and both would
     // report the same light. Keep the share the power heuristic gives this
@@ -1326,7 +1393,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute PBR BRDF (Cook-Torrance)
     float3 albedo = baseColor.rgb;
-    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm);
+    float3 brdf = CookTorranceBRDF(normal, V, L, albedo, metallic, roughness, material.complexRefractiveIndexIndex, pushConsts.camera.wavelength_nm, dielectricF0, specularF90);
 
     // Sheen, layered over the base and paid for by scaling it down. The
     // specification drives the scaling from the largest colour component; the
@@ -1427,7 +1494,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute F0 (reflectance at normal incidence) for Fresnel calculations
     // Uses physical n,k data when available for wavelength-accurate metal reflections
-    float3 F0 = ComputePhysicalF0(material, albedo, metallic, pushConsts.camera.wavelength_nm);
+    float3 F0 = ComputePhysicalF0(material, albedo, metallic, pushConsts.camera.wavelength_nm, dielectricF0);
 
     // ------------------------------------------------------------------------
     // Sky Radiance Hemispherical Integration (Diffuse Ambient)
@@ -1464,7 +1531,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
 
     // Compute diffuse reflection coefficient (energy conservation with specular)
-    float3 kD = (1.0 - FresnelSchlickRGB(max(dot(normal, V), 0.0), F0)) * (1.0 - metallic);
+    float3 kD = (1.0 - FresnelSchlickF90RGB(max(dot(normal, V), 0.0), F0, specularF90)) * (1.0 - metallic);
 
     // Hemispherical integration with Lambertian BRDF
     // Factor of π from hemisphere integral cancels with π in BRDF denominator
@@ -1556,13 +1623,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 5. Split-sum approximation
         //    L_ibl = ∫ L(l) * BRDF(l,v) * (n·l) dl
         //          ≈ (∫ L(l) * (n·l) dl) * (∫ BRDF(l,v) * (n·l) dl)
-        //          ≈ prefilteredColor * (F0 * envBRDF.x + envBRDF.y)
+        //          ≈ prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y)
         //
         //    Where:
         //    - envBRDF.x (scale): multiplies F0 (Fresnel at normal incidence)
         //    - envBRDF.y (bias): constant offset for grazing angles
         //    NOTE: F0 is computed outside this block using physical n,k data when available
-        iblSpecular = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+        iblSpecular = prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y);
 
         // 6. Energy conservation: for metals, reduce diffuse contribution
         //    (already handled by kD term in skyAmbient calculation above)
@@ -1714,14 +1781,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
                 : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
 
-            float F0_b;
-            if (lambda_b < 450.0)      F0_b = F0.b;
-            else if (lambda_b < 500.0) F0_b = lerp(F0.b, F0.g, (lambda_b - 450.0) / 50.0);
-            else if (lambda_b < 600.0) F0_b = lerp(F0.g, F0.r, (lambda_b - 500.0) / 100.0);
-            else                       F0_b = F0.r;
+            const float F0_b = InterpolateRgbToWavelength(F0, lambda_b);
 
             const float NdotV_b = max(dot(normal, V), 0.0);
-            const float F_b     = FresnelSchlick(NdotV_b, F0_b);
+            const float F_b     = FresnelSchlickF90(NdotV_b, F0_b, specularF90);
             const float kD_b    = (1.0 - F_b) * (1.0 - metallic);
 
             // Sheen at lambda_b, folded into the cosine lobe rather than given
@@ -1758,7 +1821,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // diffuse term is identically zero, gets no bounce at all there.
             // Lifting this needs the miss shader to sample the map.
             const float qSpec_b = (useIBL && !hasEnvMap)
-                ? clamp(lerp(FresnelSchlick(NdotV_b, (F0.r + F0.g + F0.b) / 3.0), 1.0, metallic),
+                ? clamp(lerp(FresnelSchlickF90(NdotV_b, (F0.r + F0.g + F0.b) / 3.0, specularF90), 1.0, metallic),
                         0.05, 1.0)
                 : 0.0;
 
@@ -1895,7 +1958,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 SheenAlbedoScaling(rhoSheen_lambda, sheenNdotV, sheenRoughness);
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
-            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda);
+            float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda,
+                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90);
             brdf_lambda *= sheenScale_lambda;
             if (hasSheen) {
                 // The real Charlie lobe: the sun is a delta light and is not
@@ -1924,26 +1988,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             //   550nm (green) → F0.g
             //   650nm (red) → F0.r
             //
-            float F0_at_lambda;
-            if (lambda < 500.0) {
-                // Blue-to-green interpolation (450-500nm)
-                float t = clamp((lambda - 450.0) / 50.0, 0.0, 1.0);
-                F0_at_lambda = lerp(F0.b, F0.g, t);
-            } else if (lambda < 600.0) {
-                // Green-to-red interpolation (500-600nm)
-                float t = clamp((lambda - 500.0) / 100.0, 0.0, 1.0);
-                F0_at_lambda = lerp(F0.g, F0.r, t);
-            } else {
-                // Red region (600nm+)
-                F0_at_lambda = F0.r;
-            }
-            // Handle edge cases below blue wavelength
-            if (lambda < 450.0) {
-                F0_at_lambda = F0.b;
-            }
+            float F0_at_lambda = InterpolateRgbToWavelength(F0, lambda);
 
             float NdotV_ambient = max(dot(normal, V), 0.0);
-            float F_ambient = FresnelSchlick(NdotV_ambient, F0_at_lambda);  // Wavelength-dependent Fresnel
+            float F_ambient = FresnelSchlickF90(NdotV_ambient, F0_at_lambda, specularF90);
             float kD_lambda = (1.0 - F_ambient) * (1.0 - metallic);
             // Lambertian BRDF = ρ/π, hemisphere integral = π, so π cancels
             // sky_radiance_lambda is already radiance (W·sr⁻¹·m⁻²·nm⁻¹)
@@ -1965,7 +2013,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float L_ibl = 0.0;
             if (useIBL) {
                 if (hasEnvMap) {
-                    float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+                    float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y);
                     L_ibl = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
                 } else {
                     // Uniform analytic sky dome, kept on the measured solar LUT:
@@ -1974,7 +2022,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // the RGB triple instead would substitute an arbitrary-unit
                     // average for the illuminant this mode exists to integrate.
                     L_ibl = sky_radiance_lambda *
-                            (F0_at_lambda * envBRDF.x + envBRDF.y);
+                            (F0_at_lambda * envBRDF.x + specularF90 * envBRDF.y);
                 }
                 // Specular is part of the base, so it pays the same toll.
                 L_ibl *= sheenScale_lambda;
@@ -2191,7 +2239,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             metallic,
             roughness,
             material.complexRefractiveIndexIndex,
-            lambda
+            lambda,
+            InterpolateRgbToWavelength(dielectricF0, lambda),
+            specularF90
         );
 
         brdf_scalar *= sheenScale_s;
@@ -2210,8 +2260,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)
-        float3 F0_scalar = lerp(float3(0.04, 0.04, 0.04), float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
-        float3 F_scalar = FresnelSchlickRGB(max(dot(normal, V), 0.0), F0_scalar);
+        float3 F0_scalar = lerp(dielectricF0, float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
+        float3 F_scalar = FresnelSchlickF90RGB(max(dot(normal, V), 0.0), F0_scalar, specularF90);
         float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
 
         // No 1/PI here. skyRadiance_lambda is already E_sky/PI -- the conversion
@@ -2236,12 +2286,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float ibl_scalar = 0.0;
         if (useIBL_scalar) {
             if (hasEnvMap) {
-                float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + envBRDF.y);
+                float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y);
                 ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
             } else {
                 // Uniform analytic sky dome on the solar LUT, as VIS_FUSED.
                 ibl_scalar = skyRadiance_lambda *
-                             (F0_scalar.r * envBRDF.x + envBRDF.y);
+                             (F0_scalar.r * envBRDF.x + specularF90 * envBRDF.y);
             }
             ibl_scalar *= sheenScale_s;  // specular is base, and pays the toll
         }
