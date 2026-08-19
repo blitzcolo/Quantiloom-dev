@@ -504,26 +504,46 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 //   float3 F0 - normal incidence reflectance (replicated to RGB for non-spectral)
 // ============================================================================
 
-// An RGB reflectance quantity read at one wavelength, by treating its channels
-// as samples at the sRGB primaries (450 / 550 / 650 nm) and interpolating.
+// An RGB reflectance read at one wavelength.
 //
-// Crude, and deliberately so: it is only ever applied to F0, which is a fitted
-// dielectric constant or a metal's albedo -- neither of which is a measurement
-// this renderer could reconstruct instead. A material that has measured n,k
-// never reaches here. Shared so the two sites that need it cannot drift apart,
-// and so the specular extension's F0 crosses wavelength the same way the base
-// F0 already did.
-float InterpolateRgbToWavelength(float3 rgb, float lambda) {
-    if (lambda < 450.0) {
-        return rgb.b;
+// F0 is a reflectance -- the fraction reflected at normal incidence -- so it
+// upsamples the way every other RGB reflectance in this renderer does, through
+// ConvertLinearRGBToSpectrum. It used to have a mapping of its own: a piecewise
+// linear interpolation treating the channels as samples at 450 / 550 / 650 nm,
+// inherited from tinting a metal's F0 across wavelength. That left two RGB
+// reflectances in one shader obeying two different rules, so a material whose
+// sheen colour and specular colour were the same triple rendered as two
+// different spectra.
+//
+// The two differ in a way that is easy to state. The upsampler normalises by
+// the sum of its three bases, which makes its output a weighted average of the
+// channels -- so it can never leave the interval [min(rgb), max(rgb)], and a
+// colour with a dip in the middle, like magenta, comes back with that dip
+// partly filled. The piecewise mapping keeps the dip but ignores blue entirely
+// above 500 nm and red entirely below it.
+//
+// Measured against a round trip through the CIE matching functions, the
+// upsampler is the better of the two everywhere and enormously better on
+// saturated warm colours: SheenChair's mango velvet, authored [1, 0.329, 0.1],
+// comes back 15.4% off through the upsampler and 39.7% off through the
+// piecewise map, which returns nearly double the green it was given. The one
+// case where piecewise holds its own is exactly the magenta dip, where the two
+// tie on total error and it is better in the green channel alone.
+//
+// Neither is good. Both sit at 15 to 40 percent round-trip error, which is what
+// an RGB reflectance costs when it is not a measurement; a material that has
+// measured n,k never reaches here, and SpectralConversion.hlsli names the
+// Jakob-Hanika sigmoid method as the upgrade that would fix it properly.
+//
+// The achromatic early-out is not an optimisation. Every dielectric without
+// KHR_materials_specular has an F0 of (0.04, 0.04, 0.04), including every scene
+// the furnace and illumination gates render, and returning it without going
+// through a division is what keeps those bit-identical.
+float RgbReflectanceAtWavelength(float3 rgb, float lambda) {
+    if (rgb.r == rgb.g && rgb.g == rgb.b) {
+        return rgb.r;
     }
-    if (lambda < 500.0) {
-        return lerp(rgb.b, rgb.g, (lambda - 450.0) / 50.0);
-    }
-    if (lambda < 600.0) {
-        return lerp(rgb.g, rgb.r, (lambda - 500.0) / 100.0);
-    }
-    return rgb.r;
+    return ConvertLinearRGBToSpectrum(rgb, lambda);
 }
 
 float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic,
@@ -2021,7 +2041,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
                 : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
 
-            const float F0_b = InterpolateRgbToWavelength(F0, lambda_b);
+            const float F0_b = RgbReflectanceAtWavelength(F0, lambda_b);
 
             const float NdotV_b = max(dot(normal, V), 0.0);
             const float F_b     = FresnelSchlickF90(NdotV_b, F0_b, specularF90);
@@ -2225,7 +2245,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda,
-                                                          InterpolateRgbToWavelength(dielectricF0, lambda), specularF90, aniso, dtBase);
+                                                          RgbReflectanceAtWavelength(dielectricF0, lambda), specularF90, aniso, dtBase);
             brdf_lambda *= sheenScale_lambda;
             if (hasSheen) {
                 // The real Charlie lobe: the sun is a delta light and is not
@@ -2258,7 +2278,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             //   550nm (green) → F0.g
             //   650nm (red) → F0.r
             //
-            float F0_at_lambda = InterpolateRgbToWavelength(F0, lambda);
+            float F0_at_lambda = RgbReflectanceAtWavelength(F0, lambda);
 
             float NdotV_ambient = max(dot(normal, V), 0.0);
             float F_ambient = FresnelSchlickF90(NdotV_ambient, F0_at_lambda, specularF90);
@@ -2527,7 +2547,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             roughness,
             material.complexRefractiveIndexIndex,
             lambda,
-            InterpolateRgbToWavelength(dielectricF0, lambda),
+            RgbReflectanceAtWavelength(dielectricF0, lambda),
             specularF90,
             aniso,
             dtBase
