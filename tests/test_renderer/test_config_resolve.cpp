@@ -569,6 +569,41 @@ TEST_F(ConfigResolveTest, DefaultTemperatureBackfillsMaterialsInThermalModes) {
     EXPECT_FLOAT_EQ(scene.materials[0].irTemperature_K, 310.0f);
 }
 
+// NIR was missing from the list of bands that demand measured spectra, which
+// is how it ended up as the one band that upsampled a base colour into the
+// infrared. It got away with it because the Gaussian mapping's tail decayed to
+// nearly nothing out there, so the band reported almost nothing by accident.
+// The shader now falls back to ir_emissivity instead, and this is the gate that
+// says a scene without measured data is not quantitative in NIR either.
+TEST_F(ConfigResolveTest, NirRequiresMeasuredSpectraLikeTheOtherInfraredBands) {
+    auto config = Parse({.spectralKeys = "mode = \"nir_fused\"\n",
+                         .trailing = "[quality]\nfail_on_srgb_upsample = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_TRUE(resolved.value().failOnSrgbUpsample);
+
+    Scene scene = MakeSceneWithMaterials({"Wall"});
+    scene.materials[0].spectralSource = Material::SpectralSource::RGBUpsampled;
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    EXPECT_FALSE(spectra.has_value())
+        << "an RGB-only material should fail the quantitative gate in NIR";
+}
+
+// The same scene in RGB mode is a preview and has nothing to prove.
+TEST_F(ConfigResolveTest, RgbModeDoesNotDemandMeasuredSpectra) {
+    auto config = Parse({.spectralKeys = "mode = \"rgb\"\n",
+                         .trailing = "[quality]\nfail_on_srgb_upsample = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Wall"});
+    scene.materials[0].spectralSource = Material::SpectralSource::RGBUpsampled;
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    EXPECT_TRUE(spectra.has_value()) << spectra.error();
+}
+
 TEST_F(ConfigResolveTest, NoTemperatureBackfillInRgbMode) {
     auto config = Parse({.spectralKeys = "mode = \"rgb\"\n"});
     auto resolved = ResolveStrict(config);

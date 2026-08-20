@@ -56,6 +56,66 @@ and multiplied by a band average. One ray either way.
 RGB mode has none of this and spawns no bounce ray from an opaque surface. It is
 the interactive preview; leave it that way.
 
+## An RGB colour has one spectral meaning, and only inside 380-780 nm
+
+Reflectance and illuminant both go through Jakob & Hanika: a sigmoid of a
+quadratic in wavelength, three coefficients read from the table on binding 25.
+`core/RgbToSpectrum.hpp` has the fit; what matters when editing a shader is the
+shape of the API and the two rules around it.
+
+```hlsl
+float4 s = FetchRgbSpectrum(rgbToSpectrumTable, rgb);   // once per colour
+float  r = RgbSpectrumAt(s, lambda);                    // once per wavelength
+```
+
+**Fetch outside the wavelength loop.** The coefficients depend only on the
+colour. VIS_FUSED reads up to five reflectances and three illuminants at each of
+32 wavelengths; fetching inside the loop would be 256 table lookups and two
+thousand buffer loads per hit. Hoisted, it is eight lookups and four flops per
+wavelength — cheaper than the three `exp()` the old Gaussian mapping cost. Every
+call site in `closesthit.rchit` and `miss.rmiss` is already arranged this way;
+adding one inside a loop is the mistake to avoid.
+
+**Grey is carried, not fitted.** The `.w` of a fetched spectrum is the
+reflectance itself when the triple is achromatic, and negative otherwise. Every
+dielectric without `KHR_materials_specular` has F0 = (0.04, 0.04, 0.04) and both
+render gates use grey scenes, so this is what lets a change here be checked
+against a bit-identical baseline rather than argued about.
+
+**Outside the fitted band it says nothing, and saying nothing is the answer.**
+The quadratic keeps growing past 780 nm and the sigmoid saturates — toward 1 for
+a saturated warm colour, which in a thermal band is a mirror where a wall should
+be. `RgbSpectrumAt` clamps lambda to the fit domain, but that is a guard rail,
+not permission: NIR, SWIR, MWIR and LWIR fall back to the material's own
+`ir_emissivity` through Kirchhoff, and `ResolveMaterialSpectra` warns at load
+time which materials that applies to. `allowRgbUpsample = false` is the same
+rule for sheen and diffuse transmission.
+
+The predecessor failed in the opposite direction and hid it: past 900 nm the
+Gaussian basis sum underflowed its own divide-by-zero guard, so a grey 0.5
+surface came back as 0.09 at 900 nm and 0.00 at 1200. Nobody chose that, and it
+is why NIR used to disagree with SWIR and MWIR about the same scene's geometry.
+
+### An RGB light source means D65
+
+An emitter is not bounded by 1, so it splits: the chroma is fitted as a
+reflectance and the magnitude rides alongside.
+
+```
+L(lambda) = scale * s(c; lambda) * d65(lambda),   scale = 2 * max(rgb)
+```
+
+`d65` is the `.w` of the CIE buffer at binding 19, normalised so a spectrum
+equal to it integrates to Y = 1 through the estimator in this directory.
+
+The D65 factor is a correction, not a preference. A flat spectrum is the
+equal-energy illuminant E, which is linear sRGB (1.205, 0.948, 0.909) — so white
+in, warm out. That used to be patched by scaling the final radiance by
+`chromaR_correction` and `chromaB_correction`, defaulting to E's own G/R and
+G/B, on every VIS_FUSED render including the spectrally correct ones. Both
+default to 1.0 now. If you find yourself reaching for them, the illuminant is
+the thing to fix.
+
 ## Two render gates, and what each is blind to
 
 Neither is `ctest`; both need a GPU and both run from `build_wsl.sh`.

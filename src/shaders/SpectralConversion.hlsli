@@ -40,13 +40,16 @@ static const float LAMBDA_MIN = 380.0;  // Visible spectrum start (nm)
 static const float LAMBDA_MAX = 780.0;  // Visible spectrum end (nm)
 static const float LAMBDA_RANGE = LAMBDA_MAX - LAMBDA_MIN;
 
-// CIE 1931 Color Matching Function integrals (380-780nm, 1nm sampling)
-// Used for normalizing XYZ values from spectral integration
-// ∫x̄(λ)dλ ≈ 95.047, ∫ȳ(λ)dλ ≈ 106.857, ∫z̄(λ)dλ ≈ 108.883
-// For normalized RGB input (0-1), divide XYZ by CIE_Y_INTEGRAL to get normalized output
-static const float CIE_X_INTEGRAL = 95.047;
+// CIE 1931 Color Matching Function integral (380-780nm, 1nm sampling).
+//
+// One constant, not three. The CMFs are normalised so that all three integrate
+// to the same value -- that is what makes the equal-energy illuminant sit at
+// x = y = z = 1/3 -- so there is nothing for an X or Z integral to differ by.
+// The two that used to stand here, 95.047 and 108.883, were the D65 white point
+// coordinates rather than integrals; nothing read them, which is why the
+// mismatch survived. The spectral estimators divide XYZ by this one so that a
+// normalised input comes back normalised.
 static const float CIE_Y_INTEGRAL = 106.857;
-static const float CIE_Z_INTEGRAL = 108.883;
 
 // ============================================================================
 // RGB → Spectrum Upsampling (Improved Gaussian Basis with Energy Conservation)
