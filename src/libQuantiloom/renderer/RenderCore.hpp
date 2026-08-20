@@ -571,6 +571,11 @@ struct PipelineBindings {
     /// Per-element surface temperatures from the thermal solver. Always bound;
     /// a scene with no solve gets a single zero entry.
     const GpuBuffer* thermalTemperatures = nullptr;
+    /// How those temperatures respond to the sun: a header record with the
+    /// solve's sun direction, then (dT/dv, v_element) per element. Always
+    /// bound; one zeroed record when there is no solve, which the header's
+    /// w = 0 turns off.
+    const GpuBuffer* thermalSunResponse = nullptr;
 };
 
 /**

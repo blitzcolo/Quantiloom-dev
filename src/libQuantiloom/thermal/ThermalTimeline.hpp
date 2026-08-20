@@ -34,6 +34,12 @@ public:
         u32 nodeCount = 10;
         InitialCondition initial = InitialCondition::Steady;
         f64 initialTemperature_K = 288.15;
+        /// Carry dT/dv beside the temperature, so a shading pass can correct a
+        /// per-triangle temperature to a per-pixel one. Doubles the state and
+        /// therefore the checkpoints, and adds an elimination pass per step;
+        /// on by default because every renderer wants it and only a caller
+        /// that just needs bulk temperatures should turn it off.
+        bool carrySunSensitivity = true;
     };
 
     ThermalTimeline(const Desc& desc, const Vector<ThermalElement>& elements,

@@ -49,6 +49,7 @@
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/RenderCore.hpp"
+#include "renderer/ThermalSunResponse.hpp"
 #include "renderer/RenderDeviceImpl.hpp"
 #include "renderer/MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
@@ -128,6 +129,7 @@ struct OfflineRenderer::Impl {
     /// created -- an unbound descriptor is not a valid one -- with a single
     /// zero entry when no solve ran.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
+    std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
@@ -256,12 +258,28 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 void OfflineRenderer::Impl::RunThermalSolver() {
     VulkanContext& context = *contextRef;
 
+    // The sun response goes up wherever the temperatures do, including on
+    // every failure path: binding 26 has no partially-bound flag either, so
+    // "no solve" is one inert record rather than no descriptor.
+    auto uploadSunResponse = [&](const Vector<f32>& sensitivity,
+                                 const Vector<f32>& visibility,
+                                 const glm::vec3& sunDirection) {
+        const auto records = rendercore::MakeThermalSunResponse(sensitivity, visibility,
+                                                                sunDirection);
+        const usize bytes = records.size() * sizeof(rendercore::ThermalSunResponseGpu);
+        thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
+            context.GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalSunResponseBuffer->Upload(records.data(), bytes);
+    };
+
     auto bindEmpty = [&] {
         const f32 zero = 0.0f;
         thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
             context.GetAllocator(), sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
+        uploadSunResponse({}, {}, glm::vec3(0.0f));
     };
 
     if (!resolved.thermal.enabled) {
@@ -335,6 +353,7 @@ void OfflineRenderer::Impl::RunThermalSolver() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     thermalTemperatureBuffer->Upload(result.surfaceTemperature_K.data(),
                                      result.surfaceTemperature_K.size() * sizeof(f32));
+    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection);
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.
@@ -683,6 +702,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.rgbToSpectrum = rgbToSpectrumRef;
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
+    bindings.thermalSunResponse = thermalSunResponseBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
 

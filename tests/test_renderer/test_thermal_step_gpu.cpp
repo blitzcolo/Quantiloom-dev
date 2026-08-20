@@ -32,10 +32,12 @@ Vector<ThermalElement> OneElement() {
     return {element};
 }
 
-ThermalState MakeState(usize elements, u32 nodes, f64 temperature_K) {
+ThermalState MakeState(usize elements, u32 nodes, f64 temperature_K,
+                       bool carryTangent = false) {
     ThermalState state;
     state.nodeCount = nodes;
     state.temperature_K.assign(elements * nodes, temperature_K);
+    if (carryTangent) state.sunSensitivity_K.assign(elements * nodes, 0.0);
     return state;
 }
 
@@ -227,8 +229,10 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
     const i32 steps = 1440;  // 24 hours
     const f64 T0 = 290.0;
 
-    // CPU run
-    ThermalState cpuState = MakeState(3, nodeCount, T0);
+    // CPU run. The tangent rides along, so this case compares it too: it
+    // shares the matrix with the temperature, and an f32 elimination that
+    // agreed about one and not the other would be a real divergence.
+    ThermalState cpuState = MakeState(3, nodeCount, T0, true);
     CpuCrankNicolsonStepper cpuStepper;
     ThermalForcing forcing;
     forcing.airTemperature_K = 293.15;
@@ -244,7 +248,7 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
     }
 
     // GPU run
-    ThermalState gpuState = MakeState(3, nodeCount, T0);
+    ThermalState gpuState = MakeState(3, nodeCount, T0, true);
     Vector<ThermalBatchStep> batch(steps);
     for (auto& b : batch) {
         b.forcing = forcing;
@@ -264,6 +268,21 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
 
     // Non-participating element must not have been touched by the GPU
     EXPECT_DOUBLE_EQ(gpuState.Surface(2), T0);
+
+    // And the tangent, on the same f32 footing. Element 1 sits at half sun
+    // visibility, so its dT/dv is what the renderer would apply across a
+    // partly-shadowed triangle -- the case the whole correction exists for.
+    f64 maxSensitivityDiff = 0.0;
+    for (usize e = 0; e < 2; ++e) {
+        maxSensitivityDiff = std::max(
+            maxSensitivityDiff,
+            std::abs(gpuState.SurfaceSensitivity(e) - cpuState.SurfaceSensitivity(e)));
+    }
+    EXPECT_GT(cpuState.SurfaceSensitivity(0), 5.0) << "nothing to compare otherwise";
+    EXPECT_LT(maxSensitivityDiff, 0.05)
+        << "GPU-CPU dT/dv mismatch after " << steps << " steps: "
+        << maxSensitivityDiff << " K";
+    EXPECT_DOUBLE_EQ(gpuState.SurfaceSensitivity(2), 0.0);
 }
 
 TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {

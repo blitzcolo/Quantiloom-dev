@@ -218,6 +218,7 @@ set(TEST_CORE_SOURCES
     test_core/test_sky_thermal.cpp
     test_core/test_shortwave_gains.cpp
     test_core/test_thermal_conduction.cpp
+    test_core/test_thermal_sun_sensitivity.cpp
     test_core/test_thermal_timeline.cpp
     test_core/test_ir_energy_conservation.cpp
     test_core/test_config.cpp

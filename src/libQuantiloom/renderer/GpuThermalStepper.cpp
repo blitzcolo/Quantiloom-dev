@@ -62,13 +62,15 @@ struct StepPushConstants {
     f32 diffuseIrradiance;
     f32 relativeHumidity;
     u32 hasReflectedGain;
+    u32 carryTangent;
 };
-static_assert(sizeof(StepPushConstants) == 64);
+static_assert(sizeof(StepPushConstants) == 68);
 
 /// Bindings the compute shader declares. Buffers 9 and 10 are the baked
-/// short-wave gains; both are always bound, with placeholders when there is
-/// nothing to bake -- Vulkan has no notion of an optional descriptor here.
-constexpr u32 kBindingCount = 11;
+/// short-wave gains and 11 is the tangent dT/dv; all three are always bound,
+/// with placeholders when there is nothing to put there -- Vulkan has no
+/// notion of an optional descriptor here.
+constexpr u32 kBindingCount = 12;
 
 std::filesystem::path ExecutableDirectory() {
 #if defined(_WIN32)
@@ -136,12 +138,16 @@ struct GpuThermalStepper::Impl {
     std::unique_ptr<GpuBuffer> diffuseGainBuffer;
     std::unique_ptr<GpuBuffer> stateBuffer;
     std::unique_ptr<GpuBuffer> surfaceBuffer;
+    std::unique_ptr<GpuBuffer> sensitivityBuffer;
 
     u32 lastElementCount = 0;
     u32 lastNodeCount = 0;
     /// False when binding 9 holds a placeholder, which the shader must not
     /// index past its first element.
     bool hasReflectedGain = false;
+    /// False when binding 11 holds a placeholder, i.e. the caller sized no
+    /// tangent into the state and does not want one stepped.
+    bool carryTangent = false;
 
     explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
 
@@ -170,7 +176,7 @@ struct GpuThermalStepper::Impl {
             return false;
         }
 
-        // Bindings 0-6 and 9-10 read-only, 7-8 read-write
+        // Bindings 0-6 and 9-10 read-only, 7-8 and 11 read-write
         Vector<VkDescriptorSetLayoutBinding> bindings(kBindingCount);
         for (u32 i = 0; i < kBindingCount; ++i) {
             bindings[i] = {};
@@ -372,6 +378,27 @@ struct GpuThermalStepper::Impl {
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         stateBuffer->Upload(stateF32.data(), stateSize * sizeof(f32));
 
+        // Tangent: same layout as the state, uploaded only when the caller is
+        // carrying one. A one-float placeholder otherwise -- the descriptor
+        // must be valid either way, and pc.carryTangent is what keeps the
+        // shader off it.
+        carryTangent = state.HasSensitivity();
+        const usize sensitivitySize = carryTangent ? stateSize : 1;
+        sensitivityBuffer = std::make_unique<GpuBuffer>(
+            alloc, sensitivitySize * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        if (carryTangent) {
+            Vector<f32> sensitivityF32(stateSize);
+            for (usize i = 0; i < stateSize; ++i) {
+                sensitivityF32[i] = static_cast<f32>(state.sunSensitivity_K[i]);
+            }
+            sensitivityBuffer->Upload(sensitivityF32.data(), stateSize * sizeof(f32));
+        } else {
+            const f32 zero = 0.0f;
+            sensitivityBuffer->Upload(&zero, sizeof(f32));
+        }
+
         // Surface ping-pong: 2 * n floats
         surfaceBuffer = std::make_unique<GpuBuffer>(
             alloc, 2u * n * sizeof(f32),
@@ -397,6 +424,7 @@ struct GpuThermalStepper::Impl {
             {surfaceBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {reflectedGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {diffuseGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+            {sensitivityBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
         };
         Vector<VkWriteDescriptorSet> writes(kBindingCount);
         for (u32 i = 0; i < kBindingCount; ++i) {
@@ -418,6 +446,9 @@ struct GpuThermalStepper::Impl {
         const u32 nodes = lastNodeCount;
 
         const f32* mapped = static_cast<const f32*>(stateBuffer->Map());
+        const f32* tangent = carryTangent && state.HasSensitivity()
+                                 ? static_cast<const f32*>(sensitivityBuffer->Map())
+                                 : nullptr;
         for (usize e = 0; e < n; ++e) {
             const u32 matId = elements[e].materialId;
             if (matId >= materials.size() || !materials[matId].ParticipatesInSolve()) {
@@ -426,8 +457,13 @@ struct GpuThermalStepper::Impl {
             for (u32 i = 0; i < nodes; ++i) {
                 state.temperature_K[e * nodes + i] =
                     static_cast<f64>(mapped[e * nodes + i]);
+                if (tangent) {
+                    state.sunSensitivity_K[e * nodes + i] =
+                        static_cast<f64>(tangent[e * nodes + i]);
+                }
             }
         }
+        if (tangent) sensitivityBuffer->Unmap();
         stateBuffer->Unmap();
     }
 };
@@ -525,6 +561,7 @@ void GpuThermalStepper::StepMany(thermal::ThermalState& state,
                     static_cast<f32>(step.forcing.diffuseIrradiance_W_m2);
                 pc.relativeHumidity = static_cast<f32>(step.forcing.relativeHumidity);
                 pc.hasReflectedGain = m_impl->hasReflectedGain ? 1u : 0u;
+                pc.carryTangent = m_impl->carryTangent ? 1u : 0u;
 
                 vkCmdPushConstants(cmd, m_impl->pipelineLayout,
                                    VK_SHADER_STAGE_COMPUTE_BIT, 0,

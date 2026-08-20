@@ -288,7 +288,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(26);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients
+    std::vector<VkDescriptorSetLayoutBinding> bindings(27);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients, 26 thermal sun response
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -567,9 +567,27 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[25].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[25].pImmutableSamplers = nullptr;
 
+    // Binding 26: how each element's temperature responds to the sun
+    // (StructuredBuffer<float4>). Binding 24 says what temperature the balance
+    // gave a triangle; this says what to do about the fact that a triangle is
+    // coarser than the shadow crossing it.
+    //
+    // Record 0 is a header -- xyz is the sun direction the solve used, w is 1
+    // when the rest of the buffer is real -- and record 1 + thermalElementBase
+    // + PrimitiveIndex() is the element's (dT/dv, v_element). The header lives
+    // here rather than in LightingParams because the forcing file owns that
+    // sun direction and it need not be [lighting] sun_direction; and at index 0
+    // rather than at the end because that needs no element count. A scene with
+    // no solve binds one zeroed record, which the w = 0 gate turns off.
+    bindings[26].binding = 26;
+    bindings[26].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[26].descriptorCount = 1;
+    bindings[26].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[26].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(26, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(27, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -596,11 +614,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24,25. Counted from the
+    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24,25,26. Counted from the
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 17;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table
+    poolSizes[2].descriptorCount = 18;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table + thermal sun response
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1484,6 +1502,28 @@ void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) con
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 23;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_DEBUG("Binding thermal sun response buffer to descriptor set (binding 26)");
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 26;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;

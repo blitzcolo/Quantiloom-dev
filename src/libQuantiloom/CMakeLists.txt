@@ -130,6 +130,8 @@ add_library(quantiloom_core OBJECT
     renderer/GpuThermalStepper.hpp
     renderer/ThermalPreview.cpp
     renderer/ThermalPreview.hpp
+    renderer/ThermalSunResponse.cpp
+    renderer/ThermalSunResponse.hpp
     renderer/ExternalRenderContext.cpp
     ${QL_PUBLIC_INC}/renderer/ExternalRenderContext.hpp
     ${QL_PUBLIC_INC}/renderer/DisplayControl.hpp

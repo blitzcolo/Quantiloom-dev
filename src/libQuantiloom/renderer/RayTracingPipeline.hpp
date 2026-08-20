@@ -341,6 +341,11 @@ public:
     /// Always bound; a scene with no solve gets a single zero entry, and the
     /// shader reads it only where InstanceGeometryInfo says there is one.
     void BindThermalTemperatureBuffer(const GpuBuffer& buffer) const;
+    /// Per-element sun response from the thermal solver (binding 26): a header
+    /// record carrying the solve's sun direction, then (dT/dv, v_element) per
+    /// element. What lets the shader resolve a shadow finer than the triangle
+    /// the solver ran on. Always bound; one zeroed record when there is none.
+    void BindThermalSunResponseBuffer(const GpuBuffer& buffer) const;
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();

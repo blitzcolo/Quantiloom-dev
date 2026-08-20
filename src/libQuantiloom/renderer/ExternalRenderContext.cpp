@@ -13,6 +13,7 @@
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/RenderCore.hpp"
+#include "renderer/ThermalSunResponse.hpp"
 #include "VulkanContextAdapter.hpp"
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
@@ -203,6 +204,7 @@ struct ExternalRenderContext::Impl {
     /// shader from reading. Bound because an unbound descriptor is not a valid
     /// one, and reading one is a device loss rather than a wrong colour.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
+    std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
     std::unique_ptr<rendercore::ThermalPreview> thermalPreview;
     /// Why the last SetThermalTime did not produce temperatures. Held here
     /// rather than only in the preview because the reasons the facade rejects
@@ -257,6 +259,14 @@ struct ExternalRenderContext::Impl {
     // Uploads lightingParams, substituting the atmosphere's air temperature
     // while a bake is active. Every write to lightingParams goes through it.
     void UploadLightingParams();
+
+    /// Pack the solver's per-element sun response into binding 26's layout and
+    /// put it on the device. Returns true when the buffer had to be
+    /// reallocated and therefore rebound -- which is only when the element
+    /// count changed, so a scrub is a plain upload with no wait.
+    bool UploadThermalSunResponse(const Vector<f32>& sunSensitivity_K,
+                                  const Vector<f32>& sunVisibility,
+                                  const glm::vec3& sunDirection);
 
     // Environment map state. True exactly while `envMap` holds a real map that
     // loaded, false while it holds the black placeholder. UploadLightingParams
@@ -414,6 +424,7 @@ struct ExternalRenderContext::Impl {
         emissiveTriangleBuffer.reset();
         thermalPreview.reset();
         thermalTemperatureBuffer.reset();
+        thermalSunResponseBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -1289,6 +1300,26 @@ const Scene* ExternalRenderContext::GetScene() const {
 // reflection. A host can raise the flag through SetLightingParams at any time
 // and this is the one place every upload passes through, so the check lives here
 // rather than at each of the nine call sites.
+bool ExternalRenderContext::Impl::UploadThermalSunResponse(
+    const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
+    const glm::vec3& sunDirection) {
+    const auto records =
+        rendercore::MakeThermalSunResponse(sunSensitivity_K, sunVisibility, sunDirection);
+    const VkDeviceSize bytes =
+        records.size() * sizeof(rendercore::ThermalSunResponseGpu);
+
+    const bool reallocate =
+        !thermalSunResponseBuffer || thermalSunResponseBuffer->GetSize() != bytes;
+    if (reallocate) {
+        if (thermalSunResponseBuffer) vkDeviceWaitIdle(device);
+        thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    thermalSunResponseBuffer->Upload(records.data(), bytes);
+    return reallocate;
+}
+
 void ExternalRenderContext::Impl::UploadLightingParams() {
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
@@ -2553,9 +2584,12 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
                 m_impl->contextAdapter->GetAllocator(), sizeof(f32),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
+            m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
             if (m_impl->pipeline) {
                 m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
+                m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
             }
+
             m_impl->geometry.SetThermalElementBases({});
             ResetAccumulation();
         } catch (const std::exception& ex) {
@@ -2604,6 +2638,17 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         m_impl->thermalTemperatureBuffer->Upload(
             result.surfaceTemperature_K.data(),
             result.surfaceTemperature_K.size() * sizeof(f32));
+    }
+
+    // Refreshed on every scrub, not only when the element count moves: dT/dv
+    // and v_element both belong to the instant being rendered, and a stale
+    // pair would correct this frame's shadow with the last hour's response.
+    // Reallocating is what needs the wait and the rebind, and that only
+    // happens when the element count changes -- the helper says which it did.
+    if (m_impl->UploadThermalSunResponse(result.sunSensitivity_K, result.sunVisibility,
+                                         result.sunDirection) &&
+        m_impl->pipeline) {
+        m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
     }
 
     ResetAccumulation();
@@ -3277,6 +3322,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
+    UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
     thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
 }
 
@@ -3312,6 +3358,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.rgbToSpectrum = rgbToSpectrumBuffer.get();
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
+    bindings.thermalSunResponse = thermalSunResponseBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);

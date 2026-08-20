@@ -1247,6 +1247,9 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     if (bindings.thermalTemperatures) {
         pipeline->BindThermalTemperatureBuffer(*bindings.thermalTemperatures);  // 24
     }
+    if (bindings.thermalSunResponse) {
+        pipeline->BindThermalSunResponseBuffer(*bindings.thermalSunResponse);  // 26
+    }
     if (bindings.emissiveTriangles) {
         pipeline->BindEmissiveTriangleBuffer(*bindings.emissiveTriangles);  // 23
     }

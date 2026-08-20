@@ -69,18 +69,27 @@ f64 LatentCoefficient(const f64 wetnessFactor, const f64 convection_W_m2K) {
            kLatentHeatVaporisation_J_kg;
 }
 
-/// Solve a tridiagonal system in place by Thomas elimination.
+/// Solve a tridiagonal system in place by Thomas elimination, for one or two
+/// right-hand sides.
 ///
 /// Exact rather than iterative, and O(n) rather than O(n^3): the matrix a
 /// slab produces has three diagonals and nothing else, and a general solver
 /// would spend its time proving that.
 ///
+/// Two right-hand sides because the tangent -- dT/dv, the sensitivity to this
+/// element's own sun visibility -- obeys the same discrete operator as the
+/// temperature and differs only in what drives it. Eliminating once and
+/// applying to both is the whole reason carrying the tangent costs a fraction
+/// of a second solve rather than a whole one.
+///
 /// @param lower  sub-diagonal, lower[0] unused
 /// @param diag   main diagonal, overwritten
 /// @param upper  super-diagonal, upper[n-1] unused, overwritten
 /// @param rhs    right-hand side, overwritten with the solution
+/// @param rhs2   optional second right-hand side, same treatment; nullptr to
+///               solve only the first
 void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
-                      Vector<f64>& rhs) {
+                      Vector<f64>& rhs, Vector<f64>* rhs2 = nullptr) {
     const usize n = diag.size();
     if (n == 0) return;
 
@@ -88,12 +97,21 @@ void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
         const f64 factor = lower[i] / diag[i - 1];
         diag[i] -= factor * upper[i - 1];
         rhs[i] -= factor * rhs[i - 1];
+        if (rhs2) (*rhs2)[i] -= factor * (*rhs2)[i - 1];
     }
     rhs[n - 1] /= diag[n - 1];
+    if (rhs2) (*rhs2)[n - 1] /= diag[n - 1];
     for (usize i = n - 1; i-- > 0;) {
         rhs[i] = (rhs[i] - upper[i] * rhs[i + 1]) / diag[i];
+        if (rhs2) (*rhs2)[i] = ((*rhs2)[i] - upper[i] * (*rhs2)[i + 1]) / diag[i];
     }
 }
+
+/// How far a tangent is allowed to travel. A sensitivity is a derivative, not
+/// a temperature, so the state clamp does not apply to it; this one is here
+/// for the same reason that one is -- a diverging element should stay visible
+/// as a wrong number rather than turn into a NaN that spreads.
+constexpr f64 kMaxSensitivity_K = 1000.0;
 
 }  // namespace
 
@@ -118,6 +136,14 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     }
 
     Vector<f64> lower(nodes), diag(nodes), upper(nodes), rhs(nodes);
+
+    // The tangent rides in the same matrix, so it needs a second right-hand
+    // side and nothing else. No ping-pong copy beside surfacePrevious: the
+    // tangent this carries is the derivative with respect to an element's OWN
+    // sun visibility, so it reads only its own previous value, which is still
+    // in the state when its turn comes.
+    const bool carryTangent = state.HasSensitivity();
+    Vector<f64> rhsTangent(carryTangent ? nodes : 0);
 
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
@@ -151,13 +177,24 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
 
         // Sun, direct. cos(theta) against the element's own normal, times the
         // precomputed visibility -- which is what carries the shadow.
-        if (forcing.sunIrradiance_W_m2 > 0.0 && e < sunVisibility.size()) {
+        //
+        // directPerVisibility is the same product with the visibility left
+        // out: d(flux)/dv, and the only term in the whole balance that has
+        // one. The reflected gain below is driven by what OTHER elements see,
+        // the diffuse by the sky, and neither moves when this element steps
+        // into shade -- which is exactly why the tangent is local and costs a
+        // right-hand side rather than a Jacobian.
+        f64 directPerVisibility_W_m2 = 0.0;
+        if (forcing.sunIrradiance_W_m2 > 0.0) {
             const f64 cosTheta = static_cast<f64>(
                 glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
             if (cosTheta > 0.0) {
-                surfaceFlux_W_m2 += absorptivity *
-                                    forcing.sunIrradiance_W_m2 * cosTheta *
-                                    static_cast<f64>(sunVisibility[e]);
+                directPerVisibility_W_m2 =
+                    absorptivity * forcing.sunIrradiance_W_m2 * cosTheta;
+                if (e < sunVisibility.size()) {
+                    surfaceFlux_W_m2 +=
+                        directPerVisibility_W_m2 * static_cast<f64>(sunVisibility[e]);
+                }
             }
         }
 
@@ -245,6 +282,32 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                  0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2 -
                  latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0];
 
+        // The tangent's face row: the same equation differentiated in v.
+        // Term by term against the line above -- the air temperature and the
+        // latent flux are constants of v and drop, the explicit long-wave
+        // loss contributes its own slope, and the short wave contributes the
+        // only source. What is left of the convection is -h/2 sigma0 rather
+        // than the +h*Tair the temperature gets, and of the evaporation
+        // -Y_lat/2 sigma0, because the flux and the half-implicit correction
+        // cancel to half.
+        //
+        // The neighbours' share of `incoming` is deliberately NOT
+        // differentiated. Its derivative is the off-diagonal of a Jacobian
+        // over every element that sees this one, and what it would add is the
+        // second-order fact that a colder patch of ground makes its
+        // neighbours very slightly colder too. Keeping it out is what makes
+        // this a per-element quantity a shader can apply per pixel.
+        f64* sigma = nullptr;
+        if (carryTangent) {
+            sigma = &state.sunSensitivity_K[e * nodes];
+            const f64 radiativeSlope =
+                4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
+            rhsTangent[0] = halfCell * sigma[0] - 0.5 * (k / dx) * (sigma[0] - sigma[1]) -
+                            0.5 * h * sigma[0] - radiativeSlope * sigma[0] -
+                            0.5 * latentAdmittance_W_m2K * sigma[0] +
+                            directPerVisibility_W_m2;
+        }
+
         // ----------------------------------------------------------------
         // The interior
         // ----------------------------------------------------------------
@@ -253,6 +316,10 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             diag[i] = 1.0 + r;
             upper[i] = -0.5 * r;
             rhs[i] = T[i] + 0.5 * r * (T[i - 1] - 2.0 * T[i] + T[i + 1]);
+            if (carryTangent) {
+                rhsTangent[i] =
+                    sigma[i] + 0.5 * r * (sigma[i - 1] - 2.0 * sigma[i] + sigma[i + 1]);
+            }
         }
 
         // ----------------------------------------------------------------
@@ -265,6 +332,9 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             diag[last] = 1.0;
             upper[last] = 0.0;
             rhs[last] = material.interiorTemperature_K;
+            // A room held at its own temperature does not care about the sun,
+            // so the tangent's Dirichlet value is zero rather than that one.
+            if (carryTangent) rhsTangent[last] = 0.0;
         } else {
             // Adiabatic: the mirror condition, a half cell exchanging only
             // with the node in front of it.
@@ -272,15 +342,22 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             diag[last] = halfCell + 0.5 * (k / dx);
             upper[last] = 0.0;
             rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]);
+            if (carryTangent) {
+                rhsTangent[last] = halfCell * sigma[last] -
+                                   0.5 * (k / dx) * (sigma[last] - sigma[last - 1]);
+            }
         }
 
-        SolveTridiagonal(lower, diag, upper, rhs);
+        SolveTridiagonal(lower, diag, upper, rhs, carryTangent ? &rhsTangent : nullptr);
 
         for (u32 i = 0; i < nodes; ++i) {
             // A temperature outside this range is a solver failure rather than
             // a cold night, and letting it through would put a NaN into the
             // render two steps later.
             T[i] = std::clamp(rhs[i], 1.0, 5000.0);
+            if (carryTangent) {
+                sigma[i] = std::clamp(rhsTangent[i], -kMaxSensitivity_K, kMaxSensitivity_K);
+            }
         }
     }
 }

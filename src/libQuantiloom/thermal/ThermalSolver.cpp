@@ -45,6 +45,28 @@ ExchangeGeometry MakeOpenSkyExchange(const usize elementCount) {
     return exchange;
 }
 
+Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
+                                  const ExchangeGeometry& exchange, const f64 time_h,
+                                  const usize elementCount) {
+    Vector<f32> visibility(elementCount, 1.0f);
+
+    if (table.SampleCount() > 0 && table.ElementCount() == elementCount) {
+        usize a = 0;
+        usize b = 0;
+        f64 blend = 0.0;
+        table.SampleIndices(time_h, a, b, blend);
+        const f32 bf = static_cast<f32>(blend);
+        const f32* colA = table.Column(a);
+        const f32* colB = table.Column(b);
+        for (usize e = 0; e < elementCount; ++e) {
+            visibility[e] = colA[e] + bf * (colB[e] - colA[e]);
+        }
+    } else if (exchange.sunVisibility.size() == elementCount) {
+        visibility = exchange.sunVisibility;
+    }
+    return visibility;
+}
+
 Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
     Vector<std::pair<f64, ThermalForcing>> series;
     if (path.empty()) return series;
@@ -237,6 +259,18 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     // What the renderer reads
     // ------------------------------------------------------------------
     result.surfaceTemperature_K.resize(mesh.elements.size());
+    // What the shading pass needs to undo the per-triangle quantisation of the
+    // shadow: the tangent, and the visibility it was taken about.
+    const bool haveTangent = state.HasSensitivity();
+    result.sunDirection =
+        SampleForcing(forcingSeries, config.time_h, constantForcing).sunDirection;
+    if (haveTangent) {
+        result.sunSensitivity_K.assign(mesh.elements.size(), 0.0f);
+        result.sunVisibility =
+            SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
+                                  mesh.elements.size());
+    }
+
     f64 sum = 0.0;
     result.minTemperature_K = std::numeric_limits<f64>::max();
     result.maxTemperature_K = std::numeric_limits<f64>::lowest();
@@ -247,6 +281,21 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                             materials[id].ParticipatesInSolve();
         const f64 T = solved ? state.Surface(e) : 0.0;
         result.surfaceTemperature_K[e] = static_cast<f32>(T);
+        if (haveTangent) {
+            result.sunSensitivity_K[e] =
+                solved ? static_cast<f32>(state.SurfaceSensitivity(e)) : 0.0f;
+            // An element the sun is behind right now has zero visibility and
+            // would have zero however finely the shader resolved it, so its
+            // correction is zero whatever the tangent says. Zeroing it here
+            // rather than testing the normal in the shader is not a shortcut:
+            // the shader's geometric normal has been flipped to face the
+            // viewer, so it cannot tell this case from a hit on the back of a
+            // sun-facing triangle -- which has the same temperature as the
+            // front and does want the correction.
+            if (glm::dot(mesh.elements[e].normal, result.sunDirection) <= 0.0f) {
+                result.sunSensitivity_K[e] = 0.0f;
+            }
+        }
         if (solved) {
             sum += T;
             result.minTemperature_K = std::min(result.minTemperature_K, T);

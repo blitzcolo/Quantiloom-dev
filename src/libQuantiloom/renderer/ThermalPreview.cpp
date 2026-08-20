@@ -385,15 +385,35 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     const thermal::ThermalState& state = m_impl->timeline->StateAt(time_h);
     m_impl->currentTime_h = time_h;
 
-    // Extract surface temperatures
+    // Extract surface temperatures, and beside them the tangent the shading
+    // pass needs to resolve a shadow finer than one triangle.
     const u32 n = static_cast<u32>(m_impl->mesh.elements.size());
     result.surfaceTemperature_K.resize(n);
+    const bool haveTangent = state.HasSensitivity();
+    if (haveTangent) {
+        result.sunSensitivity_K.assign(n, 0.0f);
+        result.sunVisibility = thermal::SampleSunVisibilityAt(
+            m_impl->sunTable, m_impl->exchange, time_h, n);
+    }
+    result.sunDirection =
+        thermal::SampleForcing(m_impl->forcingSeries, time_h, m_impl->constantForcing)
+            .sunDirection;
     for (usize e = 0; e < n; ++e) {
         const u32 id = m_impl->mesh.elements[e].materialId;
         const bool solved = m_impl->mesh.elements[e].area_m2 > 0.0f &&
                             id < m_impl->materials.size() &&
                             m_impl->materials[id].ParticipatesInSolve();
         result.surfaceTemperature_K[e] = solved ? static_cast<f32>(state.Surface(e)) : 0.0f;
+        if (haveTangent) {
+            result.sunSensitivity_K[e] =
+                solved ? static_cast<f32>(state.SurfaceSensitivity(e)) : 0.0f;
+            // Zero where the sun is behind the element: its visibility is zero
+            // at any resolution, so the correction is too. See the offline
+            // solver for why the shader cannot make this test itself.
+            if (glm::dot(m_impl->mesh.elements[e].normal, result.sunDirection) <= 0.0f) {
+                result.sunSensitivity_K[e] = 0.0f;
+            }
+        }
     }
     result.instanceElementBase = m_impl->mesh.instanceElementBase;
     result.elementCount = n;

@@ -104,6 +104,14 @@
 // instance carries the sentinel, so nothing reads it.
 [[vk::binding(24, 0)]] StructuredBuffer<float> thermalTemperatures;
 
+// How those temperatures respond to the sun (binding 26). Record 0 is a
+// header -- xyz the sun direction the solve used, w = 1 when the rest is real
+// -- and record 1 + thermalElementBase + PrimitiveIndex() carries
+// (dT/dv, v_element) for that triangle. See renderer/ThermalSunResponse.hpp
+// for why the header is at index 0 and why the direction is carried here
+// rather than read from lightingParams.
+[[vk::binding(26, 0)]] StructuredBuffer<float4> thermalSunResponse;
+
 // ============================================================================
 // Path Depth
 // ============================================================================
@@ -327,12 +335,81 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
 // A solved element of exactly zero means the solver ran but skipped this
 // surface (no thermal properties, or a degenerate triangle), which falls
 // through to the two below it.
+// The part of a solved temperature that the solver could not resolve: where
+// inside this triangle the shadow edge actually falls.
+//
+// The balance runs on one element per triangle and decides from the
+// centroid whether the sun reaches it, so its shadow can only have edges
+// where the mesh has them. On a 120 m desert ground tessellated 201 x 201
+// that is a 0.6 m triangle, and a 0.7 m sphere casts a shadow shaped like a
+// triangle -- which is a discretisation artefact and not physics: dry sand
+// diffuses heat about 3 cm in an hour, and the model gives each element an
+// independent 1D column with no lateral conduction at all, so the field it
+// describes has an edge as sharp as the geometry's.
+//
+// So this ray asks the question the solver asked once per triangle, once per
+// pixel instead, and moves the temperature along the trajectory's own tangent:
+//
+//     T(x) = T_element + (v(x) - v_element) * dT/dv
+//
+// which reproduces the solved value at the element's mean and puts the edge
+// where the ray tracer finds it. Two things make it cheap. The tangent was
+// integrated by the same operator as the temperature, so nothing is
+// recomputed here; and dT/dv is zero for an element the sun cannot reach at
+// this instant -- night, a face turned away, no solve -- which is also the
+// gate that means no ray is traced.
+//
+// The ray is offset along the sun rather than along the shading normal on
+// purpose. The normal here has been flipped to face the viewer, so a hit on
+// the BACK of a sun-facing triangle carries a normal pointing away from the
+// sun; that face has the same temperature as the front, and offsetting along
+// L leaves the surface on the side the sun is actually on either way. The
+// case the flip would have got wrong -- a face genuinely turned away -- is
+// already zero, because the host ships no sensitivity for it.
+float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload payload) {
+    const float4 header = thermalSunResponse[0];
+    if (header.w == 0.0) {
+        return 0.0;
+    }
+
+    const float2 response = thermalSunResponse[1 + element].xy;  // (dT/dv, v_element)
+    // A tenth of a kelvin is below what a cooled thermal camera resolves, and
+    // the ray is the whole cost of this -- so the threshold is what keeps a
+    // night scene, an indoor scene and every non-solar band paying nothing.
+    if (abs(response.x) < 0.1) {
+        return 0.0;
+    }
+
+    RayDesc sunRay;
+    sunRay.Origin = hitPos + header.xyz * 1e-3;
+    sunRay.Direction = header.xyz;
+    sunRay.TMin = 0.0;
+    sunRay.TMax = 1e10;
+
+    Payload sunPayload;
+    sunPayload.radiance = float3(0.0, 0.0, 0.0);
+    sunPayload.isShadowed = 1;   // cleared by shadow_miss
+    sunPayload.depth = 0;
+    sunPayload.rngState = 0;
+    sunPayload.heroLambda = payload.heroLambda;
+    sunPayload.primaryHitT = -1.0;
+    sunPayload.bsdfPdf = 0.0;
+
+    TraceRay(scene, RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+             0xFF, 0, 0, 1, sunRay, sunPayload);
+
+    const float visible = (sunPayload.isShadowed == 0) ? 1.0 : 0.0;
+    return (visible - response.y) * response.x;
+}
+
 float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo,
-                             uint primitiveIndex, float2 uv) {
+                             uint primitiveIndex, float2 uv, float3 hitPos,
+                             inout Payload payload) {
     if (geoInfo.thermalElementBase != 0xFFFFFFFFu) {
-        const float solved = thermalTemperatures[geoInfo.thermalElementBase + primitiveIndex];
+        const uint element = geoInfo.thermalElementBase + primitiveIndex;
+        const float solved = thermalTemperatures[element];
         if (solved > 0.0) {
-            return solved;
+            return solved + ThermalSunVisibilityCorrectionK(element, hitPos, payload);
         }
     }
 
@@ -2789,7 +2866,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV_swir, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
+        float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
+                                                      WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+                                                      payload);
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
@@ -3359,7 +3438,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                            NdotV, material.metallicFactor);
 
         // Sample surface temperature from texture or use scalar value
-        float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
+        float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
+                                                 WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+                                                 payload);
 
         // Atmospheric downwelling radiation temperature
         float T_atmosphere = lut.atmosphereTemperature_K;
@@ -3882,7 +3963,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Surface temperature (colormap 200K - 500K for visibility).
                 // Same decode as the emission paths, so a temperature map
                 // shows its field here instead of the scalar it overrides.
-                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
+                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
+                                                      WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+                                                      payload);
                 if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
                 debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
                 break;
@@ -3897,7 +3980,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             case DEBUG_MODE_IR_EMISSION: {
                 // Thermal emission component (grayscale, scaled)
-                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv);
+                float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
+                                                      WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+                                                      payload);
                 if (temp_K <= 0.0) temp_K = 300.0;
                 float emission = GetEffectiveIREmissivity(material) * IRPlanckRadiance(temp_K, 10000.0);
                 emission = emission / (1.0 + emission);  // Tone map

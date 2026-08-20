@@ -50,6 +50,12 @@ struct ThermalMaterialGpu {
 // indices; the diffuse gain does not depend on the sun, so it is one column.
 [[vk::binding(9, 0)]] StructuredBuffer<float>               reflectedGainTable;
 [[vk::binding(10, 0)]] StructuredBuffer<float>              diffuseGain;
+// dT/dv per node: the tangent of the trajectory with respect to this element's
+// own sun visibility, advanced by the same operator as the temperature. Same
+// element-major layout as `state`. A one-float placeholder is bound when the
+// host is not carrying it, and pc.carryTangent is what stops this shader
+// touching it -- see ThermalState::sunSensitivity_K for what it is for.
+[[vk::binding(11, 0)]] RWStructuredBuffer<float>            sensitivity;
 
 struct StepPushConstants {
     float3 sunDirection;
@@ -66,6 +72,7 @@ struct StepPushConstants {
     float  diffuseIrradiance;
     float  relativeHumidity;   // percent
     uint   hasReflectedGain;   // 0 when the table is a placeholder
+    uint   carryTangent;       // 0 when binding 11 is a placeholder
 };
 [[vk::push_constant]] StepPushConstants pc;
 
@@ -154,11 +161,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         sunVis = vA + pc.sunBlend * (vB - vA);
     }
 
+    // d(flux)/dv alongside the flux itself: the only term in the balance that
+    // moves when this element's own sun visibility does. The reflected gain
+    // below is driven by what other elements see and the diffuse by the sky,
+    // so neither appears in the tangent.
+    float directPerVisibility = 0.0;
     if (pc.sunIrradiance > 0.0) {
         const float cosTheta = dot(element.normal, normalize(pc.sunDirection));
         if (cosTheta > 0.0) {
-            surfaceFlux += mat.shortwaveAbsorptivity * pc.sunIrradiance *
-                           cosTheta * sunVis;
+            directPerVisibility = mat.shortwaveAbsorptivity * pc.sunIrradiance * cosTheta;
+            surfaceFlux += directPerVisibility * sunVis;
         }
     }
 
@@ -222,6 +234,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float diag[QL_THERMAL_MAX_NODES];
     float upper[QL_THERMAL_MAX_NODES];
     float rhs[QL_THERMAL_MAX_NODES];
+    // The tangent's right-hand side. One more array rather than one more of
+    // everything: it shares the matrix exactly, which is the whole reason
+    // carrying dT/dv costs an elimination pass and not a second solve. The
+    // current sigma is read straight from the buffer -- it is only written at
+    // the end, so nothing it needs has been clobbered.
+    float rhsTangent[QL_THERMAL_MAX_NODES];
+    const bool carryTangent = pc.carryTangent != 0;
 
     // Row 0: exposed face
     lower[0] = 0.0;
@@ -231,12 +250,32 @@ void main(uint3 tid : SV_DispatchThreadID) {
              0.5 * h * (2.0 * pc.airTemperature_K - T[0]) + surfaceFlux -
              latentFlux + 0.5 * latentAdmittance * T[0];
 
+    // The same row differentiated in v. Constants of v drop (the air
+    // temperature, the latent flux); the explicit long-wave loss leaves its
+    // own slope; the short wave leaves the only source. The neighbours' share
+    // of `incoming` is deliberately not differentiated -- see the CPU stepper
+    // for why that keeps this a per-element quantity.
+    if (carryTangent) {
+        const float radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
+        const float s0 = sensitivity[base + 0];
+        const float s1 = sensitivity[base + 1];
+        rhsTangent[0] = halfCell * s0 - 0.5 * (k / dx) * (s0 - s1) -
+                        0.5 * h * s0 - radiativeSlope * s0 -
+                        0.5 * latentAdmittance * s0 + directPerVisibility;
+    }
+
     // Interior nodes
     for (uint i = 1; i + 1 < nodes; ++i) {
         lower[i] = -0.5 * r;
         diag[i] = 1.0 + r;
         upper[i] = -0.5 * r;
         rhs[i] = T[i] + 0.5 * r * (T[i - 1] - 2.0 * T[i] + T[i + 1]);
+        if (carryTangent) {
+            rhsTangent[i] = sensitivity[base + i] +
+                            0.5 * r * (sensitivity[base + i - 1] -
+                                       2.0 * sensitivity[base + i] +
+                                       sensitivity[base + i + 1]);
+        }
     }
 
     // Back face
@@ -246,11 +285,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         diag[last] = 1.0;
         upper[last] = 0.0;
         rhs[last] = mat.interiorTemperature;
+        // A room held at its own temperature does not care about the sun.
+        if (carryTangent) rhsTangent[last] = 0.0;
     } else {
         lower[last] = -0.5 * (k / dx);
         diag[last] = halfCell + 0.5 * (k / dx);
         upper[last] = 0.0;
         rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]);
+        if (carryTangent) {
+            const float sLast = sensitivity[base + last];
+            rhsTangent[last] = halfCell * sLast -
+                               0.5 * (k / dx) * (sLast - sensitivity[base + last - 1]);
+        }
     }
 
     // Thomas elimination (forward)
@@ -258,16 +304,28 @@ void main(uint3 tid : SV_DispatchThreadID) {
         const float factor = lower[i] / diag[i - 1];
         diag[i] -= factor * upper[i - 1];
         rhs[i] -= factor * rhs[i - 1];
+        if (carryTangent) rhsTangent[i] -= factor * rhsTangent[i - 1];
     }
     // Back substitution
     rhs[last] /= diag[last];
+    if (carryTangent) rhsTangent[last] /= diag[last];
     for (uint i = last; i-- > 0;) {
         rhs[i] = (rhs[i] - upper[i] * rhs[i + 1]) / diag[i];
+        if (carryTangent) {
+            rhsTangent[i] = (rhsTangent[i] - upper[i] * rhsTangent[i + 1]) / diag[i];
+        }
     }
 
     // Write solved temperatures, clamped
     for (uint i = 0; i < nodes; ++i) {
         state[base + i] = clamp(rhs[i], 1.0, 5000.0);
+    }
+    // And the tangent, on its own clamp: a sensitivity is a derivative, not a
+    // temperature, so [1, 5000] would be meaningless for it.
+    if (carryTangent) {
+        for (uint i = 0; i < nodes; ++i) {
+            sensitivity[base + i] = clamp(rhsTangent[i], -1000.0, 1000.0);
+        }
     }
 
     // Write new surface to ping-pong buffer for next step's radiative read

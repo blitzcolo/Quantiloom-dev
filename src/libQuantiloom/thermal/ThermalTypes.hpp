@@ -146,6 +146,27 @@ struct ExchangeGeometry {
  */
 struct ThermalState {
     Vector<f64> temperature_K;
+
+    /// dT/dv: how far each node moves per unit change in this element's own
+    /// sun visibility, held for the whole trajectory rather than derived at
+    /// the end. Same element-major layout as temperature_K.
+    ///
+    /// The reason it is a state and not a formula. A shadow's contrast is not
+    /// the steady response to losing the sun -- that would be
+    /// alpha E cos(theta) / (h + 4 eps sigma T^3), 31 K for dry sand at noon,
+    /// and the ground never gets there because its time constant is hours.
+    /// Nor is it the one-step response, which is 5 K and ignores every step
+    /// before it. It is the integral of the same slab equation the
+    /// temperature obeys, driven by the short-wave term alone, and that is
+    /// exactly what this carries: the tangent of the trajectory, stepped by
+    /// the same operator, so it inherits the slab's thickness, its node
+    /// count, its boundary condition and its history for free.
+    ///
+    /// Empty means nobody asked for it, and every stepper leaves it alone --
+    /// which is what keeps a caller that only wants temperatures paying
+    /// nothing. Size it like temperature_K to turn it on.
+    Vector<f64> sunSensitivity_K;
+
     u32 nodeCount = 0;
 
     [[nodiscard]] usize ElementCount() const {
@@ -153,6 +174,14 @@ struct ThermalState {
     }
     [[nodiscard]] f64 Surface(const usize element) const {
         return temperature_K[element * nodeCount];
+    }
+    /// Whether the tangent is being carried, and therefore whether a stepper
+    /// should advance it.
+    [[nodiscard]] bool HasSensitivity() const {
+        return sunSensitivity_K.size() == temperature_K.size();
+    }
+    [[nodiscard]] f64 SurfaceSensitivity(const usize element) const {
+        return sunSensitivity_K[element * nodeCount];
     }
 };
 

@@ -54,6 +54,13 @@ public:
     struct SolveResult {
         Vector<f32> surfaceTemperature_K;
         Vector<u32> instanceElementBase;
+        /// dT/dv and the visibility it was taken about, per element, plus the
+        /// sun direction the solve used at this instant. Together they let the
+        /// shading pass trade a triangle-average shadow for the one it traces
+        /// per pixel -- see thermal::ThermalResult for the arithmetic.
+        Vector<f32> sunSensitivity_K;
+        Vector<f32> sunVisibility;
+        glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
         u32 elementCount = 0;
         bool elementCountChanged = false;
         String error;

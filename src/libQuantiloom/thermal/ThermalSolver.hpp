@@ -87,6 +87,23 @@ struct ThermalResult {
     /// Element base per instance, for the shader's PrimitiveIndex() lookup.
     Vector<u32> instanceElementBase;
 
+    /// dT/dv at the exposed face, one per triangle: how far this element's
+    /// temperature would move if it saw a unit more of the sun, all day.
+    /// Read from the trajectory's tangent, not from a steady-state formula --
+    /// see ThermalState::sunSensitivity_K.
+    Vector<f32> sunSensitivity_K;
+    /// v: the sun visibility the solve used for each element at time_h. The
+    /// pair (sensitivity, visibility) is what lets a shading pass replace a
+    /// triangle-average shadow with the one it traced for its own pixel:
+    ///     T(x) = T_element + (v(x) - v_element) * dT/dv
+    /// A shadow boundary then lands where the geometry puts it instead of on
+    /// the nearest triangle edge.
+    Vector<f32> sunVisibility;
+    /// Where the sun was at time_h, from surface toward it. The forcing file
+    /// owns this and it need not agree with [lighting] sun_direction, so the
+    /// shading pass has to be told rather than assume.
+    glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+
     u32 elementCount = 0;
     u32 participatingElements = 0;
     u32 exchangeNonZeros = 0;
@@ -124,6 +141,14 @@ struct ThermalResult {
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.
 [[nodiscard]] Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path);
+
+/// The sun visibility every element had at one time, on the same two-column
+/// interpolation the solver's own steps use. Falls back to the exchange's
+/// single column, and with neither to full sun -- which is what a scene with
+/// no shadowing precompute is.
+[[nodiscard]] Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
+                                                const ExchangeGeometry& exchange,
+                                                f64 time_h, usize elementCount);
 
 /// Interpolate a forcing series at one time, holding the ends flat.
 [[nodiscard]] ThermalForcing SampleForcing(

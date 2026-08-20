@@ -23,7 +23,11 @@ namespace {
 void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& exchange,
                        const f64 time_h, const usize n, Vector<f32>& visibility,
                        Vector<f32>& reflected) {
-    visibility.assign(n, 1.0f);
+    // The visibility is the same interpolation the renderer asks for by name
+    // when it needs v_element, so it lives in one place -- the two disagreeing
+    // would put the shading correction's reference point somewhere the solve
+    // never was.
+    visibility = SampleSunVisibilityAt(table, exchange, time_h, n);
     reflected.clear();
 
     if (table.SampleCount() > 0 && table.ElementCount() == n) {
@@ -33,12 +37,6 @@ void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& 
         table.SampleIndices(time_h, a, b, blend);
         const f32 bf = static_cast<f32>(blend);
 
-        const f32* colA = table.Column(a);
-        const f32* colB = table.Column(b);
-        for (usize e = 0; e < n; ++e) {
-            visibility[e] = colA[e] + bf * (colB[e] - colA[e]);
-        }
-
         const f32* reflectedA = table.ReflectedColumn(a);
         const f32* reflectedB = table.ReflectedColumn(b);
         if (reflectedA != nullptr && reflectedB != nullptr) {
@@ -47,8 +45,6 @@ void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& 
                 reflected[e] = reflectedA[e] + bf * (reflectedB[e] - reflectedA[e]);
             }
         }
-    } else if (exchange.sunVisibility.size() == n) {
-        visibility = exchange.sunVisibility;
     }
 }
 
@@ -133,6 +129,13 @@ ThermalTimeline::ThermalTimeline(const Desc& desc,
     initial.nodeCount = std::max(2u, desc.nodeCount);
     initial.temperature_K.assign(elements.size() * initial.nodeCount,
                                  desc.initialTemperature_K);
+    // Zero, and it means what it says: at t = 0 nothing that has happened yet
+    // depends on the sun, so the trajectory's derivative with respect to sun
+    // visibility starts at nothing and accumulates. Sizing it is what turns
+    // the tangent on for every stepper downstream.
+    if (desc.carrySunSensitivity) {
+        initial.sunSensitivity_K.assign(initial.temperature_K.size(), 0.0);
+    }
 
     if (desc.initial == InitialCondition::Steady) {
         const ThermalForcing startForcing =
@@ -199,7 +202,7 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
 usize ThermalTimeline::CheckpointBytes() const {
     usize total = 0;
     for (const auto& [k, state] : m_checkpoints) {
-        total += state.temperature_K.size() * sizeof(f64);
+        total += (state.temperature_K.size() + state.sunSensitivity_K.size()) * sizeof(f64);
     }
     return total;
 }

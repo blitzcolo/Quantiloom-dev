@@ -128,7 +128,76 @@ reference implementations live in `scripts/physics-audit/harness.py`.
 The one invariant worth knowing before touching any of it: a surface
 temperature has exactly one decode, `GetSurfaceTemperatureK` in
 `closesthit.rchit`, and all four sampling sites plus both debug views go
-through it. Solver, then texture, then the material's own scalar.
+through it. Solver, then texture, then the material's own scalar — and, when
+the solver answered, the per-pixel sun correction below, which lives inside
+that one function precisely so that no site can forget it.
+
+### A shadow is not the size of a triangle
+
+The solver runs on one element per triangle: `BuildThermalMesh` makes them,
+`RunSunVisibility` decides from each **centroid** whether the sun arrives, and
+the shader reads one temperature per `PrimitiveIndex()`. So the temperature
+field it produces can only have edges where the mesh has edges. On a 120 m
+desert ground tessellated 201 × 201 that is a 0.6 m triangle, and a 0.7 m
+sphere casts a shadow shaped like a triangle — in a band where a shadowed sand
+element runs 40 K below a lit one, so it is the most visible thing in the
+frame.
+
+Nothing about the physics is that coarse. Dry sand diffuses heat about 3 cm in
+an hour, and the model gives every element an independent one-dimensional
+column with **no lateral conduction at all** — so the field it describes has a
+shadow edge as sharp as the geometry's. Only the discretisation was coarse.
+
+The fix is to ship the derivative alongside the value. Beside each element's
+temperature the solver carries `dT/dv`: how far that temperature would move per
+unit of the element's own sun visibility. The shader traces its own ray to the
+sun and evaluates
+
+```
+T(x) = T_element + (v(x) - v_element) * dT/dv
+```
+
+which reproduces the solved value at the element's mean and resolves the edge
+at whatever resolution the ray tracer has. `renderer/ThermalSunResponse.hpp`
+holds the layout: one `float4` per record on binding 26, index 0 a header
+carrying the solve's sun direction (the forcing CSV owns it and it need not be
+`[lighting] sun_direction`) plus the flag that switches the whole thing off,
+then `1 + thermalElementBase + PrimitiveIndex()` per element.
+
+**`dT/dv` is a state, not a formula, and that is the whole design.** The two
+formulas it is tempting to use are both badly wrong for anything with thermal
+inertia. For sand at 11:00 the steady response `α E cosθ / (h + 4εσT³)` is
+about 31 K and the single-step response about 5 K; the truth after three hours
+of sun is 27.9 K and after twelve is 30.3 K. So it is integrated as the
+**tangent of the trajectory** — the same tridiagonal matrix as the temperature,
+a second right-hand side, one extra elimination pass — and inherits the slab's
+thickness, node count, boundary condition and history for free.
+`ThermalState::sunSensitivity_K` carries it, `CpuCrankNicolsonStepper` and
+`thermal_step.comp.hlsl` both step it, and it is **empty by default**: a caller
+that only wants bulk temperatures sizes nothing and pays nothing.
+
+What it costs and what it is worth:
+
+| | |
+|---|---|
+| Extra rays | one per thermal hit where \|dT/dv\| ≥ 0.1 K — so none at night, none indoors, none in a scene with no solve |
+| Extra state | doubles `ThermalState`, and therefore the timeline's checkpoints |
+| Extra solver time | one elimination pass per element per step |
+| Accuracy at full amplitude | 1.0 K on a 28.9 K contrast (3.5%), because the radiative admittance moves by a third across that span. Against a 0.6 m triangle that is fully lit or fully dark, it is not close |
+
+Two traps if you touch it:
+
+- **The tangent is local on purpose.** The neighbours' share of `incoming` is
+  not differentiated. Its derivative is the off-diagonal of a Jacobian over
+  every element that sees this one, and all it would add is the second-order
+  fact that a colder patch of ground slightly cools its neighbours. Keeping it
+  out is what makes `dT/dv` a per-element number a shader can apply per pixel.
+- **The host, not the shader, decides that the sun is behind an element.** The
+  shader's geometric normal has been flipped to face the viewer, so it cannot
+  tell a face genuinely turned away from a hit on the *back* of a sun-facing
+  triangle — which has the same temperature as the front and does want the
+  correction. Both hosts zero `dT/dv` for the first case; the ray is then
+  offset along the sun rather than along the normal, which is right for both.
 
 ### What the balance is made of
 
