@@ -194,6 +194,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
+    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;  // Jakob-Hanika coefficients (binding 25)
     std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
     /// Per-element surface temperatures (binding 24). The interactive path
     /// runs no thermal solve -- a solve is an offline step, and its output is
@@ -409,6 +410,7 @@ struct ExternalRenderContext::Impl {
         atmosHeaderBuffer.reset();
         atmosDataBuffer.reset();
         cieCmfBuffer.reset();
+        rgbToSpectrumBuffer.reset();
         emissiveTriangleBuffer.reset();
         thermalPreview.reset();
         thermalTemperatureBuffer.reset();
@@ -3263,6 +3265,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     }
 
     cieCmfBuffer = rendercore::CreateCieColourMatchingBuffer(*contextAdapter);
+    rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*contextAdapter);
 
     // No scene yet, so no emitters -- but the descriptor still has to be
     // written, and CreatePipeline can run before any scene is loaded.
@@ -3306,6 +3309,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.atmosphereHeader = atmosHeaderBuffer.get();
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCmfBuffer.get();
+    bindings.rgbToSpectrum = rgbToSpectrumBuffer.get();
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
 

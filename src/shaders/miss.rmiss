@@ -49,6 +49,17 @@
 
 [[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
 
+// ============================================================================
+// RGB -> Spectrum Coefficients (Binding 25)
+// ============================================================================
+// Jakob & Hanika sigmoid coefficients: xyz = (c0, c1, c2) of the quadratic in
+// t = (lambda - 380) / 400, w unused. Three sub-tables of res^3 nodes indexed
+// by which RGB channel is largest; core/RgbToSpectrum.hpp has the layout and
+// the reason the z axis is warped.
+// ============================================================================
+
+[[vk::binding(25, 0)]] StructuredBuffer<float4> rgbToSpectrumTable;
+
 // The push-constant block lives in common.hlsli, shared with raygen and the
 // closest-hit shader. This one reads the camera wavelength out of it.
 

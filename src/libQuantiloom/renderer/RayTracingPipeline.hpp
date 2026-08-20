@@ -319,6 +319,13 @@ public:
     void BindCIE_CMF_LUT(const GpuBuffer& buffer) const;
 
     // ========================================================================
+    // Jakob-Hanika RGB -> spectrum coefficient table (Binding 25)
+    // ========================================================================
+    // StructuredBuffer<float4>, xyz = the three polynomial coefficients. Read
+    // by closest hit and miss; see core/RgbToSpectrum.hpp.
+    void BindRgbToSpectrumTable(const GpuBuffer& buffer) const;
+
+    // ========================================================================
     // Emissive triangles (Binding 23)
     // ========================================================================
     // World-space emissive triangles with a cumulative-power CDF, so the hit

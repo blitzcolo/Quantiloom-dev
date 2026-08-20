@@ -107,6 +107,10 @@ assets/spectral/ecospeclib-all/
 /hyperspectral_output_bands/
 /pipeline_cache.bin
 
+# Fitted at first run and cached; see core/RgbToSpectrum.hpp for why it is not
+# checked in -- a stale copy would silently outlive a correction to the CIE table.
+/assets/luts/rgb2spec_*.bin
+
 # Cached reference and test renders from measure_convergence.py
 /_convergence/
 

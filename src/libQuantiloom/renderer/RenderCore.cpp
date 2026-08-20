@@ -2,6 +2,7 @@
 
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
+#include "core/RgbToSpectrum.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/ImageIO.hpp"
 #include "io/UsdLoader.hpp"
@@ -1251,6 +1252,9 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     if (bindings.cieColourMatching) {
         pipeline->BindCIE_CMF_LUT(*bindings.cieColourMatching);      // 19
     }
+    if (bindings.rgbToSpectrum) {
+        pipeline->BindRgbToSpectrumTable(*bindings.rgbToSpectrum);   // 25
+    }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
     return pipeline;
@@ -1302,6 +1306,46 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
     buffer->Upload(table.data(), bytes);
 
     QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm)", CIE_CMF_LUT_SIZE);
+    return buffer;
+}
+
+// ============================================================================
+// RGB -> spectrum coefficients
+// ============================================================================
+
+std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(VulkanContext& ctx, const String& cachePath) {
+    const u32 res = kRgbToSpectrumResolution;
+    const size_t nodeCount = static_cast<size_t>(3) * res * res * res;
+
+    // w is padding: the shader reads this as a structured buffer of float4, the
+    // same shape the CIE table above uses. Three floats per node would save a
+    // quarter of the memory and cost three scalar loads per corner instead of
+    // one vector load, eight times per fetch.
+    Vector<glm::vec4> packed(nodeCount, glm::vec4(0.0f));
+
+    auto table = RgbToSpectrumTable::LoadOrBuild(cachePath, res);
+    if (table.has_value()) {
+        const Vector<f32>& data = table.value().Data();
+        for (size_t i = 0; i < nodeCount; ++i) {
+            packed[i] = glm::vec4(data[i * 3 + 0], data[i * 3 + 1], data[i * 3 + 2], 0.0f);
+        }
+    } else {
+        // Cannot happen for a compile-time resolution, but binding 25 has no
+        // partially-bound flag, so something valid has to be written there. All
+        // zeroes is sigmoid(0) = 0.5 at every wavelength: a flat mid grey, which
+        // is visibly wrong rather than quietly wrong.
+        QL_LOG_ERROR("  RGB->spectrum table unavailable ({}); every upsampled colour will "
+                     "render as flat 0.5 grey", table.error());
+    }
+
+    const size_t bytes = packed.size() * sizeof(glm::vec4);
+    auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VMA_MEMORY_USAGE_CPU_TO_GPU);
+    buffer->Upload(packed.data(), bytes);
+
+    QL_LOG_INFO("  RGB->spectrum table uploaded ({} nodes, {:.1f} MB)", nodeCount,
+                static_cast<f64>(bytes) / (1024.0 * 1024.0));
     return buffer;
 }
 

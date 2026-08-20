@@ -122,6 +122,7 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;
     std::unique_ptr<GpuBuffer> atmosDataBuffer;
     std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
+    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;
     std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;
     /// Per-element surface temperatures from the thermal solver. Always
     /// created -- an unbound descriptor is not a valid one -- with a single
@@ -149,6 +150,7 @@ struct OfflineRenderer::Impl {
     /// Either the shared fallback or `envMap` above, decided in BuildPipeline.
     const rendercore::EnvironmentCubemap* envMapRef = nullptr;
     const GpuBuffer* cieCMF_LUTRef = nullptr;
+    const GpuBuffer* rgbToSpectrumRef = nullptr;
     bool borrowingDevice = false;
 
     ~Impl() {
@@ -499,6 +501,16 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
     }
 
     // ====================================================================
+    // RGB -> spectrum coefficients
+    // ====================================================================
+    // Fitted, not compiled in: see core/RgbToSpectrum.hpp. Also scene
+    // independent, so a shared device fits it once for a whole batch.
+    if (!rgbToSpectrumRef) {
+        rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(context);
+        rgbToSpectrumRef = rgbToSpectrumBuffer.get();
+    }
+
+    // ====================================================================
     // Material buffer
     // ====================================================================
     QL_LOG_INFO("Creating PBR material buffer...");
@@ -668,6 +680,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.atmosphereHeader = atmosHeaderBuffer.get();
     bindings.atmosphereData = atmosDataBuffer.get();
     bindings.cieColourMatching = cieCMF_LUTRef;
+    bindings.rgbToSpectrum = rgbToSpectrumRef;
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
 
@@ -763,6 +776,7 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
         impl.brdfLutRef = &shared.brdfLut;
         impl.fallbackEnvMapRef = &shared.fallbackEnvMap;
         impl.cieCMF_LUTRef = shared.cieCMF_LUTBuffer.get();
+        impl.rgbToSpectrumRef = shared.rgbToSpectrumBuffer.get();
         impl.pipelineCache = shared.pipelineCache;
     } else {
         QL_LOG_INFO("Initializing Vulkan context...");

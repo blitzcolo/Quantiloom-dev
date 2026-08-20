@@ -563,6 +563,10 @@ struct PipelineBindings {
     const GpuBuffer* atmosphereHeader = nullptr;
     const GpuBuffer* atmosphereData = nullptr;
     const GpuBuffer* cieColourMatching = nullptr;
+    /// Jakob-Hanika RGB -> spectrum coefficients. Always bound: binding 25 has
+    /// no partially-bound flag, and every spectral band that meets an RGB
+    /// reflectance without a measured curve reads it.
+    const GpuBuffer* rgbToSpectrum = nullptr;
     const GpuBuffer* emissiveTriangles = nullptr;
     /// Per-element surface temperatures from the thermal solver. Always bound;
     /// a scene with no solve gets a single zero entry.
@@ -623,5 +627,15 @@ SensorBandAdjustment SensorAdjustmentForMode(SpectralMode mode, bool hostSetWave
  *       missing.
  */
 std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx);
+
+/**
+ * @brief Fit (or load) the RGB -> spectrum coefficient table and upload it
+ *
+ * Cached to @p cachePath, defaulting beside the BRDF LUT. A miss costs a few
+ * seconds of fitting, once per machine; see core/RgbToSpectrum.hpp for why the
+ * table is built rather than shipped.
+ */
+std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(
+    VulkanContext& ctx, const String& cachePath = "assets/luts/rgb2spec_srgb_64.bin");
 
 } // namespace quantiloom::rendercore

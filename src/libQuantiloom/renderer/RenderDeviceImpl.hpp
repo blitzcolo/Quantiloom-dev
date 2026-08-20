@@ -36,6 +36,7 @@ struct RenderDevice::Impl {
     std::unique_ptr<VulkanContext> context;
     rendercore::BrdfLut brdfLut;
     std::unique_ptr<GpuBuffer> cieCMF_LUTBuffer;
+    std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;
     /// Bound when a scene names no environment map, which is most of them.
     rendercore::EnvironmentCubemap fallbackEnvMap;
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;

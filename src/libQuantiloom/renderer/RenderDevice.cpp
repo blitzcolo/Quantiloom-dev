@@ -62,6 +62,7 @@ Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
     }
 
     impl.cieCMF_LUTBuffer = rendercore::CreateCieColourMatchingBuffer(*impl.context);
+    impl.rgbToSpectrumBuffer = rendercore::CreateRgbToSpectrumBuffer(*impl.context);
     impl.fallbackEnvMap = rendercore::EnvironmentCubemap::Fallback(*impl.context);
 
     QL_LOG_INFO("  Shared render device ready");

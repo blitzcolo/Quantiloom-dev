@@ -288,7 +288,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(25);  // ..23 emissive triangles, 24 thermal temperatures
+    std::vector<VkDescriptorSetLayoutBinding> bindings(26);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -553,9 +553,23 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[24].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[24].pImmutableSamplers = nullptr;
 
+    // Binding 25: Jakob-Hanika RGB -> spectrum coefficients
+    // (StructuredBuffer<float4>, xyz = c0,c1,c2, w unused). Three sub-tables of
+    // res^3 nodes selected by which RGB channel is largest; see
+    // core/RgbToSpectrum.hpp for the layout and the axis warp.
+    //
+    // Visible to the miss shader as well as closest hit, because the sky's
+    // fallback RGB radiance is upsampled there by the same rule a surface
+    // reflectance is.
+    bindings[25].binding = 25;
+    bindings[25].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[25].descriptorCount = 1;
+    bindings[25].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR;
+    bindings[25].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(25, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(26, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -582,11 +596,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 1;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24. Counted from the
+    // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24,25. Counted from the
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 16;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures
+    poolSizes[2].descriptorCount = 17;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1514,6 +1528,28 @@ void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 19;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindRgbToSpectrumTable(const GpuBuffer& buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_DEBUG("Binding RGB->spectrum coefficient table to descriptor set (binding 25)");
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 25;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;
