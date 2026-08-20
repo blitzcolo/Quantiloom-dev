@@ -1700,15 +1700,28 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     // spectrum, and `fail_on_srgb_upsample` aborted renders whose materials
     // were in fact measured. What was bound is out.materialNameToCurve, so
     // that is what this asks.
+    //
+    // NIR_Fused belongs on this list and was missing from it. It is the one
+    // band that used to upsample a base colour rather than refuse -- the
+    // Gaussian mapping's tail happened to decay to nearly zero past 900 nm, so
+    // the band reported almost nothing and nobody had to decide that it should.
+    // It now returns exactly nothing, which is the same answer stated out loud,
+    // and this is where it gets said.
     const bool requireQuantitative = (resolved.mode == SpectralMode::Multispectral ||
                                       resolved.mode == SpectralMode::MWIR_Fused ||
                                       resolved.mode == SpectralMode::LWIR_Fused ||
-                                      resolved.mode == SpectralMode::SWIR_Fused);
+                                      resolved.mode == SpectralMode::SWIR_Fused ||
+                                      resolved.mode == SpectralMode::NIR_Fused);
 
-    if (requireQuantitative && (resolved.failOnSrgbUpsample || resolved.logMaterialSources)) {
+    // Unconditional, where it used to wait for one of two opt-in keys. What a
+    // material without a measured spectrum costs in these bands is no longer an
+    // approximate colour but a black surface, and a black surface nobody was
+    // warned about reads as a rendering bug rather than as missing data.
+    if (requireQuantitative) {
         QL_LOG_INFO("Validating material spectral sources for quantitative mode...");
 
         bool hasInvalidMaterials = false;
+        Vector<String> upsampledNames;
         for (const auto& mat : scene.materials) {
             const bool bound = out.materialNameToCurve.count(mat.name) > 0;
 
@@ -1736,9 +1749,26 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 QL_LOG_INFO("  Material '{}': source = {}", mat.name, sourceStr);
             }
             if (!bound && mat.spectralSource == Material::SpectralSource::RGBUpsampled) {
-                QL_LOG_WARN("  Material '{}' uses RGB-upsampled spectra (not quantitative)",
-                            mat.name);
+                upsampledNames.push_back(mat.name);
             }
+        }
+
+        // One line rather than one per material: a scene can carry dozens, and
+        // a wall of identical warnings is how a real one gets scrolled past.
+        if (!upsampledNames.empty()) {
+            String sample;
+            for (size_t i = 0; i < upsampledNames.size() && i < 3; ++i) {
+                sample += (i > 0 ? ", " : "") + upsampledNames[i];
+            }
+            if (upsampledNames.size() > 3) {
+                sample += ", ...";
+            }
+            QL_LOG_WARN("  {} material(s) have no measured spectrum in this band and will "
+                        "fall back to a flat reflectance from ir_emissivity: {}",
+                        upsampledNames.size(), sample);
+            QL_LOG_WARN("  A base colour is authored for 380-780 nm and says nothing "
+                        "outside it, so it is not consulted here. Bind a spectral curve "
+                        "for a quantitative result.");
         }
 
         if (hasInvalidMaterials && resolved.failOnSrgbUpsample) {

@@ -412,38 +412,38 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
 // standing over it are a different material, and multiplying them by the base's
 // mixture would be an error that happens to typecheck.
 //
-// `allowRgbUpsample` is false in the infrared bands. ConvertLinearRGBToSpectrum
-// is three Gaussians on the visible primaries, so past about 1400nm it returns
-// whatever its tail happens to be -- a number with no relationship to how a
-// fibre scatters at 10 microns. Those bands take a measured curve or no sheen.
+// `allowRgbUpsample` is false in the infrared bands. The upsampler is fitted
+// over 380-780 nm and clamped to it, so past the visible it returns the 780 nm
+// value -- a number with no relationship to how a fibre scatters at 10 microns.
+// Those bands take a measured curve or no sheen.
 // The diffuse transmission colour at one wavelength. Same priority and same
 // reasoning as sheen's: a measured curve first, then an RGB upsample where that
 // still means something. NIR and SWIR pass allowRgbUpsample = false, because a
-// colour pushed through the visible Gaussian basis says nothing at 2 microns;
+// colour fitted over the visible band says nothing at 2 microns;
 // MWIR and LWIR never call this at all, since thermal transmittance is already
 // irTransmittance and a surface cannot have two of them.
 float EvaluateDiffuseTransmissionColor(StructuredBuffer<SpectralCurveGPU> curves,
-                                       MaterialData material, float3 dtColor,
+                                       MaterialData material, float4 dtSpectrum,
                                        float lambda, bool allowRgbUpsample) {
     if (material.diffuseTransmissionColorCurveIndex >= 0) {
         return saturate(EvaluateSpectralCurve(
             curves, material.diffuseTransmissionColorCurveIndex, lambda));
     }
     if (allowRgbUpsample) {
-        return ConvertLinearRGBToSpectrum(dtColor, lambda);
+        return RgbSpectrumAt(dtSpectrum, lambda);
     }
     return 0.0;
 }
 
 float EvaluateSheenReflectance(StructuredBuffer<SpectralCurveGPU> curves,
-                               MaterialData material, float3 sheenColor,
+                               MaterialData material, float4 sheenSpectrum,
                                float lambda, bool allowRgbUpsample) {
     if (material.sheenReflectanceCurveIndex >= 0) {
         return saturate(EvaluateSpectralCurve(curves, material.sheenReflectanceCurveIndex,
                                               lambda));
     }
     if (allowRgbUpsample) {
-        return ConvertLinearRGBToSpectrum(sheenColor, lambda);
+        return RgbSpectrumAt(sheenSpectrum, lambda);
     }
     return 0.0;
 }
@@ -514,48 +514,6 @@ float3 ApplyNormalMap(float3 tangentNormal, float3 worldNormal, float3 worldTang
 // RETURNS:
 //   float3 F0 - normal incidence reflectance (replicated to RGB for non-spectral)
 // ============================================================================
-
-// An RGB reflectance read at one wavelength.
-//
-// F0 is a reflectance -- the fraction reflected at normal incidence -- so it
-// upsamples the way every other RGB reflectance in this renderer does, through
-// ConvertLinearRGBToSpectrum. It used to have a mapping of its own: a piecewise
-// linear interpolation treating the channels as samples at 450 / 550 / 650 nm,
-// inherited from tinting a metal's F0 across wavelength. That left two RGB
-// reflectances in one shader obeying two different rules, so a material whose
-// sheen colour and specular colour were the same triple rendered as two
-// different spectra.
-//
-// The two differ in a way that is easy to state. The upsampler normalises by
-// the sum of its three bases, which makes its output a weighted average of the
-// channels -- so it can never leave the interval [min(rgb), max(rgb)], and a
-// colour with a dip in the middle, like magenta, comes back with that dip
-// partly filled. The piecewise mapping keeps the dip but ignores blue entirely
-// above 500 nm and red entirely below it.
-//
-// Measured against a round trip through the CIE matching functions, the
-// upsampler is the better of the two everywhere and enormously better on
-// saturated warm colours: SheenChair's mango velvet, authored [1, 0.329, 0.1],
-// comes back 15.4% off through the upsampler and 39.7% off through the
-// piecewise map, which returns nearly double the green it was given. The one
-// case where piecewise holds its own is exactly the magenta dip, where the two
-// tie on total error and it is better in the green channel alone.
-//
-// Neither is good. Both sit at 15 to 40 percent round-trip error, which is what
-// an RGB reflectance costs when it is not a measurement; a material that has
-// measured n,k never reaches here, and SpectralConversion.hlsli names the
-// Jakob-Hanika sigmoid method as the upgrade that would fix it properly.
-//
-// The achromatic early-out is not an optimisation. Every dielectric without
-// KHR_materials_specular has an F0 of (0.04, 0.04, 0.04), including every scene
-// the furnace and illumination gates render, and returning it without going
-// through a division is what keeps those bit-identical.
-float RgbReflectanceAtWavelength(float3 rgb, float lambda) {
-    if (rgb.r == rgb.g && rgb.g == rgb.b) {
-        return rgb.r;
-    }
-    return ConvertLinearRGBToSpectrum(rgb, lambda);
-}
 
 float3 ComputePhysicalF0(MaterialData material, float3 albedo, float metallic,
                          float wavelength_nm, float3 dielectricF0) {
@@ -1746,6 +1704,47 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 F0 = ComputePhysicalF0(material, albedo, metallic, pushConsts.camera.wavelength_nm, dielectricF0);
 
     // ------------------------------------------------------------------------
+    // RGB reflectances, upsampled once
+    // ------------------------------------------------------------------------
+    // Every RGB reflectance this hit can read, fetched from the Jakob-Hanika
+    // table before any wavelength loop. The coefficients depend only on the
+    // colour, so this is loop-invariant -- and hoisting it is not a
+    // micro-optimisation. The VIS_FUSED loop asks for up to five reflectances
+    // at each of thirty-three wavelengths; fetching inside it would be 165
+    // table lookups and 1320 buffer loads per hit. Out here it is five lookups,
+    // and the loop pays four flops per wavelength instead of the three exp()
+    // the Gaussian mapping used to cost. The change is faster than what it
+    // replaces.
+    //
+    // Skipped entirely in the bands that never upsample. SPEC_SPECTRAL_MODE is
+    // a specialization constant, so this is a compile-time decision and the
+    // fetches vanish from the RGB and infrared variants rather than being
+    // branched around.
+    //
+    // Also skipped per slot when a measured curve supersedes it: a material
+    // that names a spectral reflectance never reads the base colour's, and
+    // sheen and diffuse transmission are absent from most materials entirely.
+    float4 sBase   = float4(0.0, 0.0, 0.0, -1.0);
+    float4 sSheen  = float4(0.0, 0.0, 0.0, -1.0);
+    float4 sDT     = float4(0.0, 0.0, 0.0, -1.0);
+    float4 sDielF0 = float4(0.0, 0.0, 0.0, -1.0);
+    float4 sF0     = float4(0.0, 0.0, 0.0, -1.0);
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+        if (material.spectralReflectanceCurveIndex < 0) {
+            sBase = FetchRgbSpectrum(rgbToSpectrumTable, baseColor.rgb);
+        }
+        if (hasSheen && material.sheenReflectanceCurveIndex < 0) {
+            sSheen = FetchRgbSpectrum(rgbToSpectrumTable, sheenColor);
+        }
+        if (hasDT && material.diffuseTransmissionColorCurveIndex < 0) {
+            sDT = FetchRgbSpectrum(rgbToSpectrumTable, dtColor);
+        }
+        sDielF0 = FetchRgbSpectrum(rgbToSpectrumTable, dielectricF0);
+        sF0     = FetchRgbSpectrum(rgbToSpectrumTable, F0);
+    }
+
+    // ------------------------------------------------------------------------
     // Sky Radiance Hemispherical Integration (Diffuse Ambient)
     // ------------------------------------------------------------------------
     // Computes diffuse sky lighting by integrating sky radiance over hemisphere:
@@ -1963,7 +1962,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //
         // ILLUMINATION SOURCE (priority order):
         //   1. SolarSpectralLUT with measured ASTM G-173 spectra (preferred)
-        //   2. RGB values converted to colored spectrum via ConvertLinearRGBToSpectrum
+        //   2. RGB values converted to a colored spectrum via FetchRgbSpectrum
         // ====================================================================
 
         // Spectral integration parameters
@@ -2050,9 +2049,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
             const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
                 ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
-                : ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
+                : RgbSpectrumAt(sBase, lambda_b);
 
-            const float F0_b = RgbReflectanceAtWavelength(F0, lambda_b);
+            const float F0_b = RgbSpectrumAt(sF0, lambda_b);
 
             const float NdotV_b = max(dot(normal, V), 0.0);
             const float F_b     = FresnelSchlickF90(NdotV_b, F0_b, specularF90);
@@ -2071,7 +2070,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // indirect light. The sun, which is where the velvet rim actually
             // comes from, is a delta light outside MIS and gets the real lobe.
             const float rhoSheen_b = hasSheen
-                ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, true)
+                ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda_b, true)
                 : 0.0;
             const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_b, sheenRoughness);
             const float wSheen_b = sheenE * rhoSheen_b;
@@ -2153,7 +2152,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float corr_dt = 0.0;
             if (hasDT) {
                 const float rhoDt_b = EvaluateDiffuseTransmissionColor(
-                    spectralCurves, material, dtColor, lambda_b, true);
+                    spectralCurves, material, sDT, lambda_b, true);
                 const float wDt_b = kD_b * dt * rhoDt_b * ccBase;
                 if (wDt_b > 0.0) {
                     corr_dt = TraceEnvBounceResidual(
@@ -2240,7 +2239,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
             } else {
                 // Fallback path: RGB → Spectrum upsampling
-                rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
+                rho_lambda = RgbSpectrumAt(sBase, lambda);
             }
 
             // 1b. Sheen reflectance at this wavelength, and what the base owes
@@ -2249,14 +2248,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // what the base should give up at lambda, and this mode has the
             // spectrum to say so.
             const float rhoSheen_lambda = hasSheen
-                ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda, true)
+                ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda, true)
                 : 0.0;
             const float sheenScale_lambda =
                 SheenAlbedoScaling(rhoSheen_lambda, sheenNdotV, sheenRoughness);
 
             // 2. Compute BRDF at this wavelength (scalar Cook-Torrance)
             float brdf_lambda = CookTorranceBRDF_Spectral(normal, V, L, rho_lambda, metallic, roughness, material.complexRefractiveIndexIndex, lambda,
-                                                          RgbReflectanceAtWavelength(dielectricF0, lambda), specularF90, aniso, dtBase);
+                                                          RgbSpectrumAt(sDielF0, lambda), specularF90, aniso, dtBase);
             brdf_lambda *= sheenScale_lambda;
             if (hasSheen) {
                 // The real Charlie lobe: the sun is a delta light and is not
@@ -2289,7 +2288,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             //   550nm (green) → F0.g
             //   650nm (red) → F0.r
             //
-            float F0_at_lambda = RgbReflectanceAtWavelength(F0, lambda);
+            float F0_at_lambda = RgbSpectrumAt(sF0, lambda);
 
             float NdotV_ambient = max(dot(normal, V), 0.0);
             float F_ambient = FresnelSchlickF90(NdotV_ambient, F0_at_lambda, specularF90);
@@ -2308,7 +2307,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // the residual is a difference of two different bases.
             if (hasDT) {
                 const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
-                    spectralCurves, material, dtColor, lambda, true);
+                    spectralCurves, material, sDT, lambda, true);
                 L_ambient += kD_lambda * dt * rhoDt_lambda *
                              (sky_radiance_lambda +
                               sun_radiance_lambda * dtNdotL * dtShadow);
@@ -2530,18 +2529,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
             // WARNING: This path does NOT guarantee physical accuracy
             // For quantitative rendering, materials MUST have measured spectral curves
-            spectralAlbedo = GetSpectralReflectanceFromRGBTexture(
-                baseColor.rgb,
-                lambda,
-                false  // Already in linear space (not sRGB)
-            );
+            // Admitted only inside the visible band, by the same rule the
+            // sheen term below already followed. This mode renders at whatever
+            // wavelength it is pointed at; past 780 nm the fit has nothing to
+            // say and the clamp would return the red end as though it did.
+            spectralAlbedo = (lambda <= SPECTRAL_VIS_LAMBDA_MAX)
+                ? RgbSpectrumAt(sBase, lambda)
+                : 0.0;
         }
 
         // 1b. Sheen at this wavelength. This mode renders at whatever wavelength
         // it is pointed at, so the RGB factor is only admitted inside the
         // visible range -- past it the upsampling basis has nothing to say.
         const float rhoSheen_s = hasSheen
-            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda,
+            ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda,
                                        lambda <= SPECTRAL_VIS_LAMBDA_MAX)
             : 0.0;
         const float sheenScale_s = SheenAlbedoScaling(rhoSheen_s, sheenNdotV, sheenRoughness);
@@ -2558,7 +2559,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             roughness,
             material.complexRefractiveIndexIndex,
             lambda,
-            RgbReflectanceAtWavelength(dielectricF0, lambda),
+            RgbSpectrumAt(sDielF0, lambda),
             specularF90,
             aniso,
             dtBase
@@ -2600,7 +2601,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float skyAmbient_scalar = kD_scalar * spectralAlbedo * dtBase * sheenScale_s * skyRadiance_lambda +
                                   wSheen_s * skyRadiance_lambda;
         const float rhoDt_s = hasDT
-            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor, lambda,
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, sDT, lambda,
                                                lambda <= SPECTRAL_VIS_LAMBDA_MAX)
             : 0.0;
         const float wDt_s = kD_scalar * dt * rhoDt_s;
@@ -2805,7 +2806,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 2 microns, so a glTF asset carrying only a factor has no sheen in this
         // band and the terms below fold away exactly.
         const float rhoSheen_b = hasSheen
-            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, false)
+            ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda_b, false)
             : 0.0;
         const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_swir, sheenRoughness);
         const float wSheen_b = sheenE * rhoSheen_b;
@@ -2819,7 +2820,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // reason sheen is: an RGB colour upsampled through the visible basis
         // says nothing at 2 microns.
         const float rhoDt_b = hasDT
-            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor,
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, sDT,
                                                lambda_b, false)
             : 0.0;
         const float wDt_b = dt * rhoDt_b * ccBase;
@@ -2895,7 +2896,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // sheen lobe is the first directional BRDF the sun sees here.
             if (rhoSheen_b > 0.0) {
                 const float rhoSheen_lambda = EvaluateSheenReflectance(
-                    spectralCurves, material, sheenColor, lambda, false);
+                    spectralCurves, material, sSheen, lambda, false);
                 const float sheenScale_lambda =
                     SheenAlbedoScaling(rhoSheen_lambda, NdotV_swir, sheenRoughness);
                 const float3 H_sw = SafeHalfVector(V, L, normal);
@@ -2917,7 +2918,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // division -- the same convention the reflected term above uses.
             if (hasDT) {
                 const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
-                    spectralCurves, material, dtColor, lambda, false);
+                    spectralCurves, material, sDT, lambda, false);
                 L_reflected += dt * rhoDt_lambda *
                                (sky_radiance_lambda +
                                 sun_radiance_lambda * dtNdotL * dtShadow);
@@ -3047,6 +3048,24 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // interreflection scales as rho/(1-rho), so this is the band where
         // having no bounce at all cost the most.
         const float NdotV_nir = max(dot(normal, V), 0.0);
+
+        // The last-resort reflectance for this band, and the same one SWIR
+        // falls back to: Kirchhoff against the material's own declared IR
+        // emissivity, rho = 1 - eps - tau, corrected for view angle.
+        //
+        // NOT the base colour. A base colour is authored for 380-780 nm, and
+        // the upsampler is fitted over exactly that range and clamped to it, so
+        // asking it at 1 micron returns the 780 nm value with nothing to
+        // justify it. What this band used to do was read the old Gaussian
+        // mapping's tail out here, where the basis sum underflows its own
+        // guard: a grey 0.5 surface came back as 0.09 at 900 nm and 0.00 at
+        // 1200, numbers that were an artefact of a division rather than a
+        // statement about the surface. ir_emissivity is at least a property the
+        // material declares, in the band it declares it for.
+        const float baseEmissivity_nir = GetEffectiveIREmissivity(material);
+        const float reflectance_nir = GetAngleDependentIRReflectance(
+            baseEmissivity_nir, material.irTransmittance, NdotV_nir, material.metallicFactor);
+
         const float lambda_b = heroRay
             ? payload.heroLambda
             : NIR_LAMBDA_MIN + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (NIR_LAMBDA_MAX - NIR_LAMBDA_MIN);
@@ -3062,7 +3081,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             rho_b = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
                   / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
         } else {
-            rho_b = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda_b);
+            rho_b = reflectance_nir;
         }
 
         const float L_base_b = hasSpectralSolarLUT
@@ -3071,7 +3090,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Sheen at lambda_b, from a measured curve only -- see the SWIR branch.
         const float rhoSheen_b = hasSheen
-            ? EvaluateSheenReflectance(spectralCurves, material, sheenColor, lambda_b, false)
+            ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda_b, false)
             : 0.0;
         const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_nir, sheenRoughness);
         const float wSheen_b = sheenE * rhoSheen_b;
@@ -3081,7 +3100,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // reason sheen is: an RGB colour upsampled through the visible basis
         // says nothing at 2 microns.
         const float rhoDt_b = hasDT
-            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, dtColor,
+            ? EvaluateDiffuseTransmissionColor(spectralCurves, material, sDT,
                                                lambda_b, false)
             : 0.0;
         const float wDt_b = dt * rhoDt_b * ccBase;
@@ -3137,7 +3156,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 rho_lambda = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
                            / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
             } else {
-                rho_lambda = ConvertLinearRGBToSpectrum(baseColor.rgb, lambda);
+                rho_lambda = reflectance_nir;
             }
 
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
@@ -3153,7 +3172,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // back because sun_radiance_lambda already carries a folded 1/PI.
             if (rhoSheen_b > 0.0) {
                 const float rhoSheen_lambda = EvaluateSheenReflectance(
-                    spectralCurves, material, sheenColor, lambda, false);
+                    spectralCurves, material, sSheen, lambda, false);
                 const float sheenScale_lambda =
                     SheenAlbedoScaling(rhoSheen_lambda, NdotV_nir, sheenRoughness);
                 const float3 H_ni = SafeHalfVector(V, L, normal);
@@ -3169,7 +3188,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // division -- the same convention the reflected term above uses.
             if (hasDT) {
                 const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
-                    spectralCurves, material, dtColor, lambda, false);
+                    spectralCurves, material, sDT, lambda, false);
                 L_reflected += dt * rhoDt_lambda *
                                (sky_radiance_lambda +
                                 sun_radiance_lambda * dtNdotL * dtShadow);
@@ -3495,7 +3514,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // lobe from it, which is the honest answer rather than a
                 // plausible-looking invention.
                 const float rhoSheen_l = hasSheen
-                    ? EvaluateSheenReflectance(spectralCurves, material, sheenColor,
+                    ? EvaluateSheenReflectance(spectralCurves, material, sSheen,
                                                lambda, false)
                     : 0.0;
                 const float rhoCc_l = (material.clearcoatReflectanceCurveIndex >= 0)

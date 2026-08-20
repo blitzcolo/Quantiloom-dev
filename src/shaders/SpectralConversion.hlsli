@@ -5,22 +5,20 @@
 // color rendering in spectral path tracers.
 //
 // Key Components:
-// 1. RGB → Spectrum Upsampling (Gaussian Basis Approximation - fast but limited accuracy)
+// 1. RGB → Spectrum Upsampling (Jakob & Hanika 2019 sigmoid, table-driven)
 // 2. CIE 1931 Color Matching Functions (for Spectrum → XYZ)
 // 3. XYZ ↔ RGB conversion matrices (sRGB D65 color space)
 // 4. Fast and accurate gamma correction (sRGB OETF/EOTF)
 //
 // IMPORTANT NOTES ON RGB → SPECTRUM UPSAMPLING:
-// Current implementation uses weighted Gaussian basis functions for real-time performance.
-// This is a SIMPLIFIED approach with known limitations:
-//   - Metamerism issues (multiple RGB values can map to same spectrum)
-//   - Energy conservation not guaranteed (normalization factor is empirical)
-//   - Less accurate than table-based methods
+// Reflectance goes through Jakob & Hanika: exact inside the sRGB gamut, bounded
+// by construction, three coefficients read from the table on binding 25. The
+// residual metamerism is inherent -- one RGB triple names infinitely many
+// spectra, and this picks the smooth one -- rather than an artefact of the fit.
 //
-// For production-quality spectral rendering (M2+ milestone), consider upgrading to:
-//   - Jakob & Hanika (2019): Polynomial sigmoid with precomputed coefficients (high accuracy)
-//   - Meng et al. (2015): Spectral upsampling with color matching functions
-//   - Smits (1999): RGB to spectrum basis functions (simple, reasonable accuracy)
+// Illuminants still go through the Gaussian basis below. That is a separate
+// question: an emitter is not bounded by 1, and the convention for what an RGB
+// light source means spectrally is not settled here.
 //
 // References:
 // - "Spectral and XYZ Color Functions" (PBRT v4, Chapter 4)
@@ -74,181 +72,125 @@ static const float CIE_Z_INTEGRAL = 108.883;
 // IMPORTANT: Input RGB must be in LINEAR space (not sRGB)!
 // ============================================================================
 
-// Improved Gaussian basis function with tunable width
+// Gaussian basis, still used by the illuminant path below.
 float SpectralBasisImproved(float lambda, float lambda_center, float sigma) {
     float x = (lambda - lambda_center) / sigma;
     return exp(-0.5 * x * x);
 }
 
-// Convert Linear RGB to reflectance spectrum at wavelength λ (Improved method)
-// Returns reflectance in [0, ~1.1] range (slight overshoot possible for saturated colors)
-float ConvertLinearRGBToSpectrum(float3 rgb_linear, float lambda) {
-    // Clamp RGB to [0, inf) - allow HDR but not negative
-    rgb_linear = max(rgb_linear, 0.0);
+// ============================================================================
+// RGB -> Spectrum Upsampling (Jakob & Hanika 2019)
+// ============================================================================
+// A reflectance is a sigmoid of a quadratic in wavelength:
+//
+//     R(lambda) = s(c0 t^2 + c1 t + c2),   t = (lambda - 380) / 400
+//     s(x)      = 1/2 + x / (2 sqrt(1 + x^2))
+//
+// Three numbers per colour, read from the table on binding 25. See
+// core/RgbToSpectrum.hpp for how that table is fitted and why; what matters
+// here is how it is used.
+//
+// TWO STEPS, NOT ONE, and the split is the point. The coefficients depend only
+// on the colour, so a surface fetches them once and then evaluates four flops
+// per wavelength. The Gaussian mapping this replaces had no such split: it ran
+// three exp() every time it was asked, and the VIS_FUSED loop asks up to five
+// times per wavelength across thirty-three wavelengths. Fetch-then-evaluate is
+// faster than what it replaces, not merely more accurate.
+//
+// A fetched spectrum is a float4: xyz are the coefficients, w is either
+// negative or -- for an achromatic colour -- the reflectance itself. Grey is
+// carried through untouched rather than through a sigmoid that would return it
+// to within 1e-8, because every dielectric without KHR_materials_specular has
+// F0 = (0.04, 0.04, 0.04) and both render gates use grey scenes. Exactness
+// there is what makes a change to this file provable instead of arguable.
+// ============================================================================
 
-    // ========================================================================
-    // Primary wavelengths optimized for sRGB color space
-    // These values are chosen to minimize round-trip error (RGB → Spectrum → XYZ → RGB)
-    // ========================================================================
-    const float LAMBDA_RED   = 630.0;  // Red primary (slightly lower than 650 for better gamut)
-    const float LAMBDA_GREEN = 532.0;  // Green primary (matches human luminance peak)
-    const float LAMBDA_BLUE  = 467.0;  // Blue primary (matches sRGB blue)
+static const float RGB2SPEC_LAMBDA_MIN   = 380.0;
+static const float RGB2SPEC_LAMBDA_RANGE = 400.0;
+static const uint  RGB2SPEC_RES          = 64;   // must match kRgbToSpectrumResolution
 
-    // Adaptive sigma based on color saturation
-    // More saturated colors → narrower basis (more spectral purity)
-    // Achromatic colors → wider basis (smoother spectrum)
-    float maxRGB = max(max(rgb_linear.r, rgb_linear.g), rgb_linear.b);
-    float minRGB = min(min(rgb_linear.r, rgb_linear.g), rgb_linear.b);
-    float saturation = (maxRGB > 0.001) ? (maxRGB - minRGB) / maxRGB : 0.0;
-
-    // Sigma varies from 65nm (achromatic) to 45nm (saturated)
-    float sigma = lerp(65.0, 45.0, saturation);
-
-    // ========================================================================
-    // Compute basis function contributions
-    // ========================================================================
-    float basis_R = SpectralBasisImproved(lambda, LAMBDA_RED, sigma);
-    float basis_G = SpectralBasisImproved(lambda, LAMBDA_GREEN, sigma);
-    float basis_B = SpectralBasisImproved(lambda, LAMBDA_BLUE, sigma);
-
-    // Weighted sum of basis functions
-    float R_lambda = rgb_linear.r * basis_R +
-                     rgb_linear.g * basis_G +
-                     rgb_linear.b * basis_B;
-
-    // ========================================================================
-    // Wavelength-dependent normalization for achromatic color preservation
-    // ========================================================================
-    // CRITICAL FIX: Use per-wavelength normalization to ensure achromatic
-    // (gray/white) colors produce FLAT spectra across all wavelengths.
-    //
-    // For input (g, g, g):
-    //   R_lambda = g * (basis_R + basis_G + basis_B)
-    //   white_at_lambda = basis_R + basis_G + basis_B
-    //   normalized = R_lambda / white_at_lambda = g
-    //
-    // This guarantees gray input produces gray output (flat spectrum).
-    //
-    // Previous CONSTANT normalization (1.702 at 532nm) caused green tint
-    // because basis function overlap varies across wavelengths:
-    //   - At 532nm (green): high overlap → higher output
-    //   - At 630nm (red): low overlap → lower output
-    //   - Result: green bias for achromatic colors
-    // ========================================================================
-
-    // Compute white reference at current wavelength (sum of all basis functions)
-    float white_at_lambda = basis_R + basis_G + basis_B;
-
-    // Prevent division by zero (happens at extreme UV/IR edges)
-    white_at_lambda = max(white_at_lambda, 0.001);
-
-    // Apply wavelength-dependent normalization
-    float normalized_spectrum = R_lambda / white_at_lambda;
-
-    // Final reflectance (clamped to reasonable range)
-    return clamp(normalized_spectrum, 0.0, 1.5);
+// Exact inverse of smoothstep, which the table's z axis applies twice. The
+// reference implementation binary-searches the node array instead; this is the
+// same answer with no loop, and core/RgbToSpectrum.cpp uses the identical
+// expression so the fit and the fetch cannot disagree about where a node is.
+float InvSmoothstep(float y) {
+    return 0.5 - sin(asin(clamp(1.0 - 2.0 * y, -1.0, 1.0)) * (1.0 / 3.0));
 }
 
-// ============================================================================
-// RGB → Spectrum Upsampling V2 (P3 Fix: Improved Energy Conservation)
-// ============================================================================
-// Enhanced version with better luminance preservation and round-trip accuracy.
+// The reflectance of a fetched spectrum at one wavelength.
 //
-// IMPROVEMENTS OVER V1:
-// 1. Precomputed Gaussian integrals for exact normalization
-// 2. Luminance-weighted blend ensuring Y channel matches input
-// 3. Reduced clamping artifacts for saturated colors
+// lambda is clamped to the fitted band. Outside it the quadratic keeps growing
+// and the sigmoid saturates -- to 1 for a saturated warm colour, which in a
+// thermal render is a mirror where a wall should be, emissivity zero and no
+// self-emission. Callers in the infrared must not reach here at all; this
+// clamp is the guard rail behind that rule, not a licence to ignore it.
+float RgbSpectrumAt(float4 spectrum, float lambda) {
+    if (spectrum.w >= 0.0) {
+        return spectrum.w;  // achromatic, bit-exact
+    }
+    const float t = saturate((lambda - RGB2SPEC_LAMBDA_MIN) / RGB2SPEC_LAMBDA_RANGE);
+    const float x = (spectrum.x * t + spectrum.y) * t + spectrum.z;
+    return 0.5 + 0.5 * x * rsqrt(1.0 + x * x);
+}
+
+// Look one RGB reflectance up in the coefficient table.
 //
-// ACCURACY:
-// - Round-trip error (RGB → Spectrum → XYZ → RGB): < 5% for gamut colors
-// - Luminance preservation: < 2% error
-// - Energy conservation: ∫R(λ)dλ matches input luminance
-//
-// For production-quality rendering, consider upgrading to Jakob & Hanika (2019)
-// sigmoid method with precomputed coefficient LUT (~64KB).
-// ============================================================================
+// Components outside [0,1] are clamped rather than extrapolated: this is a
+// reflectance, and an HDR triple belongs to the illuminant path, which scales
+// before it asks.
+float4 FetchRgbSpectrum(StructuredBuffer<float4> table, float3 rgb) {
+    rgb = clamp(rgb, 0.0, 1.0);
 
-float ConvertLinearRGBToSpectrum_V2(float3 rgb_linear, float lambda) {
-    // Clamp RGB to [0, inf) - allow HDR but not negative
-    rgb_linear = max(rgb_linear, 0.0);
-
-    // ========================================================================
-    // Primary wavelengths and precomputed integrals
-    // ========================================================================
-    const float LAMBDA_RED   = 630.0;
-    const float LAMBDA_GREEN = 532.0;
-    const float LAMBDA_BLUE  = 467.0;
-    const float SIGMA_BASE   = 50.0;  // Base Gaussian width (nm)
-
-    // Precomputed: ∫G(λ, center, σ)dλ over visible range [380, 780]
-    // For Gaussian centered at primary wavelengths with σ=50nm:
-    //   Integral ≈ σ × sqrt(2π) ≈ 125.3 (full), but truncated at visible edges
-    // These values are numerically integrated:
-    const float INTEGRAL_R = 118.7;  // Red: partial truncation at 780nm edge
-    const float INTEGRAL_G = 125.3;  // Green: fully within visible range
-    const float INTEGRAL_B = 108.2;  // Blue: partial truncation at 380nm edge
-
-    // ========================================================================
-    // Compute basis function values at query wavelength
-    // ========================================================================
-    float basis_R = SpectralBasisImproved(lambda, LAMBDA_RED, SIGMA_BASE);
-    float basis_G = SpectralBasisImproved(lambda, LAMBDA_GREEN, SIGMA_BASE);
-    float basis_B = SpectralBasisImproved(lambda, LAMBDA_BLUE, SIGMA_BASE);
-
-    // ========================================================================
-    // Luminance-preserving normalization
-    // ========================================================================
-    // CIE Y (luminance) weights for sRGB primaries:
-    //   Y = 0.2126 × R + 0.7152 × G + 0.0722 × B
-    //
-    // We want: ∫R(λ) × CIE_Y(λ) dλ ≈ Y_input
-    // This ensures the perceived brightness matches the input RGB.
-    // ========================================================================
-
-    // Input luminance (linear sRGB → CIE Y)
-    float Y_input = 0.2126 * rgb_linear.r + 0.7152 * rgb_linear.g + 0.0722 * rgb_linear.b;
-
-    // Normalize each basis by its integral (so ∫basis dλ = 1)
-    float basis_R_norm = basis_R / INTEGRAL_R;
-    float basis_G_norm = basis_G / INTEGRAL_G;
-    float basis_B_norm = basis_B / INTEGRAL_B;
-
-    // Weighted sum with normalized bases
-    // This ensures energy is properly distributed across the spectrum
-    float R_lambda = rgb_linear.r * basis_R_norm +
-                     rgb_linear.g * basis_G_norm +
-                     rgb_linear.b * basis_B_norm;
-
-    // ========================================================================
-    // Scale factor for luminance matching
-    // ========================================================================
-    // The raw spectrum integral is approximately:
-    //   ∫R(λ)dλ = r × 1 + g × 1 + b × 1 = r + g + b
-    // But we want the luminance-weighted integral to match Y_input.
-    //
-    // Approximate scale factor based on luminance ratio:
-    float rgb_sum = rgb_linear.r + rgb_linear.g + rgb_linear.b;
-    float scale = (rgb_sum > 0.001) ? Y_input / (rgb_sum / 3.0) : 1.0;
-
-    // Apply scale and clamp
-    // The 3.0 factor compensates for the sum of three normalized bases
-    R_lambda = R_lambda * scale * 3.0;
-
-    // ========================================================================
-    // Handle HDR colors (rgb > 1)
-    // ========================================================================
-    // For HDR, allow values > 1 but with soft clipping to prevent extreme spikes
-    float maxRGB = max(max(rgb_linear.r, rgb_linear.g), rgb_linear.b);
-    if (maxRGB > 1.0) {
-        // Soft clip: R_hdr = 1 + log(R) for R > 1
-        // This compresses HDR range while preserving relative intensities
-        float hdr_factor = maxRGB;
-        R_lambda = R_lambda / hdr_factor;  // Normalize to [0,1] range
-        R_lambda = clamp(R_lambda, 0.0, 1.0);
-        R_lambda = R_lambda * hdr_factor;  // Scale back
+    if (rgb.r == rgb.g && rgb.g == rgb.b) {
+        return float4(0.0, 0.0, 0.0, rgb.r);
     }
 
-    return clamp(R_lambda, 0.0, 10.0);  // Allow moderate HDR
+    // Which channel is largest picks the sub-table; the other two divided by it
+    // are what determine the spectrum's shape. Written out rather than indexed
+    // dynamically, which scalarises badly on a float3.
+    float z, a, b;
+    uint maxc;
+    if (rgb.r >= rgb.g && rgb.r >= rgb.b) {
+        maxc = 0; z = rgb.r; a = rgb.g; b = rgb.b;
+    } else if (rgb.g >= rgb.b) {
+        maxc = 1; z = rgb.g; a = rgb.b; b = rgb.r;
+    } else {
+        maxc = 2; z = rgb.b; a = rgb.r; b = rgb.g;
+    }
+
+    const float res1 = float(RGB2SPEC_RES - 1);
+    const float xf = saturate(a / z) * res1;
+    const float yf = saturate(b / z) * res1;
+    const float zf = saturate(InvSmoothstep(InvSmoothstep(z))) * res1;
+
+    const uint xi = min((uint)xf, RGB2SPEC_RES - 2);
+    const uint yi = min((uint)yf, RGB2SPEC_RES - 2);
+    const uint zi = min((uint)zf, RGB2SPEC_RES - 2);
+    const float dx = xf - float(xi);
+    const float dy = yf - float(yi);
+    const float dz = zf - float(zi);
+
+    const uint strideY = RGB2SPEC_RES;
+    const uint strideZ = RGB2SPEC_RES * RGB2SPEC_RES;
+    const uint base = ((maxc * RGB2SPEC_RES + zi) * RGB2SPEC_RES + yi) * RGB2SPEC_RES + xi;
+
+    const float3 c000 = table[base].xyz;
+    const float3 c001 = table[base + 1].xyz;
+    const float3 c010 = table[base + strideY].xyz;
+    const float3 c011 = table[base + strideY + 1].xyz;
+    const float3 c100 = table[base + strideZ].xyz;
+    const float3 c101 = table[base + strideZ + 1].xyz;
+    const float3 c110 = table[base + strideZ + strideY].xyz;
+    const float3 c111 = table[base + strideZ + strideY + 1].xyz;
+
+    const float3 c = lerp(lerp(lerp(c000, c001, dx), lerp(c010, c011, dx), dy),
+                          lerp(lerp(c100, c101, dx), lerp(c110, c111, dx), dy), dz);
+    return float4(c, -1.0);
+}
+
+// One-shot, for the callers with no loop to hoist the fetch out of.
+float ConvertLinearRGBToSpectrum(StructuredBuffer<float4> table, float3 rgb, float lambda) {
+    return RgbSpectrumAt(FetchRgbSpectrum(table, rgb), lambda);
 }
 
 // ============================================================================
@@ -600,8 +542,8 @@ float3 ConvertSRGBToLinearRGB_Fast(float3 srgb) {
 // RGB → Illuminant Spectrum (For Light Sources, NOT Reflectance)
 // ============================================================================
 // CRITICAL: This function is for light sources (sun, sky, emissive, IBL).
-// Unlike ConvertLinearRGBToSpectrum() which is for reflectance (clamped to 1.5),
-// this function preserves HDR values without clamping.
+// Unlike FetchRgbSpectrum/RgbSpectrumAt above, which are for reflectance and are
+// bounded by [0,1] by construction, this preserves HDR values without clamping.
 //
 // DIFFERENCES FROM REFLECTANCE VERSION:
 //   1. No per-wavelength normalization (not needed for light sources)
@@ -619,8 +561,8 @@ float3 ConvertSRGBToLinearRGB_Fast(float3 srgb) {
 //   - IBL:           ConvertLinearRGBToIlluminantSpectrum(prefilteredColor, lambda)
 //
 // DO NOT USE FOR:
-//   - Material base color (use ConvertLinearRGBToSpectrum instead)
-//   - Albedo textures (use ConvertLinearRGBToSpectrum instead)
+//   - Material base color (use FetchRgbSpectrum / RgbSpectrumAt instead)
+//   - Albedo textures (use FetchRgbSpectrum / RgbSpectrumAt instead)
 // ============================================================================
 
 float ConvertLinearRGBToIlluminantSpectrum(float3 rgb_linear, float lambda) {
@@ -651,9 +593,9 @@ float ConvertLinearRGBToIlluminantSpectrum(float3 rgb_linear, float lambda) {
     // XYZ integration to produce Y >> X, leading to negative R after
     // XYZ→RGB conversion → cyan (0, G, B) output!
     //
-    // The key difference from ConvertLinearRGBToSpectrum():
-    //   - We normalize for color accuracy (same as reflectance version)
-    //   - But we DO NOT clamp to 1.5 (allow full HDR for light sources)
+    // The key difference from the reflectance path:
+    //   - We normalize for color accuracy, as the reflectance path does
+    //   - But nothing bounds the result, since a light source is not a reflectance
     // ================================================================
     float white_at_lambda = basis_R + basis_G + basis_B;
     white_at_lambda = max(white_at_lambda, 0.001);
@@ -663,31 +605,6 @@ float ConvertLinearRGBToIlluminantSpectrum(float3 rgb_linear, float lambda) {
     // NO CLAMP - allow full HDR range for light sources
     // Only prevent negative values (non-physical)
     return max(normalized, 0.0);
-}
-
-// ============================================================================
-// Helper: Wavelength-dependent reflectance from RGB texture
-// ============================================================================
-// Convenience function that combines:
-//   1. sRGB → Linear RGB conversion (if needed)
-//   2. Linear RGB → Spectrum upsampling at target wavelength
-//
-// Use this when sampling a glTF texture to get spectral reflectance.
-//
-// Parameters:
-//   rgb_srgb: Color sampled from texture (assumed sRGB-encoded)
-//   lambda: Target wavelength (nm)
-//   is_srgb: Whether the input is sRGB-encoded (true for most glTF textures)
-//
-// Returns: Reflectance at wavelength λ (0 to ~1, can exceed 1 for HDR)
-// ============================================================================
-
-float GetSpectralReflectanceFromRGBTexture(float3 rgb_srgb, float lambda, bool is_srgb = true) {
-    // Convert to linear RGB if needed
-    float3 rgb_linear = is_srgb ? ConvertSRGBToLinearRGB(rgb_srgb) : rgb_srgb;
-
-    // Upsample to spectrum at target wavelength
-    return ConvertLinearRGBToSpectrum(rgb_linear, lambda);
 }
 
 #endif // QUANTILOOM_SPECTRAL_CONVERSION_HLSLI
