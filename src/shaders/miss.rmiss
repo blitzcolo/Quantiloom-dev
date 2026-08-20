@@ -47,7 +47,7 @@
 // Provides <0.1% error vs analytical approximation's 10-20% at edges
 // ============================================================================
 
-[[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
+[[vk::binding(19, 0)]] StructuredBuffer<float4> cieCMF_LUT;
 
 // ============================================================================
 // RGB -> Spectrum Coefficients (Binding 25)
@@ -121,9 +121,17 @@ void main(inout Payload payload) {
         const uint sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
         float heroRadiance = 0.0;
 
+        // The sky's fallback chroma does not depend on wavelength, so it is
+        // fitted once rather than at every sample.
+        const RgbIlluminant skyFallback =
+            FetchRgbIlluminant(rgbToSpectrumTable, lut.skyRadiance_rgb);
+
         for (uint i = 0; i < sampleCount; ++i) {
             float lambda = heroRay ? payload.heroLambda
                                    : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP);
+
+            // Matching functions and D65 in one fetch; both are needed below.
+            float4 cieSample = SampleCIE_LUT(cieCMF_LUT, lambda);
 
             // Query sky radiance at this wavelength
             float sky_radiance_lambda;
@@ -132,11 +140,11 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
-                sky_radiance_lambda = ConvertLinearRGBToIlluminantSpectrum(lut.skyRadiance_rgb, lambda);
+                sky_radiance_lambda = RgbIlluminantAt(skyFallback, cieSample.w, lambda);
             }
 
             // Weight by CIE color matching functions (use LUT for high precision)
-            float3 xyz_cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda);
+            float3 xyz_cmf = cieSample.xyz;
             float x_bar = xyz_cmf.x;
             float y_bar = xyz_cmf.y;
             float z_bar = xyz_cmf.z;

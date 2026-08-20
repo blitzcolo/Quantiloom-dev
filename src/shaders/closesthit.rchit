@@ -157,7 +157,7 @@ static const float WAVELENGTH_B_NM = 450.0;  // Blue channel representative wave
 // - Used in VIS_FUSED spectral integration for accurate XYZ conversion
 // ============================================================================
 
-[[vk::binding(19, 0)]] StructuredBuffer<float3> cieCMF_LUT;
+[[vk::binding(19, 0)]] StructuredBuffer<float4> cieCMF_LUT;
 
 // ============================================================================
 // RGB -> Spectrum Coefficients (Binding 25)
@@ -2182,6 +2182,26 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
         }
 
+        // The three RGB light sources this loop can read, fitted once. None of
+        // them varies with wavelength: the emissive factor is a material
+        // property, the IBL product is built from F0 and the split-sum terms,
+        // and the sampled emitter was chosen before the loop began.
+        // Written out rather than with ?:, which HLSL does not allow to yield a
+        // struct. Black fits for free -- FetchRgbIlluminant returns scale 0
+        // without touching the table -- so the guards are about not paying for
+        // a lookup, not about correctness.
+        const RgbIlluminant iEmissive = FetchRgbIlluminant(rgbToSpectrumTable, emissive);
+        RgbIlluminant iIbl = FetchRgbIlluminant(rgbToSpectrumTable, float3(0.0, 0.0, 0.0));
+        if (useIBL && hasEnvMap) {
+            iIbl = FetchRgbIlluminant(
+                rgbToSpectrumTable,
+                prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y));
+        }
+        RgbIlluminant iNee = FetchRgbIlluminant(rgbToSpectrumTable, float3(0.0, 0.0, 0.0));
+        if (visNeeScale > 0.0) {
+            iNee = FetchRgbIlluminant(rgbToSpectrumTable, visLight.emissive);
+        }
+
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
         // Modern GPUs handle small loops efficiently without forced unrolling
@@ -2197,6 +2217,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 ? (uint)clamp(round((lambda - LAMBDA_MIN_VIS) / LAMBDA_STEP),
                               0.0, float(NUM_WAVELENGTH_SAMPLES - 1))
                 : i;
+
+            // Matching functions and the normalised D65 in one fetch. Both are
+            // read below, the first to weight this sample into XYZ and the
+            // second to shape whatever RGB light sources the scene fell back to.
+            const float4 cieSample = SampleCIE_LUT(cieCMF_LUT, lambda);
 
             // ================================================================
             // Query Sun/Sky Spectral Radiance at Wavelength λ
@@ -2320,7 +2345,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Convert emissive RGB to spectral radiance at this wavelength
             // Use illuminant function (no clamp) to preserve HDR emissive intensity
             // Dimmed by the coat: it sits over the emitter, not under it.
-            float L_emissive = ConvertLinearRGBToIlluminantSpectrum(emissive, lambda) * ccBase;
+            float L_emissive = RgbIlluminantAt(iEmissive, cieSample.w, lambda) * ccBase;
 
             // 5. IBL specular contribution (spectrally integrated)
             // Apply Fresnel × BRDF in RGB space first, then convert to spectrum
@@ -2328,8 +2353,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float L_ibl = 0.0;
             if (useIBL) {
                 if (hasEnvMap) {
-                    float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y);
-                    L_ibl = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+                    L_ibl = RgbIlluminantAt(iIbl, cieSample.w, lambda);
                 } else {
                     // Uniform analytic sky dome, kept on the measured solar LUT:
                     // prefiltering a uniform dome returns its radiance, which at
@@ -2358,7 +2382,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
                     visF * sheenScale_lambda * ccBase, aniso);
                 L_nee = brdf_at_light *
-                        ConvertLinearRGBToIlluminantSpectrum(visLight.emissive, lambda) *
+                        RgbIlluminantAt(iNee, cieSample.w, lambda) *
                         visNeeScale;
             }
 
@@ -2382,7 +2406,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 6. Weight by CIE XYZ color matching functions (High-precision LUT version)
             // Using LUT instead of analytical approximation for <0.1% error (vs 10-20% at edges)
-            float3 xyz_cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda);
+            float3 xyz_cmf = cieSample.xyz;
             float x_bar = xyz_cmf.x;
             float y_bar = xyz_cmf.y;
             float z_bar = xyz_cmf.z;
@@ -2625,7 +2649,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (useIBL_scalar) {
             if (hasEnvMap) {
                 float3 ibl_rgb = prefilteredColor * (F0 * envBRDF.x + specularF90 * envBRDF.y);
-                ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(ibl_rgb, lambda);
+                ibl_scalar = ConvertLinearRGBToIlluminantSpectrum(
+                    rgbToSpectrumTable, cieCMF_LUT, ibl_rgb, lambda);
             } else {
                 // Uniform analytic sky dome on the solar LUT, as VIS_FUSED.
                 ibl_scalar = skyRadiance_lambda *
@@ -2641,7 +2666,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    `emissive.r` did. An emissive colour is a colour; at a wavelength
         //    it has to be evaluated, not indexed.
         float emissive_scalar =
-            ConvertLinearRGBToIlluminantSpectrum(emissive, lambda) * ccBase;
+            ConvertLinearRGBToIlluminantSpectrum(
+                rgbToSpectrumTable, cieCMF_LUT, emissive, lambda) * ccBase;
         float radiance_spectral = directSun_scalar + skyAmbient_scalar +
                                   emissive_scalar + ibl_scalar;
 
@@ -2685,7 +2711,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         F_scalar.r * sheenScale_s * ccBase, aniso);
                     radiance_spectral +=
                         brdf_at_light *
-                        ConvertLinearRGBToIlluminantSpectrum(s.emissive, lambda) *
+                        ConvertLinearRGBToIlluminantSpectrum(
+                            rgbToSpectrumTable, cieCMF_LUT, s.emissive, lambda) *
                         NdotWl * PowerHeuristic(s.pdfSolid, pdfBsdfAtLight) / s.pdfSolid;
                 }
             }

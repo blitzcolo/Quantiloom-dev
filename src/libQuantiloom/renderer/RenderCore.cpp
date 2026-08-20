@@ -2,6 +2,7 @@
 
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
+#include "core/D65Illuminant.hpp"
 #include "core/RgbToSpectrum.hpp"
 #include "io/GltfLoader.hpp"
 #include "io/ImageIO.hpp"
@@ -1291,12 +1292,39 @@ SensorBandAdjustment SensorAdjustmentForMode(const SpectralMode mode,
 // ============================================================================
 
 std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
+    // w carries D65, scaled so that a spectrum equal to it integrates to Y = 1
+    // through the shader's own estimator:
+    //
+    //     w(lambda) = D65(lambda) * integral(ybar) / integral(D65 * ybar)
+    //
+    // It rides along here rather than on a binding of its own because it is
+    // sampled at exactly the same wavelengths as the matching functions, on the
+    // same grid, by the same callers -- and because the slot was already being
+    // uploaded as padding. A structured buffer of float3 has a 16-byte stride
+    // either way.
+    //
+    // What it is for: an RGB light source has no spectrum, and the renderer has
+    // to pick a convention for what one means. A flat spectrum -- what this used
+    // to imply -- is the equal-energy illuminant E, which in sRGB is
+    // (1.205, 0.948, 0.909): a nominally white light rendering distinctly warm.
+    // D65 is the white point sRGB is defined against, so weighting by it is what
+    // makes (1,1,1) mean white.
+    f64 yIntegral = 0.0;
+    f64 d65Integral = 0.0;
+    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
+        const f32 lambda = CIE_CMF_LAMBDA_MIN + static_cast<f32>(i);
+        const f64 w = (i == 0 || i == CIE_CMF_LUT_SIZE - 1) ? 0.5 : 1.0;  // trapezoid
+        yIntegral += w * CIE_1931_2DEG[i][1];
+        d65Integral += w * static_cast<f64>(D65Relative(lambda)) * CIE_1931_2DEG[i][1];
+    }
+    const f64 d65Scale = yIntegral / d65Integral;
+
     Vector<glm::vec4> table;
     table.reserve(CIE_CMF_LUT_SIZE);
     for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
-        // w is padding: the shader reads this as a structured buffer of float4.
-        table.emplace_back(CIE_1931_2DEG[i][0], CIE_1931_2DEG[i][1],
-                           CIE_1931_2DEG[i][2], 0.0f);
+        const f32 lambda = CIE_CMF_LAMBDA_MIN + static_cast<f32>(i);
+        table.emplace_back(CIE_1931_2DEG[i][0], CIE_1931_2DEG[i][1], CIE_1931_2DEG[i][2],
+                           static_cast<f32>(D65Relative(lambda) * d65Scale));
     }
 
     const size_t bytes = table.size() * sizeof(glm::vec4);
@@ -1305,7 +1333,7 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
                                               VMA_MEMORY_USAGE_CPU_TO_GPU);
     buffer->Upload(table.data(), bytes);
 
-    QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm)", CIE_CMF_LUT_SIZE);
+    QL_LOG_INFO("  CIE CMF LUT created ({} samples, 380-780 nm, D65 in w)", CIE_CMF_LUT_SIZE);
     return buffer;
 }
 

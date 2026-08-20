@@ -215,8 +215,22 @@ namespace LightingDefaults {
     // Correction factors normalize RGB output to neutral gray
     // NOTE: These values are for EQUAL-INTEGRAL CMF data (∫x̄=∫ȳ=∫z̄≈106.85)
     //       Standard CIE 1931 has UNEQUAL integrals and needs different factors!
-    constexpr f32 CHROMA_R_CORRECTION = 0.7872f;  // G/R ratio to neutralize red shift
-    constexpr f32 CHROMA_B_CORRECTION = 1.0437f;  // G/B ratio to neutralize blue deficit
+    // Identity, and the history is worth keeping. These used to be 0.7872 and
+    // 1.0437 -- exactly the G/R and G/B of the equal-energy illuminant in sRGB
+    // -- because an RGB light source was upsampled to a FLAT spectrum, which is
+    // E rather than D65, and a nominally white sky rendered visibly warm. The
+    // fix was a diagonal scale on the final radiance, and it was applied to
+    // every VIS_FUSED render including the spectrally correct ones: a scene lit
+    // by a real D65 spectrum came out 16.6% short in red and 10.6% long in blue
+    // because of it.
+    //
+    // The convention is now fixed where it was wrong. An RGB illuminant is
+    // upsampled against D65, so (1,1,1) integrates back to sRGB white with no
+    // correction at all, and a measured solar spectrum is left alone. The keys
+    // remain for anyone who wants the old look; the default no longer applies a
+    // white balance nobody asked for.
+    constexpr f32 CHROMA_R_CORRECTION = 1.0f;
+    constexpr f32 CHROMA_B_CORRECTION = 1.0f;
 }
 
 // ============================================================================

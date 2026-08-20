@@ -16,9 +16,9 @@
 // residual metamerism is inherent -- one RGB triple names infinitely many
 // spectra, and this picks the smooth one -- rather than an artefact of the fit.
 //
-// Illuminants still go through the Gaussian basis below. That is a separate
-// question: an emitter is not bounded by 1, and the convention for what an RGB
-// light source means spectrally is not settled here.
+// Illuminants use the same fit on their chroma, with the magnitude carried as a
+// scalar and the result weighted by D65 -- see the illuminant section below for
+// why that weighting is a correction and not a preference.
 //
 // References:
 // - "Spectral and XYZ Color Functions" (PBRT v4, Chapter 4)
@@ -71,12 +71,6 @@ static const float CIE_Z_INTEGRAL = 108.883;
 //
 // IMPORTANT: Input RGB must be in LINEAR space (not sRGB)!
 // ============================================================================
-
-// Gaussian basis, still used by the illuminant path below.
-float SpectralBasisImproved(float lambda, float lambda_center, float sigma) {
-    float x = (lambda - lambda_center) / sigma;
-    return exp(-0.5 * x * x);
-}
 
 // ============================================================================
 // RGB -> Spectrum Upsampling (Jakob & Hanika 2019)
@@ -216,17 +210,20 @@ static const uint  CIE_LUT_SIZE = 401;  // 1nm resolution: 780 - 380 + 1
 // ============================================================================
 // LUT-Based CIE CMF (High Precision)
 // ============================================================================
-// Requires StructuredBuffer<float3> CIE_XYZ_LUT bound to shader
-// Each entry contains (x_bar, y_bar, z_bar) at wavelength (380 + index) nm
+// Requires StructuredBuffer<float4> CIE_XYZ_LUT bound to shader
+// Each entry is (x_bar, y_bar, z_bar, d65) at wavelength (380 + index) nm, where
+// d65 is the D65 relative power scaled so a spectrum equal to it integrates to
+// Y = 1 through this file's own estimator. It rides in w because it is sampled
+// at the same wavelengths by the same callers, and because w was padding.
 //
 // Usage:
 //   float3 xyz = SampleCIE_XYZ_LUT(cieLUT, wavelength_nm);
 // ============================================================================
 
-float3 SampleCIE_XYZ_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
+float4 SampleCIE_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
     // Clamp to valid range
     if (lambda < CIE_LAMBDA_MIN || lambda > CIE_LAMBDA_MAX) {
-        return float3(0.0, 0.0, 0.0);
+        return float4(0.0, 0.0, 0.0, 0.0);
     }
 
     // Compute fractional index
@@ -237,6 +234,17 @@ float3 SampleCIE_XYZ_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
 
     // Linear interpolation
     return lerp(cieLUT[idx0], cieLUT[idx1], t);
+}
+
+float3 SampleCIE_XYZ_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
+    return SampleCIE_LUT(cieLUT, lambda).xyz;
+}
+
+// D65 relative power, normalised. Outside the observer's support this is zero,
+// which is also where the matching functions are zero, so the two agree about
+// where the visible band ends.
+float SampleD65_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
+    return SampleCIE_LUT(cieLUT, lambda).w;
 }
 
 // ============================================================================
@@ -287,15 +295,15 @@ float VisibleWavelengthPDF(float lambda) {
 }
 
 // Individual channel accessors for LUT version
-float SampleCIE_X_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
+float SampleCIE_X_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
     return SampleCIE_XYZ_LUT(cieLUT, lambda).x;
 }
 
-float SampleCIE_Y_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
+float SampleCIE_Y_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
     return SampleCIE_XYZ_LUT(cieLUT, lambda).y;
 }
 
-float SampleCIE_Z_LUT(StructuredBuffer<float3> cieLUT, float lambda) {
+float SampleCIE_Z_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
     return SampleCIE_XYZ_LUT(cieLUT, lambda).z;
 }
 
@@ -539,72 +547,60 @@ float3 ConvertSRGBToLinearRGB_Fast(float3 srgb) {
 }
 
 // ============================================================================
-// RGB → Illuminant Spectrum (For Light Sources, NOT Reflectance)
+// RGB -> Illuminant Spectrum (For Light Sources, NOT Reflectance)
 // ============================================================================
-// CRITICAL: This function is for light sources (sun, sky, emissive, IBL).
-// Unlike FetchRgbSpectrum/RgbSpectrumAt above, which are for reflectance and are
-// bounded by [0,1] by construction, this preserves HDR values without clamping.
+// An emitter is not bounded by 1, so it cannot be a sigmoid on its own. The
+// standard construction is to split it: fit the chroma as a reflectance and
+// carry the magnitude as a scalar.
 //
-// DIFFERENCES FROM REFLECTANCE VERSION:
-//   1. No per-wavelength normalization (not needed for light sources)
-//   2. No 1.5 clamp (HDR light sources can have arbitrary intensity)
-//   3. Simple Gaussian basis weighted sum (preserves color and intensity)
+//     L(lambda) = scale * s(c; lambda) * d65(lambda),   scale = 2 * max(rgb)
 //
-// PHYSICAL JUSTIFICATION:
-//   For reflectance: R(λ) ∈ [0, 1] by definition (energy conservation)
-//   For light sources: L(λ) can be arbitrary positive value (HDR)
+// The 2 keeps the fitted triple at or below 0.5, in the sigmoid's
+// well-conditioned interior rather than against the saturating ends. The error
+// is then independent of scale -- measured at 0.10% for a triple scaled from 1
+// to 5000, which is the table's interpolation error and nothing else.
 //
-// USAGE:
-//   - Sun radiance:  ConvertLinearRGBToIlluminantSpectrum(sunRadiance_rgb, lambda)
-//   - Sky radiance:  ConvertLinearRGBToIlluminantSpectrum(skyRadiance_rgb, lambda)
-//   - Emissive:      ConvertLinearRGBToIlluminantSpectrum(emissiveFactor, lambda)
-//   - IBL:           ConvertLinearRGBToIlluminantSpectrum(prefilteredColor, lambda)
+// THE D65 FACTOR IS THE POINT, and it is a correction rather than a refinement.
+// This function used to return a FLAT spectrum for a grey triple, and a flat
+// spectrum is the equal-energy illuminant E, not D65: it integrates to sRGB
+// (1.205, 0.948, 0.909), so a nominally white sky rendered warm. That was
+// patched downstream by scaling the final radiance by 0.7872 and 1.0437 --
+// exactly E's G/R and G/B -- unconditionally, including on renders lit by a
+// measured solar spectrum, which it then pushed 16.6% short in red. Weighting
+// the illuminant by D65 here makes (1,1,1) integrate back to white on its own,
+// and the downstream scale is now identity.
 //
-// DO NOT USE FOR:
-//   - Material base color (use FetchRgbSpectrum / RgbSpectrumAt instead)
-//   - Albedo textures (use FetchRgbSpectrum / RgbSpectrumAt instead)
+// What this does NOT change: a scene with lighting.solar_lut never reaches
+// here. A measured spectrum is the illuminant, and this is what a renderer says
+// when it was handed three numbers instead.
 // ============================================================================
 
-float ConvertLinearRGBToIlluminantSpectrum(float3 rgb_linear, float lambda) {
-    // Clamp to [0, inf) - allow HDR but not negative (non-physical)
-    rgb_linear = max(rgb_linear, 0.0);
+struct RgbIlluminant {
+    float4 spectrum;  // as FetchRgbSpectrum, on the chroma alone
+    float  scale;     // 2 * max(rgb); zero for black
+};
 
-    // Primary wavelengths matching sRGB primaries
-    const float LAMBDA_RED   = 630.0;
-    const float LAMBDA_GREEN = 532.0;
-    const float LAMBDA_BLUE  = 467.0;
-    const float SIGMA = 50.0;  // Fixed width for light sources
+RgbIlluminant FetchRgbIlluminant(StructuredBuffer<float4> table, float3 rgb) {
+    RgbIlluminant o;
+    rgb = max(rgb, 0.0);
+    const float m = max(max(rgb.r, rgb.g), rgb.b);
+    o.scale = 2.0 * m;
+    o.spectrum = (m > 0.0) ? FetchRgbSpectrum(table, rgb / o.scale)
+                           : float4(0.0, 0.0, 0.0, 0.0);
+    return o;
+}
 
-    // Compute Gaussian basis functions
-    float basis_R = SpectralBasisImproved(lambda, LAMBDA_RED, SIGMA);
-    float basis_G = SpectralBasisImproved(lambda, LAMBDA_GREEN, SIGMA);
-    float basis_B = SpectralBasisImproved(lambda, LAMBDA_BLUE, SIGMA);
+// d65Relative comes from SampleD65_LUT at the same wavelength.
+float RgbIlluminantAt(RgbIlluminant src, float d65Relative, float lambda) {
+    return src.scale * RgbSpectrumAt(src.spectrum, lambda) * d65Relative;
+}
 
-    // Weighted sum
-    float L_lambda = rgb_linear.r * basis_R +
-                     rgb_linear.g * basis_G +
-                     rgb_linear.b * basis_B;
-
-    // ================================================================
-    // CRITICAL: Per-wavelength normalization for color accuracy
-    // ================================================================
-    // This ensures gray (1,1,1) → flat spectrum (1.0 at all wavelengths)
-    // Without normalization, gray produces non-flat spectrum which causes
-    // XYZ integration to produce Y >> X, leading to negative R after
-    // XYZ→RGB conversion → cyan (0, G, B) output!
-    //
-    // The key difference from the reflectance path:
-    //   - We normalize for color accuracy, as the reflectance path does
-    //   - But nothing bounds the result, since a light source is not a reflectance
-    // ================================================================
-    float white_at_lambda = basis_R + basis_G + basis_B;
-    white_at_lambda = max(white_at_lambda, 0.001);
-
-    float normalized = L_lambda / white_at_lambda;
-
-    // NO CLAMP - allow full HDR range for light sources
-    // Only prevent negative values (non-physical)
-    return max(normalized, 0.0);
+// One-shot, for the callers with a single wavelength and nothing to hoist.
+float ConvertLinearRGBToIlluminantSpectrum(StructuredBuffer<float4> table,
+                                           StructuredBuffer<float4> cieLUT,
+                                           float3 rgb, float lambda) {
+    return RgbIlluminantAt(FetchRgbIlluminant(table, rgb),
+                           SampleD65_LUT(cieLUT, lambda), lambda);
 }
 
 #endif // QUANTILOOM_SPECTRAL_CONVERSION_HLSLI

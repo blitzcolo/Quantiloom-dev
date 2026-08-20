@@ -220,14 +220,19 @@ TEST(LightingParamsTest, DefaultConstantsConsistency) {
     EXPECT_FLOAT_EQ(params.chromaB_correction, LightingDefaults::CHROMA_B_CORRECTION);
 }
 
-TEST(LightingParamsTest, ChromaCorrectionDefaults) {
-    // Verify chromaticity correction factors have correct defaults
+TEST(LightingParamsTest, ChromaCorrectionDefaultsToIdentity) {
     LightingParams params = CreateDefaultLightingParams();
 
-    // Default corrections for EQUAL-INTEGRAL CIE CMF data (∫x̄=∫ȳ=∫z̄≈106.85)
-    // For flat spectrum, XYZ→RGB produces ratio ≈ (1.27:1.0:0.96)
-    // R correction: 0.7872 = G/R ratio (reduces red excess)
-    // B correction: 1.0437 = G/B ratio (compensates blue deficit)
-    EXPECT_NEAR(params.chromaR_correction, 0.7872f, 0.001f);
-    EXPECT_NEAR(params.chromaB_correction, 1.0437f, 0.001f);
+    // These were 0.7872 and 1.0437 -- the G/R and G/B of the equal-energy
+    // illuminant in sRGB -- because an RGB light source was upsampled to a flat
+    // spectrum, which is E rather than D65, so a nominally white sky rendered
+    // warm. The scale corrected that on the way out, and applied to every
+    // VIS_FUSED render including the ones lit by a measured solar spectrum,
+    // which it pushed 16.6% short in red.
+    //
+    // The illuminant is now fitted against D65, so (1,1,1) integrates back to
+    // sRGB white unaided. A default other than identity would mean the renderer
+    // still applies a white balance nobody asked for.
+    EXPECT_FLOAT_EQ(params.chromaR_correction, 1.0f);
+    EXPECT_FLOAT_EQ(params.chromaB_correction, 1.0f);
 }
