@@ -56,6 +56,17 @@ sky_radiance = [1.0, 1.0, 1.0]
 # -- the thermal desert config this one descends from zeroes both radiances
 # because its forcing CSV owns the sun, which is correct for a solver-driven
 # LWIR render and renders VIS, NIR and SWIR black.
+#
+# KNOWN LIMITATION, and the renderer warns about it at load. ASTM G-173 ends at
+# 4000 nm while the MWIR band runs to 5000 nm, so the top fifth of that band is
+# held flat at the 4 um value rather than following the real decline. Measured
+# against the spectrum itself, that flat tail is 7.1 W/m2 against 7.4 W/m2 of
+# real data -- 49 % of the band's solar irradiance -- and solar is 34 % of the
+# MWIR signal in this scene, so about a sixth of the MWIR panel rests on an
+# extrapolation. Solar irradiance actually falls by roughly half across
+# 4-5 um, so the flat hold overestimates. The VIS, NIR and SWIR panels are
+# entirely inside the measured range and unaffected; LWIR does not sample the
+# solar path at all.
 solar_lut = "assets/luts/astmg173.csv"
 solar_lut_columns = [4, 3]
 solar_lut_diffuse_is_global = true

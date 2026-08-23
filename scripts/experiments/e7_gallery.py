@@ -84,9 +84,12 @@ def strip(args):
         # is the thing most worth recording: a silent fallback to a base colour
         # is exactly the defect Section VIII-D caught, and it is invisible in
         # the pixels.
-        bound = [line.strip() for line in log.splitlines()
-                 if "spectral" in line.lower() and
-                 ("curve" in line.lower() or "material" in line.lower())]
+        bound = [line.split("] ")[-1].strip() for line in log.splitlines()
+                 if "using spectral curve" in line
+                 or "falling back" in line.lower()
+                 or "no spectral" in line.lower()
+                 or "base colour" in line.lower()
+                 or "base color" in line.lower()]
         records.append({"band": name, "mode": mode, "output": str(output),
                         "display": display, "spp": args.spp,
                         "spectral_log": bound[:12]})
