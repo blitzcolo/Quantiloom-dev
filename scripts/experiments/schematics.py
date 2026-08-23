@@ -274,7 +274,7 @@ def figure6():
     figure, axis = blank_axes(7.16, 2.65)
 
     gates = [
-        ("(i) Unit suite", "1,252 tests, < 8 s\nlinks the core library,\nnot the shaders"),
+        ("(i) Unit suite", "1,260 tests in 7.6 s\nlinks the core library,\nnot the shaders"),
         ("(ii) ABI gate", "export list diffed\nagainst a golden\nbaseline of 244 symbols"),
         ("(iii) Furnace gate", "8 isothermal cavities\n(5 LWIR, 3 MWIR) against\n"
                                "band-integrated Planck"),
