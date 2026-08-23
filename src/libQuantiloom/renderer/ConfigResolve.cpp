@@ -1435,6 +1435,44 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     // ------------------------------------------------------------------
     QL_LOG_INFO("Loading spectral curves...");
 
+    // The band both curve-binding paths below resample onto. A measured curve
+    // for a cross-band asset spans the near ultraviolet to the LWIR, and 64
+    // uniform samples over that span leave the visible band two interior grid
+    // points; see SpectralCurveGPU::FromCPUBand for what that cost. Edges match
+    // the [refractive_index] block's table further down, so n,k and reflectance
+    // are resampled onto the same window.
+    const auto activeBandName = config.Get<String>("spectral.band", "VIS");
+    f32 bandMinNm = 400.0f, bandMaxNm = 780.0f;
+    if (activeBandName == "LWIR")      { bandMinNm = 8000.0f; bandMaxNm = 12000.0f; }
+    else if (activeBandName == "MWIR") { bandMinNm = 3000.0f; bandMaxNm = 5000.0f; }
+    else if (activeBandName == "SWIR") { bandMinNm = 1400.0f; bandMaxNm = 2400.0f; }
+    else if (activeBandName == "NIR")  { bandMinNm =  930.0f; bandMaxNm = 1200.0f; }
+
+    // A cube asks for a wavelength axis rather than a band, so it resamples over
+    // the axis it declared instead of over the band that named it.
+    if (config.Get<String>("spectral.mode", "") == "multispectral") {
+        bandMinNm = config.Get<f32>("hyperspectral.wavelength_min_nm", bandMinNm);
+        bandMaxNm = config.Get<f32>("hyperspectral.wavelength_max_nm", bandMaxNm);
+    }
+
+    // Says what a material ended up with, which is the question no internal gate
+    // asks -- a grey furnace cavity cannot see a reflectance lose its chroma.
+    const auto logBound = [&](const String& name, const SpectralCurveGPU& gpu,
+                              i32 index, const char* source) {
+        const f32 last = gpu.GetWavelength(gpu.numSamples - 1);
+        QL_LOG_INFO("  Material '{}': reflectance curve from {}, {} samples, "
+                    "λ=[{:.1f}, {:.1f}] nm, step {:.2f} nm → curve index {}",
+                    name, source, gpu.numSamples, gpu.startWavelength_nm, last,
+                    gpu.stepSize_nm, index);
+        if (gpu.startWavelength_nm > bandMinNm + 1.0f || last < bandMaxNm - 1.0f) {
+            diag.Warn("spectral_curves",
+                      "    '" + name + "' does not span the " + activeBandName +
+                      " band; it is clamped outside [" +
+                      std::to_string(static_cast<i32>(gpu.startWavelength_nm)) + ", " +
+                      std::to_string(static_cast<i32>(last)) + "] nm");
+        }
+    };
+
     if (config.HasSection("spectral_curves")) {
         for (const auto& [materialName, csvPath] : config.GetSection("spectral_curves")) {
             QL_LOG_INFO("  Loading spectral curve for '{}' from '{}'", materialName, csvPath);
@@ -1449,15 +1487,14 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
             SpectralCurve curve;
             curve.samples = result.value();
-            SpectralCurveGPU gpuCurve = SpectralCurveGPU::FromCPU(curve);
+            SpectralCurveGPU gpuCurve =
+                SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
 
             const i32 curveIndex = static_cast<i32>(out.curves.size());
             out.materialNameToCurve[materialName] = curveIndex;
             out.curves.push_back(gpuCurve);
 
-            QL_LOG_INFO("    Loaded: {} samples, λ=[{:.1f}, {:.1f}] nm → curve index {}",
-                        gpuCurve.numSamples, gpuCurve.startWavelength_nm,
-                        gpuCurve.GetWavelength(gpuCurve.numSamples - 1), curveIndex);
+            logBound(materialName, gpuCurve, curveIndex, "the config");
         }
     }
 
@@ -1489,7 +1526,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
         SpectralCurve curve;
         curve.samples = mat.irReflectanceCurve;
-        const SpectralCurveGPU gpuCurve = SpectralCurveGPU::FromCPU(curve);
+        const SpectralCurveGPU gpuCurve =
+            SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
         if (gpuCurve.numSamples == 0) continue;
 
         const i32 curveIndex = static_cast<i32>(out.curves.size());
@@ -1497,10 +1535,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         out.curves.push_back(gpuCurve);
         ++boundFromScene;
 
-        QL_LOG_INFO("  Material '{}': reflectance curve from the scene file, "
-                    "{} samples, λ=[{:.1f}, {:.1f}] nm → curve index {}",
-                    mat.name, gpuCurve.numSamples, gpuCurve.startWavelength_nm,
-                    gpuCurve.GetWavelength(gpuCurve.numSamples - 1), curveIndex);
+        logBound(mat.name, gpuCurve, curveIndex, "the scene file");
     }
     if (boundFromScene > 0) {
         QL_LOG_INFO("  Bound {} reflectance curve(s) declared by the scene file",

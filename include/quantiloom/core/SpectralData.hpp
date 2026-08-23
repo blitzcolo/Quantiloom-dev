@@ -226,7 +226,10 @@ struct SpectralCurveGPU {
     //   curve: Source SpectralCurve with arbitrary wavelength samples
     //   targetSamples: Number of uniform samples (default: MAX_SPECTRAL_SAMPLES)
     //
-    // The resulting uniform grid spans the full wavelength range of the input.
+    // The resulting uniform grid spans the full wavelength range of the input,
+    // and for a curve that spans several octaves that is almost never what a
+    // render wants -- see FromCPUBand below, which is what callers that know
+    // their band should use.
     // ========================================================================
     static SpectralCurveGPU FromCPU(const SpectralCurve& curve,
                                      u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
@@ -254,6 +257,67 @@ struct SpectralCurveGPU {
             gpu.values[i] = curve.Evaluate(lambda);
         }
 
+        return gpu;
+    }
+
+    // ========================================================================
+    // Convert from CPU SpectralCurve, resampled to the band being rendered
+    // ========================================================================
+    // 64 samples spread over a curve's whole range is 64 samples spread over
+    // nothing in particular. A measured reflectance for a cross-band asset runs
+    // from the near ultraviolet into the LWIR -- the Cornell box's materials
+    // span 300 to 12500 nm, because one asset serves both its visible and its
+    // thermal configuration -- and a uniform grid over that span steps 194 nm.
+    // The visible band then holds two interior grid points, and a curve's green
+    // peak falls between them: the olive paint of that scene measures 0.2175 at
+    // 550 nm and reached the shader as 0.127, a 41.6 % error, which is why its
+    // wall rendered grey.
+    //
+    // Measured across the five Cornell curves and all five bands, the same grid
+    // is wrong by 10-120 % *in every band*, not only the visible; the visible
+    // was merely the one an eye could see. Resampling over the band being
+    // rendered instead costs nothing -- the grid stays uniform, only its start
+    // and step change -- and brings the worst case to 0.04-16 %, better on every
+    // curve and every band than uniform-in-wavenumber (which fixes the visible
+    // and leaves LWIR one sample, up to 199 % wrong) or an equal split of the 64
+    // slots across bands (3-8x worse, and it would need a non-uniform grid this
+    // struct's layout cannot express).
+    //
+    // Coverage is clipped rather than required: unlike ComplexRefractiveIndexGPU
+    // ::FromCPUBand, which returns an empty table when the source does not span
+    // the band, a reflectance that covers part of the band is still the best
+    // information available about that material, and dropping it would silently
+    // fall the material back to upsampling its base colour. Callers that care
+    // should compare the returned range against the band and say so.
+    // ========================================================================
+    static SpectralCurveGPU FromCPUBand(const SpectralCurve& curve,
+                                        f32 bandMinNm, f32 bandMaxNm,
+                                        u32 targetSamples = MAX_SPECTRAL_SAMPLES) {
+        SpectralCurveGPU gpu;
+        if (curve.samples.empty()) return gpu;
+
+        const f32 srcMin = curve.samples.front().first;
+        const f32 srcMax = curve.samples.back().first;
+
+        // No overlap at all: the caller asked about a band this curve says
+        // nothing about, and the honest grid is the curve's own.
+        if (srcMax <= bandMinNm || srcMin >= bandMaxNm) {
+            return FromCPU(curve, targetSamples);
+        }
+
+        const f32 lo = std::max(srcMin, bandMinNm);
+        const f32 hi = std::min(srcMax, bandMaxNm);
+        if (!(hi > lo)) return FromCPU(curve, targetSamples);
+
+        targetSamples = std::min(targetSamples, MAX_SPECTRAL_SAMPLES);
+        if (targetSamples < 2) targetSamples = 2;
+
+        gpu.startWavelength_nm = lo;
+        gpu.stepSize_nm = (hi - lo) / static_cast<f32>(targetSamples - 1);
+        gpu.numSamples = targetSamples;
+        for (u32 i = 0; i < targetSamples; ++i) {
+            gpu.values[i] = curve.Evaluate(lo + static_cast<f32>(i) * gpu.stepSize_nm);
+        }
         return gpu;
     }
 

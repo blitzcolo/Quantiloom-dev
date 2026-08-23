@@ -208,6 +208,79 @@ TEST(SpectralDataTest, SpectralCurveGPUFromCPUEmpty) {
     EXPECT_EQ(gpu.numSamples, 0);
 }
 
+// ============================================================================
+// FromCPUBand: 64 samples over the band, not over whatever the curve spans
+// ============================================================================
+// The regression these pin cost the Cornell box its colour. A cross-band asset
+// carries one measured curve from the near ultraviolet into the LWIR, because
+// the same glTF serves both a visible and a thermal config, and resampling that
+// span uniformly put two interior grid points inside the whole visible band.
+
+// A curve shaped like the scene's olive paint: flat ends, a peak at 550 nm.
+static quantiloom::SpectralCurve BroadbandWithGreenPeak() {
+    quantiloom::Vector<quantiloom::f32> wavelengths, values;
+    for (quantiloom::f32 nm = 300.0f; nm <= 12500.0f; nm += 10.0f) {
+        wavelengths.push_back(nm);
+        const quantiloom::f32 d = (nm - 550.0f) / 60.0f;
+        values.push_back(0.115f + 0.103f * std::exp(-d * d));
+    }
+    return quantiloom::SpectralCurve(wavelengths, values);
+}
+
+TEST(SpectralDataTest, FromCPUBandResolvesAPeakThatFullSpanResamplingErases) {
+    const SpectralCurve cpu = BroadbandWithGreenPeak();
+
+    const SpectralCurveGPU full = SpectralCurveGPU::FromCPU(cpu);
+    const SpectralCurveGPU band = SpectralCurveGPU::FromCPUBand(cpu, 400.0f, 780.0f);
+
+    // Both fill the grid; they disagree about what the grid spans.
+    EXPECT_EQ(full.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_EQ(band.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_GT(full.stepSize_nm, 150.0f);   // ~194 nm across 300-12500
+    EXPECT_LT(band.stepSize_nm, 7.0f);     // ~6 nm across 400-780
+
+    // The peak is 0.218. Whole-span resampling steps straight over it.
+    const auto at = [](const SpectralCurveGPU& g, f32 nm) {
+        const f32 t = (nm - g.startWavelength_nm) / g.stepSize_nm;
+        const auto i = static_cast<u32>(t);
+        if (i + 1 >= g.numSamples) return g.values[g.numSamples - 1];
+        const f32 f = t - static_cast<f32>(i);
+        return g.values[i] * (1.0f - f) + g.values[i + 1] * f;
+    };
+    EXPECT_NEAR(at(band, 550.0f), 0.218f, 0.005f);
+    EXPECT_LT(at(full, 550.0f), 0.16f);
+}
+
+TEST(SpectralDataTest, FromCPUBandClipsToOverlapRatherThanDroppingTheCurve) {
+    // Asphalt's measured curve starts at 420 nm, inside the visible band. A
+    // reflectance that covers part of a band is still the best information
+    // about that material; dropping it falls the material back to upsampling
+    // its base colour, silently.
+    quantiloom::Vector<quantiloom::f32> wavelengths, values;
+    for (quantiloom::f32 nm = 420.0f; nm <= 14000.0f; nm += 10.0f) {
+        wavelengths.push_back(nm);
+        values.push_back(0.07f);
+    }
+    const SpectralCurve cpu(wavelengths, values);
+
+    const SpectralCurveGPU band = SpectralCurveGPU::FromCPUBand(cpu, 400.0f, 780.0f);
+    EXPECT_EQ(band.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_NEAR(band.startWavelength_nm, 420.0f, 1e-3f);
+    EXPECT_NEAR(band.GetWavelength(band.numSamples - 1), 780.0f, 1e-3f);
+}
+
+TEST(SpectralDataTest, FromCPUBandFallsBackWhenTheCurveMissesTheBandEntirely) {
+    // A visible-only curve asked about LWIR: there is nothing to clip to, and
+    // the curve's own range is the only honest grid.
+    quantiloom::Vector<quantiloom::f32> wavelengths = {400.0f, 600.0f, 780.0f};
+    quantiloom::Vector<quantiloom::f32> values = {0.2f, 0.5f, 0.3f};
+    const SpectralCurve cpu(wavelengths, values);
+
+    const SpectralCurveGPU band = SpectralCurveGPU::FromCPUBand(cpu, 8000.0f, 12000.0f);
+    EXPECT_EQ(band.numSamples, MAX_SPECTRAL_SAMPLES);
+    EXPECT_NEAR(band.startWavelength_nm, 400.0f, 1e-3f);
+}
+
 TEST(SpectralDataTest, SpectralCurveGPUFromCPUSmall) {
     Vector<f32> wavelengths = {400.0f, 500.0f, 600.0f};
     Vector<f32> values = {0.2f, 0.5f, 0.8f};
