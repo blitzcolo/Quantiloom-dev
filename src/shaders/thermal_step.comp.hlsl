@@ -71,6 +71,7 @@ struct StepPushConstants {
     uint   sunSampleB;
     float  diffuseIrradiance;
     float  relativeHumidity;   // percent
+    float  convection_W_m2K;   // 0 means "the material's own"
     uint   hasReflectedGain;   // 0 when the table is a placeholder
     uint   carryTangent;       // 0 when binding 11 is a placeholder
 };
@@ -208,7 +209,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float Ti = mySurface;
     surfaceFlux += emissivity * kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
 
-    const float h = mat.convection;
+    // The forcing's coefficient wins when it has one, matching
+    // CpuCrankNicolsonStepper. A constant cannot describe a day: the
+    // wind and the stability of the air over the surface both reverse
+    // between afternoon and midnight.
+    const float h = pc.convection_W_m2K > 0.0 ? pc.convection_W_m2K
+                                             : mat.convection;
     const float halfCell = rhoC * dx / (2.0 * pc.dt_s);
 
     // Evaporation, linearised about the previous surface temperature and split

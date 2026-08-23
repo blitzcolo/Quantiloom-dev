@@ -210,6 +210,19 @@ struct ThermalForcing {
     /// what a wet surface can evaporate is set by how far the air is from
     /// saturated. Same quantity the clear-sky model reads.
     f64 relativeHumidity = 50.0;
+    /// Convective exchange coefficient for this instant, W/(m^2 K). Zero or
+    /// negative means "the material's own", which is what every scene that
+    /// does not supply one gets.
+    ///
+    /// It is here rather than only on the material because a constant cannot
+    /// describe a day. The coefficient is set by the wind and by whether the
+    /// air over the surface is being stirred or is sitting stably on top of
+    /// it, and those reverse between afternoon and midnight. Measured against
+    /// a SURFRAD station, one constant fitted to the daytime signal
+    /// over-warmed the nights by up to 1.8 K -- at night the ground is colder
+    /// than the air, so convection is a source, and too large a coefficient
+    /// pours in heat that the real stable boundary layer withholds.
+    f64 convection_W_m2K = 0.0;
 };
 
 /**

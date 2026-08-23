@@ -1,0 +1,42 @@
+# Cornell Box — VIS spectral rendering (380-780nm, CIE XYZ integration)
+# Indoor scene illuminated ONLY by the emissive ceiling light panel.
+# No directional sun — this is a closed room.
+
+[renderer]
+resolution = [512, 512]
+spp = 64
+output = "D:/Quantiloom-dev/_noise/cb_spp64.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "D:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "D:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "D:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+world_units_to_meters = 0.001
+
+[camera]
+position = [278.0, 273.0, -800.0]
+look_at  = [278.0, 273.0, 280.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 39.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+# A closed Cornell box has no sky. It is lit by its own Light Panel material,
+# which is what the original scene is; the 0.3 ambient here was standing in for
+# an illuminant whose spectrum was never specified.
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

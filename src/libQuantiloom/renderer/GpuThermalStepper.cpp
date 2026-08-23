@@ -61,10 +61,16 @@ struct StepPushConstants {
     u32 sunSampleB;
     f32 diffuseIrradiance;
     f32 relativeHumidity;
+    /// The forcing's convective coefficient, or 0 to mean the material's own.
+    /// Mirrors ThermalForcing::convection_W_m2K so that a trajectory stepped
+    /// on the GPU matches one stepped on the CPU; test_thermal_step_gpu
+    /// compares them over 24 h and would otherwise start disagreeing the
+    /// moment a forcing file carried a ninth column.
+    f32 convection_W_m2K;
     u32 hasReflectedGain;
     u32 carryTangent;
 };
-static_assert(sizeof(StepPushConstants) == 68);
+static_assert(sizeof(StepPushConstants) == 72);
 
 /// Bindings the compute shader declares. Buffers 9 and 10 are the baked
 /// short-wave gains and 11 is the tangent dT/dv; all three are always bound,
@@ -560,6 +566,8 @@ void GpuThermalStepper::StepMany(thermal::ThermalState& state,
                 pc.diffuseIrradiance =
                     static_cast<f32>(step.forcing.diffuseIrradiance_W_m2);
                 pc.relativeHumidity = static_cast<f32>(step.forcing.relativeHumidity);
+                pc.convection_W_m2K =
+                    static_cast<f32>(step.forcing.convection_W_m2K);
                 pc.hasReflectedGain = m_impl->hasReflectedGain ? 1u : 0u;
                 pc.carryTangent = m_impl->carryTangent ? 1u : 0u;
 

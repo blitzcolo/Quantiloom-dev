@@ -37,7 +37,7 @@ def shade_night(axis, times, is_day):
 
 
 def figure(window, out_path, station):
-    measured = window["modes"]["measured_e0.96"]
+    measured = window["modes"]["measured_windh_e0.96"]
     series = measured["series"]
     times = np.asarray(series["time_h"])
     observed = np.asarray(series["observed_k"])
@@ -69,8 +69,8 @@ def figure(window, out_path, station):
     top.set_title(
         f"{station['name']} \u2014 days {window['days'][0]}\u2013{window['days'][-1]}, "
         f"{int(window['evaluate_from_h'] // 24)} d spin-up discarded\n"
-        f"day RMSE {day['rmse_k']:.2f} K, night RMSE {night['rmse_k']:.2f} K, "
-        f"peak lag {measured['peak_lag_h']['median']:+.2f} h",
+        f"wind-driven convection, no fitted parameter — "
+        f"day RMSE {day['rmse_k']:.2f} K, night RMSE {night['rmse_k']:.2f} K",
         fontsize=9)
 
     limit = max(3.0, float(np.abs(residual).max()) * 1.1)
@@ -90,7 +90,8 @@ def table(results):
     rows = []
     lags = []
     for window in results["windows"]:
-        for key in ("measured_e0.96", "modelled_e0.96"):
+        for key in ("measured_e0.96", "modelled_e0.96",
+                    "measured_windh_e0.96"):
             entry = window["modes"].get(key)
             if not entry:
                 continue
@@ -98,6 +99,8 @@ def table(results):
                 "window": window["label"],
                 "days_evaluated": len(window["days"]) - results["spinup_days"],
                 "forcing": entry["mode"],
+                "convection": ("wind-driven" if entry.get("wind_driven_h")
+                               else "constant"),
                 "day_rmse_k": entry["day"]["rmse_k"],
                 "day_mae_k": entry["day"]["mae_k"],
                 "day_bias_k": entry["day"]["bias_k"],
@@ -107,17 +110,18 @@ def table(results):
                 "peak_lag_h": entry["peak_lag_h"]["median"],
                 "calibration": window["days"][0] == results["calibration_window"],
             })
-            if entry["mode"] == "measured":
+            if entry["mode"] == "measured" and not entry.get("wind_driven_h"):
                 lags += entry["peak_lag_h"]["per_day"]
 
-    lines = ["| Window (DOY) | Days | Forcing | Day RMSE | Day MAE | Day bias | "
-             "Night RMSE | Night MAE | Night bias | Peak lag |",
-             "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|"]
+    lines = ["| Window (DOY) | Days | Sky | Convection | Day RMSE | Day MAE | "
+             "Day bias | Night RMSE | Night MAE | Night bias | Peak lag |",
+             "|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|"]
     for r in rows:
         mark = " \u2020" if r["calibration"] else ""
         lines.append(
             f"| {r['window'].split('_')[1]}{mark} | {r['days_evaluated']} | "
-            f"{r['forcing']} | {r['day_rmse_k']:.2f} K | {r['day_mae_k']:.2f} K | "
+            f"{r['forcing']} | {r['convection']} | "
+            f"{r['day_rmse_k']:.2f} K | {r['day_mae_k']:.2f} K | "
             f"{r['day_bias_k']:+.2f} K | {r['night_rmse_k']:.2f} K | "
             f"{r['night_mae_k']:.2f} K | {r['night_bias_k']:+.2f} K | "
             f"{r['peak_lag_h']:+.2f} h |")

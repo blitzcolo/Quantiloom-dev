@@ -184,6 +184,12 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         if (fields >> diffuse_W_m2) forcing.diffuseIrradiance_W_m2 = diffuse_W_m2;
         f64 relativeHumidity = 0.0;
         if (fields >> relativeHumidity) forcing.relativeHumidity = relativeHumidity;
+        // Ninth column, optional exactly as the seventh and eighth are: the
+        // convective coefficient at this instant. A file written before it
+        // existed keeps its meaning, and a zero means the same as an absent
+        // column -- use the material's own.
+        f64 convection_W_m2K = 0.0;
+        if (fields >> convection_W_m2K) forcing.convection_W_m2K = convection_W_m2K;
 
         const f64 az = azimuth_deg * std::numbers::pi / 180.0;
         const f64 el = elevation_deg * std::numbers::pi / 180.0;
@@ -224,6 +230,8 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
                 a.skyTemperature_K + t * (b.skyTemperature_K - a.skyTemperature_K);
             out.relativeHumidity =
                 a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
+            out.convection_W_m2K =
+                a.convection_W_m2K + t * (b.convection_W_m2K - a.convection_W_m2K);
             out.sunDirection = glm::normalize(
                 glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
             return out;

@@ -195,7 +195,26 @@ def surface_temperature(row, emissivity):
     return (numerator / (emissivity * STEFAN_BOLTZMANN)) ** 0.25
 
 
-def write_forcing(rows, path, mode, sample_minutes=10):
+def convection_from_wind(wind_speed_m_s):
+    """Convective coefficient from wind speed: McAdams' flat-plate correlation.
+
+        h = 5.7 + 3.8 u        W/(m^2 K)
+
+    Two parameters, both from the literature, neither fitted here. It is used
+    because the station measures wind every minute and the model was being
+    given a constant -- and a constant is the one thing the coefficient is
+    not. At this site it swings between about 12 on a calm night and 30 in an
+    afternoon, which is the difference between the daytime and night-time
+    values a single fitted constant had to compromise between.
+
+    A calm-limit floor of 5.7 is the correlation's own intercept and stands in
+    for free convection; no stability correction is applied, which matters at
+    night and is discussed with the result rather than tuned away.
+    """
+    return 5.7 + 3.8 * max(0.0, wind_speed_m_s)
+
+
+def write_forcing(rows, path, mode, sample_minutes=10, wind_driven_h=False):
     """The solver's eight-column CSV, at a coarser cadence than one minute.
 
     Ten minutes rather than one because the sun-visibility table costs a column
@@ -222,6 +241,8 @@ def write_forcing(rows, path, mode, sample_minutes=10):
             STATION["latitude"], STATION["longitude"], STATION["utc_offset_h"])
 
         written.append({
+            "convection": (convection_from_wind(row["windspd"])
+                           if wind_driven_h else 0.0),
             "time_h": row["absolute_hour"],
             "air_k": air_k,
             "dni": max(0.0, row["direct_n"]),
@@ -244,12 +265,19 @@ def write_forcing(rows, path, mode, sample_minutes=10):
             f.write("# sky_k from Berdahl-Fromberg driven by the station's own\n"
                     "#   air temperature and relative humidity. Everything else\n"
                     "#   is identical to the measured mode.\n")
+        if wind_driven_h:
+            f.write("# The ninth column is the convective coefficient, computed\n"
+                    "#   from the station's own measured wind through McAdams'\n"
+                    "#   h = 5.7 + 3.8u. A zero there would mean the material's\n"
+                    "#   own constant, which is what an eight-column file gets.\n")
         f.write("# time_h, air_k, dni, sun_azimuth_deg, sun_elevation_deg, "
-                "sky_k, diffuse_w_m2, relative_humidity\n")
+                "sky_k, diffuse_w_m2, relative_humidity"
+                + (", convection_w_m2k\n" if wind_driven_h else "\n"))
         for r in written:
             f.write(f"{r['time_h']:.5f}, {r['air_k']:.3f}, {r['dni']:.2f}, "
                     f"{r['azimuth']:.3f}, {r['elevation']:.3f}, {r['sky_k']:.3f}, "
-                    f"{r['diffuse']:.2f}, {r['rh']:.1f}\n")
+                    f"{r['diffuse']:.2f}, {r['rh']:.1f}"
+                    + (f", {r['convection']:.3f}\n" if wind_driven_h else "\n"))
 
     # The solar model against the station's own measurement of the same angle.
     # Not decorative: if these disagree the forcing's sun is in the wrong place
@@ -426,19 +454,23 @@ def run(args):
                 continue
             absorptivity = 1.0 - (albedo_of(rows) or 0.22)
 
-            for mode in ("measured", "modelled"):
-                forcing = work / f"forcing_{label}_{mode}_e{emissivity:.2f}.csv"
-                written, solar_error = write_forcing(rows, forcing, mode)
-                spec = work / f"spec_{label}_{mode}_e{emissivity:.2f}.toml"
+            for mode, wind_driven in (("measured", False), ("modelled", False),
+                                      ("measured", True)):
+                tag = f"{mode}{'_windh' if wind_driven else ''}"
+                forcing = work / f"forcing_{label}_{tag}_e{emissivity:.2f}.csv"
+                written, solar_error = write_forcing(rows, forcing, mode,
+                                                     wind_driven_h=wind_driven)
+                spec = work / f"spec_{label}_{tag}_e{emissivity:.2f}.toml"
                 write_spec(spec, forcing, written[-1]["time_h"],
                            absorptivity, emissivity)
-                predicted = run_column(spec, work / f"traj_{label}_{mode}_"
+                predicted = run_column(spec, work / f"traj_{label}_{tag}_"
                                                     f"e{emissivity:.2f}.csv")
                 stats = statistics(predicted, observed, is_day,
                                    entry["evaluate_from_h"])
-                key = f"{mode}_e{emissivity:.2f}"
+                key = f"{tag}_e{emissivity:.2f}"
                 entry["modes"][key] = {
-                    "mode": mode, "emissivity": emissivity,
+                    "mode": mode, "wind_driven_h": wind_driven,
+                    "emissivity": emissivity,
                     "shortwave_absorptivity": absorptivity,
                     "solar_elevation_max_error_deg": solar_error,
                     "forcing_rows": len(written),

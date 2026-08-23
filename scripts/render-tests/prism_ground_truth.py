@@ -13,25 +13,22 @@ It answers "what does air -> prism -> air actually look like" without relying on
 any unverified code, and the refraction it does is correct per wavelength on both
 faces.
 
-WHAT IT IS NOT: a quantitative reference for VIS_FUSED. It was written to be one
--- to localise the hero-wavelength bias -- and measurement says it cannot be.
-With a CONSTANT n(lambda), where nothing disperses and every mode should agree,
-this sweep differs from the deterministic VIS_FUSED grid by **30.9%**.
-
-That gap is not about wavelengths. SINGLE and VIS_FUSED are separate shading
-branches, and SINGLE says so itself at every render: "PREVIEW MODE: using
-RGB-averaged spectral albedo, NOT suitable for quantitative analysis". They agree
-on where reflectance comes from (measured curve, else RGB upsampling) but not on
-the BRDF and IBL treatment, and on a specular prism over a floor that is worth
-30%. Which of the two is right is an open question and its own investigation --
-it is the same two-implementations-drift this project has been closing elsewhere.
-
-So: use this to LOOK at dispersion. Do not use it as a numeric reference until
-the 30.9% is explained.
-
-Reproduces the shader's own combination exactly (SpectralConversion.hlsli):
+Reproduces the shader's own combination (SpectralConversion.hlsli):
   XYZ = sum_i L(lambda_i) * cmf(lambda_i) * dlambda,  then / CIE_Y_INTEGRAL
-  RGB = XYZ_to_linear_sRGB(XYZ),  then R *= 0.7872, B *= 1.0437
+  RGB = XYZ_to_linear_sRGB(XYZ),  then R *= chroma_r, B *= chroma_b
+
+The two chroma factors are read from the scene config rather than baked in here.
+They are a legacy escape hatch and default to 1.0 on both channels; a constant
+pair hardcoded in this file silently white-balances the reference against a
+renderer that no longer applies one, which is a bias in the ground truth itself
+and the hardest kind to notice.
+
+WHAT TO CHECK BEFORE TRUSTING A NUMBER FROM IT. SINGLE and VIS_FUSED are
+separate shading branches. `--flat` is the control: with a constant n(lambda)
+nothing disperses and every mode must agree, so any residual between this sweep
+and the deterministic VIS_FUSED grid is branch drift rather than dispersion, and
+bounds what a dispersing comparison can claim. Run it first; quote its residual
+alongside any figure taken from the BK7 run.
 
     python3 scripts/render-tests/prism_ground_truth.py [--spp N] [--res N]
 """
@@ -40,6 +37,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import tomllib
 
 import numpy as np
 import OpenEXR
@@ -56,8 +54,14 @@ OUT_DIR = ROOT / "renders/ground-truth"
 # for a different integral.
 LAMBDA_MIN, LAMBDA_MAX, N_SAMPLES = 400.0, 780.0, 32
 CIE_Y_INTEGRAL = 106.857
-CHROMA_R, CHROMA_B = 0.7872, 1.0437
 BK7_ABBE = 64.17
+
+# The renderer's own defaults, from LightingParams.hpp::LightingDefaults, with
+# the scene's override honoured if it sets one -- TMP_CFG inherits every key
+# from BASE_CFG, so whatever is read here is what the render applied.
+_quality = tomllib.loads(BASE_CFG.read_text()).get("quality", {})
+CHROMA_R = float(_quality.get("chroma_r_correction", 1.0))
+CHROMA_B = float(_quality.get("chroma_b_correction", 1.0))
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--spp", type=int, default=64)
@@ -82,8 +86,11 @@ def load_cmf():
 def set_material(dispersing):
     doc = json.loads(GLTF.read_text())
     for mat in doc["materials"]:
-        ext = mat.setdefault("extensions", {})
-        if "KHR_materials_transmission" not in ext:
+        # get, not setdefault: setdefault writes the key before the check below
+        # decides this material is not the prism, so every opaque material in
+        # the file grew an empty "extensions": {} on every run.
+        ext = mat.get("extensions")
+        if not ext or "KHR_materials_transmission" not in ext:
             continue
         if dispersing:
             ext["KHR_materials_dispersion"] = {"dispersion": 20.0 / BK7_ABBE}
@@ -121,8 +128,10 @@ def render(lambda_nm, index):
 
 
 cmf = load_cmf()
-set_material(dispersing=not args.flat)
+# Read the backup BEFORE mutating, or the finally below faithfully restores the
+# mutation and this script edits a tracked asset every time it runs.
 backup = GLTF.read_text()
+set_material(dispersing=not args.flat)
 
 try:
     XYZ = None

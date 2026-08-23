@@ -248,7 +248,16 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
 
         // Convection, which is linear in the unknown and therefore goes into
         // the matrix rather than into the flux.
-        const f64 h = material.convection_W_m2K;
+        //
+        // The forcing's value wins when it has one. A constant cannot describe
+        // a day: the coefficient is set by the wind and by whether the air is
+        // being stirred over the surface or sitting stably on top of it, and
+        // those reverse between afternoon and midnight. The latent term below
+        // derives from this same h, so a forcing that varies it varies the
+        // evaporation with it -- which is right, since both are the same
+        // turbulent exchange carrying different quantities.
+        const f64 h = forcing.convection_W_m2K > 0.0 ? forcing.convection_W_m2K
+                                                     : material.convection_W_m2K;
 
         // Evaporation. Non-linear in the unknown like the radiation, but with
         // several times its slope, so this one goes into the matrix as well:
