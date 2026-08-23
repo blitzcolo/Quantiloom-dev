@@ -297,10 +297,20 @@ static_assert(sizeof(InstanceGeometryInfo) == 32, "InstanceGeometryInfo size mis
  * triangle makes the area-measure density `luminance(emissive) / total`, in
  * which the area has cancelled -- see LightingParams::emissiveTotalPower.
  */
+/*
+ * `emissiveCurveIndex` took the first padding word, so the struct is still 64
+ * bytes. It is the emitter's spectral radiance curve, or -1 when the emitter is
+ * an RGB triple like every emitter used to be. Sampling is unaffected either
+ * way: the CDF and the density are built from `emissive`, which the material
+ * resolution guarantees is the linear-sRGB that same curve integrates to. Only
+ * the radiance the shader returns changes, from an upsampled triple to the
+ * curve -- which is the whole point, since the density may be approximate but
+ * the radiance may not.
+ */
 struct EmissiveTriangleGPU {
     glm::vec3 v0;         float cumulativePower;  //  0..16
     glm::vec3 edge1;      float area;             // 16..32
-    glm::vec3 edge2;      float _pad0;            // 32..48
+    glm::vec3 edge2;      i32   emissiveCurveIndex; // 32..48
     glm::vec3 emissive;   float _pad1;            // 48..64
 };
 
@@ -470,6 +480,11 @@ struct MaterialGpuIndices {
     // NIR or SWIR, for the same reason sheen's curve is: a visible-basis RGB
     // factor says nothing past ~1400nm.
     i32 diffuseTransmissionColorCurve = -1;
+
+    // Measured spectral radiance for self-emission. The emission-side twin of
+    // lighting.solar_lut: the only path by which a light in the scene is
+    // described by data rather than by an RGB triple expanded through D65.
+    i32 emissiveRadianceCurve = -1;
 };
 
 /**
@@ -489,7 +504,8 @@ struct MaterialGpuIndices {
                               material.weightTextureIndex,
                               material.sheenReflectanceCurveIndex,
                               material.clearcoatReflectanceCurveIndex,
-                              material.diffuseTransmissionColorCurveIndex};
+                              material.diffuseTransmissionColorCurveIndex,
+                              material.emissiveRadianceCurveIndex};
 }
 
 /**

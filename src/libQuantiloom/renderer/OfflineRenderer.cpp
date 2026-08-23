@@ -554,6 +554,12 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             QL_LOG_INFO("  Material '{}': using physical Fresnel (CRI index {})",
                         mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToEmissiveCurve.find(mat.name);
+            it != spectra.materialNameToEmissiveCurve.end()) {
+            slots.emissiveRadianceCurve = it->second;
+            QL_LOG_INFO("  Material '{}': emitting from spectral curve index {}",
+                        mat.name, it->second);
+        }
         if (auto it = spectra.materialNameToEndmembers.find(mat.name);
             it != spectra.materialNameToEndmembers.end()) {
             const auto& slotsIn = it->second;

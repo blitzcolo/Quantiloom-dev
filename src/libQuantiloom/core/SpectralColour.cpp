@@ -72,6 +72,16 @@ glm::vec3 SpectralIrradianceToLinearSrgb(const SpectralCurve& curve) {
         static_cast<f32>( 0.0557 * xyz.x - 0.2040 * xyz.y + 1.0570 * xyz.z));
 }
 
+glm::vec3 EmissionSpectrumToRenderedLinearSrgb(const SpectralCurve& curve) {
+    // One constant apart from the function above, shared with the D65 factor the
+    // CIE buffer carries so the host and the shader cannot drift.
+    const f64 yIntegral = CieLuminanceIntegral();
+    if (yIntegral <= 0.0) {
+        return glm::vec3(0.0f);
+    }
+    return SpectralIrradianceToLinearSrgb(curve) / static_cast<f32>(yIntegral);
+}
+
 glm::vec3 ReflectanceToLinearSrgbD65(const SpectralCurve& reflectance) {
     if (reflectance.samples.empty()) {
         return glm::vec3(0.0f);

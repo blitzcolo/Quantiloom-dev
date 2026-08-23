@@ -698,6 +698,7 @@ struct LightSample {
     float  dist;        // distance to the sampled point
     float3 emissive;    // the emitter's RGB emissive factor
     float  pdfSolid;    // density in solid angle measure at the shading point
+    int    curveIndex;  // measured emission spectrum, -1 = expand the RGB above
     bool   valid;
 };
 
@@ -804,6 +805,7 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout Payload payload) {
     s.dist = 0.0;
     s.emissive = float3(0.0, 0.0, 0.0);
     s.pdfSolid = 0.0;
+    s.curveIndex = -1;
     s.valid = false;
 
     const uint  count = lightingParams[0].emissiveTriangleCount;
@@ -868,6 +870,11 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout Payload payload) {
     s.wi       = wi;
     s.dist     = dist;
     s.emissive = tri.emissive;
+    // The density above stays built from the RGB, and that is correct rather
+    // than approximate: when a curve is bound the host rewrites emissiveFactor
+    // to the linear-sRGB the curve itself integrates to, so the two describe one
+    // lamp. Only the radiance the caller finally evaluates changes.
+    s.curveIndex = tri.emissiveCurveIndex;
     s.pdfSolid = pdfArea * dist2 / cosAtLight;
     s.valid    = s.pdfSolid > 0.0;
     return s;
@@ -935,6 +942,40 @@ float EmissiveMisWeight(float3 emissive, int emissiveTextureIndex,
     const float pdfArea  = dot(emissive, EMISSIVE_LUMINANCE_WEIGHTS) / total;
     const float pdfLight = pdfArea * hitT * hitT / cosAtLight;
     return PowerHeuristic(bsdfPdf, pdfLight);
+}
+
+// ============================================================================
+// Self-emission from a BOUND spectrum
+// ============================================================================
+// The spectral radiance this surface emits at one wavelength, or 0 when it has
+// no bound curve. Zero is the whole contract for the bands below the visible:
+// SWIR, MWIR and LWIR must NOT fall back to expanding emissiveFactor, because
+// the Jakob-Hanika fit is defined on 380-780 nm and its sigmoid saturates
+// towards 1 outside it -- an RGB lamp extended into the thermal bands is a
+// fiction with the magnitude of a real one. Those bands therefore see a light
+// source only when someone bound data for it, which is the same rule this
+// renderer already applies to reflectance.
+//
+// An emissive texture still varies the magnitude across the surface. It cannot
+// vary the spectrum: a curve has no channels for an RGB texture to tint, and
+// painting a lamp's colour with a texture while measuring it with a curve would
+// be two answers to one question. The texture therefore enters as the ratio of
+// its own luminance to the material's, which is 1 where the texture is white.
+float BoundEmissionRadiance(StructuredBuffer<SpectralCurveGPU> spectralCurves,
+                            MaterialData material,
+                            float3 emissiveModulated,
+                            float lambda_nm) {
+    if (material.emissiveRadianceCurveIndex < 0) {
+        return 0.0;
+    }
+    float texScale = 1.0;
+    if (material.emissiveTextureIndex >= 0) {
+        texScale = dot(emissiveModulated, EMISSIVE_LUMINANCE_WEIGHTS) /
+                   max(dot(material.emissiveFactor, EMISSIVE_LUMINANCE_WEIGHTS), 1e-8);
+    }
+    return EvaluateEmissionCurve(spectralCurves,
+                                 material.emissiveRadianceCurveIndex,
+                                 lambda_nm) * texScale;
 }
 
 float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
@@ -2279,6 +2320,27 @@ void main(inout Payload payload, in HitAttributes attribs) {
             iNee = FetchRgbIlluminant(rgbToSpectrumTable, visLight.emissive);
         }
 
+        // A bound emission spectrum replaces the RGB expansion above rather than
+        // adding to it. Hoisted out of the loop as an index and a scale, not as
+        // a fetched spectrum: the curve IS wavelength-dependent, which is the
+        // point of it, so only the branch can be lifted.
+        const int  emissiveCurve = material.emissiveRadianceCurveIndex;
+        const bool hasEmissiveCurve = emissiveCurve >= 0;
+        const int  neeCurve = visLight.curveIndex;
+        const bool hasNeeCurve = neeCurve >= 0;
+
+        // An emissive texture still modulates a bound spectrum, but a spectrum
+        // has no channels for an RGB texture to tint, so it modulates the
+        // magnitude only -- through the texture's luminance. Painting a lamp's
+        // colour with a texture and its spectrum with a curve would be two
+        // answers to one question; the curve is the one that is measured.
+        float emissiveCurveScale = 1.0;
+        if (hasEmissiveCurve && material.emissiveTextureIndex >= 0) {
+            emissiveCurveScale = dot(emissive, EMISSIVE_LUMINANCE_WEIGHTS) /
+                                 max(dot(material.emissiveFactor,
+                                         EMISSIVE_LUMINANCE_WEIGHTS), 1e-8);
+        }
+
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
         // Modern GPUs handle small loops efficiently without forced unrolling
@@ -2422,7 +2484,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Convert emissive RGB to spectral radiance at this wavelength
             // Use illuminant function (no clamp) to preserve HDR emissive intensity
             // Dimmed by the coat: it sits over the emitter, not under it.
-            float L_emissive = RgbIlluminantAt(iEmissive, cieSample.w, lambda) * ccBase;
+            // A bound spectrum is read straight -- it is already spectral
+            // radiance, so it needs neither the sigmoid fit nor the D65 factor
+            // that exist to invent a spectrum from a colour.
+            float L_emissive = hasEmissiveCurve
+                ? EvaluateEmissionCurve(spectralCurves, emissiveCurve, lambda) *
+                      emissiveCurveScale * ccBase
+                : RgbIlluminantAt(iEmissive, cieSample.w, lambda) * ccBase;
 
             // 5. IBL specular contribution (spectrally integrated)
             // Apply Fresnel × BRDF in RGB space first, then convert to spectrum
@@ -2458,9 +2526,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     (visKD * rho_lambda * dtBase * sheenScale_lambda +
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
                     visF * sheenScale_lambda * ccBase, aniso);
-                L_nee = brdf_at_light *
-                        RgbIlluminantAt(iNee, cieSample.w, lambda) *
-                        visNeeScale;
+                const float L_light = hasNeeCurve
+                    ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda)
+                    : RgbIlluminantAt(iNee, cieSample.w, lambda);
+                L_nee = brdf_at_light * L_light * visNeeScale;
             }
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee;
@@ -2763,9 +2832,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    having its red channel read off as a spectral value, which is what
         //    `emissive.r` did. An emissive colour is a colour; at a wavelength
         //    it has to be evaluated, not indexed.
+        //    A bound emission spectrum skips that conversion entirely: it is
+        //    already spectral radiance at this wavelength, and it is the only
+        //    form of this term that stays meaningful outside 380-780 nm, where
+        //    the sigmoid fit has nothing to say. An emissive texture modulates
+        //    its magnitude through the texture's luminance, since a spectrum has
+        //    no channels to tint.
         float emissive_scalar =
-            ConvertLinearRGBToIlluminantSpectrum(
-                rgbToSpectrumTable, cieCMF_LUT, emissive, lambda) * ccBase;
+            (material.emissiveRadianceCurveIndex >= 0)
+                ? BoundEmissionRadiance(spectralCurves, material, emissive, lambda) * ccBase
+                : ConvertLinearRGBToIlluminantSpectrum(
+                      rgbToSpectrumTable, cieCMF_LUT, emissive, lambda) * ccBase;
         float radiance_spectral = directSun_scalar + skyAmbient_scalar +
                                   emissive_scalar + ibl_scalar;
 
@@ -2807,10 +2884,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                             ccWeight * ccE,
                         F_scalar.r * sheenScale_s * ccBase, aniso);
+                    const float L_light_s = (s.curveIndex >= 0)
+                        ? EvaluateEmissionCurve(spectralCurves, s.curveIndex, lambda)
+                        : ConvertLinearRGBToIlluminantSpectrum(
+                              rgbToSpectrumTable, cieCMF_LUT, s.emissive, lambda);
                     radiance_spectral +=
-                        brdf_at_light *
-                        ConvertLinearRGBToIlluminantSpectrum(
-                            rgbToSpectrumTable, cieCMF_LUT, s.emissive, lambda) *
+                        brdf_at_light * L_light_s *
                         NdotWl * PowerHeuristic(s.pdfSolid, pdfBsdfAtLight) / s.pdfSolid;
                 }
             }
@@ -3074,6 +3153,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_emission = emissivity * L_blackbody * ccBase;
             }
 
+            // 4b. Self-emission from a bound spectrum. Separate from the Planck
+            // term above and additive to it: that one is what the surface emits
+            // because of its temperature, this one is what it emits because it
+            // is a lamp. A filament is both, and a config that sets the
+            // material's temperature to the filament's would be describing the
+            // same light twice -- bind the curve or set the temperature, not
+            // both. Zero unless a curve is bound, so every existing SWIR scene
+            // is bit-identical.
+            L_emission += BoundEmissionRadiance(spectralCurves, material, emissive, lambda) *
+                          ccBase;
+
             // 5. Total spectral radiance
             float L_lambda = L_reflected + L_emission;
 
@@ -3336,6 +3426,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Note: Thermal emission is negligible in NIR for T < 600K
             // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
             // Skip thermal calculation for performance
+            //
+            // A bound emission spectrum is a different matter and is not
+            // skipped: a tungsten filament at 3000 K peaks at 966 nm, which is
+            // inside this band, so a lamp someone measured is one of the
+            // brightest things a NIR render can contain. Zero unless a curve is
+            // bound, so every existing NIR scene is bit-identical.
+            L_reflected += BoundEmissionRadiance(spectralCurves, material, emissive, lambda) *
+                           ccBase;
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
@@ -3699,8 +3797,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // uses atmospheric background which is valid for outdoor scenes.
             }
 
+            // 4b. Self-emission from a bound spectrum, additive to the Planck
+            // term. The two answer different questions -- L_emission is what
+            // this surface radiates at its own temperature, this is what it
+            // radiates because someone measured it emitting -- so a scene that
+            // sets both is describing one lamp twice. Zero unless a curve is
+            // bound, so every existing MWIR and LWIR scene is bit-identical,
+            // and there is deliberately no RGB fallback here: expanding an
+            // emissiveFactor at 10 um would read a sigmoid fitted on 380-780 nm
+            // far outside its domain, which is the failure this renderer's
+            // out-of-band rule exists to prevent.
+            const float L_bound = BoundEmissionRadiance(spectralCurves, material,
+                                                        emissive, lambda) * ccBase;
+
             // 5. Total spectral radiance at this wavelength (with transmittance)
-            float L_lambda = L_emission + L_reflected_atm + L_reflected_sun + L_transmitted;
+            float L_lambda = L_emission + L_bound + L_reflected_atm + L_reflected_sun +
+                             L_transmitted;
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             // (MWIR L_path already merges PTH_THRML + night-gated SOL_SCAT at bake time)

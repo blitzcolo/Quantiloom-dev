@@ -39,6 +39,55 @@ public:
     LoadSpectralCurveCSV(const std::filesystem::path& csvPath);
 
     // ========================================================================
+    // Emission spectra (what a surface emits, not what it reflects)
+    // ========================================================================
+    //
+    // A glTF material's self-emission is an RGB triple, and an RGB triple is
+    // not a lamp. The renderer's only way to get a spectrum out of one is to
+    // upsample it and multiply by D65 -- a computer-graphics construct, and
+    // exactly the kind of invention the band-aware convention forbids for
+    // reflectance. `emissive_curve` is the way out: it binds a measured or
+    // standard spectral radiance to a material, the same way `solar_lut` binds
+    // one to the sun.
+    //
+    // A token names a built-in; anything else is a path to a table.
+
+    struct EmissionSpectrumInfo {
+        String token;        ///< what a config writes, e.g. "cie_f7"
+        String description;  ///< one line, for a UI listing
+        f32 lambdaMinNm = 0.0f;
+        f32 lambdaMaxNm = 0.0f;
+    };
+
+    // Every built-in emission spectrum, in a stable order suitable for a UI.
+    // The blackbody family is parametric and appears once, as "blackbody_<T>k".
+    [[nodiscard]] static const Vector<EmissionSpectrumInfo>& BuiltinEmissionSpectra();
+
+    // Resolve a built-in token or a file path to a spectral radiance curve.
+    //
+    // Tokens (case-insensitive):
+    //   equal_energy / illuminant_e   flat, CIE illuminant E
+    //   d65                           CIE standard illuminant D65
+    //   illuminant_a                  CIE standard illuminant A, 2856 K tungsten
+    //   halogen                       alias for blackbody_3000k
+    //   cie_f1 .. cie_f12             CIE fluorescent lamps
+    //   cie_f3.1 .. cie_f3.15         CIE fluorescent lamps, FL3 series
+    //   blackbody_<T>k                Planck at T kelvin, e.g. blackbody_3000k
+    //
+    // Everything except the blackbody family is a RELATIVE distribution, as
+    // published -- normalised to 100 at 560 nm, with no absolute level. The
+    // blackbody family is absolute, in W m^-2 sr^-1 nm^-1. Which is which is
+    // why the caller must decide on a scale rather than inherit one; see
+    // EmissiveScale in ConfigResolve.hpp.
+    //
+    // @param nameOrPath  A token above, or a path to a whitespace- or
+    //                    comma-separated table with wavelength in column 1
+    // @param baseDir     Directory a relative path resolves against
+    // @param column      1-based column holding the radiance, for a file
+    [[nodiscard]] static Result<SpectralCurve, String> LoadEmissionSpectrum(
+        const String& nameOrPath, const std::filesystem::path& baseDir, u32 column = 2);
+
+    // ========================================================================
     // USGS Spectral Library Support
     // ========================================================================
     // USGS splib07a format: separate wavelength file + reflectance file

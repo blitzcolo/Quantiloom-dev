@@ -102,7 +102,10 @@ struct MaterialDataCPU {
     i32 diffuseTransmissionColorTextureIndex;// offset 300,  4
     i32 diffuseTransmissionColorCurveIndex;  // offset 304,  4
 
-    f32 _padding2;                           // offset 308,  4
+    // Spectral self-emission. Took _padding2, so sizeof and every offset above
+    // are unchanged -- see Material::emissiveRadianceCurveIndex for what it
+    // means and why emissiveFactor is rewritten to match when it is set.
+    i32 emissiveRadianceCurveIndex;          // offset 308,  4
     f32 _padding3;                           // offset 312,  4
     f32 _padding4;                           // offset 316,  4
 
@@ -195,6 +198,7 @@ static_assert(offsetof(MaterialDataCPU, diffuseTransmissionTextureIndex) == 284)
 static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorFactor) == 288);
 static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorTextureIndex) == 300);
 static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorCurveIndex) == 304);
+static_assert(offsetof(MaterialDataCPU, emissiveRadianceCurveIndex)  == 308);
 static_assert(offsetof(MaterialDataCPU, uvTransformMat)              == 320);
 static_assert(offsetof(MaterialDataCPU, uvTransformOffset)           == 544);
 

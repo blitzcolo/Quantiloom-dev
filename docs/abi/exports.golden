@@ -151,6 +151,7 @@ public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::
 public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173(class std::filesystem::path const &,unsigned int)
+public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadEmissionSpectrum(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::filesystem::path const &,unsigned int)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadLibRadtranUvspec(class std::filesystem::path const &,unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGS(class std::filesystem::path const &,class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGSAuto(class std::filesystem::path const &)
@@ -160,6 +161,7 @@ public: static class quantiloom::Result<struct std::pair<struct quantiloom::Spec
 public: static class std::optional<class std::tuple<unsigned int,unsigned int,unsigned int> > quantiloom::ImageIO::GetDimensions(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadImage(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class std::vector<struct quantiloom::SpectralIO::EmissionSpectrumInfo,class std::allocator<struct quantiloom::SpectralIO::EmissionSpectrumInfo> > const & quantiloom::SpectralIO::BuiltinEmissionSpectra(void)
 public: static enum quantiloom::Log::Level quantiloom::Log::GetLevel(void)
 public: static int const quantiloom::Material::MAX_ENDMEMBERS
 public: static struct quantiloom::Material quantiloom::Material::CreateLambertian(struct glm::vec<3,float,0> const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
@@ -239,6 +241,7 @@ public: void quantiloom::Material::ComputeSpectralAlbedo(void)
 public: void quantiloom::Scene::PrintSummary(void)const
 public: void quantiloom::mcp::Server::Pump(void)
 public: void quantiloom::mcp::Server::Stop(void)
+struct glm::vec<3,float,0> quantiloom::EmissionSpectrumToRenderedLinearSrgb(struct quantiloom::SpectralCurve const &)
 struct glm::vec<3,float,0> quantiloom::ReflectanceToLinearSrgbD65(struct quantiloom::SpectralCurve const &)
 struct glm::vec<3,float,0> quantiloom::SpectralIrradianceToLinearSrgb(struct quantiloom::SpectralCurve const &)
 struct quantiloom::SpectralCurve quantiloom::MakeEqualEnergyIlluminant(float,float)

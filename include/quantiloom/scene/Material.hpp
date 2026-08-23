@@ -520,6 +520,38 @@ struct QL_API Material {
     UvTransform diffuseTransmissionColorUv;
 
     // ========================================================================
+    // Spectral self-emission
+    // ========================================================================
+    // What this surface EMITS, per wavelength, in W m^-2 sr^-1 nm^-1.
+    //
+    // emissiveFactor above is an RGB triple, and an RGB triple is not a lamp.
+    // The only spectrum a renderer can get from one is the Jakob-Hanika
+    // upsampling multiplied by D65 -- a computer-graphics construct, fine for a
+    // preview and an invention in a measurement, which is exactly what this
+    // repository's out-of-band convention forbids for reflectance. Binding a
+    // curve here is the way out, and it is the emission-side twin of
+    // lighting.solar_lut: measured or standard data replacing a colour.
+    //
+    // >= 0 indexes the same shared curve array as spectralReflectanceCurveIndex.
+    // -1 means fall back to the RGB expansion, which stays the default so that
+    // every scene that does not ask for this is bit-identical.
+    //
+    // The two must agree: when a curve is bound, ResolveMaterialSpectra
+    // OVERWRITES emissiveFactor with the linear-sRGB the curve integrates to, so
+    // RGB mode, the emitter-sampling CDF and the spectral modes all describe one
+    // lamp rather than three. Setting this index without going through that
+    // resolution leaves the two halves disagreeing.
+    //
+    // Outside the curve's own measured span the emission is ZERO, not held flat
+    // at the endpoint. A fluorescent table stops at 780 nm; extending it into
+    // SWIR would invent the part of the lamp nobody measured.
+    i32 emissiveRadianceCurveIndex = -1;
+
+    // The token or path the curve came from, kept so a config round-trips and a
+    // UI can show what is bound. Empty when nothing is.
+    String emissiveCurveSource;
+
+    // ========================================================================
     // Utilities
     // ========================================================================
 

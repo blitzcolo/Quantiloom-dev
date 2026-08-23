@@ -911,6 +911,26 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     ResolvedMaterialSpectra out;
     Diagnostics diag(options, report);
 
+    // The band every curve-binding path below resamples onto. A measured curve
+    // for a cross-band asset spans the near ultraviolet to the LWIR, and 64
+    // uniform samples over that span leave the visible band two interior grid
+    // points; see SpectralCurveGPU::FromCPUBand for what that cost. Edges match
+    // the [refractive_index] block's table further down, so n,k, reflectance and
+    // emission are all resampled onto the same window.
+    const auto activeBandName = config.Get<String>("spectral.band", "VIS");
+    f32 bandMinNm = 400.0f, bandMaxNm = 780.0f;
+    if (activeBandName == "LWIR")      { bandMinNm = 8000.0f; bandMaxNm = 12000.0f; }
+    else if (activeBandName == "MWIR") { bandMinNm = 3000.0f; bandMaxNm = 5000.0f; }
+    else if (activeBandName == "SWIR") { bandMinNm = 1400.0f; bandMaxNm = 2400.0f; }
+    else if (activeBandName == "NIR")  { bandMinNm =  930.0f; bandMaxNm = 1200.0f; }
+
+    // A cube asks for a wavelength axis rather than a band, so it resamples over
+    // the axis it declared instead of over the band that named it.
+    if (config.Get<String>("spectral.mode", "") == "multispectral") {
+        bandMinNm = config.Get<f32>("hyperspectral.wavelength_min_nm", bandMinNm);
+        bandMaxNm = config.Get<f32>("hyperspectral.wavelength_max_nm", bandMaxNm);
+    }
+
     // ------------------------------------------------------------------
     // Default IR surface temperature
     // ------------------------------------------------------------------
@@ -1007,6 +1027,243 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         }
         if (const auto emissive = matTable.GetFloatArray("emissive"); emissive.size() >= 3) {
             it->emissiveFactor = glm::vec3(emissive[0], emissive[1], emissive[2]);
+        }
+
+        // ------------------------------------------------------------------
+        // emissive_curve: what this surface EMITS, per wavelength
+        // ------------------------------------------------------------------
+        // The emission-side twin of lighting.solar_lut. Without it a light in
+        // the scene is an RGB triple, and the only spectrum the renderer can
+        // make from one is the Jakob-Hanika upsampling multiplied by D65 --
+        // fine for a preview, an invention in a measurement, and precisely
+        // what the band-aware convention forbids on the reflectance side.
+        //
+        // Resolved here rather than deferred like spectral_material_ref
+        // because the scale policy needs the emissiveFactor this loop has just
+        // finished writing, and because it rewrites that same factor on the
+        // way out.
+        if (matTable.Has("emissive_curve")) {
+            const auto source = matTable.GetString("emissive_curve", "");
+            const auto column = static_cast<u32>(matTable.GetInt("emissive_curve_column", 2));
+            const auto scale = matTable.GetString("emissive_scale", "match_luminance");
+
+            auto loaded = SpectralIO::LoadEmissionSpectrum(source, options.baseDir, column);
+            if (!loaded) {
+                diag.Fatal("emissive_curve", "  '" + name + "': " + loaded.error());
+            } else {
+                SpectralCurve curve = std::move(loaded.value());
+
+                // Published illuminants are relative -- normalised to 100 at
+                // 560 nm -- so their absolute level means nothing on its own.
+                // match_luminance takes the level from the author's RGB and the
+                // shape from the data, which is what makes swapping one lamp
+                // for another a change of spectrum and not of exposure.
+                // absolute is for a radiometrically calibrated measurement,
+                // where the level IS the datum and must not be touched.
+                // Everything below levels and colours the curve the SHADER will
+                // read, not the one the file held. They are not the same curve:
+                // FromCPUBand clips it to the band and resamples it onto 64
+                // uniform points, and for a line spectrum that is lossy. Doing
+                // the arithmetic on the source would leave the RGB half and the
+                // spectral half describing measurably different lamps -- a CIE
+                // FL11 triphosphor came out 20% apart in blue -- and the whole
+                // point of deriving one from the other is that they agree.
+                const auto Luminance = [](const glm::vec3& c) {
+                    return 0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b;
+                };
+                const auto AsCurve = [](const SpectralCurveGPU& g) {
+                    SpectralCurve c;
+                    c.samples.reserve(g.numSamples);
+                    for (u32 i = 0; i < g.numSamples; ++i) {
+                        c.samples.emplace_back(g.GetWavelength(i), g.values[i]);
+                    }
+                    return c;
+                };
+
+                // Band-averaged onto the grid, not point-sampled like a
+                // reflectance. A reflectance is smooth and a point sample of it
+                // is a fine estimate of its neighbourhood; a fluorescent lamp is
+                // mostly mercury lines, and point-sampling a line spectrum
+                // either hits a line or misses it -- FL11 came out 4.9% wrong in
+                // green that way, and the sign of the error depends on nothing
+                // more principled than where the grid happens to land. Averaging
+                // each sample over its own bin conserves the energy instead, and
+                // is what a spectrometer of this resolution would have reported:
+                // it brings the same lamp to 0.2%.
+                auto gpu = SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
+                if (gpu.numSamples >= 2 && gpu.stepSize_nm > 0.0f) {
+                    // 16 sub-samples per bin: enough that a 5 nm-tabulated line
+                    // lands in the right bin with the right weight, cheap enough
+                    // that it does not matter that this runs per material.
+                    constexpr u32 kSubSamples = 16;
+                    const f32 half = 0.5f * gpu.stepSize_nm;
+                    SpectralCurveGPU averaged = gpu;
+                    for (u32 i = 0; i < gpu.numSamples; ++i) {
+                        const f32 centre = gpu.GetWavelength(i);
+                        f64 sum = 0.0;
+                        for (u32 k = 0; k < kSubSamples; ++k) {
+                            const f32 t = (static_cast<f32>(k) + 0.5f) /
+                                          static_cast<f32>(kSubSamples);
+                            sum += curve.Evaluate(centre - half + t * gpu.stepSize_nm);
+                        }
+                        averaged.values[i] = static_cast<f32>(sum / kSubSamples);
+                    }
+                    gpu = averaged;
+                }
+
+                // Does this render see anything the observer does? Everything
+                // that turns a spectrum into an RGB below goes through the CIE
+                // 1931 observer, which is zero outside 380-780 nm -- so in a
+                // thermal band those numbers are not small, they are undefined.
+                // (SpectralCurve::Evaluate clamps at its endpoints, so
+                // integrating an 8-12 um curve against the observer silently
+                // returns its 8 um value spread across the visible: a large,
+                // confident, meaningless colour.) Both the luminance match and
+                // the emissiveFactor rewrite are therefore gated on this.
+                const bool bandSeesVisible = (bandMinNm < 780.0f && bandMaxNm > 380.0f);
+
+                bool scaleKnown = true;
+                if (scale == "match_luminance" && !bandSeesVisible) {
+                    scaleKnown = false;
+                    diag.Fatal("emissive_scale",
+                               "  '" + name + "': emissive_scale = \"match_luminance\" has no "
+                               "meaning in the " + activeBandName + " band -- luminance is "
+                               "defined by the CIE observer, which sees nothing outside "
+                               "380-780 nm. Use emissive_scale = \"absolute\" and give the "
+                               "curve in W m^-2 sr^-1 nm^-1, which is what the sun's own "
+                               "spectrum is in.");
+                } else if (scale == "match_luminance") {
+                    const f32 targetY = Luminance(it->emissiveFactor);
+                    const f32 curveY =
+                        Luminance(EmissionSpectrumToRenderedLinearSrgb(AsCurve(gpu)));
+                    if (curveY > 0.0f && targetY > 0.0f) {
+                        const f32 k = targetY / curveY;
+                        // Scaling the resampled grid rather than the source and
+                        // resampling again: resampling is linear, so the two are
+                        // the same spectrum, and this way there is exactly one
+                        // array whose numbers reach the GPU.
+                        for (u32 i = 0; i < gpu.numSamples; ++i) gpu.values[i] *= k;
+                        for (auto& s : curve.samples) s.second *= k;
+                    } else if (!(targetY > 0.0f)) {
+                        diag.Warn("emissive_curve",
+                                  "  '" + name + "': emissive_scale is match_luminance but "
+                                  "the material's emissive RGB has zero luminance, so there "
+                                  "is no level to match and the lamp stays dark. Give it an "
+                                  "`emissive` triple, or say emissive_scale = \"absolute\".");
+                    } else {
+                        diag.Warn("emissive_curve",
+                                  "  '" + name + "': the emission spectrum has zero "
+                                  "luminance in the visible, so match_luminance has nothing "
+                                  "to normalise against; use emissive_scale = \"absolute\".");
+                    }
+                } else if (scale != "absolute") {
+                    scaleKnown = false;
+                    diag.Fatal("emissive_scale",
+                               "  '" + name + "': unknown emissive_scale '" + scale +
+                               "' (expected \"match_luminance\" or \"absolute\")");
+                }
+
+                if (scaleKnown) {
+                    const auto index = static_cast<i32>(out.curves.size());
+                    out.curves.push_back(gpu);
+                    out.materialNameToEmissiveCurve[name] = index;
+                    it->emissiveRadianceCurveIndex = index;
+                    it->emissiveCurveSource = source;
+
+                    // One lamp, every mode. RGB mode has no wavelength and the
+                    // emitter-sampling CDF is built from a luminance, so both
+                    // need a colour; taking it from the curve is what stops the
+                    // three halves of the renderer describing three lamps. It
+                    // replaces whatever `emissive` said, which was a triple in
+                    // arbitrary units with no defined relationship to the
+                    // spectrum beside it.
+                    //
+                    // Only where the observer can see, though. In a thermal band
+                    // the stored curve has no visible support and the integral
+                    // would be an artefact of endpoint clamping; the authored
+                    // triple is left alone there, which costs nothing because no
+                    // thermal path reads it -- those bands have no emitter
+                    // sampling and no RGB output.
+                    if (!bandSeesVisible) {
+                        QL_LOG_INFO("  Material '{}': emissive RGB left as authored -- the {} "
+                                    "band is outside the CIE observer, so the curve has no "
+                                    "colour to derive one from",
+                                    name, activeBandName);
+                    } else {
+                    it->emissiveFactor = EmissionSpectrumToRenderedLinearSrgb(AsCurve(gpu));
+
+                    // Is this lamp band-limited at the resolution the renderer
+                    // works at? Band-averaging and point-sampling the same
+                    // spectrum onto the same grid agree exactly when it is, and
+                    // diverge in proportion to the structure between the grid
+                    // points when it is not. That difference is therefore a
+                    // direct measure of what no amount of care in the storage
+                    // can fix: the visible estimator point-samples 32
+                    // wavelengths, so a spectrum with lines between them carries
+                    // a quadrature error of this order into the render itself.
+                    //
+                    // Measured on CIE FL11 in VIS: band-averaging holds the
+                    // stored colour to 0.2% where point-sampling loses 4.9%, and
+                    // the render still lands 14.5% high in blue because the
+                    // estimator has its own 12 nm spacing. That number is the
+                    // one worth telling the user about, and this is the cheapest
+                    // honest proxy for it.
+                    SpectralCurveGPU pointSampled =
+                        SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
+                    const glm::vec3 loose =
+                        EmissionSpectrumToRenderedLinearSrgb(AsCurve(pointSampled));
+                    const glm::vec3 tight = it->emissiveFactor;
+                    const f32 scaleRef = std::max(Luminance(tight), 1e-6f);
+                    const f32 structure =
+                        std::max({std::abs(loose.r - tight.r), std::abs(loose.g - tight.g),
+                                  std::abs(loose.b - tight.b)}) / scaleRef;
+                    if (structure > 0.02f) {
+                        diag.Warn("emissive_curve",
+                                  "    '" + name + "': this spectrum is not band-limited at "
+                                  "the renderer's spectral resolution -- band-averaging and "
+                                  "point-sampling it onto the same " +
+                                  std::to_string(gpu.numSamples) + "-sample grid disagree by " +
+                                  std::to_string(static_cast<i32>(structure * 100.0f)) +
+                                  "%, which a fluorescent lamp's mercury lines will do. The "
+                                  "stored curve is band-averaged and so is close to the "
+                                  "measurement, but the estimator point-samples 32 "
+                                  "wavelengths and the rendered colour can be off by about "
+                                  "this much regardless. A smooth illuminant (illuminant_a, "
+                                  "blackbody_<T>k, d65) carries no such error.");
+                    }
+                    }  // bandSeesVisible
+
+                    const f32 last = gpu.GetWavelength(gpu.numSamples - 1);
+                    QL_LOG_INFO("  Material '{}': emission curve from '{}' ({}), "
+                                "{} samples, λ=[{:.1f}, {:.1f}] nm, step {:.2f} nm "
+                                "→ curve index {}, colour [{:.4g}, {:.4g}, {:.4g}]",
+                                name, source, scale, gpu.numSamples,
+                                gpu.startWavelength_nm, last, gpu.stepSize_nm, index,
+                                it->emissiveFactor.r, it->emissiveFactor.g,
+                                it->emissiveFactor.b);
+
+                    // Unlike a reflectance, an emission curve is NOT clamped
+                    // outside its span -- the shader returns zero there. So a
+                    // lamp measured only across the visible goes dark in SWIR
+                    // rather than glowing at its 780 nm value, and the warning
+                    // is about a light that will be missing, not one that will
+                    // be wrong.
+                    if (curve.samples.front().first > bandMinNm + 1.0f ||
+                        curve.samples.back().first < bandMaxNm - 1.0f) {
+                        diag.Warn("emissive_curve",
+                                  "    '" + name + "': the emission spectrum spans [" +
+                                  std::to_string(static_cast<i32>(curve.samples.front().first)) +
+                                  ", " +
+                                  std::to_string(static_cast<i32>(curve.samples.back().first)) +
+                                  "] nm but this render is " + activeBandName + " [" +
+                                  std::to_string(static_cast<i32>(bandMinNm)) + ", " +
+                                  std::to_string(static_cast<i32>(bandMaxNm)) +
+                                  "] nm. Emission is zero outside the measured span, never "
+                                  "held flat, so the uncovered part of the band is dark "
+                                  "rather than invented.");
+                    }
+                }
+            }
         }
 
         // Transmission, dispersion and participating media. The fields have
@@ -1434,26 +1691,6 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     // [spectral_curves]: material name -> reflectance CSV
     // ------------------------------------------------------------------
     QL_LOG_INFO("Loading spectral curves...");
-
-    // The band both curve-binding paths below resample onto. A measured curve
-    // for a cross-band asset spans the near ultraviolet to the LWIR, and 64
-    // uniform samples over that span leave the visible band two interior grid
-    // points; see SpectralCurveGPU::FromCPUBand for what that cost. Edges match
-    // the [refractive_index] block's table further down, so n,k and reflectance
-    // are resampled onto the same window.
-    const auto activeBandName = config.Get<String>("spectral.band", "VIS");
-    f32 bandMinNm = 400.0f, bandMaxNm = 780.0f;
-    if (activeBandName == "LWIR")      { bandMinNm = 8000.0f; bandMaxNm = 12000.0f; }
-    else if (activeBandName == "MWIR") { bandMinNm = 3000.0f; bandMaxNm = 5000.0f; }
-    else if (activeBandName == "SWIR") { bandMinNm = 1400.0f; bandMaxNm = 2400.0f; }
-    else if (activeBandName == "NIR")  { bandMinNm =  930.0f; bandMaxNm = 1200.0f; }
-
-    // A cube asks for a wavelength axis rather than a band, so it resamples over
-    // the axis it declared instead of over the band that named it.
-    if (config.Get<String>("spectral.mode", "") == "multispectral") {
-        bandMinNm = config.Get<f32>("hyperspectral.wavelength_min_nm", bandMinNm);
-        bandMaxNm = config.Get<f32>("hyperspectral.wavelength_max_nm", bandMaxNm);
-    }
 
     // Says what a material ended up with, which is the question no internal gate
     // asks -- a grey furnace cavity cannot see a reflectance lose its chroma.
@@ -1895,6 +2132,35 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             QL_LOG_WARN("  A base colour is authored for 380-780 nm and says nothing "
                         "outside it, so it is not consulted here. Bind a spectral curve "
                         "for a quantitative result.");
+        }
+
+        // The same question asked of the emission side, which had no gate at
+        // all. A material with a luminous emissiveFactor and no bound spectrum
+        // is a light source in the scene that these bands cannot render: they
+        // do not read emissiveFactor, precisely because expanding it would run
+        // the 380-780 nm fit outside its domain. So the lamp is simply absent,
+        // and an absent lamp is the hardest kind of missing data to notice --
+        // the render is dark and plausible rather than wrong and obvious.
+        Vector<String> unboundEmitters;
+        for (const auto& mat : scene.materials) {
+            if (mat.emissiveRadianceCurveIndex >= 0) continue;
+            const glm::vec3& e = mat.emissiveFactor;
+            if (0.2126f * e.r + 0.7152f * e.g + 0.0722f * e.b <= 0.0f) continue;
+            unboundEmitters.push_back(mat.name);
+        }
+        if (!unboundEmitters.empty()) {
+            String sample;
+            for (size_t i = 0; i < unboundEmitters.size() && i < 3; ++i) {
+                sample += (i > 0 ? ", " : "") + unboundEmitters[i];
+            }
+            if (unboundEmitters.size() > 3) sample += ", ...";
+            QL_LOG_WARN("  {} material(s) emit light but have no bound emission spectrum, "
+                        "so they contribute NOTHING in this band: {}",
+                        unboundEmitters.size(), sample);
+            QL_LOG_WARN("  An emissive RGB is authored for 380-780 nm and is not expanded "
+                        "outside it. Bind one with [material_overrides.\"<name>\"] "
+                        "emissive_curve = \"...\" -- a built-in such as \"illuminant_a\" or "
+                        "\"blackbody_3000k\", or a measured table.");
         }
 
         // The count, not just the verdict: RenderSingleFrame and the EXR's

@@ -1,7 +1,13 @@
 #include "io/SpectralIO.hpp"
 
+#include "core/Blackbody.hpp"
+#include "core/D65Illuminant.hpp"
+#include "core/FluorescentIlluminants.hpp"
 #include "io/SpectralBasisLoader.hpp"
 
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -727,11 +733,13 @@ Result<SpectralCurve, String>
 SpectralIO::LoadLibRadtranUvspec(const std::filesystem::path& uvspecFile,
                                   u32 column,
                                   const String& wavelengthUnit) {
-    // Validate column index (2-5 for standard output)
-    if (column < 2 || column > 10) {
+    // Validate column index (2-5 for standard uvspec output; wider tables are
+    // legitimate -- CIE_illum_FLs.csv is 28 columns, one per fluorescent lamp --
+    // so the cap only exists to turn a nonsense index into a message).
+    if (column < 2 || column > 64) {
         return Result<SpectralCurve>(Result<SpectralCurve>::Err{
             "libRadtran: Invalid column " + std::to_string(column) +
-            " (valid: 2=edir, 3=edn, 4=eup, 5=uavg, or higher for custom output)"
+            " (valid: 2-64; 2=edir, 3=edn, 4=eup, 5=uavg for uvspec output)"
         });
     }
 
@@ -836,6 +844,179 @@ SpectralIO::LoadLibRadtranUvspec(const std::filesystem::path& uvspecFile,
                 curve.samples.front().first, curve.samples.back().first);
 
     return Result(std::move(curve));
+}
+
+// ============================================================================
+// Public API: emission spectra
+// ============================================================================
+
+namespace {
+
+/// Every built-in that is not a blackbody spans exactly the range its source
+/// standardises, and stops there. Illuminant A's defining equation would happily
+/// evaluate at 10 um -- CIE 015:2018 tabulates it to 830 nm, and continuing it
+/// past that would be the renderer inventing the part of a lamp nobody measured.
+/// A caller who genuinely wants a 2856 K Planckian across the infrared should
+/// say `blackbody_2856k`, which is that claim written down.
+constexpr f32 kEqualEnergyMinNm = 300.0f;
+constexpr f32 kEqualEnergyMaxNm = 20000.0f;
+constexpr f32 kBlackbodyMinNm = 300.0f;
+constexpr f32 kBlackbodyMaxNm = 20000.0f;
+constexpr f32 kBlackbodyStepNm = 10.0f;
+constexpr f32 kIlluminantAMinNm = 300.0f;
+constexpr f32 kIlluminantAMaxNm = 830.0f;
+constexpr f32 kIlluminantAStepNm = 1.0f;
+constexpr f32 kHalogenTemperatureK = 3000.0f;
+
+String ToLowerAscii(const String& s) {
+    String out = s;
+    std::ranges::transform(out, out.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return out;
+}
+
+/// CIE 015:2018 equation 4.1. The 1.435e7 nm*K is the 1968 value of c2 and the
+/// 2848 K is the equation's own constant, not the lamp's temperature -- together
+/// they put illuminant A at a distribution temperature of 2856 K on ITS-90.
+/// Checked against the CIE's published 1 nm table to 5e-6 relative on all 531
+/// rows; assets/luts/README.md records that check.
+f64 IlluminantARelative(f64 lambdaNm) {
+    constexpr f64 c2NmK = 1.435e7;
+    constexpr f64 tK = 2848.0;
+    const f64 shape = std::pow(560.0 / lambdaNm, 5.0);
+    const f64 num = std::exp(c2NmK / (tK * 560.0)) - 1.0;
+    const f64 den = std::exp(c2NmK / (tK * lambdaNm)) - 1.0;
+    return 100.0 * shape * (num / den);
+}
+
+/// Parse "blackbody_3000k" into 3000. Returns nullopt when the token is not of
+/// that shape, which is how the caller falls through to treating it as a path.
+std::optional<f32> ParseBlackbodyToken(const String& lower) {
+    constexpr StringView kPrefix = "blackbody_";
+    if (!lower.starts_with(kPrefix) || !lower.ends_with('k')) return std::nullopt;
+    const auto digits = lower.substr(kPrefix.size(), lower.size() - kPrefix.size() - 1);
+    if (digits.empty()) return std::nullopt;
+    // strtof rather than from_chars: libc++ only grew floating-point from_chars
+    // very recently, and this has to build under Clang as well as MSVC and GCC.
+    const char* first = digits.c_str();
+    char* end = nullptr;
+    const f32 t = std::strtof(first, &end);
+    if (end != first + digits.size()) return std::nullopt;
+    if (!(t > 0.0f) || t > 100000.0f) return std::nullopt;
+    return t;
+}
+
+SpectralCurve MakeUniform(f32 minNm, f32 maxNm, f32 stepNm, const auto& fn) {
+    SpectralCurve curve;
+    const auto n = static_cast<u32>((maxNm - minNm) / stepNm) + 1u;
+    curve.samples.reserve(n);
+    for (u32 i = 0; i < n; ++i) {
+        const f32 lambda = minNm + static_cast<f32>(i) * stepNm;
+        curve.samples.emplace_back(lambda, static_cast<f32>(fn(lambda)));
+    }
+    return curve;
+}
+
+}  // namespace
+
+const Vector<SpectralIO::EmissionSpectrumInfo>& SpectralIO::BuiltinEmissionSpectra() {
+    static const Vector<EmissionSpectrumInfo> kTable = [] {
+        Vector<EmissionSpectrumInfo> t;
+        t.push_back({"equal_energy",
+                     "CIE illuminant E -- flat, favours no wavelength",
+                     kEqualEnergyMinNm, kEqualEnergyMaxNm});
+        t.push_back({"d65",
+                     "CIE standard illuminant D65 -- average daylight, the sRGB white point",
+                     D65_LAMBDA_MIN, D65_LAMBDA_MAX});
+        t.push_back({"illuminant_a",
+                     "CIE standard illuminant A -- 2856 K tungsten, the incandescent standard",
+                     kIlluminantAMinNm, kIlluminantAMaxNm});
+        t.push_back({"halogen",
+                     "Tungsten halogen -- alias for blackbody_3000k",
+                     kBlackbodyMinNm, kBlackbodyMaxNm});
+        for (u32 i = 0; i < FL_LAMP_COUNT; ++i) {
+            const String token = FL_LAMP_TOKENS[i];
+            String what = "CIE fluorescent lamp " + token.substr(4);
+            if (token == "cie_f2" || token == "cie_f7" || token == "cie_f11") {
+                // CIE 015:2018 singles these three out as the ones to use when
+                // only one fluorescent lamp is being tested against.
+                what += " (CIE-preferred representative)";
+            }
+            t.push_back({token, what, FL_LAMBDA_MIN, FL_LAMBDA_MAX});
+        }
+        t.push_back({"blackbody_<T>k",
+                     "Planck's law at T kelvin, absolute -- e.g. blackbody_3000k",
+                     kBlackbodyMinNm, kBlackbodyMaxNm});
+        return t;
+    }();
+    return kTable;
+}
+
+Result<SpectralCurve, String> SpectralIO::LoadEmissionSpectrum(
+    const String& nameOrPath, const std::filesystem::path& baseDir, u32 column) {
+    using Res = Result<SpectralCurve, String>;
+
+    const String lower = ToLowerAscii(nameOrPath);
+
+    // Tokens are matched before paths, so a file literally named "d65" in the
+    // working directory cannot shadow the built-in. That ordering is deliberate:
+    // a config naming a built-in must always get the same lamp.
+    if (lower == "equal_energy" || lower == "illuminant_e") {
+        SpectralCurve curve;
+        curve.samples.emplace_back(kEqualEnergyMinNm, 1.0f);
+        curve.samples.emplace_back(kEqualEnergyMaxNm, 1.0f);
+        return Res(std::move(curve));
+    }
+
+    if (lower == "d65") {
+        return Res(MakeUniform(D65_LAMBDA_MIN, D65_LAMBDA_MAX, D65_LAMBDA_STEP,
+                               [](f32 lambda) { return D65Relative(lambda); }));
+    }
+
+    if (lower == "illuminant_a") {
+        return Res(MakeUniform(kIlluminantAMinNm, kIlluminantAMaxNm, kIlluminantAStepNm,
+                               [](f32 lambda) { return IlluminantARelative(lambda); }));
+    }
+
+    const f32 blackbodyK =
+        (lower == "halogen") ? kHalogenTemperatureK
+                             : ParseBlackbodyToken(lower).value_or(0.0f);
+    if (blackbodyK > 0.0f) {
+        return Res(MakeUniform(kBlackbodyMinNm, kBlackbodyMaxNm, kBlackbodyStepNm,
+                               [blackbodyK](f32 lambda) {
+                                   return blackbody::SpectralRadiancePerNm(lambda, blackbodyK);
+                               }));
+    }
+
+    for (u32 i = 0; i < FL_LAMP_COUNT; ++i) {
+        if (lower != FL_LAMP_TOKENS[i]) continue;
+        const f32* row = CIE_FL[i];
+        return Res(MakeUniform(FL_LAMBDA_MIN, FL_LAMBDA_MAX, FL_LAMBDA_STEP,
+                               [row](f32 lambda) {
+                                   const f32 pos = (lambda - FL_LAMBDA_MIN) / FL_LAMBDA_STEP;
+                                   const auto i0 = static_cast<u32>(pos);
+                                   return row[std::min(i0, FL_LUT_SIZE - 1u)];
+                               }));
+    }
+
+    // Not a token, so it is a file. A misspelt token lands here and fails as a
+    // missing path, which reads badly, so say both things.
+    std::filesystem::path path(nameOrPath);
+    if (path.is_relative() && !baseDir.empty()) path = baseDir / path;
+    if (!std::filesystem::exists(path)) {
+        return Res(Res::Err{
+            "Emission spectrum '" + nameOrPath + "' is neither a built-in nor a file "
+            "that exists (looked for " + path.string() +
+            "). Built-in tokens: equal_energy, d65, illuminant_a, halogen, "
+            "cie_f1..cie_f12, cie_f3.1..cie_f3.15, blackbody_<T>k."});
+    }
+
+    auto loaded = LoadLibRadtranUvspec(path, column, "nm");
+    if (!loaded) {
+        return Res(Res::Err{"Emission spectrum '" + path.string() + "': " + loaded.error()});
+    }
+    return Res(std::move(loaded.value()));
 }
 
 Result<std::pair<SpectralCurve, SpectralCurve>, String>

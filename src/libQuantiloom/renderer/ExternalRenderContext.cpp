@@ -997,6 +997,15 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             it != spectra.materialNameToDiffuseTransmissionCurve.end()) {
             mat.diffuseTransmissionColorCurveIndex = it->second;
         }
+        // ResolveMaterialSpectra already wrote this onto the material, along
+        // with the emissiveFactor it derived from the same curve. Read it back
+        // from the map anyway, so the map stays the single authority and a
+        // future resolve that stops touching the material in place does not
+        // silently leave the interactive path unlit.
+        if (auto it = spectra.materialNameToEmissiveCurve.find(mat.name);
+            it != spectra.materialNameToEmissiveCurve.end()) {
+            mat.emissiveRadianceCurveIndex = it->second;
+        }
         if (auto it = spectra.bandAveragedIREmissivity.find(mat.name);
             it != spectra.bandAveragedIREmissivity.end()) {
             mat.bandAveragedIREmissivity = it->second;

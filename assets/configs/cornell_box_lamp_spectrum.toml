@@ -1,0 +1,93 @@
+# Cornell Box — the light panel described by a spectrum instead of a colour
+#
+# The scene is cornell_box_vis.toml with one key added. That key is the whole
+# point: `emissive_curve` binds a real illuminant to the lamp, where the glTF
+# only offers an RGB triple.
+#
+# What the triple costs. A glTF emissiveFactor of [15, 15, 12] is expanded by
+# the renderer as L(λ) = 2·max(rgb) · sigmoid(c; λ) · D65(λ) — the Jakob &
+# Hanika fit multiplied by D65. Nothing measured that. It is a convention, it is
+# defined only on 380–780 nm, and it is the same category of invention this
+# renderer refuses on the reflectance side, where an out-of-band RGB upsample is
+# a hard error. The sun has had a way out for a long time (`lighting.solar_lut`
+# binds ASTM G-173); a lamp inside the scene did not.
+#
+# Swap the token below to compare lamps. Each is a published standard:
+#
+#   d65            average daylight — the sRGB white point, so it renders neutral
+#   illuminant_a   2856 K tungsten, CIE's incandescent standard — strongly warm
+#   halogen        alias for blackbody_3000k
+#   blackbody_<T>k Planck at T kelvin, ABSOLUTE (W m⁻² sr⁻¹ nm⁻¹), any band
+#   cie_f1..f12    fluorescent lamps; f2, f7 and f11 are CIE's representatives
+#   cie_f3.1..3.15 the FL3 series
+#   equal_energy   CIE illuminant E — flat, favours no wavelength
+#
+# ...or give a path to your own two-column table, with
+# `emissive_curve_column` if the radiance is not in column 2.
+#
+# Two things worth knowing before you change the band.
+#
+# 1. Emission is ZERO outside the curve's own measured span, never held flat at
+#    the endpoint the way a reflectance is. The CIE fluorescent tables stop at
+#    780 nm, so `cie_f7` in a SWIR render is a dark lamp, and the CLI says so.
+#    That is deliberate: extending a triphosphor lamp into the near infrared
+#    would furnish it with output no one measured. `blackbody_<T>k` is the
+#    built-in that spans every band, because it is a formula rather than a table.
+#
+# 2. `emissive_scale` decides what the numbers mean.
+#      match_luminance (default) — the curve supplies the SHAPE and the
+#        `emissive` triple supplies the LEVEL, so swapping lamps changes the
+#        colour of the room without re-exposing the render. Every built-in
+#        except the blackbody family is a relative distribution normalised to
+#        100 at 560 nm, so this is the only thing that can be meant by them.
+#      absolute — the curve is spectral radiance in W m⁻² sr⁻¹ nm⁻¹ and is used
+#        as given. For a calibrated measurement, where the level IS the datum.
+#        Required outside the visible: luminance is a property of the CIE
+#        observer, which sees nothing at 10 µm, so match_luminance is refused
+#        there rather than quietly guessed at.
+#
+# Either way the renderer rewrites `emissive` to the colour the curve integrates
+# to, so the RGB preview, the emitter-sampling density and the spectral bands
+# all describe one lamp rather than three. The resolved colour is printed in the
+# render log; check it, it is the cheapest way to see what you bound.
+
+[renderer]
+resolution = [1024, 1024]
+spp = 256
+output = "cornell_box_lamp_spectrum.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "H:/Quantiloom-dev/assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "H:/Quantiloom-dev/assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/cornell_box/cornell_box.gltf"
+world_units_to_meters = 0.001
+
+[camera]
+position = [278.0, 273.0, -800.0]
+look_at  = [278.0, 273.0, 280.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 39.0
+
+[lighting]
+# A closed Cornell box has no sun and no sky. It is lit only by the panel below.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[material_overrides."Light Panel"]
+emissive_curve = "illuminant_a"
+# emissive_scale = "match_luminance"   # the default; shown for clarity
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false

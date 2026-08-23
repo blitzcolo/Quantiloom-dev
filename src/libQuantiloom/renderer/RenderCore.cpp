@@ -998,6 +998,7 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.doubleSided = material.doubleSided ? 1u : 0u;
     cpuMat.emissiveFactor = material.emissiveFactor;
     cpuMat.emissiveTextureIndex = material.emissiveTextureIndex;
+    cpuMat.emissiveRadianceCurveIndex = indices.emissiveRadianceCurve;
     cpuMat.alphaMode = static_cast<u32>(material.alphaMode);
     cpuMat.alphaCutoff = material.alphaCutoff;
     cpuMat.spectralAlbedo = material.spectralAlbedo;
@@ -1074,7 +1075,6 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.diffuseTransmissionColorTextureIndex = material.diffuseTransmissionColorTextureIndex;
     cpuMat.diffuseTransmissionColorCurveIndex = indices.diffuseTransmissionColorCurve;
 
-    cpuMat._padding2 = 0.0f;
     cpuMat._padding3 = 0.0f;
     cpuMat._padding4 = 0.0f;
 
@@ -1321,12 +1321,11 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
     // (1.205, 0.948, 0.909): a nominally white light rendering distinctly warm.
     // D65 is the white point sRGB is defined against, so weighting by it is what
     // makes (1,1,1) mean white.
-    f64 yIntegral = 0.0;
+    const f64 yIntegral = CieLuminanceIntegral();
     f64 d65Integral = 0.0;
     for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
         const f32 lambda = CIE_CMF_LAMBDA_MIN + static_cast<f32>(i);
         const f64 w = (i == 0 || i == CIE_CMF_LUT_SIZE - 1) ? 0.5 : 1.0;  // trapezoid
-        yIntegral += w * CIE_1931_2DEG[i][1];
         d65Integral += w * static_cast<f64>(D65Relative(lambda)) * CIE_1931_2DEG[i][1];
     }
     const f64 d65Scale = yIntegral / d65Integral;
@@ -1477,6 +1476,11 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
             tri.area = area;
             tri.edge2 = e2;
             tri.emissive = emissive;
+            // The density stays built from the RGB above. When a curve is bound
+            // that triple IS the curve's own colour -- ResolveMaterialSpectra
+            // rewrites emissiveFactor from it -- so the CDF is not merely close
+            // to right, it is the same lamp measured through the observer.
+            tri.emissiveCurveIndex = mat.emissiveRadianceCurveIndex;
             triangles.push_back(tri);
         }
     });

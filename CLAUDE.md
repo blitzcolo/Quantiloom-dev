@@ -107,6 +107,76 @@ flag with `hasCustomEnvMap`, so a host raising it through `SetLightingParams`
 with nothing loaded cannot reach the shader. `HasEnvironmentMap()` reports load
 state, not lighting state — a map can be loaded with IBL turned off.
 
+## A lamp can be a spectrum, and outside the visible it must be
+
+The sun has been able to say what it is made of for a long time:
+`lighting.solar_lut` binds ASTM G-173, and `sun_radiance` is only the fallback
+for when nothing is bound. A light *inside* the scene had no such path. Its
+spectrum could only come from a glTF `emissiveFactor`, expanded as
+
+```
+L(λ) = 2·max(rgb) · sigmoid(c; λ) · D65(λ)
+```
+
+which is a computer-graphics construct — nothing measured it, and it is defined
+only on 380–780 nm. That is the same category of invention `§ An RGB colour has
+one spectral meaning` forbids outright for reflectance.
+
+`[material_overrides."<name>"] emissive_curve = "..."` is the way out. It takes
+a built-in token (`d65`, `illuminant_a`, `halogen`, `cie_f1`…`cie_f12`,
+`cie_f3.1`…`cie_f3.15`, `blackbody_<T>k`, `equal_energy`) or a path;
+`assets/luts/README.md` has the table and `assets/configs/cornell_box_lamp_spectrum.toml`
+is the worked example. Five things about it are load-bearing:
+
+- **Zero outside the curve's span, never clamped.** `EvaluateEmissionCurve` in
+  `spectral_query.hlsli` differs from `EvaluateSpectralCurve` in exactly this,
+  and the difference is the point. Constant extrapolation is defensible for a
+  reflectance — bounded in [0,1], and a surface that reflects 0.4 at 780 nm
+  plausibly reflects about that at 800. It is indefensible for an emission: the
+  CIE fluorescent tables stop at 780 nm, and holding FL7's last value flat
+  across SWIR furnishes a triphosphor lamp with near-infrared output it does not
+  have. The host warns whenever a bound spectrum falls short of the band.
+- **The IR bands read a bound curve and nothing else.** SWIR, NIR, MWIR and LWIR
+  previously ignored `emissiveFactor` entirely, and they still do — there is
+  deliberately no RGB fallback there, because expanding a triple at 10 µm runs
+  the 380–780 nm fit far outside its domain. So a lamp appears in a thermal band
+  only when someone bound data for it, and the quantitative gate now counts the
+  materials that emit with nothing bound: they contribute *nothing*, which is
+  the hardest kind of missing data to notice, since the render is merely dark.
+- **One lamp, every mode.** When a curve is bound, `ResolveMaterialSpectra`
+  overwrites `emissiveFactor` with the linear sRGB the curve integrates to. That
+  is what keeps the RGB preview, the emitter-sampling CDF (`EmissiveTriangleGPU`
+  carries the curve index in what used to be `_pad0`) and the spectral bands from
+  describing three different lamps. It only happens where the CIE observer has
+  support: in a thermal band the authored triple is left alone, because
+  `SpectralCurve::Evaluate` clamps and integrating an 8–12 µm curve against the
+  observer returns a large, confident, meaningless colour.
+- **`match_luminance` is the default and `absolute` is the calibrated case.**
+  Every built-in but the blackbody family is a *relative* distribution
+  normalised to 100 at 560 nm, so the level has to come from somewhere: the
+  material's own `emissive` triple. Swapping lamps then changes the room's
+  colour without re-exposing the render. `absolute` takes the curve as spectral
+  radiance in W·m⁻²·sr⁻¹·nm⁻¹ and is *required* outside the visible, where
+  luminance is undefined — asking for `match_luminance` there is an error rather
+  than a guess. Checked against Planck: a `blackbody_3000k` panel renders 1.948
+  W·m⁻²·sr⁻¹·nm⁻¹ at 10 µm against the closed form's 1.935.
+- **Emission is band-averaged onto the 64-point grid, reflectance is
+  point-sampled.** A reflectance is smooth; a fluorescent lamp is mostly mercury
+  lines, and point-sampling a line spectrum either hits a line or misses it —
+  CIE FL11 lands 4.9% wrong in green that way, with the sign decided by nothing
+  more principled than where the grid falls. Averaging each sample over its own
+  bin conserves the energy and brings it to 0.2%. It does not fix the
+  *estimator*, which point-samples 32 wavelengths and leaves FL11 about 14% high
+  in blue; the host detects that case — band-averaging and point-sampling the
+  same curve disagree exactly when it is not band-limited — and says so.
+
+The host-side twin of the estimator's normalisation is
+`EmissionSpectrumToRenderedLinearSrgb`, which is `SpectralIrradianceToLinearSrgb`
+divided by `CieLuminanceIntegral()`. Using the un-normalised form is a 106×
+error that scales every wavelength equally, so it changes nothing about the
+colour and reads as an exposure mistake rather than a unit one. It cost a
+debugging round already.
+
 ## Thermography
 
 Four things a thermal scene can now do that it could not, each independent of

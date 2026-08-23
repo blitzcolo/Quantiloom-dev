@@ -106,6 +106,67 @@ float EvaluateSpectralCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
 }
 
 // ============================================================================
+// Emission Curve Evaluation - ZERO outside the measured span
+// ============================================================================
+// Same O(1) lookup as EvaluateSpectralCurve, with the one difference that
+// decides whether a render is a measurement: outside the curve's own range this
+// returns 0 rather than holding the nearest endpoint flat.
+//
+// The difference is not a style choice. Constant extrapolation is defensible
+// for a REFLECTANCE -- a material that reflects 0.4 at the red end of a
+// measurement plausibly reflects about 0.4 just past it, and the quantity is
+// bounded in [0,1] either way. It is indefensible for an EMISSION: the CIE
+// fluorescent tables stop at 780 nm, and holding FL7's last value flat across
+// the SWIR band would furnish a lamp with near-infrared output that nobody
+// measured and that a real triphosphor lamp does not have. The error is not
+// small and it is not conservative -- it is a light source invented out of a
+// table's right-hand edge.
+//
+// Zero is not a claim that the lamp emits nothing there. It is the refusal to
+// claim anything, and the host warns at load time whenever a bound emission
+// spectrum falls short of the band being rendered, so the darkness is reported
+// rather than discovered.
+float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
+                            int curveIndex,
+                            float lambda_nm) {
+    if (curveIndex < 0 || curveIndex >= MAX_SPECTRAL_CURVES) {
+        return 0.0;
+    }
+
+    uint numSamples = spectralCurves[curveIndex].numSamples;
+    if (numSamples == 0) {
+        return 0.0;
+    }
+
+    float startWavelength = spectralCurves[curveIndex].startWavelength_nm;
+    float stepSize = spectralCurves[curveIndex].stepSize_nm;
+    if (stepSize <= 0.0) {
+        return 0.0;
+    }
+
+    float index_f = (lambda_nm - startWavelength) / stepSize;
+
+    // The whole point of this function. A half-step of tolerance at each end
+    // would only smear the same invention over one sample.
+    if (index_f < 0.0 || index_f > float(numSamples - 1)) {
+        return 0.0;
+    }
+
+    if (index_f >= float(numSamples - 1)) {
+        return spectralCurves[curveIndex].values[numSamples - 1];
+    }
+
+    uint  index0 = uint(floor(index_f));
+    uint  index1 = index0 + 1;
+    float t = frac(index_f);
+
+    float value0 = spectralCurves[curveIndex].values[index0];
+    float value1 = spectralCurves[curveIndex].values[index1];
+
+    return lerp(value0, value1, t);
+}
+
+// ============================================================================
 // Material Spectral Albedo Query
 // ============================================================================
 

@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ConfigResolve.hpp"
+#include "core/Blackbody.hpp"
 
 #include <filesystem>
 #include <fstream>
@@ -1462,4 +1463,199 @@ dump_elements = "elements.csv"
     EXPECT_TRUE(resolved.value().thermal.sunCorrection)
         << "an unread section must not half-apply";
     EXPECT_TRUE(resolved.value().thermal.dumpElementsFile.empty());
+}
+
+// ============================================================================
+// emissive_curve: a light in the scene described by data
+// ============================================================================
+// An emissive RGB triple is not a lamp, and the only spectrum the renderer can
+// build from one is the Jakob-Hanika fit multiplied by D65 -- a construct with
+// no measurement behind it, defined only on 380-780 nm. These pin what binding
+// a real spectrum instead is allowed to mean.
+
+TEST_F(ConfigResolveTest, EmissiveCurveBindsAndRewritesTheColourToMatch) {
+    auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\nband = \"VIS\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [15.0, 15.0, 12.0]\n"
+                                     "emissive_curve = \"illuminant_a\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const auto it = spectra.value().materialNameToEmissiveCurve.find("Lamp");
+    ASSERT_NE(it, spectra.value().materialNameToEmissiveCurve.end());
+    EXPECT_EQ(scene.materials[0].emissiveRadianceCurveIndex, it->second);
+    EXPECT_EQ(scene.materials[0].emissiveCurveSource, "illuminant_a");
+
+    // The colour must come from the curve, not survive from the config: a 2856 K
+    // tungsten lamp is emphatically not neutral, and if this still reads
+    // [15, 15, 12] then the RGB half and the spectral half are describing two
+    // different lamps.
+    const auto& e = scene.materials[0].emissiveFactor;
+    EXPECT_GT(e.r, 2.0f * e.g) << "illuminant A should render strongly red";
+    EXPECT_GT(e.g, 2.0f * e.b);
+}
+
+TEST_F(ConfigResolveTest, MatchLuminanceChangesTheSpectrumAndNotTheExposure) {
+    // The property that makes swapping lamps usable: the scene does not need
+    // re-exposing every time someone tries a different illuminant.
+    const f32 expected = 0.2126f * 15.0f + 0.7152f * 15.0f + 0.0722f * 12.0f;
+    for (const char* lamp : {"d65", "illuminant_a", "cie_f7", "equal_energy"}) {
+        auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\nband = \"VIS\"\n",
+                             .trailing = String("[material_overrides.\"Lamp\"]\n"
+                                                "emissive = [15.0, 15.0, 12.0]\n"
+                                                "emissive_curve = \"") + lamp + "\"\n"});
+        auto resolved = ResolveStrict(config);
+        ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+        Scene scene = MakeSceneWithMaterials({"Lamp"});
+        ConfigApplyOptions options;
+        auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+        ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+        const auto& e = scene.materials[0].emissiveFactor;
+        const f32 Y = 0.2126f * e.r + 0.7152f * e.g + 0.0722f * e.b;
+        EXPECT_NEAR(Y, expected, expected * 0.01f) << lamp;
+    }
+}
+
+TEST_F(ConfigResolveTest, D65BoundAsAnEmitterComesBackNeutral) {
+    // The one case with an answer known independently of this renderer: D65 is
+    // the white point sRGB is defined against, so a lamp whose spectrum IS D65
+    // has to be achromatic. Anything else means the colour pipeline is wrong
+    // somewhere between the curve and the sRGB primaries.
+    auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\nband = \"VIS\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [1.0, 1.0, 1.0]\n"
+                                     "emissive_curve = \"d65\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const auto& e = scene.materials[0].emissiveFactor;
+    EXPECT_NEAR(e.r, 1.0f, 0.01f);
+    EXPECT_NEAR(e.g, 1.0f, 0.01f);
+    EXPECT_NEAR(e.b, 1.0f, 0.01f);
+}
+
+TEST_F(ConfigResolveTest, AbsoluteScaleLeavesTheRadianceAlone) {
+    // A calibrated measurement's level IS the datum. Planck at 3000 K and 10 um
+    // is 1.935 W m^-2 sr^-1 nm^-1, and the bound curve must still say so.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\nband = \"LWIR\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [15.0, 15.0, 12.0]\n"
+                                     "emissive_curve = \"blackbody_3000k\"\n"
+                                     "emissive_scale = \"absolute\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const auto idx = scene.materials[0].emissiveRadianceCurveIndex;
+    ASSERT_GE(idx, 0);
+    const auto& gpu = spectra.value().curves[static_cast<usize>(idx)];
+    EXPECT_NEAR(gpu.Evaluate(10000.0f),
+                static_cast<f32>(blackbody::SpectralRadiancePerNm(10000.0, 3000.0)),
+                0.02f);
+
+    // And the authored RGB is left exactly as authored, because a thermal band
+    // has no observer to derive a colour with.
+    EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.r, 15.0f);
+    EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.b, 12.0f);
+}
+
+TEST_F(ConfigResolveTest, MatchLuminanceIsRefusedWhereThereIsNoObserver) {
+    // Luminance is a property of the CIE observer, which sees nothing at 10 um.
+    // Silently falling back to `absolute` would put the lamp at whatever
+    // absolute level the table happened to carry -- for a relative illuminant,
+    // a number with no physical meaning at all.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\nband = \"LWIR\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [15.0, 15.0, 12.0]\n"
+                                     "emissive_curve = \"blackbody_3000k\"\n"
+                                     "emissive_scale = \"match_luminance\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    EXPECT_FALSE(spectra.has_value())
+        << "match_luminance in a thermal band should be refused, not guessed at";
+}
+
+TEST_F(ConfigResolveTest, EmissionCurveIsResampledOntoTheBandBeingRendered) {
+    // The same rule reflectance follows: a lamp that spans the ultraviolet to
+    // the thermal must not arrive as 64 samples across all of it. Bound in
+    // SWIR, the stored grid has to sit in SWIR.
+    auto config = Parse({.spectralKeys = "mode = \"swir_fused\"\nband = \"SWIR\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [1.0, 1.0, 1.0]\n"
+                                     "emissive_curve = \"blackbody_3000k\"\n"
+                                     "emissive_scale = \"absolute\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    const auto idx = scene.materials[0].emissiveRadianceCurveIndex;
+    ASSERT_GE(idx, 0);
+    const auto& gpu = spectra.value().curves[static_cast<usize>(idx)];
+    EXPECT_NEAR(gpu.startWavelength_nm, 1400.0f, 1.0f);
+    EXPECT_NEAR(gpu.GetWavelength(gpu.numSamples - 1), 2400.0f, 1.0f);
+}
+
+TEST_F(ConfigResolveTest, AnUnknownEmissiveCurveOrScaleIsFatalRatherThanIgnored) {
+    // A config that asks for a measured lamp and does not get one must not
+    // quietly render the RGB lamp instead -- that is the substitution the whole
+    // feature exists to stop.
+    for (const char* body : {"emissive_curve = \"no_such_lamp\"\n",
+                             "emissive_curve = \"d65\"\nemissive_scale = \"normalised\"\n"}) {
+        auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\nband = \"VIS\"\n",
+                             .trailing = String("[material_overrides.\"Lamp\"]\n"
+                                                "emissive = [1.0, 1.0, 1.0]\n") + body});
+        auto resolved = ResolveStrict(config);
+        ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+        Scene scene = MakeSceneWithMaterials({"Lamp"});
+        ConfigApplyOptions options;
+        options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
+        auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+        EXPECT_FALSE(spectra.has_value()) << body;
+    }
+}
+
+TEST_F(ConfigResolveTest, ScenesWithoutAnEmissiveCurveAreUntouched) {
+    // The default has to stay exactly what it was, or every existing scene
+    // changes. -1 is the sentinel the shader branches on.
+    auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\nband = \"VIS\"\n",
+                         .trailing = "[material_overrides.\"Lamp\"]\n"
+                                     "emissive = [15.0, 15.0, 12.0]\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Lamp"});
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    EXPECT_EQ(scene.materials[0].emissiveRadianceCurveIndex, -1);
+    EXPECT_TRUE(spectra.value().materialNameToEmissiveCurve.empty());
+    EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.r, 15.0f);
+    EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.b, 12.0f);
 }

@@ -559,4 +559,25 @@ inline auto GetCIE_XYZ_Interp(f32 wavelength_nm) -> std::array<f32, 3> {
     };
 }
 
+// integral(ybar) dlambda over 380-780 nm, trapezoid on the 1 nm grid.
+//
+// This is the renderer's luminance normalisation, and it has to be ONE number.
+// The shaders' spectral estimator divides by it, so a spectrum whose ybar
+// integral is I renders at I / this. Anything on the host that wants to predict
+// or match a rendered level must divide by the same value -- getting it wrong is
+// silent, because it scales every wavelength equally and so changes only the
+// brightness of a thing nobody has an independent reading of.
+//
+// Two callers depend on that agreement: CreateCieColourMatchingBuffer, which
+// scales the D65 factor by it, and EmissionSpectrumToRenderedLinearSrgb, which
+// is how a bound emission curve is levelled against an authored RGB.
+[[nodiscard]] inline f64 CieLuminanceIntegral() {
+    f64 sum = 0.0;
+    for (u32 i = 0; i < CIE_CMF_LUT_SIZE; ++i) {
+        const f64 w = (i == 0 || i == CIE_CMF_LUT_SIZE - 1) ? 0.5 : 1.0;  // trapezoid
+        sum += w * CIE_1931_2DEG[i][1];
+    }
+    return sum;
+}
+
 } // namespace quantiloom

@@ -223,6 +223,17 @@ struct ResolvedMaterialSpectra {
     /// irTransmittance and a surface cannot have two.
     std::unordered_map<String, i32> materialNameToDiffuseTransmissionCurve;
 
+    /// Measured spectral radiance for self-emission, pointing into the same
+    /// `curves`. The emission-side twin of lighting.solar_lut: without it a
+    /// light in the scene can only be an RGB triple expanded through D65, which
+    /// is a computer-graphics construct standing where a measurement belongs.
+    ///
+    /// Every material in this map also has its emissiveFactor rewritten to the
+    /// linear-sRGB its own curve integrates to, so the RGB preview path, the
+    /// emitter-sampling density and the spectral modes describe one lamp. That
+    /// rewrite is the reason this is resolved here and not in the shader.
+    std::unordered_map<String, i32> materialNameToEmissiveCurve;
+
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
 

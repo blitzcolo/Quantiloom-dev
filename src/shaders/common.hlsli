@@ -327,7 +327,7 @@ struct SpectralCurveGPU {
 struct EmissiveTriangleGPU {
     float3 v0;        float cumulativePower;
     float3 edge1;     float area;
-    float3 edge2;     float _pad0;
+    float3 edge2;     int   emissiveCurveIndex;  // -1 = the RGB triple below
     float3 emissive;  float _pad1;
 };
 
@@ -1128,7 +1128,10 @@ struct MaterialData {
     int    diffuseTransmissionColorTextureIndex; // RGB, sRGB-encoded (-1 = no texture)             // Offset: 300-304
     int    diffuseTransmissionColorCurveIndex;   // measured, the NIR/SWIR path (-1 = none)         // Offset: 304-308
 
-    float  _padding2;                    // Padding for alignment                                   // Offset: 308-312
+    // Spectral self-emission: index into spectralCurves, -1 = expand
+    // emissiveFactor through the RGB->illuminant path instead. Zero outside the
+    // curve's own span, never held flat -- see EvaluateEmissionCurve.
+    int    emissiveRadianceCurveIndex;   // Index into spectralCurves (-1 = RGB expansion)          // Offset: 308-312
     float  _padding3;                    // Padding for alignment                                   // Offset: 312-316
     float  _padding4;                    // Padding for alignment                                   // Offset: 316-320
 

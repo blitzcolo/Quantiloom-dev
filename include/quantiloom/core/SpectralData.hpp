@@ -628,6 +628,24 @@ QL_API glm::vec3 SpectralIrradianceToLinearSrgb(const SpectralCurve& curve);
 // curve with the scene's own solar spectrum, wavelength by wavelength.
 QL_API glm::vec3 ReflectanceToLinearSrgbD65(const SpectralCurve& reflectance);
 
+// The linear sRGB a spectral RADIANCE curve actually renders as, which is the
+// tristimulus integral above divided by the observer's own luminance integral.
+//
+// The difference from SpectralIrradianceToLinearSrgb is one constant, and it is
+// the constant the shaders' spectral estimator carries: they divide by
+// integral(ybar) dlambda, so a grey emissive of v renders as v rather than as
+// 106.86 v. SpectralIrradianceToLinearSrgb deliberately does not, because for a
+// sun the absolute magnitude is the answer and no render level is being
+// predicted.
+//
+// Use this whenever a host-side number has to agree with a rendered one: to
+// level a bound emission spectrum against an authored emissive RGB, and to show
+// a user what a lamp they picked will look like. Using the un-normalised form
+// there makes the lamp two orders of magnitude too dark, uniformly across every
+// wavelength -- which changes nothing about its colour and so looks like an
+// exposure mistake rather than a unit mistake.
+QL_API glm::vec3 EmissionSpectrumToRenderedLinearSrgb(const SpectralCurve& curve);
+
 // A flat spectrum normalised so its CIE luminance is 1, which puts its linear
 // sRGB at exactly (1, 1, 1): CIE illuminant E, the neutral white illuminant.
 //

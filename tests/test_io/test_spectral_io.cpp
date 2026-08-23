@@ -13,9 +13,11 @@
 #include "io/SpectralIO.hpp"
 #include "io/SpectralBasisLoader.hpp"
 #include "core/SpectralData.hpp"
+#include "core/Blackbody.hpp"
 #include <filesystem>
 #include <fstream>
 #include <cstdio>
+#include <cmath>
 
 using namespace quantiloom;
 
@@ -502,4 +504,148 @@ TEST_F(SpectralIOTest, ReconstructBasisCurveReportsWhatWentWrong) {
         SpectralIO::ReconstructBasisCurve(root / "nope.qlbin", json, names[0], "VIS")
             .has_value());
     EXPECT_FALSE(SpectralIO::ReconstructBasisCurve(basis, json, "", "VIS").has_value());
+}
+
+// ============================================================================
+// Emission spectra
+// ============================================================================
+// The point of these is not that a table loads. It is that the two properties
+// the emission path depends on hold: a built-in token always resolves to the
+// same lamp, and a lamp's spectrum stops where its measurement stops.
+
+TEST_F(SpectralIOTest, BuiltinEmissionTokensAllResolve) {
+    // Every token the listing advertises must load, or a UI populated from that
+    // listing offers the user a choice that fails.
+    for (const auto& info : SpectralIO::BuiltinEmissionSpectra()) {
+        const String token =
+            (info.token == "blackbody_<T>k") ? "blackbody_3000k" : info.token;
+        auto curve = SpectralIO::LoadEmissionSpectrum(token, {});
+        ASSERT_TRUE(curve.has_value()) << token << ": " << curve.error();
+        ASSERT_GE(curve.value().samples.size(), 2u) << token;
+        EXPECT_NEAR(curve.value().samples.front().first, info.lambdaMinNm, 1.0f) << token;
+        EXPECT_NEAR(curve.value().samples.back().first, info.lambdaMaxNm, 1.0f) << token;
+        for (const auto& [lambda, value] : curve.value().samples) {
+            EXPECT_GE(value, 0.0f) << token << " at " << lambda << " nm";
+        }
+    }
+}
+
+TEST_F(SpectralIOTest, EmissionTokensAreCaseInsensitiveAndAliased) {
+    auto lower = SpectralIO::LoadEmissionSpectrum("cie_f7", {});
+    auto upper = SpectralIO::LoadEmissionSpectrum("CIE_F7", {});
+    ASSERT_TRUE(lower.has_value());
+    ASSERT_TRUE(upper.has_value());
+    EXPECT_EQ(lower.value().samples, upper.value().samples);
+
+    // halogen is documented as an alias, so it must not drift from what it
+    // aliases -- a lamp that changes when you spell it differently is worse
+    // than no lamp at all.
+    auto halogen = SpectralIO::LoadEmissionSpectrum("halogen", {});
+    auto planck = SpectralIO::LoadEmissionSpectrum("blackbody_3000k", {});
+    ASSERT_TRUE(halogen.has_value());
+    ASSERT_TRUE(planck.has_value());
+    EXPECT_EQ(halogen.value().samples, planck.value().samples);
+}
+
+TEST_F(SpectralIOTest, FluorescentSpectraCarryTheMercuryLines) {
+    // The whole reason a fluorescent lamp cannot be an RGB triple. If these
+    // spikes are ever smoothed away by a resampling change, this fails.
+    // Mercury emits at 405, 436 and 546 nm; CIE tabulates on a 5 nm grid, so
+    // the lines land in the 405, 435 and 545 nm bins. Compared against the mean
+    // of the two adjacent bins, which is the phosphor continuum under them.
+    // Measured margins across these four lamps are 2.9-8.8x at 405, 3.3-4.2x at
+    // 435 and 1.9-2.0x at 545; 1.5x is below all of them and well above 1.
+    for (const char* lamp : {"cie_f1", "cie_f2", "cie_f7", "cie_f11"}) {
+        auto fl = SpectralIO::LoadEmissionSpectrum(lamp, {});
+        ASSERT_TRUE(fl.has_value()) << lamp;
+        const auto& c = fl.value();
+        for (const f32 line : {405.0f, 435.0f, 545.0f}) {
+            const f32 continuum = 0.5f * (c.Evaluate(line - 5.0f) + c.Evaluate(line + 5.0f));
+            EXPECT_GT(c.Evaluate(line), 1.5f * continuum)
+                << lamp << " has no mercury line at " << line << " nm";
+        }
+    }
+}
+
+TEST_F(SpectralIOTest, IlluminantAMatchesItsDefiningEquation) {
+    // CIE 015:2018 defines illuminant A by an equation, so this is the one
+    // built-in that can be checked against its own standard rather than against
+    // a copy of the table it came from.
+    auto a = SpectralIO::LoadEmissionSpectrum("illuminant_a", {});
+    ASSERT_TRUE(a.has_value());
+    EXPECT_NEAR(a.value().Evaluate(560.0f), 100.0f, 0.05f);  // normalisation point
+    for (const f32 lambda : {300.0f, 400.0f, 560.0f, 700.0f, 830.0f}) {
+        const f64 shape = std::pow(560.0 / lambda, 5.0);
+        const f64 expected = 100.0 * shape *
+            ((std::exp(1.435e7 / (2848.0 * 560.0)) - 1.0) /
+             (std::exp(1.435e7 / (2848.0 * lambda)) - 1.0));
+        EXPECT_NEAR(a.value().Evaluate(lambda), static_cast<f32>(expected),
+                    static_cast<f32>(expected) * 1e-4f) << lambda << " nm";
+    }
+}
+
+TEST_F(SpectralIOTest, BlackbodyEmissionIsAbsoluteAndPeaksWhereWienSaysItShould) {
+    // Absolute, unlike every other built-in: this one is Planck's law, not a
+    // relative distribution, so the magnitude is a claim about W/m2/sr/nm.
+    auto bb = SpectralIO::LoadEmissionSpectrum("blackbody_3000k", {});
+    ASSERT_TRUE(bb.has_value());
+    const auto& c = bb.value();
+
+    const f32 peakNm = 2.897771955e6f / 3000.0f;  // Wien, ~966 nm
+    EXPECT_GT(c.Evaluate(peakNm), c.Evaluate(peakNm * 0.5f));
+    EXPECT_GT(c.Evaluate(peakNm), c.Evaluate(peakNm * 2.0f));
+    EXPECT_NEAR(c.Evaluate(peakNm),
+                static_cast<f32>(blackbody::SpectralRadiancePerNm(peakNm, 3000.0)),
+                static_cast<f32>(blackbody::SpectralRadiancePerNm(peakNm, 3000.0)) * 1e-3f);
+
+    // A tungsten filament's peak is in the NIR band, which is the reason NIR
+    // reads a bound emission curve at all.
+    EXPECT_GT(peakNm, 930.0f);
+    EXPECT_LT(peakNm, 1200.0f);
+}
+
+TEST_F(SpectralIOTest, EmissionSpectraStopWhereTheirMeasurementStops) {
+    // Not a limitation to be worked around -- it is what the shader's
+    // zero-outside rule is defined against. A fluorescent table has nothing to
+    // say about SWIR, and the span is how the renderer knows that.
+    auto fl = SpectralIO::LoadEmissionSpectrum("cie_f7", {});
+    ASSERT_TRUE(fl.has_value());
+    EXPECT_LE(fl.value().samples.back().first, 780.0f);
+
+    auto d65 = SpectralIO::LoadEmissionSpectrum("d65", {});
+    ASSERT_TRUE(d65.has_value());
+    EXPECT_LE(d65.value().samples.back().first, 780.0f);
+
+    // The blackbody family is the deliberate exception: it is a formula, valid
+    // wherever it is evaluated, so it spans every band the renderer has.
+    auto bb = SpectralIO::LoadEmissionSpectrum("blackbody_2856k", {});
+    ASSERT_TRUE(bb.has_value());
+    EXPECT_LE(bb.value().samples.front().first, 400.0f);
+    EXPECT_GE(bb.value().samples.back().first, 12000.0f);
+}
+
+TEST_F(SpectralIOTest, UnknownEmissionTokenSaysWhatTheTokensAre) {
+    // A misspelt token would otherwise fail as "file not found", which sends
+    // the reader looking for a file they never meant to write.
+    auto bad = SpectralIO::LoadEmissionSpectrum("cie_f99", {});
+    ASSERT_FALSE(bad.has_value());
+    EXPECT_NE(bad.error().find("built-in"), String::npos) << bad.error();
+    EXPECT_NE(bad.error().find("blackbody_<T>k"), String::npos) << bad.error();
+
+    EXPECT_FALSE(SpectralIO::LoadEmissionSpectrum("blackbody_0k", {}).has_value());
+    EXPECT_FALSE(SpectralIO::LoadEmissionSpectrum("blackbody_abck", {}).has_value());
+}
+
+TEST_F(SpectralIOTest, EmissionSpectrumLoadsFromAFileWithAChosenColumn) {
+    // The path a user with a calibrated lamp measurement takes.
+    const auto path = tempDir / "lamp.csv";
+    std::ofstream(path) << "400 1.0 7.0\n500 2.0 8.0\n600 3.0 9.0\n";
+
+    auto second = SpectralIO::LoadEmissionSpectrum("lamp.csv", tempDir, 2);
+    ASSERT_TRUE(second.has_value()) << second.error();
+    EXPECT_FLOAT_EQ(second.value().Evaluate(500.0f), 2.0f);
+
+    auto third = SpectralIO::LoadEmissionSpectrum("lamp.csv", tempDir, 3);
+    ASSERT_TRUE(third.has_value()) << third.error();
+    EXPECT_FLOAT_EQ(third.value().Evaluate(500.0f), 8.0f);
 }
