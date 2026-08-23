@@ -72,6 +72,22 @@ f64 Mean(const std::vector<f64>& values) {
     return sum / static_cast<f64>(values.size());
 }
 
+/// A string safe to put between JSON quotes.
+///
+/// The only string this file emits is a file path, and on Windows a path is
+/// full of backslashes -- `H:\quantiloom` opens with an invalid JSON escape and
+/// makes the whole stats file unparseable, which is a poor way for a
+/// measurement to fail.
+std::string JsonEscaped(const std::string& text) {
+    std::string out;
+    out.reserve(text.size() + 8);
+    for (const char c : text) {
+        if (c == '\\' || c == '"') out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
+}
+
 f64 StdDev(const std::vector<f64>& values) {
     if (values.size() < 2) return 0.0;
     const f64 mean = Mean(values);
@@ -154,9 +170,77 @@ int main(int argc, char** argv) {
             return 1;
         }
         hdr = std::move(image.value());
+
+        // Pick the radiance channel BY NAME. ImageIO::ReadEXR fills its channel
+        // list by walking OpenEXR's ChannelList, which iterates alphabetically,
+        // so an RGBA file arrives ordered A, B, G, R -- index 0 is the ALPHA.
+        // Reading index 0 here gave a constant 1.0 for every scene: first as a
+        // signal four thousand times too small, so every cavity read as the same
+        // dark frame, and then, once the band scaling was added, as 4000
+        // W/sr/m^2, which saturates the well for every cavity alike. Both look
+        // like a sensor result and neither is.
+        //
+        // Every band this tool serves is monochrome, so the radiance channel is
+        // copied across three and the alpha is dropped.
+        usize source = 0;
+        for (usize c = 0; c < hdr.channelNames.size(); ++c) {
+            const std::string& name = hdr.channelNames[c];
+            if (name == "R" || name == "Y" || name == "V" || name == "Gray") {
+                source = c;
+                break;
+            }
+            if (name != "A" && name != "Alpha") source = c;
+        }
+        if (hdr.channels != 3 || source != 0) {
+            const std::string picked = source < hdr.channelNames.size()
+                                           ? hdr.channelNames[source] : "0";
+            Image mono(hdr.width, hdr.height, 3);
+            for (usize p = 0; p < static_cast<usize>(hdr.width) * hdr.height; ++p) {
+                const f32 value = hdr.data[p * hdr.channels + source];
+                mono.data[p * 3] = value;
+                mono.data[p * 3 + 1] = value;
+                mono.data[p * 3 + 2] = value;
+            }
+            mono.metadata = hdr.metadata;
+            QL_LOG_INFO("sensor_lab: {} input channels, taking '{}' (index {}) as "
+                        "the radiance", hdr.channels, picked, source);
+            hdr = std::move(mono);
+        }
     } else {
         hdr = Image(width, height, 3);
         std::fill(hdr.data.begin(), hdr.data.end(), static_cast<f32>(uniformRadiance));
+    }
+
+    // ------------------------------------------------------------------
+    // Into the units the sensor chain expects
+    // ------------------------------------------------------------------
+    // A fused IR render writes the band AVERAGE, in W/sr/m^2/nm, and the
+    // detector collects the band INTEGRAL. RenderJob multiplies by the band
+    // width on the way in and divides it back out on the way to the EXR;
+    // anything else driving GenericSensor has to do the same.
+    //
+    // Skipping it is not a small error. At 10 um the band is 4000 nm wide, so
+    // the photon signal arrives 4000x too small -- for a 300 K cavity that is
+    // about two thousand electrons against two hundred thousand from dark
+    // current, and every scene reads as the same dark frame. Measured that way,
+    // a 250 K and a 350 K cavity both returned 1357.2 DN.
+    const auto parsedMode = ParseSpectralMode(loaded.value().GetString("spectral.mode", "rgb"));
+    const SpectralMode mode = parsedMode.has_value() ? parsedMode.value() : SpectralMode::RGB;
+    f64 radianceScale = 1.0;
+    if (const auto band = GetFusedBandInfo(mode); band.has_value() && IsIRFusedMode(mode)) {
+        radianceScale = static_cast<f64>(band->WidthNm());
+        for (f32& value : hdr.data) {
+            value = static_cast<f32>(static_cast<f64>(value) * radianceScale);
+        }
+        QL_LOG_INFO("sensor_lab: band {:.0f}-{:.0f} nm, radiance scaled by {:.0f} nm "
+                    "to the band integral the detector sees",
+                    band->lambdaMinNm, band->lambdaMaxNm, radianceScale);
+    }
+
+    {
+        const auto [lo, hi] = std::minmax_element(hdr.data.begin(), hdr.data.end());
+        QL_LOG_INFO("sensor_lab: radiance into the chain {:.6e} .. {:.6e} W/sr/m^2",
+                    *lo, *hi);
     }
 
     QL_LOG_INFO("sensor_lab: {}x{} x{} channels, {} frames, seed {}, FPN {}, NUC {} @ {:.1f}%",
@@ -257,7 +341,9 @@ int main(int argc, char** argv) {
           << "  \"width\": " << hdr.width << ",\n"
           << "  \"height\": " << hdr.height << ",\n"
           << "  \"source\": \""
-          << (inputPath.empty() ? ("uniform:" + std::to_string(uniformRadiance)) : inputPath)
+          << JsonEscaped(inputPath.empty()
+                             ? ("uniform:" + std::to_string(uniformRadiance))
+                             : inputPath)
           << "\",\n"
           << "  \"noise_seed\": " << params.noiseSeed << ",\n"
           << "  \"enable_fpn\": " << (params.enableFPN ? "true" : "false") << ",\n"
