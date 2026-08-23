@@ -24,12 +24,21 @@
 # emissivity-versus-temperature confusion Section VI's apparent-temperature
 # inversion exists to keep legible.
 #
-# Geometry: scripts/utils/generate_desert_scene.py --divisions 101
-#           --sphere-radius 0.7 --sphere-height 0.7
-# The sphere rests on the ground here rather than floating clear of it as in
-# the dT/dv scene of Section VIII-C: nothing in this figure integrates a
-# pointwise column, so the open-sky condition that floating buys is not needed,
-# and a resting object is what a camouflage figure is about.
+# THE GEOMETRY IS THE OTHER HALF OF THE CONTROL, and it was arrived at by
+# failing first. The scene began as a brick-spectrum sphere resting on the
+# desert ground, and it refuted its own figure: the target came out with a
+# Michelson contrast of 0.117 in the visible against 0.060 in MWIR -- more
+# visible where it was supposed to hide. Nothing was wrong with the spectra. A
+# sphere's normals point somewhere other than the ground's, so shading separates
+# it from its background whatever it is made of, and the geometry was answering
+# a question the figure meant to ask of the material.
+#
+# The target is therefore a flat patch of the ground itself: same plane, same
+# normal, same irradiance, same view angle, lifted 10 mm only because co-planar
+# geometry z-fights and 10 mm casts a shadow well under one pixel. Any contrast
+# that survives that arrangement is spectral, which is the whole claim.
+#
+# Geometry: scripts/utils/generate_camouflage_scene.py
 # ============================================================================
 
 [renderer]
@@ -45,15 +54,18 @@ basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
 materials_json = "assets/spectral/quantiloom_materials_merged.json"
 
 [scene]
-gltf = "assets/models/desert_camouflage/desert_101.gltf"
+gltf = "assets/models/desert_camouflage/camouflage_flat.gltf"
 world_units_to_meters = 1.0
 default_temperature_k = 320.0
 
+# Oblique and from above, so the patch reads as a square of ground rather than
+# as a horizon line. The camera sits in the x = 0 plane, which makes the
+# patch's projection symmetric and its regions of interest easy to state.
 [camera]
-position = [6.0, 2.2, 6.0]
-look_at = [0.0, 0.7, 0.0]
+position = [0.0, 9.0, 16.0]
+look_at = [0.0, 0.0, 0.0]
 up = [0.0, 1.0, 0.0]
-fov_y = 30.0
+fov_y = 34.0
 
 [lighting]
 # The same mid-afternoon sun as the five-band strip, so the two figures in
@@ -93,7 +105,7 @@ spectral_material_type = "quantiloom_merged"
 spectral_material_ref = "Brown loamy fine sand (87P3468)"
 
 [[materials]]
-name = "ShadowSphere"
+name = "CamouflageTarget"
 ir_emissivity = 0.90
 ir_temperature_k = 320.0
 spectral_material_type = "quantiloom_merged"

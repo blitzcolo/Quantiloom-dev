@@ -16,8 +16,14 @@ Two things keep this from being a picture that merely looks convincing.
     come from a temperature difference. What is left is emissivity, which
     through Kirchhoff is one minus the reflectance the search selected on.
 
+  * The target is a flat patch of the ground rather than an object on it, so
+    it shares the ground's normal, irradiance and view angle exactly. The first
+    version used a sphere and refuted itself: shading separated the target in
+    the visible band more strongly than emissivity separated it in MWIR, and
+    the geometry was answering a question meant for the material.
+
 The contrast is then measured rather than asserted, from regions of interest
-placed by projecting the sphere analytically through the camera the config
+placed by projecting the patch analytically through the camera the config
 declares -- not by thresholding the image, which would use the separation being
 measured to decide where to measure it.
 
@@ -51,9 +57,10 @@ BANDS = [("VIS", "vis_fused", "VIS"),
 
 # Mirrors assets/configs/gallery/camouflage_desert.toml. Kept here so the ROI
 # geometry is derived from the same numbers the renderer was given.
-CAMERA = dict(position=(6.0, 2.2, 6.0), look_at=(0.0, 0.7, 0.0), up=(0.0, 1.0, 0.0),
-              fov_y_deg=30.0, resolution=(1024, 768))
-SPHERE = dict(centre=(0.0, 0.7, 0.0), radius=0.7)
+CAMERA = dict(position=(0.0, 9.0, 16.0), look_at=(0.0, 0.0, 0.0), up=(0.0, 1.0, 0.0),
+              fov_y_deg=34.0, resolution=(1024, 768))
+# The target is a square of the ground itself, from generate_camouflage_scene.py.
+PATCH = dict(half=4.0, y=0.01)
 
 
 def read_exr(path):
@@ -74,14 +81,12 @@ def luminance(image):
     return image[..., 0] if image.ndim == 3 else image
 
 
-def project_sphere():
-    """Where the sphere lands in pixels, from the camera the config declares.
+def project(points):
+    """World points to pixels, through the camera the config declares.
 
     A right-handed look-at basis and a pinhole with a vertical field of view,
-    which is what the renderer builds. The projected outline of a sphere is an
-    ellipse in general; at this distance and this field of view the eccentricity
-    is under a per cent, so a circle of the sphere's angular radius is used and
-    the regions are placed with margin rather than to the pixel.
+    which is what the renderer builds. A planar quad projects to a quad, so
+    unlike a sphere's silhouette this is exact rather than approximated.
     """
     position = np.array(CAMERA["position"], dtype=np.float64)
     forward = np.array(CAMERA["look_at"], dtype=np.float64) - position
@@ -90,37 +95,44 @@ def project_sphere():
     right /= np.linalg.norm(right)
     up = np.cross(right, forward)
 
-    offset = np.array(SPHERE["centre"], dtype=np.float64) - position
-    depth = float(np.dot(offset, forward))
-    distance = float(np.linalg.norm(offset))
-
     width, height = CAMERA["resolution"]
-    half = np.tan(np.radians(CAMERA["fov_y_deg"]) / 2.0)
-    # Pixels per unit of tangent, vertically; the horizontal axis shares it.
-    scale = (height / 2.0) / half
+    scale = (height / 2.0) / np.tan(np.radians(CAMERA["fov_y_deg"]) / 2.0)
 
-    x = width / 2.0 + float(np.dot(offset, right)) / depth * scale
-    y = height / 2.0 - float(np.dot(offset, up)) / depth * scale
-    radius_px = np.tan(np.arcsin(SPHERE["radius"] / distance)) * scale
-    return x, y, radius_px
+    out = []
+    for point in points:
+        offset = np.asarray(point, dtype=np.float64) - position
+        depth = float(np.dot(offset, forward))
+        out.append((width / 2.0 + float(np.dot(offset, right)) / depth * scale,
+                    height / 2.0 - float(np.dot(offset, up)) / depth * scale))
+    return np.array(out)
+
+
+def patch_corners(scale):
+    """The target square, grown about its centre by `scale`, in world space."""
+    h, y = PATCH["half"] * scale, PATCH["y"]
+    return [(-h, y, -h), (h, y, -h), (h, y, h), (-h, y, h)]
 
 
 def regions(shape):
-    """A disc on the target and an arc of ground beyond it.
+    """The inside of the target patch, and a ring of ground around it.
 
-    The background arc is taken from the upper half only. The sphere rests on
-    the ground and its own shadow falls image-downward from its base, so a full
-    annulus would average the shadow into the background and inflate every
-    band's contrast at once.
+    Both are the *same* square grown by different factors and projected through
+    the same camera, so both sit on one plane at one orientation and neither
+    region contains an edge. The inner inset keeps the patch's own boundary --
+    where a pixel straddles two materials -- out of the target mean.
     """
+    from matplotlib.path import Path
     height, width = shape[:2]
-    cx, cy, r = project_sphere()
     ys, xs = np.mgrid[0:height, 0:width]
-    distance = np.hypot(xs - cx, ys - cy)
+    points = np.column_stack((xs.ravel(), ys.ravel()))
 
-    target = distance < 0.62 * r                       # well inside the limb
-    background = (distance > 1.9 * r) & (distance < 3.4 * r) & (ys < cy - 0.2 * r)
-    return target, background, (cx, cy, r)
+    def mask(scale):
+        polygon = Path(project(patch_corners(scale)))
+        return polygon.contains_points(points).reshape(height, width)
+
+    target = mask(0.80)
+    background = mask(2.2) & ~mask(1.25)
+    return target, background, project(patch_corners(1.0))
 
 
 def michelson(a, b):
@@ -192,9 +204,9 @@ def figure(out):
     if not panels:
         raise SystemExit(f"no renders under {WORK}; run with --render")
 
-    target, background, (cx, cy, r) = regions(panels[0][1].shape)
-    print(f"  target disc {target.sum():,} px, background arc {background.sum():,} px "
-          f"(sphere at {cx:.0f}, {cy:.0f}, r = {r:.0f} px)")
+    target, background, corners = regions(panels[0][1].shape)
+    print(f"  target {target.sum():,} px, background {background.sum():,} px; "
+          f"patch corners " + ", ".join(f"({x:.0f},{y:.0f})" for x, y in corners))
 
     record = {}
     figure_, axes = plt.subplots(1, len(panels), figsize=(2.0 * len(panels), 2.35))
@@ -226,12 +238,14 @@ def figure(out):
     plt.close(figure_)
 
     (WORK / "contrast.json").write_text(json.dumps(
-        {"config": str(CONFIG), "camera": CAMERA, "sphere": SPHERE,
+        {"config": str(CONFIG), "camera": CAMERA, "patch": PATCH,
          "regions": {"target_px": int(target.sum()),
                      "background_px": int(background.sum()),
-                     "sphere_centre_px": [cx, cy], "sphere_radius_px": r,
-                     "note": "background arc is upper-half only, to keep the "
-                             "sphere's own shadow out of it"},
+                     "patch_corners_px": corners.tolist(),
+                     "note": "target is the patch inset to 80 % of its width; "
+                             "background is the same square grown to 220 % with "
+                             "the inner 125 % removed, so neither region "
+                             "contains the material boundary"},
          "bands": record}, indent=2), encoding="utf-8")
 
     print()

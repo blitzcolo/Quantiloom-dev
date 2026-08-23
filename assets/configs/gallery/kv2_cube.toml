@@ -14,9 +14,9 @@
 # demonstrating that a cube writer runs and showing that the cube carries the
 # scene's spectroscopy.
 #
-# 400-2500 nm at 20 nm is 106 bands, which is the reflective range those curves
-# actually cover -- past 2500 nm the scene is emission-dominated and a
-# reflectance comparison stops being the right check. Resolution and sample
+# 1100-2500 nm at 20 nm is 71 bands, the window `spectral.band = "SWIR"`
+# reconstructs the measured curves over. Past 2500 nm the scene turns
+# emission-dominated and a reflectance comparison stops being the right check. Resolution and sample
 # count are well below the strip's: a cube is 106 renders, and the subject here
 # is the spectral axis rather than the image.
 # ============================================================================
@@ -29,12 +29,23 @@ output = "renders/gallery/kv2_cube.exr"
 
 [spectral]
 mode = "multispectral"
-band = "VIS"
+band = "SWIR"
 basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
 materials_json = "assets/spectral/quantiloom_materials_merged.json"
 
+# THE RANGE IS THE BOUND BAND'S RANGE, and it has to be. `spectral.band`
+# selects the window the measured curves are reconstructed over -- the load log
+# reports "λ=[1100.0, 2500.0] nm, coverage=1.00" for every material here -- and
+# outside that window the reflectance is whatever the fit degrades to rather
+# than what the library says. A cube first written across 400-2500 nm with the
+# visible curves bound recovered the sand's reflectance correctly below 780 nm
+# and then ran flat at 0.20 through NIR and SWIR against a library curve rising
+# to 0.45, which is the out-of-band failure of Section IV seen from the other
+# side. The cube path and the band-aware convention are in tension: a cube is a
+# continuous wavelength axis and the convention binds reflectance per band, so
+# one cube covers one band's window. Section VIII-F states this.
 [hyperspectral]
-wavelength_min_nm = 400.0
+wavelength_min_nm = 1100.0
 wavelength_max_nm = 2500.0
 wavelength_step_nm = 20.0
 output_format = "envi_bsq"        # the interleave downstream tools open first

@@ -1,0 +1,12 @@
+{
+  "name": "camouflage_flat",
+  "extent_m": 60.0,
+  "patch_m": 8.0,
+  "patch_lift_m": 0.01,
+  "materials": [
+    "DesertGround",
+    "CamouflageTarget"
+  ],
+  "triangles": 4,
+  "note": "target and ground are co-planar and co-normal, so any contrast between them is spectral"
+}
