@@ -259,6 +259,32 @@ uint NextSeed(uint s) {
 // so that a caller scaling it by a count cannot index one past the end.
 // ============================================================================
 
+#ifdef QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE
+
+// The control arm of the Section VIII-B measurement, enabled by the CMake
+// option of the same name. Every slot draws from PCG -- the same white-noise
+// stream the deeper bounces use -- so the two builds differ in the sampler and
+// in nothing else: same seed, same slot decomposition, same sample index.
+// Never enabled in a build anyone renders with.
+//
+// Declared ahead of its definition below, which is where the PCG stream lives
+// for the deeper bounces; moving that block up would be a larger diff than the
+// experiment is worth.
+float pcg_float(inout uint s);
+
+float StratifiedSample1D(uint index, uint2 pixel, uint slot, uint sequenceSeed) {
+    uint s = SampleSlotSeed(pixel, slot, sequenceSeed) + index * 0x9E3779B9u;
+    return pcg_float(s);
+}
+
+float2 StratifiedSample2D(uint index, uint2 pixel, uint slot, uint sequenceSeed) {
+    uint s = SampleSlotSeed(pixel, slot, sequenceSeed) + index * 0x9E3779B9u;
+    const float x = pcg_float(s);
+    return float2(x, pcg_float(s));
+}
+
+#else
+
 float StratifiedSample1D(uint index, uint2 pixel, uint slot, uint sequenceSeed) {
     const uint seed = SampleSlotSeed(pixel, slot, sequenceSeed);
     const uint idx  = ShuffleSampleIndex(index, NextSeed(seed));
@@ -276,6 +302,8 @@ float2 StratifiedSample2D(uint index, uint2 pixel, uint slot, uint sequenceSeed)
     return float2(OwenScramble(reversebits(idx), seed),
                   OwenScramble(SobolDim1(idx), seedY)) * (1.0 / 4294967296.0);
 }
+
+#endif  // QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE
 
 // ============================================================================
 // PCG32 -- the unstratified stream

@@ -67,6 +67,21 @@ file(GLOB SHADER_HEADERS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/*.hlsli"
 # these files.
 set(DXC_RT_FLAGS   -spirv -T lib_6_3 -fspv-target-env=vulkan1.2)
 set(DXC_COMP_FLAGS -spirv -T cs_6_0  -fspv-target-env=vulkan1.2 -E main)
+
+# The A/B behind the first-bounce stratification measurement of the paper's
+# Section VIII-B. ON replaces the six padded Owen-scrambled Sobol' slots with
+# the same PCG stream the deeper bounces already use, changing nothing else, so
+# the two convergence curves differ only in the sampler. It is not a supported
+# rendering mode -- it exists so the reported speed-up can be reproduced rather
+# than taken on trust, and it must be OFF for anything that ships.
+option(QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE
+       "Draw first-bounce samples from PCG instead of Sobol' (measurement only)" OFF)
+if(QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE)
+    message(WARNING "First-bounce stratification is DISABLED. This build is for "
+                    "sampling measurements only.")
+    list(APPEND DXC_RT_FLAGS -D QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE=1)
+    list(APPEND DXC_COMP_FLAGS -D QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE=1)
+endif()
 # Inline ray query needs SM 6.5; everything else stays on the byte-stable 6.0
 set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 
