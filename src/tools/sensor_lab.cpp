@@ -145,10 +145,17 @@ int main(int argc, char** argv) {
         std::cerr << "one of --input or --uniform is required\n";
         return 1;
     }
-    if (frames < 2) {
-        std::cerr << "--frames must be at least 2; one frame has no temporal spread\n";
+    if (frames < 1) {
+        std::cerr << "--frames must be at least 1\n";
         return 1;
     }
+    // One frame is a legitimate request -- it is what a figure showing the
+    // chain's effect on an image wants -- but it separates nothing: the
+    // per-pixel spread over a single sample is zero by construction, so the
+    // temporal and residual-FPN columns below are meaningless rather than
+    // small, and saying so is cheaper than a reader deducing it from a row of
+    // zeros.
+    const bool temporalDefined = frames >= 2;
 
     Log::Init();
 
@@ -303,9 +310,15 @@ int main(int argc, char** argv) {
     // has driven the temporal part down by sqrt(N) and left the pattern. This
     // is the number that should track (1 - NUC efficiency) x injected FPN.
     QL_LOG_INFO("  mean DN                       {:.4f}", meanDN);
-    QL_LOG_INFO("  temporal sigma (median px)    {:.4f} DN", temporalMedian);
-    QL_LOG_INFO("  temporal sigma (mean px)      {:.4f} DN", temporalMean);
-    QL_LOG_INFO("  residual FPN (spatial sigma)  {:.4f} DN", residualFpn);
+    if (temporalDefined) {
+        QL_LOG_INFO("  temporal sigma (median px)    {:.4f} DN", temporalMedian);
+        QL_LOG_INFO("  temporal sigma (mean px)      {:.4f} DN", temporalMean);
+        QL_LOG_INFO("  residual FPN (spatial sigma)  {:.4f} DN", residualFpn);
+    } else {
+        QL_LOG_INFO("  temporal sigma                undefined at one frame");
+        QL_LOG_INFO("  residual FPN                  undefined at one frame "
+                    "(nothing has averaged out)");
+    }
     QL_LOG_INFO("  single-frame spatial sigma    {:.4f} DN", singleFrameSpatial);
 
     if (outPrefix.empty()) {
@@ -357,6 +370,8 @@ int main(int argc, char** argv) {
           << "  \"quantum_efficiency\": " << params.quantumEfficiency << ",\n"
           << "  \"well_capacity_e\": " << params.wellCapacity_e << ",\n"
           << "  \"wavelength_nm\": " << params.wavelength_nm << ",\n"
+          << "  \"temporal_statistics_defined\": "
+          << (temporalDefined ? "true" : "false") << ",\n"
           << "  \"mean_dn\": " << meanDN << ",\n"
           << "  \"temporal_sigma_dn_median\": " << temporalMedian << ",\n"
           << "  \"temporal_sigma_dn_mean\": " << temporalMean << ",\n"

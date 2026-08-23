@@ -10,12 +10,20 @@ than by four renders: fixed-pattern noise is a property of the detector, and
 re-rendering per panel would give each panel a different detector and turn a
 cumulative figure into four unrelated ones.
 
-The bottom row is the tone operators on that final image, with the statistic
-that decides which is the default. Linear AGC is a window and a straight line;
-Equalize shares one CDF across all tiles; CLAHE gives each tile its own. The
-number under each panel is the fraction of brightness-ordered pixel pairs the
-operator inverts — sampled, since 3.16 megapixels is 5 x 10^12 pairs — and it
-is what a temperature being readable off an image actually requires.
+The bottom row is the tone operators, with the statistic that decides which is
+the default. Linear AGC is a window and a straight line; Equalize shares one CDF
+across all tiles; CLAHE gives each tile its own. The number under each panel is
+the fraction of brightness-ordered pixel pairs the operator inverts — sampled,
+since 3.16 megapixels is 5 x 10^12 pairs — and it is what a temperature being
+readable off an image actually requires.
+
+That row runs on the *radiance field*, not on the chain's output, and the
+difference matters. The claim under test is that two pixels at one temperature
+must display alike; once temporal noise and a 16-bit quantisation are in the
+image they no longer arrive alike, and the measurement would be reporting the
+detector rather than the operator. Measured through the full chain the same
+statistic reads 0.285 % instead of 1.902 % — quantisation ties are excluded
+from an ordered comparison, so the noisier input flatters CLAHE.
 
 The AGC arithmetic is `clahe.comp.hlsl`'s three passes reimplemented in numpy so
 that the number can be checked line by line against the shader, and is imported
@@ -56,7 +64,14 @@ RESOLUTION = (2048, 1544)
 SEED_PATH = 0x547C
 SEED_SENSOR = 0x548C
 
-# The LWIR sensor of Fig. 11, so the two figures describe one instrument.
+# The LWIR sensor of Fig. 11 with one deliberate change: 2 ms of integration
+# rather than 200 us. At 200 us this scene is photon-starved -- about 280
+# electrons per pixel, so Poisson noise alone is 87 % of the scene's own spatial
+# modulation and panel three is noise with a picture somewhere inside it. Fig. 11
+# measures NETD on a uniform field where that does not matter; a figure whose
+# subject is what the chain does to an *image* needs the image to survive it. At
+# 2 ms the modulation-to-temporal-noise ratio is 3.4, which is a degraded image
+# rather than an absent one, and the caption states the integration time.
 SENSOR_BASE = """
 [sensor]
 enabled = true
@@ -64,13 +79,13 @@ focal_length_mm = 50.0
 f_number = 2.0
 pixel_pitch_um = 12.0
 quantum_efficiency = 0.8
-integration_time_s = 0.0002
+integration_time_s = 0.002
 well_capacity_e = 20000000.0
-read_noise_e_rms = 300.0
+read_noise_e_rms = 20.0
 bit_depth = 16
 gain = 1.0
 detector_temperature_k = 300.0
-dark_current_e_s = 100000.0
+dark_current_e_s = 20000.0
 noise_seed = {seed}
 psf_sigma_px = {psf}
 enable_poisson_noise = {poisson}
@@ -80,7 +95,7 @@ enable_fpn = {fpn}
 
 [sensor.fpn]
 prnu_sigma = 0.01
-dsnu_sigma_e = 5000.0
+dsnu_sigma_e = 2000.0
 enable_nuc = true
 nuc_efficiency = 0.97
 """
@@ -178,9 +193,16 @@ def main():
                         default=FIGURES / "fig5_sensor_chain.png")
     args = parser.parse_args()
 
+    # The render and the chain are cached separately: the render is minutes and
+    # the four sensor passes are seconds, so a change to the chain must not
+    # require the radiance field again, and a stale chain must not survive
+    # because the radiance beside it happens to exist.
     radiance = WORK / "radiance.exr"
     if args.render or not radiance.is_file():
         radiance = render_radiance()
+    outputs = [pathlib.Path(f"{WORK / f'stage{i}'}_mean.exr") for i in range(len(STAGES))]
+    if args.render or not all(path.is_file() for path in outputs):
+        print("applying the sensor chain ...", flush=True)
         for index, (label, switches) in enumerate(STAGES):
             apply_stage(radiance, label, switches, index)
 
@@ -192,8 +214,14 @@ def main():
     if not panels:
         raise SystemExit(f"no stage outputs under {WORK}; run with --render")
 
-    final = panels[-1][1]
-    finite = np.where(np.isfinite(final), final, 0.0)
+    # Deliberately the radiance field rather than the chain's output. The claim
+    # under test is that two pixels at one temperature must display alike, and
+    # with temporal noise and a 16-bit quantisation in the image they no longer
+    # arrive alike -- the measurement would then be reporting the detector, not
+    # the operator. The panels below are the operators applied to that same
+    # noiseless field, so the statistic and the picture agree.
+    tone_input = read_first(radiance)
+    finite = np.where(np.isfinite(tone_input), tone_input, 0.0)
     megapixels = finite.size / 1e6
     lo, hi = float(finite.min()), float(finite.max())
     print(f"\nfinal image {finite.shape[1]} x {finite.shape[0]} = {megapixels:.3f} Mpx, "
@@ -214,11 +242,29 @@ def main():
         print(f"  {name:9s} inverted {100 * fraction:7.3f} %   "
               f"worst drop {drop * 255:.0f} of 255 display levels")
 
-    figure, axes = plt.subplots(2, 4, figsize=(7.16, 4.35))
-    for axis, (label, image) in zip(axes[0], panels):
+    figure, axes = plt.subplots(2, 4, figsize=(7.16, 4.5))
+    # Each stage reports how much it moved the image, relative to the image's own
+    # spatial spread. On a smooth plate a 1.6 px blur is nearly invisible by eye,
+    # and a panel a reader cannot distinguish from its neighbour has to say what
+    # it did or it is decoration.
+    changes = []
+    previous = None
+    for label, image in panels:
+        finite_panel = np.where(np.isfinite(image), image, 0.0)
+        if previous is None:
+            changes.append(None)
+        else:
+            spread = float(previous.std()) or 1.0
+            changes.append(float(np.sqrt(((finite_panel - previous) ** 2).mean())) / spread)
+        previous = finite_panel
+
+    for axis, (label, image), change in zip(axes[0], panels, changes):
         axis.imshow(linear_window(np.where(np.isfinite(image), image, 0.0)),
                     cmap="gray", vmin=0.0, vmax=1.0)
         axis.set_title(label, fontsize=7.6)
+        axis.set_xlabel("radiance field" if change is None
+                        else f"RMS change {100 * change:.1f} %\nof the previous panel's spread",
+                        fontsize=6.4)
         axis.set_xticks([]); axis.set_yticks([])
     axes[0][0].set_ylabel("cumulative chain\n(linear AGC throughout)", fontsize=7.0)
 
@@ -230,7 +276,7 @@ def main():
                         f"worst drop {values['worst_drop_levels_of_255']:.0f}/255",
                         fontsize=6.4)
         axis.set_xticks([]); axis.set_yticks([])
-    axes[1][0].set_ylabel("tone operators\non the final image", fontsize=7.0)
+    axes[1][0].set_ylabel("tone operators on the\nradiance field (no sensor)", fontsize=7.0)
     axes[1][3].axis("off")
     axes[1][3].text(0.0, 0.5,
                     "Linear AGC is the default\nbecause it is the only\nglobally monotonic "
@@ -252,6 +298,8 @@ def main():
          "megapixels": megapixels, "spp": 64,
          "seed_path": hex(SEED_PATH), "seed_sensor": hex(SEED_SENSOR),
          "pairs_sampled": args.pairs,
+         "tone_operator_input": "radiance field, before the sensor chain",
+         "stage_rms_change_fraction": changes,
          "stages": [{"label": label, **switches} for label, switches in STAGES],
          "tone_operators": tone}, indent=2), encoding="utf-8")
     print(f"\nwrote {args.out}")
