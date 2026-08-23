@@ -76,13 +76,63 @@ def srgb(image):
     return display, out_of_gamut
 
 
+def diurnal(out):
+    """The thermal shadow moving through the day.
+
+    One shared display window across all frames, unlike the five-band strip:
+    here the whole point is that the scene changes between panels, so mapping
+    each one to its own range would erase the very thing being shown.
+    """
+    manifest_path = EVIDENCE / "diurnal.json"
+    if not manifest_path.is_file():
+        raise SystemExit(f"{manifest_path} missing; run e7_gallery.py --diurnal")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+    frames = []
+    for frame in manifest["frames"]:
+        path = pathlib.Path(frame["output"])
+        if path.is_file():
+            image = read_exr(path)
+            frames.append((frame["time_h"], image[..., 0] if image.ndim == 3 else image))
+    if not frames:
+        raise SystemExit("no diurnal frames rendered")
+
+    stacked = np.concatenate([f[1].ravel() for f in frames])
+    lo, hi = np.percentile(stacked, [0.5, 99.5])
+
+    figure, axes = plt.subplots(1, len(frames), figsize=(3.0 * len(frames), 2.3))
+    if len(frames) == 1:
+        axes = [axes]
+    for axis, (hour, image) in zip(axes, frames):
+        axis.imshow(np.clip((image - lo) / (hi - lo), 0, 1), cmap="gray",
+                    vmin=0.0, vmax=1.0)
+        # Hours into the forcing file, which starts at midnight of day one.
+        axis.set_title(f"t = {hour:g} h  ({hour % 24:g}:00, day {int(hour // 24) + 1})",
+                       fontsize=8.5)
+        axis.set_xticks([])
+        axis.set_yticks([])
+    figure.suptitle(f"LWIR, one shared linear AGC window "
+                    f"({lo:.4g}–{hi:.4g} W/sr/m$^2$)", fontsize=8, y=0.04)
+    figure.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(out, dpi=300, bbox_inches="tight")
+    figure.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
+    plt.close(figure)
+    print(f"wrote {out}  ({len(frames)} frames)")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--diurnal", action="store_true")
     parser.add_argument("--strip", action="store_true", default=True)
     parser.add_argument("--out", type=pathlib.Path,
                         default=FIGURES / "fig8_five_band_strip.png")
     args = parser.parse_args()
+
+    if args.diurnal:
+        diurnal(FIGURES / "fig8b_diurnal_shadow.png")
+        return
 
     manifest_path = EVIDENCE / "strip.json"
     if not manifest_path.is_file():
