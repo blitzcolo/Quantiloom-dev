@@ -420,11 +420,39 @@ TEST_F(InteractiveBench, DISABLED_ThermalTimelineBackwardSeek) {
             }
         }
 
+        // The decisive control: seek to where we already are. StateAt returns
+        // the checkpoint whose index equals the target without stepping at all,
+        // so whatever this costs is the fixed cost of a seek -- everything that
+        // is not the re-solve. If it is the whole 500 ms, the stride cannot
+        // matter no matter how few steps it saves.
+        // If the ray-traced exchange or the sun columns are being rebuilt per
+        // seek, this counter climbs with the loop. That would explain a cost
+        // that ignores how far the timeline actually replayed.
+        const u32 exchangeRunsBefore = context->GetThermalSolveStatus().exchangeRunCount;
+
+        std::vector<f64> zeroStep;
+        for (int run = 0; run < kWarmup + 10; ++run) {
+            const auto start = std::chrono::steady_clock::now();
+            const auto sought = context->SetThermalTime(cursor);
+            const auto elapsed = std::chrono::duration<f64, std::milli>(
+                std::chrono::steady_clock::now() - start).count();
+            ASSERT_TRUE(sought.has_value()) << sought.error();
+            if (run >= kWarmup) zeroStep.push_back(elapsed);
+        }
+
         const auto after = context->GetThermalSolveStatus();
         char label[64];
         std::snprintf(label, sizeof(label), "T2 backward seek, stride %.2f h", stride);
         std::printf("  [BENCH] %-34s replayed %.1f steps per seek on average\n",
                     label, stepSum / static_cast<f64>(samples.size()));
+        char zeroLabel[72];
+        std::snprintf(zeroLabel, sizeof(zeroLabel),
+                      "T2 re-seek to the same time, %.2f h", stride);
+        char zeroNote[96];
+        std::snprintf(zeroNote, sizeof(zeroNote),
+                      "zero solver steps, %u exchange runs over 13 seeks",
+                      after.exchangeRunCount - exchangeRunsBefore);
+        Report(zeroLabel, Summarise(zeroStep), zeroNote);
         // Which stepper actually ran belongs in the record: the GPU path is
         // declined for a layer count above its thread-local Thomas solve, and a
         // latency measured on the CPU fallback is a different claim.
