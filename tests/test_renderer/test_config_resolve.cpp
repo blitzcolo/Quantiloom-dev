@@ -1394,3 +1394,72 @@ diffuse_transmission_spectral_material_ref = "Leaf cuticle"
         << "a bound coat reference is a coat even with a zero factor";
     EXPECT_TRUE(scene.materials[0].HasDiffuseTransmission());
 }
+
+// ---------------------------------------------------------------------------
+// The two [thermal] keys that exist to be measured with
+// ---------------------------------------------------------------------------
+
+TEST_F(ConfigResolveTest, SunCorrectionIsOnUnlessTheConfigTurnsItOff) {
+    // The default has to stay true: every render wants the correction, and a
+    // scene that does not name the key is every scene in the repository. What
+    // the key buys is the other render -- the uncorrected field the corrected
+    // one is compared against.
+    auto on = ResolveStrict(Parse({.trailing = "[thermal]\nenabled = true\n"}));
+    ASSERT_TRUE(on.has_value()) << on.error();
+    EXPECT_TRUE(on.value().thermal.sunCorrection);
+
+    auto off = ResolveStrict(
+        Parse({.trailing = "[thermal]\nenabled = true\nsun_correction = false\n"}));
+    ASSERT_TRUE(off.has_value()) << off.error();
+    EXPECT_FALSE(off.value().thermal.sunCorrection);
+}
+
+TEST_F(ConfigResolveTest, DumpElementsIsAnOutputPathAndIsTakenAsWritten) {
+    // The two file-valued keys in [thermal] resolve by opposite rules, and the
+    // reason is which direction the file goes. forcing_file is an input, so it
+    // takes ResolveConfigPath's "prefer the copy beside the config" rule --
+    // which can only fire for a file that already exists. dump_elements is an
+    // output, so it is taken verbatim, exactly as renderer.output is; putting
+    // it through the input helper would leave it relative to the caller's
+    // directory in every case that matters, while looking resolved.
+    auto none = ResolveStrict(Parse({.trailing = "[thermal]\nenabled = true\n"}));
+    ASSERT_TRUE(none.has_value()) << none.error();
+    EXPECT_TRUE(none.value().thermal.dumpElementsFile.empty())
+        << "no key must mean no file, not a file named nothing";
+
+    // Exists beside the config, so the input rule would visibly rewrite it.
+    { std::ofstream(testDir / "beside.csv") << "placeholder\n"; }
+
+    auto config = Parse({.trailing = R"([thermal]
+enabled = true
+dump_elements = "beside.csv"
+forcing_file = "beside.csv"
+)"});
+    ConfigApplyOptions options;
+    options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
+    options.baseDir = testDir.string();
+    auto resolved = ResolveRenderConfig(config, options, report);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    EXPECT_EQ(resolved.value().thermal.dumpElementsFile, "beside.csv")
+        << "an output path is where the run was told to write, not where an "
+           "identically named input happens to sit";
+    EXPECT_EQ(std::filesystem::path(resolved.value().thermal.forcingFile).parent_path(),
+              testDir)
+        << "the input beside it still resolves against the config";
+}
+
+TEST_F(ConfigResolveTest, ThermalKeysAreIgnoredWhileThermalIsOff) {
+    // The whole section is read only when enabled, which is what lets a scene
+    // keep a thermal block it is not currently using.
+    auto resolved = ResolveStrict(Parse({.trailing = R"([thermal]
+enabled = false
+sun_correction = false
+dump_elements = "elements.csv"
+)"}));
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FALSE(resolved.value().thermal.enabled);
+    EXPECT_TRUE(resolved.value().thermal.sunCorrection)
+        << "an unread section must not half-apply";
+    EXPECT_TRUE(resolved.value().thermal.dumpElementsFile.empty());
+}

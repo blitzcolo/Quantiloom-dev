@@ -49,6 +49,7 @@
       "doubleSided": true,
       "extensions": {
         "QUANTILOOM_material_ir": {
+          "emissivityCurve": "furnace_rho1_emissivity.csv",
           "temperature_K": 300.0
         }
       }

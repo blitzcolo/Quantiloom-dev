@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iomanip>
 #include <limits>
 #include <numbers>
 #include <sstream>
@@ -33,6 +34,81 @@ f32 EmissivityOf(const Material& material) {
         return material.irEmissivityCurve.front().second;
     }
     return 0.95f - 0.90f * material.metallicFactor;
+}
+
+/// Write the solve out one row per element, for the studies that have to
+/// measure the temperature field rather than look at it. Deliberately the
+/// solver's own numbers: the renderer's images carry the per-pixel sun
+/// correction and a radiance inversion on top, and a mesh-resolution study
+/// needs the field underneath both.
+///
+/// sky_fraction rides along because it is what makes the per-element column
+/// model defensible -- an element whose hemisphere is mostly sky is one whose
+/// neighbours barely reach it, which is the assumption a pointwise reference
+/// integration makes. A file where it is far from one says the reference does
+/// not apply, and that is worth seeing without a second run.
+void DumpElements(const String& path, const Vector<ThermalElement>& elements,
+                  const Vector<ThermalMaterial>& materials,
+                  const ExchangeGeometry& geometry, const ThermalResult& result,
+                  const Vector<f32>& visibility) {
+    std::ofstream out(path);
+    if (!out) {
+        QL_LOG_WARN("  Thermal: cannot write thermal.dump_elements to '{}'", path);
+        return;
+    }
+
+    out << std::setprecision(9);
+
+    // The material properties AS THE SOLVE SAW THEM, not as the config wrote
+    // them. The two differ routinely and silently: a material bound to a
+    // measured spectrum has its long-wave emissivity replaced by the
+    // Planck-weighted band average of that spectrum, so a scene whose config
+    // says 0.90 can be solved at 0.9329. Anything reproducing an element's
+    // trajectory outside the renderer -- which is how a mesh-resolution study
+    // gets a reference -- has to start from these numbers, and reading them off
+    // the config instead is a 0.4 K error that looks exactly like a result.
+    for (usize m = 0; m < materials.size(); ++m) {
+        const ThermalMaterial& mat = materials[m];
+        out << "# material " << m << ": k=" << mat.conductivity_W_mK
+            << " rho=" << mat.density_kg_m3 << " c=" << mat.specificHeat_J_kgK
+            << " d=" << mat.thickness_m << " h=" << mat.convection_W_m2K
+            << " alpha_sw=" << mat.shortwaveAbsorptivity
+            << " eps_lw=" << mat.longwaveEmissivity
+            << " wetness=" << mat.wetnessFactor
+            << " interior_bc="
+            << (mat.interiorBoundary == InteriorBoundary::FixedTemperature ? "fixed"
+                                                                          : "adiabatic")
+            << " interior_K=" << mat.interiorTemperature_K
+            << " solves=" << (mat.ParticipatesInSolve() ? 1 : 0) << '\n';
+    }
+
+    // dTdv_K is empty rather than zero when the tangent was not carried:
+    // zero is a temperature that does not move, which is a different claim
+    // from not having asked.
+    out << "element,centroid_x,centroid_y,centroid_z,normal_x,normal_y,normal_z,"
+           "area_m2,material_id,solved,T_K,dTdv_K,v_element,sky_fraction\n";
+
+    const bool haveTangent = result.sunSensitivity_K.size() == elements.size();
+    for (usize e = 0; e < elements.size(); ++e) {
+        const ThermalElement& element = elements[e];
+        out << e << ',' << element.centroid.x << ',' << element.centroid.y << ','
+            << element.centroid.z << ',' << element.normal.x << ',' << element.normal.y
+            << ',' << element.normal.z << ',' << element.area_m2 << ','
+            << element.materialId << ','
+            << (e < result.surfaceTemperature_K.size() && result.surfaceTemperature_K[e] > 0.0f
+                    ? 1
+                    : 0)
+            << ',';
+        if (e < result.surfaceTemperature_K.size()) out << result.surfaceTemperature_K[e];
+        out << ',';
+        if (haveTangent) out << result.sunSensitivity_K[e];
+        out << ',';
+        if (e < visibility.size()) out << visibility[e];
+        out << ',';
+        if (e < geometry.skyFraction.size()) out << geometry.skyFraction[e];
+        out << '\n';
+    }
+    QL_LOG_INFO("  Thermal: wrote {} elements to {}", elements.size(), path);
 }
 
 }  // namespace
@@ -248,6 +324,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     desc.nodeCount = config.nodeCount;
     desc.initial = config.initial;
     desc.initialTemperature_K = config.initialTemperature_K;
+    desc.carrySunSensitivity = config.sunCorrection;
 
     ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
                              effectiveTable, forcingSeries, constantForcing, stepper);
@@ -307,6 +384,12 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     } else {
         result.minTemperature_K = 0.0;
         result.maxTemperature_K = 0.0;
+    }
+
+    if (!config.dumpElementsFile.empty()) {
+        DumpElements(config.dumpElementsFile, mesh.elements, materials, geometry, result,
+                     SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
+                                           mesh.elements.size()));
     }
 
     QL_LOG_INFO("  Thermal: {} elements ({} solved), {} exchange entries, {} steps, "

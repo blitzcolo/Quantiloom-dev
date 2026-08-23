@@ -121,3 +121,12 @@ assets/spectral/ecospeclib-all/
 # src/libQuantiloom/CMakeLists.txt looks for it here and prints download
 # instructions when absent; it is fetched by hand, not committed.
 vendor/bc7enc_rdo/
+
+# ============================================================================
+# Render outputs and experiment evidence
+# ============================================================================
+# Renders are reproducible from a config plus a manifest, and an EXR archive
+# would dominate the repository. The scripts and configs that produce them are
+# tracked; the pixels are not.
+renders/
+evidence/

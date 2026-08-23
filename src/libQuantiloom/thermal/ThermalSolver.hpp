@@ -75,6 +75,23 @@ struct ThermalConfig {
     /// a row that stops early keeps the defaults for what it did not say.
     String forcingFile;
 
+    /// Carry dT/dv through the trajectory, so the shading pass can resolve a
+    /// shadow edge inside a triangle rather than at its border. On by default;
+    /// off exists so the two renders can be compared, which is the only way to
+    /// show what the correction is worth. Turning it off does not merely
+    /// suppress the correction at the shader -- it sizes the tangent out of
+    /// ThermalState, so the solve neither carries nor pays for it.
+    bool sunCorrection = true;
+
+    /// Where to write the per-element solve, if anywhere. One row per triangle
+    /// in BuildThermalMesh order: the centroid and normal the solve used, the
+    /// temperature it reached, and the (dT/dv, v) pair the shader would apply.
+    /// Empty writes nothing. The renderer's own outputs are images, and an
+    /// image is the temperature after the per-pixel correction and the
+    /// radiance inversion -- this is what the solver itself produced, which is
+    /// what a mesh-resolution study has to measure against.
+    String dumpElementsFile;
+
     /// Thermal properties by material name, from [[materials]].
     std::unordered_map<String, ThermalMaterial> materials;
 };

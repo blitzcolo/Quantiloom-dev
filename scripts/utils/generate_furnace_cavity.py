@@ -110,8 +110,16 @@ def make_gltf(name, emissivity, out_dir, roughness=1.0):
         # A constant curve, so ε is scalar and ρ = 1 - ε is too.
         emiss_csv = f"{name}_emissivity.csv"
         write_csv(out_dir / emiss_csv, emissivity)
-        if emissivity > 0:
-            ext["emissivityCurve"] = emiss_csv
+        # Bound even at zero. This used to read `if emissivity > 0`, which wrote
+        # the ε=0 curve to disk and then declined to reference it -- so the
+        # cavity this file calls a white furnace was loaded with no emissivity
+        # at all and fell back to the material default, making it a second copy
+        # of a middling-ε cavity rather than the extreme the suite claims to
+        # cover. Measured both ways, the cavity returns 1.00000002 either way,
+        # which is the invariant holding rather than a reason not to test it at
+        # the limit: ε=0 is where a closed cavity's radiance comes entirely
+        # from reflection, and nothing else here exercises that.
+        ext["emissivityCurve"] = emiss_csv
     # emissivity None: the config binds a measured spectral curve to this
     # material by name, and the shader derives ε(λ) = 1 - ρ(λ) from it.
     ext["temperature_K"] = 300.0

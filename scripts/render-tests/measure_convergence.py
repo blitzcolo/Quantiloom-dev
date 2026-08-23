@@ -54,9 +54,11 @@ import OpenEXR
 REPO = pathlib.Path(__file__).resolve().parents[2]
 DEFAULT_CLI = REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe"
 
-# Distinct seeds: see the docstring. Both are arbitrary and only have to differ.
-SEED_REFERENCE = 0xBEEF
-SEED_TEST = 0x51ED
+# Distinct seeds: see the docstring. Both are derived from the project's default
+# sampling seed (0x547C) so that every number in the paper traces to one root;
+# they only have to differ from each other and from the default itself.
+SEED_REFERENCE = 0x547C + 1
+SEED_TEST = 0x547C + 2
 
 GPU_ABSENT = re.compile(
     r"No Vulkan-compatible GPUs|Failed to create Vulkan instance|No suitable")

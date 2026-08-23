@@ -972,15 +972,18 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     const u32 height = params.height;
     const u32 spp = params.spp;
 
+    // No preview warning here. Whether a render is quantitative is a property
+    // of its materials, not of its mode, and ResolveMaterialSpectra already
+    // decided it -- per material, after the config's own spectral assignments,
+    // and it names the offenders. Repeating a blanket version at render time
+    // told a fully measured LWIR scene that it was RGB-averaged, which is both
+    // false and the loudest thing in the log.
     if (params.mode == SpectralMode::Single ||
         params.mode == SpectralMode::MWIR_Fused ||
         params.mode == SpectralMode::LWIR_Fused ||
         params.mode == SpectralMode::SWIR_Fused) {
         QL_LOG_INFO("Rendering frame at wavelength {:.1f} nm with {} samples per pixel...",
                     params.wavelengthNm, spp);
-        QL_LOG_WARN("  PREVIEW MODE: Using RGB-averaged spectral albedo.");
-        QL_LOG_WARN("  NOT suitable for quantitative analysis.");
-        QL_LOG_WARN("  For quantitative results, provide measured spectral curves.");
     } else {
         QL_LOG_INFO("Rendering frame in RGB mode with {} samples per pixel...", spp);
     }
@@ -1130,15 +1133,30 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         params.mode == SpectralMode::LWIR_Fused ||
         params.mode == SpectralMode::SWIR_Fused) {
         img.metadata["wavelength_nm"] = std::to_string(params.wavelengthNm);
-        img.metadata["quality_level"] = "PREVIEW_ONLY";
-        img.metadata["warning"] = "RGB-averaged spectral albedo, not quantitative";
-        img.metadata["note"] = "For quantitative results provide measured spectral curves";
-    } else if (params.mode == SpectralMode::RGB) {
+    }
+
+    // quality_level answers "can this file be measured off", so it reads the
+    // material resolve rather than the mode. A band on the gate's list with
+    // every material carrying a measured spectrum is quantitative and says so;
+    // one with materials falling back to a flat reflectance is not, and names
+    // how many. Stamping PREVIEW_ONLY on the mode alone marked the repo's own
+    // furnace and thermography scenes non-quantitative while they were the
+    // ones being measured.
+    if (params.mode == SpectralMode::RGB) {
         img.metadata["quality_level"] = "PREVIEW";
         img.metadata["note"] = "RGB rendering (fast, no spectral integration)";
     } else if (params.mode == SpectralMode::VIS_Fused) {
         img.metadata["quality_level"] = "SPECTRAL";
         img.metadata["note"] = "32-wavelength spectral integration";
+    } else if (spectra.rgbUpsampledMaterials > 0) {
+        img.metadata["quality_level"] = "PREVIEW_ONLY";
+        img.metadata["warning"] =
+            std::to_string(spectra.rgbUpsampledMaterials) +
+            " material(s) have no measured spectrum in this band; they fall back "
+            "to a flat reflectance";
+        img.metadata["note"] = "For quantitative results provide measured spectral curves";
+    } else {
+        img.metadata["quality_level"] = "SPECTRAL";
     }
     img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
     img.metadata["spp"] = std::to_string(spp);

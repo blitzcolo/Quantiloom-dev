@@ -56,7 +56,7 @@ struct SensorParams {
     // aimed at quantitative validation needs, and which was impossible while
     // the sensor seeded itself from std::random_device with no way to override.
     // Set 0 to draw a nondeterministic seed instead (frame-varying noise).
-    u32 noiseSeed = 0x5EEDU;
+    u32 noiseSeed = 0x548CU;
 
     // NUC parameters (Non-Uniformity Correction)
     bool enableNUC = false;             // Apply NUC correction (leaves residual noise)

@@ -98,6 +98,12 @@ def main():
 
     print(f"ROI mean:  {mean_val:.6e}")
     print(f"Rel error: {rel_err:.4%}")
+    # The ratio at full width. "Rel error" rounds to 0.0000% for five of the
+    # eight cavities, which is a statement about the format rather than about
+    # the renderer -- a table that reports it cannot distinguish a cavity that
+    # closes to one part in 10^7 from one that closes to one part in 10^5.
+    # Purely an addition to what is printed; nothing above this line changed.
+    print(f"Ratio:     {mean_val / ref:.8f}" if ref > 0 else "Ratio:     n/a")
 
     if rel_err > args.tol:
         print(f"FAIL: error {rel_err:.4%} exceeds tolerance {args.tol:.4%}")

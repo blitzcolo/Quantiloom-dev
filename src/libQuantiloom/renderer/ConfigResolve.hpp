@@ -238,6 +238,19 @@ struct ResolvedMaterialSpectra {
     /// adopts the scene so both ThermalSolver and ThermalPreview see it.
     std::unordered_map<String, f32> bandAveragedIREmissivity;
 
+    /// How many materials reached a quantitative band with no measured
+    /// spectrum -- counted by the sRGB-upsampling gate below, after the
+    /// config's own assignments have been applied, so it reflects what the
+    /// render will actually shade with rather than what the scene file
+    /// happened to load with. Zero in RGB and VIS_FUSED, which have no such
+    /// requirement, and in SINGLE inside the visible band, where upsampling a
+    /// base colour is exactly what VIS_FUSED does per wavelength.
+    ///
+    /// This is the authority for "is this render quantitative". Callers must
+    /// not re-derive it from the spectral mode: every band on the gate's list
+    /// *can* be quantitative, and whether one is depends on its materials.
+    u32 rgbUpsampledMaterials = 0;
+
     u32 temperatureBackfilled = 0;
     u32 materialsOverridden = 0;
     u32 nodesTransformed = 0;

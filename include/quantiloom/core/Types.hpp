@@ -553,7 +553,7 @@ namespace constants {
     // SetSamplingSeed(). Nonzero makes a render reproducible; 0 asks for a
     // nondeterministic seed instead. Kept here rather than duplicated at each
     // call site so the two paths cannot drift to different defaults.
-    inline constexpr u32 DEFAULT_SAMPLING_SEED = 0x51EDU;
+    inline constexpr u32 DEFAULT_SAMPLING_SEED = 0x547CU;
 
     // Speed of light (m/s)
     inline constexpr f64 SPEED_OF_LIGHT = 299792458.0;

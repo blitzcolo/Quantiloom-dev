@@ -1,0 +1,110 @@
+# ============================================================================
+# Desert thermal scene -- the reference tessellation
+# ============================================================================
+# A 120 m sand plane at 201 x 201 vertices (0.6 m triangles) carrying a 0.7 m
+# sphere held 2 m clear of the ground, solved through a synthetic clear July
+# day and rendered in LWIR at mid-afternoon, when the shadow is fully developed
+# and the sun/shade contrast is at its largest.
+#
+# The sphere floats deliberately.  Resting on the ground it would occlude a
+# third of the sky over the elements its own shadow falls on, and those
+# elements would no longer be the open-sky 1-D columns that a pointwise
+# reference integrates -- the mesh-refinement study would then be measuring its
+# reference's error along with the mesh's.  Held clear, the shadow lands where
+# the sky fraction is still about 0.98, which thermal.dump_elements reports so
+# that it is checked rather than asserted.
+#
+# Geometry: scripts/utils/generate_desert_scene.py
+# Forcing:  scripts/experiments/make_desert_forcing.py
+# ============================================================================
+
+[renderer]
+resolution = [1024, 1024]
+spp = 64
+seed = 21628                      # 0x547C, the project's default sampling seed
+output = "renders/desert/desert_201_1500.exr"
+
+[spectral]
+mode = "lwir_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_merged.json"
+
+[scene]
+gltf = "assets/models/desert/desert_201.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+# Looking down the shadow from the sunward side, so the sphere, its shadow and
+# a wide stretch of open ground are all in frame at a grazing enough angle for
+# the shadow's edge to read as an edge.
+[camera]
+position = [-6.0, 5.5, 7.0]
+look_at = [1.6, 0.0, -0.2]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[lighting]
+# Overwritten per time step by the forcing CSV, which owns the sun for the
+# solve.  Kept consistent with 15:00 so that the rendered shading and the
+# solved temperature field agree about where the shadow is.
+sun_direction = [-0.6857, 0.7232, 0.0819]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 313.0
+
+# The CLI's required fallback albedo. Every surface here is a named material
+# with a measured spectrum, so nothing reads it.
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 313.0
+relative_humidity = 20.0
+
+[thermal]
+enabled = true
+time_h = 87.0   # day 4 at 15:00; three days of spin-up ahead of it
+start_time_h = 0.0
+timestep_s = 60.0
+layers = 10
+initial = "steady"
+checkpoint_stride_h = 24.0        # one query, so checkpoints are pure cost here
+forcing_file = "desert_day.csv"
+exchange_rays = 256
+exchange_top_k = 32
+dump_elements = "renders/desert/elements_201_1500.csv"
+
+[[materials]]
+name = "DesertGround"
+# Dry sand, the properties test_thermal_sun_sensitivity.cpp pins its own sand
+# to, so the scene and the unit test describe the same material.
+thermal_conductivity_w_mk = 0.30
+density_kg_m3 = 1600.0
+specific_heat_j_kgk = 800.0
+thickness_m = 0.15
+convection_h_w_m2k = 14.0
+shortwave_absorptivity = 0.72
+ir_emissivity = 0.90
+interior_bc = "adiabatic"
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Brown loamy fine sand (87P3468)"
+
+[[materials]]
+name = "ShadowSphere"
+# The sphere is an occluder, not a subject.  It carries no conductivity, so it
+# stays out of the solve and keeps its scalar temperature -- one fewer thing
+# varying in a study about the ground.
+ir_emissivity = 0.90
+ir_temperature_k = 310.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+
+[thermography]
+enabled = true
+emissivity = 0.90
+report_netd = false
+
+[sensor]
+enabled = false

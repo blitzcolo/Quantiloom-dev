@@ -1,0 +1,26 @@
+{
+  "name": "desert_201",
+  "extent_m": 120.0,
+  "divisions": 201,
+  "cells_per_side": 200,
+  "cell_size_m": 0.6,
+  "triangle_leg_m": 0.6,
+  "triangle_hypotenuse_m": 0.848528137423857,
+  "triangle_area_m2": 0.18,
+  "ground_triangles": 80000,
+  "sphere_triangles": 2208,
+  "total_triangles": 82208,
+  "vertices": 41626,
+  "materials": [
+    "DesertGround",
+    "ShadowSphere"
+  ],
+  "sphere_centre_m": [
+    0.0,
+    2.7,
+    0.0
+  ],
+  "sphere_radius_m": 0.7,
+  "ground_emissivity_fallback": 0.92,
+  "sphere_emissivity_fallback": 0.9
+}

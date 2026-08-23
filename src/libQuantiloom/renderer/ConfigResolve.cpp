@@ -8,6 +8,7 @@
 #include "renderer/ConfigResolve.hpp"
 
 #include "core/Blackbody.hpp"
+#include "core/RgbToSpectrum.hpp"
 #include "core/SkyThermal.hpp"
 
 #include "core/Log.hpp"
@@ -740,6 +741,22 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.checkpointStride_h = config.Get<f64>("thermal.checkpoint_stride_h", 1.0);
         out.thermal.forcingFile =
             ResolveConfigPath(config.GetString("thermal.forcing_file", ""), options.baseDir);
+
+        // Both of these exist to be measured rather than to be rendered with.
+        // sun_correction off gives the uncorrected temperature field -- one
+        // constant per triangle, shadow edges on triangle borders -- which is
+        // the thing the correction is compared against. dump_elements writes
+        // what the solver produced before any of it reaches a pixel.
+        out.thermal.sunCorrection = config.Get<bool>("thermal.sun_correction", true);
+
+        // Taken as written, deliberately -- not through ResolveConfigPath like
+        // forcing_file beside it. That helper resolves an *input*: it prefers a
+        // copy sitting next to the config, and it can only do that for a file
+        // that already exists. An output does not exist yet, so the helper
+        // would silently leave it relative to the caller's directory while
+        // looking like it had resolved it. renderer.output is read the same
+        // plain way, and these two land in the same place for the same run.
+        out.thermal.dumpElementsFile = config.GetString("thermal.dump_elements", "");
 
         const auto initial = config.GetString("thermal.initial", "steady");
         if (initial == "uniform") {
@@ -1707,11 +1724,25 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     // the band reported almost nothing and nobody had to decide that it should.
     // It now returns exactly nothing, which is the same answer stated out loud,
     // and this is where it gets said.
+    //
+    // SINGLE belongs on it too, but only outside the visible band. Inside it,
+    // upsampling a base colour is precisely what VIS_FUSED does at each of its
+    // 32 wavelengths, and calling that non-quantitative here would contradict
+    // the mode next door. Outside it, EvaluateRgbSpectrum refuses -- the
+    // polynomial saturates past 780 nm rather than decaying, which in a thermal
+    // band is a mirror where a wall should be -- so a SINGLE render at 10 um
+    // faces exactly what the fused IR bands face, and gets the same answer.
+    const bool singleOutsideVisible =
+        resolved.mode == SpectralMode::Single &&
+        (resolved.wavelengthNm < RGB2SPEC_LAMBDA_MIN ||
+         resolved.wavelengthNm > RGB2SPEC_LAMBDA_MAX);
+
     const bool requireQuantitative = (resolved.mode == SpectralMode::Multispectral ||
                                       resolved.mode == SpectralMode::MWIR_Fused ||
                                       resolved.mode == SpectralMode::LWIR_Fused ||
                                       resolved.mode == SpectralMode::SWIR_Fused ||
-                                      resolved.mode == SpectralMode::NIR_Fused);
+                                      resolved.mode == SpectralMode::NIR_Fused ||
+                                      singleOutsideVisible);
 
     // Unconditional, where it used to wait for one of two opt-in keys. What a
     // material without a measured spectrum costs in these bands is no longer an
@@ -1770,6 +1801,11 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                         "outside it, so it is not consulted here. Bind a spectral curve "
                         "for a quantitative result.");
         }
+
+        // The count, not just the verdict: RenderSingleFrame and the EXR's
+        // quality metadata both need to say whether *this* render is
+        // quantitative, and the mode alone cannot tell them.
+        out.rgbUpsampledMaterials = static_cast<u32>(upsampledNames.size());
 
         if (hasInvalidMaterials && resolved.failOnSrgbUpsample) {
             return SpectraResult::Err(

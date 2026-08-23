@@ -1,0 +1,152 @@
+{
+  "asset": {
+    "version": "2.0",
+    "generator": "generate_desert_scene.py"
+  },
+  "extensionsUsed": [
+    "QUANTILOOM_material_ir"
+  ],
+  "scene": 0,
+  "scenes": [
+    {
+      "nodes": [
+        0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "mesh": 0,
+      "name": "Desert"
+    }
+  ],
+  "meshes": [
+    {
+      "name": "Desert",
+      "primitives": [
+        {
+          "attributes": {
+            "POSITION": 1,
+            "NORMAL": 2
+          },
+          "indices": 0,
+          "material": 0
+        },
+        {
+          "attributes": {
+            "POSITION": 1,
+            "NORMAL": 2
+          },
+          "indices": 3,
+          "material": 1
+        }
+      ]
+    }
+  ],
+  "materials": [
+    {
+      "name": "DesertGround",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.62,
+          0.52,
+          0.36,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      },
+      "doubleSided": false,
+      "extensions": {
+        "QUANTILOOM_material_ir": {
+          "emissivityCurve": "desert_ground_emissivity.csv",
+          "temperature_K": 300.0
+        }
+      }
+    },
+    {
+      "name": "ShadowSphere",
+      "pbrMetallicRoughness": {
+        "baseColorFactor": [
+          0.35,
+          0.38,
+          0.3,
+          1.0
+        ],
+        "metallicFactor": 0.0,
+        "roughnessFactor": 1.0
+      },
+      "doubleSided": false,
+      "extensions": {
+        "QUANTILOOM_material_ir": {
+          "emissivityCurve": "desert_sphere_emissivity.csv",
+          "temperature_K": 300.0
+        }
+      }
+    }
+  ],
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5125,
+      "count": 240000,
+      "type": "SCALAR",
+      "byteOffset": 0
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 41626,
+      "type": "VEC3",
+      "min": [
+        -60.0,
+        0.0,
+        -60.0
+      ],
+      "max": [
+        60.0,
+        3.4000000000000004,
+        60.0
+      ]
+    },
+    {
+      "bufferView": 2,
+      "componentType": 5126,
+      "count": 41626,
+      "type": "VEC3"
+    },
+    {
+      "bufferView": 0,
+      "componentType": 5125,
+      "count": 6624,
+      "type": "SCALAR",
+      "byteOffset": 960000
+    }
+  ],
+  "bufferViews": [
+    {
+      "buffer": 0,
+      "byteOffset": 0,
+      "byteLength": 986496,
+      "target": 34963
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 986496,
+      "byteLength": 499512,
+      "target": 34962
+    },
+    {
+      "buffer": 0,
+      "byteOffset": 1486008,
+      "byteLength": 499512,
+      "target": 34962
+    }
+  ],
+  "buffers": [
+    {
+      "uri": "desert_201.bin",
+      "byteLength": 1985520
+    }
+  ]
+}
