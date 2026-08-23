@@ -27,6 +27,7 @@
 #include "Types.hpp"
 #include <vector>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace quantiloom {
@@ -122,6 +123,41 @@ struct Image {
 
     [[nodiscard]] inline const f32* PixelPtr(const u32 x, const u32 y) const {
         return &data[y * width * channels + x * channels];
+    }
+
+    // Index of a named channel, or `fallback` if this image does not name one.
+    //
+    // Interleaved order is NOT the order a writer used. ImageIO::WriteEXR hands
+    // its channels to an Imf::ChannelList, which is a name-sorted map, and
+    // ImageIO::ReadEXR walks that list back -- so "R","G","B" returns as
+    // "B","G","R" and "R","G","B","A" as "A","B","G","R". The per-channel data
+    // follows its own name, so nothing is corrupted; only the index moves.
+    // Reading index 0 of an EXR that came off disk therefore gets the
+    // alphabetically first channel, which for a render output is the alpha.
+    //
+    // Anything that reads an image it did not itself allocate must ask by name.
+    [[nodiscard]] inline u32 ChannelIndex(const std::string_view name,
+                                          const u32 fallback = 0) const {
+        for (u32 i = 0; i < channelNames.size() && i < channels; ++i) {
+            if (channelNames[i] == name) return i;
+        }
+        return fallback;
+    }
+
+    // Index of the channel to read when a monochrome quantity is wanted from an
+    // image that may be grey, RGB or RGBA: the red channel by preference, then
+    // any of the usual single-channel spellings, and otherwise the first
+    // channel that is not the alpha.
+    [[nodiscard]] inline u32 LuminanceChannelIndex() const {
+        for (const std::string_view name : {"R", "Y", "V", "Gray", "Grey"}) {
+            for (u32 i = 0; i < channelNames.size() && i < channels; ++i) {
+                if (channelNames[i] == name) return i;
+            }
+        }
+        for (u32 i = 0; i < channelNames.size() && i < channels; ++i) {
+            if (channelNames[i] != "A" && channelNames[i] != "Alpha") return i;
+        }
+        return 0;
     }
 
     // ========================================================================

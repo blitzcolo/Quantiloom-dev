@@ -476,6 +476,17 @@ Texture UsdLoader::ParseTexture(const void* /* stagePtr */, const String& assetP
     size_t pixelCount = static_cast<size_t>(img.width) * img.height;
     tex.pixels.resize(pixelCount * 4);
 
+    // Positional indices are right for a PNG or JPEG, where stb_image really
+    // does hand back R,G,B in that order, and wrong for an .exr, which comes
+    // back in OpenEXR's name-sorted channel order. Asking by name is correct
+    // for both, since ImageIO names the stb channels too. See
+    // Image::ChannelIndex.
+    const u32 cr = img.ChannelIndex("R", 0);
+    const u32 cg = img.ChannelIndex("G", 1);
+    const u32 cb = img.ChannelIndex("B", 2);
+    const u32 ca = img.ChannelIndex("A", 3);
+    const u32 grey = img.LuminanceChannelIndex();
+
     for (size_t i = 0; i < pixelCount; ++i) {
         float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
 
@@ -484,19 +495,19 @@ Texture UsdLoader::ParseTexture(const void* /* stagePtr */, const String& assetP
             r = g = b = std::clamp(img.data[i], 0.0f, 1.0f);
         } else if (img.channels == 2) {
             // Gray + Alpha
-            r = g = b = std::clamp(img.data[i * 2], 0.0f, 1.0f);
-            a = std::clamp(img.data[i * 2 + 1], 0.0f, 1.0f);
+            r = g = b = std::clamp(img.data[i * 2 + grey], 0.0f, 1.0f);
+            a = std::clamp(img.data[i * 2 + (grey == 0 ? 1 : 0)], 0.0f, 1.0f);
         } else if (img.channels == 3) {
             // RGB
-            r = std::clamp(img.data[i * 3], 0.0f, 1.0f);
-            g = std::clamp(img.data[i * 3 + 1], 0.0f, 1.0f);
-            b = std::clamp(img.data[i * 3 + 2], 0.0f, 1.0f);
+            r = std::clamp(img.data[i * 3 + cr], 0.0f, 1.0f);
+            g = std::clamp(img.data[i * 3 + cg], 0.0f, 1.0f);
+            b = std::clamp(img.data[i * 3 + cb], 0.0f, 1.0f);
         } else if (img.channels >= 4) {
             // RGBA
-            r = std::clamp(img.data[i * img.channels], 0.0f, 1.0f);
-            g = std::clamp(img.data[i * img.channels + 1], 0.0f, 1.0f);
-            b = std::clamp(img.data[i * img.channels + 2], 0.0f, 1.0f);
-            a = std::clamp(img.data[i * img.channels + 3], 0.0f, 1.0f);
+            r = std::clamp(img.data[i * img.channels + cr], 0.0f, 1.0f);
+            g = std::clamp(img.data[i * img.channels + cg], 0.0f, 1.0f);
+            b = std::clamp(img.data[i * img.channels + cb], 0.0f, 1.0f);
+            a = std::clamp(img.data[i * img.channels + ca], 0.0f, 1.0f);
         }
 
         tex.pixels[i * 4 + 0] = static_cast<u8>(r * 255.0f + 0.5f);

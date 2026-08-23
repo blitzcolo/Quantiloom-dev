@@ -102,10 +102,19 @@ glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
     const f32 wx = fx - std::floor(fx);
     const f32 wy = fy - std::floor(fy);
 
-    const glm::vec3 c00(equirect(x0, y0, 0), equirect(x0, y0, 1), equirect(x0, y0, 2));
-    const glm::vec3 c10(equirect(x1, y0, 0), equirect(x1, y0, 1), equirect(x1, y0, 2));
-    const glm::vec3 c01(equirect(x0, y1, 0), equirect(x0, y1, 1), equirect(x0, y1, 2));
-    const glm::vec3 c11(equirect(x1, y1, 0), equirect(x1, y1, 1), equirect(x1, y1, 2));
+    // By name, not by position. An .exr HDRI read back through ImageIO arrives
+    // in OpenEXR's name-sorted channel order -- "R","G","B" returns as
+    // "B","G","R" -- so sampling 0,1,2 swapped red and blue on every EXR
+    // environment map. A .hdr goes through stb_image, whose data really is
+    // R,G,B in that order, and was never affected. See Image::ChannelIndex.
+    const u32 cr = equirect.ChannelIndex("R", 0);
+    const u32 cg = equirect.ChannelIndex("G", 1);
+    const u32 cb = equirect.ChannelIndex("B", 2);
+
+    const glm::vec3 c00(equirect(x0, y0, cr), equirect(x0, y0, cg), equirect(x0, y0, cb));
+    const glm::vec3 c10(equirect(x1, y0, cr), equirect(x1, y0, cg), equirect(x1, y0, cb));
+    const glm::vec3 c01(equirect(x0, y1, cr), equirect(x0, y1, cg), equirect(x0, y1, cb));
+    const glm::vec3 c11(equirect(x1, y1, cr), equirect(x1, y1, cg), equirect(x1, y1, cb));
 
     const glm::vec3 c0 = c00 * (1.0f - wx) + c10 * wx;
     const glm::vec3 c1 = c01 * (1.0f - wx) + c11 * wx;

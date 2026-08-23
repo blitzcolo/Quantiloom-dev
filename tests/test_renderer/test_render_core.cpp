@@ -53,6 +53,32 @@ constexpr u32 kMinusY = 3;
 
 }  // namespace
 
+// An .exr environment map comes back from ImageIO in OpenEXR's name-sorted
+// channel order, so "R","G","B" arrives as "B","G","R". Sampling positions
+// 0,1,2 therefore swapped red and blue on every EXR HDRI in the repository,
+// and the tests above never saw it because MakeVerticalRamp builds its image
+// in memory with the default "Channel_0".."Channel_2" names, which sort back
+// into the order they were written and are grey besides.
+TEST(RenderCoreEquirectToCubemap, HonoursChannelNamesRatherThanPositions) {
+    Image src(16, 8, 3);
+    src.channelNames = {"B", "G", "R"};  // what a read-back .exr looks like
+    for (u32 y = 0; y < src.height; ++y) {
+        for (u32 x = 0; x < src.width; ++x) {
+            src(x, y, 0) = 0.0f;  // B
+            src(x, y, 1) = 0.0f;  // G
+            src(x, y, 2) = 1.0f;  // R
+        }
+    }
+
+    const auto faces = rendercore::EquirectToCubemap(src, 8);
+    ASSERT_EQ(faces.size(), 6u);
+    for (const Image& face : faces) {
+        EXPECT_NEAR(face(4, 4, 0), 1.0f, 1e-5f) << "red belongs in the red slot";
+        EXPECT_NEAR(face(4, 4, 1), 0.0f, 1e-5f);
+        EXPECT_NEAR(face(4, 4, 2), 0.0f, 1e-5f) << "blue must not inherit red";
+    }
+}
+
 TEST(RenderCoreEquirectToCubemap, ProducesSixSquareRgbFaces) {
     const Image src = MakeVerticalRamp(64, 32);
     const auto faces = rendercore::EquirectToCubemap(src, 16);

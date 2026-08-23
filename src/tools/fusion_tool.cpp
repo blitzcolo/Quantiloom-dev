@@ -97,16 +97,27 @@ int main(int argc, char** argv) {
         QL_LOG_INFO("  SWIR: {}x{} ({} channels)", swirImg.width, swirImg.height, swirImg.channels);
         QL_LOG_INFO("  MWIR: {}x{} ({} channels)", mwirImg.width, mwirImg.height, mwirImg.channels);
 
-        // Extract grayscale channel (first channel)
+        // Extract the radiance channel BY NAME. A render output is RGBA, and an
+        // EXR comes back off disk in the name-sorted order OpenEXR keeps its
+        // channel list in -- so index 0 is the alpha, a constant 1.0. Taken
+        // positionally, all three bands here were the same flat image and the
+        // fusion had nothing to fuse. See Image::ChannelIndex.
+        const u32 visC = visImg.LuminanceChannelIndex();
+        const u32 swirC = swirImg.LuminanceChannelIndex();
+        const u32 mwirC = mwirImg.LuminanceChannelIndex();
+        QL_LOG_INFO("  Radiance channels: VIS '{}', SWIR '{}', MWIR '{}'",
+                    visImg.channelNames[visC], swirImg.channelNames[swirC],
+                    mwirImg.channelNames[mwirC]);
+
         Image visGray(visImg.width, visImg.height, 1);
         Image swirGray(swirImg.width, swirImg.height, 1);
         Image mwirGray(mwirImg.width, mwirImg.height, 1);
 
         for (u32 y = 0; y < visImg.height; ++y) {
             for (u32 x = 0; x < visImg.width; ++x) {
-                visGray(x, y, 0) = visImg(x, y, 0);
-                swirGray(x, y, 0) = swirImg(x, y, 0);
-                mwirGray(x, y, 0) = mwirImg(x, y, 0);
+                visGray(x, y, 0) = visImg(x, y, visC);
+                swirGray(x, y, 0) = swirImg(x, y, swirC);
+                mwirGray(x, y, 0) = mwirImg(x, y, mwirC);
             }
         }
 

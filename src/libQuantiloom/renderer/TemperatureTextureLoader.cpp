@@ -43,9 +43,14 @@ std::optional<Texture> LoadTemperatureTexture(const String& path, const String& 
     tex.skipBlockCompression = true; // and BC7 would smear them across blocks
     tex.pixels.resize(texelCount * 4);
 
+    // By name: a grey .exr authored with an alpha reads back alpha-first, and
+    // index 0 would be a constant 1.0 -- a uniform field at the top of the
+    // temperature range. See Image::ChannelIndex.
+    const u32 source = img.LuminanceChannelIndex();
+
     usize clipped = 0;
     for (usize i = 0; i < texelCount; ++i) {
-        const f32 v = img.data[i * img.channels];
+        const f32 v = img.data[i * img.channels + source];
         if (v < 0.0f || v > 1.0f) {
             ++clipped;
         }

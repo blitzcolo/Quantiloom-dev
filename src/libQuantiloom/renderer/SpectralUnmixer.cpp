@@ -78,11 +78,18 @@ std::optional<Texture> LoadAuthoredWeightTexture(const String& path, const Strin
     tex.skipBlockCompression = true; // and BC7 would smear them across blocks
     tex.pixels.resize(texelCount * 4);
 
+    // Endmember k lives in the k-th colour channel, which is not the k-th
+    // stored channel for an .exr: it comes back name-sorted, so a four-
+    // endmember weight map authored RGBA arrives ABGR and every endmember
+    // would be fed its neighbour's weights. See Image::ChannelIndex.
+    const u32 channelOf[4] = {img.ChannelIndex("R", 0), img.ChannelIndex("G", 1),
+                              img.ChannelIndex("B", 2), img.ChannelIndex("A", 3)};
+
     bool clipped = false;
     for (usize i = 0; i < texelCount; ++i) {
         for (i32 c = 0; c < 4; ++c) {
             const f32 v = c < static_cast<i32>(img.channels)
-                              ? img.data[i * img.channels + static_cast<usize>(c)]
+                              ? img.data[i * img.channels + channelOf[c]]
                               : 0.0f;
             tex.pixels[i * 4 + static_cast<usize>(c)] = EncodeWeight(v, clipped);
         }

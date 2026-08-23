@@ -115,6 +115,67 @@ TEST_F(ImageIOTest, WriteAndReadRGB) {
     }
 }
 
+// An EXR round-trip preserves each channel's DATA but not its INDEX, because
+// OpenEXR keeps its channel list name-sorted. WriteAndReadRGB above passes only
+// because the default constructor names channels "Channel_0".."Channel_2",
+// which sort back into the order they were written. Named RGBA does not, and
+// that has cost real bugs: fusion_tool fused three copies of the alpha plane,
+// and .exr environment maps came out with red and blue swapped.
+//
+// This test pins the behaviour rather than the wish. If ImageIO is ever changed
+// to preserve index order, this test is the place to record that -- and the
+// Image::ChannelIndex assertions below must still hold either way, since asking
+// by name is correct under both conventions.
+TEST_F(ImageIOTest, EXRRoundTripReordersNamedChannelsButNotTheirData) {
+    Image original(4, 3, 4);
+    original.channelNames = {"R", "G", "B", "A"};
+    const f32 perChannel[4] = {0.25f, 0.50f, 0.75f, 1.0f};
+    for (u32 y = 0; y < original.height; ++y) {
+        for (u32 x = 0; x < original.width; ++x) {
+            for (u32 c = 0; c < 4; ++c) original(x, y, c) = perChannel[c];
+        }
+    }
+
+    const auto filepath = GetTestPath("named_rgba.exr");
+    ASSERT_TRUE(ImageIO::WriteEXR(filepath.string(), original));
+    const auto loaded = ImageIO::ReadEXR(filepath.string());
+    ASSERT_TRUE(loaded.has_value());
+
+    // The order that actually comes back: alphabetical.
+    EXPECT_EQ(loaded->channelNames,
+              (std::vector<std::string>{"A", "B", "G", "R"}));
+    EXPECT_NE(loaded->ChannelIndex("R", 99), 0u)
+        << "index 0 is the alpha here; reading it as radiance is the bug";
+
+    // Every channel still carries its own values, found by name.
+    const char* names[4] = {"R", "G", "B", "A"};
+    for (u32 c = 0; c < 4; ++c) {
+        const u32 index = loaded->ChannelIndex(names[c], 99);
+        ASSERT_LT(index, 4u) << "channel " << names[c] << " went missing";
+        EXPECT_NEAR((*loaded)(1, 1, index), perChannel[c], 1e-6f)
+            << "channel " << names[c];
+    }
+
+    // What a monochrome consumer should take: the red channel, not index 0.
+    EXPECT_EQ(loaded->LuminanceChannelIndex(), loaded->ChannelIndex("R", 99));
+    EXPECT_NEAR((*loaded)(1, 1, loaded->LuminanceChannelIndex()), perChannel[0],
+                1e-6f);
+}
+
+TEST_F(ImageIOTest, LuminanceChannelIndexFallsBackPastAlpha) {
+    Image grey(2, 2, 2);
+    grey.channelNames = {"Y", "A"};
+    EXPECT_EQ(grey.LuminanceChannelIndex(), 0u);
+
+    Image sorted(2, 2, 2);
+    sorted.channelNames = {"A", "Y"};
+    EXPECT_EQ(sorted.LuminanceChannelIndex(), 1u);
+
+    // Nothing recognisable, nothing named alpha: the first channel stands.
+    Image unnamed(2, 2, 3);
+    EXPECT_EQ(unnamed.LuminanceChannelIndex(), 0u);
+}
+
 TEST_F(ImageIOTest, WriteAndReadMultispectral) {
     // Create a multi-channel image (simulating multispectral bands)
     Image original(10, 10, 8);
