@@ -1,0 +1,123 @@
+# ============================================================================
+# Gallery scene -- a KV-2 on the desert plain, LWIR
+# ============================================================================
+# The cross-band figure of Section VIII-F. One asset, one camera, one set of
+# measured spectra, rendered in five bands by overriding `spectral.mode` and
+# `spectral.band` together -- which is the whole point of the band-aware
+# convention: nothing about the scene changes between the panels except which
+# part of the spectrum is being asked about.
+#
+# Every surface carries a measured reflectance from the ECOSTRESS/ASTER
+# library, chosen for coverage as much as for plausibility: all five run to
+# 100 % through VIS, NIR, SWIR and MWIR, and 71-88 % in LWIR. Nothing here is
+# an RGB base colour upsampled past the band it was fitted in.
+#
+# Geometry: scripts/utils/generate_desert_scene.py --sphere-radius 0
+#           scripts/utils/merge_gltf_scene.py --scale 5.298 --translate 0 1.542 0
+# The scale makes the hull 6.75 m long, which is a KV-2; the lift puts its
+# tracks on the ground rather than in it.
+# ============================================================================
+
+[renderer]
+resolution = [1600, 900]
+spp = 512
+seed = 21628                      # 0x547C, the project's default sampling seed
+output = "renders/gallery/kv2_lwir.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_merged.json"
+
+[scene]
+gltf = "assets/models/desert/desert_kv2.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+# Three-quarter view from the sunward side, low enough that the hull's shadow
+# runs into frame and the turret breaks the horizon.
+[camera]
+position = [14.0, 5.0, 13.0]
+look_at = [0.0, 1.8, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 40.0
+
+[lighting]
+# Mid-afternoon in July, matching the forcing file's 15:00 row so that the
+# shading and the solved temperature field agree about where the shadow is.
+sun_direction = [-0.6857, 0.7232, 0.0819]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 313.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 313.0
+relative_humidity = 20.0
+
+# ----------------------------------------------------------------------------
+# Materials
+# ----------------------------------------------------------------------------
+# Thermal properties are on the ground only. The tank is a shell, not a slab:
+# giving it a one-dimensional conduction column would model it as solid steel
+# 15 cm thick and say more about the model than about the tank. It keeps a
+# prescribed temperature, which is the honest thing for an object whose
+# internal state this scene does not attempt to solve.
+
+[[materials]]
+name = "DesertGround"
+thermal_conductivity_w_mk = 0.30
+density_kg_m3 = 1600.0
+specific_heat_j_kgk = 800.0
+thickness_m = 0.15
+convection_h_w_m2k = 14.0
+shortwave_absorptivity = 0.72
+ir_emissivity = 0.90
+interior_bc = "adiabatic"
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Brown loamy fine sand (87P3468)"
+
+[[materials]]
+name = "hull"
+ir_emissivity = 0.92
+ir_temperature_k = 322.0          # sun-warmed painted steel, above air
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+
+[[materials]]
+name = "turret"
+# A second sample of the same paint, so the turret and hull are not literally
+# the same curve -- two panels painted from two batches is what a real vehicle
+# looks like to a spectrometer.
+ir_emissivity = 0.92
+ir_temperature_k = 324.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0386UUUPNT)"
+
+[[materials]]
+name = "track"
+# Oxidised rather than clean galvanised: a track that has been driven is not
+# bright metal, and the oxidised sample's emissivity is far more representative.
+ir_emissivity = 0.75
+ir_temperature_k = 318.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Oxidized Galvanized Steel Metal (0526UUUSTLa)"
+
+[[materials]]
+name = "wheels"
+ir_emissivity = 0.94
+ir_temperature_k = 316.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Black unspecified rubber (0833UUURBR)"
+
+[thermography]
+enabled = true
+emissivity = 1.0
+
+[sensor]
+enabled = false

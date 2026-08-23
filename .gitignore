@@ -130,3 +130,8 @@ vendor/bc7enc_rdo/
 # tracked; the pixels are not.
 renders/
 evidence/
+
+# Derived scene: ground + tank, rebuilt by the command in the header of
+# assets/configs/gallery/kv2_desert_lwir.toml. 26 MB of merge output whose
+# inputs are both tracked.
+assets/models/desert/desert_kv2.*

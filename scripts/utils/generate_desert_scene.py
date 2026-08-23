@@ -127,8 +127,14 @@ def write_csv(path, value):
 
 def build(name, extent, divisions, sphere_radius, sphere_height):
     ground_p, ground_n, ground_i = ground_grid(extent, divisions)
-    centre = (0.0, sphere_height + sphere_radius, 0.0)
-    sphere_p, sphere_n, sphere_i = uv_sphere(centre, sphere_radius)
+    # A zero radius means ground only. The sphere is the shadow-edge study's
+    # occluder; the gallery scene of Section VIII-F puts a tank there instead
+    # and does not want a sphere hanging two metres over it.
+    if sphere_radius > 0.0:
+        centre = (0.0, sphere_height + sphere_radius, 0.0)
+        sphere_p, sphere_n, sphere_i = uv_sphere(centre, sphere_radius)
+    else:
+        sphere_p, sphere_n, sphere_i = [], [], []
 
     # One buffer, two primitives, each with its own accessor range. The sphere's
     # indices are rebased onto the concatenated vertex array.
@@ -183,12 +189,17 @@ def build(name, extent, divisions, sphere_radius, sphere_height):
         "meshes": [
             {
                 "name": "Desert",
-                "primitives": [
-                    {"attributes": {"POSITION": 1, "NORMAL": 2}, "indices": 0, "material": 0},
-                    {"attributes": {"POSITION": 1, "NORMAL": 2}, "indices": 3, "material": 1},
-                ],
+                "primitives": (
+                    [{"attributes": {"POSITION": 1, "NORMAL": 2}, "indices": 0,
+                      "material": 0}]
+                    + ([{"attributes": {"POSITION": 1, "NORMAL": 2}, "indices": 3,
+                         "material": 1}] if sphere_i else [])
+                ),
             }
         ],
+        # The sphere's material is written either way. A scene that carries a
+        # material nothing references is inert; one whose material indices
+        # shift with a flag is a scene whose configs stop matching.
         "materials": [
             material(GROUND_MATERIAL, ground_csv, [0.62, 0.52, 0.36, 1.0]),
             material(SPHERE_MATERIAL, sphere_csv, [0.35, 0.38, 0.30, 1.0]),
@@ -210,6 +221,10 @@ def build(name, extent, divisions, sphere_radius, sphere_height):
                 "max": [max(xs), max(ys), max(zs)],
             },
             {"bufferView": 2, "componentType": 5126, "count": len(normals), "type": "VEC3"},
+        ] + ([
+            # Accessor 3, the sphere's indices. Omitted entirely without a
+            # sphere rather than left at count 0, which glTF does not allow
+            # even for an accessor nothing references.
             {
                 "bufferView": 0,
                 "componentType": 5125,
@@ -217,7 +232,7 @@ def build(name, extent, divisions, sphere_radius, sphere_height):
                 "type": "SCALAR",
                 "byteOffset": len(ground_i) * 4,
             },
-        ],
+        ] if sphere_i else []),
         "bufferViews": [
             {"buffer": 0, "byteOffset": 0, "byteLength": len(idx_b), "target": 34963},
             {"buffer": 0, "byteOffset": pos_off, "byteLength": len(pos_b), "target": 34962},
@@ -249,7 +264,7 @@ def build(name, extent, divisions, sphere_radius, sphere_height):
         "total_triangles": len(indices) // 3,
         "vertices": len(positions),
         "materials": [GROUND_MATERIAL, SPHERE_MATERIAL],
-        "sphere_centre_m": list(centre),
+        "sphere_centre_m": list(centre) if sphere_i else None,
         "sphere_radius_m": sphere_radius,
         "ground_emissivity_fallback": GROUND_EMISSIVITY,
         "sphere_emissivity_fallback": SPHERE_EMISSIVITY,
