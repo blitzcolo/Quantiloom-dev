@@ -1,0 +1,115 @@
+# ============================================================================
+# Gallery scene -- the KV-2 as a hyperspectral cube
+# ============================================================================
+# The ENVI cube of Section VIII-F. Same asset, same camera and same measured
+# spectra as the five-band strip; what changes is that the renderer is asked
+# for a wavelength axis instead of a band average, and writes it in the
+# interleave a remote-sensing tool reads directly.
+#
+# The cube is the one product in this paper that can be checked against its own
+# inputs pixel by pixel: every surface here carries a named ECOSTRESS/ASTER
+# curve, so a spectrum pulled out of the cube at a pixel on the hull can be
+# plotted against the library curve that pixel's material was bound to. That is
+# what `scripts/experiments/e7_cube.py` does, and it is the difference between
+# demonstrating that a cube writer runs and showing that the cube carries the
+# scene's spectroscopy.
+#
+# 400-2500 nm at 20 nm is 106 bands, which is the reflective range those curves
+# actually cover -- past 2500 nm the scene is emission-dominated and a
+# reflectance comparison stops being the right check. Resolution and sample
+# count are well below the strip's: a cube is 106 renders, and the subject here
+# is the spectral axis rather than the image.
+# ============================================================================
+
+[renderer]
+resolution = [512, 288]
+spp = 64
+seed = 21628                      # 0x547C
+output = "renders/gallery/kv2_cube.exr"
+
+[spectral]
+mode = "multispectral"
+band = "VIS"
+basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_merged.json"
+
+[hyperspectral]
+wavelength_min_nm = 400.0
+wavelength_max_nm = 2500.0
+wavelength_step_nm = 20.0
+output_format = "envi_bsq"        # the interleave downstream tools open first
+use_gpu_reconstruction = true
+
+[scene]
+gltf = "assets/models/desert/desert_kv2.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [14.0, 5.0, 13.0]
+look_at = [0.0, 1.8, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 40.0
+
+[lighting]
+sun_direction = [-0.6857, 0.7232, 0.0819]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [1.0, 1.0, 1.0]
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 313.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 313.0
+relative_humidity = 20.0
+
+# ----------------------------------------------------------------------------
+# Materials -- identical bindings to assets/configs/gallery/kv2_desert_lwir.toml
+# ----------------------------------------------------------------------------
+
+[[materials]]
+name = "DesertGround"
+ir_emissivity = 0.90
+ir_temperature_k = 320.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Brown loamy fine sand (87P3468)"
+
+[[materials]]
+name = "hull"
+ir_emissivity = 0.92
+ir_temperature_k = 322.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+
+[[materials]]
+name = "turret"
+ir_emissivity = 0.92
+ir_temperature_k = 324.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0386UUUPNT)"
+
+[[materials]]
+name = "track"
+ir_emissivity = 0.75
+ir_temperature_k = 318.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Oxidized Galvanized Steel Metal (0526UUUSTLa)"
+
+[[materials]]
+name = "wheels"
+ir_emissivity = 0.94
+ir_temperature_k = 316.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Black unspecified rubber (0833UUURBR)"
+
+[thermography]
+enabled = false
+
+[sensor]
+enabled = false

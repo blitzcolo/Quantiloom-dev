@@ -1,0 +1,118 @@
+# ============================================================================
+# Camouflage scene -- a brick-spectrum target on desert sand
+# ============================================================================
+# The multi-band fusion panel of Section VIII-F. The claim being illustrated is
+# that a target can be indistinguishable from its background in the visible and
+# separated from it in the thermal bands, so the pair is *measured* rather than
+# arranged: `scripts/experiments/e7_find_camouflage_pair.py` searched the whole
+# ECOSTRESS/ASTER library for the material closest to this sand across
+# 400-780 nm and furthest from it in MWIR, and reported
+#
+#   Red smooth-faced Brick (0097UUUBRK)
+#     visible RMS reflectance difference   0.0174
+#     MWIR mean reflectance                0.285  against the sand's 0.143
+#
+# Nothing about the pair was chosen for the picture.
+#
+# THE CONTROL THAT MAKES THE FIGURE MEAN SOMETHING. Both surfaces are held at
+# the SAME temperature. A scene in which the target is also hotter than its
+# background would separate in MWIR for two reasons at once, and the figure
+# could not say which. Held isothermal, the only thing left that can separate
+# them there is emissivity -- which through Kirchhoff is one minus the measured
+# reflectance the search selected on. The target therefore reads *colder* than
+# the sand in MWIR despite being the same temperature, which is the
+# emissivity-versus-temperature confusion Section VI's apparent-temperature
+# inversion exists to keep legible.
+#
+# Geometry: scripts/utils/generate_desert_scene.py --divisions 101
+#           --sphere-radius 0.7 --sphere-height 0.7
+# The sphere rests on the ground here rather than floating clear of it as in
+# the dT/dv scene of Section VIII-C: nothing in this figure integrates a
+# pointwise column, so the open-sky condition that floating buys is not needed,
+# and a resting object is what a camouflage figure is about.
+# ============================================================================
+
+[renderer]
+resolution = [1024, 768]
+spp = 512
+seed = 21628                      # 0x547C, the project's default sampling seed
+output = "renders/gallery/camouflage.exr"
+
+[spectral]
+mode = "vis_fused"
+band = "VIS"
+basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_merged.json"
+
+[scene]
+gltf = "assets/models/desert_camouflage/desert_101.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 320.0
+
+[camera]
+position = [6.0, 2.2, 6.0]
+look_at = [0.0, 0.7, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 30.0
+
+[lighting]
+# The same mid-afternoon sun as the five-band strip, so the two figures in
+# Section VIII-F are lit alike.
+sun_direction = [-0.6857, 0.7232, 0.0819]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [1.0, 1.0, 1.0]
+
+# ASTM G-173 as scene data. Column 4 is the direct beam, column 3 the global
+# irradiance. Without it the reflective bands have nothing to reflect. The
+# same 4000 nm end-of-data limitation the gallery config documents applies to
+# the MWIR panel here; the VIS and SWIR panels are entirely inside measured
+# range.
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 313.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 313.0
+relative_humidity = 20.0
+
+# ----------------------------------------------------------------------------
+# Materials -- isothermal by construction, see the header
+# ----------------------------------------------------------------------------
+
+[[materials]]
+name = "DesertGround"
+ir_emissivity = 0.90
+ir_temperature_k = 320.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Brown loamy fine sand (87P3468)"
+
+[[materials]]
+name = "ShadowSphere"
+ir_emissivity = 0.90
+ir_temperature_k = 320.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Red smooth-faced Brick (0097UUUBRK)"
+
+[fusion]
+# The default of Section VI. Weighted averaging dilutes each band's unique
+# detail by its weight and per-pixel maximum response seams at band-switching
+# boundaries; the pyramid averages the low frequencies and takes the
+# maximum-absolute high frequencies, which keeps detail from whichever band
+# carries it. Per-band normalisation is not optional -- the three bands'
+# radiances differ by orders of magnitude -- and the merged values carry no
+# physical unit.
+method = "laplacian_pyramid"
+auto_normalize = true
+
+[thermography]
+enabled = true
+emissivity = 1.0
+
+[sensor]
+enabled = false

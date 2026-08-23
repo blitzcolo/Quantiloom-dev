@@ -45,7 +45,8 @@ cmake.exe --build build --config Release -j -- /v:q /nologo
 ./scripts/check_exports.sh
 
 # --- Physics gate -----------------------------------------------------------
-# Six isothermal furnace cavities, each of which must return the Planck
+# Eight isothermal furnace cavities -- five LWIR, three MWIR -- each of which
+# must return the Planck
 # radiance of its own temperature whatever its emissivity. Kirchhoff fixes the
 # answer with no free parameters, so unlike every other render in the repo
 # these can fail on their own rather than by comparison with a previous run.

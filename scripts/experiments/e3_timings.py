@@ -23,10 +23,22 @@ REPO = pathlib.Path(__file__).resolve().parents[2]
 BINARY = REPO / "build" / "tests" / "Release" / "libquantiloom_tests.exe"
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e3")
 
+# One space, not two, before `median`: Report() pads the label to 34 characters
+# and several labels are longer than that, so the columns close up and a
+# two-space rule silently drops exactly the zero-step control rows that the
+# stride sweep exists to be compared against.
 BENCH = re.compile(
-    r"\[BENCH\]\s+(?P<name>.+?)\s{2,}median\s+(?P<median>[\d.]+) ms\s+"
+    r"\[BENCH\]\s+(?P<name>.+?)\s+median\s+(?P<median>[\d.]+) ms\s+"
     r"p95\s+(?P<p95>[\d.]+) ms\s+min\s+(?P<min>[\d.]+)\s+max\s+(?P<max>[\d.]+)\s+"
     r"n=(?P<n>\d+)(?:\s{2,}(?P<note>.+))?$")
+
+# Scene open reports once rather than as a distribution, and no target names it.
+SETUP = re.compile(r"\[BENCH\]\s+(?P<name>.+?)\s+once\s+(?P<ms>[\d.]+) ms\s+"
+                   r"\((?P<note>.+)\)$")
+
+# The replayed-step counts carry no timing, so they do not match either row
+# pattern; they are the independent variable panel (b) of Fig. 9 plots against.
+REPLAYED = re.compile(r"\[BENCH\]\s+(?P<name>.+?)\s+replayed\s+(?P<steps>[\d.]+) steps")
 
 # The targets Section VIII-G commits to before any of this is measured.
 TARGETS_MS = {
@@ -59,25 +71,46 @@ def main():
     parser.add_argument("--filter", default="InteractiveBench*",
                         help="gtest filter; a bare 'T1'/'T2' is expanded")
     parser.add_argument("--timeout", type=int, default=7200)
+    parser.add_argument("--from-stdout", type=pathlib.Path,
+                        help="re-parse a saved bench_stdout.txt instead of running; "
+                             "the suite takes ~24 min, so a parser fix must not "
+                             "cost a re-measurement")
     args = parser.parse_args()
 
-    if not BINARY.is_file():
-        raise SystemExit(f"{BINARY} not built")
+    if args.from_stdout:
+        stdout = args.from_stdout.read_text(encoding="utf-8", errors="replace")
+        gtest_filter = f"(re-parsed from {args.from_stdout.name})"
+    else:
+        if not BINARY.is_file():
+            raise SystemExit(f"{BINARY} not built")
 
-    gtest_filter = args.filter
-    if gtest_filter in ("T1", "T2"):
-        gtest_filter = {"T1": "InteractiveBench.DISABLED_Geometry*",
-                        "T2": "InteractiveBench.DISABLED_Thermal*"}[gtest_filter]
+        gtest_filter = args.filter
+        if gtest_filter in ("T1", "T2"):
+            gtest_filter = {"T1": "InteractiveBench.DISABLED_Geometry*",
+                            "T2": "InteractiveBench.DISABLED_Thermal*"}[gtest_filter]
 
-    print(f"running {gtest_filter} ...", flush=True)
-    result = subprocess.run(
-        [str(BINARY), "--gtest_also_run_disabled_tests", f"--gtest_filter={gtest_filter}"],
-        cwd=REPO, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        timeout=args.timeout)
-    print(result.stdout[-3000:], flush=True)
+        print(f"running {gtest_filter} ...", flush=True)
+        result = subprocess.run(
+            [str(BINARY), "--gtest_also_run_disabled_tests",
+             f"--gtest_filter={gtest_filter}"],
+            cwd=REPO, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=args.timeout)
+        print(result.stdout[-3000:], flush=True)
+        stdout = result.stdout
+
+    setup, replayed = [], {}
+    for line in stdout.splitlines():
+        match = SETUP.search(line.rstrip())
+        if match:
+            setup.append({"name": match.group("name").strip(),
+                          "ms": float(match.group("ms")),
+                          "note": match.group("note")})
+        match = REPLAYED.search(line.rstrip())
+        if match:
+            replayed[match.group("name").strip()] = float(match.group("steps"))
 
     rows = []
-    for line in result.stdout.splitlines():
+    for line in stdout.splitlines():
         match = BENCH.search(line.rstrip())
         if not match:
             continue
@@ -103,9 +136,12 @@ def main():
                  "processor": platform.processor()},
         "gtest_filter": gtest_filter,
         "rows": rows,
+        "setup": setup,
+        "replayed_steps": replayed,
     }
     (EVIDENCE / "timings.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    (EVIDENCE / "bench_stdout.txt").write_text(result.stdout, encoding="utf-8")
+    if not args.from_stdout:
+        (EVIDENCE / "bench_stdout.txt").write_text(stdout, encoding="utf-8")
 
     lines = ["| Measurement | Median (ms) | p95 (ms) | n | Target (ms) | Margin |",
              "|---|---:|---:|---:|---:|---:|"]
