@@ -299,6 +299,59 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     const ConfigApplyOptions& options, ConfigApplyReport& report);
 
 /**
+ * @brief What a material declares about the light it emits.
+ *
+ * The emission-side twin of SolarLutRequest, split out for the same reason: a
+ * host that binds a lamp from a panel must mean exactly what the same keys in a
+ * TOML would mean. Getting a second reading of the levelling rule would put the
+ * viewport and the CLI on different lamps, which is the class of divergence
+ * this file exists to prevent.
+ */
+struct EmissionBindingRequest {
+    /// A built-in token ("d65", "illuminant_a", "blackbody_3000k", ...) or a
+    /// path to a table. SpectralIO::LoadEmissionSpectrum owns the list.
+    String source;
+    /// 1-based column holding the radiance, for a file.
+    u32 column = 2;
+    /// "match_luminance" (the curve gives the shape, authoredEmissive the
+    /// level) or "absolute" (the curve is W m^-2 sr^-1 nm^-1 as given).
+    String scale = "match_luminance";
+    /// The band being rendered. The curve is resampled onto it, and whether it
+    /// overlaps the CIE observer decides if a colour can be derived at all.
+    f32 bandMinNm = 400.0f;
+    f32 bandMaxNm = 780.0f;
+    /// The material's authored emissive triple, which match_luminance levels
+    /// against and which is left alone outside the visible.
+    glm::vec3 authoredEmissive{0.0f};
+};
+
+/// One bound lamp: the curve the shader reads, and the colour every non-spectral
+/// path must use so that the two cannot describe different lights.
+struct ResolvedEmission {
+    SpectralCurveGPU curve;
+    /// The linear sRGB the curve renders as. Only meaningful, and only set,
+    /// when rewriteRgb is true.
+    glm::vec3 renderedRgb{0.0f};
+    /// False in a thermal band, where the CIE observer has no support and a
+    /// derived colour would be an artefact of endpoint clamping rather than a
+    /// property of the lamp. The authored triple stands in that case.
+    bool rewriteRgb = false;
+    /// Band coverage and spectral-resolution notes. Not errors: the render
+    /// proceeds, and these are the things that make it mean less than it looks
+    /// like it does.
+    Vector<String> warnings;
+};
+
+/**
+ * @brief Load, level and resample one material's emission spectrum.
+ *
+ * @param request  What the material (or the host) asked for.
+ * @param baseDir  Directory a relative path resolves against.
+ */
+Result<ResolvedEmission, String> ResolveEmissionSpectrum(
+    const EmissionBindingRequest& request, const String& baseDir);
+
+/**
  * @brief The illuminant, resolved from what a scene declares about it.
  *
  * Everything `lighting.solar_lut*` means, in one place: which file (or the

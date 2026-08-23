@@ -960,6 +960,41 @@ public:
     i32 AddSpectralCurve(const SpectralCurve& curve);
 
     /**
+     * @brief Bind (or clear) the spectrum a material emits
+     * @param materialIndex  Material to change
+     * @param sourceOrEmpty  A built-in token ("d65", "illuminant_a", "halogen",
+     *                       "cie_f7", "blackbody_3000k", ...) or a path to a
+     *                       table. Empty clears the binding.
+     * @param scale          "match_luminance" (the default) or "absolute"
+     * @return Warnings worth showing the user, or an error if nothing was bound
+     *
+     * The interactive twin of `[material_overrides] emissive_curve`, and it goes
+     * through the same ResolveEmissionSpectrum the config path does -- a second
+     * reading of the levelling rule would put the viewport and the CLI on
+     * different lamps.
+     *
+     * Why this exists rather than the caller doing AddSpectralCurve() and
+     * setting an index: binding a lamp is not one assignment. The curve has to
+     * be resampled onto the band being rendered, levelled against the material's
+     * own emissive triple (published illuminants are relative and carry no
+     * absolute level), and then that triple has to be REPLACED by the colour the
+     * curve integrates to, or the RGB preview and the emitter-sampling density
+     * end up describing a different lamp from the spectral bands. All of that is
+     * one decision, and it belongs on one side of the interface.
+     *
+     * A non-empty result is not a failure. Emission is zero outside a curve's
+     * measured span rather than held flat, so a lamp that does not cover the
+     * band comes back with a warning saying it will be dark there -- which is
+     * the honest answer, and the one a user needs to see.
+     *
+     * @param baseDir  Directory a relative path resolves against; unused, and
+     *                 safely empty, for a built-in token.
+     */
+    Result<Vector<String>, String> SetMaterialEmissionSpectrum(
+        u32 materialIndex, const String& sourceOrEmpty,
+        const String& scale = "match_luminance", const String& baseDir = "");
+
+    /**
      * @brief Build an endmember weight map for a material, from its base colour
      * @param materialIndex   Material to unmix
      * @param endmemberColors Linear sRGB colour of each endmember curve, in the

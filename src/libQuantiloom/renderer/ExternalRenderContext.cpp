@@ -2392,6 +2392,85 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
     return index;
 }
 
+Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectrum(
+    u32 materialIndex, const String& sourceOrEmpty, const String& scale,
+    const String& baseDir) {
+    using EmissionResult = Result<Vector<String>, String>;
+
+    if (!m_impl->scene) {
+        return EmissionResult::Err("SetMaterialEmissionSpectrum: no scene loaded");
+    }
+    if (materialIndex >= m_impl->scene->materials.size()) {
+        return EmissionResult::Err("SetMaterialEmissionSpectrum: invalid material index " +
+                                   std::to_string(materialIndex));
+    }
+
+    Material material = m_impl->scene->materials[materialIndex];
+
+    if (sourceOrEmpty.empty()) {
+        // Unbinding leaves emissiveFactor where it is. It was derived from the
+        // curve, and the triple the author originally typed is gone -- but the
+        // colour on screen is the one they have been looking at, and silently
+        // changing a light's brightness because a dropdown moved to "None" is
+        // worse than keeping a number whose provenance changed.
+        material.emissiveRadianceCurveIndex = -1;
+        material.emissiveCurveSource.clear();
+        UpdateMaterial(materialIndex, material);
+        return EmissionResult(Vector<String>{});
+    }
+
+    // The band this viewport is rendering, so the curve is resampled onto the
+    // window it will actually be sampled in -- the same rule the config path
+    // follows, and the reason a cross-band lamp does not arrive as 64 samples
+    // spread from the ultraviolet to the thermal.
+    rendercore::EmissionBindingRequest request;
+    request.source = sourceOrEmpty;
+    request.scale = scale;
+    request.authoredEmissive = material.emissiveFactor;
+    if (const auto band = GetFusedBandInfo(m_impl->spectralMode)) {
+        request.bandMinNm = band->lambdaMinNm;
+        request.bandMaxNm = band->lambdaMaxNm;
+    }
+
+    auto bound = rendercore::ResolveEmissionSpectrum(request, baseDir);
+    if (!bound) {
+        return EmissionResult::Err(bound.error());
+    }
+    const auto& resolved = bound.value();
+
+    // Appended like AddSpectralCurve, but from a SpectralCurveGPU that is
+    // already resampled and levelled -- going back through the CPU curve would
+    // discard the band clipping and the band averaging that make it right.
+    const auto index = static_cast<i32>(m_impl->spectralCurveEntries.size());
+    m_impl->spectralCurveEntries.push_back(resolved.curve);
+
+    const size_t bytes = m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
+    m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
+        m_impl->contextAdapter->GetAllocator(), bytes,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
+    if (m_impl->pipeline) {
+        m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
+    }
+
+    material.emissiveRadianceCurveIndex = index;
+    material.emissiveCurveSource = sourceOrEmpty;
+    if (resolved.rewriteRgb) {
+        material.emissiveFactor = resolved.renderedRgb;
+    }
+    UpdateMaterial(materialIndex, material);
+
+    QL_LOG_INFO("SetMaterialEmissionSpectrum: '{}' on material {} ('{}'), curve index {}, "
+                "colour [{:.4g}, {:.4g}, {:.4g}]",
+                sourceOrEmpty, materialIndex, material.name, index,
+                material.emissiveFactor.r, material.emissiveFactor.g,
+                material.emissiveFactor.b);
+    for (const auto& warning : resolved.warnings) {
+        QL_LOG_WARN("  {}", warning);
+    }
+    return EmissionResult(Vector<String>(resolved.warnings));
+}
+
 i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
     if (!curve.IsValid()) {
         QL_LOG_WARN("AddSpectralCurve: Invalid curve data");
