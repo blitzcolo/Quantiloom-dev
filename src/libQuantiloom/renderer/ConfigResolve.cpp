@@ -1212,8 +1212,22 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         if (transmittance > 0.0f) {
             it->irTransmittanceCurve = {{kMwirNm, transmittance}, {kLwirNm, transmittance}};
         }
+        // Derived only when the config actually said something to derive it
+        // from. Both keys above default to zero when absent, so this used to
+        // compute 1 - 0 - 0 = 1 for every override block that did not mention
+        // infrared -- and then overwrite whatever reflectance curve the scene
+        // file had loaded with a flat perfect reflector.
+        //
+        // The trigger was any override at all. A block setting `roughness`, or
+        // `specular = 0`, on a material carrying a measured curve silently
+        // turned it into an IR mirror; nothing was logged, because from here it
+        // looks like a config stating rho = 1. Found while porting the Cornell
+        // box to a second renderer, where the wall reflectances stopped
+        // matching the file both renderers were reading.
+        const bool saysInfrared =
+            matTable.Has("ir_emissivity") || matTable.Has("ir_transmittance");
         const f32 reflectance = 1.0f - emissivity - transmittance;
-        if (reflectance > 0.0f) {
+        if (saysInfrared && reflectance > 0.0f) {
             it->irReflectanceCurve = {{kMwirNm, reflectance}, {kLwirNm, reflectance}};
         }
         if (matTable.Has("ir_temperature_k")) {
@@ -1445,6 +1459,52 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                         gpuCurve.numSamples, gpuCurve.startWavelength_nm,
                         gpuCurve.GetWavelength(gpuCurve.numSamples - 1), curveIndex);
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Reflectance curves the SCENE FILE bound, rather than the config
+    // ------------------------------------------------------------------
+    // A glTF may carry QUANTILOOM_material_ir.reflectanceCurve, and the loader
+    // reads it into Material::irReflectanceCurve. Until this loop existed that
+    // was where it stopped: the curve was parsed, logged as loaded, and never
+    // registered here, so no index reached the shader and the material fell
+    // back to upsampling its base colour. Every render said "Loaded
+    // reflectance curve: ..." and then did not use it.
+    //
+    // The cost was not subtle. Construction concrete measures 0.254 at 550 nm
+    // and its base colour is 0.65; in a closed room that ratio compounds with
+    // every bounce, and the shipped Cornell box rendered 36% bright overall
+    // and nearly 3x bright in the dimmest corners. The four cornell_box_*
+    // configs each describe their materials as measured, which is what the
+    // scene file says and was not what the renderer did.
+    //
+    // The config wins where both name the same material: an explicit
+    // [spectral_curves] entry is a deliberate override of what the asset
+    // carries, and it is also how a scene author corrects an asset they cannot
+    // edit.
+    u32 boundFromScene = 0;
+    for (const auto& mat : scene.materials) {
+        if (mat.irReflectanceCurve.empty()) continue;
+        if (out.materialNameToCurve.count(mat.name) > 0) continue;
+
+        SpectralCurve curve;
+        curve.samples = mat.irReflectanceCurve;
+        const SpectralCurveGPU gpuCurve = SpectralCurveGPU::FromCPU(curve);
+        if (gpuCurve.numSamples == 0) continue;
+
+        const i32 curveIndex = static_cast<i32>(out.curves.size());
+        out.materialNameToCurve[mat.name] = curveIndex;
+        out.curves.push_back(gpuCurve);
+        ++boundFromScene;
+
+        QL_LOG_INFO("  Material '{}': reflectance curve from the scene file, "
+                    "{} samples, λ=[{:.1f}, {:.1f}] nm → curve index {}",
+                    mat.name, gpuCurve.numSamples, gpuCurve.startWavelength_nm,
+                    gpuCurve.GetWavelength(gpuCurve.numSamples - 1), curveIndex);
+    }
+    if (boundFromScene > 0) {
+        QL_LOG_INFO("  Bound {} reflectance curve(s) declared by the scene file",
+                    boundFromScene);
     }
 
     QL_LOG_INFO("  Total spectral curves from CSV: {}", out.curves.size());

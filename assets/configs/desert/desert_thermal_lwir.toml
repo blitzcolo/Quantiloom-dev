@@ -26,6 +26,10 @@ output = "renders/desert/desert_201_1500.exr"
 
 [spectral]
 mode = "lwir_fused"
+# Which band the measured spectra are reconstructed in. Separate from `mode`
+# and defaulting to VIS, so an LWIR scene that omits it binds each material's
+# VISIBLE curve and then samples it at 10 um, off the end of its own range.
+band = "LWIR"
 basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
 materials_json = "assets/spectral/quantiloom_materials_merged.json"
 
