@@ -234,3 +234,62 @@ def read_exr(path, channel=0):
     pixels = list(f.channels().values())[0].pixels
     array = np.asarray(pixels, dtype=np.float64)
     return array[:, :, channel] if array.ndim == 3 else array
+
+
+# ---------------------------------------------------------------------------
+# The open-ground scene, shared by the two analytic experiments
+# ---------------------------------------------------------------------------
+
+def ground_plane_scene(srf, resolution, sky_irradiance, rho=0.7,
+                       sun_irradiance=None, sun_direction=None,
+                       ortho_half_extent=8.0, max_depth=9):
+    """A Lambertian plane under a uniform sky, optionally with a directional sun.
+
+    Two conversions live here because getting either wrong produces a plausible
+    number rather than an obvious failure:
+
+      * Mitsuba's `constant` emitter carries RADIANCE; the Quantiloom configs
+        carry the hemispherical IRRADIANCE their illuminant file lists. L = E/pi.
+      * Mitsuba's `directional` emitter's `direction` is where the light TRAVELS;
+        Quantiloom's `sun_direction` points from the surface toward the sun.
+        One is the negation of the other, and a sign error here still renders --
+        it renders an unlit plane, which looks like a scene setup mistake.
+
+    The ground is scaled far past the camera's field so that no pixel sees its
+    edge; an edge in frame would make the comparison partly a comparison of
+    framing.
+    """
+    import mitsuba as mi
+    transform = mi.ScalarTransform4f
+
+    scene = {
+        "type": "scene",
+        "integrator": {"type": "path", "max_depth": max_depth},
+        "sensor": {
+            "type": "orthographic",
+            "to_world": (transform().look_at(origin=[0, 20, 0], target=[0, 0, 0],
+                                             up=[0, 0, 1])
+                         @ transform().scale([ortho_half_extent,
+                                              ortho_half_extent, 1])),
+            "film": specfilm(resolution, resolution, srf),
+            "sampler": {"type": "independent"},
+        },
+        "ground": {
+            "type": "rectangle",
+            "to_world": transform().rotate(axis=[1, 0, 0], angle=-90)
+                        @ transform().scale([50, 50, 1]),
+            "bsdf": {"type": "diffuse", "reflectance": flat(rho)},
+        },
+        "sky": {"type": "constant", "radiance": flat(sky_irradiance / np.pi)},
+    }
+
+    if sun_irradiance is not None:
+        direction = np.asarray(sun_direction, dtype=np.float64)
+        direction = direction / np.linalg.norm(direction)
+        scene["sun"] = {
+            "type": "directional",
+            "direction": [float(-direction[0]), float(-direction[1]),
+                          float(-direction[2])],
+            "irradiance": flat(sun_irradiance),
+        }
+    return scene
