@@ -47,8 +47,18 @@ fov_y = 40.0
 # Mid-afternoon in July, matching the forcing file's 15:00 row so that the
 # shading and the solved temperature field agree about where the shadow is.
 sun_direction = [-0.6857, 0.7232, 0.0819]
-sun_radiance = [0.0, 0.0, 0.0]
-sky_radiance = [0.0, 0.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [1.0, 1.0, 1.0]
+
+# The sun's spectrum as scene data rather than something the renderer invents.
+# ASTM G-173: column 4 is the direct beam, column 3 the global irradiance,
+# which includes it. Without this the reflective bands have nothing to reflect
+# -- the thermal desert config this one descends from zeroes both radiances
+# because its forcing CSV owns the sun, which is correct for a solver-driven
+# LWIR render and renders VIS, NIR and SWIR black.
+solar_lut = "assets/luts/astmg173.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
 atmosphere_temperature_k = 313.0
 
 [material]

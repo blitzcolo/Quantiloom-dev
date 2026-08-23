@@ -57,14 +57,23 @@ def linear_agc(image, low=0.5, high=99.5):
 
 
 def srgb(image):
-    """Linear radiance to display, exposure-normalised then gamma-encoded."""
+    """Linear radiance to display, exposure-normalised then gamma-encoded.
+
+    A spectral renderer writing to sRGB primaries produces negative components
+    wherever a spectrum falls outside the sRGB gamut -- about 0.7 % of pixels
+    here, on the saturated paint and sand. That is gamut clipping, not negative
+    radiance, so it is clamped for display and counted for the caption rather
+    than quietly folded into a reported range.
+    """
     rgb = image[..., :3]
+    out_of_gamut = float((rgb < 0.0).any(axis=-1).mean())
     scale = np.percentile(rgb, 99.5)
     if scale <= 0:
         scale = 1.0
     linear = np.clip(rgb / scale, 0.0, 1.0)
-    return np.where(linear <= 0.0031308, 12.92 * linear,
-                    1.055 * np.power(linear, 1 / 2.4) - 0.055)
+    display = np.where(linear <= 0.0031308, 12.92 * linear,
+                       1.055 * np.power(linear, 1 / 2.4) - 0.055)
+    return display, out_of_gamut
 
 
 def main():
@@ -88,10 +97,15 @@ def main():
             continue
         image = read_exr(path)
         if band["band"] == "VIS":
-            display, span = srgb(image), (float(image.min()), float(image.max()))
+            display, out_of_gamut = srgb(image)
+            rgb = image[..., :3]
+            span = (max(0.0, float(rgb.min())), float(rgb.max()))
+            note = (band["display"] +
+                    (f", {out_of_gamut:.1%} out of gamut" if out_of_gamut > 0.001 else ""))
         else:
             display, span = linear_agc(image)
-        panels.append((band["band"], display, span, band["display"]))
+            note = band["display"]
+        panels.append((band["band"], display, span, note))
 
     if not panels:
         raise SystemExit("no panels rendered")
