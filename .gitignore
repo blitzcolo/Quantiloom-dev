@@ -113,6 +113,7 @@ assets/spectral/ecospeclib-all/
 
 # Cached reference and test renders from measure_convergence.py
 /_convergence/
+/_convergence_t3/
 
 # ============================================================================
 # Manually-fetched third-party source
