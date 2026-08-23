@@ -1,0 +1,7 @@
+# A flat Lambertian reflectance of 0.7, spanning every band the renderer
+# integrates. Used by the cross-renderer validation scenes, where both
+# renderers must be given the same reflectance as data rather than each
+# deriving one from its own conventions.
+# wavelength_nm, reflectance
+300, 0.7
+15000, 0.7

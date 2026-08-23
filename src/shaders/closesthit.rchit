@@ -2626,17 +2626,38 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // This enables physically-accurate spectral rendering.
             // One endmember and no weight texture is the single flat curve.
             spectralAlbedo = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
+        } else if (lambda > SPECTRAL_VIS_LAMBDA_MAX) {
+            // Past the fitted band a base colour says nothing, but the
+            // material's own IR emissivity does, and Kirchhoff turns it into a
+            // reflectance: rho = 1 - eps - tau. This is the same expression
+            // NIR, SWIR, MWIR and LWIR use for the same material, through
+            // GetAngleDependentIRReflectance.
+            //
+            // It used to be zero here, which made the mode selector choose the
+            // material model rather than the integration domain: one surface
+            // with one emissivity curve reflected 0.7 in swir_fused and 0.0 in
+            // single at the same 2000 nm, and nothing said so -- the
+            // sRGB-upsampling gate does not fire, because the material *has*
+            // spectral data, just not of the kind this branch was looking for.
+            // A black surface is a physical claim, and it was the quantitative
+            // mode making it.
+            //
+            // No angle dependence, deliberately: the fused bands apply it
+            // around a band-averaged emissivity, and adding a second
+            // convention here would be a third answer rather than agreement
+            // with the second. A material carrying no IR data at all lands on
+            // GetEffectiveIREmissivity's metallic heuristic, which is again
+            // what the fused bands do -- and ResolveMaterialSpectra has
+            // already warned about that material by the time a ray is traced.
+            spectralAlbedo = saturate(1.0 - GetEffectiveIREmissivity(material)
+                                          - material.irTransmittance);
         } else {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
             // WARNING: This path does NOT guarantee physical accuracy
             // For quantitative rendering, materials MUST have measured spectral curves
-            // Admitted only inside the visible band, by the same rule the
-            // sheen term below already followed. This mode renders at whatever
-            // wavelength it is pointed at; past 780 nm the fit has nothing to
-            // say and the clamp would return the red end as though it did.
-            spectralAlbedo = (lambda <= SPECTRAL_VIS_LAMBDA_MAX)
-                ? RgbSpectrumAt(sBase, lambda)
-                : 0.0;
+            // Inside the visible band this is exactly what VIS_FUSED does at
+            // each of its 32 wavelengths, so the two modes agree here too.
+            spectralAlbedo = RgbSpectrumAt(sBase, lambda);
         }
 
         // 1b. Sheen at this wavelength. This mode renders at whatever wavelength

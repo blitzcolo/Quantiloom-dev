@@ -1,0 +1,79 @@
+# Open-sky equivalence check, SWIR.
+#
+# One unobstructed ground plane. Every environment bounce ray escapes to the
+# sky, so the radiance it brings back IS the analytic base the wavelength loop
+# already reflected, and the traced correction is identically zero -- not small,
+# zero. The render therefore has to equal the closed-form Lambertian answer
+#
+#     L(lambda) = rho(lambda) * ( E_sun(lambda)/pi * cos(theta) + E_sky(lambda)/pi )
+#
+# to floating point, at any spp.
+#
+# That exactness is the point. The bounce was added as a CORRECTION to the
+# analytic sky term rather than as a replacement for it, and the failure mode of
+# getting that wrong -- adding traced sky light on top of analytic sky light --
+# doubles the ambient term in every open scene. A test that tolerated Monte
+# Carlo noise would not notice until the error was large; this one has no noise
+# to hide in.
+#
+# Sun at 53 deg elevation, plane facing up, so cos(theta) = 0.8 exactly.
+#
+# Geometry: python scripts/utils/generate_shadow_scene.py
+# Check:    python scripts/render-tests/check_sky_equiv.py skyequiv_swir_output.exr
+
+[renderer]
+resolution = [256, 256]
+spp = 16
+output = "renders/validation/e1_furnace_single2000.exr"
+
+[spectral]
+mode = "single"
+wavelength_nm = 2000.0
+band = "SWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+solar_lut = "assets/luts/flat_sky_only.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
+
+# Reflectance as data, not as a derivation. Bound explicitly because the two
+# modes do not agree without it: swir_fused falls back to rho = 1 - epsilon
+# from the material's emissivity curve, while single falls back to RGB
+# upsampling, which is refused past 780 nm and renders black. Binding the curve
+# is what the cross-renderer protocol requires anyway -- both renderers are
+# given the same reflectance rather than each deriving one.
+[spectral_curves]
+"shadow_scene_open" = "H:/Quantiloom-dev/assets/luts/flat_reflectance_070.csv"
+
+# Pure Lambert. A glTF material with no KHR_materials_specular still gets the
+# dielectric default F0 = 0.04, so the surface carries a GGX lobe alongside the
+# diffuse one and returns about 4% less than the Lambertian closed form -- which
+# is energy Mitsuba's `diffuse` BSDF does not have either. Writing specular = 0
+# is an instruction rather than an absence: it zeroes F0 and F90 both.
+[material_overrides."shadow_scene_open"]
+specular = 0.0
