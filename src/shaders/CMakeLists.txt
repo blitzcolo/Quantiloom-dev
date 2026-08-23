@@ -85,6 +85,18 @@ endif()
 # Inline ray query needs SM 6.5; everything else stays on the byte-stable 6.0
 set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 
+# A .spv depends on the flags it was compiled with as much as on its source, and
+# add_custom_command cannot see a flag change: flipping the option above leaves
+# every previously built .spv newer than its inputs, so nothing recompiles and
+# the next measurement silently runs the old shader. That is not hypothetical --
+# it made both arms of the Section VIII-B A/B return bit-identical numbers.
+# A stamp whose *content* is the flag set gives the dependency something to
+# notice; file(CONFIGURE) rewrites it only when the content actually differs, so
+# an unchanged configure still costs nothing.
+set(SHADER_FLAGS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/shader_flags.stamp")
+file(CONFIGURE OUTPUT "${SHADER_FLAGS_STAMP}"
+     CONTENT "RT=${DXC_RT_FLAGS}\nCOMP=${DXC_COMP_FLAGS}\nRQ=${DXC_RQ_FLAGS}\n")
+
 set(COMPILED_SHADERS)
 
 # Compile one HLSL source to one .spv. Several compute sources produce more
@@ -103,7 +115,7 @@ function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
     add_custom_command(
         OUTPUT ${SHADER_OUTPUT}
         COMMAND ${DXC_EXECUTABLE} ${FLAGS} ${ARGN} -Fo ${SHADER_OUTPUT} ${SHADER_SOURCE}
-        DEPENDS ${SHADER_SOURCE} ${SHADER_HEADERS}
+        DEPENDS ${SHADER_SOURCE} ${SHADER_HEADERS} ${SHADER_FLAGS_STAMP}
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         COMMENT "Compiling shader: ${OUT_NAME}"
         VERBATIM

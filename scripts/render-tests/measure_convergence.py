@@ -119,10 +119,11 @@ def render(cli, config_text, work, tag, *, resolution, spp, seed):
     # and the child inherits it -- a Windows binary cannot resolve a WSL path.
     rel_exr = exr.relative_to(REPO).as_posix()
     cfg.write_text(patch_config(config_text, resolution=resolution, spp=spp,
-                                seed=seed, output=rel_exr))
+                                seed=seed, output=rel_exr), encoding="utf-8")
 
     proc = subprocess.run([str(cli), cfg.relative_to(REPO).as_posix()],
-                          cwd=REPO, capture_output=True, text=True)
+                          cwd=REPO, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
     log = proc.stdout + proc.stderr
     if log.count("Saved spectral image") != 1:
         if GPU_ABSENT.search(log):
@@ -160,7 +161,11 @@ def main():
     if not config.exists():
         print(f"ERROR: {config} not found", file=sys.stderr)
         sys.exit(1)
-    config_text = config.read_text()
+    # Explicit UTF-8 both ways. Python takes its default from the locale, which
+    # on a Chinese-locale Windows is GBK, and the configs in this repo carry
+    # non-ASCII punctuation in their comments -- so the default decodes them as
+    # a UnicodeDecodeError rather than as a config.
+    config_text = config.read_text(encoding="utf-8")
 
     work = pathlib.Path(args.work_dir)
     work.mkdir(parents=True, exist_ok=True)

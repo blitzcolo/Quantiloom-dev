@@ -22,6 +22,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import pathlib
 import re
@@ -30,6 +31,7 @@ import sys
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e1b")
+WORK = REPO / "_convergence_t3" / "e1b"
 CONFIG = "assets/configs/cornell_box_vis.toml"
 OPTION = "QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE"
 
@@ -42,20 +44,47 @@ def wsl(command, timeout=1800):
                           errors="replace", timeout=timeout)
 
 
+def digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:12] if path.is_file() else None
+
+
 def set_option(enabled):
-    """Reconfigure and rebuild the shaders with the sampler option set."""
+    """Reconfigure, recompile the shaders, and put them where the CLI looks.
+
+    Building `CompileShaders` alone is not enough and the failure is silent.
+    DXC writes the .spv into `src/shaders/`, and it is the CLI's own target that
+    copies them next to the executable; without that step the renderer keeps
+    loading the previous build's shaders and both arms of this A/B return
+    bit-identical numbers, which is what happened the first time it was run.
+    """
     value = "ON" if enabled else "OFF"
     result = wsl(f"cmake.exe -S . -B build -D{OPTION}={value} >/dev/null 2>&1 && "
                  f"cmake.exe --build build --config Release "
-                 f"--target CompileShaders CompileComputeShaders -j")
+                 f"--target CompileShaders CompileComputeShaders Quantiloom -j")
     if result.returncode != 0:
         print(result.stdout + result.stderr, file=sys.stderr)
         raise SystemExit(f"failed to build shaders with {OPTION}={value}")
-    print(f"  shaders rebuilt with {OPTION}={value}", flush=True)
+
+    # Assert what the comment above explains, so this can never again be
+    # discovered by two arms agreeing to the last digit.
+    source = REPO / "src" / "shaders" / "raygen.spv"
+    deployed = REPO / "build" / "src" / "app" / "Release" / "raygen.spv"
+    if digest(source) != digest(deployed):
+        raise SystemExit(
+            f"the CLI's shaders are not the ones just built "
+            f"({digest(source)} in src/shaders, {digest(deployed)} beside the exe) "
+            f"-- the copy step did not run, and any measurement from here is void")
+    print(f"  shaders rebuilt and deployed with {OPTION}={value} "
+          f"(raygen {digest(source)})", flush=True)
 
 
-SPP_LINE = re.compile(r"(\d+)\s+spp.*?([\d.]+)\s*%")
-ESTIMATE = re.compile(r"(?:reach|below)\D*([\d.]+)\s*%[^\n]*?(\d[\d,]*)\s*spp", re.I)
+# The instrument prints a fixed-width table, "     64     5.6128%     0.4490",
+# and one summary line, "spp for 2.0% rel RMSE: 504". Neither of the patterns
+# these replaced matched either of those, so both arms recorded an empty row
+# list and no estimate -- which is why the run reported nothing rather than
+# reporting a wrong number.
+SPP_LINE = re.compile(r"^\s*(\d+)\s+([\d.]+)%\s+([\d.]+)", re.M)
+ESTIMATE = re.compile(r"spp for\s+([\d.]+)\s*%[^\n:]*:\s*(\d[\d,]*)", re.I)
 
 
 def measure(label, args):
@@ -65,7 +94,12 @@ def measure(label, args):
                "--resolution", str(args.resolution), "--target-rmse", str(args.target_rmse),
                # A fresh reference per arm would compare each arm against its own
                # noise. Both arms share one, which is why the work dir is shared.
-               "--work-dir", str(EVIDENCE / "work")]
+               #
+               # It has to live inside this repository: the renders are written
+               # by the Windows CLI, whose cwd is the repo root, and the
+               # instrument refuses a path it cannot hand that binary. Only the
+               # summary crosses into the manuscript's evidence tree.
+               "--work-dir", str(WORK)]
     print(f"  measuring [{label}] ...", flush=True)
     result = subprocess.run(command, cwd=REPO, capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=14400)
@@ -74,8 +108,12 @@ def measure(label, args):
         print(result.stderr[-2000:], file=sys.stderr)
         raise SystemExit(f"convergence measurement failed for {label}")
 
-    rows = [{"spp": int(m.group(1)), "rel_rmse_pct": float(m.group(2))}
+    rows = [{"spp": int(m.group(1)), "rel_rmse_pct": float(m.group(2)),
+             "rmse_root_spp": float(m.group(3))}
             for m in SPP_LINE.finditer(result.stdout)]
+    if not rows:
+        raise SystemExit(f"parsed no convergence rows for {label}; the instrument's "
+                         f"table format has moved and the patterns above must follow it")
     estimate = ESTIMATE.search(result.stdout)
     return {
         "arm": label,
