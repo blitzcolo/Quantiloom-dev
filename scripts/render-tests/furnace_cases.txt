@@ -1,0 +1,39 @@
+# The furnace cavities, one per line: <band> <case>.
+#
+# This list is data rather than code because two runners read it -- the bash
+# suite that build_wsl.sh calls and the PowerShell one that build_windows.ps1
+# calls -- and a cavity added to one runner but not the other would be a gate
+# that passes on one machine and is simply absent on the other.
+#
+# Each line names assets/configs/furnace_<band>_<case>.toml and expects
+# furnace_<band>_<case>_output.exr.
+#
+# An isothermal cavity must return B(T) from every direction and for every
+# emissivity -- Kirchhoff, with no free parameters. That makes these the only
+# renders in the repo with an answer known in advance, and the only ones that
+# can fail on their own rather than by comparison with a previous run.
+#
+# The pairing is the useful part: an LWIR cavity and an MWIR one differing only
+# in a band that adds a solar term, so a failure on one side and not the other
+# says where to look.
+#
+# Two LWIR-only cavities cover what the grey ones cannot, and both are LWIR
+# because quartz's reststrahlen band is -- a flat curve would test neither:
+#
+#   spectral  measured quartz emissivity. Fails if eps(lambda) and the incident
+#             radiance are evaluated at different wavelengths -- invisible to a
+#             grey wall, where rho_bar*L_bar and <rho*L> are the same number,
+#             and 1.15% here.
+#   specular  the same wall at roughness 0.2, which routes the bounce through
+#             the GGX lobe. Every other cavity is roughness 1, so nothing else
+#             here weights a specular sample; getting that weight wrong reads
+#             8.8% low.
+
+lwir e1
+lwir e05
+lwir rho1
+lwir spectral
+lwir specular
+mwir e1
+mwir e05
+mwir rho1

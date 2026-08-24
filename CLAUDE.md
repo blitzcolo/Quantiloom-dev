@@ -22,10 +22,24 @@ drive the Visual Studio generator. Run everything from the repo root.
 Quantiloom-Qt frontend links against. It takes minutes — use a 600000 ms timeout and
 never interrupt it mid-install.
 
-Two gates run before the install, so neither a red suite nor an unreviewed ABI
-change can reach the SDK: the test suite, then `scripts/check_exports.sh` against
-`docs/abi/*.golden`. The export gate prints what to do when it trips; `src/libQuantiloom/CLAUDE.md`
-has the rule it enforces.
+Four gates run before the install, so nothing red reaches the SDK: the test
+suite, `scripts/check_exports.sh` against `docs/abi/*.golden`, the furnace
+cavities, and the illumination suite. The export gate prints what to do when it
+trips; `src/libQuantiloom/CLAUDE.md` has the rule it enforces.
+
+**The Windows path is `./build_windows.ps1` then `./install_windows.ps1`, and it
+must stay equivalent.** Both paths install the same SDK to the same prefix and
+Quantiloom-Qt cannot tell which produced it, so a gate added to one belongs in
+the other. The gates are *ported*, not wrapped: a Windows build machine has MSVC
+and CMake and need not have bash or WSL, so `check_exports.ps1` and the two
+`run_*_suite.ps1` are PowerShell reimplementations of their `.sh` twins. What is
+shared rather than duplicated: the furnace cavity list (`furnace_cases.txt`, read
+by both runners) and every checker in `scripts/render-tests/*.py`, which own all
+the thresholds. Those stay Python because they are the measurement — Planck
+integrals and RMSE over EXR images — and Python is portable in a way bash is not.
+`build_windows.ps1` writes `build/.gates-passed.json`, and `install_windows.ps1`
+refuses without it (`-Force` overrides), since two scripts cannot enforce an
+order between themselves the way one script's `set -e` does.
 
 ## Tests
 

@@ -7,20 +7,33 @@
 # install_windows.ps1` published a red build, an unreviewed export surface and
 # an unrendered physics suite into the SDK without a word.
 #
-# The gates themselves are not reimplemented here. They are the same three shell
-# scripts build_wsl.sh calls, run through Git Bash, so there is one definition of
-# each check rather than two that drift.
-#
 #   ./build_windows.ps1        build + gates
 #   ./install_windows.ps1      install, refuses unless the gates passed
 #
-# Two prerequisites this needs and WSL supplies for free:
-#   * a POSIX shell -- Git for Windows
-#   * a Python with numpy and OpenEXR, for the render gates' checkers. Point
-#     $env:QUANTILOOM_PYTHON at one if it is not on PATH. Without it the render
-#     gates are SKIPPED, loudly, and the stamp records that they were.
+# Dependencies are MSVC, CMake and PowerShell -- no POSIX shell, and no WSL.
+# The gates are PowerShell ports of the shell scripts build_wsl.sh calls, not
+# wrappers around them: a Windows build machine need not have bash, so a gate
+# reachable only through bash is a gate that silently does not run.
+#
+# The one thing not ported is the render gates' checkers, which stay Python.
+# They compute band-integrated Planck radiance, RMSE and region statistics over
+# EXR images with numpy and OpenEXR behind them; that is the measurement itself,
+# not shell glue, and reimplementing it in PowerShell would be rewriting the
+# thing under test. Python is a portable dependency, unlike bash -- point
+# $env:QUANTILOOM_PYTHON at an interpreter that has numpy and OpenEXR if the
+# one on PATH does not. Without it the render gates are SKIPPED, loudly, and
+# the stamp records that they were.
 
 $ErrorActionPreference = "Stop"
+
+# Native commands here are read by their exit code, not by whether they wrote to
+# stderr: the render gates distinguish 3 (no GPU, a skip) from 1 (a real
+# failure), and the checkers report through stdout while exiting non-zero. If
+# $PSNativeCommandUseErrorActionPreference is left $true -- it is $false by
+# default but a profile can set it -- a non-zero exit throws before the code
+# below can look at it, and "this machine has no RTX card" becomes "the build
+# failed". Pinned rather than assumed.
+$PSNativeCommandUseErrorActionPreference = $false
 $SourceDir = $PSScriptRoot
 $BuildDir  = Join-Path $SourceDir "build"
 Set-Location $SourceDir
@@ -42,37 +55,17 @@ if (Test-Path $CacheFile) {
     }
 }
 
-# --- Helpers -----------------------------------------------------------------
-
 function Assert-ExitZero([string]$What) {
     if ($LASTEXITCODE -ne 0) { throw "$What failed (exit $LASTEXITCODE)" }
 }
 
-# The gates live in bash. Git for Windows ships one; prefer bin\bash.exe, which
-# sets up the MSYS environment, over usr\bin\bash.exe.
-function Find-Bash {
-    if ($env:QUANTILOOM_BASH) { return $env:QUANTILOOM_BASH }
-    $onPath = Get-Command bash.exe -ErrorAction SilentlyContinue |
-        Where-Object { $_.Source -notlike "*\WindowsApps\*" -and $_.Source -notlike "*\System32\*" } |
-        Select-Object -First 1
-    if ($onPath) { return $onPath.Source }
-    foreach ($c in @("$env:ProgramFiles\Git\bin\bash.exe",
-                     "${env:ProgramFiles(x86)}\Git\bin\bash.exe")) {
-        if (Test-Path $c) { return $c }
-    }
-    # System32\bash.exe is the WSL launcher, not a Windows bash: it would run the
-    # gates against the WSL filesystem view and a different toolchain. Refusing is
-    # clearer than silently building somewhere else.
-    throw "no Git Bash found. Install Git for Windows, or set `$env:QUANTILOOM_BASH."
-}
-
 # The render gates' checkers import numpy and OpenEXR. `python3` on a stock
-# Windows is a Microsoft Store stub that imports nothing, so the interpreter is
+# Windows is a Microsoft Store stub that imports neither, so the interpreter is
 # probed rather than assumed.
 function Find-Python {
     $candidates = @()
     if ($env:QUANTILOOM_PYTHON) { $candidates += $env:QUANTILOOM_PYTHON }
-    $candidates += @("python", "python3")
+    $candidates += @("python", "python3", "py")
     foreach ($c in $candidates) {
         $exe = (Get-Command $c -ErrorAction SilentlyContinue | Select-Object -First 1)
         if (-not $exe) { continue }
@@ -81,9 +74,6 @@ function Find-Python {
     }
     return $null
 }
-
-$Bash = Find-Bash
-Write-Host "bash:   $Bash"
 
 # --- Configure ---------------------------------------------------------------
 # QUANTILOOM_BUILD_TESTS is passed explicitly, not left to its default, because
@@ -116,7 +106,7 @@ Assert-ExitZero "test gate"
 # --- ABI gate ----------------------------------------------------------------
 # The export table is the SDK's contract with Quantiloom-Qt, and it drifts
 # quietly: a new class picks up QL_API by habit and is public forever.
-& $Bash "./scripts/check_exports.sh"
+& "$SourceDir\scripts\check_exports.ps1"
 Assert-ExitZero "ABI gate"
 
 # --- Physics gates -----------------------------------------------------------
@@ -133,9 +123,9 @@ $RenderGates = "run"
 if ($Python) {
     Write-Host "python: $Python"
     $env:PYTHON = $Python
-    foreach ($gate in @(@{Name = "physics"; Script = "./scripts/render-tests/run_furnace_suite.sh"},
-                        @{Name = "illumination"; Script = "./scripts/render-tests/run_illumination_suite.sh"})) {
-        & $Bash $gate.Script
+    foreach ($gate in @(@{Name = "physics"; Script = "scripts\render-tests\run_furnace_suite.ps1"},
+                        @{Name = "illumination"; Script = "scripts\render-tests\run_illumination_suite.ps1"})) {
+        & (Join-Path $SourceDir $gate.Script)
         if ($LASTEXITCODE -eq 3) {
             Write-Warning "$($gate.Name) gate skipped, no GPU on this machine"
             $RenderGates = "skipped: no GPU"
@@ -156,9 +146,17 @@ if ($Python) {
 # enforce an order between themselves the way build_wsl.sh's single `set -e`
 # does, so the ordering is recorded instead of assumed.
 $Dll = Join-Path $BuildDir "src\libQuantiloom\Release\Quantiloom.dll"
+# git is not a build dependency -- a release tarball has no .git and a build
+# machine need not have the client -- so the commit is recorded when it can be
+# and left null when it cannot, rather than throwing here.
+$commit = $null
+if (Get-Command git -ErrorAction SilentlyContinue) {
+    $commit = (& git rev-parse HEAD 2>$null)
+    if ($LASTEXITCODE -ne 0) { $commit = $null }
+}
 $stamp = [ordered]@{
     utc          = (Get-Date).ToUniversalTime().ToString("o")
-    commit       = (& git rev-parse HEAD 2>$null)
+    commit       = $commit
     dllWriteUtc  = (Get-Item $Dll).LastWriteTimeUtc.ToString("o")
     tests        = "passed"
     abi          = "passed"
