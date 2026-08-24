@@ -30,7 +30,14 @@ What is compared, and the error budget it sits in:
             wavelength; Mitsuba integrates a narrow boxcar around it.
 
 Usage:
-    run_e3_cornell.py --out-dir evidence/e3
+    run_e3_cornell.py --out-dir <paper>/evidence/e1/cornell
+
+The output directory is e1/cornell, not e3: "e3" here is the third scene of the
+cross-renderer batch, while evidence/e3/ is Section VIII-G's convergence work,
+and the two wrote files into one directory under different meanings of the same
+token. They diverged -- a Cornell run landed in e1/cornell while e3/ kept an
+older one, and the tracked copy was the stale one, disagreeing with the
+manuscript it was evidence for.
 """
 
 import argparse
