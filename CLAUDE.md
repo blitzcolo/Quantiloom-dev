@@ -43,7 +43,7 @@ order between themselves the way one script's `set -e` does.
 
 ## Tests
 
-1125 tests run in ~4 s, and the binary reruns without rebuilding. They link the
+1279 tests run in ~9 s, and the binary reruns without rebuilding. They link the
 objects, not the DLL, so internal code is testable without being exported.
 
 ```bash
