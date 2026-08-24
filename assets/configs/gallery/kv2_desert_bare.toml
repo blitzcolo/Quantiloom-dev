@@ -1,5 +1,5 @@
 # ============================================================================
-# Gallery scene -- a KV-2 on the desert plain, LWIR (PAINTED)
+# Gallery scene -- a KV-2 on the desert plain, LWIR (UNPAINTED)
 # ============================================================================
 # The cross-band figure of Section VIII-F. One asset, one camera, one set of
 # measured spectra, rendered in five bands by overriding `spectral.mode` and
@@ -16,13 +16,43 @@
 #           scripts/utils/merge_gltf_scene.py --scale 5.298 --translate 0 1.542 0
 # The scale makes the hull 6.75 m long, which is a KV-2; the lift puts its
 # tracks on the ground rather than in it.
+#
+# THE UNPAINTED COUNTERPART of kv2_desert_lwir.toml. Same geometry, same camera,
+# same sun, same prescribed temperatures; the hull and turret bind bare
+# galvanised steel instead of olive paint, and are metals rather than
+# dielectrics. Tracks and wheels are untouched -- steel track and rubber tyres
+# are not painted on the real vehicle either.
+#
+# "Paint" here is not a coating layer. The renderer has KHR_materials_clearcoat
+# and this scene does not use it: what is bound is a measured
+# directional-hemispherical reflectance of a PAINTED PANEL, so the coat is
+# already inside the measurement. Removing it therefore means binding a
+# different measured material, not switching a layer off -- which is why this is
+# a separate config rather than a flag.
+#
+# What the pair shows, from the measurements alone (rho, with eps in brackets):
+#
+#            paint 0407      bare steel 0525b
+#   VIS      0.165 (0.84)    0.286 (0.71)
+#   NIR      0.747 (0.25)    0.234 (0.77)     <- olive drab is engineered for this
+#   SWIR     0.487 (0.51)    0.530 (0.47)
+#   MWIR     0.107 (0.89)    0.471 (0.53)
+#   LWIR     0.052 (0.95)    0.380 (0.62)     <- and this
+#
+# The NIR row is why military paint is the colour it is: it holds a high
+# near-infrared reflectance so the vehicle sits with vegetation rather than
+# against it, and bare steel does not. The LWIR row is the one worth stating
+# carefully in a caption -- both tanks are at the SAME prescribed temperature,
+# and the painted one still radiates half as much again, because emissivity is
+# what converts a temperature into a signal. A thermal camera reads that as a
+# colder tank, not a shinier one.
 # ============================================================================
 
 [renderer]
 resolution = [1600, 900]
 spp = 512
 seed = 21628                      # 0x547C, the project's default sampling seed
-output = "renders/gallery/kv2_lwir.exr"
+output = "renders/gallery/kv2_bare_lwir.exr"
 
 [spectral]
 mode = "lwir_fused"
@@ -144,7 +174,7 @@ spectral_material_type = "quantiloom_merged"
 # because wood is a dielectric whose emissivity is close to the paint's, so
 # where the coat is thin the substrate behaves like more paint -- whereas
 # aluminium behaves like a mirror, in the one band this scene exists to show.
-spectral_material_ref = "Olive green paint (0407UUUPNT)"
+spectral_material_ref = "Galvanized Steel Metal (0525UUUSTLb)"
 
 [[materials]]
 name = "turret"
@@ -153,7 +183,7 @@ name = "turret"
 # looks like to a spectrometer. 0408 is the two-coat sample to the hull's one.
 ir_temperature_k = 324.0
 spectral_material_type = "quantiloom_merged"
-spectral_material_ref = "Olive green paint (0408UUUPNT)"
+spectral_material_ref = "Galvanized Steel Metal (0525UUUSTLb)"
 
 [[materials]]
 name = "track"
@@ -191,11 +221,13 @@ spectral_material_ref = "Black unspecified rubber (0833UUURBR)"
 #
 # Overridden here rather than edited into the glTF: the asset is a conversion
 # and should keep saying what it was converted from.
+# Bare steel is a metal, so its measured hemispherical reflectance goes in as
+# F0 rather than as a diffuse albedo -- the opposite of the painted config.
 [material_overrides.hull]
-metallic = 0.0
+metallic = 1.0
 
 [material_overrides.turret]
-metallic = 0.0
+metallic = 1.0
 
 [material_overrides.wheels]
 metallic = 0.0
