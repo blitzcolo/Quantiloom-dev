@@ -14,83 +14,113 @@ import numpy as np
 
 from usgs_loader import MaterialData
 
-# Descriptions from Kotthaus et al. 2014 Table C.1.
-# Key = sample ID, value = (short description, material category).
+# Sample descriptions, transcribed from the LUMA SLUM documentation PDF:
+#   https://urban-meteorology-reading.github.io/other%20files/LUMA_SLUM.pdf
+# which gives Class / Material / Colour / Status / Dimension for each of the 74
+# samples. Key = sample ID, value = (description, material category); the
+# trailing comment is the manual's Material field, kept because it distinguishes
+# samples the Colour and Class fields do not.
+#
+# These were WRONG until 2026-08-24, and wrong in a way worth recording. The
+# previous table claimed the same source and did not come from it: it called
+# B003 "Red brick, smooth" where the manual says black cement brick, and called
+# X001-X003 "Grass" and "Soil" where they are quartzite conglomerate. Three
+# independent checks agree with the manual and against it -- Kotthaus et al.
+# (2014) say in the text "the black cement brick (B006) has a constantly low
+# reflectance" and give a class table in which G is Granite, and the measured
+# spectra themselves match the manual's colours in 25 of the 26 brick and
+# roofing-tile samples. The exception is R001, whose manual entry reads Black
+# while its short-wave reflectance is a strong red; that one disagreement is the
+# data's, not this table's, and it is left as the manual has it.
+#
+# The names matter because a scene binds a material BY NAME through
+# spectral_material_ref -- so a wrong name here is not a cosmetic slip, it hands
+# the renderer a different measurement than the one that was asked for.
 SAMPLE_INFO: Dict[str, tuple] = {
-    "A001": ("Dark new asphalt, road", "asphalt"),
-    "A002": ("Medium grey asphalt, road", "asphalt"),
-    "A003": ("Dark grey asphalt, road", "asphalt"),
-    "A004": ("Aged dark asphalt, pavement", "asphalt"),
-    "A005": ("Grey asphalt, pavement", "asphalt"),
-    "A006": ("Black asphalt, fresh patch", "asphalt"),
-    "A007": ("Dark asphalt, road surface", "asphalt"),
-    "A008": ("Grey asphalt, kerb", "asphalt"),
-    "A009": ("Weathered asphalt, car park", "asphalt"),
-    "A010": ("Grey asphalt, car park", "asphalt"),
-    "B001": ("Yellow London stock brick", "brick"),
-    "B002": ("Dark engineering brick", "brick"),
-    "B003": ("Red brick, smooth", "brick"),
-    "B004": ("Cream rendered wall", "brick"),
-    "B005": ("Light brown brick", "brick"),
-    "B006": ("White painted brick", "brick"),
-    "B007": ("Yellow painted brick", "brick"),
-    "B008": ("White painted render", "brick"),
-    "B009": ("Buff brick", "brick"),
-    "B010": ("Light grey mortar", "brick"),
-    "B011": ("Dark brown brick", "brick"),
-    "B012": ("Red-brown brick", "brick"),
-    "B013": ("Light render, pebbledash", "brick"),
-    "B014": ("Cream brick", "brick"),
-    "C001": ("Grey concrete, precast", "concrete"),
-    "C002": ("Pale grey concrete, paving", "concrete"),
-    "C003": ("Dark grey concrete, paving", "concrete"),
-    "C004": ("Light grey concrete, kerb", "concrete"),
-    "C005": ("Weathered concrete, wall", "concrete"),
-    "C006": ("Light concrete, paving", "concrete"),
-    "C008": ("Dark concrete, block", "concrete"),
-    "G001": ("York stone, paving", "stone"),
-    "G002": ("Pale sandstone, wall", "stone"),
-    "G003": ("Portland stone, wall", "stone"),
-    "G004": ("White quartzite, chippings", "stone"),
-    "G005": ("Grey granite, kerb", "stone"),
-    "L001d": ("Dark slate, roof", "slate"),
-    "L001u": ("Slate underside, roof", "slate"),
-    "L002": ("Grey fibre cement, roof", "slate"),
-    "L003": ("Fibre cement sheet", "slate"),
-    "R001": ("Red clay roof tile", "roof_tile"),
-    "R002": ("Dark red clay tile", "roof_tile"),
-    "R003": ("Orange clay pantile", "roof_tile"),
-    "R004": ("Brown clay tile", "roof_tile"),
-    "R005": ("Dark brown concrete tile", "roof_tile"),
-    "R006": ("Grey concrete tile", "roof_tile"),
-    "R007": ("Red-brown concrete tile", "roof_tile"),
-    "R008": ("Brown concrete tile", "roof_tile"),
-    "R009": ("Dark concrete tile", "roof_tile"),
-    "R010": ("Terracotta ridge tile", "roof_tile"),
-    "R012": ("Weathered clay tile", "roof_tile"),
-    "R013": ("Light grey concrete tile", "roof_tile"),
-    "S001": ("Natural Welsh slate", "slate"),
-    "S002": ("Dark grey slate", "slate"),
-    "S003": ("Grey-green slate", "slate"),
-    "S004": ("Fibre cement slate", "slate"),
-    "S005": ("Grey fibre cement", "slate"),
-    "V001": ("PVC membrane, lead grey", "pvc"),
-    "V002": ("PVC membrane, light grey", "pvc"),
-    "V003": ("PVC membrane, copper brown", "pvc"),
-    "V004": ("PVC membrane, sky blue", "pvc"),
-    "V005": ("PVC membrane, verdigris", "pvc"),
-    "V006": ("PVC membrane, dark grey", "pvc"),
-    "X001": ("Grass, dry cut", "miscellaneous"),
-    "X002": ("Grass, green", "miscellaneous"),
-    "X003": ("Soil, dark brown", "miscellaneous"),
-    "Z001": ("Aluminium sheet, bright", "metal"),
-    "Z002": ("Aluminium sheet, embossed", "metal"),
-    "Z003": ("Painted metal, white", "metal"),
-    "Z004": ("Painted metal, dark green", "metal"),
-    "Z005": ("Painted metal, slate grey", "metal"),
-    "Z006": ("Weathered iron, corrugated", "metal"),
-    "Z007": ("Lead sheet, weathered", "metal"),
-    "Z008": ("Zinc-aluminium sheet", "metal"),
+    # --- Asphalt ---
+    "A001": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A002": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A003": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A004": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A005": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A006": ("Black/grey road asphalt, weathered", "asphalt"),                # Asphalt with stone aggregate
+    "A007": ("Grey asphalt roofing, new", "asphalt"),                         # Asphalt roofing shingle with slate chippings
+    "A008": ("Black road asphalt, weathered", "asphalt"),                     # Tarmac
+    "A009": ("Black road asphalt, weathered", "asphalt"),                     # Tarmac
+    "A010": ("Black road asphalt, weathered", "asphalt"),                     # Tarmac
+    # --- Brick ---
+    "B001": ("Yellow cement brick, new", "brick"),                            # Cement
+    "B002": ("Black/light grey cement brick, new, sandy", "brick"),           # Cement
+    "B003": ("Black cement brick, new", "brick"),                             # Cement
+    "B004": ("Red ceramic brick, weathered", "brick"),                        # Ceramic with cement
+    "B005": ("Red cement brick, weathered", "brick"),                         # Cement
+    "B006": ("Black cement brick, sandy", "brick"),                           # Cement
+    "B007": ("Light red cement brick, new", "brick"),                         # Cement
+    "B008": ("Light red ceramic brick, new", "brick"),                        # Ceramic
+    "B009": ("Red cement brick, weathered", "brick"),                         # Cement
+    "B010": ("Red with beige and grey paint ceramic brick, weathered", "brick"),# Ceramic with paint
+    "B011": ("Red/grey ceramic brick, weathered", "brick"),                   # Ceramic brick with cement
+    "B012": ("Red with white paint ceramic brick, weathered", "brick"),       # Ceramic brick with paint
+    "B013": ("Red ceramic brick, weathered", "brick"),                        # Ceramic brick
+    "B014": ("Yellow/grey ceramic brick, weathered", "brick"),                # Ceramic brick
+    # --- Concrete and cement ---
+    "C001": ("Grey/ochre cement, weathered", "concrete"),                     # Cement
+    "C002": ("Grey/white concrete, new", "concrete"),                         # Concrete with small aggregate
+    "C003": ("Grey cement, weathered", "concrete"),                           # Cement
+    "C004": ("Grey concrete, weathered", "concrete"),                         # Concrete with small stone aggregate
+    "C005": ("Grey cement, weathered", "concrete"),                           # Cement
+    "C006": ("White concrete, weathered", "concrete"),                        # Concrete with small stone aggregate
+    "C008": ("Grey concrete, weathered/rough", "concrete"),                   # Concrete
+    # --- Granite ---
+    "G001": ("White/black granite, new, rough", "granite"),                   # Granite
+    "G002": ("White/red granite, weathered", "granite"),                      # Granite with cement
+    "G003": ("White/black granite, weathered", "granite"),                    # Granite with cement
+    "G004": ("White/red/black granite, new, dusty", "granite"),               # Granite
+    "G005": ("Red/black granite, new", "granite"),                            # Granite
+    # --- Roofing shingle ---
+    "L001d": ("Grey roofing shingle, clear", "roofing_shingle"),              # Slate
+    "L001u": ("Grey roofing shingle, weathered", "roofing_shingle"),          # Slate roofing shingle
+    "L002": ("Black roofing shingle, weathered", "roofing_shingle"),          # Fibre cement
+    "L003": ("Black roofing shingle, weathered", "roofing_shingle"),          # Fibre cement
+    # --- Roofing tile ---
+    "R001": ("Black roofing tile, new", "roof_tile"),                         # Ceramic
+    "R002": ("Brown roofing tile, new", "roof_tile"),                         # Ceramic
+    "R003": ("Rustic red roofing tile, new", "roof_tile"),                    # Cement
+    "R004": ("Burnt red roofing tile, new", "roof_tile"),                     # Ceramic
+    "R005": ("Rustic red/black shading roofing tile, new/shiny", "roof_tile"),# Cement
+    "R006": ("Slate grey roofing tile, new", "roof_tile"),                    # Cement
+    "R007": ("Black roofing tile, new", "roof_tile"),                         # Ceramic
+    "R008": ("Rustic red roofing tile, new", "roof_tile"),                    # Cement
+    "R009": ("Autumn red roofing tile, new/rough", "roof_tile"),              # Cement
+    "R010": ("Red roofing tile, weathered", "roof_tile"),                     # Ceramic
+    "R012": ("Red roofing tile, weathered", "roof_tile"),                     # Ceramic
+    "R013": ("Red roofing tile, weathered", "roof_tile"),                     # Ceramic
+    # --- Stone ---
+    "S001": ("Beige stone, weathered", "stone"),                              # Sandstone
+    "S002": ("Grey stone, weathered", "stone"),                               # Carboniferous coral limestone
+    "S003": ("Ochre stone, weathered", "stone"),                              # Sandstone
+    "S004": ("Beige stone, weathered", "stone"),                              # Limestone
+    "S005": ("Light grey stone, weathered", "stone"),                         # Sandstone
+    # --- PVC roofing sheet ---
+    "V001": ("Lead grey pvc roofing sheet, new", "pvc"),                      # PVC
+    "V002": ("Light grey pvc roofing sheet, new", "pvc"),                     # PVC
+    "V003": ("Copper pvc roofing sheet, new/structured", "pvc"),              # PVC
+    "V004": ("Azure blue pvc roofing sheet, new", "pvc"),                     # PVC
+    "V005": ("Copper brown pvc roofing sheet, new", "pvc"),                   # PVC
+    "V006": ("Copper patina pvc roofing sheet, new", "pvc"),                  # PVC
+    # --- Quartzite conglomerate ---
+    "X001": ("Beige/brown/black/red quartzite conglomerate, new", "quartzite"),# Quartzite
+    "X002": ("Beige/brown/black quartzite conglomerate, new", "quartzite"),   # Quartzite
+    "X003": ("Beige/brown/black/red quartzite conglomerate, new", "quartzite"),# Quartzite
+    # --- Metal ---
+    "Z001": ("Dull grey metal, new", "metal"),                                # Aluminium plus zinc
+    "Z002": ("Shiny grey metal, new", "metal"),                               # Aluminium, stucco
+    "Z003": ("Dark green metal, new", "metal"),                               # Metal with paint
+    "Z004": ("Copper patina metal, weathered", "metal"),                      # Metal with paint
+    "Z005": ("Slate grey metal, new", "metal"),                               # Metal with paint
+    "Z006": ("Grey metal, weathered", "metal"),                               # Aluminium
+    "Z007": ("Grey metal, weathered", "metal"),                               # Lead
+    "Z008": ("Black metal, weathered", "metal"),                              # Iron
 }
 
 
@@ -190,7 +220,7 @@ def load_slum_materials(
         )
         materials.append(mat)
 
-    # Sanity: Z002 (embossed aluminium) should have IR reflectance ~0.84
+    # Sanity: Z002 (stucco aluminium) should have IR reflectance ~0.84
     z002_idx = sw_ids.index("Z002")
     z002_ir_rho_mean = float(np.mean(ir_reflectance[:, z002_idx]))
     if not (0.75 < z002_ir_rho_mean < 0.90):
