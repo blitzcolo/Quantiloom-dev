@@ -57,7 +57,7 @@ world_units_to_meters = 1.0
 default_temperature_k = 300.0
 
 [camera]
-position = [14.0, 5.0, 13.0]
+position = [-7.0, 3.4, 6.5]   # sunward side, 48 deg from the sun; see kv2_desert_lwir.toml
 look_at = [0.0, 1.8, 0.0]
 up = [0.0, 1.0, 0.0]
 fov_y = 40.0
@@ -93,31 +93,45 @@ spectral_material_ref = "Brown loamy fine sand (87P3468)"
 
 [[materials]]
 name = "hull"
-ir_emissivity = 0.92
 ir_temperature_k = 322.0
 spectral_material_type = "quantiloom_merged"
-spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+spectral_material_ref = "Olive green paint (0407UUUPNT)"
 
 [[materials]]
 name = "turret"
-ir_emissivity = 0.92
 ir_temperature_k = 324.0
 spectral_material_type = "quantiloom_merged"
-spectral_material_ref = "Olive green gloss paint (0386UUUPNT)"
+spectral_material_ref = "Olive green paint (0408UUUPNT)"
 
 [[materials]]
 name = "track"
-ir_emissivity = 0.75
 ir_temperature_k = 318.0
 spectral_material_type = "quantiloom_merged"
 spectral_material_ref = "Oxidized Galvanized Steel Metal (0526UUUSTLa)"
 
 [[materials]]
 name = "wheels"
-ir_emissivity = 0.94
 ir_temperature_k = 316.0
 spectral_material_type = "quantiloom_merged"
 spectral_material_ref = "Black unspecified rubber (0833UUURBR)"
+
+# Paint and rubber are dielectrics; the asset declares no metallicFactor, so
+# glTF's default of 1.0 stood and kD = (1 - F)(1 - metallic) was discarding most
+# of the diffuse lobe the measured reflectance rides on. The track keeps 1.0
+# because its sample is oxidised steel, for which the measured hemispherical
+# reflectance essentially IS the Fresnel reflectance. Same reasoning, and the
+# same values, as kv2_desert_lwir.toml.
+[material_overrides.hull]
+metallic = 0.0
+
+[material_overrides.turret]
+metallic = 0.0
+
+[material_overrides.wheels]
+metallic = 0.0
+
+[material_overrides.track]
+metallic = 1.0
 
 [thermography]
 enabled = false

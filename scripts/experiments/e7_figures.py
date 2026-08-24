@@ -28,6 +28,7 @@ import sys
 
 import matplotlib
 matplotlib.use("Agg")
+import matplotlib.colors  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
@@ -52,7 +53,14 @@ def read_exr(path):
     # Separate channels: assemble R, G, B by name rather than by position.
     planes = [np.asarray(channels[c].pixels, dtype=np.float64)
               for c in ("R", "G", "B") if c in channels]
-    return np.stack(planes, axis=-1)
+    if len(planes) == 3:
+        return np.stack(planes, axis=-1)
+    # A single-channel image: the thermography inversion writes one plane named
+    # "T", in kelvin. Returned two-dimensional so callers can tell it apart from
+    # a colour image by ndim rather than by filename.
+    if len(channels) == 1:
+        return np.asarray(next(iter(channels.values())).pixels, dtype=np.float64)
+    raise SystemExit(f"{path}: cannot read channels {sorted(channels)}")
 
 
 def linear_agc(image, low=0.5, high=99.5):
@@ -85,6 +93,46 @@ def srgb(image):
                        1.055 * np.power(linear, 1 / 2.4) - 0.055)
     return display, out_of_gamut
 
+
+
+# The palettes are the renderer's, transcribed control point for control point
+# from src/shaders/clahe.comp.hlsl -- which says why they are ramps rather than
+# fitted curves: "the control points are the specification, someone checking a
+# palette against a reference reads numbers". matplotlib's viridis is close but
+# is not the one Studio shows.
+_PALETTES = {
+    "viridis": [(0.267, 0.005, 0.329), (0.283, 0.141, 0.458), (0.254, 0.265, 0.530),
+                (0.207, 0.372, 0.553), (0.164, 0.471, 0.558), (0.128, 0.567, 0.551),
+                (0.135, 0.659, 0.518), (0.267, 0.749, 0.441), (0.478, 0.821, 0.318),
+                (0.741, 0.873, 0.150), (0.993, 0.906, 0.144)],
+    "ironbow": [(0.000, 0.000, 0.000), (0.110, 0.020, 0.260), (0.300, 0.030, 0.430),
+                (0.510, 0.060, 0.430), (0.730, 0.170, 0.310), (0.900, 0.350, 0.130),
+                (0.990, 0.640, 0.010), (1.000, 1.000, 0.850)],
+}
+
+
+def renderer_colormap(name, samples=256):
+    control = np.asarray(_PALETTES[name])
+    x = np.linspace(0.0, 1.0, len(control))
+    grid = np.linspace(0.0, 1.0, samples)
+    return matplotlib.colors.ListedColormap(
+        np.stack([np.interp(grid, x, control[:, i]) for i in range(3)], axis=1),
+        name=f"quantiloom_{name}")
+
+
+# Why the bars do not all say kelvin. LWIR is essentially all self-emission, so
+# inverting radiance through Planck recovers a temperature and the axis means
+# what it says. NIR and SWIR emit nothing at 300 K -- the same inversion returns
+# medians near 926 K and 557 K by reporting reflected sunlight as the object's
+# own temperature. MWIR is between: a mid-wave camera does report temperature,
+# but roughly half of this band is reflected sun here, so an axis in kelvin
+# would present an instrument reading as a property of the object.
+BAR_UNITS = {
+    "NIR": "linear, from radiance",
+    "SWIR": "linear, from radiance",
+    "MWIR": "linear, from radiance\n(half this band is reflected sun)",
+    "LWIR": "linear, from the apparent-temperature inversion",
+}
 
 def diurnal(out):
     """The thermal shadow moving through the day.
@@ -156,48 +204,90 @@ def main():
         raise SystemExit(f"{manifest_path} missing; run e7_gallery.py --strip first")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
-    panels = []
-    for band in manifest["bands"]:
-        path = pathlib.Path(band["output"])
-        if not path.is_file():
-            print(f"  missing {path}, skipping {band['band']}")
-            continue
+    by = {(b["variant"], b["band"]): b for b in manifest["bands"] if "variant" in b}
+    if not by:
+        raise SystemExit("strip.json predates the painted/unpainted pair; re-run "
+                         "e7_gallery.py --strip")
+
+    order = ["VIS", "NIR", "SWIR", "MWIR", "LWIR"]
+    rows = [("paint", "PAINTED"), ("bare", "UNPAINTED")]
+
+    def scalar(variant, band):
+        """The quantity the panel and its bar are both built from.
+
+        LWIR reads the apparent-temperature inversion; everything else reads
+        radiance. See BAR_UNITS for why that split is not arbitrary.
+        """
+        record = by[(variant, band)]
+        path = pathlib.Path(record["output"])
+        if band == "LWIR":
+            tapp = path.with_name(path.stem + "_tapp.exr")
+            if tapp.is_file():
+                image = read_exr(tapp)
+                return (image[..., 0] if image.ndim == 3 else image), "K"
         image = read_exr(path)
-        if band["band"] == "VIS":
-            display, out_of_gamut = srgb(image)
-            rgb = image[..., :3]
-            span = (max(0.0, float(rgb.min())), float(rgb.max()))
-            note = (band["display"] +
-                    (f", {out_of_gamut:.1%} out of gamut" if out_of_gamut > 0.001 else ""))
-        else:
-            display, span = linear_agc(image)
-            note = band["display"]
-        panels.append((band["band"], display, span, note))
+        grey = image[..., :3] @ np.array([0.2126, 0.7152, 0.0722]) \
+            if image.ndim == 3 else image
+        return grey, "radiance"
 
-    if not panels:
-        raise SystemExit("no panels rendered")
+    # One window per band, shared by both rows, so a difference between the
+    # rows is the vehicle and not the scaling.
+    windows = {}
+    for band in order:
+        if band == "VIS":
+            continue
+        lo, hi = [], []
+        for variant, _ in rows:
+            values, _unit = scalar(variant, band)
+            finite = values[np.isfinite(values)]
+            lo.append(np.percentile(finite, 1.0))
+            hi.append(np.percentile(finite, 99.0))
+        windows[band] = (float(min(lo)), float(max(hi)))
 
-    figure, axes = plt.subplots(1, len(panels), figsize=(3.1 * len(panels), 2.4))
-    if len(panels) == 1:
-        axes = [axes]
-    for axis, (name, display, span, transform) in zip(axes, panels):
-        axis.imshow(display, cmap=None if display.ndim == 3 else "gray",
-                    vmin=None if display.ndim == 3 else 0.0,
-                    vmax=None if display.ndim == 3 else 1.0)
-        axis.set_title(name, fontsize=10)
-        # The window each panel was mapped through, so nobody reads the strip
-        # as a common scale.
-        axis.set_xlabel(f"{transform}\n{span[0]:.3g}\u2013{span[1]:.3g} W/sr/m$^2$",
-                        fontsize=6.5)
-        axis.set_xticks([])
-        axis.set_yticks([])
-    figure.tight_layout()
+    for palette_name in ("viridis", "ironbow"):
+        cmap = renderer_colormap(palette_name)
+        figure, axes = plt.subplots(len(rows), len(order),
+                                    figsize=(3.05 * len(order), 2.55 * len(rows)))
+        for r, (variant, row_label) in enumerate(rows):
+            for c, band in enumerate(order):
+                axis = axes[r][c]
+                if band == "VIS":
+                    image = read_exr(pathlib.Path(by[(variant, band)]["output"]))
+                    display, out_of_gamut = srgb(image)
+                    axis.imshow(display)
+                    axis.set_xlabel("sRGB, scene exposure"
+                                    + (f"\n{out_of_gamut:.1%} out of gamut"
+                                       if out_of_gamut > 0.001 else ""),
+                                    fontsize=6.2)
+                else:
+                    values, unit = scalar(variant, band)
+                    lo, hi = windows[band]
+                    handle = axis.imshow(values, cmap=cmap, vmin=lo, vmax=hi)
+                    bar = figure.colorbar(handle, ax=axis, fraction=0.043, pad=0.015)
+                    bar.ax.tick_params(labelsize=5.6)
+                    if unit == "K":
+                        bar.set_label("apparent temperature (K)", fontsize=5.8)
+                    else:
+                        bar.set_label("radiance (W sr$^{-1}$ m$^{-2}$ nm$^{-1}$)",
+                                      fontsize=5.8)
+                        bar.formatter.set_powerlimits((0, 0))
+                        bar.update_ticks()
+                    axis.set_xlabel(BAR_UNITS[band], fontsize=6.2)
+                axis.set_title(f"{row_label}  {band}" if c == 0 else band, fontsize=8)
+                axis.set_xticks([]); axis.set_yticks([])
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    figure.savefig(args.out, dpi=300, bbox_inches="tight")
-    figure.savefig(args.out.with_suffix(".pdf"), bbox_inches="tight")
-    plt.close(figure)
-    print(f"wrote {args.out}  ({len(panels)} panels)")
+        figure.suptitle(
+            "One asset, two surfaces, five bands. Linear mapping throughout; "
+            f"{palette_name} palette; window shared between rows within a band.",
+            fontsize=7.5, y=0.02)
+        figure.tight_layout()
+        out = args.out if palette_name == "viridis" else \
+            args.out.with_name(args.out.stem + "_ironbow" + args.out.suffix)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(out, dpi=300, bbox_inches="tight")
+        figure.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
+        plt.close(figure)
+        print(f"wrote {out}")
 
 
 if __name__ == "__main__":

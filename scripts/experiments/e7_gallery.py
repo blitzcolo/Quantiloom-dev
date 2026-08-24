@@ -29,6 +29,16 @@ import sys
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CLI = REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe"
 CONFIG = REPO / "assets" / "configs" / "gallery" / "kv2_desert_lwir.toml"
+
+# The strip renders the vehicle twice. "Paint" is not a coating layer that can
+# be switched off -- the renderer has KHR_materials_clearcoat and this asset
+# uses no extensions at all -- it is a measured reflectance of a painted panel,
+# so the unpainted case is a different bound material and therefore a different
+# config. Everything else about the two is identical, including temperatures.
+VARIANTS = [
+    ("paint", CONFIG),
+    ("bare", REPO / "assets" / "configs" / "gallery" / "kv2_desert_bare.toml"),
+]
 WORK = pathlib.Path(r"H:\quantiloom-paper\evidence\e7")
 
 # These are Windows paths; under WSL they are directory NAMES, not paths.
@@ -62,12 +72,12 @@ def toml_value(value):
     return repr(value)
 
 
-def render(overrides, output, work):
+def render(overrides, output, work, config=None):
     tokens = " ".join(f"{k}={toml_value(v)}" for k, v in
                       {**overrides, "renderer.output": output.as_posix()}.items())
     manifest = work / "_batch.txt"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    manifest.write_text(f"{CONFIG.as_posix()} | {tokens}\n", encoding="utf-8")
+    manifest.write_text(f"{(config or CONFIG).as_posix()} | {tokens}\n", encoding="utf-8")
     result = subprocess.run([str(CLI), "batch", str(manifest)], cwd=str(REPO),
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=14400)
@@ -81,11 +91,12 @@ def strip(args):
     work = WORK / "strip"
     work.mkdir(parents=True, exist_ok=True)
     records = []
-    for name, mode, band, display in BANDS:
-        output = work / f"kv2_{name.lower()}.exr"
-        print(f"  rendering {name} ...", flush=True)
+    for variant, config in VARIANTS:
+      for name, mode, band, display in BANDS:
+        output = work / f"kv2_{variant}_{name.lower()}.exr"
+        print(f"  rendering {variant} {name} ...", flush=True)
         log = render({"spectral.mode": mode, "spectral.band": band,
-                      "renderer.spp": args.spp}, output, work)
+                      "renderer.spp": args.spp}, output, work, config)
         # Whether every material actually bound a measured curve in this band
         # is the thing most worth recording: a silent fallback to a base colour
         # is exactly the defect Section VIII-D caught, and it is invisible in
@@ -96,7 +107,8 @@ def strip(args):
                  or "no spectral" in line.lower()
                  or "base colour" in line.lower()
                  or "base color" in line.lower()]
-        records.append({"band": name, "mode": mode, "output": str(output),
+        records.append({"variant": variant, "config": str(config),
+                        "band": name, "mode": mode, "output": str(output),
                         "display": display, "spp": args.spp,
                         "spectral_log": bound[:12]})
         print(f"    -> {output.name}", flush=True)
