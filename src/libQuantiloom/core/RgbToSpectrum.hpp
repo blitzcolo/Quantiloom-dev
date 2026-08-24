@@ -30,17 +30,24 @@
  *
  * ACCURACY. Fitting is exact: for any colour inside the sRGB gamut the solver
  * drives the CIELab residual to zero, so the only error left is the table's own
- * interpolation. Measured on 20k random colours plus the gamut corners:
+ * interpolation. Measured on 200k random colours plus the gamut corners:
  *
  *     res   coeff memory   mean dE     p99    worst
- *      32       1.1 MB      0.103    0.638    3.54
- *      48       3.8 MB      0.045    0.291    2.01
- *      64       9.0 MB      0.025    0.156    1.25
+ *      32       1.1 MB      0.098    0.453    3.49
+ *      48       3.8 MB      0.043    0.201    2.05
+ *      64       9.0 MB      0.024    0.112    1.23
  *
  * A just-noticeable difference is about 2.3. 64 is what the reference
  * implementation ships and is what kRgbToSpectrumResolution is set to; 48 is
  * the smallest table whose *worst* colour is still under one JND, if the memory
  * ever matters.
+ *
+ * Reproduced by `colour_lab --lut-sweep`, which drives MeasureAccuracy below:
+ * 200k colours drawn uniformly from the unit cube plus the eight corners, seed
+ * in the tool. An earlier edition of this table quoted a p99 around a third
+ * higher at every resolution while agreeing on mean and worst -- the tail is
+ * the part a sampling distribution moves, and that edition did not record which
+ * one it used. These numbers name theirs.
  *
  * OUTSIDE THE FIT DOMAIN THE MODEL IS DANGEROUS, not merely useless. The
  * quadratic keeps growing, so past 780 nm the sigmoid saturates -- to 1 when c0
@@ -189,5 +196,38 @@ private:
     u32 m_res = 0;
     Vector<f32> m_data;
 };
+
+/**
+ * @brief What a table's interpolation costs, in CIELab
+ *
+ * The fit at a lattice node is exact -- the solver drives the Lab residual to
+ * zero for any in-gamut colour -- so everything this reports is the trilinear
+ * blend between nodes, which is the only thing the resolution controls.
+ */
+struct RgbToSpectrumAccuracy {
+    u32 resolution = 0;
+    u64 coefficientBytes = 0;
+    u32 samples = 0;
+    f64 meanDeltaE = 0.0;
+    f64 p99DeltaE = 0.0;
+    f64 worstDeltaE = 0.0;
+    glm::vec3 worstColour{0.0f};
+};
+
+/**
+ * @brief Measure a table against the colours it claims to reproduce
+ *
+ * Lives here rather than in a tool because the comparison has to use the
+ * fitter's own observer, illuminant and Lab conversion. Those are file-static
+ * in RgbToSpectrum.cpp, and a measurement that reimplemented them elsewhere
+ * would drift from the thing it measures the first time either is corrected --
+ * which is the same argument that keeps the table built rather than shipped.
+ *
+ * Sampling is `randomSamples` colours drawn uniformly from the unit cube with
+ * the given seed, plus the eight cube corners, which are the hardest colours
+ * in the gamut and would be missed by any finite random draw.
+ */
+[[nodiscard]] RgbToSpectrumAccuracy MeasureAccuracy(const RgbToSpectrumTable& table,
+                                                    u32 randomSamples, u64 seed);
 
 }  // namespace quantiloom

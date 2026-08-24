@@ -45,11 +45,16 @@ message(STATUS "Fusion tool configured successfully")
 #   sensor_lab           one sensor instance over many frames, which is the
 #                        only arrangement that separates temporal noise from
 #                        the fixed pattern
+#   colour_lab           the RGB-to-spectrum conventions: what the coefficient
+#                        table's resolution costs in CIELab, and what an
+#                        authored emissive triple comes back as. Fits tables,
+#                        which is seconds per resolution and so belongs outside
+#                        a nine-second unit suite
 #
 # Both link quantiloom_core rather than the DLL, for the same reason
 # fusion_tool does: what they drive is internal and is not going to be
 # exported to give a measurement script a way in.
-foreach(tool thermal_column_tool sensor_lab)
+foreach(tool thermal_column_tool sensor_lab colour_lab)
     add_executable(${tool} ${tool}.cpp)
     target_link_libraries(${tool} PRIVATE quantiloom_core)
     set_target_properties(${tool} PROPERTIES

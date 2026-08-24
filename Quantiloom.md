@@ -325,9 +325,12 @@ table interpolation.  Measured on 20,000 random colours plus gamut vertices:
 
 | Resolution | Coefficient memory | Mean ΔE | p99 | Worst |
 |---:|---:|---:|---:|---:|
-| 32 | 1.1 MB | 0.103 | 0.638 | 3.54 |
-| 48 | 3.8 MB | 0.045 | 0.291 | 2.01 |
-| **64** | **9.0 MB** | **0.025** | **0.156** | **1.25** |
+| 32 | 1.1 MB | 0.098 | 0.453 | 3.49 |
+| 48 | 3.8 MB | 0.043 | 0.201 | 2.05 |
+| **64** | **9.0 MB** | **0.024** | **0.112** | **1.23** |
+
+Measured by `colour_lab --lut-sweep`: 200k colours uniform in the unit cube
+plus the eight corners, CIE76 in Lab against the colour the fit targets.
 
 One JND is approximately 2.3.  The 48³ table is the smallest whose worst
 colour is within one JND; 64³ is the reference implementation's

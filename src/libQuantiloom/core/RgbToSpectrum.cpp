@@ -27,6 +27,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <random>
 #include <thread>
 
 namespace quantiloom {
@@ -545,6 +546,81 @@ Result<RgbToSpectrumTable, String> RgbToSpectrumTable::LoadOrBuild(const String&
         built.value().Save(cachePath);
     }
     return built;
+}
+
+RgbToSpectrumAccuracy MeasureAccuracy(const RgbToSpectrumTable& table, u32 randomSamples,
+                                      u64 seed) {
+    RgbToSpectrumAccuracy out;
+    out.resolution = table.Resolution();
+    out.coefficientBytes = static_cast<u64>(table.Data().size()) * sizeof(f32);
+
+    // The eight cube corners first, then the random draw. The corners are where
+    // the fit is hardest -- c2 runs to +/-inf as a colour approaches white or
+    // black, which is why the z axis is warped at all -- and no finite uniform
+    // sample lands on them.
+    Vector<glm::vec3> colours;
+    colours.reserve(static_cast<size_t>(randomSamples) + 8);
+    for (int corner = 0; corner < 8; ++corner) {
+        colours.emplace_back(static_cast<f32>((corner >> 0) & 1),
+                             static_cast<f32>((corner >> 1) & 1),
+                             static_cast<f32>((corner >> 2) & 1));
+    }
+
+    // Explicit engine and distribution rather than whatever <random> defaults
+    // to: this number goes in a paper, so the sample has to be the same one on
+    // every implementation that reads the seed.
+    std::mt19937_64 rng(seed);
+    std::uniform_real_distribution<f64> uniform(0.0, 1.0);
+    for (u32 i = 0; i < randomSamples; ++i) {
+        colours.emplace_back(static_cast<f32>(uniform(rng)), static_cast<f32>(uniform(rng)),
+                             static_cast<f32>(uniform(rng)));
+    }
+
+    Vector<f64> errors;
+    errors.reserve(colours.size());
+    for (const glm::vec3& colour : colours) {
+        const f64 rgb[3] = {static_cast<f64>(colour.r), static_cast<f64>(colour.g),
+                            static_cast<f64>(colour.b)};
+        f64 targetLab[3];
+        RgbToLab(rgb, targetLab);
+
+        const RgbSpectrumCoeffs fetched = table.Lookup(colour);
+        const f64 c[3] = {static_cast<f64>(fetched.c0), static_cast<f64>(fetched.c1),
+                          static_cast<f64>(fetched.c2)};
+        f64 xyz[3];
+        EvalXyz(c, xyz);
+        f64 lab[3];
+        XyzToLab(xyz, lab);
+
+        // CIE76: the Euclidean distance in Lab. The fitter minimises this same
+        // quantity, so the number reported is the one being optimised and not a
+        // second opinion about it.
+        const f64 dE = std::sqrt((lab[0] - targetLab[0]) * (lab[0] - targetLab[0]) +
+                                 (lab[1] - targetLab[1]) * (lab[1] - targetLab[1]) +
+                                 (lab[2] - targetLab[2]) * (lab[2] - targetLab[2]));
+        errors.push_back(dE);
+        if (dE > out.worstDeltaE) {
+            out.worstDeltaE = dE;
+            out.worstColour = colour;
+        }
+    }
+
+    out.samples = static_cast<u32>(errors.size());
+    f64 sum = 0.0;
+    for (const f64 e : errors) {
+        sum += e;
+    }
+    out.meanDeltaE = errors.empty() ? 0.0 : sum / static_cast<f64>(errors.size());
+
+    Vector<f64> sorted = errors;
+    std::sort(sorted.begin(), sorted.end());
+    if (!sorted.empty()) {
+        // Nearest-rank, so the value reported is one of the measurements rather
+        // than an interpolation between two of them.
+        const size_t rank = static_cast<size_t>(std::ceil(0.99 * static_cast<f64>(sorted.size())));
+        out.p99DeltaE = sorted[std::min(sorted.size() - 1, rank == 0 ? 0 : rank - 1)];
+    }
+    return out;
 }
 
 }  // namespace quantiloom
