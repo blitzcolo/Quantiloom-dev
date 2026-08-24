@@ -33,23 +33,15 @@ static double GetEffectiveIREmissivity(double irEmissivity, double metallic, dou
     return irEmissivity;
 }
 
-static double GetAngleDependentIREmissivity(double baseEmissivity, double NdotV, double metallic) {
-    double cosTheta = std::max(NdotV, 0.01);
-    if (metallic > 0.5) {
-        constexpr double METAL_GRAZING_ALPHA = 1.0;
-        double f = 1.0 + METAL_GRAZING_ALPHA * (1.0 - cosTheta);
-        return std::clamp(baseEmissivity * f, 0.0, 1.0);
-    } else {
-        constexpr double DIELECTRIC_GRAZING_BETA = 0.7;
-        double f = std::pow(cosTheta, DIELECTRIC_GRAZING_BETA);
-        return baseEmissivity * f;
-    }
-}
+// Mirror of the shipping shader: emissivity is hemispherical, so there is no
+// view argument to pass. This replaced a mirror of GetAngleDependentIR*, which
+// modulated eps by cos^0.7(theta) and derived rho from the result -- a
+// view-dependent albedo that was then used in Lambertian lobes. Both shader
+// functions are deleted; see the tombstone in src/shaders/common.hlsli.
+static double IREmissivityOf(double baseEmissivity) { return baseEmissivity; }
 
-static double GetAngleDependentIRReflectance(double baseEmissivity, double transmittance,
-                                              double NdotV, double metallic) {
-    double e = GetAngleDependentIREmissivity(baseEmissivity, NdotV, metallic);
-    return std::clamp(1.0 - e - transmittance, 0.0, 1.0);
+static double IRReflectanceOf(double baseEmissivity, double transmittance) {
+    return std::clamp(1.0 - baseEmissivity - transmittance, 0.0, 1.0);
 }
 
 // ---- Energy conservation: ε(θ) + ρ(θ) + τ = 1 ----
@@ -62,11 +54,18 @@ TEST(IREnergyConservation, EpsilonPlusRhoPlusTauEqualsOne_Opaque) {
     constexpr double tau = 0.0;
 
     for (double eps0 : eps0_vals) {
+        double e = IREmissivityOf(eps0);
+        double r = IRReflectanceOf(eps0, tau);
+        // Exact, not within 0.01: with no angular modulation this is an
+        // identity rather than an approximation.
+        EXPECT_NEAR(e + r, 1.0, 1e-12) << "eps0=" << eps0;
+        // And it does not depend on the view. The sweep is kept for that
+        // reason alone -- the values above are angle-free now, so the loop
+        // documents the invariant the render gate measures end to end
+        // (scripts/render-tests/check_view_independence.py).
         for (double NdotV : NdotV_vals) {
             for (double metallic : metal_vals) {
-                double e = GetAngleDependentIREmissivity(eps0, NdotV, metallic);
-                double r = GetAngleDependentIRReflectance(eps0, tau, NdotV, metallic);
-                EXPECT_NEAR(e + r, 1.0, 0.01)
+                EXPECT_DOUBLE_EQ(IREmissivityOf(eps0), e)
                     << "eps0=" << eps0 << " NdotV=" << NdotV
                     << " metallic=" << metallic;
             }
@@ -75,9 +74,10 @@ TEST(IREnergyConservation, EpsilonPlusRhoPlusTauEqualsOne_Opaque) {
 }
 
 TEST(IREnergyConservation, EpsilonPlusRhoPlusTauEqualsOne_Transmissive) {
-    // With τ>0, metal Hagen-Rubens boost can push ε+τ>1; reflectance
-    // clamps to 0, so sum exceeds 1.  This is a known approximation in the
-    // current shader — document but tolerate up to 15%.
+    // This used to tolerate 15%, with the comment "metal Hagen-Rubens boost can
+    // push ε+τ>1; reflectance clamps to 0, so sum exceeds 1 -- a known
+    // approximation in the current shader". That approximation is gone, so the
+    // sum is now exact and the tolerance says so.
     constexpr double eps0_vals[]  = {0.3, 0.5, 0.9};
     constexpr double tau_vals[]   = {0.05, 0.1};
     constexpr double NdotV_vals[] = {1.0, 0.5, 0.05};
@@ -88,10 +88,10 @@ TEST(IREnergyConservation, EpsilonPlusRhoPlusTauEqualsOne_Transmissive) {
             if (eps0 + tau > 1.0) continue;
             for (double NdotV : NdotV_vals) {
                 for (double metallic : metal_vals) {
-                    double e = GetAngleDependentIREmissivity(eps0, NdotV, metallic);
-                    double r = GetAngleDependentIRReflectance(eps0, tau, NdotV, metallic);
+                    double e = IREmissivityOf(eps0);
+                    double r = IRReflectanceOf(eps0, tau);
                     double sum = e + r + tau;
-                    EXPECT_NEAR(sum, 1.0, 0.15)
+                    EXPECT_NEAR(sum, 1.0, 1e-12)
                         << "eps0=" << eps0 << " tau=" << tau
                         << " NdotV=" << NdotV << " metallic=" << metallic;
                 }
@@ -115,8 +115,8 @@ TEST(IREnergyConservation, IsothermalCavityInvariant) {
 
             // In an isothermal cavity every surface sees B(T) from all directions.
             // Emitted + reflected + transmitted = ε·B + ρ·B + τ·B = (ε+ρ+τ)·B = B
-            double e = GetAngleDependentIREmissivity(eps0, 1.0, 0.0);
-            double r = GetAngleDependentIRReflectance(eps0, tau, 1.0, 0.0);
+            double e = IREmissivityOf(eps0);
+            double r = IRReflectanceOf(eps0, tau);
             double L = e * B + r * B + tau * B;
             EXPECT_NEAR(L / B, 1.0, 1e-6)
                 << "T=" << T << " lambda=" << lam;

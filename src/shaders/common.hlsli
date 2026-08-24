@@ -1282,48 +1282,41 @@ float GetEffectiveIRReflectance(MaterialData mat) {
 }
 
 // ============================================================================
-// Angle-Dependent IR Emissivity (Fresnel Effect for Thermal Radiation)
+// Angle-dependent IR emissivity: removed
 // ============================================================================
-// Implements the angular dependence of thermal emissivity:
-// - Metals: emissivity INCREASES at grazing angles (Hagen-Rubens effect)
-// - Dielectrics: emissivity DECREASES at grazing angles (Fresnel effect)
+// There were two functions here, GetAngleDependentIREmissivity and
+// GetAngleDependentIRReflectance, implementing
 //
-// Physics: By Kirchhoff's law, ε = 1 - ρ. At grazing angles:
-// - Metal reflectance stays high but decreases slightly → ε increases
-// - Dielectric reflectance increases sharply (Fresnel) → ε decreases
+//     dielectrics:  eps(theta) = eps0 * cos^0.7(theta)
+//     metals:       eps(theta) = eps0 * (1 + 1.0*(1 - cos theta)), saturated
+//     rho(theta)  = 1 - eps(theta) - tau
 //
-// Reference: "Radiative Heat Transfer" (Modest, 3rd ed.), Chapter 3
+// They are gone rather than merely unused, because the shape of the mistake
+// invites reintroduction. Two things were wrong with them:
+//
+//   * The exponents were tuned constants -- the source comments said "typical:
+//     0.5-1.0" -- not Fresnel. Against smooth-dielectric Fresnel the law runs
+//     about 2x too dark beyond 60 degrees, and rough natural surfaces are more
+//     Lambertian than smooth Fresnel, not less.
+//   * Worse, rho(theta) was a function of the VIEW direction and was then used
+//     as the albedo of Lambertian lobes that collect light from every other
+//     direction -- an isotropic sky (rho * L_down) and a sun at its own
+//     incidence angle (rho/pi * E * NdotL). Such a lobe is not reciprocal and
+//     does not conserve energy: integrated over the hemisphere, desert sand
+//     returned 0.365 where its measured reflectance is 0.143.
+//
+// Every build gate was blind to it, because every gate scene views its surface
+// down the surface normal, where cos theta = 1 and the law is the identity: the
+// eight furnace cavities (isothermal, so eps + rho = 1 at any angle anyway) and
+// all seven illumination scenes (orthographic, camera on the normal). Off-normal
+// it reported a 300 K desert at 324 K in MWIR and inverted the thermal ordering
+// of the scene. assets/configs/viewangle_{swir,lwir}_*.toml now cover it.
+//
+// Directional emissivity is a real effect. When it is wanted it belongs in a
+// specular lobe driven by measured n,k through FresnelConductor (pbr.hlsli),
+// which is exact, reciprocal, and already checked against
+// scripts/physics-audit/harness.py -- not as a scale on a diffuse albedo.
 // ============================================================================
-
-float GetAngleDependentIREmissivity(float baseEmissivity, float NdotV, float metallic) {
-    // Clamp NdotV to avoid division issues at grazing angles
-    float cosTheta = max(NdotV, 0.01);
-
-    if (metallic > 0.5) {
-        // METALS: Hagen-Rubens approximation
-        // At grazing angles, emissivity approaches ~1.0 for real metals
-        // ε(θ) ≈ ε₀ × (1 + α × (1 - cos(θ)))
-        // α controls the strength of the effect (typical: 0.5-1.5)
-        const float METAL_GRAZING_ALPHA = 1.0;
-        float grazingFactor = 1.0 + METAL_GRAZING_ALPHA * (1.0 - cosTheta);
-        return saturate(baseEmissivity * grazingFactor);
-    } else {
-        // DIELECTRICS: Fresnel-like behavior
-        // At grazing angles, reflectance → 1, so emissivity → 0
-        // ε(θ) ≈ ε₀ × cos^β(θ)
-        // β controls sharpness (typical: 0.5-1.0, higher = sharper transition)
-        const float DIELECTRIC_GRAZING_BETA = 0.7;
-        float grazingFactor = pow(cosTheta, DIELECTRIC_GRAZING_BETA);
-        return baseEmissivity * grazingFactor;
-    }
-}
-
-// Corresponding reflectance adjustment (energy conservation)
-float GetAngleDependentIRReflectance(float baseEmissivity, float transmittance,
-                                      float NdotV, float metallic) {
-    float angleEmissivity = GetAngleDependentIREmissivity(baseEmissivity, NdotV, metallic);
-    return saturate(1.0 - angleEmissivity - transmittance);
-}
 
 // ============================================================================
 // Helper: Validate Energy Conservation for IR Material

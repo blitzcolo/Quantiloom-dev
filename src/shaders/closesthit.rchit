@@ -2725,8 +2725,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Past the fitted band a base colour says nothing, but the
             // material's own IR emissivity does, and Kirchhoff turns it into a
             // reflectance: rho = 1 - eps - tau. This is the same expression
-            // NIR, SWIR, MWIR and LWIR use for the same material, through
-            // GetAngleDependentIRReflectance.
+            // NIR, SWIR, MWIR and LWIR use for the same material.
             //
             // It used to be zero here, which made the mode selector choose the
             // material model rather than the integration domain: one surface
@@ -2737,10 +2736,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // A black surface is a physical claim, and it was the quantitative
             // mode making it.
             //
-            // No angle dependence, deliberately: the fused bands apply it
-            // around a band-averaged emissivity, and adding a second
-            // convention here would be a third answer rather than agreement
-            // with the second. A material carrying no IR data at all lands on
+            // No angle dependence, which this branch got right first: the
+            // fused bands used to apply a fabricated one and have now stopped,
+            // so all of them agree that a measured emissivity is hemispherical.
+            // A material carrying no IR data at all lands on
             // GetEffectiveIREmissivity's metallic heuristic, which is again
             // what the fused bands do -- and ResolveMaterialSpectra has
             // already warned about that material by the time a ray is traced.
@@ -2986,11 +2985,29 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Compute view angle for angle-dependent emissivity
         float NdotV_swir = max(dot(normal, V), 0.0);
 
-        // Material IR properties with angle-dependent correction (P1 fix + angle correction)
+        // Emissivity and reflectance are HEMISPHERICAL quantities, used as
+        // measured. There used to be an angle-dependent "correction" here --
+        // eps0*cos^0.7(theta) for dielectrics, eps0*(2 - cos theta) for metals
+        // -- and it was wrong twice over. The exponents were tuned constants
+        // rather than Fresnel, and the reflectance derived from them was a
+        // function of the VIEW angle that then multiplied light arriving from
+        // every other direction: an isotropic sky, and a sun at its own
+        // incidence angle. A Lambertian lobe whose albedo depends on the
+        // outgoing direction is not reciprocal, and its directional-hemispherical
+        // albedo is not the number that was measured -- for desert sand it
+        // integrated to 0.365 where the measurement says 0.143.
+        //
+        // It was invisible to every gate because they all view their surface
+        // down its own normal, where cos theta = 1 and the law is the identity.
+        // Off-normal it reported a 300 K desert at 324 K in MWIR and inverted
+        // the scene's thermal ordering. viewangle_{swir,lwir}_* now check this.
+        //
+        // Directional emissivity is real, but it belongs in a specular lobe
+        // driven by Fresnel(n, k) -- FresnelConductor in pbr.hlsli, already
+        // harness-verified -- not as a scale on a Lambertian albedo.
         float baseEmissivity_swir = GetEffectiveIREmissivity(material);
-        float emissivity = GetAngleDependentIREmissivity(baseEmissivity_swir, NdotV_swir, material.metallicFactor);
-        float reflectance = GetAngleDependentIRReflectance(baseEmissivity_swir, material.irTransmittance,
-                                                           NdotV_swir, material.metallicFactor);
+        float emissivity = baseEmissivity_swir;
+        float reflectance = saturate(1.0 - baseEmissivity_swir - material.irTransmittance);
 
         // Sample surface temperature from texture or use scalar value
         float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
@@ -3308,8 +3325,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // statement about the surface. ir_emissivity is at least a property the
         // material declares, in the band it declares it for.
         const float baseEmissivity_nir = GetEffectiveIREmissivity(material);
-        const float reflectance_nir = GetAngleDependentIRReflectance(
-            baseEmissivity_nir, material.irTransmittance, NdotV_nir, material.metallicFactor);
+        // Hemispherical, as measured -- see the note in the SWIR branch above.
+        const float reflectance_nir =
+            saturate(1.0 - baseEmissivity_nir - material.irTransmittance);
 
         const float lambda_b = heroRay
             ? payload.heroLambda
@@ -3579,11 +3597,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Compute view angle for angle-dependent emissivity
         float NdotV = max(dot(normal, V), 0.0);
 
-        // Material IR properties with angle-dependent correction (Fresnel effect)
+        // Hemispherical, as measured -- see the note in the SWIR branch above.
         float baseEmissivity = GetEffectiveIREmissivity(material);
-        float emissivity = GetAngleDependentIREmissivity(baseEmissivity, NdotV, material.metallicFactor);
-        float reflectance = GetAngleDependentIRReflectance(baseEmissivity, material.irTransmittance,
-                                                           NdotV, material.metallicFactor);
+        float emissivity = baseEmissivity;
+        float reflectance = saturate(1.0 - baseEmissivity - material.irTransmittance);
 
         // Sample surface temperature from texture or use scalar value
         float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
@@ -3620,17 +3637,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float rho_b = reflectance;
         if (material.spectralReflectanceCurveIndex >= 0) {
             float rho_curve = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
-            float eps_b = saturate(1.0 - rho_curve - material.irTransmittance);
-            rho_b = GetAngleDependentIRReflectance(eps_b, material.irTransmittance,
-                                                   NdotV, material.metallicFactor);
+            rho_b = rho_curve;
         } else if (material.complexRefractiveIndexIndex >= 0) {
             float2 nk = SampleComplexRefractiveIndex(
                 complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
             float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
                      / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-            float eps_b = saturate(1.0 - R0 - material.irTransmittance);
-            rho_b = GetAngleDependentIRReflectance(eps_b, material.irTransmittance,
-                                                   NdotV, material.metallicFactor);
+            // Normal-incidence Fresnel, used hemispherically. Exact directional
+            // Fresnel needs a specular lobe, not a scale on a diffuse one.
+            rho_b = saturate(R0);
         }
 
         const float L_base_b = IRDownwellingRadiance(atmos, atmosIdx_b, lambda_b,
@@ -3667,19 +3682,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float reflectance_l = reflectance;
             if (material.spectralReflectanceCurveIndex >= 0) {
                 float rho_l = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
-                float eps_l = saturate(1.0 - rho_l - material.irTransmittance);
-                emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
-                reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
-                                                              NdotV, material.metallicFactor);
+                emissivity_l = saturate(1.0 - rho_l - material.irTransmittance);
+                reflectance_l = rho_l;
             } else if (material.complexRefractiveIndexIndex >= 0) {
                 float2 nk = SampleComplexRefractiveIndex(
                     complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
                 float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
                          / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-                float eps_l = saturate(1.0 - R0 - material.irTransmittance);
-                emissivity_l = GetAngleDependentIREmissivity(eps_l, NdotV, material.metallicFactor);
-                reflectance_l = GetAngleDependentIRReflectance(eps_l, material.irTransmittance,
-                                                              NdotV, material.metallicFactor);
+                emissivity_l = saturate(1.0 - R0 - material.irTransmittance);
+                reflectance_l = saturate(R0);
             }
 
             // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)

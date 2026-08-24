@@ -26,6 +26,12 @@
 #               outside the light panel got there by bouncing, and the side
 #               walls tint what they reflect. Catches a bounce that never fires
 #               and a bounce that comes back colourless.
+#   view        The same surface seen from 60 degrees off its normal as well
+#               as down it. A hemispherical reflectance and emissivity do not
+#               depend on where the camera stands, so both views must return one
+#               closed form. Catches a view-dependent albedo -- which every other
+#               check here is blind to, because they all point the camera down
+#               the surface normal, where such a law is the identity.
 #   mis         The same box rendered with light sampling on and off, which
 #               estimate the same integral and so must agree. Catches emitted
 #               radiance counted by both strategies at full weight -- which the
@@ -159,8 +165,39 @@ $MisRes = if ($env:MIS_RES) { $env:MIS_RES } else { "192" }
 Invoke-Checker "mis" @("scripts/render-tests/check_nee_mis.py",
                        "--spp", $MisSpp, "--resolution", $MisRes) 'worst region' 'worst region|worst for|FAIL'
 
+
+# Whether the answer depends on where the camera stands. Every check above --
+# and every furnace cavity -- views its surface down the surface normal, so
+# NdotV is 1 at every pixel and an emissivity law of the form eps0*f(cos theta)
+# with f(1)=1 is the identity in all of them. It was not the identity anywhere
+# else: it turned rho 0.700 into 0.815 at 60 degrees and reported a 300 K desert
+# at 324 K in MWIR, with the scene's thermal ordering inverted.
+#
+# Two regimes, because they fail differently: a reflectance under a sun and sky,
+# and an emissivity against a COLD sky. The cold sky is what makes the second
+# observable at all -- with the sky at the surface's own temperature,
+# eps*B + rho*B = B for any split, which is exactly why the furnace cavities
+# cannot see an emissivity error.
+if (Invoke-Render "assets/configs/viewangle_swir_oblique.toml" "viewangle_swir_oblique") {
+    Invoke-Checker "view:refl" @("scripts/render-tests/check_view_independence.py",
+                                 "skyequiv_swir_output.exr",
+                                 "viewangle_swir_oblique_output.exr",
+                                 "--mode", "reflective") 'Rel error' 'Rel error|FAIL'
+}
+
+$thermalOk = $true
+foreach ($cfg in @("viewangle_lwir_nadir", "viewangle_lwir_oblique")) {
+    if (-not (Invoke-Render "assets/configs/$cfg.toml" $cfg)) { $thermalOk = $false; break }
+}
+if ($thermalOk) {
+    Invoke-Checker "view:therm" @("scripts/render-tests/check_view_independence.py",
+                                  "viewangle_lwir_nadir_output.exr",
+                                  "viewangle_lwir_oblique_output.exr",
+                                  "--mode", "thermal") 'Rel error' 'Rel error|FAIL'
+}
+
 if ($script:fail -eq 0) {
-    Write-Host "illumination suite: occlusion, open sky, indirect and MIS all within tolerance"
+    Write-Host "illumination suite: occlusion, open sky, indirect, MIS and view independence all within tolerance"
 } else {
     Write-Host "illumination suite: FAILURES above" -ForegroundColor Red
 }

@@ -1,0 +1,64 @@
+# View-independence check, thermal band, nadir view (NdotV = 1.0).
+#
+# The complement of viewangle_swir_oblique.toml: that one asks whether a
+# REFLECTANCE is view-independent, this one asks the same of an EMISSIVITY, in
+# the band where getting it wrong is most expensive.
+#
+# THE SKY IS COLD ON PURPOSE. With the sky at the surface's own temperature,
+#
+#     L = eps*B(Ts) + rho*B(Ts) = (eps + rho)*B(Ts) = B(Ts)
+#
+# for ANY split of eps and rho -- which is exactly why the eight furnace
+# cavities cannot see an emissivity error, and why this defect survived them.
+# Putting the sky at 200 K against a 300 K plate makes the split observable:
+# eps and rho now multiply numbers that differ by more than an order of
+# magnitude, so a law that moves eps from 0.300 to 0.185 at 60 deg moves the
+# answer by about a third.
+#
+# The reflectance is bound as a curve rather than derived from ir_emissivity so
+# that this pair covers the path a measured-spectrum scene actually takes --
+# the one the KV-2 gallery scene uses, and the one the defect was found on.
+# It is flat, so the closed form survives any resampling.
+#
+# Check: python scripts/render-tests/check_view_independence.py #            viewangle_lwir_nadir_output.exr viewangle_lwir_oblique_output.exr #            --mode thermal
+
+[renderer]
+resolution = [256, 256]
+spp = 16
+output = "viewangle_lwir_nadir_output.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[spectral_curves]
+shadow_scene_open = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open_reflectance.csv"
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 4.0
+
+[lighting]
+# No sun: LWIR does not sample the solar path, and leaving it out keeps the
+# closed form to two terms.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 200.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

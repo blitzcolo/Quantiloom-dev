@@ -1,0 +1,8 @@
+# wavelength_nm, value
+#
+# The complement of shadow_scene_open_emissivity.csv (0.3), spanning far enough
+# either side of every render band that FromCPUBand never has to clamp. Flat on
+# purpose: a constant survives any resampling, so a gate built on it compares
+# against a closed form rather than against another copy of the resampler.
+300, 0.7
+15000, 0.7

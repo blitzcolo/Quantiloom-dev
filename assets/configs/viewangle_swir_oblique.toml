@@ -1,0 +1,68 @@
+# View-independence check, reflective band. The same plane as skyequiv_swir,
+# seen from 60 deg off its normal instead of straight down.
+#
+# WHY THIS SCENE EXISTS. A Lambertian surface whose reflectance is a
+# hemispherical quantity returns the same radiance in every direction. Nothing
+# in the build gates tested that, because every gate scene points its camera
+# down the surface normal:
+#
+#   skyequiv_swir.toml    position [0, 20, 0], orthographic, plane normal +Y
+#   shadow_*_{sun,nosun}  the same, all six of them
+#   furnace_*             isothermal, where eps + rho = 1 holds at any angle
+#
+# so NdotV was 1 at every pixel of every gate, and an emissivity law of the form
+# eps(theta) = eps0 * cos^b(theta) is the identity there. It was not the identity
+# anywhere else: at 60 deg it turned rho = 0.700 into 0.815, and on a 120 m
+# ground plane viewed from 5 m up -- i.e. at grazing angles over most of the
+# frame -- it reported a 300 K desert at 324 K in MWIR.
+#
+# The camera is tilted rather than the surface, so the SUN's incidence angle is
+# untouched and the closed form below is the same number skyequiv_swir asserts.
+# That is the whole point: the answer must not depend on where you stand.
+#
+# Camera direction (0.866, 0.5, 0) is 60 deg from +Y, so NdotV = 0.5 at every
+# pixel -- orthographic, so it is constant across the frame and the reference
+# stays exact and variance-free. ortho_height 4 keeps the footprint (4/cos60 =
+# 8 m along the tilt) inside the 16 m plane, so no pixel sees sky.
+#
+# Check: python scripts/render-tests/check_view_independence.py \
+#            skyequiv_swir_output.exr viewangle_swir_oblique_output.exr --mode reflective
+
+[renderer]
+resolution = [256, 256]
+spp = 16
+output = "viewangle_swir_oblique_output.exr"
+
+[spectral]
+mode = "swir_fused"
+band = "SWIR"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [17.320508, 10.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 4.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/flat_sun_sky.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

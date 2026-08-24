@@ -453,122 +453,26 @@ TEST(BlackbodyPhysicsTest, NIR_BandIntegration_vs_SWIR) {
 }
 
 // ============================================================================
-// Angle-Dependent IR Emissivity Tests (CPU mirror of shader functions)
+// Angle-dependent IR emissivity: tests removed with the code
 // ============================================================================
-// These tests validate the physics of GetAngleDependentIREmissivity from
-// common.hlsli. The CPU implementation mirrors the GPU shader logic exactly.
+// A CPU mirror of GetAngleDependentIREmissivity / GetAngleDependentIRReflectance
+// lived here with six tests. Both shader functions are gone (see the tombstone
+// in src/shaders/common.hlsli), so the mirror described code that no longer
+// exists, and the two load-bearing tests among the six --
+// AngleEmissivity_MetalGrazingIncrease and _DielectricGrazingDecrease --
+// asserted the strict monotonicity of the fabricated law itself, not physics.
+// They would have to be deleted to fix the defect, which is a fair description
+// of what they were protecting.
 //
-// Physics:
-// - Metals (Hagen-Rubens): emissivity INCREASES at grazing angles
-// - Dielectrics (Fresnel): emissivity DECREASES at grazing angles
+// The other four asserted only sums and clamps (eps + rho == 1, eps == eps0 at
+// normal incidence, output in [0,1]) and were insensitive to the defect. They
+// go too: a mirror of a deleted function is a claim about nothing.
+//
+// What replaces them is a render gate rather than a unit test, because the
+// defect was never in the formula in isolation -- it was in feeding a
+// view-dependent albedo to a Lambertian lobe, which no test of the formula
+// alone can see. assets/configs/viewangle_{swir,lwir}_*.toml render one surface
+// from two directions and require both to equal a closed form;
+// scripts/render-tests/check_view_independence.py is the check, and it reads
+// 16.5 % (reflective) and 28.9 % (thermal) against the old code.
 // ============================================================================
-
-namespace {
-
-// Mirror of GPU function GetAngleDependentIREmissivity from common.hlsli
-double GetAngleDependentIREmissivity_CPU(double baseEmissivity, double NdotV, double metallic) {
-    double cosTheta = std::max(NdotV, 0.01);
-
-    if (metallic > 0.5) {
-        // Metals: Hagen-Rubens approximation
-        const double METAL_GRAZING_ALPHA = 1.0;
-        double grazingFactor = 1.0 + METAL_GRAZING_ALPHA * (1.0 - cosTheta);
-        return std::clamp(baseEmissivity * grazingFactor, 0.0, 1.0);
-    } else {
-        // Dielectrics: Fresnel-like behavior
-        const double DIELECTRIC_GRAZING_BETA = 0.7;
-        double grazingFactor = std::pow(cosTheta, DIELECTRIC_GRAZING_BETA);
-        return baseEmissivity * grazingFactor;
-    }
-}
-
-// Mirror of GPU function GetAngleDependentIRReflectance
-double GetAngleDependentIRReflectance_CPU(double baseEmissivity, double transmittance,
-                                           double NdotV, double metallic) {
-    double angleEmissivity = GetAngleDependentIREmissivity_CPU(baseEmissivity, NdotV, metallic);
-    return std::clamp(1.0 - angleEmissivity - transmittance, 0.0, 1.0);
-}
-
-} // anonymous namespace
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_MetalGrazingIncrease) {
-    // Metals: emissivity must increase at grazing angles (Hagen-Rubens effect)
-    double baseEmissivity = 0.1;  // Typical polished metal
-    double metallic = 1.0;
-
-    double e_normal = GetAngleDependentIREmissivity_CPU(baseEmissivity, 1.0, metallic);
-    double e_45deg = GetAngleDependentIREmissivity_CPU(baseEmissivity, 0.707, metallic);
-    double e_grazing = GetAngleDependentIREmissivity_CPU(baseEmissivity, 0.1, metallic);
-
-    // Monotonically increasing toward grazing
-    EXPECT_GT(e_45deg, e_normal);
-    EXPECT_GT(e_grazing, e_45deg);
-    EXPECT_GT(e_grazing, e_normal);
-}
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_DielectricGrazingDecrease) {
-    // Dielectrics: emissivity must decrease at grazing angles (Fresnel effect)
-    double baseEmissivity = 0.9;  // Typical dielectric (asphalt, concrete)
-    double metallic = 0.0;
-
-    double e_normal = GetAngleDependentIREmissivity_CPU(baseEmissivity, 1.0, metallic);
-    double e_45deg = GetAngleDependentIREmissivity_CPU(baseEmissivity, 0.707, metallic);
-    double e_grazing = GetAngleDependentIREmissivity_CPU(baseEmissivity, 0.1, metallic);
-
-    // Monotonically decreasing toward grazing
-    EXPECT_LT(e_45deg, e_normal);
-    EXPECT_LT(e_grazing, e_45deg);
-    EXPECT_LT(e_grazing, e_normal);
-}
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_EnergyConservation_Opaque) {
-    // For opaque materials (τ = 0): ε + ρ = 1 at all angles
-    double baseEmissivity = 0.9;
-    double transmittance = 0.0;
-
-    // Test at several angles for both metal and dielectric
-    for (double NdotV : {1.0, 0.8, 0.5, 0.2, 0.05}) {
-        for (double metallic : {0.0, 1.0}) {
-            double e = GetAngleDependentIREmissivity_CPU(baseEmissivity, NdotV, metallic);
-            double r = GetAngleDependentIRReflectance_CPU(baseEmissivity, transmittance, NdotV, metallic);
-
-            // ε + ρ should equal 1.0 for opaque materials
-            EXPECT_NEAR(e + r, 1.0, 0.01) << "Failed at NdotV=" << NdotV << " metallic=" << metallic;
-        }
-    }
-}
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_NormalIncidence) {
-    // At normal incidence (NdotV = 1.0), emissivity should equal base value
-    double baseEmissivity = 0.85;
-
-    // Dielectric: cos^β(1.0) = 1.0, so result = base
-    double e_dielectric = GetAngleDependentIREmissivity_CPU(baseEmissivity, 1.0, 0.0);
-    EXPECT_NEAR(e_dielectric, baseEmissivity, 1e-6);
-
-    // Metal: factor = 1 + α(1-1) = 1, so result = base
-    double e_metal = GetAngleDependentIREmissivity_CPU(baseEmissivity, 1.0, 1.0);
-    EXPECT_NEAR(e_metal, baseEmissivity, 1e-6);
-}
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_SaturateClamp) {
-    // Metal at grazing angle with high base emissivity should clamp to 1.0
-    double e = GetAngleDependentIREmissivity_CPU(0.8, 0.01, 1.0);
-
-    // 0.8 * (1 + 1.0 * (1 - 0.01)) = 0.8 * 1.99 = 1.592 → clamped to 1.0
-    EXPECT_LE(e, 1.0);
-    EXPECT_GE(e, 0.0);
-}
-
-TEST(BlackbodyPhysicsTest, AngleEmissivity_ReflectanceNonNegative) {
-    // Reflectance should never be negative
-    for (double base : {0.01, 0.1, 0.5, 0.9, 0.99}) {
-        for (double NdotV : {1.0, 0.5, 0.1, 0.01}) {
-            for (double metallic : {0.0, 1.0}) {
-                double r = GetAngleDependentIRReflectance_CPU(base, 0.0, NdotV, metallic);
-                EXPECT_GE(r, 0.0) << "Negative reflectance at base=" << base
-                                   << " NdotV=" << NdotV << " metallic=" << metallic;
-            }
-        }
-    }
-}

@@ -23,6 +23,12 @@
 #               outside the light panel got there by bouncing, and the side
 #               walls tint what they reflect. Catches a bounce that never fires
 #               and a bounce that comes back colourless.
+#   view        The same surface seen from 60 degrees off its normal as well
+#               as down it. A hemispherical reflectance and emissivity do not
+#               depend on where the camera stands, so both views must return
+#               one closed form. Catches a view-dependent albedo -- which every
+#               other check here is blind to, because they all point the camera
+#               down the surface normal, where such a law is the identity.
 #   mis         The same box rendered with light sampling on and off, which
 #               estimate the same integral and so must agree. Catches emitted
 #               radiance counted by both strategies at full weight -- which the
@@ -152,8 +158,55 @@ else
     fail=1
 fi
 
+
+# Whether the answer depends on where the camera stands. Every check above --
+# and every furnace cavity -- views its surface down the surface normal, so
+# NdotV is 1 at every pixel and an emissivity law of the form eps0*f(cos theta)
+# with f(1)=1 is the identity in all of them. It was not the identity anywhere
+# else: it turned rho 0.700 into 0.815 at 60 degrees and reported a 300 K
+# desert at 324 K in MWIR, with the scene's thermal ordering inverted.
+#
+# Two regimes, because they fail differently: a reflectance under a sun and sky,
+# and an emissivity against a COLD sky. The cold sky is what makes the second
+# one observable at all -- with the sky at the surface's own temperature,
+# eps*B + rho*B = B for any split, which is exactly why the furnace cavities
+# cannot see an emissivity error.
+for pair in "reflective:skyequiv_swir_output.exr:viewangle_swir_oblique_output.exr"             "thermal:viewangle_lwir_nadir_output.exr:viewangle_lwir_oblique_output.exr"; do
+    mode="${pair%%:*}"; rest="${pair#*:}"; a="${rest%%:*}"; b="${rest#*:}"
+
+    if [ "$mode" = thermal ]; then
+        for cfg in viewangle_lwir_nadir viewangle_lwir_oblique; do
+            log=$("$CLI" "assets/configs/${cfg}.toml" 2>&1)
+            if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+                if printf '%s' "$log" | grep -qE 'No Vulkan-compatible GPUs|Failed to create Vulkan instance|No suitable'; then
+                    echo "illumination suite: no usable GPU, nothing measured" >&2
+                    exit 3
+                fi
+                echo "RENDER FAILED  $cfg"; printf '%s
+' "$log" | tail -5 >&2; fail=1; continue 2
+            fi
+        done
+    else
+        log=$("$CLI" assets/configs/viewangle_swir_oblique.toml 2>&1)
+        if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+            echo "RENDER FAILED  viewangle_swir_oblique"; printf '%s
+' "$log" | tail -5 >&2; fail=1; continue
+        fi
+    fi
+
+    printf '%-8s ' "view:$mode"
+    if report=$("$PY" scripts/render-tests/check_view_independence.py "$a" "$b" --mode "$mode"); then
+        echo "$report" | grep -E 'Rel error' | tr -d '
+'; echo '  PASS'
+    else
+        echo "$report" | grep -E 'Rel error|FAIL' | tr '
+' ' '; echo
+        fail=1
+    fi
+done
+
 if [ "$fail" = 0 ]; then
-    echo "illumination suite: occlusion, open sky, indirect and MIS all within tolerance"
+    echo "illumination suite: occlusion, open sky, indirect, MIS and view independence all within tolerance"
 else
     echo "illumination suite: FAILURES above" >&2
 fi
