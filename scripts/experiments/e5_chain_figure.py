@@ -54,6 +54,12 @@ WORK = REPO / "_convergence_t3" / "e5chain"
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e5")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(EVIDENCE, FIGURES)
+
+
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from e8_agc_monotonicity import (apply_pass, clipped_cdfs,  # noqa: E402
                                  inverted_pairs, tile_histograms)

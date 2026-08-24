@@ -15,12 +15,16 @@ Usage:
 import argparse
 import json
 import pathlib
+import sys
 import statistics
 
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
 
 
 def shade_night(axis, times, is_day):
@@ -140,6 +144,9 @@ def main():
                         help="which window to plot; the default is the first "
                              "HELD-OUT one, not the calibration window")
     args = parser.parse_args()
+    # These defaults are Windows paths; under WSL they are directory NAMES.
+    # See scripts/experiments/_winpaths.py for what that silently does.
+    require_windows_paths(args.results, args.out)
 
     results = json.loads(args.results.read_text(encoding="utf-8"))
     path = figure(results["windows"][args.window_index],

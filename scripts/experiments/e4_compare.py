@@ -38,6 +38,9 @@ import numpy as np  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import e4_dtdv_sweep as e4  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+
 TANGENT_GATE_K = 0.1     # closesthit.rchit skips the correction below this
 EDGE_BAND_M = 2.0        # the +/- band the paper reports an RMSE over
 
@@ -197,6 +200,9 @@ def main():
     parser.add_argument("--figures", type=pathlib.Path,
                         default=pathlib.Path(r"H:\quantiloom-paper\figures"))
     args = parser.parse_args()
+    # These defaults are Windows paths; under WSL they are directory NAMES.
+    # See scripts/experiments/_winpaths.py for what that silently does.
+    require_windows_paths(args.figures)
 
     reference = json.loads(
         (e4.WORK / f"reference{args.suffix}.json").read_text(encoding="utf-8"))

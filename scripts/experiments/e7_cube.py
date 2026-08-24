@@ -35,6 +35,7 @@ Usage:
 import argparse
 import json
 import pathlib
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -48,6 +49,12 @@ LIBRARY = REPO / "assets" / "spectral" / "ecospeclib-all"
 MATERIALS = REPO / "assets" / "spectral" / "quantiloom_materials_merged.json"
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e7")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(EVIDENCE, FIGURES)
 
 # Pixels on each material, in fractions of the frame so they survive a
 # resolution change, with the library curve each was bound to in the config.

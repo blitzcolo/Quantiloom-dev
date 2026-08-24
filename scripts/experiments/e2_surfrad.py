@@ -62,6 +62,11 @@ import solar  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CACHE = pathlib.Path(r"H:\quantiloom-paper\evidence\e2_surfrad\raw")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(CACHE)
 TOOL = REPO / "build" / "src" / "tools" / "Release" / "thermal_column_tool.exe"
 
 STATION = {

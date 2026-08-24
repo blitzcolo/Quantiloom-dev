@@ -50,6 +50,12 @@ CONFIG = REPO / "assets" / "configs" / "gallery" / "camouflage_desert.toml"
 WORK = pathlib.Path(r"H:\quantiloom-paper\evidence\e7\camouflage")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(WORK, FIGURES)
+
 # fusion_tool takes exactly these three, in this order.
 BANDS = [("VIS", "vis_fused", "VIS"),
          ("SWIR", "swir_fused", "SWIR"),

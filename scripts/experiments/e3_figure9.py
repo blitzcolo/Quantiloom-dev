@@ -29,6 +29,7 @@ Usage:
 import argparse
 import json
 import pathlib
+import sys
 import re
 
 import matplotlib
@@ -38,6 +39,12 @@ import numpy as np  # noqa: E402
 
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e3")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(EVIDENCE, FIGURES)
 
 REPLAYED = re.compile(r"\[BENCH\]\s+T2 backward seek, stride (?P<stride>[\d.]+) h\s+"
                       r"replayed (?P<steps>[\d.]+) steps")

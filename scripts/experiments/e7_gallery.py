@@ -31,6 +31,12 @@ CLI = REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe"
 CONFIG = REPO / "assets" / "configs" / "gallery" / "kv2_desert_lwir.toml"
 WORK = pathlib.Path(r"H:\quantiloom-paper\evidence\e7")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(WORK)
+
 # `mode` and `band` move together. A scene that sets one without the other
 # binds each material's visible curve and then samples it in the infrared,
 # which is the failure the convention exists to prevent.

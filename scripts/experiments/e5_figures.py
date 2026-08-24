@@ -14,6 +14,7 @@ import argparse
 import collections
 import json
 import pathlib
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -21,6 +22,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e5")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(EVIDENCE)
 
 
 def panel_roundtrip(axis):

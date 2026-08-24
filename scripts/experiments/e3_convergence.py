@@ -47,6 +47,12 @@ WORK = REPO / "_convergence_t3"
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e3")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(EVIDENCE, FIGURES)
+
 sys.path.insert(0, str(REPO / "scripts" / "render-tests"))
 from measure_convergence import patch_config  # noqa: E402
 

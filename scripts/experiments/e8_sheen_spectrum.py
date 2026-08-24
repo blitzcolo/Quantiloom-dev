@@ -30,6 +30,7 @@ Usage:
 import argparse
 import json
 import pathlib
+import sys
 import struct
 
 import matplotlib
@@ -43,6 +44,12 @@ CHAIR = (REPO / "assets" / "models" / "glTF-Sample-Assets" / "Models" /
          "SheenChair" / "glTF" / "SheenChair.gltf")
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
 EVIDENCE = pathlib.Path(r"H:\quantiloom-paper\evidence\e8")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(FIGURES, EVIDENCE)
 
 LAMBDA_MIN = 380.0     # RGB2SPEC_LAMBDA_MIN
 LAMBDA_RANGE = 400.0   # RGB2SPEC_LAMBDA_RANGE, so the fit ends at 780 nm

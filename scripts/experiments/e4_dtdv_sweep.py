@@ -63,6 +63,11 @@ BASE_CONFIG = REPO / "assets" / "configs" / "desert" / "desert_thermal_lwir.toml
 FORCING = REPO / "assets" / "configs" / "desert" / "desert_day.csv"
 WORK = pathlib.Path(r"H:\quantiloom-paper\evidence\e4_dtdv")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(WORK)
+
 DIVISIONS = [51, 101, 201, 401]
 EVALUATE_H = 87.0          # day 4 at 15:00; three days of spin-up ahead of it
 TRANSECT_HALF_M = 3.0

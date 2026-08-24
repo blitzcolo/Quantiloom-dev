@@ -36,8 +36,12 @@ Usage:
 import argparse
 import json
 import pathlib
+import sys
 
 import numpy as np
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
 
 BINS = 256
 TILES = 8          # DisplayEnhancementParams::tileSize, a grid dimension
@@ -164,6 +168,9 @@ def main():
                         default=pathlib.Path(r"H:\quantiloom-paper\evidence\e8"
                                              r"\agc_monotonicity.json"))
     args = parser.parse_args()
+    # These defaults are Windows paths; under WSL they are directory NAMES.
+    # See scripts/experiments/_winpaths.py for what that silently does.
+    require_windows_paths(args.out)
 
     values = read_exr_luminance(args.input)
     finite = np.isfinite(values)

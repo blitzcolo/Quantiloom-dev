@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import pathlib
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -30,6 +31,12 @@ import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.patches import FancyArrowPatch, FancyBboxPatch  # noqa: E402
 
 FIGURES = pathlib.Path(r"H:\quantiloom-paper\figures")
+
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(FIGURES)
 
 # Lightness rises with each stage so the order survives a greyscale print.
 INK = "#1c1c1c"

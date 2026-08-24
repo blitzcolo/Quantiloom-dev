@@ -57,6 +57,11 @@ SENSOR_LAB = REPO / "build" / "src" / "tools" / "Release" / "sensor_lab.exe"
 CONFIGS = REPO / "assets" / "configs"
 WORK = pathlib.Path(r"H:\quantiloom-paper\evidence\e5")
 
+# These are Windows paths; under WSL they are directory NAMES, not paths.
+# See scripts/experiments/_winpaths.py for what that silently does.
+from _winpaths import require_windows_paths  # noqa: E402
+require_windows_paths(WORK)
+
 TEMPERATURES = list(range(250, 351, 10))
 
 # The eight cavities of the furnace gate, so the round-trip is measured on the
