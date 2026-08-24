@@ -20,12 +20,34 @@ namespace quantiloom::rendercore {
 
 namespace {
 
-// Weights are stored halved so the [0, 1] a UNORM texture can hold covers
-// [0, 2]. One endmember is brightness modulation, and a texel brighter than
-// the endmember's own colour needs w > 1 -- an unscaled encoding would clip
-// every highlight to the curve's own brightness and flatten exactly what this
-// is meant to recover.
-constexpr f32 kWeightScale = 2.0f;
+// Weights are stored divided by this, so the [0, 1] a UNORM8 texture holds
+// covers [0, kWeightScale]. One endmember is brightness modulation, and a texel
+// brighter than the endmember's own colour needs w > 1 -- an unscaled encoding
+// would clip every highlight to the curve's own brightness and flatten exactly
+// what this is meant to recover.
+//
+// 6, not the 2 this started at. These weight distributions are heavily
+// right-skewed -- a base colour texture is mostly dark body with a thin tail of
+// highlights and markings -- so with the mean anchored to 1 the median sits
+// around 0.4 to 0.6 and the 99th percentile at 5 to 9. A ceiling of 2 therefore
+// truncated 18 to 31 % of the texels of the four KV-2 tank materials. Measured
+// over those four textures:
+//
+//     ceiling   clipped (hull / track / turret / wheels)   quantum vs median
+//        2.0      18.5 %  30.8 %  23.3 %  22.0 %                  1.3 %
+//        4.0       4.8 %   6.0 %   1.9 %   9.9 %                  2.6 %
+//        6.0       0.1 %   0.8 %   1.3 %   4.0 %                  3.8 %
+//        8.0       0.0 %   0.1 %   1.1 %   0.9 %                  5.1 %
+//
+// The trade is truncation of the bright tail against quantisation everywhere,
+// and 6 is where the first has essentially stopped while the second is still
+// under 4 % of a typical texel. It does not change the mean -- the anchoring
+// below is exact at any ceiling -- only how much of the variation survives.
+//
+// MUST MATCH the decode in SampleEndmemberWeights (src/shaders/closesthit.rchit),
+// which multiplies the sampled UNORM by this number and whose fallback texel is
+// its reciprocal. Nothing checks the pair at build time. The value itself lives
+// in SpectralUnmixer.hpp so the tests share it.
 
 // sRGB EOTF, per byte value. Built once: the alternative is a pow() per
 // channel per texel, which on a 4 megapixel base colour is 12 million of them.
@@ -171,12 +193,56 @@ u64 UnmixTexels(const u8* rgba, const u64 texelCount, const bool srgb,
         weightSum += perEndmember[c];
     }
     const f64 meanTotal = weightSum / static_cast<f64>(count);
-    const f32 normalise = meanTotal > 1e-6 ? static_cast<f32>(1.0 / meanTotal) : 1.0f;
+    f32 normalise = meanTotal > 1e-6 ? static_cast<f32>(1.0 / meanTotal) : 1.0f;
+
+    // Re-anchor against the clamp, not just against the raw weights.
+    //
+    // EncodeWeight stores w/kWeightScale in a UNORM8, so anything above
+    // kWeightScale is truncated. Solving for mean(w) = 1 BEFORE that truncation
+    // therefore did not achieve mean(w) = 1 after it: every texel above the
+    // ceiling lost its excess, and the surface rendered darker than the curve it
+    // was bound to. On the KV-2 tank textures -- which are dark and heavily
+    // skewed, so 13-18 % of texels sat above the ceiling -- the four materials
+    // came out at 0.68 to 0.80 of their measured band reflectance while the
+    // ground, having no base-colour texture and so no weight map at all,
+    // rendered at exactly 1.00. That is an asymmetry between the two objects
+    // being compared, which is the worst place for one to hide.
+    //
+    // Fixed point rather than closed form: raising the scale pushes more texels
+    // into the clamp, so the correction feeds back. It converges quickly because
+    // the clipped population only shrinks -- a handful of iterations, and the
+    // loop exits as soon as the encoded mean is within a UNORM8 quantum of 1.
+    const auto encodedMean = [&](const f32 scale) {
+        f64 sum = 0.0;
+        for (usize i = 0; i < count; ++i) {
+            for (i32 c = 0; c < k; ++c) {
+                const f32 w = weights[i * Material::MAX_ENDMEMBERS + static_cast<usize>(c)] * scale;
+                sum += std::min(static_cast<f64>(w), static_cast<f64>(kWeightScale));
+            }
+        }
+        return sum / static_cast<f64>(count);
+    };
+
+    constexpr i32 kMaxAnchorIters = 8;
+    constexpr f64 kAnchorTol = 1.0 / 255.0 / 2.0;  // half a UNORM8 step
+    for (i32 iter = 0; iter < kMaxAnchorIters; ++iter) {
+        const f64 achieved = encodedMean(normalise);
+        if (achieved < 1e-9 || std::abs(achieved - 1.0) <= kAnchorTol) {
+            break;
+        }
+        normalise = static_cast<f32>(static_cast<f64>(normalise) / achieved);
+    }
 
     if (meanWeightsOut != nullptr) {
+        // Reported post-clamp, so the "endmember split" log describes the
+        // mixture that was actually encoded rather than the one solved for.
         for (i32 c = 0; c < k; ++c) {
-            meanWeightsOut[c] =
-                static_cast<f32>(perEndmember[c] / static_cast<f64>(count)) * normalise;
+            f64 sum = 0.0;
+            for (usize i = 0; i < count; ++i) {
+                const f32 w = weights[i * Material::MAX_ENDMEMBERS + static_cast<usize>(c)] * normalise;
+                sum += std::min(static_cast<f64>(w), static_cast<f64>(kWeightScale));
+            }
+            meanWeightsOut[c] = static_cast<f32>(sum / static_cast<f64>(count));
         }
     }
 

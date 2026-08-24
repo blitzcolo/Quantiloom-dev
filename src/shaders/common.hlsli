@@ -1247,19 +1247,25 @@ float GetIRReflectance(MaterialData mat) {
 // Reference: "Handbook of Optical Constants" (Palik, 1985)
 // ============================================================================
 
-float GetEffectiveIREmissivity(MaterialData mat) {
+// metallic and roughness are the TEXTURED values, not mat.metallicFactor and
+// mat.roughnessFactor. The visible band has always shaded from the texture
+// (closesthit.rchit computes them once as factor * metallicRoughness.bg), while
+// every infrared band read the bare factors -- so a material whose texture says
+// dielectric over most of its area but whose factor is glTF's default 1.0 was a
+// dielectric in VIS and a metal in LWIR. One decode, like GetSurfaceTemperatureK.
+float GetEffectiveIREmissivity(MaterialData mat, float metallic, float roughness) {
     // Sentinel value: irEmissivity < 0 means "derive from PBR properties"
     if (mat.irEmissivity < 0.0) {
         // Derive emissivity from metallic factor using physically-based model
         // Base emissivity for dielectric: 0.95 (rough surface, high absorptance)
         // Metal emissivity reduction: up to 0.90 (leaving 0.05 for polished metal)
         // The 0.90 factor accounts for typical metal reflectance ρ ≈ 0.95
-        float emissivity_derived = 0.95 - 0.90 * mat.metallicFactor;
+        float emissivity_derived = 0.95 - 0.90 * metallic;
 
         // Apply roughness correction: rough metals have higher emissivity
         // due to micro-cavity effects (multiple reflections increase absorptance)
         // Rough metal: ε increases by up to 2x the polished value
-        float roughness_correction = mat.metallicFactor * mat.roughnessFactor * 0.15;
+        float roughness_correction = metallic * roughness * 0.15;
         emissivity_derived += roughness_correction;
 
         return saturate(emissivity_derived);
@@ -1276,8 +1282,8 @@ float GetEffectiveIREmissivity(MaterialData mat) {
 // Use this function for IR rendering to ensure Kirchhoff's law compliance.
 // ============================================================================
 
-float GetEffectiveIRReflectance(MaterialData mat) {
-    float emissivity = GetEffectiveIREmissivity(mat);
+float GetEffectiveIRReflectance(MaterialData mat, float metallic, float roughness) {
+    float emissivity = GetEffectiveIREmissivity(mat, metallic, roughness);
     return saturate(1.0 - emissivity - mat.irTransmittance);
 }
 

@@ -35,6 +35,17 @@
 
 namespace quantiloom::rendercore {
 
+/// Encoded weights are stored divided by this, so the [0, 1] a UNORM8 texture
+/// holds covers [0, kWeightScale]. Declared here rather than in the .cpp so the
+/// tests decode with the same number the writer encodes with -- they had their
+/// own copy, and it silently decoded every weight a third of its true value the
+/// moment this changed.
+///
+/// The shader has the only remaining mirror, in SampleEndmemberWeights
+/// (src/shaders/closesthit.rchit); nothing checks that pair at build time.
+/// SpectralUnmixer.cpp carries the measurements behind the value.
+inline constexpr f32 kWeightScale = 6.0f;
+
 /**
  * @brief Unmix one texel buffer against a set of endmember colours
  *
@@ -46,13 +57,14 @@ namespace quantiloom::rendercore {
  * @param baseColorFactor  glTF factor the texture is modulated by
  * @param colors      endmember colours in linear sRGB
  * @param k           endmember count, 1..Material::MAX_ENDMEMBERS
- * @param rgbaOut     receives 4 bytes per texel: channel i is w_i / 2
+ * @param rgbaOut     receives 4 bytes per texel: channel i is
+ *                    w_i / kWeightScale
  * @param meanWeightsOut  optional, receives Material::MAX_ENDMEMBERS mean
  *                    weights after normalisation. They sum to 1 and say how
  *                    the surface divided between the endmembers, which is the
  *                    only feedback on whether a chosen endmember was present
  *                    in the texture at all.
- * @return number of texels whose weights were clipped by the /2 encoding
+ * @return number of texels whose weights were clipped by the encoding
  *
  * The weights are scaled by one scalar so their mean total is 1, which keeps
  * the surface's average reflectance equal to the measured mixture: without it

@@ -20,8 +20,10 @@ using namespace quantiloom::rendercore;
 
 namespace {
 
-constexpr f32 kWeightScale = 2.0f;
-
+// kWeightScale comes from SpectralUnmixer.hpp. It used to be redefined here,
+// which meant this file went on decoding against 2.0 after the writer moved to
+// 6.0 -- every weight read a third of its value and three tests failed for a
+// reason that had nothing to do with what they were testing.
 f32 DecodeWeight(u8 encoded) {
     return kWeightScale * static_cast<f32>(encoded) / 255.0f;
 }

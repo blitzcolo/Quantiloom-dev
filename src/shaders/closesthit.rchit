@@ -304,9 +304,14 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
 
     // LOD 0: the weight map is data, and a mip average of it would blend
     // materials that are not adjacent in the mixture.
-    float4 w = 2.0 * SampleTexture(material.weightTextureIndex,
-                                   material.weightTextureIndex, uv,
-                                   float4(0.5, 0.0, 0.0, 0.0));
+    //
+    // 6.0 MUST MATCH kWeightScale in SpectralUnmixer.cpp, which divides by it
+    // when encoding; the comment there records why it is 6 and not 2. The
+    // fallback texel is its reciprocal so a missing texture decodes to w = 1.
+    const float kWeightScale = 6.0;
+    float4 w = kWeightScale * SampleTexture(material.weightTextureIndex,
+                                            material.weightTextureIndex, uv,
+                                            float4(1.0 / kWeightScale, 0.0, 0.0, 0.0));
 
     // A texel with no material in it at all is a black surface, which is
     // almost always a hole in the unmix rather than a physical black. Fall
@@ -2743,7 +2748,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // GetEffectiveIREmissivity's metallic heuristic, which is again
             // what the fused bands do -- and ResolveMaterialSpectra has
             // already warned about that material by the time a ray is traced.
-            spectralAlbedo = saturate(1.0 - GetEffectiveIREmissivity(material)
+            spectralAlbedo = saturate(1.0 - GetEffectiveIREmissivity(material, metallic, roughness)
                                           - material.irTransmittance);
         } else {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
@@ -3005,7 +3010,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Directional emissivity is real, but it belongs in a specular lobe
         // driven by Fresnel(n, k) -- FresnelConductor in pbr.hlsli, already
         // harness-verified -- not as a scale on a Lambertian albedo.
-        float baseEmissivity_swir = GetEffectiveIREmissivity(material);
+        float baseEmissivity_swir = GetEffectiveIREmissivity(material, metallic, roughness);
         float emissivity = baseEmissivity_swir;
         float reflectance = saturate(1.0 - baseEmissivity_swir - material.irTransmittance);
 
@@ -3324,7 +3329,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 1200, numbers that were an artefact of a division rather than a
         // statement about the surface. ir_emissivity is at least a property the
         // material declares, in the band it declares it for.
-        const float baseEmissivity_nir = GetEffectiveIREmissivity(material);
+        const float baseEmissivity_nir = GetEffectiveIREmissivity(material, metallic, roughness);
         // Hemispherical, as measured -- see the note in the SWIR branch above.
         const float reflectance_nir =
             saturate(1.0 - baseEmissivity_nir - material.irTransmittance);
@@ -3598,7 +3603,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float NdotV = max(dot(normal, V), 0.0);
 
         // Hemispherical, as measured -- see the note in the SWIR branch above.
-        float baseEmissivity = GetEffectiveIREmissivity(material);
+        float baseEmissivity = GetEffectiveIREmissivity(material, metallic, roughness);
         float emissivity = baseEmissivity;
         float reflectance = saturate(1.0 - baseEmissivity - material.irTransmittance);
 
@@ -4146,7 +4151,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             case DEBUG_MODE_IR_EMISSIVITY: {
                 // IR emissivity (grayscale)
-                float emissivity = GetEffectiveIREmissivity(material);
+                float emissivity = GetEffectiveIREmissivity(material, metallic, roughness);
                 debug_output = float3(emissivity, emissivity, emissivity);
                 break;
             }
@@ -4157,7 +4162,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                       WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
                                                       payload);
                 if (temp_K <= 0.0) temp_K = 300.0;
-                float emission = GetEffectiveIREmissivity(material) * IRPlanckRadiance(temp_K, 10000.0);
+                float emission = GetEffectiveIREmissivity(material, metallic, roughness) * IRPlanckRadiance(temp_K, 10000.0);
                 emission = emission / (1.0 + emission);  // Tone map
                 debug_output = float3(emission, emission, emission);
                 break;
@@ -4165,7 +4170,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             case DEBUG_MODE_IR_REFLECTION: {
                 // IR reflection component (grayscale)
-                float refl = GetEffectiveIRReflectance(material);
+                float refl = GetEffectiveIRReflectance(material, metallic, roughness);
                 debug_output = float3(refl, refl, refl);
                 break;
             }
