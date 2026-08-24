@@ -61,7 +61,13 @@ def render(exe, name, refs_line):
         # binary and cannot open a /mnt/... path, but it inherits the working
         # directory through the interop layer.
         proc = subprocess.run([str(exe), str(tmp.relative_to(REPO))],
-                              capture_output=True, text=True, cwd=str(REPO), timeout=900)
+                          # encoding explicitly, not text=True: that decodes with the
+                          # locale codec, and the renderer's log has bytes GBK rejects.
+                          # The reader thread then dies and stdout returns None, so the
+                          # failure arrives as a TypeError with nothing to suggest an
+                          # encoding. errors=replace: this is only ever grepped for an
+                          # ASCII marker.
+                              capture_output=True, encoding="utf-8", errors="replace", cwd=str(REPO), timeout=900)
         if proc.returncode != 0 and "Rendering COMPLETED" not in proc.stdout:
             print(proc.stdout[-2000:], file=sys.stderr)
             raise SystemExit(f"render failed: {name}")

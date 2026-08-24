@@ -66,8 +66,14 @@ def run(name, dispersion, cri):
     TMP_CFG.write_text(cfg)
 
     proc = subprocess.run([str(CLI), str(TMP_CFG.relative_to(ROOT))],
-                          cwd=ROOT, capture_output=True, text=True)
-    if "Saved spectral image" not in proc.stdout + proc.stderr:
+                          # encoding explicitly, not text=True: that decodes with the
+                          # locale codec, and the renderer's log has bytes GBK rejects.
+                          # The reader thread then dies and stdout returns None, so the
+                          # failure arrives as a TypeError with nothing to suggest an
+                          # encoding. errors=replace: this is only ever grepped for an
+                          # ASCII marker.
+                          cwd=ROOT, capture_output=True, encoding="utf-8", errors="replace")
+    if "Saved spectral image" not in (proc.stdout or "") + (proc.stderr or ""):
         sys.exit(f"{name}: render produced no output\n{proc.stdout[-2000:]}")
 
     produced = ROOT / f"_dispersion_{name}.exr"

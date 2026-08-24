@@ -58,10 +58,23 @@ require_windows_paths(EVIDENCE, FIGURES)
 
 # Pixels on each material, in fractions of the frame so they survive a
 # resolution change, with the library curve each was bound to in the config.
+# Fractional image coordinates, so they survive a resolution change -- but NOT
+# a camera change, which is what happened: these were placed for a camera at
+# [14, 5, 13] and kv2_cube.toml now stands at [-7, 3.4, 6.5], on the sunward
+# side and at half the distance. The old positions then sampled sky and sand
+# while still being labelled turret and hull, and the figure reported a hull
+# ANTI-correlated with the curve it was supposed to match, r = -0.618.
+#
+# Replaced by locating the vehicle in the painted/bare difference of the
+# companion config -- the ground is the same material in both, so anything that
+# differs is the vehicle -- and taking the turret from the top of that
+# silhouette and the hull from its middle. Placed by geometry and checked
+# against the curves afterwards; choosing them by which curve they matched best
+# would assume what the figure sets out to show.
 PROBES = [
-    ("turret", 0.505, 0.400, "Olive green gloss paint (0386UUUPNT)", "#4a6b2a"),
-    ("hull", 0.470, 0.560, "Olive green gloss paint (0385UUUPNT)", "#6b8f3a"),
-    ("sand", 0.180, 0.860, "Brown loamy fine sand (87P3468)", "#c19a5b"),
+    ("turret", 0.515, 0.362, "Olive green paint (0408UUUPNT)", "#4a6b2a"),
+    ("hull", 0.505, 0.491, "Olive green paint (0407UUUPNT)", "#6b8f3a"),
+    ("sand", 0.099, 0.860, "Brown loamy fine sand (87P3468)", "#c19a5b"),
 ]
 PATCH = 6  # half-width of the averaging window, in pixels
 
@@ -172,6 +185,15 @@ def main():
         # Reported, but not the claim: with texture modulation and an
         # uncorrected illumination geometry between the two curves, a shape
         # correlation is a number about the confounds as much as about the cube.
+        #
+        # It is also a number about how much shape there is to correlate, which
+        # is why the sand reads near zero while the paint reads above 0.93.
+        # Over 1100-2500 nm the two olive samples swing from 0.21 to 0.86 --
+        # (max-min)/mean of 1.2 -- and the sand runs 0.36 to 0.47, a contrast of
+        # 0.25 around a mean of 0.43. A Pearson coefficient on a nearly flat
+        # curve is dominated by whatever residual structure survives the
+        # illumination division, so a low value there is the expected outcome of
+        # a featureless spectrum and not evidence of a mis-bound material.
         correlation = float(np.corrcoef(recovered[inside], reference[inside])[0, 1])
 
         axes[0].plot([x], [y], "o", ms=6, mfc="none", mew=1.6, color=colour, zorder=5)
