@@ -23,6 +23,22 @@ esac
 BUILD_DIR="${BUILD_DIR:-build}"
 ABI_DIR="docs/abi"
 
+# --- Shell portability -------------------------------------------------------
+# This runs from WSL (build_wsl.sh) and from Git Bash (build_windows.ps1), which
+# mount the Windows drives at different roots and hand Windows paths to native
+# tools by different means. Both are resolved once here rather than at each use.
+if command -v wslpath >/dev/null 2>&1; then
+    to_win() { wslpath -w "$1"; }
+    C_DRIVE=/mnt/c
+elif command -v cygpath >/dev/null 2>&1; then
+    to_win() { cygpath -w "$1"; }
+    C_DRIVE=/c
+else
+    # Neither converter: assume the shell already speaks Windows paths.
+    to_win() { printf '%s' "$1"; }
+    C_DRIVE=/c
+fi
+
 # --- Locate the MSVC tools ---------------------------------------------------
 # Neither is on PATH outside a developer prompt, so glob the VS installs. Any
 # toolset version works; the export table does not depend on which one reads it.
@@ -30,8 +46,8 @@ find_msvc_tool() {
     local name="$1" override="$2" found
     if [[ -n "${!override:-}" ]]; then printf '%s' "${!override}"; return 0; fi
     found=$(command -v "$name" 2>/dev/null) && { printf '%s' "$found"; return 0; }
-    found=$(find "/mnt/c/Program Files/Microsoft Visual Studio" \
-                 "/mnt/c/Program Files (x86)/Microsoft Visual Studio" \
+    found=$(find "${C_DRIVE}/Program Files/Microsoft Visual Studio" \
+                 "${C_DRIVE}/Program Files (x86)/Microsoft Visual Studio" \
                  -name "$name" -path '*Hostx64/x64*' 2>/dev/null | head -1)
     [[ -n "$found" ]] || {
         echo "check_exports: cannot find $name. Set ${override}=/path/to/$name" >&2
@@ -46,10 +62,16 @@ UNDNAME=$(find_msvc_tool undname.exe QL_UNDNAME)
 # --- Read one DLL's export table --------------------------------------------
 # dumpbin's export rows are "ordinal hint RVA name"; take the name, undecorate,
 # then sort. Sorting is what makes the baseline stable: link order is not.
+#
+# The switches are spelled -nologo, not /nologo, because MSYS (Git Bash) rewrites
+# an argument that looks like an absolute POSIX path into a Windows one before
+# the native tool sees it: /nologo arrived as C:\Program Files\Git\nologo and
+# dumpbin tried to open it as the input file. MSVC tools take either prefix, and
+# the dash form means the same thing in both shells.
 dump_exports() {
     local dll="$1" decorated
     decorated=$(mktemp)
-    "$DUMPBIN" /nologo /exports "$(wslpath -w "$dll")" \
+    "$DUMPBIN" -nologo -exports "$(to_win "$dll")" \
         | tr -d '\r' \
         | awk '/ordinal hint RVA      name/{f=1;next} /^  Summary/{f=0} f' \
         | grep -E '^ +[0-9]+ +[0-9A-F]+ +[0-9A-F]+ +\S+' \
@@ -58,7 +80,7 @@ dump_exports() {
         echo "check_exports: no exports found in $dll -- is it built?" >&2
         rm -f "$decorated"; exit 1
     fi
-    "$UNDNAME" "$(wslpath -w "$decorated")" \
+    "$UNDNAME" "$(to_win "$decorated")" \
         | tr -d '\r' \
         | sed 's/ __ptr64//g; s/__cdecl //g; s/  */ /g; s/^ //; s/ $//' \
         | grep -v '^$' \

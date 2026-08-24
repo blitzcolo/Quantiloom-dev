@@ -3,6 +3,13 @@
 # Produces Windows binaries (EXE/DLL), identical to running
 # build_windows.ps1 + install_windows.ps1 on the Windows side.
 #
+# That last sentence is an invariant to maintain, not an observation: both paths
+# install to the same prefix, and Quantiloom-Qt cannot tell which one produced
+# the SDK it links. It stopped being true once -- build_windows.ps1 configured
+# tests OFF and ran no gate, so the Windows pair published whatever it built --
+# and the same four gates now run on both sides, from the same scripts. A gate
+# added here belongs there too.
+#
 # set -e guarantees the install step is never reached if any build step fails.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -19,7 +26,12 @@ cd "$(dirname "$0")"
 # rendering and saved little VRAM, so it is a net loss here. vendor/bc7enc_rdo/
 # is also gitignored, so ON would not build from a fresh clone anyway. This
 # leaves the 8 BC7CompressionActualTest cases skipped, which is expected.
+# QUANTILOOM_BUILD_TESTS is passed explicitly rather than left to its default,
+# because CMake caches it and build_windows.ps1 used to force it OFF: a tree
+# configured by that script kept tests off, and the gate below then failed for
+# want of a binary rather than for want of a passing test.
 cmake.exe -B build -G "Visual Studio 18 2026" -A x64 \
+    -DQUANTILOOM_BUILD_TESTS=ON \
     -DQUANTILOOM_USE_BC7ENC=OFF \
     -DQUANTILOOM_USE_OPENUSD=ON \
     -DUSD_ROOT=C:/openusd

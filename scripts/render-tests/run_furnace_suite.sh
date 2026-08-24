@@ -30,6 +30,13 @@ cd "$(dirname "$0")/../.."
 CLI="${CLI:-./build/src/app/Release/Quantiloom.exe}"
 [ -x "$CLI" ] || { echo "no CLI at $CLI -- build first (build-and-install skill)" >&2; exit 2; }
 
+
+# The checkers below need numpy and OpenEXR. In WSL those sit on python3; a
+# Windows shell usually has no python3 at all (the name resolves to a Store
+# stub), so build_windows.ps1 sets PYTHON to an interpreter that has them.
+# The default is unchanged, so the WSL path runs exactly as before.
+PY="${PYTHON:-python3}"
+
 fail=0
 for band in lwir mwir; do
     # Two LWIR-only cavities, each covering something the grey ones cannot.
@@ -71,7 +78,7 @@ for band in lwir mwir; do
         # straight into grep would test grep's status instead, and grep
         # succeeds precisely when it has found the word FAIL.
         printf '%-22s ' "${band}_${case}"
-        if report=$(python3 scripts/render-tests/check_furnace.py "$out" "${band^^}"); then
+        if report=$("$PY" scripts/render-tests/check_furnace.py "$out" "${band^^}"); then
             echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
         else
             echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
