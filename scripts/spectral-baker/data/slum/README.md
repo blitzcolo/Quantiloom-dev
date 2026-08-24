@@ -34,15 +34,33 @@ per-material coverage per band and skips bands with zero coverage, so MWIR
 
 ## Sample categories (from Kotthaus et al. 2014, Table C.1)
 
-| Prefix | Count | Material |
+| Prefix | Count | Class |
 |---|---|---|
-| A | 10 | Asphalt |
-| B | 14 | Brick / engineering brick |
-| C | 7 | Concrete / cement |
-| G | 5 | Stone / granite / quartzite |
-| L | 3 | Slate / fibre cement |
-| R | 13 | Roof tile (clay + concrete) |
-| S | 5 | Roof tile (slate + fibre cement) |
-| V | 6 | PVC roofing membrane |
-| X | 3 | Miscellaneous |
-| Z | 8 | Metal (aluminium, zinc, lead, iron, painted) |
+| A | 10 | Road asphalt (9) + asphalt roofing (1) |
+| B | 14 | Cement brick (7) + ceramic brick (7) |
+| C | 7 | Concrete (4) + cement (3) |
+| G | 5 | Granite |
+| L | 4 | Roofing shingle (slate, fibre cement) |
+| R | 12 | Roofing tile (ceramic + cement) |
+| S | 5 | Stone (sandstone 3, limestone 2) |
+| V | 6 | PVC roofing sheet |
+| X | 3 | Quartzite conglomerate |
+| Z | 8 | Metal (aluminium, lead, iron, painted) |
+
+These counts are the paper's own class table (Kotthaus et al. 2014, p. 200) and
+the documentation PDF agrees with them sample by sample. An earlier version of
+this table had L at 3, R at 13, S as roof tiles, G as mixed stone and X as
+"miscellaneous" — none of which is right, and the same edit that corrected it
+replaced 74 invented sample descriptions in `slum_loader.py`. See that file's
+header for the evidence.
+
+## Sample names
+
+The two CSVs carry **only sample IDs** — `A001`, `B001`, and so on. Every
+human-readable name comes from the documentation PDF:
+
+<https://urban-meteorology-reading.github.io/other%20files/LUMA_SLUM.pdf>
+
+78 pages, one per sample, each giving Class / Material / Colour / Status /
+Dimension. That file is the authority for anything descriptive about a sample;
+nothing else in this repository is.
