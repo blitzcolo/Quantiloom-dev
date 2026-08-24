@@ -183,7 +183,73 @@ def diurnal(out):
     figure.savefig(out, dpi=300, bbox_inches="tight")
     figure.savefig(out.with_suffix(".pdf"), bbox_inches="tight")
     plt.close(figure)
+
+    # The prose beside this figure quotes a radiance at three of the hours and
+    # asserts the vehicle is darker than the sand at exactly one of them. Those
+    # are measurements, so measure them here rather than by hand: a number in
+    # the manuscript that no committed script recomputes is a number that
+    # silently goes stale the next time the frames are re-rendered, and these
+    # already did once.
+    #
+    # The vehicle is isolated without a hand-drawn mask. The painted and
+    # unpainted strip renders differ only in the tank's bound reflectance -- the
+    # ground is the same material, rendered from the same camera with the same
+    # seed, and comes out bit-identical -- so whatever differs between them is
+    # the vehicle. Both are tracked beside this manifest, so the mask is
+    # reproducible from the repository and not from a scratch render.
+    measurements = _diurnal_radiances(frames)
+    if measurements:
+        (EVIDENCE / "diurnal_measurements.json").write_text(
+            json.dumps(measurements, indent=2), encoding="utf-8")
+        print(f"wrote {EVIDENCE / 'diurnal_measurements.json'}")
+
     print(f"wrote {out}  ({len(frames)} frames)")
+
+
+def _diurnal_radiances(frames):
+    """Mean band radiance over ground and vehicle, per frame.
+
+    Returns None when the painted/unpainted pair is absent, since without it
+    there is no principled vehicle mask and a guessed one would be worse than
+    no number at all.
+    """
+    paint = EVIDENCE / "strip" / "kv2_paint_vis.exr"
+    bare = EVIDENCE / "strip" / "kv2_bare_vis.exr"
+    if not (paint.is_file() and bare.is_file()):
+        print("  (skipping radiance measurements: run e7_gallery.py --strip first)")
+        return None
+
+    luma = np.array([0.2126, 0.7152, 0.0722])
+
+    def grey(path):
+        image = read_exr(path)
+        return image[..., :3] @ luma if image.ndim == 3 else image
+
+    # 0.005 absolute, not a fraction of the maximum: the VIS frame has a
+    # specular highlight near 3.0, so a relative threshold sets the bar three
+    # orders above the paint difference and selects nothing.
+    mask = np.abs(grey(paint) - grey(bare)) > 0.005
+
+    rows = []
+    for hour, image in frames:
+        h, w = image.shape
+        ys = (np.arange(h) / (h / mask.shape[0])).astype(int).clip(0, mask.shape[0] - 1)
+        xs = (np.arange(w) / (w / mask.shape[1])).astype(int).clip(0, mask.shape[1] - 1)
+        vehicle = mask[np.ix_(ys, xs)]
+        # Ground is everything below the horizon that is not the vehicle;
+        # 0.72 of frame height puts the cut under the skyline for this camera.
+        ground = (~vehicle) & (np.arange(h)[:, None] > h * 0.72)
+        g, v = float(image[ground].mean()), float(image[vehicle].mean())
+        rows.append({"time_h": hour, "clock_h": hour % 24,
+                     "ground_mean": g, "vehicle_mean": v,
+                     "vehicle_over_ground": v / g})
+
+    inverted = [r["clock_h"] for r in rows if r["vehicle_over_ground"] < 1.0]
+    return {"source": "evidence/e7/diurnal.json frames",
+            "mask": "|paint - bare| > 0.005 on the VIS strip pair",
+            "units": "W sr^-1 m^-2 nm^-1, band mean",
+            "rows": rows,
+            "hours_sand_brighter_than_vehicle": inverted}
 
 
 def main():

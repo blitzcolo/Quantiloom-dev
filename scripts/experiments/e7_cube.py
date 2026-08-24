@@ -44,6 +44,7 @@ import numpy as np  # noqa: E402
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 CUBE = REPO / "renders" / "gallery" / "kv2_cube.hdr"
+CONFIG = REPO / "assets" / "configs" / "gallery" / "kv2_cube.toml"
 SOLAR = REPO / "assets" / "luts" / "astmg173.csv"
 LIBRARY = REPO / "assets" / "spectral" / "ecospeclib-all"
 MATERIALS = REPO / "assets" / "spectral" / "quantiloom_materials_merged.json"
@@ -71,6 +72,11 @@ require_windows_paths(EVIDENCE, FIGURES)
 # silhouette and the hull from its middle. Placed by geometry and checked
 # against the curves afterwards; choosing them by which curve they matched best
 # would assume what the figure sets out to show.
+#
+# e7_place_probes.py is that placement, and it re-derives these three numbers
+# from the tracked strip renders rather than trusting the literal. Run it after
+# any camera change: it reports a probe that matches a different material's
+# curve better than its own as a MISMATCH, and exits non-zero.
 PROBES = [
     ("turret", 0.515, 0.362, "Olive green paint (0408UUUPNT)", "#4a6b2a"),
     ("hull", 0.505, 0.491, "Olive green paint (0407UUUPNT)", "#6b8f3a"),
@@ -231,6 +237,17 @@ def main():
         {"cube": str(CUBE), "shape": [width, height, len(grid)],
          "wavelength_nm": [float(grid[0]), float(grid[-1])],
          "step_nm": float(grid[1] - grid[0]),
+         # The cube is 262 MB and lives under renders/, which is gitignored, so
+         # it is the one figure input the paper repository cannot carry. What it
+         # can carry is enough of the header to say which render this was: the
+         # config that produced it, and the spp and renderer string the writer
+         # stamped in. A stale log file next to a re-rendered cube says less
+         # than this does, and can contradict it.
+         "source_config": str(CONFIG),
+         "envi_metadata": {k: cube.metadata[k] for k in
+                           ("renderer", "spp", "description", "interleave",
+                            "data type", "byte order")
+                           if k in cube.metadata},
          "reader": f"spectral-python {spectral.__version__}",
          "note": "recovered curves are apparent reflectance -- pi L / E with E the "
                  "ASTM G-173 global spectrum the scene was lit with -- so they carry "
