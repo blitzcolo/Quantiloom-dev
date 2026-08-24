@@ -23,6 +23,13 @@
 #               outside the light panel got there by bouncing, and the side
 #               walls tint what they reflect. Catches a bounce that never fires
 #               and a bounce that comes back colourless.
+#   mis         The same box rendered with light sampling on and off, which
+#               estimate the same integral and so must agree. Catches emitted
+#               radiance counted by both strategies at full weight -- which the
+#               indirect check cannot see, since a box at twice its brightness
+#               is still a lit box. Run for both emission representations, the
+#               RGB emissiveFactor and a bound emissive_curve, because they are
+#               separate paths in the shader that meet only at the MIS weight.
 #
 #   ./scripts/render-tests/run_illumination_suite.sh
 #
@@ -36,6 +43,13 @@ cd "$(dirname "$0")/../.."
 
 CLI="${CLI:-./build/src/app/Release/Quantiloom.exe}"
 [ -x "$CLI" ] || { echo "no CLI at $CLI -- build first (build-and-install skill)" >&2; exit 2; }
+
+
+# The checkers below need numpy and OpenEXR. In WSL those sit on python3; a
+# Windows shell usually has no python3 at all (the name resolves to a Store
+# stub), so build_windows.ps1 sets PYTHON to an interpreter that has them.
+# The default is unchanged, so the WSL path runs exactly as before.
+PY="${PYTHON:-python3}"
 
 fail=0
 for band in nir swir mwir; do
@@ -59,7 +73,7 @@ for band in nir swir mwir; do
     done
 
     printf '%-8s ' "$band"
-    if report=$(python3 scripts/render-tests/check_shadow.py \
+    if report=$("$PY" scripts/render-tests/check_shadow.py \
                     "shadow_${band}_sun_output.exr" \
                     "shadow_${band}_nosun_output.exr"); then
         echo "$report" | grep -E 'Shadowed fraction' | tr -d '\n'; echo '  PASS'
@@ -81,7 +95,7 @@ if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
     fail=1
 else
     printf '%-8s ' "open"
-    if report=$(python3 scripts/render-tests/check_sky_equiv.py skyequiv_swir_output.exr); then
+    if report=$("$PY" scripts/render-tests/check_sky_equiv.py skyequiv_swir_output.exr); then
         echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
     else
         echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
@@ -89,9 +103,10 @@ else
     fi
 fi
 
-# Indirect light in the visible band. Only emitter is the ceiling panel, and
-# nothing does next-event estimation for emissive geometry, so a lit frame here
-# is bounced light by construction.
+# Indirect light in the visible band. The only emitter is the ceiling panel and
+# the camera cannot see it, so every lit pixel here arrived by bouncing. This
+# asserts that indirect light EXISTS and carries the wall's colour; whether
+# there is the right AMOUNT of it is the next check's job.
 log=$("$CLI" assets/configs/cornell_box_vis_bleed.toml 2>&1)
 if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
     echo "RENDER FAILED  cornell_box_vis_bleed"
@@ -99,7 +114,7 @@ if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
     fail=1
 else
     printf '%-8s ' "bleed"
-    if report=$(python3 scripts/render-tests/check_color_bleed.py cornell_box_vis_bleed_output.exr); then
+    if report=$("$PY" scripts/render-tests/check_color_bleed.py cornell_box_vis_bleed_output.exr); then
         echo "$report" | grep -E 'Lit fraction' | tr -d '\n'; echo '  PASS'
     else
         echo "$report" | grep -E 'Lit fraction|R/G|FAIL' | tr '\n' ' '; echo
@@ -107,8 +122,38 @@ else
     fi
 fi
 
+
+# How much indirect light, rather than whether any. The panel's radiance reaches
+# a surface two ways -- a BSDF-sampled bounce that lands on it, and explicit
+# light sampling from the previous vertex -- and the MIS weights must split the
+# credit, not duplicate it. Rendering the same scene with light sampling on and
+# off estimates the same integral twice, so the two must agree.
+#
+# Nothing above can see this. The furnace cavities and the open-sky check are
+# both scenes where light sampling never fires, and the bleed check asserts that
+# bounced light exists, not that there is the right amount of it -- a Cornell box
+# at twice its correct brightness still looks like a Cornell box. When the MIS
+# weight was being applied to the RGB triple, which a curve-bound emitter never
+# reads, every one of the checks above passed while everything the lamp lit
+# rendered at 2x. A second renderer found it; this is what would have.
+#
+# Runs both emission representations, because they are separate shader paths.
+printf '%-8s ' "mis"
+if report=$("$PY" scripts/render-tests/check_nee_mis.py \
+                --spp "${MIS_SPP:-2048}" --resolution "${MIS_RES:-192}"); then
+    echo "$report" | grep -E 'worst region' | tr -d '\n'; echo '  PASS'
+else
+    mis_status=$?
+    if [ "$mis_status" = 3 ]; then
+        echo "illumination suite: no usable GPU, nothing measured" >&2
+        exit 3
+    fi
+    echo "$report" | grep -E 'worst region|FAIL|worst for' | tr '\n' ' '; echo
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "illumination suite: occlusion, open sky and indirect all within tolerance"
+    echo "illumination suite: occlusion, open sky, indirect and MIS all within tolerance"
 else
     echo "illumination suite: FAILURES above" >&2
 fi

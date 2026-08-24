@@ -4,11 +4,16 @@
 # change resolution without touching the scene people actually look at.
 #
 # The point of this scene as a test is what it does NOT have: no sun, no sky, no
-# solar LUT. Its only emitter is the ceiling panel, and there is no next-event
-# estimation for emissive geometry anywhere in the renderer, so every photon
-# that reaches any other surface arrived there by bouncing. Before the visible
-# band had an environment bounce this frame was the light panel and nothing
-# else -- 0.6% of pixels above the noise floor, the rest exactly zero.
+# solar LUT. Its only emitter is the ceiling panel, so every photon that reaches
+# any other surface arrived there by bouncing. Before the visible band had an
+# environment bounce this frame was the light panel and nothing else -- 0.6% of
+# pixels above the noise floor, the rest exactly zero.
+#
+# (This used to add "and there is no next-event estimation for emissive geometry
+# anywhere in the renderer". There is, and it is on by default -- see
+# renderer.enable_light_sampling. It does not change what this scene proves,
+# since both strategies sample the same panel, but check_nee_mis.py is the one
+# that checks their weights agree.)
 #
 # Check: python scripts/render-tests/check_color_bleed.py cornell_box_vis_bleed_output.exr
 
