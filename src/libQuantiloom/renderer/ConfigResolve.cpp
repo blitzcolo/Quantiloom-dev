@@ -2016,7 +2016,17 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 // a long-wave calculation whatever band the camera is looking
                 // in. This one has to follow the camera, because the whole point
                 // is what the shader will use.
-                if (!mat.irEmissivityCurve.empty() && !allRefs.empty()) {
+                //
+                // MWIR and LWIR only. ir_emissivity is an infrared statement --
+                // the key is named for it and the curve synthesised from it
+                // spans 4000-10000 nm -- so holding it against a visible or
+                // near-infrared band average compares two different physical
+                // quantities. Dry sand really does reflect 0.28 in the visible
+                // and emit 0.93 in the long wave; warning that 0.90 "disagrees"
+                // with a VIS number would be noise, and noise in a diagnostic
+                // is worse than no diagnostic.
+                const bool thermalBand = (activeBandName == "MWIR" || activeBandName == "LWIR");
+                if (thermalBand && !mat.irEmissivityCurve.empty() && !allRefs.empty()) {
                     f64 renderRhoSum = 0.0;
                     i32 renderRhoCount = 0;
                     for (const auto& ref : allRefs) {

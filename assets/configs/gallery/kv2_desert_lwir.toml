@@ -37,8 +37,26 @@ default_temperature_k = 300.0
 
 # Three-quarter view from the sunward side, low enough that the hull's shadow
 # runs into frame and the turret breaks the horizon.
+#
+# x is negative, and that is the whole point. It used to be +14, which put the
+# camera 108.7 degrees from the sun -- the opposite side -- so every tank surface
+# the lens could see was in shadow, lit by the sky alone. Outside the visible
+# that is not a small difference: the direct beam is 17x the diffuse in NIR and
+# 42x in SWIR, so a sky-only face renders 14x and 32x below sunlit ground, and
+# the tank came out as a black silhouette whatever its reflectance was. The
+# manuscript then read that silhouette as a material property and said the tank
+# was dark "because dry sand reflects strongly across both bands and olive paint
+# does not" -- which is the reverse of what the bound spectra say (NIR 0.370
+# against 0.697, SWIR 0.422 against 0.474).
+#
+# At -14 the camera sits 48 degrees from the sun and sees lit faces, so the
+# panels show what the measured reflectances actually do.
+#
+# Do NOT fix this by negating sun_direction instead. That vector is tied to the
+# 15:00 row of the forcing file below, and moving it would leave the shading and
+# the solved temperature field disagreeing about where the shadow falls.
 [camera]
-position = [14.0, 5.0, 13.0]
+position = [-14.0, 5.0, 13.0]
 look_at = [0.0, 1.8, 0.0]
 up = [0.0, 1.0, 0.0]
 fov_y = 40.0
@@ -105,36 +123,85 @@ spectral_material_ref = "Brown loamy fine sand (87P3468)"
 
 [[materials]]
 name = "hull"
-ir_emissivity = 0.92
+# No ir_emissivity. The bound curve IS the emissivity -- the shader derives
+# eps(lambda) = 1 - rho(lambda) - tau from it and never reads a declared scalar
+# -- so writing one down would assert a second surface that nothing uses. This
+# scene used to declare 0.92 against a sample giving 0.387 over MWIR; the
+# renderer now warns when the two disagree, and the fix it recommends is this.
 ir_temperature_k = 322.0          # sun-warmed painted steel, above air
 spectral_material_type = "quantiloom_merged"
-spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+# 0407, not the 0385UUUPNT this used to bind. Both are the same Martin Senour
+# olive green, but 0385 is "a single coat ... on an aluminum surface" and the
+# alkyd goes optically thin around 4-5 um, so the aluminium shows through and
+# takes MWIR reflectance to 0.469 while LWIR stays at 0.099. A KV-2 is thick
+# paint on steel armour, which is opaque in both. The library's samples order
+# themselves by exactly that: one coat on aluminium |d| = 0.370 between the two
+# bands, two coats 0.225, and these paint-on-lumber samples 0.049.
+#
+# What is imperfect about it, stated rather than hidden: the substrate is pine,
+# and the sample's own description notes cellulose features and a slightly
+# translucent coat. Those sit in NIR and SWIR. It is the better wrong answer,
+# because wood is a dielectric whose emissivity is close to the paint's, so
+# where the coat is thin the substrate behaves like more paint -- whereas
+# aluminium behaves like a mirror, in the one band this scene exists to show.
+spectral_material_ref = "Olive green paint (0407UUUPNT)"
 
 [[materials]]
 name = "turret"
 # A second sample of the same paint, so the turret and hull are not literally
 # the same curve -- two panels painted from two batches is what a real vehicle
-# looks like to a spectrometer.
-ir_emissivity = 0.92
+# looks like to a spectrometer. 0408 is the two-coat sample to the hull's one.
 ir_temperature_k = 324.0
 spectral_material_type = "quantiloom_merged"
-spectral_material_ref = "Olive green gloss paint (0386UUUPNT)"
+spectral_material_ref = "Olive green paint (0408UUUPNT)"
 
 [[materials]]
 name = "track"
 # Oxidised rather than clean galvanised: a track that has been driven is not
 # bright metal, and the oxidised sample's emissivity is far more representative.
-ir_emissivity = 0.75
 ir_temperature_k = 318.0
 spectral_material_type = "quantiloom_merged"
 spectral_material_ref = "Oxidized Galvanized Steel Metal (0526UUUSTLa)"
 
 [[materials]]
 name = "wheels"
-ir_emissivity = 0.94
 ir_temperature_k = 316.0
 spectral_material_type = "quantiloom_merged"
 spectral_material_ref = "Black unspecified rubber (0833UUURBR)"
+
+# ----------------------------------------------------------------------------
+# What the tank is made of, electrically
+# ----------------------------------------------------------------------------
+# desert_kv2.gltf declares no metallicFactor for the four tank materials, so
+# glTF's default of 1.0 applies, modulated by each material's
+# metallicRoughness texture -- which leaves the effective value at a median of
+# 0.69 (hull), 0.50 (turret), 0.91 (track) and 0.75 (wheels).
+#
+# Olive drab paint and rubber tyres are dielectrics. Calling them metals costs
+# them most of their diffuse lobe, because kD = (1 - F)(1 - metallic), and the
+# measured reflectance bound above rides on that lobe: at metallic 0.69 roughly
+# seventy per cent of the hull's measured spectrum was being thrown away and
+# replaced by a specular term driven by a very dark base-colour texture.
+#
+# The track keeps 1.0, and it is not an oversight. Its bound sample is oxidised
+# galvanised steel, and for a metal the measured directional-hemispherical
+# reflectance IS essentially the Fresnel reflectance, so feeding it in as F0 --
+# which is what metallic = 1 does -- is the right treatment rather than a
+# discarded one.
+#
+# Overridden here rather than edited into the glTF: the asset is a conversion
+# and should keep saying what it was converted from.
+[material_overrides.hull]
+metallic = 0.0
+
+[material_overrides.turret]
+metallic = 0.0
+
+[material_overrides.wheels]
+metallic = 0.0
+
+[material_overrides.track]
+metallic = 1.0
 
 [thermography]
 enabled = true
