@@ -343,7 +343,20 @@ the whole image is mapped the same way. Measured on `thermal_solver_lwir` at
 |---|---:|---:|
 | `Linear` | 0.000% | 0 |
 | `Equalize` | 0.000% | 0 |
-| `Clahe` | 50.6% | 0.176 — 45 display levels |
+| `Clahe` | 1.902% | 17 display levels |
+
+`Equalize` inverts nothing because a global CDF is a monotone map; `Clahe` is
+tile-local, so it is not. That is the whole difference between them, and it is
+why `Equalize` is safe to read an *ordering* off and `Clahe` is not. Neither is
+safe to read a *value* off without publishing the CDF, which is what keeps
+`Linear` the default for anything carrying a colour bar.
+
+(This table read 50.6% and 45 levels until it was re-measured over a 2e7 pair
+sample against a numpy reimplementation of the three passes that can be checked
+line by line against the shader; a second scene gives 2.02%. The old figure is
+not reproducible from anything in either repository. The qualitative claim is
+unchanged: 17 display levels is still enough that a temperature must not be read
+off one.)
 
 So **do not read a temperature off a `Clahe` view**: two pixels at one
 temperature in different tiles come out as different greys. It is for finding an
