@@ -28,10 +28,18 @@ $ErrorActionPreference = "Stop"
 # below can look at it, and "this machine has no RTX card" becomes "the build
 # failed". Pinned rather than assumed.
 $PSNativeCommandUseErrorActionPreference = $false
-Set-Location (Join-Path $PSScriptRoot "..")
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+Set-Location $RepoRoot
 
 $BuildDir = if ($env:BUILD_DIR) { $env:BUILD_DIR } else { "build" }
-$AbiDir = "docs/abi"
+# Absolute, not "docs/abi": Set-Location only updates PowerShell's $PWD, and on
+# a cross-drive `cd` (e.g. C:\Users\... -> H:\...) that does not carry over to
+# [Environment]::CurrentDirectory -- Windows tracks a separate current directory
+# per drive letter. A relative path here would resolve fine through PowerShell
+# cmdlets (which honor $PWD) but wrongly through the raw .NET calls below
+# ([System.IO.File]::ReadAllLines / WriteAllText), which resolve against
+# [Environment]::CurrentDirectory instead.
+$AbiDir = Join-Path $RepoRoot "docs/abi"
 
 # --- Locate the MSVC tools ---------------------------------------------------
 # Neither is on PATH outside a developer prompt, so glob the VS installs. Any
