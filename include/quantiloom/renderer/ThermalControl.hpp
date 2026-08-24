@@ -38,6 +38,27 @@ struct ThermalSolveParams {
     f64 relativeHumidity = 50.0;
     String forcingFile;
     f64 checkpointStride_h = 1.0;
+
+    /// Carry dT/dv through the trajectory, so the shading pass can resolve a
+    /// shadow edge inside a triangle rather than at its border. On by default;
+    /// off exists so the two renders can be compared, which is the only way to
+    /// show what the correction is worth.
+    ///
+    /// Off does not merely suppress the correction at the shader -- it sizes
+    /// the tangent out of the solve state, so the trajectory neither carries
+    /// nor pays for it. Changing it therefore rebuilds the timeline.
+    bool sunCorrection = true;
+
+    /// Where DumpThermalElements() writes, when it is called with no path of
+    /// its own. Empty for the scenes that never want one.
+    ///
+    /// Naming a file here does NOT make the solve write it. The offline path
+    /// runs once and a dump per run is exactly right; a viewport re-solves on
+    /// every scrub of the hour slider, and a parameter that wrote a file each
+    /// time would turn dragging a slider into hundreds of writes. So the path
+    /// travels with the parameters -- a config carries it, a host round-trips
+    /// it -- and the write is an explicit call.
+    String dumpElementsFile;
 };
 
 struct ThermalMaterialParams {

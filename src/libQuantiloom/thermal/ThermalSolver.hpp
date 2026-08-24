@@ -155,6 +155,38 @@ struct ThermalResult {
 /// explicitly that this is what it wants.
 [[nodiscard]] ExchangeGeometry MakeOpenSkyExchange(usize elementCount);
 
+/// Write the solve out one row per element, for the studies that have to
+/// measure the temperature field rather than look at it. Deliberately the
+/// solver's own numbers: the renderer's images carry the per-pixel sun
+/// correction and a radiance inversion on top, and a mesh-resolution study
+/// needs the field underneath both. The material block above the table is what
+/// the SOLVE saw -- a material bound to a measured spectrum is solved at the
+/// Planck-weighted band average of that curve, not at the emissivity its config
+/// typed, and reproducing a trajectory from the config instead is a 0.4 K error
+/// that looks exactly like a result.
+///
+/// Takes the two fields rather than a ThermalResult so the interactive solve,
+/// which produces its own result type, writes byte-identical files to the
+/// offline one instead of a second format that drifts.
+///
+/// @param temperature_K  per element; an entry of 0 marks an element the solve
+///                       did not participate in
+/// @param sunSensitivity_K  per element, or empty when the tangent was not
+///                       carried -- which the file distinguishes from zero,
+///                       because a temperature that does not move is a
+///                       different claim from not having asked
+/// @param visibility     v per element at the dumped instant. It rides along
+///                       because a pointwise reference integration assumes an
+///                       element whose hemisphere is mostly sky, and a file
+///                       where sky_fraction is far from one says the reference
+///                       does not apply.
+void DumpThermalElements(const String& path, const Vector<ThermalElement>& elements,
+                         const Vector<ThermalMaterial>& materials,
+                         const ExchangeGeometry& geometry,
+                         const Vector<f32>& temperature_K,
+                         const Vector<f32>& sunSensitivity_K,
+                         const Vector<f32>& visibility);
+
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.
 [[nodiscard]] Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path);

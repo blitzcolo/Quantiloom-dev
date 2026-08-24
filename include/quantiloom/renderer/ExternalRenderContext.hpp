@@ -833,6 +833,29 @@ public:
     void ClearThermalMaterials();
 
     /**
+     * @brief Write the current thermal solve out, one row per element
+     * @param pathOrEmpty  Where to write; empty takes ThermalSolveParams
+     *                     ::dumpElementsFile, which is what a config set
+     * @return The file written, or why nothing was
+     *
+     * The interactive twin of `[thermal] dump_elements`, and deliberately a
+     * call rather than a parameter. Offline, one run is one dump and writing
+     * from inside the solve is right; a viewport re-solves on every scrub of
+     * the hour slider, so the same arrangement here would turn dragging a
+     * slider into hundreds of writes. The path travels with the parameters and
+     * the write happens when a host asks for it.
+     *
+     * What lands is the instant already on screen and the solver's own numbers
+     * -- centroid, normal, the temperature reached, and the (dT/dv, v) pair the
+     * shader would apply -- not the image, which carries the per-pixel sun
+     * correction and a radiance inversion on top. The header block above the
+     * table is the material properties AS THE SOLVE SAW THEM: a material bound
+     * to a measured spectrum is solved at the Planck-weighted band average of
+     * that curve rather than at the emissivity its config typed.
+     */
+    Result<String, String> DumpThermalElements(const String& pathOrEmpty = "");
+
+    /**
      * @brief Enable or disable the thermal solve
      *
      * When disabled the viewport reverts to the per-material scalar

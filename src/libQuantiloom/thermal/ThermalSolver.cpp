@@ -36,21 +36,14 @@ f32 EmissivityOf(const Material& material) {
     return 0.95f - 0.90f * material.metallicFactor;
 }
 
-/// Write the solve out one row per element, for the studies that have to
-/// measure the temperature field rather than look at it. Deliberately the
-/// solver's own numbers: the renderer's images carry the per-pixel sun
-/// correction and a radiance inversion on top, and a mesh-resolution study
-/// needs the field underneath both.
-///
-/// sky_fraction rides along because it is what makes the per-element column
-/// model defensible -- an element whose hemisphere is mostly sky is one whose
-/// neighbours barely reach it, which is the assumption a pointwise reference
-/// integration makes. A file where it is far from one says the reference does
-/// not apply, and that is worth seeing without a second run.
-void DumpElements(const String& path, const Vector<ThermalElement>& elements,
-                  const Vector<ThermalMaterial>& materials,
-                  const ExchangeGeometry& geometry, const ThermalResult& result,
-                  const Vector<f32>& visibility) {
+}  // namespace
+
+void DumpThermalElements(const String& path, const Vector<ThermalElement>& elements,
+                         const Vector<ThermalMaterial>& materials,
+                         const ExchangeGeometry& geometry,
+                         const Vector<f32>& temperature_K,
+                         const Vector<f32>& sunSensitivity_K,
+                         const Vector<f32>& visibility) {
     std::ofstream out(path);
     if (!out) {
         QL_LOG_WARN("  Thermal: cannot write thermal.dump_elements to '{}'", path);
@@ -88,20 +81,20 @@ void DumpElements(const String& path, const Vector<ThermalElement>& elements,
     out << "element,centroid_x,centroid_y,centroid_z,normal_x,normal_y,normal_z,"
            "area_m2,material_id,solved,T_K,dTdv_K,v_element,sky_fraction\n";
 
-    const bool haveTangent = result.sunSensitivity_K.size() == elements.size();
+    const bool haveTangent = sunSensitivity_K.size() == elements.size();
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
         out << e << ',' << element.centroid.x << ',' << element.centroid.y << ','
             << element.centroid.z << ',' << element.normal.x << ',' << element.normal.y
             << ',' << element.normal.z << ',' << element.area_m2 << ','
             << element.materialId << ','
-            << (e < result.surfaceTemperature_K.size() && result.surfaceTemperature_K[e] > 0.0f
+            << (e < temperature_K.size() && temperature_K[e] > 0.0f
                     ? 1
                     : 0)
             << ',';
-        if (e < result.surfaceTemperature_K.size()) out << result.surfaceTemperature_K[e];
+        if (e < temperature_K.size()) out << temperature_K[e];
         out << ',';
-        if (haveTangent) out << result.sunSensitivity_K[e];
+        if (haveTangent) out << sunSensitivity_K[e];
         out << ',';
         if (e < visibility.size()) out << visibility[e];
         out << ',';
@@ -110,8 +103,6 @@ void DumpElements(const String& path, const Vector<ThermalElement>& elements,
     }
     QL_LOG_INFO("  Thermal: wrote {} elements to {}", elements.size(), path);
 }
-
-}  // namespace
 
 ExchangeGeometry MakeOpenSkyExchange(const usize elementCount) {
     ExchangeGeometry exchange;
@@ -395,9 +386,10 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     }
 
     if (!config.dumpElementsFile.empty()) {
-        DumpElements(config.dumpElementsFile, mesh.elements, materials, geometry, result,
-                     SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
-                                           mesh.elements.size()));
+        DumpThermalElements(config.dumpElementsFile, mesh.elements, materials, geometry,
+                            result.surfaceTemperature_K, result.sunSensitivity_K,
+                            SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
+                                                  mesh.elements.size()));
     }
 
     QL_LOG_INFO("  Thermal: {} elements ({} solved), {} exchange entries, {} steps, "

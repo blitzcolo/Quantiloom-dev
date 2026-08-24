@@ -1128,6 +1128,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.relativeHumidity = resolved.thermal.relativeHumidity;
             tp.forcingFile = resolved.thermal.forcingFile;
             tp.checkpointStride_h = resolved.thermal.checkpointStride_h;
+            // The two measurement switches. sunCorrection changes what the
+            // solve carries, so the viewport has to be told or it silently
+            // renders the corrected field a config asked not to have;
+            // dumpElementsFile only records where a dump would go, since the
+            // write here is DumpThermalElements() rather than the solve.
+            tp.sunCorrection = resolved.thermal.sunCorrection;
+            tp.dumpElementsFile = resolved.thermal.dumpElementsFile;
             SetThermalSolveParams(tp);
 
             ClearThermalMaterials();
@@ -2658,6 +2665,13 @@ void ExternalRenderContext::SetThermalMaterial(const String& materialName,
 
 void ExternalRenderContext::ClearThermalMaterials() {
     if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
+}
+
+Result<String, String> ExternalRenderContext::DumpThermalElements(const String& pathOrEmpty) {
+    if (!m_impl->thermalPreview) {
+        return Result<String, String>::Err("this context has no thermal solve");
+    }
+    return m_impl->thermalPreview->DumpElements(pathOrEmpty);
 }
 
 void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {

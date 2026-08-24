@@ -68,6 +68,10 @@ public:
 
     SolveResult SolveAt(f64 time_h, const Scene& scene, VkAccelerationStructureKHR tlas);
 
+    /// Write the solve at the instant last shown, one row per element. Empty
+    /// takes the path from the parameters. Returns the file written.
+    [[nodiscard]] Result<String, String> DumpElements(const String& pathOrEmpty = "");
+
     [[nodiscard]] ThermalSolveStatus Status() const;
 
 private:

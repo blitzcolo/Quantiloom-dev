@@ -78,6 +78,51 @@ struct ThermalPreview::Impl {
         gpuStepper = std::make_unique<GpuThermalStepper>(ctx);
     }
 
+    /// The per-element field at one instant: the temperature, the tangent the
+    /// shading pass corrects a shadow with, the visibility that tangent was
+    /// taken about, and where the sun was. One function because a dump has to
+    /// describe the same field the viewport is showing -- reading the state
+    /// twice, in two places, is how the two would come to disagree.
+    ///
+    /// @return the element count, so callers do not size it a second way
+    u32 ExtractField(const thermal::ThermalState& state, const f64 time_h,
+                     Vector<f32>& temperature_K, Vector<f32>& sunSensitivity_K,
+                     Vector<f32>& visibility, glm::vec3& sunDirection) const {
+        const u32 n = static_cast<u32>(mesh.elements.size());
+        temperature_K.assign(n, 0.0f);
+        // Left empty rather than zeroed when the tangent was not carried: zero
+        // is a temperature that does not move, which is a different claim from
+        // not having asked for one.
+        sunSensitivity_K.clear();
+        visibility.clear();
+        const bool haveTangent = state.HasSensitivity();
+        if (haveTangent) {
+            sunSensitivity_K.assign(n, 0.0f);
+            visibility = thermal::SampleSunVisibilityAt(sunTable, exchange, time_h, n);
+        }
+        sunDirection =
+            thermal::SampleForcing(forcingSeries, time_h, constantForcing).sunDirection;
+        for (usize e = 0; e < n; ++e) {
+            const u32 id = mesh.elements[e].materialId;
+            const bool solved = mesh.elements[e].area_m2 > 0.0f &&
+                                id < materials.size() &&
+                                materials[id].ParticipatesInSolve();
+            temperature_K[e] = solved ? static_cast<f32>(state.Surface(e)) : 0.0f;
+            if (haveTangent) {
+                sunSensitivity_K[e] =
+                    solved ? static_cast<f32>(state.SurfaceSensitivity(e)) : 0.0f;
+                // Zero where the sun is behind the element: its visibility is
+                // zero at any resolution, so the correction is too. See the
+                // offline solver for why the shader cannot make this test
+                // itself.
+                if (glm::dot(mesh.elements[e].normal, sunDirection) <= 0.0f) {
+                    sunSensitivity_K[e] = 0.0f;
+                }
+            }
+        }
+        return n;
+    }
+
     thermal::IThermalStepper& ChooseStepper() {
         if (gpuStepper && gpuStepper->IsValid() && params.layerCount <= GpuThermalStepper::kMaxNodes) {
             return *gpuStepper;
@@ -254,6 +299,10 @@ struct ThermalPreview::Impl {
             ? thermal::InitialCondition::Steady
             : thermal::InitialCondition::Uniform;
         desc.initialTemperature_K = params.initialTemperature_K;
+        // Off sizes the tangent out of the state rather than suppressing it
+        // later, so it has to reach the desc -- and SetParams marks the
+        // timeline dirty for every change, which is what makes it take.
+        desc.carrySunSensitivity = params.sunCorrection;
 
         // Every argument but the desc is held by reference for the timeline's
         // lifetime, so all of them are members -- a local would be read after
@@ -387,34 +436,9 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
 
     // Extract surface temperatures, and beside them the tangent the shading
     // pass needs to resolve a shadow finer than one triangle.
-    const u32 n = static_cast<u32>(m_impl->mesh.elements.size());
-    result.surfaceTemperature_K.resize(n);
-    const bool haveTangent = state.HasSensitivity();
-    if (haveTangent) {
-        result.sunSensitivity_K.assign(n, 0.0f);
-        result.sunVisibility = thermal::SampleSunVisibilityAt(
-            m_impl->sunTable, m_impl->exchange, time_h, n);
-    }
-    result.sunDirection =
-        thermal::SampleForcing(m_impl->forcingSeries, time_h, m_impl->constantForcing)
-            .sunDirection;
-    for (usize e = 0; e < n; ++e) {
-        const u32 id = m_impl->mesh.elements[e].materialId;
-        const bool solved = m_impl->mesh.elements[e].area_m2 > 0.0f &&
-                            id < m_impl->materials.size() &&
-                            m_impl->materials[id].ParticipatesInSolve();
-        result.surfaceTemperature_K[e] = solved ? static_cast<f32>(state.Surface(e)) : 0.0f;
-        if (haveTangent) {
-            result.sunSensitivity_K[e] =
-                solved ? static_cast<f32>(state.SurfaceSensitivity(e)) : 0.0f;
-            // Zero where the sun is behind the element: its visibility is zero
-            // at any resolution, so the correction is too. See the offline
-            // solver for why the shader cannot make this test itself.
-            if (glm::dot(m_impl->mesh.elements[e].normal, result.sunDirection) <= 0.0f) {
-                result.sunSensitivity_K[e] = 0.0f;
-            }
-        }
-    }
+    const u32 n = m_impl->ExtractField(state, time_h, result.surfaceTemperature_K,
+                                       result.sunSensitivity_K, result.sunVisibility,
+                                       result.sunDirection);
     result.instanceElementBase = m_impl->mesh.instanceElementBase;
     result.elementCount = n;
     result.elementCountChanged = (n != m_impl->lastElementCount);
@@ -444,6 +468,47 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     }
 
     return result;
+}
+
+Result<String, String> ThermalPreview::DumpElements(const String& pathOrEmpty) {
+    using DumpResult = Result<String, String>;
+
+    const String& path = pathOrEmpty.empty() ? m_impl->params.dumpElementsFile : pathOrEmpty;
+    if (path.empty()) {
+        return DumpResult::Err("no path: pass one, or set thermal.dump_elements");
+    }
+    if (!m_impl->timeline) {
+        return DumpResult::Err("the thermal solve has not run yet");
+    }
+
+    // The instant already on screen, never a fresh one. A dump exists to be
+    // compared against the image beside it, and re-solving at some other hour
+    // would produce a file describing a picture nobody looked at.
+    const thermal::ThermalState& state = m_impl->timeline->StateAt(m_impl->currentTime_h);
+
+    Vector<f32> temperature_K;
+    Vector<f32> sunSensitivity_K;
+    Vector<f32> visibility;
+    glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+    const u32 n = m_impl->ExtractField(state, m_impl->currentTime_h, temperature_K,
+                                       sunSensitivity_K, visibility, sunDirection);
+
+    // Sampled again, and unconditionally, because ExtractField answers the
+    // shading pass: there, v travels with the tangent it corrects and is left
+    // empty when no tangent was carried. The file's v_element column is not
+    // that -- it is a property of the geometry and the sun, which an element
+    // has whether or not anyone asked how its temperature responds to it. The
+    // offline writer emits it either way, and two writers that disagreed about
+    // one column would be the second dialect this function exists to prevent.
+    if (visibility.empty()) {
+        visibility = thermal::SampleSunVisibilityAt(m_impl->sunTable, m_impl->exchange,
+                                                    m_impl->currentTime_h, n);
+    }
+
+    thermal::DumpThermalElements(path, m_impl->mesh.elements, m_impl->materials,
+                                 m_impl->exchange, temperature_K, sunSensitivity_K,
+                                 visibility);
+    return path;
 }
 
 ThermalSolveStatus ThermalPreview::Status() const {
