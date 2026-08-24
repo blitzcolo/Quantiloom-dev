@@ -10,7 +10,7 @@ Each panel names its own display transform in the caption, because an LWIR
 render's radiance sits two orders of magnitude below the display range and
 saying "here is the infrared" without saying how it was mapped is not a
 measurement. The infrared panels use linear AGC, never CLAHE: CLAHE inverts
-half of all brightness-ordered pixel pairs, so a temperature cannot be read off
+1.902 % of brightness-ordered pixel pairs, so a value cannot be read off
 one, and a figure whose point is the reflection-to-emission transition must not
 be shown through an operator that reorders brightness.
 

@@ -7,11 +7,14 @@ gain control for the four infrared bands -- and the point of the figure is that
 the *scene* changes character across the strip while the asset, the camera and
 the material spectra do not.
 
-Linear AGC and nothing else in the infrared. CLAHE inverts about half of all
-brightness-ordered pixel pairs, so a temperature cannot be read off one; a
-figure whose subject is the reflection-to-emission transition must not be shown
-through an operator that reorders brightness. Each panel therefore carries its
-own radiance range in the caption, which is the honest way to say that the
+Linear AGC and nothing else in the infrared. CLAHE is tile-local and therefore
+not monotone: it inverts 1.902 % of brightness-ordered pixel pairs with a worst
+drop of 17 display levels, so a value read off one is not a measurement. (An
+earlier draft of this comment said "about half", from a statistic that was
+withdrawn as unreproducible; the qualitative point is unchanged.) A figure whose
+subject is the reflection-to-emission transition must not be shown through an
+operator that reorders brightness. Each panel therefore carries its own scale
+bar, in the units it was mapped from -- which is the honest way to say that the
 panels are not on a common scale.
 
 Usage:
@@ -103,17 +106,24 @@ def diurnal(out):
     figure, axes = plt.subplots(1, len(frames), figsize=(3.0 * len(frames), 2.3))
     if len(frames) == 1:
         axes = [axes]
+    handle = None
     for axis, (hour, image) in zip(axes, frames):
-        axis.imshow(np.clip((image - lo) / (hi - lo), 0, 1), cmap="gray",
-                    vmin=0.0, vmax=1.0)
+        # Mapped from radiance directly rather than through a normalised copy,
+        # so the colour bar below is the actual scale and not a 0-1 proxy.
+        handle = axis.imshow(image, cmap="viridis", vmin=lo, vmax=hi)
         # Hours into the forcing file, which starts at midnight of day one.
         axis.set_title(f"t = {hour:g} h  ({hour % 24:g}:00, day {int(hour // 24) + 1})",
                        fontsize=8.5)
         axis.set_xticks([])
         axis.set_yticks([])
-    figure.suptitle(f"LWIR, one shared linear AGC window "
-                    f"({lo:.4g}–{hi:.4g} W/sr/m$^2$)", fontsize=8, y=0.04)
-    figure.tight_layout()
+    # One bar for the whole strip: the window is shared, so the panels are
+    # comparable and a single scale describes all of them.
+    bar = figure.colorbar(handle, ax=axes, fraction=0.020, pad=0.012)
+    bar.set_label("spectral radiance (W sr$^{-1}$ m$^{-2}$ nm$^{-1}$)", fontsize=8)
+    bar.ax.tick_params(labelsize=7)
+    bar.formatter.set_powerlimits((0, 0))
+    figure.suptitle("LWIR, one shared linear window across the sequence",
+                    fontsize=8, y=0.04)
     out.parent.mkdir(parents=True, exist_ok=True)
     figure.savefig(out, dpi=300, bbox_inches="tight")
     figure.savefig(out.with_suffix(".pdf"), bbox_inches="tight")

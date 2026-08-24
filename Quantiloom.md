@@ -971,7 +971,7 @@ display value by raw radiance and counting inverted pairs:
 |---|---:|---:|
 | `Linear` | 0.000% | 0 |
 | `Equalize` | 0.000% | 0 |
-| `Clahe` | 50.6% | 0.176 (45 display levels) |
+| `Clahe` | 1.902% | 17 display levels |
 
 Two pixels at the same temperature in different CLAHE tiles come out as
 different greys.  **Do not read a temperature from a CLAHE view.**  It is
@@ -1254,7 +1254,7 @@ Orchestrators: `run_furnace_suite.sh` (furnace gate),
 | Temperature inversion | Per-band | Total-flux σT⁴ | σT⁴ folds out-of-band tail errors into every temperature |
 | NETD noise terms | Exclude FPN, exclude well saturation | Include all | Matches NETD's definition; keeps well-saturation mismatch visible |
 | Display enhancement | Tone × palette (two stages) | Single enumeration | Two orthogonal decisions; product enumeration is unmaintainable |
-| Default tone operator | `Linear` | `Clahe` | Globally monotonic—the only operator from which temperature can be read (Clahe: 50.6% inverted pairs) |
+| Default tone operator | `Linear` | `Clahe` | Globally monotonic—the only operator from which temperature can be read (Clahe: 1.902% inverted pairs) |
 | Sensor chain | Offline CPU + interactive GPU (6 passes) | Unified single chain | Offline needs determinism; interactive needs frame-rate; round-trip exceeds budget |
 | FPN modelling | PRNU / DSNU separate | Single intensity parameter | Multiplicative and additive cannot be calibrated with one parameter |
 | NUC | Retain 95–99% residual | Perfect correction | Perfect correction ≡ not modelling FPN |
