@@ -22,6 +22,7 @@
 #include <algorithm>
 #include <utility>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 
 namespace quantiloom::rendercore {
@@ -552,7 +553,15 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         if (result.has_value()) {
             auto& lut = result.value();
             for (const auto& warning : lut.warnings) {
-                QL_LOG_WARN("{}", warning);
+                // diag.Warn, not a bare QL_LOG_WARN: these go into
+                // report.messages like every other resolve diagnostic, so a
+                // host that surfaces the report shows them. One of them is that
+                // the illuminant does not span the band being rendered -- ASTM
+                // G-173 stops at 4000 nm while MWIR runs to 5000, where the
+                // held-flat tail overstates the band's solar irradiance by
+                // about a quarter -- which is exactly the kind of thing that
+                // should not live only in a console nobody reads.
+                diag.Warn("lighting.solar_lut", warning);
             }
 
             out.lighting.sunRadiance_rgb = lut.sunRadianceRgb;
@@ -1681,13 +1690,27 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
     // Says what a material ended up with, which is the question no internal gate
     // asks -- a grey furnace cavity cannot see a reflectance lose its chroma.
+    // `superseded` says an NMF reference will overwrite this material's curve
+    // index later in this same function, so the curve being logged is not the
+    // one the shader will read. Saying so matters: the flat 2-point curve
+    // synthesised from ir_emissivity spans 4000-10000 nm, so in a VIS render it
+    // tripped the span warning below for five materials whose actual bound
+    // spectra cover the band completely -- five alarms about a curve nothing
+    // would sample. The curve is still registered rather than skipped, because
+    // whether the reference resolves is not known until the NMF pass runs, and
+    // a stale entry costs one unused GPU slot where a missing one would cost
+    // the material its reflectance.
     const auto logBound = [&](const String& name, const SpectralCurveGPU& gpu,
-                              i32 index, const char* source) {
+                              i32 index, const char* source, bool superseded = false) {
         const f32 last = gpu.GetWavelength(gpu.numSamples - 1);
         QL_LOG_INFO("  Material '{}': reflectance curve from {}, {} samples, "
-                    "λ=[{:.1f}, {:.1f}] nm, step {:.2f} nm → curve index {}",
+                    "λ=[{:.1f}, {:.1f}] nm, step {:.2f} nm → curve index {}{}",
                     name, source, gpu.numSamples, gpu.startWavelength_nm, last,
-                    gpu.stepSize_nm, index);
+                    gpu.stepSize_nm, index,
+                    superseded ? " (superseded by a spectral_material_ref)" : "");
+        if (superseded) {
+            return;
+        }
         if (gpu.startWavelength_nm > bandMinNm + 1.0f || last < bandMaxNm - 1.0f) {
             diag.Warn("spectral_curves",
                       "    '" + name + "' does not span the " + activeBandName +
@@ -1759,7 +1782,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         out.curves.push_back(gpuCurve);
         ++boundFromScene;
 
-        logBound(mat.name, gpuCurve, curveIndex, "the scene file");
+        logBound(mat.name, gpuCurve, curveIndex, "the scene file",
+                 mat.HasQuantiloomRef());
     }
     if (boundFromScene > 0) {
         QL_LOG_INFO("  Bound {} reflectance curve(s) declared by the scene file",
@@ -1967,6 +1991,72 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                                     mat.name, eps, static_cast<i32>(kSolverT),
                                     static_cast<i32>(kLwirMinNm), static_cast<i32>(kLwirMaxNm));
                     }
+
+                // Does the material's declared ir_emissivity agree with the
+                // curve that supersedes it?
+                //
+                // When a spectral reflectance is bound, the shader derives
+                // emissivity from it -- eps(lambda) = 1 - rho(lambda) - tau --
+                // and never reads ir_emissivity at all. So a config asserting
+                // both is asserting two different surfaces, and the one it
+                // wrote down is the one being ignored, silently.
+                //
+                // That is not a hypothetical. The KV-2 gallery scene declares
+                // ir_emissivity = 0.92 for its painted hull and binds an
+                // ECOSTRESS sample whose MWIR reflectance is 0.469, i.e. an
+                // emissivity of 0.531. Both numbers are defensible on their own
+                // -- the sample is a thin coat on an aluminium substrate, opaque
+                // in LWIR (rho 0.099, agreeing with 0.92) and not in MWIR, where
+                // the metal shows through -- and the disagreement is exactly the
+                // signal that the sample does not describe the object the scene
+                // thinks it does. Nothing said so.
+                //
+                // Checked over the RENDER band, not the solver's. The block
+                // above is hard-coded to LWIR on purpose: the energy balance is
+                // a long-wave calculation whatever band the camera is looking
+                // in. This one has to follow the camera, because the whole point
+                // is what the shader will use.
+                if (!mat.irEmissivityCurve.empty() && !allRefs.empty()) {
+                    f64 renderRhoSum = 0.0;
+                    i32 renderRhoCount = 0;
+                    for (const auto& ref : allRefs) {
+                        SpectralCurve bandCurve = basisLoader.ReconstructCurve(ref, activeBandName);
+                        if (bandCurve.samples.empty()) continue;
+                        renderRhoSum += blackbody::PlanckWeightedBandAverage(
+                            bandCurve, static_cast<f64>(bandMinNm),
+                            static_cast<f64>(bandMaxNm), kSolverT);
+                        ++renderRhoCount;
+                    }
+                    if (renderRhoCount > 0) {
+                        const f64 midNm = 0.5 * (static_cast<f64>(bandMinNm)
+                                               + static_cast<f64>(bandMaxNm));
+                        const f64 tauBand = mat.irTransmittanceCurve.empty()
+                            ? 0.0
+                            : static_cast<f64>(mat.GetIRTransmittance(static_cast<f32>(midNm)));
+                        const f64 epsFromCurve = std::clamp(
+                            1.0 - renderRhoSum / renderRhoCount - tauBand, 0.0, 1.0);
+                        const f64 epsDeclared =
+                            static_cast<f64>(mat.GetIREmissivity(static_cast<f32>(midNm)));
+
+                        // 0.05 because a Planck-weighted band average of an NMF
+                        // reconstruction is not the same arithmetic the author
+                        // did in their head, and a few percent of disagreement
+                        // says nothing. A tenth or more is two different surfaces.
+                        constexpr f64 kEmissivityDisagreement = 0.05;
+                        if (std::abs(epsFromCurve - epsDeclared) > kEmissivityDisagreement) {
+                            char buf[288];
+                            std::snprintf(buf, sizeof(buf),
+                                "    '%s' declares ir_emissivity = %.3f but its bound "
+                                "reflectance gives %.3f over %s -- the curve wins and the "
+                                "declared value is never read. Either the sample does not "
+                                "describe this surface in this band, or the declaration is "
+                                "stale; the render will use %.3f.",
+                                mat.name.c_str(), epsDeclared, epsFromCurve,
+                                activeBandName.c_str(), epsFromCurve);
+                            diag.Warn("materials.ir_emissivity", String(buf));
+                        }
+                    }
+                }
                 }
             }
 
