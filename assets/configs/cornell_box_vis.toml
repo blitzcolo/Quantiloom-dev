@@ -40,3 +40,20 @@ log_material_sources = true
 
 [sensor]
 enabled = false
+
+[material_overrides."Light Panel"]
+# The lamp, described by a measured standard rather than by a colour. Without
+# this the panel's spectrum is emissiveFactor expanded as sigmoid(rgb)*D65 -- a
+# computer-graphics convention that nothing measured, and the last place this
+# scene asserted a spectrum it had no data for.
+#
+# D65 rather than a warmer lamp because this box's job is to compare two light
+# transports, not to look like a room: it is the white point sRGB is defined
+# against, so the panel comes out achromatic and any colour in the render is the
+# walls' doing. Binding it also makes the RGB triple honest -- the renderer
+# rewrites emissiveFactor to the colour this spectrum integrates to, which for
+# D65 is a neutral grey rather than the warm [15, 15, 12] the author typed.
+#
+# match_luminance (the default) keeps the panel's brightness at what that triple
+# said, so the spectrum changes and the exposure does not.
+emissive_curve = "d65"

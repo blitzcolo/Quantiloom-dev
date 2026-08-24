@@ -42,6 +42,7 @@ import numpy as np
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import mitsuba_common as common  # noqa: E402
+import measure_panel_spectrum as panel  # noqa: E402  (one lamp, one definition)
 
 REPO = common.REPO
 PORT_DIR = REPO / "build" / "validation" / "cornell_m3"
@@ -61,8 +62,23 @@ def write_quantiloom_config(path, description):
     # block that mentions neither ir_emissivity nor ir_transmittance leaves the
     # derived reflectance undefined, and this key states the intent explicitly
     # rather than relying on what a defaulted derivation happens to produce.
-    overrides = "\n\n".join(
-        f'[material_overrides."{name}"]\nspecular = 0.0' for name in MATERIAL_NAMES)
+    # The panel needs its emission spectrum bound as well as its specular
+    # zeroed, and the binding has to be the SAME one measure_panel_spectrum.py
+    # used -- which is why the token is imported from there rather than spelled
+    # again. Mitsuba is handed cornell_panel_radiance.csv, which that script
+    # measured out of a panel with this curve bound; if this config renders the
+    # panel without it, Quantiloom lights the box with the RGB expansion while
+    # Mitsuba lights it with the measured spectrum, and the comparison reports
+    # the difference between two lamps as a transport disagreement. It did
+    # exactly that once: 16 % apart at 450 nm, uniform across the whole frame.
+    def override(name):
+        block = f'[material_overrides."{name}"]\nspecular = 0.0'
+        if name == panel.PANEL_NAME:
+            block += (f'\nemissive_curve = "{panel.PANEL_EMISSIVE_CURVE}"'
+                      f'\nemissive_scale = "{panel.PANEL_EMISSIVE_SCALE}"')
+        return block
+
+    overrides = "\n\n".join(override(name) for name in MATERIAL_NAMES)
 
     # Both renderers read the SAME visible-band file. Quantiloom uploads a
     # spectral curve as 64 samples on a uniform grid over the curve's whole

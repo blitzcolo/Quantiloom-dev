@@ -961,9 +961,15 @@ float EmissiveMisWeight(float3 emissive, int emissiveTextureIndex,
 // painting a lamp's colour with a texture while measuring it with a curve would
 // be two answers to one question. The texture therefore enters as the ratio of
 // its own luminance to the material's, which is 1 where the texture is white.
+// misWeight is the multiple-importance-sampling share this strategy keeps, and
+// it is a REQUIRED argument rather than a defaulted one because forgetting it
+// is silent: the render simply doubles wherever a bound emitter lights
+// something, and looks like a plausible brighter room. The bands that do no
+// light sampling pass 1.0.
 float BoundEmissionRadiance(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                             MaterialData material,
                             float3 emissiveModulated,
+                            float misWeight,
                             float lambda_nm) {
     if (material.emissiveRadianceCurveIndex < 0) {
         return 0.0;
@@ -975,7 +981,7 @@ float BoundEmissionRadiance(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     }
     return EvaluateEmissionCurve(spectralCurves,
                                  material.emissiveRadianceCurveIndex,
-                                 lambda_nm) * texScale;
+                                 lambda_nm) * texScale * misWeight;
 }
 
 float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
@@ -1597,12 +1603,24 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // thermal bands -- which spawn bounce rays but sample no lights -- keep
     // whatever emission they find. The density is built from the untextured
     // emissiveFactor, matching the CDF the host built.
+    // Kept as a scalar as well as folded into `emissive`, because a material
+    // with a bound emission spectrum does not read `emissive` at all -- it
+    // reads its curve. Scaling only the RGB left the curve path collecting the
+    // emitter's full radiance from the BSDF strategy while NEE collected it
+    // again, and since the light-sampling share is close to 1 for a small
+    // bright panel, every indirectly lit surface came out at almost exactly
+    // twice its correct value. Mitsuba said 2.02x on the Cornell walls with the
+    // panel itself matching, which is what that failure looks like from
+    // outside: the directly viewed emitter is fine, everything it lights is
+    // double.
+    float emissiveMisWeight = 1.0;
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
-        emissive *= EmissiveMisWeight(material.emissiveFactor,
-                                      material.emissiveTextureIndex,
-                                      worldGeometricNormal,
-                                      rayDir, RayTCurrent(), payload.bsdfPdf);
+        emissiveMisWeight = EmissiveMisWeight(material.emissiveFactor,
+                                              material.emissiveTextureIndex,
+                                              worldGeometricNormal,
+                                              rayDir, RayTCurrent(), payload.bsdfPdf);
+        emissive *= emissiveMisWeight;
     }
 
     // ========================================================================
@@ -2334,7 +2352,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // magnitude only -- through the texture's luminance. Painting a lamp's
         // colour with a texture and its spectrum with a curve would be two
         // answers to one question; the curve is the one that is measured.
-        float emissiveCurveScale = 1.0;
+        //
+        // It also carries the MIS share, because the curve path never reads
+        // `emissive` and would otherwise keep the emitter's whole radiance
+        // while NEE collected it a second time. The textured branch gets that
+        // for free -- `emissive` has already been multiplied by the weight, so
+        // the ratio below contains it -- and in any case EmissiveMisWeight
+        // returns 1 for a textured emitter, which is excluded from the CDF. The
+        // untextured branch is the one that has to say it.
+        float emissiveCurveScale = emissiveMisWeight;
         if (hasEmissiveCurve && material.emissiveTextureIndex >= 0) {
             emissiveCurveScale = dot(emissive, EMISSIVE_LUMINANCE_WEIGHTS) /
                                  max(dot(material.emissiveFactor,
@@ -2840,7 +2866,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         //    no channels to tint.
         float emissive_scalar =
             (material.emissiveRadianceCurveIndex >= 0)
-                ? BoundEmissionRadiance(spectralCurves, material, emissive, lambda) * ccBase
+                ? BoundEmissionRadiance(spectralCurves, material, emissive,
+                                        emissiveMisWeight, lambda) * ccBase
                 : ConvertLinearRGBToIlluminantSpectrum(
                       rgbToSpectrumTable, cieCMF_LUT, emissive, lambda) * ccBase;
         float radiance_spectral = directSun_scalar + skyAmbient_scalar +
@@ -3161,7 +3188,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // same light twice -- bind the curve or set the temperature, not
             // both. Zero unless a curve is bound, so every existing SWIR scene
             // is bit-identical.
-            L_emission += BoundEmissionRadiance(spectralCurves, material, emissive, lambda) *
+            L_emission += BoundEmissionRadiance(spectralCurves, material, emissive,
+                                                1.0, lambda) *
                           ccBase;
 
             // 5. Total spectral radiance
@@ -3432,7 +3460,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // inside this band, so a lamp someone measured is one of the
             // brightest things a NIR render can contain. Zero unless a curve is
             // bound, so every existing NIR scene is bit-identical.
-            L_reflected += BoundEmissionRadiance(spectralCurves, material, emissive, lambda) *
+            L_reflected += BoundEmissionRadiance(spectralCurves, material, emissive,
+                                                 1.0, lambda) *
                            ccBase;
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
@@ -3808,7 +3837,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // far outside its domain, which is the failure this renderer's
             // out-of-band rule exists to prevent.
             const float L_bound = BoundEmissionRadiance(spectralCurves, material,
-                                                        emissive, lambda) * ccBase;
+                                                        emissive, 1.0, lambda) * ccBase;
 
             // 5. Total spectral radiance at this wavelength (with transmittance)
             float L_lambda = L_emission + L_bound + L_reflected_atm + L_reflected_sun +

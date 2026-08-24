@@ -63,3 +63,5 @@ specular = 0.0
 
 [material_overrides."Light Panel"]
 specular = 0.0
+emissive_curve = "d65"
+emissive_scale = "match_luminance"

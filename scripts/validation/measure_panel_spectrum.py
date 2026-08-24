@@ -1,17 +1,22 @@
 #!/usr/bin/env python3
 """Measure the Cornell light panel's emitted spectrum out of Quantiloom itself.
 
-The Cornell box is lit by one emissive quad whose author values are an RGB
-triple, and an RGB triple has no spectrum. Quantiloom expands it by a fixed
-convention -- the chromaticity fitted as a reflectance, the magnitude carried
-alongside, the whole multiplied by D65 -- and there is no configuration key that
-would let the same spectrum be handed to a second renderer as data.
+The Cornell box is lit by one emissive quad. It used to be lit by an RGB triple
+with no spectrum, expanded by a fixed convention -- chromaticity fitted as a
+reflectance, magnitude carried alongside, the whole multiplied by D65 -- because
+no configuration key could hand a real one to the renderer. `emissive_curve` is
+that key now, and the panel binds CIE standard illuminant D65: published data
+rather than a graphics convention, and the neutral choice for a scene whose job
+is to compare two transports rather than to look like a room.
 
-Rather than reimplement that convention in the comparison script, where it would
-be a second implementation to disagree with the first, the spectrum is measured:
-point a camera at the panel and nothing else, render one wavelength at a time,
-and read the radiance off the pixels. What comes back is by definition what the
-renderer emits, including any normalisation the convention carries.
+The spectrum is still MEASURED rather than read out of the CIE table, and for a
+better reason than before. Three things sit between the published table and what
+the surface emits: the levelling that takes the lamp's brightness from the
+author's RGB, the resampling onto the band being rendered, and the estimator
+itself. Handing Mitsuba the raw table would be handing it a different lamp from
+the one the comparison scene has. So: point a camera at the panel and nothing
+else, render one wavelength at a time, read the radiance off the pixels. What
+comes back is by definition what this renderer emits.
 
 The panel must be measured ALONE. Measured inside the box, a pixel on the panel
 also carries interior light that has bounced back onto it -- small, since the
@@ -55,8 +60,17 @@ PANEL_QUAD = [(213.0, 548.7, 332.0), (213.0, 548.7, 227.0),
 PANEL_EMISSIVE = [15.0, 15.0, 12.0]
 PANEL_NAME = "Light Panel"
 
-# The band the convention is defined over. Outside it the sigmoid fit says
-# nothing, which is why the Cornell comparison is a visible-band comparison.
+# The lamp the box binds, and which this sweep must bind too. If these ever
+# disagree, the spectrum handed to the second renderer is not the spectrum the
+# comparison scene emits, and every number downstream measures the mismatch.
+PANEL_EMISSIVE_CURVE = "d65"
+PANEL_EMISSIVE_SCALE = "match_luminance"
+
+# The sweep stops where the observer does, and so does the lamp: the compiled
+# D65 table runs 380-780 nm, and emission is zero outside a bound curve's own
+# span rather than held flat. The render band is 400-780, so the first ten
+# samples here come back as exact zeros -- that is the boundary reporting
+# itself, not a gap in the measurement.
 LAMBDA_MIN, LAMBDA_MAX, LAMBDA_STEP = 380.0, 780.0, 2.0
 
 
@@ -165,6 +179,14 @@ sky_radiance = [0.0, 0.0, 0.0]
 [material]
 albedo = [0.5, 0.5, 0.5]
 
+[material_overrides."{PANEL_NAME}"]
+# The same binding cornell_box_vis.toml gives the panel. Repeated here rather
+# than inherited, because this is a different scene file -- and if it is ever
+# dropped, the sweep quietly measures the RGB expansion instead of the lamp, and
+# the second renderer is handed an emitter this scene does not have.
+emissive_curve = "{PANEL_EMISSIVE_CURVE}"
+emissive_scale = "{PANEL_EMISSIVE_SCALE}"
+
 [sensor]
 enabled = false
 ''', encoding="utf-8")
@@ -209,11 +231,14 @@ def collect(args):
     with open(CSV_OUT, "w", encoding="utf-8") as f:
         f.write("# Emitted spectral radiance of the Cornell light panel, measured\n"
                 "# from Quantiloom by rendering the panel alone one wavelength at a\n"
-                f"# time. Author RGB {PANEL_EMISSIVE}; the expansion convention is\n"
-                "# L(lambda) = 2*max(rgb) * sigmoid(c; lambda) * D65(lambda).\n"
-                "# Produced by scripts/validation/measure_panel_spectrum.py so that a\n"
-                "# second renderer can be given the same emitter as data rather than\n"
-                "# reimplementing the convention.\n"
+                f'# time. The panel binds emissive_curve = "{PANEL_EMISSIVE_CURVE}" with\n'
+                f'# emissive_scale = "{PANEL_EMISSIVE_SCALE}", so its shape is that\n'
+                f"# published curve and its level is the author RGB {PANEL_EMISSIVE}.\n"
+                "# Measured rather than recomputed even so: the levelling, the resampling\n"
+                "# onto the render band and the estimator all sit between the published\n"
+                "# table and what the surface actually emits, and reimplementing that\n"
+                "# chain here would be a second version of it to disagree with.\n"
+                "# Produced by scripts/validation/measure_panel_spectrum.py.\n"
                 "# wavelength_nm, radiance_W_sr-1_m-2_nm-1\n")
         for lam, value, _ in rows:
             f.write(f"{lam:.1f}, {value:.9g}\n")
@@ -309,7 +334,24 @@ def check(args):
           f"{'PASS' if worst_handoff < 1e-3 else 'FAIL'}")
     print(f"film-response bias  {worst_window_bias:.2e}  "
           f"(systematic, carried into the comparison's error budget)")
-    return 0 if worst_handoff < 1e-3 else 1
+
+    # The endpoints, because that is where this measurement has already caught a
+    # renderer bug. A bound emission curve is zero OUTSIDE its span, and the
+    # shader decides inside-or-outside from (lambda - start) / step compared
+    # against numSamples - 1. step is stored as a rounded f32, so at the very
+    # last wavelength that quotient can land a fraction above the last index and
+    # the guard returns zero -- which is what happened here: 780 nm read exactly
+    # 0.0 while 778 nm was the brightest sample in the spectrum. A hole one
+    # sample wide at the end of a lamp is invisible in a render and fatal in a
+    # handoff, so it is asserted rather than eyeballed.
+    interior = float(values[-2])
+    endpoint = float(values[-1])
+    print(f"endpoint continuity {grid[-2]:.0f} nm {interior:.6g} -> "
+          f"{grid[-1]:.0f} nm {endpoint:.6g}  ", end="")
+    endpoint_ok = endpoint > 0.5 * interior
+    print("PASS" if endpoint_ok else "FAIL -- the curve's last sample dropped out")
+
+    return 0 if (worst_handoff < 1e-3 and endpoint_ok) else 1
 
 
 def main():

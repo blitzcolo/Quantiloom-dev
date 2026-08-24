@@ -35,5 +35,13 @@ sky_radiance = [0.0, 0.0, 0.0]
 [material]
 albedo = [0.5, 0.5, 0.5]
 
+[material_overrides."Light Panel"]
+# The same binding cornell_box_vis.toml gives the panel. Repeated here rather
+# than inherited, because this is a different scene file -- and if it is ever
+# dropped, the sweep quietly measures the RGB expansion instead of the lamp, and
+# the second renderer is handed an emitter this scene does not have.
+emissive_curve = "d65"
+emissive_scale = "match_luminance"
+
 [sensor]
 enabled = false

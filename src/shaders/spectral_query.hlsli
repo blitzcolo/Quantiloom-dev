@@ -145,14 +145,25 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     }
 
     float index_f = (lambda_nm - startWavelength) / stepSize;
+    const float lastIndex = float(numSamples - 1);
 
     // The whole point of this function. A half-step of tolerance at each end
     // would only smear the same invention over one sample.
-    if (index_f < 0.0 || index_f > float(numSamples - 1)) {
+    //
+    // The epsilon is NOT such a tolerance -- it is floating-point equality at
+    // the two endpoints, and it has to be here. stepSize is (hi - lo) / (n - 1)
+    // rounded to f32, so recomputing (hi - lo) / stepSize does not land exactly
+    // on n - 1: measuring this lamp at its own last wavelength returned zero
+    // where the sample beside it was the peak of the spectrum. 1e-4 of a sample
+    // step is 6e-4 nm on this curve -- an equality test, not a licence to
+    // extrapolate.
+    const float kEndpointEps = 1e-4;
+    if (index_f < -kEndpointEps || index_f > lastIndex + kEndpointEps) {
         return 0.0;
     }
+    index_f = clamp(index_f, 0.0, lastIndex);
 
-    if (index_f >= float(numSamples - 1)) {
+    if (index_f >= lastIndex) {
         return spectralCurves[curveIndex].values[numSamples - 1];
     }
 
