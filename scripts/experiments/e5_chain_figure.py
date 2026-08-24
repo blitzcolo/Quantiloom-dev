@@ -268,6 +268,15 @@ def main():
         axis.set_xticks([]); axis.set_yticks([])
     axes[0][0].set_ylabel("cumulative chain\n(linear AGC throughout)", fontsize=7.0)
 
+    # Radiance values to mark on the scale strips, inside the display window.
+    marks = np.linspace(lo, hi, 5)
+
+    def transfer(display, value, width=None):
+        """Where `value` lands in [0,1], measured from the operator's output."""
+        width = width or (hi - lo) / 60.0
+        near = np.abs(finite - value) <= width
+        return float(np.median(display[near])) if near.sum() > 32 else None
+
     for axis, name in zip(axes[1], ("Linear", "Equalize", "Clahe")):
         axis.imshow(displays[name], cmap="gray", vmin=0.0, vmax=1.0)
         axis.set_title(name, fontsize=7.6)
@@ -276,13 +285,47 @@ def main():
                         f"worst drop {values['worst_drop_levels_of_255']:.0f}/255",
                         fontsize=6.4)
         axis.set_xticks([]); axis.set_yticks([])
+
+        # The scale strip. Two of the three get one; the third is the argument.
+        strip = axis.inset_axes([0.0, -0.34, 1.0, 0.085])
+        strip.set_yticks([])
+        strip.set_xlim(0.0, 1.0)
+        strip.tick_params(labelsize=5.2, length=2, pad=1)
+        if name == "Clahe":
+            strip.imshow(np.zeros((1, 256)), cmap="gray", vmin=0, vmax=1,
+                         aspect="auto", extent=(0, 1, 0, 1), alpha=0.10)
+            strip.set_xticks([])
+            for side in strip.spines.values():
+                side.set_linestyle((0, (2, 2)))
+                side.set_color("#999999")
+            strip.set_xlabel("no scale exists: the map is per tile",
+                             fontsize=5.6, color="#777777", labelpad=1)
+        else:
+            strip.imshow(np.linspace(0, 1, 256)[None, :], cmap="gray",
+                         vmin=0, vmax=1, aspect="auto", extent=(0, 1, 0, 1))
+            positions, labels = [], []
+            for value in marks:
+                where = value if name == "Linear" else transfer(displays[name], value)
+                if where is None:
+                    continue
+                if name == "Linear":
+                    where = (value - lo) / (hi - lo)
+                positions.append(where)
+                labels.append(f"{value:.2e}")
+            strip.set_xticks(positions)
+            strip.set_xticklabels(labels, rotation=45, ha="right")
+            strip.set_xlabel("radiance  W/sr/m$^2$/nm"
+                             + ("" if name == "Linear" else "  (spacing is not uniform)"),
+                             fontsize=5.6, labelpad=1)
     axes[1][0].set_ylabel("tone operators on the\nradiance field (no sensor)", fontsize=7.0)
     axes[1][3].axis("off")
     axes[1][3].text(0.0, 0.5,
-                    "Linear AGC is the default\nbecause it is the only\nglobally monotonic "
-                    "choice.\n\nTwo pixels at one temperature\nin different CLAHE tiles\n"
-                    "display as different greys,\nso a temperature must not\nbe read from "
-                    "one.\n\nCLAHE stays available\nfor finding an edge.",
+                    "Linear AGC is the default\nbecause it is the only\noperator whose scale is\n"
+                    "both monotone AND evenly\nspaced.\n\nEqualize is monotone too, so\n"
+                    "its bar is real -- but the\nspacing is data-dependent,\nand reading a value off it\n"
+                    "needs the CDF as well.\n\nCLAHE has no bar because\nit has no scale: the map is\n"
+                    "per tile, so two pixels at\none temperature display as\ndifferent greys. It stays\n"
+                    "available for finding an edge.",
                     ha="left", va="center", fontsize=6.5, color="#333333",
                     linespacing=1.5, transform=axes[1][3].transAxes)
     figure.tight_layout()
