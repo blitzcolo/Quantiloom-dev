@@ -436,6 +436,62 @@ geometry, the sun columns and the absorptivities, and every event that
 changes one of those already marks the timeline dirty — so they are re-baked
 in `RebuildTimeline` and are fresh by construction.
 
+### The offline solve is cached, and the key is the interesting part
+
+A batch varies the sensor, and nothing about a sensor reaches the energy
+balance. So a list of 1290 LWIR renders contains about **15 distinct solves**
+and, before this, computed each of them eighty times — 61% of a full rebuild's
+wall clock. `thermal/ThermalSolveCache.hpp` stores a solved `ThermalResult`
+under a SHA-256 of its inputs. Measured: ABeautifulGame's `nominal_LWIR`
+(1518656 elements) goes from 169.4 s to 5.2 s, and the render is byte-identical.
+
+On by default and invisible from a config — no TOML key, no `InitParams` field,
+no exported symbol. `QUANTILOOM_THERMAL_CACHE=0` switches it off,
+`QUANTILOOM_THERMAL_CACHE_DIR` moves it (default
+`<platform cache dir>/Quantiloom/cache/thermal`). There is no eviction; the
+management story is deleting the directory.
+
+Four things to know before touching it:
+
+- **The boundary is `RunThermalSolver()`, not `RunThermalSolve`.** An entry
+  stands for the GPU view-factor precompute *as well as* the trajectory — 15 s
+  plus 150 s on the big scene. Caching only the stepping gives back a tenth of
+  the win, and the precompute is the part that needs a TLAS.
+- **The key hashes resolved inputs, never config text.** That is what makes two
+  configs differing only in `sensor.*` one entry. It covers the built
+  `ThermalMesh`, the merged materials, the `[thermal]` scalars, the forcing
+  CSV's *contents*, `[lighting] sun_direction`, the stepper's `Name()`, the
+  library version and the GPU. Miss a field and the cache serves another
+  scene's temperature field while the render exits 0 — which is why it is 256
+  bits and why `BuildSolvedMaterials` was hoisted: the emissivity the solve uses
+  is the Planck band average of the material's curve, not the number in the
+  TOML, and a key built from the config would be blind to 0.4 K.
+- **The GPU is in the key because the precompute is ray-traced GPU work.** It is
+  deterministic for a fixed binary on a fixed driver — Hammersley, a stateless
+  coverage hash, no atomics — but BVH construction and intersection are a
+  vendor's business. Keying on device identity makes a driver update a miss
+  rather than a wrong answer.
+- **A hit still prints the gate line**, through `LogThermalSolveSummary`, which
+  is now the only place that emits it. Downstream reads `solved/elements` off
+  that line to catch a scene where the subject fell out of the solve; a hit that
+  printed nothing would make every render look clean. Anything new logs
+  `Thermal cache:` or `Thermal stepper:` so nothing can mistake it for the
+  summary. What a hit *does* skip are the advisory warnings — "no view factors",
+  the timestep-versus-time-constant note — so a cold and a hot log differ there.
+
+Naming `thermal.dump_elements` opts out in both directions: the dump needs the
+exchange's sky fractions, which an entry does not carry.
+
+`QUANTILOOM_THERMAL_GPU_STEPPER=1` runs the offline trajectory on
+`GpuThermalStepper` (`kMaxNodes = 32`, else it falls back and says so). **Off by
+default, and not judgeable by byte equality** — f32 and a different reduction
+order give different floats. Against the 0.2.5 baseline at `nominal_LWIR`, on a
+DN range of about 34000: DamagedHelmet moved 85.8% of pixels (mean 6.5 DN, p99
+17, max 23), CesiumMilkTruck 35.7% (mean 0.4 DN, p99 1, max 2). An order of
+magnitude apart, so a tolerance argued from one scene is wrong for the other.
+Stating one per band is the work before this defaults on; what it already buys
+is the wait while authoring, where 165 s is per material edit.
+
 The core is compiled once into `quantiloom_core` (an OBJECT library) and consumed
 two ways. **A new target links one or the other, never both** — two copies of the
 library's global state (the spdlog logger, static caches) in one process is a
