@@ -15,6 +15,7 @@
 #pragma once
 
 #include "scene/Scene.hpp"
+#include "thermal/ThermalStepper.hpp"
 #include "thermal/ThermalTypes.hpp"
 
 #include <unordered_map>
@@ -145,10 +146,17 @@ struct ThermalResult {
  *                  night -- for a street.
  * @param sunTable  per-sample sun visibility (empty → synthesised from
  *                  exchange.sunVisibility as a single column)
+ * @param stepper   who advances the trajectory. Null, the default, builds a
+ *                  CpuCrankNicolsonStepper here -- which keeps this callable
+ *                  without a Vulkan device, as the tests need. A caller with a
+ *                  device may pass the GPU stepper instead; it mirrors the
+ *                  same maths in f32, so the two do not agree to the last bit
+ *                  and their results must not be mixed.
  */
 [[nodiscard]] ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                                             const ExchangeGeometry& exchange,
-                                            const SunVisibilityTable& sunTable = {});
+                                            const SunVisibilityTable& sunTable = {},
+                                            IThermalStepper* stepper = nullptr);
 
 /**
  * @brief The per-material properties the solve will actually use

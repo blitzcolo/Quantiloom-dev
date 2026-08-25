@@ -263,7 +263,7 @@ void LogThermalSolveSummary(const ThermalResult& result) {
 
 ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                               const ExchangeGeometry& exchange,
-                              const SunVisibilityTable& sunTable) {
+                              const SunVisibilityTable& sunTable, IThermalStepper* stepper) {
     ThermalResult result;
 
     ThermalMesh mesh = BuildThermalMesh(scene);
@@ -324,7 +324,10 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     constantForcing.skyTemperature_K = config.skyTemperature_K;
     constantForcing.relativeHumidity = config.relativeHumidity;
 
-    CpuCrankNicolsonStepper stepper;
+    // The caller's stepper if it brought one, otherwise our own. The local
+    // outlives the timeline below either way.
+    CpuCrankNicolsonStepper cpuStepper;
+    IThermalStepper& activeStepper = stepper != nullptr ? *stepper : cpuStepper;
 
     const f64 shortest = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
         mesh.elements, materials, config.airTemperature_K);
@@ -346,7 +349,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     desc.carrySunSensitivity = config.sunCorrection;
 
     ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
-                             effectiveTable, forcingSeries, constantForcing, stepper);
+                             effectiveTable, forcingSeries, constantForcing, activeStepper);
 
     const ThermalState& state = timeline.StateAt(config.time_h);
     result.stepsTaken = timeline.LastStepCount();

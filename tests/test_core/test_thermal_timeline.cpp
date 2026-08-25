@@ -282,6 +282,25 @@ TEST(ThermalTimelineTest, RunThermalSolveStepsOnTheFixedGrid) {
     EXPECT_GT(result.stepsTaken, 0u);
     EXPECT_GT(result.meanTemperature_K, 250.0);
     EXPECT_LT(result.meanTemperature_K, 400.0);
+
+    // RunThermalSolve now takes a stepper, defaulted to null so callers
+    // without a Vulkan device -- this test among them -- keep working. A null
+    // stepper must be the CPU one exactly, not merely something like it: the
+    // solve cache keys on which stepper ran, so a default that quietly became
+    // a different implementation would serve entries across the two.
+    const ThermalResult explicitDefault =
+        RunThermalSolve(scene, config, exchange, SunVisibilityTable{}, nullptr);
+    ASSERT_TRUE(explicitDefault.error.empty()) << explicitDefault.error;
+    EXPECT_EQ(explicitDefault.surfaceTemperature_K, result.surfaceTemperature_K);
+    EXPECT_EQ(explicitDefault.sunSensitivity_K, result.sunSensitivity_K);
+    EXPECT_EQ(explicitDefault.stepsTaken, result.stepsTaken);
+    EXPECT_DOUBLE_EQ(explicitDefault.meanTemperature_K, result.meanTemperature_K);
+
+    CpuCrankNicolsonStepper cpu;
+    const ThermalResult explicitCpu =
+        RunThermalSolve(scene, config, exchange, SunVisibilityTable{}, &cpu);
+    ASSERT_TRUE(explicitCpu.error.empty()) << explicitCpu.error;
+    EXPECT_EQ(explicitCpu.surfaceTemperature_K, result.surfaceTemperature_K);
 }
 
 TEST(ThermalTimelineTest, TheBlendedSunTableScalesTheAbsorbedFlux) {

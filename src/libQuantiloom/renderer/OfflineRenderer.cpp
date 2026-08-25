@@ -39,6 +39,7 @@
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
 #include "core/LibVersion.hpp"
+#include "renderer/GpuThermalStepper.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalSolveCache.hpp"
@@ -77,7 +78,20 @@ namespace quantiloom {
 
 namespace {
 using SetupResult = Result<void, String>;
+
+/// An environment switch that is off unless someone deliberately turned it on:
+/// unset reads as off, and so does any spelling that is not an affirmative.
+bool EnvFlagEnabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return false;
+    }
+    String lowered(value);
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return lowered == "1" || lowered == "on" || lowered == "true" || lowered == "yes";
 }
+}  // namespace
 
 // ============================================================================
 // Impl
@@ -300,7 +314,31 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // Which stepper will run, decided before the key is built: CPU and GPU
     // differ in f64 versus f32, so the answer they give is part of what an
     // entry stands for.
+    //
+    // The GPU one is opt-in and off by default, and will stay that way until
+    // somebody states a per-band tolerance for it. A different reduction order
+    // gives different floats, so it cannot be judged by the byte-equality the
+    // rest of this path is held to -- what it is actually for is the wait
+    // while authoring a scene, where 165 s per material edit is the cost.
+    std::unique_ptr<rendercore::GpuThermalStepper> gpuStepper;
+    thermal::IThermalStepper* stepper = nullptr;
     const char* stepperName = thermal::CpuCrankNicolsonStepper::kName;
+    if (EnvFlagEnabled("QUANTILOOM_THERMAL_GPU_STEPPER")) {
+        if (thermalConfig.nodeCount > rendercore::GpuThermalStepper::kMaxNodes) {
+            QL_LOG_INFO("  Thermal stepper: CPU ({} layers is past the GPU stepper's {})",
+                        thermalConfig.nodeCount, rendercore::GpuThermalStepper::kMaxNodes);
+        } else {
+            gpuStepper = std::make_unique<rendercore::GpuThermalStepper>(context);
+            if (gpuStepper->IsValid()) {
+                stepper = gpuStepper.get();
+                stepperName = stepper->Name();
+            } else {
+                gpuStepper.reset();
+                QL_LOG_INFO("  Thermal stepper: CPU (the GPU stepper would not start)");
+            }
+        }
+    }
+    QL_LOG_INFO("  Thermal stepper: {}", stepperName);
 
     // Has this exact solve already been done? The key covers the mesh, the
     // materials as merged, the [thermal] scalars, the forcing file's contents,
@@ -402,7 +440,7 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     }
 
     const thermal::ThermalResult result =
-        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange, sunTable);
+        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange, sunTable, stepper);
     if (!result.error.empty()) {
         QL_LOG_WARN("  Thermal: {}; the scene keeps the temperatures it was given",
                     result.error);
