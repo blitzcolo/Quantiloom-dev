@@ -320,6 +320,13 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // gives different floats, so it cannot be judged by the byte-equality the
     // rest of this path is held to -- what it is actually for is the wait
     // while authoring a scene, where 165 s per material edit is the cost.
+    //
+    // Note this builds the stepper's pipeline before the cache is consulted,
+    // so a hit throws that setup away. Deferring it would mean naming the
+    // stepper in the key before knowing whether it will start, and then owing
+    // a second key when it does not. The waste is a pipeline creation on a
+    // switch that is off by default and, when on, is being used for the runs
+    // that miss anyway.
     std::unique_ptr<rendercore::GpuThermalStepper> gpuStepper;
     thermal::IThermalStepper* stepper = nullptr;
     const char* stepperName = thermal::CpuCrankNicolsonStepper::kName;
