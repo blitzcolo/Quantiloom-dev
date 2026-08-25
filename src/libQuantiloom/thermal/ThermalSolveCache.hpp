@@ -126,8 +126,11 @@ struct ThermalSolveCacheKeyInputs {
  * @brief Read an entry back, if it is there and it is ours
  *
  * Checks magic, format version, the key it was written under, the array counts
- * against each other, and a digest of the payload. Any disagreement warns and
- * returns nothing -- the caller re-solves and overwrites.
+ * against each other, and a digest over everything but the digest itself. The
+ * header is inside that digest deliberately: it carries the counts and the
+ * temperature range the summary line is printed from, and bit rot there would
+ * otherwise be reported to the downstream gates as a measurement. Any
+ * disagreement warns and returns nothing -- the caller re-solves and overwrites.
  */
 [[nodiscard]] std::optional<ThermalResult> LoadThermalSolveCache(
     const std::filesystem::path& file, StringView expectedKeyHex);

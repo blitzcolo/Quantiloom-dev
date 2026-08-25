@@ -73,9 +73,31 @@ bool ReadPod(std::istream& in, T& value) {
     return static_cast<usize>(in.gcount()) == sizeof(T);
 }
 
-/// The payload digest, over exactly the bytes the payload occupies in the file.
-String DigestPayload(const ThermalResult& result) {
+/// The entry's digest: header first, then the arrays -- everything the file
+/// holds except the digest itself. The header is in there because it carries
+/// the counts the gate line is printed from, and a temperature range flipped
+/// by bit rot would otherwise be reported as a measurement.
+String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
     core::Sha256 hasher;
+
+    hasher.UpdateU32(header.magic);
+    hasher.UpdateU32(header.formatVersion);
+    hasher.Update(header.keyHex, kKeyHexLength);
+    hasher.UpdateU64(header.temperatureCount);
+    hasher.UpdateU64(header.instanceBaseCount);
+    hasher.UpdateU64(header.sensitivityCount);
+    hasher.UpdateU64(header.visibilityCount);
+    hasher.UpdateF32(header.sunDirection[0]);
+    hasher.UpdateF32(header.sunDirection[1]);
+    hasher.UpdateF32(header.sunDirection[2]);
+    hasher.UpdateU32(header.elementCount);
+    hasher.UpdateU32(header.participatingElements);
+    hasher.UpdateU32(header.exchangeNonZeros);
+    hasher.UpdateU32(header.stepsTaken);
+    hasher.UpdateF64(header.minTemperature_K);
+    hasher.UpdateF64(header.maxTemperature_K);
+    hasher.UpdateF64(header.meanTemperature_K);
+
     const auto feed = [&hasher](const auto& vec) {
         if (!vec.empty()) {
             hasher.Update(vec.data(), vec.size() * sizeof(typename std::decay_t<decltype(vec)>::value_type));
@@ -321,9 +343,8 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
     result.maxTemperature_K = header.maxTemperature_K;
     result.meanTemperature_K = header.meanTemperature_K;
 
-    if (DigestPayload(result) != StringView(storedDigest, kKeyHexLength)) {
-        QL_LOG_WARN("  Thermal cache: {} failed its payload digest; solving instead",
-                    file.string());
+    if (DigestEntry(header, result) != StringView(storedDigest, kKeyHexLength)) {
+        QL_LOG_WARN("  Thermal cache: {} failed its digest; solving instead", file.string());
         return std::nullopt;
     }
 
@@ -405,7 +426,7 @@ bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex
         writeArray(result.sunSensitivity_K);
         writeArray(result.sunVisibility);
 
-        const String digest = DigestPayload(result);
+        const String digest = DigestEntry(header, result);
         out.write(digest.data(), kKeyHexLength);
 
         out.flush();

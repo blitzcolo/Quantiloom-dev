@@ -322,6 +322,28 @@ TEST_F(ThermalSolveCacheTest, CorruptedPayloadIsCaughtByTheDigest) {
     EXPECT_FALSE(LoadThermalSolveCache(Entry(), kKeyA).has_value());
 }
 
+TEST_F(ThermalSolveCacheTest, CorruptedStatsAreCaughtByTheDigest) {
+    // The stats are not pixels -- they are the summary line the downstream
+    // gates parse to notice a scene whose subject fell out of the solve. A
+    // flipped participatingElements would be read as a measurement, so the
+    // digest has to cover the header and not just the arrays.
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), kKeyA, MakeResult()));
+
+    // participatingElements sits after magic(4) + formatVersion(4) +
+    // keyHex(64) + four counts(32) + sunDirection(12) + elementCount(4).
+    constexpr usize kParticipatingOffset = 4 + 4 + 64 + 32 + 12 + 4;
+    FlipByteAt(Entry(), kParticipatingOffset);
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), kKeyA).has_value());
+}
+
+TEST_F(ThermalSolveCacheTest, CorruptedTemperatureRangeIsCaughtByTheDigest) {
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), kKeyA, MakeResult()));
+    // meanTemperature_K: the last f64 before the arrays begin.
+    constexpr usize kMeanOffset = 4 + 4 + 64 + 32 + 12 + 16 + 8 + 8;
+    FlipByteAt(Entry(), kMeanOffset);
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), kKeyA).has_value());
+}
+
 TEST_F(ThermalSolveCacheTest, RejectedEntryCanBeOverwritten) {
     // The whole recovery story: a bad entry is a miss, the caller re-solves,
     // and the store replaces it.
