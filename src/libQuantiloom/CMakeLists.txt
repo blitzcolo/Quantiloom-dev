@@ -176,6 +176,8 @@ add_library(quantiloom_core OBJECT
     thermal/ThermalTimeline.hpp
     thermal/ThermalSolver.cpp
     thermal/ThermalSolver.hpp
+    thermal/ThermalSolveCache.cpp
+    thermal/ThermalSolveCache.hpp
 
     # Postprocess module
     ${QL_PUBLIC_INC}/postprocess/SensorModel.hpp

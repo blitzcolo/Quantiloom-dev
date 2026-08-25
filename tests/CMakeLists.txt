@@ -223,6 +223,7 @@ set(TEST_CORE_SOURCES
     test_core/test_thermal_element_dump.cpp
     test_core/test_thermal_sun_sensitivity.cpp
     test_core/test_thermal_timeline.cpp
+    test_core/test_thermal_solve_cache.cpp
     test_core/test_ir_energy_conservation.cpp
     test_core/test_config.cpp
     test_core/test_spectral_cube.cpp
