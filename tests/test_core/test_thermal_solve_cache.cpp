@@ -85,7 +85,7 @@ struct KeyFixture {
     glm::vec3 exchangeSun{0.3f, 0.8f, 0.1f};
     String gpu = "TestGPU|4318|8712|123456";
     String stepper = "CPU Crank-Nicolson";
-    String version = "0.2.5";
+    String version = "0.2.7";
 
     KeyFixture() {
         ThermalElement a;
@@ -478,7 +478,7 @@ TEST(ThermalSolveCacheKey, ProvenanceChangesIt) {
     EXPECT_NE(fixture.Key(), before) << "f32 and f64 steppers must not share an entry";
 
     fixture = KeyFixture();
-    fixture.version = "0.2.6";
+    fixture.version = "0.2.7";
     EXPECT_NE(fixture.Key(), before);
 }
 
