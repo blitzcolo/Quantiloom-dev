@@ -51,6 +51,8 @@ add_library(quantiloom_core OBJECT
     core/RgbToSpectrum.hpp
     core/Sha256.cpp
     core/Sha256.hpp
+    core/CacheDirectory.cpp
+    core/CacheDirectory.hpp
     ${QL_PUBLIC_INC}/core/Platform.hpp
     ${QL_PUBLIC_INC}/core/Types.hpp
     ${QL_PUBLIC_INC}/core/Image.hpp

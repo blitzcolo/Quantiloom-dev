@@ -29,6 +29,7 @@
 
 #include "renderer/ThermalPreview.hpp"
 #include "core/Log.hpp"
+#include "core/CacheDirectory.hpp"
 #include "core/CIE_CMF_Data.hpp"
 #include "core/SpectralData.hpp"
 #include "io/GltfLoader.hpp"
@@ -44,90 +45,15 @@
 #include <fstream>
 #include <random>
 
-// Platform-specific includes for cache directory
+// Not for the cache directory -- that moved to core/CacheDirectory.hpp -- but
+// for GetModuleFileNameW, which resolves the DLL's own path further down.
 #if defined(_WIN32)
-    #include <shlobj.h>
     #include <windows.h>
-#elif defined(__APPLE__)
-    #include <pwd.h>
-    #include <unistd.h>
-#else  // Linux
-    #include <pwd.h>
-    #include <unistd.h>
 #endif
 
 namespace quantiloom {
 
-// ============================================================================
-// Platform-specific cache directory helper
-// ============================================================================
-
-/**
- * @brief Get the default pipeline cache directory for the current platform
- * @return Path to cache directory (creates if doesn't exist)
- *
- * Platform-specific locations:
- *   Windows: %LOCALAPPDATA%/Quantiloom/cache/
- *   Linux:   ~/.cache/Quantiloom/
- *   macOS:   ~/Library/Caches/Quantiloom/
- */
-static std::string GetDefaultCacheDirectory() {
-    std::filesystem::path cacheDir;
-
-#if defined(_WIN32)
-    // Windows: Use LOCALAPPDATA
-    wchar_t* localAppData = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
-        cacheDir = std::filesystem::path(localAppData) / "Quantiloom" / "cache";
-        CoTaskMemFree(localAppData);
-    } else {
-        // Fallback to temp directory
-        cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
-    }
-
-#elif defined(__APPLE__)
-    // macOS: Use ~/Library/Caches/
-    const char* home = getenv("HOME");
-    if (!home) {
-        struct passwd* pw = getpwuid(getuid());
-        if (pw) home = pw->pw_dir;
-    }
-    if (home) {
-        cacheDir = std::filesystem::path(home) / "Library" / "Caches" / "Quantiloom";
-    } else {
-        cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
-    }
-
-#else  // Linux
-    // Linux: Use XDG_CACHE_HOME or ~/.cache/
-    const char* xdgCache = getenv("XDG_CACHE_HOME");
-    if (xdgCache && xdgCache[0] != '\0') {
-        cacheDir = std::filesystem::path(xdgCache) / "Quantiloom";
-    } else {
-        const char* home = getenv("HOME");
-        if (!home) {
-            struct passwd* pw = getpwuid(getuid());
-            if (pw) home = pw->pw_dir;
-        }
-        if (home) {
-            cacheDir = std::filesystem::path(home) / ".cache" / "Quantiloom";
-        } else {
-            cacheDir = std::filesystem::temp_directory_path() / "Quantiloom" / "cache";
-        }
-    }
-#endif
-
-    // Create directory if it doesn't exist
-    std::error_code ec;
-    std::filesystem::create_directories(cacheDir, ec);
-    if (ec) {
-        QL_LOG_WARN("Failed to create cache directory {}: {}", cacheDir.string(), ec.message());
-        // Fall back to current directory
-        return ".";
-    }
-
-    return cacheDir.string();
-}
+using core::GetDefaultCacheDirectory;
 
 // ============================================================================
 // InstanceGeometryInfo - Per-instance geometry offset info (must match shader)
