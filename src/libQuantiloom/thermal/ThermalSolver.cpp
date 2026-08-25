@@ -231,6 +231,36 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
     return series.back().second;
 }
 
+Vector<ThermalMaterial> BuildSolvedMaterials(const Scene& scene, const ThermalConfig& config,
+                                             u32* namedCount) {
+    Vector<ThermalMaterial> materials(scene.materials.size());
+    u32 named = 0;
+    for (usize m = 0; m < scene.materials.size(); ++m) {
+        materials[m].longwaveEmissivity = EmissivityOf(scene.materials[m]);
+        const auto it = config.materials.find(scene.materials[m].name);
+        if (it != config.materials.end()) {
+            // Copy the config's block wholesale, then put the curve's
+            // emissivity back: the config never carries a trustworthy one.
+            const f32 emissivity = materials[m].longwaveEmissivity;
+            materials[m] = it->second;
+            materials[m].longwaveEmissivity = emissivity;
+            ++named;
+        }
+    }
+    if (namedCount != nullptr) {
+        *namedCount = named;
+    }
+    return materials;
+}
+
+void LogThermalSolveSummary(const ThermalResult& result) {
+    QL_LOG_INFO("  Thermal: {} elements ({} solved), {} exchange entries, {} steps, "
+                "{:.1f}-{:.1f} K (mean {:.1f} K)",
+                result.elementCount, result.participatingElements, result.exchangeNonZeros,
+                result.stepsTaken, result.minTemperature_K, result.maxTemperature_K,
+                result.meanTemperature_K);
+}
+
 ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                               const ExchangeGeometry& exchange,
                               const SunVisibilityTable& sunTable) {
@@ -244,18 +274,8 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         return result;
     }
 
-    Vector<ThermalMaterial> materials(scene.materials.size());
     u32 named = 0;
-    for (usize m = 0; m < scene.materials.size(); ++m) {
-        materials[m].longwaveEmissivity = EmissivityOf(scene.materials[m]);
-        const auto it = config.materials.find(scene.materials[m].name);
-        if (it != config.materials.end()) {
-            const f32 emissivity = materials[m].longwaveEmissivity;
-            materials[m] = it->second;
-            materials[m].longwaveEmissivity = emissivity;
-            ++named;
-        }
-    }
+    const Vector<ThermalMaterial> materials = BuildSolvedMaterials(scene, config, &named);
     if (named == 0) {
         result.error = "no material in the scene has thermal properties; "
                        "set thermal_conductivity_w_mk on at least one";
@@ -392,11 +412,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                                                   mesh.elements.size()));
     }
 
-    QL_LOG_INFO("  Thermal: {} elements ({} solved), {} exchange entries, {} steps, "
-                "{:.1f}-{:.1f} K (mean {:.1f} K)",
-                result.elementCount, result.participatingElements, result.exchangeNonZeros,
-                result.stepsTaken, result.minTemperature_K, result.maxTemperature_K,
-                result.meanTemperature_K);
+    LogThermalSolveSummary(result);
     return result;
 }
 

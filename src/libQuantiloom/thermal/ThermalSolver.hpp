@@ -150,6 +150,35 @@ struct ThermalResult {
                                             const ExchangeGeometry& exchange,
                                             const SunVisibilityTable& sunTable = {});
 
+/**
+ * @brief The per-material properties the solve will actually use
+ *
+ * One entry per scene material, in scene order: the config's [[materials]]
+ * thermal block matched by name, over the long-wave emissivity read from the
+ * material's own IR curve. The emissivity wins over anything the config typed
+ * -- a material bound to a measured spectrum is solved at the Planck-weighted
+ * band average of that curve, which differs from the typed number by about
+ * 0.4 K in the trajectory.
+ *
+ * Hoisted out of RunThermalSolve because the solve cache has to hash exactly
+ * these numbers. Two implementations of the merge would let the key and the
+ * solve disagree, and a cache that keys on the wrong emissivity serves a
+ * trajectory from the wrong surface without saying so.
+ *
+ * @param namedCount  optional out: how many scene materials matched a config
+ *                    entry. Zero means the solve would fail for want of any
+ *                    material with thermal properties.
+ */
+[[nodiscard]] Vector<ThermalMaterial> BuildSolvedMaterials(const Scene& scene,
+                                                           const ThermalConfig& config,
+                                                           u32* namedCount = nullptr);
+
+/// The one line the downstream gates parse out of a render's log. It lives here
+/// rather than at the end of RunThermalSolve so that a solve served from cache
+/// prints it identically -- a gate that reads nothing reports every render
+/// clean, which is the failure it exists to catch.
+void LogThermalSolveSummary(const ThermalResult& result);
+
 /// The sky-only exchange the fallback uses: every row empty, every sky
 /// fraction 1, every element in full sun. Exposed so a caller can say
 /// explicitly that this is what it wants.
