@@ -56,7 +56,10 @@ public:
               const ThermalForcing& forcing, f64 dt_s,
               const ShortwaveSample& shortwave) override;
 
-    [[nodiscard]] const char* Name() const override { return "CPU Crank-Nicolson"; }
+    /// Also reachable without an instance, because a caller has to name the
+    /// stepper for the solve cache key before it has decided to build one.
+    static constexpr const char* kName = "CPU Crank-Nicolson";
+    [[nodiscard]] const char* Name() const override { return kName; }
 
     /// Shortest time constant across the participating materials, in seconds:
     /// rho c d / (h + 4 eps sigma T^3 + latent), the scale a timestep should stay under

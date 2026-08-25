@@ -69,7 +69,12 @@ public:
                           const SunVisibilityTable& sunTable,
                           std::span<const ThermalBatchStep> steps);
 
-    /// For the log line that says which one ran.
+    /// For the log line that says which one ran -- and for the solve cache,
+    /// which keys on it: two steppers give answers that differ in the last
+    /// bits, so an entry is only valid for the one that produced it. Renaming
+    /// one is therefore a cache invalidation, which is harmless; giving two of
+    /// them the same name would let their results be served for each other,
+    /// which is not.
     [[nodiscard]] virtual const char* Name() const = 0;
 };
 

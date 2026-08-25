@@ -38,7 +38,10 @@
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
+#include "core/LibVersion.hpp"
+#include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalMesh.hpp"
+#include "thermal/ThermalSolveCache.hpp"
 #include "thermal/ThermalSolver.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "renderer/RayTracingPipeline.hpp"
@@ -294,6 +297,65 @@ void OfflineRenderer::Impl::RunThermalSolver() {
 
     const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(loadedScene);
 
+    // Which stepper will run, decided before the key is built: CPU and GPU
+    // differ in f64 versus f32, so the answer they give is part of what an
+    // entry stands for.
+    const char* stepperName = thermal::CpuCrankNicolsonStepper::kName;
+
+    // Has this exact solve already been done? The key covers the mesh, the
+    // materials as merged, the [thermal] scalars, the forcing file's contents,
+    // the lighting sun direction, the stepper, this library's version and this
+    // GPU -- see ThermalSolveCache.hpp for why each is there. A hit skips the
+    // view-factor precompute as well as the trajectory.
+    //
+    // Naming a dump file opts out both ways: the dump needs the exchange's sky
+    // fractions, which an entry does not carry, so a hit could not write it.
+    const auto cacheSettings = thermal::ResolveThermalSolveCacheSettings();
+    const bool cacheEligible = cacheSettings.enabled && thermalConfig.dumpElementsFile.empty();
+    String cacheKey;
+    std::filesystem::path cacheFile;
+    if (cacheEligible) {
+        const VkPhysicalDeviceProperties& gpu = context.GetDeviceProperties();
+        const Vector<thermal::ThermalMaterial> solvedMaterials =
+            thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
+
+        thermal::ThermalSolveCacheKeyInputs keyInputs;
+        keyInputs.mesh = &mesh;
+        keyInputs.solvedMaterials = &solvedMaterials;
+        keyInputs.config = &thermalConfig;
+        keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
+        const String gpuIdentity =
+            thermal::MakeGpuIdentity(StringView(gpu.deviceName, sizeof(gpu.deviceName)),
+                                     gpu.vendorID, gpu.deviceID, gpu.driverVersion);
+        keyInputs.gpuIdentity = gpuIdentity;
+        keyInputs.stepperName = stepperName;
+        keyInputs.libVersion = version::LibVersionString;
+        cacheKey = thermal::ComputeThermalSolveCacheKey(keyInputs);
+
+        if (!cacheKey.empty()) {
+            cacheFile = cacheSettings.directory / (cacheKey + ".qltc");
+            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey)) {
+                QL_LOG_INFO("  Thermal cache: hit ({}...)", cacheKey.substr(0, 12));
+                // The gate line, from the entry rather than from a solve. A
+                // render served from cache has to be indistinguishable in the
+                // log from one that was not.
+                thermal::LogThermalSolveSummary(*cached);
+
+                thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
+                    context.GetAllocator(), cached->surfaceTemperature_K.size() * sizeof(f32),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+                thermalTemperatureBuffer->Upload(
+                    cached->surfaceTemperature_K.data(),
+                    cached->surfaceTemperature_K.size() * sizeof(f32));
+                uploadSunResponse(cached->sunSensitivity_K, cached->sunVisibility,
+                                  cached->sunDirection);
+                geometry.SetThermalElementBases(cached->instanceElementBase);
+                return;
+            }
+            QL_LOG_INFO("  Thermal cache: miss; solving");
+        }
+    }
+
     // The view factors. On the GPU where there is one to run them on: the same
     // rays Aguerre et al. cast with Embree, against the acceleration structure
     // the render already built. A failure here is not a failed render -- the
@@ -346,6 +408,11 @@ void OfflineRenderer::Impl::RunThermalSolver() {
                     result.error);
         bindEmpty();
         return;
+    }
+
+    // Only reachable with an empty error, so a failed solve is never stored.
+    if (cacheEligible && !cacheKey.empty()) {
+        thermal::StoreThermalSolveCache(cacheFile, cacheKey, result);
     }
 
     thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
