@@ -1,0 +1,31 @@
+# Synthetic fluorescent dye, emission.
+# Shape only: the level is normalised away at binding, because a
+# spectrofluorimeter reports counts and the yield is what says how much
+# comes back. Raised cosine on [550, 650] nm, disjoint from the
+# excitation band above so a transfer between them is unambiguous.
+# wavelength_nm,emission
+540.0,0.000000
+545.0,0.000000
+550.0,0.000000
+555.0,0.024472
+560.0,0.095492
+565.0,0.206107
+570.0,0.345492
+575.0,0.500000
+580.0,0.654508
+585.0,0.793893
+590.0,0.904508
+595.0,0.975528
+600.0,1.000000
+605.0,0.975528
+610.0,0.904508
+615.0,0.793893
+620.0,0.654508
+625.0,0.500000
+630.0,0.345492
+635.0,0.206107
+640.0,0.095492
+645.0,0.024472
+650.0,0.000000
+655.0,0.000000
+660.0,0.000000

@@ -1021,9 +1021,16 @@ Result<ResolvedFluorescence, String> ResolveFluorescence(
     // instrument; and with the area fixed at 1, `yield` is the only number that
     // says how much comes back, which is what makes the energy rule above a
     // rule about one quantity rather than about a product of two.
+    //
+    // Trapezoid and not a rectangle sum, because the grid is N points spanning
+    // N-1 steps: summing N values and multiplying by the step integrates one
+    // step too many, which for the 64-sample grid is 1.6% of the area and lands
+    // on every fluorescent surface as 1.6% too little light. A flat curve over
+    // the visible band has to come back as exactly the band's width.
     f64 area = 0.0;
     for (u32 i = 0; i < out.emission.numSamples; ++i) {
-        area += static_cast<f64>(out.emission.values[i]);
+        const f64 v = static_cast<f64>(out.emission.values[i]);
+        area += (i == 0 || i + 1 == out.emission.numSamples) ? 0.5 * v : v;
     }
     area *= static_cast<f64>(out.emission.stepSize_nm);
     out.emissionAreaInBand = static_cast<f32>(area);

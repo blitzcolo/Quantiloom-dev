@@ -1,0 +1,59 @@
+# A flat plate under a flat sun and sky, with a fluorescent dye on it.
+#
+# The same open ground the sky-equivalence checks use, chosen for the same
+# reason: nothing occludes it, the residual is zero, and the illumination is a
+# closed form, so anything that changes in the frame changes because of the
+# material. The dye absorbs on [400, 500] nm and emits on [550, 650] nm, two
+# bands that do not overlap, so light appearing in the second because of light
+# in the first is a transfer that no diagonal renderer can produce.
+#
+# The illuminant is deliberately flat (assets/luts/flat_sun_sky.csv) so that the
+# excitation integral has a value this scene's checker can state: with E
+# constant, INTEGRAL ex(lambda) E dlambda is E times the area under ex.
+#
+# Check: python scripts/render-tests/check_fluorescence.py
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+seed = 12345
+output = "fluorescence_plate_output.exr"
+
+[spectral]
+mode = "vis_hero"
+band = "VIS"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/flat_sun_sky.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
+
+[material_overrides."shadow_scene_open"]
+fluorescence_excitation_curve = "assets/data/fluorescence/demo_dye_excitation.csv"
+fluorescence_emission_curve = "assets/data/fluorescence/demo_dye_emission.csv"
+fluorescence_yield = 0.6

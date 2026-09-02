@@ -1,0 +1,30 @@
+# Synthetic fluorescent dye, excitation.
+# The fraction of arriving light this channel absorbs, dimensionless.
+# Raised cosine on [400, 500] nm peaking at 0.8, zero outside: a test
+# fixture, not a measurement of anything.
+# wavelength_nm,excitation
+390.0,0.000000
+395.0,0.000000
+400.0,0.000000
+405.0,0.019577
+410.0,0.076393
+415.0,0.164886
+420.0,0.276393
+425.0,0.400000
+430.0,0.523607
+435.0,0.635114
+440.0,0.723607
+445.0,0.780423
+450.0,0.800000
+455.0,0.780423
+460.0,0.723607
+465.0,0.635114
+470.0,0.523607
+475.0,0.400000
+480.0,0.276393
+485.0,0.164886
+490.0,0.076393
+495.0,0.019577
+500.0,0.000000
+505.0,0.000000
+510.0,0.000000

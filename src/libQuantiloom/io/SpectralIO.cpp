@@ -1002,9 +1002,24 @@ Result<SpectralCurve, String> SpectralIO::LoadEmissionSpectrum(
 
     // Not a token, so it is a file. A misspelt token lands here and fails as a
     // missing path, which reads badly, so say both things.
+    //
+    // Two places to look, in the order ResolveConfigPath uses: beside the
+    // config, then as written. Beside the config is what a scene bundled with
+    // its own data means; as written is what a repository-relative path in a
+    // config under assets/configs/ means, and every other asset key in this
+    // repository accepts one. Without the second, a curve had to be named
+    // relative to the config's own directory while the illuminant beside it
+    // could be named relative to the working directory.
+    std::error_code ec;
     std::filesystem::path path(nameOrPath);
-    if (path.is_relative() && !baseDir.empty()) path = baseDir / path;
-    if (!std::filesystem::exists(path)) {
+    if (path.is_relative() && !baseDir.empty()) {
+        const std::filesystem::path besideConfig = baseDir / path;
+        if (std::filesystem::exists(besideConfig, ec) ||
+            !std::filesystem::exists(path, ec)) {
+            path = besideConfig;
+        }
+    }
+    if (!std::filesystem::exists(path, ec)) {
         return Res(Res::Err{
             "Emission spectrum '" + nameOrPath + "' is neither a built-in nor a file "
             "that exists (looked for " + path.string() +

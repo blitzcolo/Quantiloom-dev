@@ -2280,6 +2280,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // the horizon -- and the loop skips the work.
         LightSample visLight;
         float visNeeScale = 0.0;
+        float visNeeScaleFluor = 0.0;
         // The bounce's BRDF terms, kept so the loop evaluates the same f the
         // bounce samples. wDiffuse is per-wavelength, so what is carried out is
         // everything except rho: kD_b, and the pieces of the specular lobe. Four
@@ -2413,6 +2414,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     visNeeScale = NdotWl *
                                   PowerHeuristic(visLight.pdfSolid, pdfBsdfAtLight) /
                                   visLight.pdfSolid;
+                    // The same emitter without the MIS weight. Fluorescence
+                    // absorbs at a wavelength no other technique draws -- the
+                    // bounce carries the OUTGOING wavelengths -- so the
+                    // excitation integral has one strategy estimating it and a
+                    // power heuristic against a competitor that does not exist
+                    // would throw away the share it assigns to nobody.
+                    visNeeScaleFluor = NdotWl / visLight.pdfSolid;
                     visKD     = kD4;
                     visF      = F4;
                     visQSpec  = qSpec_b;
@@ -2525,6 +2533,65 @@ void main(inout Payload payload, in HitAttributes attribs) {
             emissiveCurveScale = dot(emissive, EMISSIVE_LUMINANCE_WEIGHTS) /
                                  max(dot(material.emissiveFactor,
                                          EMISSIVE_LUMINANCE_WEIGHTS), 1e-8);
+        }
+
+        // ====================================================================
+        // Fluorescence: the excitation integral
+        // ====================================================================
+        // Every other term in this loop is diagonal in lambda -- what arrives
+        // at a wavelength leaves at that wavelength -- which is what lets four
+        // of them share one path. Fluorescence is the term that is not: it
+        // absorbs across one band and gives back across another, so the
+        // radiance leaving at lambda_out depends on an integral over lambda_in
+        // that no wavelength this path carries can answer.
+        //
+        //     M = INTEGRAL ex(lambda_in) E(lambda_in) dlambda_in
+        //
+        // One sample of it, drawn from the same density the bounce wavelength
+        // uses, on a slot of its own so that a scene without fluorescence draws
+        // nothing and its sequence is untouched:
+        //
+        //     M ~ ex(lambda_f) E(lambda_f) / p(lambda_f)
+        //
+        // E is the irradiance already established at this vertex: the sun
+        // through the shadow ray that has been traced, the sky dome, and the
+        // emitter the light sample found. No ray is traced for this, which is
+        // why the estimate is one sample rather than a sweep -- the cost is a
+        // curve lookup and the variance is in a term that is a correction to
+        // the reflected light, not a replacement for it.
+        //
+        // Held as a scalar to the loop, where it is multiplied by the emission
+        // density at each outgoing wavelength. Being inside the shared loop is
+        // what makes the deterministic sweep, the quartet and a collapsed hero
+        // ray agree without three implementations.
+        float fluorM = 0.0;
+        const bool hasFluorescence = material.fluorescenceExcitationCurveIndex >= 0 &&
+                                     material.fluorescenceEmissionCurveIndex >= 0 &&
+                                     material.fluorescenceYield > 0.0;
+        if (hasFluorescence) {
+            const float lambda_f =
+                SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_FLUOR_LAMBDA));
+            const float ex_f = EvaluateEmissionCurve(
+                spectralCurves, material.fluorescenceExcitationCurveIndex, lambda_f);
+            if (ex_f > 0.0) {
+                float E_f = 0.0;
+                if (hasSpectralSolarLUT) {
+                    // Irradiance, not radiance: the sun's normal irradiance
+                    // projected onto the surface and shadowed, plus the dome's
+                    // hemispherical irradiance as it is. The sky term above
+                    // divides by pi to become a radiance; a surface absorbs the
+                    // irradiance, so this one does not.
+                    E_f = SampleSunIrradiance(solarSpectralLUT, lambda_f) * NdotL * shadowFactor +
+                          SampleSkyIrradiance(solarSpectralLUT, lambda_f);
+                }
+                if (visNeeScaleFluor > 0.0) {
+                    const float L_light_f = hasNeeCurve
+                        ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda_f)
+                        : RgbIlluminantAt(iNee, SampleCIE_LUT(cieCMF_LUT, lambda_f).w, lambda_f);
+                    E_f += L_light_f * visNeeScaleFluor;
+                }
+                fluorM = ex_f * E_f / VisibleWavelengthPDF(lambda_f);
+            }
         }
 
         // Loop over wavelengths
@@ -2729,7 +2796,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_nee = brdf_at_light * L_light * visNeeScale;
             }
 
-            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee;
+            // 4c. Fluorescent re-emission at this wavelength. Lambertian, so
+            // the 1/pi is the BRDF; the emission curve integrates to 1 over the
+            // band, which is what leaves the yield as the only number saying
+            // how much of what was absorbed comes back.
+            float L_fluor = 0.0;
+            if (fluorM > 0.0) {
+                L_fluor = material.fluorescenceYield *
+                          EvaluateEmissionCurve(
+                              spectralCurves, material.fluorescenceEmissionCurveIndex, lambda) *
+                          fluorM * (1.0 / PI);
+            }
+
+            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee + L_fluor;
 
             // The quartet's indirect correction at this wavelength, added
             // before the atmosphere composes the surface rather than after:

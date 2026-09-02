@@ -1700,8 +1700,13 @@ TEST(ConfigResolveFluorescence, TheEmissionIsADensityThatIntegratesToOne) {
 
     const auto& em = resolved.value().emission;
     ASSERT_GT(em.numSamples, 0u);
+    // Trapezoid, because the grid is N points spanning N-1 steps. A rectangle
+    // sum here would agree with a rectangle sum in the binder and the pair
+    // would be wrong together, by 1.6% on the 64-sample grid.
     f64 area = 0.0;
-    for (u32 i = 0; i < em.numSamples; ++i) area += em.values[i];
+    for (u32 i = 0; i < em.numSamples; ++i) {
+        area += (i == 0 || i + 1 == em.numSamples) ? 0.5 * em.values[i] : em.values[i];
+    }
     area *= em.stepSize_nm;
     EXPECT_NEAR(area, 1.0, 1e-3);
 
@@ -1769,6 +1774,28 @@ TEST(ConfigResolveFluorescence, SwappedCurvesAreWarnedAboutRatherThanRefused) {
         sawIt = sawIt || warning.find("wrong way round") != String::npos;
     }
     EXPECT_TRUE(sawIt) << "a swapped pair should be reported";
+}
+
+// A curve that is flat across the band must normalise to 1/width, so that a
+// surface absorbing everything and re-emitting everything returns exactly what
+// it took. This is the case where an off-by-one-step integration shows: a
+// rectangle sum over 64 points reads the band 1.6% wider than it is.
+TEST(ConfigResolveFluorescence, AFlatEmissionNormalisesToTheBandWidth) {
+    FluorescenceBindingRequest request;
+    request.excitationSamples = {{400.0f, 1.0f}, {780.0f, 1.0f}};
+    request.emissionSamples = {{400.0f, 1.0f}, {780.0f, 1.0f}};
+    request.yield = 1.0f;
+    request.bandMinNm = 400.0f;
+    request.bandMaxNm = 780.0f;
+
+    auto resolved = ResolveFluorescence(request);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().emissionAreaInBand, 380.0f, 0.5f)
+        << "a flat curve's area over the band IS the band's width";
+    for (u32 i = 0; i < resolved.value().emission.numSamples; ++i) {
+        EXPECT_NEAR(resolved.value().emission.values[i], 1.0f / 380.0f, 1e-6f)
+            << "sample " << i;
+    }
 }
 
 // Nothing about a scene that does not ask for this changes, which is what makes
