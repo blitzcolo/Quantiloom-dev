@@ -884,6 +884,34 @@ public:
      */
     [[nodiscard]] ThermalSolveStatus GetThermalSolveStatus() const;
 
+    /**
+     * @brief What one element did between two hours
+     *
+     * Replays the trajectory at @p samples evenly spaced instants and reports
+     * the temperatures and, where the stepper decomposes its own balance, the
+     * six fluxes that produced them. Nothing is re-solved: the checkpoints are
+     * already there and this steps between them, which is why a probe is
+     * cheap enough to move around a scene.
+     *
+     * Read-only in every sense that matters -- the field the viewport is
+     * showing is not disturbed, and the hour it is showing is restored before
+     * this returns.
+     *
+     * The fluxes are decomposed by the reference CPU balance whichever stepper
+     * produced the trajectory, so the six numbers do not change with whether
+     * the machine has a GPU. What they describe is the balance AT the state
+     * the trajectory reached, which is the trajectory's own either way.
+     *
+     * @param element  index into the thermal mesh, as a viewport pick reports it
+     * @param fromHour, toHour  the stretch to sample; swapped if given backwards
+     * @param samples  how many instants, at least two
+     *
+     * @return An error when there is no solve, the element is out of range, or
+     *         fewer than two samples were asked for.
+     */
+    Result<ThermalElementTrajectory, String> GetElementTrajectory(
+        u32 element, f64 fromHour, f64 toHour, u32 samples = 96);
+
     // ========================================================================
     // Scene Editing (Phase 2)
     // ========================================================================

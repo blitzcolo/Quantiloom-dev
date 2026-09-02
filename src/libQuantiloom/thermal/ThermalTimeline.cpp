@@ -225,6 +225,27 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
     return m_scratch;
 }
 
+bool ThermalTimeline::SurfaceFluxesAt(const f64 time_h, const u32 element,
+                                      SurfaceFluxes& out,
+                                      const IThermalStepper& decomposer) {
+    if (element >= m_elements.size()) return false;
+
+    const ThermalState& state = StateAt(time_h);
+    const ThermalForcing forcing = SampleForcing(m_forcingSeries, time_h, m_constantForcing);
+
+    Vector<f32> sunVis;
+    Vector<f32> reflected;
+    ShortwaveSample sample;
+    SampleShortwaveAt(m_sunTable, m_exchange, time_h, m_elements.size(), sunVis, reflected,
+                      &sample);
+    sample.sunVisibility = sunVis;
+    sample.reflectedGain = reflected;
+    sample.diffuseGain = m_sunTable.diffuseGain;
+
+    return decomposer.SurfaceFluxesAt(state, m_elements, m_materials, m_exchange, forcing,
+                                      sample, element, out);
+}
+
 usize ThermalTimeline::CheckpointBytes() const {
     usize total = 0;
     for (const auto& [k, state] : m_checkpoints) {

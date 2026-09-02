@@ -145,6 +145,51 @@ struct ThermalMaterialParams {
     f32 interiorConvection_W_m2K = 3.0f;
 };
 
+/**
+ * @brief One element's surface energy balance, term by term
+ *
+ * Every number is W/m^2, signed POSITIVE INTO the exposed face, and the six
+ * sum to the rate the surface is storing heat. That is what makes them an
+ * explanation rather than six unrelated readings: a surface that is warming
+ * has a positive sum, and which term made it positive is the answer to why.
+ *
+ * Two are usually negative in daylight, and the reason is in their
+ * definitions. Long wave is a NET -- what the hemisphere sends back minus what
+ * this element radiates -- so a surface warmer than its sky loses by it.
+ * Evaporation only ever leaves.
+ */
+struct ThermalSurfaceFluxes {
+    f64 shortwave_W_m2 = 0.0;   ///< absorbed sun: direct through its shadow, reflected, diffuse
+    f64 longwave_W_m2 = 0.0;    ///< net against the hemisphere and the sky
+    f64 convection_W_m2 = 0.0;  ///< h (T_air - T_surface)
+    f64 latent_W_m2 = 0.0;      ///< evaporation, never positive
+    f64 conduction_W_m2 = 0.0;  ///< from the node below into the surface node
+    f64 lateral_W_m2 = 0.0;     ///< across shared edges; zero unless the mesh carries contacts
+};
+
+/**
+ * @brief What one element did over a stretch of the day
+ *
+ * The probe behind a time-series panel. Sampled by replaying the trajectory,
+ * which is what makes it cheap: the checkpoints are already there, so asking
+ * about an element costs stepping between them rather than solving again.
+ *
+ * Every vector has the same length, or `fluxes` is empty -- which is what a
+ * stepper that does not decompose its own balance reports, and the difference
+ * between "no heat moved" and "nobody asked" is worth keeping.
+ */
+struct ThermalElementTrajectory {
+    /// Hours, ascending, the samples the caller asked for.
+    Vector<f64> time_h;
+    /// The exposed face.
+    Vector<f64> surfaceTemperature_K;
+    /// The back face: the other end of the slab, which is what says whether a
+    /// wall has finished responding to yesterday.
+    Vector<f64> backTemperature_K;
+    /// Empty when the stepper declines to decompose its balance.
+    Vector<ThermalSurfaceFluxes> fluxes;
+};
+
 struct ThermalSolveStatus {
     bool enabled = false;
     bool solveValid = false;

@@ -275,3 +275,105 @@ TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
     EXPECT_NEAR(context->GetThermalSolveStatus().meanTemperature_K, plain, 1e-9)
         << "carrying a tangent perturbed the trajectory it is a tangent of";
 }
+
+TEST_F(ThermalPreviewTest, AnElementTrajectoryReplaysWithoutMovingTheViewport) {
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.airTemperature_K = 293.15;
+    params.sunIrradiance_W_m2 = 800.0;
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 shown = context->GetThermalSolveStatus().meanTemperature_K;
+    ASSERT_GT(shown, 0.0);
+
+    auto probe = context->GetElementTrajectory(0, 6.0, 18.0, 13);
+    ASSERT_TRUE(probe.has_value()) << probe.error();
+    const auto& trajectory = probe.value();
+
+    EXPECT_EQ(trajectory.time_h.size(), 13u);
+    EXPECT_EQ(trajectory.surfaceTemperature_K.size(), 13u);
+    EXPECT_EQ(trajectory.backTemperature_K.size(), 13u);
+    EXPECT_DOUBLE_EQ(trajectory.time_h.front(), 6.0);
+    EXPECT_DOUBLE_EQ(trajectory.time_h.back(), 18.0);
+    for (const f64 T : trajectory.surfaceTemperature_K) {
+        EXPECT_GT(T, 100.0) << "a replayed sample is not a temperature";
+    }
+
+    // A probe is a question about the past, not a request to move. Replaying
+    // walks the timeline to 18:00 and the viewport is still showing noon, so
+    // the status it reports has to be noon's.
+    EXPECT_DOUBLE_EQ(context->GetThermalSolveStatus().meanTemperature_K, shown);
+}
+
+TEST_F(ThermalPreviewTest, TheSixFluxesSumToWhatTheSurfaceIsStoring) {
+    // The claim that makes the decomposition readable rather than six
+    // unrelated numbers: they are the whole balance, so their sum is the rate
+    // the surface half-cell is storing heat. Checked against a finite
+    // difference of the temperature the same replay reports, which is the only
+    // reading of it that does not just restate the code.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.timestep_s = 30.0;
+    params.airTemperature_K = 293.15;
+    params.sunIrradiance_W_m2 = 800.0;
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    // Half a minute apart, which is the timestep: closer and the difference is
+    // rounding, further and the balance has moved between the two samples.
+    const f64 dt_h = 30.0 / 3600.0;
+    auto probe = context->GetElementTrajectory(0, 12.0, 12.0 + dt_h, 2);
+    ASSERT_TRUE(probe.has_value()) << probe.error();
+    const auto& t = probe.value();
+    ASSERT_EQ(t.fluxes.size(), 2u) << "the CPU stepper decomposes its own balance";
+
+    const ThermalSurfaceFluxes& f = t.fluxes.front();
+    const f64 sum = f.shortwave_W_m2 + f.longwave_W_m2 + f.convection_W_m2 +
+                    f.latent_W_m2 + f.conduction_W_m2 + f.lateral_W_m2;
+
+    // rho c dx/2 dT/dt, the half-cell's storage. The material is the config's
+    // CheckerGround: 1.4 W/mK, 2300 kg/m^3, 880 J/kgK, 0.2 m over 10 nodes.
+    const f64 rhoC = 2300.0 * 880.0;
+    const f64 dx = 0.2 / 9.0;
+    const f64 dTdt =
+        (t.surfaceTemperature_K[1] - t.surfaceTemperature_K[0]) / (dt_h * 3600.0);
+    const f64 storing = rhoC * dx * 0.5 * dTdt;
+
+    // Loose, and honestly so: the fluxes are read at the start of the step and
+    // the difference spans it, so the two agree to the scheme's order rather
+    // than exactly. What this catches is a term with the wrong sign or a term
+    // left out, which is a factor rather than a percent.
+    EXPECT_NEAR(sum, storing, 0.25 * std::abs(storing) + 5.0)
+        << "fluxes " << f.shortwave_W_m2 << " sw, " << f.longwave_W_m2 << " lw, "
+        << f.convection_W_m2 << " conv, " << f.latent_W_m2 << " lat, "
+        << f.conduction_W_m2 << " cond, " << f.lateral_W_m2 << " lat.cond";
+
+    // In full sun at noon the two that carry the surface are the absorbed
+    // shortwave, which is positive, and the conduction into the slab, which is
+    // not: a sunlit surface is where the heat arrives and the slab is where it
+    // goes.
+    EXPECT_GT(f.shortwave_W_m2, 0.0);
+    EXPECT_LT(f.conduction_W_m2, 0.0);
+}
+
+TEST_F(ThermalPreviewTest, AProbeSaysWhenItCannotAnswer) {
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    EXPECT_FALSE(context->GetElementTrajectory(1u << 30, 0.0, 24.0, 8).has_value())
+        << "an element past the end of the mesh is an error, not an empty answer";
+    EXPECT_FALSE(context->GetElementTrajectory(0, 0.0, 24.0, 1).has_value())
+        << "one sample is not a trajectory";
+
+    // Given backwards, which a slider dragged the other way will do.
+    auto reversed = context->GetElementTrajectory(0, 18.0, 6.0, 5);
+    ASSERT_TRUE(reversed.has_value()) << reversed.error();
+    EXPECT_DOUBLE_EQ(reversed.value().time_h.front(), 6.0);
+    EXPECT_DOUBLE_EQ(reversed.value().time_h.back(), 18.0);
+}

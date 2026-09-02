@@ -281,7 +281,224 @@ u32 ClaimLagSlot(ThermalState& state, const u32 column) {
 /// as a wrong number rather than turn into a NaN that spreads.
 constexpr f64 kMaxSensitivity_K = 1000.0;
 
+/// Everything the outside does to one exposed face, at the temperatures it had
+/// at the start of a step.
+///
+/// Extracted from Step rather than written beside it, and that is the point:
+/// the same numbers are wanted twice -- once to build the step's right-hand
+/// side, once to answer "what is heating this element" for a probe -- and two
+/// readings of one energy balance is exactly the kind of pair that drifts. The
+/// accumulation order inside is the one Step had, so the flux it returns is
+/// bit-for-bit the flux Step used to compute for itself.
+struct SurfaceBalance {
+    /// The whole of it, as the right-hand side wants it: short wave absorbed,
+    /// plus the net long wave. Convection and evaporation are not here --
+    /// they are linear in the unknown and belong in the matrix.
+    f64 surfaceFlux_W_m2 = 0.0;
+    /// The short-wave half with the absorptivity divided out, and the
+    /// long-wave half with the emissivity divided out: each is its own
+    /// derivative in that coefficient, which is what the parameter tangents
+    /// read. Accumulated beside the flux so the two cannot disagree about
+    /// which terms are in them.
+    f64 shortwavePerAbsorptivity_W_m2 = 0.0;
+    f64 longwavePerEmissivity_W_m2 = 0.0;
+    /// d(flux)/dv: the direct beam with the sun visibility left out. The only
+    /// term in the balance that has one.
+    f64 directPerVisibility_W_m2 = 0.0;
+    /// The convective coefficient and the admittance the matrix takes, which
+    /// are the same number only under the constant law.
+    f64 h = 0.0;
+    f64 convectiveAdmittance_W_m2K = 0.0;
+    /// Evaporation, linearised about the previous surface temperature.
+    f64 latentFlux_W_m2 = 0.0;
+    f64 latentAdmittance_W_m2K = 0.0;
+};
+
+SurfaceBalance EvaluateSurfaceBalance(const u32 e, const ThermalElement& element,
+                                      const ThermalMaterial& material,
+                                      const ExchangeGeometry& exchange,
+                                      const ThermalForcing& forcing,
+                                      const ShortwaveSample& shortwave,
+                                      const std::span<const f32> sunVisibility,
+                                      const Vector<f64>& surfacePrevious,
+                                      const ConvectionLaw& convection) {
+    SurfaceBalance out;
+    const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
+
+    const f64 absorptivity = material.shortwaveAbsorptivity;
+    // The same flux with the coefficient divided out, which is its own
+    // derivative in that coefficient. Accumulated beside the flux rather
+    // than reconstructed later, so the two cannot come to disagree about
+    // which terms are in it.
+
+    // Sun, direct. cos(theta) against the element's own normal, times the
+    // precomputed visibility -- which is what carries the shadow.
+    //
+    // directPerVisibility is the same product with the visibility left
+    // out: d(flux)/dv, and the only term in the whole balance that has
+    // one. The reflected gain below is driven by what OTHER elements see,
+    // the diffuse by the sky, and neither moves when this element steps
+    // into shade -- which is exactly why the tangent is local and costs a
+    // right-hand side rather than a Jacobian.
+    if (forcing.sunIrradiance_W_m2 > 0.0) {
+        const f64 cosTheta = static_cast<f64>(
+            glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
+        if (cosTheta > 0.0) {
+            out.directPerVisibility_W_m2 =
+                absorptivity * forcing.sunIrradiance_W_m2 * cosTheta;
+            if (e < sunVisibility.size()) {
+                out.surfaceFlux_W_m2 +=
+                    out.directPerVisibility_W_m2 * static_cast<f64>(sunVisibility[e]);
+                out.shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 * cosTheta *
+                                                 static_cast<f64>(sunVisibility[e]);
+            }
+        }
+    }
+
+    // Sun, off a neighbour. This is where a north wall gets its afternoon:
+    // it is never in the sun, and the road in front of it is. The gain is
+    // a gather over the whole hemisphere, so it carries no cos(theta) of
+    // its own -- that was applied to the surfaces doing the reflecting,
+    // when it was baked.
+    if (forcing.sunIrradiance_W_m2 > 0.0 && e < shortwave.reflectedGain.size()) {
+        out.surfaceFlux_W_m2 += absorptivity * forcing.sunIrradiance_W_m2 *
+                            static_cast<f64>(shortwave.reflectedGain[e]);
+        out.shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 *
+                                         static_cast<f64>(shortwave.reflectedGain[e]);
+    }
+
+    // Sky, diffuse. For an isotropic dome the geometric factor is the
+    // element's own sky fraction, plus whatever one bounce adds; that sum
+    // is the baked gain, and the bare sky fraction is what it degrades to.
+    // Under overcast this term is the entire solar input, which is why a
+    // run without it has a cloudy day with no sunlight in it at all.
+    if (forcing.diffuseIrradiance_W_m2 > 0.0) {
+        f64 diffuseGain = 0.0;
+        if (e < shortwave.diffuseGain.size()) {
+            diffuseGain = static_cast<f64>(shortwave.diffuseGain[e]);
+        } else if (e < exchange.skyFraction.size()) {
+            diffuseGain = static_cast<f64>(exchange.skyFraction[e]);
+        }
+        out.surfaceFlux_W_m2 += absorptivity * forcing.diffuseIrradiance_W_m2 * diffuseGain;
+        out.shortwavePerAbsorptivity_W_m2 += forcing.diffuseIrradiance_W_m2 * diffuseGain;
+    }
+
+    // Long wave: what the hemisphere sends back, minus what this element
+    // radiates. The sky fills whatever the other elements do not, which is
+    // what makes a surface under an overhang cool more slowly than one
+    // under open sky.
+    f64 incoming = 0.0;
+    if (e + 1 < exchange.viewFactors.rowStart.size()) {
+        const u32 begin = exchange.viewFactors.rowStart[e];
+        const u32 end = exchange.viewFactors.rowStart[e + 1];
+        for (u32 n = begin; n < end; ++n) {
+            const u32 j = exchange.viewFactors.column[n];
+            if (j < surfacePrevious.size()) {
+                const f64 Tj = surfacePrevious[j];
+                incoming += exchange.viewFactors.value[n] * Tj * Tj * Tj * Tj;
+            }
+        }
+    }
+    if (e < exchange.skyFraction.size()) {
+        const f64 Tsky = forcing.skyTemperature_K;
+        incoming += static_cast<f64>(exchange.skyFraction[e]) * Tsky * Tsky * Tsky * Tsky;
+    }
+    const f64 Ti = surfacePrevious[e];
+    out.longwavePerEmissivity_W_m2 = kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
+    out.surfaceFlux_W_m2 += emissivity * out.longwavePerEmissivity_W_m2;
+
+    // Convection, which is linear in the unknown and therefore goes into
+    // the matrix rather than into the flux.
+    //
+    // The forcing's value wins when it has one, then the law, then the
+    // material's constant. The latent term below derives from this same out.h,
+    // so anything that varies it varies the evaporation with it -- which
+    // is right, since both are the same turbulent exchange carrying
+    // different quantities.
+    ConvectionAt(convection, forcing, material, Ti, out.h, out.convectiveAdmittance_W_m2K);
+
+    // Evaporation. Non-linear in the unknown like the radiation, but with
+    // several times its slope, so this one goes into the matrix as well:
+    // linearised about the previous surface temperature and split
+    // half-and-half the way Crank-Nicolson splits everything else. A wet
+    // element under dry air can shed hundreds of watts per square metre,
+    // and leaving that explicit oscillates at a minute per step.
+    if (material.wetnessFactor > 0.0f) {
+        f64 qSurface = 0.0;
+        f64 dq_dT = 0.0;
+        SaturationHumidity(Ti, qSurface, dq_dT);
+        const f64 qAir = SaturationHumidity(forcing.airTemperature_K);
+
+        const f64 humidity = std::clamp(forcing.relativeHumidity, 0.0, 100.0) / 100.0;
+        const f64 coefficient =
+            LatentCoefficient(static_cast<f64>(material.wetnessFactor), out.h);
+        out.latentFlux_W_m2 = coefficient * (qSurface - humidity * qAir);
+        out.latentAdmittance_W_m2K = coefficient * dq_dT;
+    }
+    return out;
+}
+
 }  // namespace
+
+bool CpuCrankNicolsonStepper::SurfaceFluxesAt(
+    const ThermalState& state, const Vector<ThermalElement>& elements,
+    const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
+    const ThermalForcing& forcing, const ShortwaveSample& shortwave, const u32 element,
+    SurfaceFluxes& out) const {
+    const u32 nodes = state.nodeCount;
+    if (nodes < 2 || element >= elements.size()) return false;
+
+    const ThermalElement& e = elements[element];
+    if (e.materialId >= materials.size()) return false;
+    const ThermalMaterial& material = materials[e.materialId];
+
+    const f64 k = material.conductivity_W_mK;
+    const f64 rhoC =
+        static_cast<f64>(material.density_kg_m3) * material.specificHeat_J_kgK;
+    const f64 dx = static_cast<f64>(material.thickness_m) / static_cast<f64>(nodes - 1);
+    if (!(rhoC > 0.0) || !(dx > 0.0)) return false;
+
+    // The same view of the field the step takes: surface values only, as they
+    // were before anything moved.
+    Vector<f64> surfacePrevious(elements.size());
+    for (usize i = 0; i < elements.size(); ++i) surfacePrevious[i] = state.Surface(i);
+
+    const SurfaceBalance balance =
+        EvaluateSurfaceBalance(element, e, material, exchange, forcing, shortwave,
+                               shortwave.sunVisibility, surfacePrevious, m_convection);
+
+    const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
+    const f64 Ts = surfacePrevious[element];
+    const f64 T1 = state.temperature_K[static_cast<usize>(element) * nodes + 1];
+
+    out = SurfaceFluxes{};
+    out.longwave_W_m2 = emissivity * balance.longwavePerEmissivity_W_m2;
+    // What is left of the flux once the long wave is taken out of it, rather
+    // than the short wave recomputed: surfaceFlux was accumulated in the step's
+    // own order and this keeps the two exactly consistent.
+    out.shortwave_W_m2 = balance.surfaceFlux_W_m2 - out.longwave_W_m2;
+    out.convection_W_m2 = balance.h * (forcing.airTemperature_K - Ts);
+    out.latent_W_m2 = -balance.latentFlux_W_m2;
+    out.conduction_W_m2 = (k / dx) * (T1 - Ts);
+
+    // Lateral is a rate the step turns into a flux with the half-cell's
+    // capacity, so the same product appears here.
+    if (exchange.lateral.RowCount() == elements.size() && !exchange.lateral.value.empty() &&
+        e.area_m2 > 0.0f) {
+        f64 rate = 0.0;
+        const usize base = static_cast<usize>(element) * nodes;
+        for (u32 nz = exchange.lateral.rowStart[element];
+             nz < exchange.lateral.rowStart[element + 1]; ++nz) {
+            const u32 j = exchange.lateral.column[nz];
+            rate += exchange.lateral.value[nz] *
+                    (state.temperature_K[static_cast<usize>(j) * nodes] -
+                     state.temperature_K[base]);
+        }
+        rate /= rhoC * static_cast<f64>(e.area_m2);
+        out.lateral_W_m2 = rhoC * dx * 0.5 * rate;
+    }
+    return true;
+}
 
 void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElement>& elements,
                                    const Vector<ThermalMaterial>& materials,
@@ -495,126 +712,24 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // Everything the outside does to this element, as one flux. The
         // radiative part is linearised against the previous temperatures, so
         // this is a number rather than a term in the unknown.
+        // Everything the outside does to this element, as one flux, plus the
+        // pieces of it the tangents and a probe read. One evaluation, so a
+        // decomposition shown in a panel is the decomposition the step used.
+        const SurfaceBalance balance = EvaluateSurfaceBalance(
+            e, element, material, exchange, forcing, shortwave, sunVisibility,
+            surfacePrevious, m_convection);
         const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
-        f64 surfaceFlux_W_m2 = 0.0;
-
-        const f64 absorptivity = material.shortwaveAbsorptivity;
-        // The same flux with the coefficient divided out, which is its own
-        // derivative in that coefficient. Accumulated beside the flux rather
-        // than reconstructed later, so the two cannot come to disagree about
-        // which terms are in it.
-        f64 shortwavePerAbsorptivity_W_m2 = 0.0;
-        f64 longwavePerEmissivity_W_m2 = 0.0;
-
-        // Sun, direct. cos(theta) against the element's own normal, times the
-        // precomputed visibility -- which is what carries the shadow.
-        //
-        // directPerVisibility is the same product with the visibility left
-        // out: d(flux)/dv, and the only term in the whole balance that has
-        // one. The reflected gain below is driven by what OTHER elements see,
-        // the diffuse by the sky, and neither moves when this element steps
-        // into shade -- which is exactly why the tangent is local and costs a
-        // right-hand side rather than a Jacobian.
-        f64 directPerVisibility_W_m2 = 0.0;
-        if (forcing.sunIrradiance_W_m2 > 0.0) {
-            const f64 cosTheta = static_cast<f64>(
-                glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
-            if (cosTheta > 0.0) {
-                directPerVisibility_W_m2 =
-                    absorptivity * forcing.sunIrradiance_W_m2 * cosTheta;
-                if (e < sunVisibility.size()) {
-                    surfaceFlux_W_m2 +=
-                        directPerVisibility_W_m2 * static_cast<f64>(sunVisibility[e]);
-                    shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 * cosTheta *
-                                                     static_cast<f64>(sunVisibility[e]);
-                }
-            }
-        }
-
-        // Sun, off a neighbour. This is where a north wall gets its afternoon:
-        // it is never in the sun, and the road in front of it is. The gain is
-        // a gather over the whole hemisphere, so it carries no cos(theta) of
-        // its own -- that was applied to the surfaces doing the reflecting,
-        // when it was baked.
-        if (forcing.sunIrradiance_W_m2 > 0.0 && e < shortwave.reflectedGain.size()) {
-            surfaceFlux_W_m2 += absorptivity * forcing.sunIrradiance_W_m2 *
-                                static_cast<f64>(shortwave.reflectedGain[e]);
-            shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 *
-                                             static_cast<f64>(shortwave.reflectedGain[e]);
-        }
-
-        // Sky, diffuse. For an isotropic dome the geometric factor is the
-        // element's own sky fraction, plus whatever one bounce adds; that sum
-        // is the baked gain, and the bare sky fraction is what it degrades to.
-        // Under overcast this term is the entire solar input, which is why a
-        // run without it has a cloudy day with no sunlight in it at all.
-        if (forcing.diffuseIrradiance_W_m2 > 0.0) {
-            f64 diffuseGain = 0.0;
-            if (e < shortwave.diffuseGain.size()) {
-                diffuseGain = static_cast<f64>(shortwave.diffuseGain[e]);
-            } else if (e < exchange.skyFraction.size()) {
-                diffuseGain = static_cast<f64>(exchange.skyFraction[e]);
-            }
-            surfaceFlux_W_m2 += absorptivity * forcing.diffuseIrradiance_W_m2 * diffuseGain;
-            shortwavePerAbsorptivity_W_m2 += forcing.diffuseIrradiance_W_m2 * diffuseGain;
-        }
-
-        // Long wave: what the hemisphere sends back, minus what this element
-        // radiates. The sky fills whatever the other elements do not, which is
-        // what makes a surface under an overhang cool more slowly than one
-        // under open sky.
-        f64 incoming = 0.0;
-        if (e + 1 < exchange.viewFactors.rowStart.size()) {
-            const u32 begin = exchange.viewFactors.rowStart[e];
-            const u32 end = exchange.viewFactors.rowStart[e + 1];
-            for (u32 n = begin; n < end; ++n) {
-                const u32 j = exchange.viewFactors.column[n];
-                if (j < surfacePrevious.size()) {
-                    const f64 Tj = surfacePrevious[j];
-                    incoming += exchange.viewFactors.value[n] * Tj * Tj * Tj * Tj;
-                }
-            }
-        }
-        if (e < exchange.skyFraction.size()) {
-            const f64 Tsky = forcing.skyTemperature_K;
-            incoming += static_cast<f64>(exchange.skyFraction[e]) * Tsky * Tsky * Tsky * Tsky;
-        }
+        const f64 surfaceFlux_W_m2 = balance.surfaceFlux_W_m2;
+        const f64 shortwavePerAbsorptivity_W_m2 = balance.shortwavePerAbsorptivity_W_m2;
+        const f64 longwavePerEmissivity_W_m2 = balance.longwavePerEmissivity_W_m2;
+        const f64 directPerVisibility_W_m2 = balance.directPerVisibility_W_m2;
+        const f64 h = balance.h;
+        const f64 convectiveAdmittance_W_m2K = balance.convectiveAdmittance_W_m2K;
+        const f64 latentFlux_W_m2 = balance.latentFlux_W_m2;
+        const f64 latentAdmittance_W_m2K = balance.latentAdmittance_W_m2K;
+        // The surface temperature the balance was linearised about, which the
+        // tangent rows below linearise about too.
         const f64 Ti = surfacePrevious[e];
-        longwavePerEmissivity_W_m2 = kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
-        surfaceFlux_W_m2 += emissivity * longwavePerEmissivity_W_m2;
-
-        // Convection, which is linear in the unknown and therefore goes into
-        // the matrix rather than into the flux.
-        //
-        // The forcing's value wins when it has one, then the law, then the
-        // material's constant. The latent term below derives from this same h,
-        // so anything that varies it varies the evaporation with it -- which
-        // is right, since both are the same turbulent exchange carrying
-        // different quantities.
-        f64 h = 0.0;
-        f64 convectiveAdmittance_W_m2K = 0.0;
-        ConvectionAt(m_convection, forcing, material, Ti, h, convectiveAdmittance_W_m2K);
-
-        // Evaporation. Non-linear in the unknown like the radiation, but with
-        // several times its slope, so this one goes into the matrix as well:
-        // linearised about the previous surface temperature and split
-        // half-and-half the way Crank-Nicolson splits everything else. A wet
-        // element under dry air can shed hundreds of watts per square metre,
-        // and leaving that explicit oscillates at a minute per step.
-        f64 latentAdmittance_W_m2K = 0.0;
-        f64 latentFlux_W_m2 = 0.0;
-        if (material.wetnessFactor > 0.0f) {
-            f64 qSurface = 0.0;
-            f64 dq_dT = 0.0;
-            SaturationHumidity(Ti, qSurface, dq_dT);
-            const f64 qAir = SaturationHumidity(forcing.airTemperature_K);
-
-            const f64 humidity = std::clamp(forcing.relativeHumidity, 0.0, 100.0) / 100.0;
-            const f64 coefficient =
-                LatentCoefficient(static_cast<f64>(material.wetnessFactor), h);
-            latentFlux_W_m2 = coefficient * (qSurface - humidity * qAir);
-            latentAdmittance_W_m2K = coefficient * dq_dT;
-        }
 
         // Crank-Nicolson on the half-cell at the face. The half cell has
         // capacity rho c dx/2 and exchanges with node 1 by conduction and with

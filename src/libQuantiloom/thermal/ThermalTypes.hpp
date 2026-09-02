@@ -82,6 +82,44 @@ enum class ThermalParameter : u8 {
     Count
 };
 
+/**
+ * @brief The surface energy balance for one element, term by term
+ *
+ * Every number is a flux density in W/m^2, signed POSITIVE INTO the exposed
+ * face. They sum to the rate the surface half-cell is storing heat, which is
+ * what makes the set readable as an explanation rather than as six unrelated
+ * numbers: a surface that is warming has a positive sum, and which term made
+ * it positive is the answer to why.
+ *
+ * The signs are worth stating because two of them are usually negative in
+ * daylight. Long wave is a NET: what the hemisphere sends back minus what this
+ * element radiates, so a surface warmer than its sky is losing by it.
+ * Evaporation only ever leaves.
+ */
+struct SurfaceFluxes {
+    /// Sunlight absorbed: the direct beam through whatever shadow the element
+    /// is in, plus what neighbours reflected onto it, plus the sky's diffuse.
+    f64 shortwave_W_m2 = 0.0;
+    /// Net long wave against the hemisphere and the sky.
+    f64 longwave_W_m2 = 0.0;
+    /// h (T_air - T_surface). Positive when the air is the warmer.
+    f64 convection_W_m2 = 0.0;
+    /// Evaporation, which is never positive.
+    f64 latent_W_m2 = 0.0;
+    /// Conduction from the node below into the surface node. Negative through
+    /// a sunlit afternoon, when the slab is where the heat is going.
+    f64 conduction_W_m2 = 0.0;
+    /// What the neighbouring elements conduct in across the shared edges.
+    /// Zero unless the mesh was built with contacts and the stepper carries
+    /// them.
+    f64 lateral_W_m2 = 0.0;
+
+    [[nodiscard]] f64 Sum() const {
+        return shortwave_W_m2 + longwave_W_m2 + convection_W_m2 + latent_W_m2 +
+               conduction_W_m2 + lateral_W_m2;
+    }
+};
+
 /// The name a config writes for each, and the name a dump column carries.
 [[nodiscard]] const char* ThermalParameterName(ThermalParameter parameter);
 /// The reverse; Count for a name this build does not know.

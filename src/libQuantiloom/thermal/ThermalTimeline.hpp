@@ -62,6 +62,25 @@ public:
     /// scratch state that is discarded on the next call.
     const ThermalState& StateAt(f64 time_h);
 
+    /// One element's surface balance at a time, term by term.
+    ///
+    /// Replayed exactly as StateAt replays; the forcing and the shortwave
+    /// gains are assembled here because they are the ones a step at that
+    /// instant would have used.
+    ///
+    /// @param decomposer  which stepper answers. Not necessarily the one that
+    ///        built the trajectory: the balance is a pure function of the
+    ///        state, so decomposing with one implementation keeps a panel's
+    ///        numbers from depending on which stepper a machine happened to
+    ///        choose. What is being reported either way is the balance AT the
+    ///        state the trajectory reached.
+    ///
+    /// @return false when the decomposer does not decompose a balance, or the
+    ///         element is out of range. `out` is untouched then, so a caller
+    ///         cannot mistake a refusal for six zero fluxes.
+    [[nodiscard]] bool SurfaceFluxesAt(f64 time_h, u32 element, SurfaceFluxes& out,
+                                       const IThermalStepper& decomposer);
+
     [[nodiscard]] u32 LastStepCount() const { return m_lastStepCount; }
     [[nodiscard]] u32 CheckpointCount() const {
         return static_cast<u32>(m_checkpoints.size());

@@ -77,6 +77,11 @@ public:
     /// takes the path from the parameters. Returns the file written.
     [[nodiscard]] Result<String, String> DumpElements(const String& pathOrEmpty = "");
 
+    /// One element's history, by replaying the trajectory rather than solving
+    /// again. The hour the viewport is showing is restored before this returns.
+    [[nodiscard]] Result<ThermalElementTrajectory, String> ElementTrajectory(
+        u32 element, f64 fromHour, f64 toHour, u32 samples);
+
     [[nodiscard]] ThermalSolveStatus Status() const;
 
 private:

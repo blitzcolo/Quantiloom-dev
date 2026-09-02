@@ -2647,6 +2647,14 @@ void ExternalRenderContext::ClearThermalMaterials() {
     if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
 }
 
+Result<ThermalElementTrajectory, String> ExternalRenderContext::GetElementTrajectory(
+    const u32 element, const f64 fromHour, const f64 toHour, const u32 samples) {
+    if (!m_impl->thermalPreview) {
+        return Result<ThermalElementTrajectory, String>::Err("this context has no thermal solve");
+    }
+    return m_impl->thermalPreview->ElementTrajectory(element, fromHour, toHour, samples);
+}
+
 Result<String, String> ExternalRenderContext::DumpThermalElements(const String& pathOrEmpty) {
     if (!m_impl->thermalPreview) {
         return Result<String, String>::Err("this context has no thermal solve");

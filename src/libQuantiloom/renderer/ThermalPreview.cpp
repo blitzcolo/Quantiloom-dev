@@ -596,6 +596,70 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     return result;
 }
 
+Result<ThermalElementTrajectory, String> ThermalPreview::ElementTrajectory(
+    const u32 element, f64 fromHour, f64 toHour, const u32 samples) {
+    using TrajectoryResult = Result<ThermalElementTrajectory, String>;
+
+    if (!m_impl->timeline) {
+        return TrajectoryResult::Err("the thermal solve has not run yet");
+    }
+    if (element >= m_impl->mesh.elements.size()) {
+        return TrajectoryResult::Err("element " + std::to_string(element) + " is past the " +
+                                     std::to_string(m_impl->mesh.elements.size()) +
+                                     " this scene has");
+    }
+    if (samples < 2) {
+        return TrajectoryResult::Err("a trajectory needs at least two samples");
+    }
+    if (toHour < fromHour) std::swap(fromHour, toHour);
+
+    const u32 nodes = m_impl->params.layerCount;
+    ThermalElementTrajectory out;
+    out.time_h.reserve(samples);
+    out.surfaceTemperature_K.reserve(samples);
+    out.backTemperature_K.reserve(samples);
+
+    // Whether the fluxes come at all is a property of the stepper, and it is
+    // the same stepper for every sample -- so the first answer decides, and a
+    // later refusal would mean the vectors disagree in length. Which is why
+    // this is a flag rather than a per-sample push.
+    bool haveFluxes = true;
+    const f64 step = (toHour - fromHour) / static_cast<f64>(samples - 1);
+    for (u32 i = 0; i < samples; ++i) {
+        const f64 t = fromHour + step * static_cast<f64>(i);
+        const thermal::ThermalState& state = m_impl->timeline->StateAt(t);
+
+        out.time_h.push_back(t);
+        out.surfaceTemperature_K.push_back(state.Surface(element));
+        const usize back = static_cast<usize>(element) * nodes + (nodes - 1);
+        out.backTemperature_K.push_back(back < state.temperature_K.size()
+                                            ? state.temperature_K[back]
+                                            : state.Surface(element));
+
+        if (haveFluxes) {
+            thermal::SurfaceFluxes f;
+            // The CPU stepper decomposes, whichever one stepped. The balance is
+            // a pure function of the state, and evaluating it one way keeps a
+            // panel's six numbers from depending on whether this machine has a
+            // GPU -- the state they describe is the trajectory's either way.
+            if (m_impl->timeline->SurfaceFluxesAt(t, element, f, m_impl->cpuStepper)) {
+                out.fluxes.push_back(ThermalSurfaceFluxes{
+                    f.shortwave_W_m2, f.longwave_W_m2, f.convection_W_m2,
+                    f.latent_W_m2, f.conduction_W_m2, f.lateral_W_m2});
+            } else {
+                haveFluxes = false;
+                out.fluxes.clear();
+            }
+        }
+    }
+
+    // The viewport is showing an hour, and a probe is a question about the
+    // past rather than a request to move: replaying left the timeline wherever
+    // the last sample was, so put it back.
+    m_impl->timeline->StateAt(m_impl->currentTime_h);
+    return TrajectoryResult(std::move(out));
+}
+
 Result<String, String> ThermalPreview::DumpElements(const String& pathOrEmpty) {
     using DumpResult = Result<String, String>;
 

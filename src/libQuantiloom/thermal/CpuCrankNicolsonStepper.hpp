@@ -67,6 +67,17 @@ public:
     [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
     [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
 
+    /// Answered from the same EvaluateSurfaceBalance the step uses, so what a
+    /// probe shows is what the trajectory was built from rather than a second
+    /// opinion about it.
+    [[nodiscard]] bool SurfaceFluxesAt(const ThermalState& state,
+                                       const Vector<ThermalElement>& elements,
+                                       const Vector<ThermalMaterial>& materials,
+                                       const ExchangeGeometry& exchange,
+                                       const ThermalForcing& forcing,
+                                       const ShortwaveSample& shortwave, u32 element,
+                                       SurfaceFluxes& out) const override;
+
     /// Also reachable without an instance, because a caller has to name the
     /// stepper for the solve cache key before it has decided to build one.
     static constexpr const char* kName = "CPU Crank-Nicolson";
