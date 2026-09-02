@@ -242,6 +242,22 @@ struct ThermalMaterial {
     /// AmbientInterior. Still air inside a bay rather than the wind outside it.
     f32 interiorConvection_W_m2K = 3.0f;
 
+    /// Two sides of one thin slab rather than a surface with something behind
+    /// it: a car panel, a road sign, a tent, an aircraft skin.
+    ///
+    /// An asset models such a thing as two sheets of triangles, and solved
+    /// naively that is two independent slabs each insulating against nothing --
+    /// so a panel in the sun comes out as hot as if its back were against a
+    /// wall, and the back face itself sits wherever the initial condition left
+    /// it. With this the two faces share one column and the back row is a full
+    /// surface balance rather than a boundary condition.
+    ///
+    /// The pairing is a heuristic over geometry nobody authored for it, so the
+    /// mesh reports how many triangles of a shell material found no partner.
+    /// Those are solved one-sided, which is the old behaviour rather than a
+    /// failure.
+    bool isShell = false;
+
     [[nodiscard]] bool ParticipatesInSolve() const { return conductivity_W_mK > 0.0f; }
 };
 

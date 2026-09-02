@@ -26,7 +26,7 @@ namespace {
 
 /// Bumped when the *list* of hashed inputs changes -- adding a field would
 /// otherwise leave every existing entry addressable under a new meaning.
-constexpr u32 kKeySchemaVersion = 2u;
+constexpr u32 kKeySchemaVersion = 3u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
@@ -216,6 +216,10 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
         hasher.UpdateU8(static_cast<u8>(material.interiorBoundary));
         hasher.UpdateF32(material.interiorTemperature_K);
         hasher.UpdateF32(material.interiorConvection_W_m2K);
+        // Changes what the mesh pairs and how the back row is written, so it
+        // changes the trajectory even when nothing else about the material
+        // moved.
+        hasher.UpdateBool(material.isShell);
     }
 
     // 5. The [thermal] scalars. Not dumpElementsFile (an output), not enabled

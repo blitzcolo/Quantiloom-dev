@@ -420,6 +420,37 @@ can trace a shadow at the hour it was cast, and `parameter_sensitivities`
 (`["h", "epsilon", "alpha", "k", "rhoc"]`) differentiates the trajectory with
 respect to material parameters. All three are CPU-stepper work too.
 
+`[[materials]] shell = true` says a material's triangles are two sides of one
+thin slab rather than a surface with something behind it: a car panel, a road
+sign, a tent, an aircraft skin. An asset models such a thing as two sheets, and
+solved as written that is two independent slabs each insulated against a wall
+that is not there -- a panel in the sun comes out as hot as if it were bolted to
+masonry, and the shaded face sits wherever the initial condition left it.
+
+The pair shares one column. `ThermalMesh` pairs two triangles of one primitive
+whose normals oppose and whose centroids are within a small multiple of the
+material's own thickness; the lower index owns the column and is stepped with a
+full surface balance at BOTH ends -- the back one evaluated with the partner's
+normal, sky fraction and view factors, through the same `EvaluateSurfaceBalance`
+the front uses. The higher index is not stepped, and the owner's back-node
+temperature is written into its surface slot, so the radiative exchange, the
+render's temperature buffer, a dump and a probe all read it without knowing a
+shell is involved.
+
+Two things the pairing will not do: cross a primitive, since two panels a
+millimetre apart are geometrically indistinguishable from one shell and the
+conductance between them is one nobody supplied; and pair faces that point the
+same way, which is a floor and a ceiling. Triangles of a shell material that
+found no partner are counted and logged -- the rule is a heuristic over geometry
+nobody authored for it, and a material that declared itself a shell and paired a
+tenth of its triangles is a modelling problem rather than a solver one.
+
+The back face carries no shadow-edge tangent. What the column holds is dT/dv for
+the OWNER's visibility, and the shading pass would pair that derivative with the
+partner's own visibility, which is a different quantity; the partner's tangent
+is therefore zero, meaning its triangle gets one temperature with no
+sub-triangle correction.
+
 On a material: `internal_heat_w_m2` is a flux entering the back face — an
 engine, a battery, a compartment, and the only way a shaded surface can be the
 warmest thing in an infrared scene. `interior_bc` chooses what is behind it:
@@ -640,8 +671,8 @@ Four things to know before touching it:
 Naming `thermal.dump_elements` opts out in both directions: the dump needs the
 exchange's sky fractions, which an entry does not carry.
 
-Both versions are at **2**. `kKeySchemaVersion` bumps when a new input joins
-the key — the convection law and its constants, `lateral_conduction`,
+`kKeySchemaVersion` is at **3** and `kCacheFormatVersion` at **2**. The first
+bumps when a new input joins the key — the convection law and its constants, `lateral_conduction`,
 `sun_memory_lags`, `parameter_sensitivities`, `internal_heat_w_m2` and the
 interior boundary all did — and `kCacheFormatVersion` bumps when the stored
 result grows an array, which the lag and parameter tangents did. Adding an

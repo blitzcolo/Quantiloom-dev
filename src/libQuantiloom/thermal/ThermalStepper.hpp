@@ -95,6 +95,13 @@ public:
     [[nodiscard]] virtual bool CarriesLagSensitivity() const { return false; }
     [[nodiscard]] virtual bool CarriesParameterSensitivity() const { return false; }
 
+    /// Whether it solves a thin shell as one column exposed on both sides.
+    /// False is honest for one that gives every triangle its own slab, and the
+    /// host picks one that does not -- a shell solved as two independent slabs
+    /// puts a panel in the sun at the temperature it would have with its back
+    /// against a wall.
+    [[nodiscard]] virtual bool CarriesShells() const { return false; }
+
     /**
      * @brief Decompose one element's surface balance at the state it is in
      *

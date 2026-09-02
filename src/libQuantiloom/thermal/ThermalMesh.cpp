@@ -5,6 +5,8 @@
 
 #include "thermal/ThermalMesh.hpp"
 
+#include "core/Log.hpp"
+
 #include <glm/gtc/matrix_inverse.hpp>
 
 #include <algorithm>
@@ -63,7 +65,99 @@ EdgeKey MakeEdgeKey(const glm::vec3& p, const glm::vec3& q) {
     return key;
 }
 
+/// Pair the two faces of a thin shell, within one primitive.
+///
+/// The rule is the one a shell actually looks like in an asset: two triangles
+/// of the same primitive whose normals point opposite ways and whose centroids
+/// are within a small multiple of the slab's own thickness. Nothing else in a
+/// scene satisfies both -- two walls facing each other are metres apart, and
+/// two triangles of one wall face the same way.
+///
+/// Quadratic in the primitive's triangle count, and deliberately: it runs only
+/// for materials that declared themselves shells, which is a panel or a sign
+/// rather than a city, and a spatial index for a few hundred triangles costs
+/// more to build than the scan costs to run. A primitive large enough for that
+/// to matter is one where the pairing is unlikely to be what was meant.
+void PairShellFaces(ThermalMesh& mesh, const ThermalMeshOptions& options,
+                    const u32 first, const u32 last) {
+    if (options.shellMaterials.empty() || last <= first) return;
+
+    const auto isShell = [&options](const u32 materialId) {
+        return materialId < options.shellMaterials.size() &&
+               options.shellMaterials[materialId] != 0;
+    };
+    bool any = false;
+    for (u32 e = first; e < last && !any; ++e) {
+        any = isShell(mesh.elements[e].materialId);
+    }
+    if (!any) return;
+
+    if (mesh.shellPartner.size() < mesh.elements.size()) {
+        mesh.shellPartner.resize(mesh.elements.size(), ThermalMesh::kNoShellPartner);
+    }
+
+    for (u32 a = first; a < last; ++a) {
+        const ThermalElement& ea = mesh.elements[a];
+        if (!isShell(ea.materialId) || ea.area_m2 <= 0.0f) continue;
+        if (mesh.shellPartner[a] != ThermalMesh::kNoShellPartner) continue;
+
+        const f32 thickness = ea.materialId < options.materialThickness_m.size()
+                                  ? options.materialThickness_m[ea.materialId]
+                                  : 0.0f;
+        if (!(thickness > 0.0f)) continue;
+        const f32 reach = thickness * options.shellThicknessTolerance;
+
+        // The nearest opposing triangle inside the reach, not the first: a
+        // curved shell has several candidates and the nearest is the one
+        // across the slab rather than the one further along it.
+        u32 best = ThermalMesh::kNoShellPartner;
+        f32 bestDistance = reach;
+        for (u32 b = a + 1; b < last; ++b) {
+            const ThermalElement& eb = mesh.elements[b];
+            if (eb.materialId != ea.materialId || eb.area_m2 <= 0.0f) continue;
+            if (mesh.shellPartner[b] != ThermalMesh::kNoShellPartner) continue;
+            // Opposite normals, with room for a shell that is not flat.
+            if (glm::dot(ea.normal, eb.normal) > -0.5f) continue;
+            const f32 distance = glm::length(eb.centroid - ea.centroid);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                best = b;
+            }
+        }
+        if (best == ThermalMesh::kNoShellPartner) continue;
+
+        mesh.shellPartner[a] = best;
+        mesh.shellPartner[best] = a;
+        ++mesh.shellPairCount;
+    }
+
+    for (u32 e = first; e < last; ++e) {
+        if (isShell(mesh.elements[e].materialId) && mesh.elements[e].area_m2 > 0.0f &&
+            mesh.shellPartner[e] == ThermalMesh::kNoShellPartner) {
+            ++mesh.shellUnpairedCount;
+        }
+    }
+}
+
 }  // namespace
+
+ThermalMeshOptions MeshOptionsFor(const Vector<ThermalMaterial>& materials,
+                                  const bool contacts) {
+    ThermalMeshOptions options;
+    options.contacts = contacts;
+
+    bool anyShell = false;
+    for (const ThermalMaterial& m : materials) anyShell = anyShell || m.isShell;
+    if (!anyShell) return options;   // the pairing scan does not run at all
+
+    options.shellMaterials.reserve(materials.size());
+    options.materialThickness_m.reserve(materials.size());
+    for (const ThermalMaterial& m : materials) {
+        options.shellMaterials.push_back(m.isShell ? 1u : 0u);
+        options.materialThickness_m.push_back(m.thickness_m);
+    }
+    return options;
+}
 
 ThermalMesh BuildThermalMesh(const Scene& scene, const ThermalMeshOptions& options) {
     ThermalMesh mesh;
@@ -114,6 +208,7 @@ ThermalMesh BuildThermalMesh(const Scene& scene, const ThermalMeshOptions& optio
             mesh.instanceElementBase.push_back(static_cast<u32>(mesh.elements.size()));
             if (!primitive) continue;
 
+            const u32 instanceFirst = static_cast<u32>(mesh.elements.size());
             for (usize i = 0; i + 2 < primitive->indices.size(); i += 3) {
                 const glm::vec3 p0 = glm::vec3(
                     node.transform * glm::vec4(primitive->positions[primitive->indices[i]], 1.0f));
@@ -187,7 +282,19 @@ ThermalMesh BuildThermalMesh(const Scene& scene, const ThermalMeshOptions& optio
                     mesh.contacts.push_back(contact);
                 }
             }
+
+            PairShellFaces(mesh, options, instanceFirst,
+                           static_cast<u32>(mesh.elements.size()));
         }
+    }
+
+    if (!mesh.shellPartner.empty() && mesh.shellPartner.size() < mesh.elements.size()) {
+        mesh.shellPartner.resize(mesh.elements.size(), ThermalMesh::kNoShellPartner);
+    }
+    if (mesh.shellPairCount > 0 || mesh.shellUnpairedCount > 0) {
+        QL_LOG_INFO("  Thermal shells: {} pair(s) share a column, {} triangle(s) of a "
+                    "shell material found no partner and are solved one-sided",
+                    mesh.shellPairCount, mesh.shellUnpairedCount);
     }
 
     return mesh;

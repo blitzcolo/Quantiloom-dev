@@ -315,19 +315,22 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                               const SunVisibilityTable& sunTable, IThermalStepper* stepper) {
     ThermalResult result;
 
-    ThermalMesh mesh = BuildThermalMesh(scene, {.contacts = config.lateralConduction});
-    result.elementCount = static_cast<u32>(mesh.elements.size());
-    result.instanceElementBase = std::move(mesh.instanceElementBase);
-    if (mesh.elements.empty()) {
-        result.error = "the scene has no triangles to solve on";
-        return result;
-    }
-
+    // Materials first: the shell pairing needs to know which of them are
+    // shells and how thick they are, so the mesh cannot be built before them.
     u32 named = 0;
     const Vector<ThermalMaterial> materials = BuildSolvedMaterials(scene, config, &named);
     if (named == 0) {
         result.error = "no material in the scene has thermal properties; "
                        "set thermal_conductivity_w_mk on at least one";
+        return result;
+    }
+
+    ThermalMesh mesh =
+        BuildThermalMesh(scene, MeshOptionsFor(materials, config.lateralConduction));
+    result.elementCount = static_cast<u32>(mesh.elements.size());
+    result.instanceElementBase = std::move(mesh.instanceElementBase);
+    if (mesh.elements.empty()) {
+        result.error = "the scene has no triangles to solve on";
         return result;
     }
 
@@ -413,6 +416,12 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                     chosen->Name(), cpuStepper.Name());
         chosen = nullptr;
     }
+    if (chosen != nullptr && mesh.shellPairCount > 0 && !chosen->CarriesShells()) {
+        QL_LOG_INFO("  Thermal stepper: {} solves a shell as two independent slabs; "
+                    "using {}", chosen->Name(), cpuStepper.Name());
+        chosen = nullptr;
+    }
+    cpuStepper.SetShellPartners(mesh.shellPartner);
     IThermalStepper& activeStepper = chosen != nullptr ? *chosen : cpuStepper;
 
     f64 fastestWind_m_s = 0.0;

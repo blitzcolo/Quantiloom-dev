@@ -424,6 +424,7 @@ TEST(ThermalSolveCacheKey, EveryMaterialFieldChangesIt) {
         [](ThermalMaterial& m) { m.interiorBoundary = InteriorBoundary::AmbientInterior; },
         [](ThermalMaterial& m) { m.interiorTemperature_K += 1.0f; },
         [](ThermalMaterial& m) { m.interiorConvection_W_m2K += 1.0f; },
+        [](ThermalMaterial& m) { m.isShell = !m.isShell; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {

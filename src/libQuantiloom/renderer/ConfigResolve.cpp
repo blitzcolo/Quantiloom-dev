@@ -1862,6 +1862,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             props.interiorConvection_W_m2K =
                 matTable.GetFloat("interior_convection_h_w_m2k", 3.0f);
 
+            props.isShell = matTable.GetBool("shell", false);
+
             const auto boundary = matTable.GetString("interior_bc", "adiabatic");
             if (boundary == "fixed") {
                 props.interiorBoundary = thermal::InteriorBoundary::FixedTemperature;
@@ -1873,6 +1875,20 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 diag.Warn("materials.interior_bc",
                           "  Material '" + name + "': unknown interior_bc '" + boundary +
                               "', expected adiabatic|fixed|ambient. Using adiabatic.");
+            }
+
+            // A shell has two exposed faces and no interior, so nothing the
+            // interior keys say can reach it. Said rather than silently
+            // ignored: a config carrying both is describing two different
+            // objects and only one of them is being rendered.
+            if (props.isShell &&
+                (props.interiorBoundary != thermal::InteriorBoundary::Adiabatic ||
+                 props.internalHeat_W_m2 != 0.0f)) {
+                diag.Warn("materials.shell",
+                          "  Material '" + name +
+                              "': shell = true means both faces are exposed, so "
+                              "interior_bc and internal_heat_w_m2 have nothing to act "
+                              "on and are ignored.");
             }
 
             // A pinned back node absorbs whatever is put into it, so an

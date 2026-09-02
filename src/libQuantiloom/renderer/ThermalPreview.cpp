@@ -200,7 +200,8 @@ struct ThermalPreview::Impl {
             params.layerCount <= GpuThermalStepper::kMaxNodes &&
             (params.sunMemoryLags == 0 || gpuStepper->CarriesLagSensitivity()) &&
             (params.parameterSensitivities.empty() ||
-             gpuStepper->CarriesParameterSensitivity())) {
+             gpuStepper->CarriesParameterSensitivity()) &&
+            (mesh.shellPairCount == 0 || gpuStepper->CarriesShells())) {
             return *gpuStepper;
         }
         return cpuStepper;
@@ -506,8 +507,14 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
 
     // Rebuild mesh if geometry changed
     if (m_impl->exchangeDirty) {
+        // The material table decides which materials are shells, so it is
+        // built first when the mesh is about to be. Cheap: it is a walk of the
+        // scene's materials, and this branch already rebuilds everything.
+        m_impl->RebuildMaterialTable(scene);
         m_impl->mesh = thermal::BuildThermalMesh(
-            scene, {.contacts = m_impl->params.lateralConduction});
+            scene, thermal::MeshOptionsFor(m_impl->materials,
+                                           m_impl->params.lateralConduction));
+        m_impl->cpuStepper.SetShellPartners(m_impl->mesh.shellPartner);
     }
 
     if (m_impl->mesh.elements.empty()) {

@@ -5,6 +5,8 @@
 
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 
+#include "thermal/ThermalMesh.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -620,11 +622,26 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         lateralPreviousParameter = state.parameterSensitivity;
     }
 
+    // Which elements are the far side of a shell, and therefore not stepped:
+    // their temperature is the owner's back node and is written there at the
+    // end. The lower index owns, so a pair is decided without a tie-break.
+    const auto shellPartnerOf = [this, &elements](const usize e) -> u32 {
+        if (m_shellPartner.size() != elements.size()) return ThermalMesh::kNoShellPartner;
+        return m_shellPartner[e];
+    };
+
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
         if (element.materialId >= materials.size()) continue;
         const ThermalMaterial& material = materials[element.materialId];
         if (!material.ParticipatesInSolve()) continue;
+
+        // The far side of a shell has no column of its own. Skipped here and
+        // filled in after the loop, from the column it shares.
+        const u32 shellPartner = shellPartnerOf(e);
+        const bool isShellOwner =
+            shellPartner != ThermalMesh::kNoShellPartner && shellPartner > e;
+        if (shellPartner != ThermalMesh::kNoShellPartner && !isShellOwner) continue;
 
         const f64 k = material.conductivity_W_mK;
         const f64 rhoC = static_cast<f64>(material.density_kg_m3) *
@@ -787,7 +804,43 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         const u32 last = nodes - 1;
         f64 backAdmittance_W_m2K = 0.0;
         f64 backRadiativeSlope_W_m2K = 0.0;
-        if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
+        if (isShellOwner) {
+            // The other face of the same slab, exposed. Not a boundary
+            // condition standing in for what is behind the surface -- there is
+            // nothing behind it, and the same balance the front face gets is
+            // what the back one gets, evaluated with the PARTNER's geometry:
+            // its own normal against the sun, its own sky fraction, its own
+            // view factors.
+            //
+            // EvaluateSurfaceBalance linearises about surfacePrevious[partner],
+            // and surfacePrevious carries the owner's back node there -- which
+            // is what makes this the same function rather than a second reading
+            // of the balance written for one side.
+            const SurfaceBalance back = EvaluateSurfaceBalance(
+                shellPartner, elements[shellPartner], material, exchange, forcing,
+                shortwave, sunVisibility, surfacePrevious, m_convection);
+
+            // Mirror of the front row. The internal source is deliberately not
+            // added: a shell has two exposed faces and no interior for a source
+            // to enter from, and a config that asks for both is asking for a
+            // panel that is also a wall.
+            lower[last] = -0.5 * (k / dx);
+            diag[last] = halfCell + 0.5 * (k / dx + back.convectiveAdmittance_W_m2K +
+                                           back.latentAdmittance_W_m2K);
+            upper[last] = 0.0;
+            rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
+                        0.5 * back.h * (2.0 * forcing.airTemperature_K - T[last]) +
+                        back.surfaceFlux_W_m2 - back.latentFlux_W_m2 +
+                        0.5 * back.latentAdmittance_W_m2K * T[last] +
+                        0.5 * (back.convectiveAdmittance_W_m2K - back.h) * T[last];
+            if (carryLateral) rhs[last] += halfCell * dt_s * lateralRate[last];
+
+            // The tangent rows below read these two, and for a shell the back
+            // face's own convection and radiation are what they see.
+            backAdmittance_W_m2K = back.convectiveAdmittance_W_m2K;
+            backRadiativeSlope_W_m2K =
+                4.0 * emissivity * kStefanBoltzmann * T[last] * T[last] * T[last];
+        } else if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
             // A Dirichlet row: whatever is behind this surface holds it there.
             lower[last] = 0.0;
             diag[last] = 1.0;
@@ -1009,6 +1062,38 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 // millions, emissivity is one. So this is only the NaN guard the
                 // others are, not a statement about a plausible sensitivity.
                 slot[i] = std::clamp(rhsParameter[p * nodes + i], -1e12, 1e12);
+            }
+        }
+    }
+
+    // The far side of each shell, from the column it shares. Written into the
+    // partner's own surface slot rather than mapped at every reader: the
+    // radiative exchange, the render's temperature buffer, a dump and a probe
+    // all reach for state.Surface(e), and one write per pair per step is what
+    // lets none of them know a shell is involved.
+    //
+    // Its tangent is left at zero, which is a claim rather than an omission.
+    // What the column carries is dT/dv for the OWNER's sun visibility, and the
+    // shading pass would pair that derivative with the partner's own
+    // visibility -- a different quantity. Zero means the back face gets the
+    // triangle's own temperature with no sub-triangle shadow correction, which
+    // is what every surface got before the correction existed.
+    if (m_shellPartner.size() == elements.size()) {
+        for (usize e = 0; e < elements.size(); ++e) {
+            const u32 partner = m_shellPartner[e];
+            if (partner == ThermalMesh::kNoShellPartner || partner < e) continue;
+            if (elements[e].materialId >= materials.size()) continue;
+            if (!materials[elements[e].materialId].ParticipatesInSolve()) continue;
+
+            const usize ownerBack = e * nodes + (nodes - 1);
+            const usize partnerFront = static_cast<usize>(partner) * nodes;
+            if (ownerBack >= state.temperature_K.size() ||
+                partnerFront >= state.temperature_K.size()) {
+                continue;
+            }
+            state.temperature_K[partnerFront] = state.temperature_K[ownerBack];
+            if (state.HasSensitivity()) {
+                state.sunSensitivity_K[partnerFront] = 0.0;
             }
         }
     }

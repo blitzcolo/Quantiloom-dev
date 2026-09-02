@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalStepper.hpp"
 
 namespace quantiloom::thermal {
@@ -64,6 +65,21 @@ public:
     /// rather than what the weather is doing, and because it is fixed for a
     /// whole run.
     void SetConvection(const ConvectionLaw& law) { m_convection = law; }
+
+    /// The two faces of each thin shell, from ThermalMesh::shellPartner.
+    ///
+    /// A pair shares one column: the lower index owns it and is stepped with a
+    /// full surface balance at BOTH ends, the higher index is not stepped at
+    /// all, and the owner's back-node temperature is written into the
+    /// partner's surface slot at the end of the step. Every consumer -- the
+    /// radiative exchange, the render's temperature buffer, a dump, a probe --
+    /// then reads the partner's real temperature without knowing a shell is
+    /// involved.
+    ///
+    /// Empty is every scene that declares no shells, and the rows below are
+    /// then exactly the rows they were.
+    void SetShellPartners(Vector<u32> partners) { m_shellPartner = std::move(partners); }
+    [[nodiscard]] bool CarriesShells() const override { return true; }
     [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
     [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
     [[nodiscard]] bool CarriesLagSensitivity() const override { return true; }
@@ -105,6 +121,9 @@ public:
 
 private:
     ConvectionLaw m_convection;
+    /// Element -> the triangle on the other side of the same shell, or
+    /// ThermalMesh::kNoShellPartner. Empty when nothing is a shell.
+    Vector<u32> m_shellPartner;
 };
 
 }  // namespace quantiloom::thermal

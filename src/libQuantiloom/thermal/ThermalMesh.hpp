@@ -45,6 +45,33 @@ struct ThermalMesh {
     /// adjacency and this is the only place that has them.
     Vector<ThermalContact> contacts;
 
+    /// For each element, the triangle on the other side of the same thin
+    /// shell, or kNoShellPartner. Built only for materials that declared
+    /// themselves a shell.
+    ///
+    /// A shell is one slab exposed on both sides: a car panel, a road sign, a
+    /// tent. Modelled as two sheets of triangles, which is what every asset
+    /// does, it would otherwise be solved as two independent slabs that each
+    /// insulate against nothing -- so a panel in the sun would be as hot as if
+    /// its back face were against a wall, and the back face itself would sit at
+    /// whatever the initial condition left it.
+    ///
+    /// The pair shares ONE column. The lower index owns it and is stepped; the
+    /// higher index is not stepped at all and reads its temperature off the
+    /// owner's back node, which the stepper writes into its surface slot so
+    /// that every consumer -- the radiative exchange, the render's temperature
+    /// buffer, a dump, a probe -- sees it without knowing a shell is involved.
+    Vector<u32> shellPartner;
+    static constexpr u32 kNoShellPartner = 0xFFFFFFFFu;
+
+    /// Triangles of a shell material that found no partner, and are therefore
+    /// solved one-sided. Reported rather than hidden: the pairing is a
+    /// heuristic over an asset nobody wrote for it, and a material that
+    /// declared itself a shell and paired a tenth of its triangles is a
+    /// modelling problem rather than a solver one.
+    u32 shellUnpairedCount = 0;
+    u32 shellPairCount = 0;
+
     /// Elements whose area is zero: degenerate triangles, which the solver
     /// skips. Counted rather than removed, because the shader indexes by
     /// PrimitiveIndex() and dropping one would shift every element after it in
@@ -61,7 +88,35 @@ struct ThermalMeshOptions {
     /// hash insert per triangle edge over the whole scene, and nothing reads
     /// it unless lateral conduction is on.
     bool contacts = false;
+
+    /// Per material, whether its triangles are two sides of one thin shell.
+    /// Indexed by ThermalElement::materialId; an empty vector is no shells,
+    /// which is every scene that does not ask.
+    Vector<u8> shellMaterials;
+
+    /// How far apart two triangles' centroids may be, as a multiple of the
+    /// material's own thickness, and still be the two faces of one shell.
+    ///
+    /// Two rather than one because the thickness is the slab's and the
+    /// centroids sit on its faces, so the distance IS the thickness for a
+    /// flat pair -- and a curved shell, or one whose triangles do not line up
+    /// exactly, wants room. Larger than about three starts pairing a shell
+    /// with the wall behind it.
+    f32 shellThicknessTolerance = 2.0f;
+
+    /// Per material, the thickness the tolerance is a multiple of. Indexed
+    /// like shellMaterials.
+    Vector<f32> materialThickness_m;
 };
+
+/// The mesh options a solved material table implies.
+///
+/// Shell pairing needs to know which materials are shells and how thick they
+/// are, and both live on the materials -- so the mesh cannot be built before
+/// they are. Three call sites want the same derivation, and a fourth reading
+/// of "which materials are shells" is a fourth chance to disagree.
+[[nodiscard]] ThermalMeshOptions MeshOptionsFor(const Vector<ThermalMaterial>& materials,
+                                                bool contacts);
 
 /// Build the element list from a scene, one element per triangle, in the order
 /// SceneGeometry enumerates instances.
