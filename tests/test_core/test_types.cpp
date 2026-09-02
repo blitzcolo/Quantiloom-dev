@@ -94,14 +94,25 @@ TEST(TypesTest, ParseSpectralModeRGB) {
 }
 
 TEST(TypesTest, ParseSpectralModeVISFused) {
-    // "vis_fused" and "VIS" map to visible spectral integration mode
+    // Both visible modes are reachable by their own name.
     auto res1 = ParseSpectralMode("vis_fused");
     EXPECT_TRUE(res1.has_value());
     EXPECT_EQ(res1.value(), SpectralMode::VIS_Fused);
 
-    auto res2 = ParseSpectralMode("VIS");
+    auto res2 = ParseSpectralMode("vis_hero");
     EXPECT_TRUE(res2.has_value());
-    EXPECT_EQ(res2.value(), SpectralMode::VIS_Fused);
+    EXPECT_EQ(res2.value(), SpectralMode::VIS_Hero);
+}
+
+TEST(TypesTest, TheBandAliasNamesTheSampledMode) {
+    // "VIS" is the band, and asking for a band rather than an estimator gets
+    // the one to render with: four sampled wavelengths a path, which follows
+    // n(lambda) through a dispersive interface. vis_fused stays reachable, and
+    // only by name, because what it is for is being the reference.
+    auto res = ParseSpectralMode("VIS");
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res.value(), SpectralMode::VIS_Hero);
+    EXPECT_TRUE(IsVisMode(res.value()));
 }
 
 TEST(TypesTest, ParseSpectralModeMultispectral) {

@@ -149,8 +149,12 @@ TEST_F(ConfigResolveTest, RgbModeKeepsFiveFiftyAndDoesNotTakeABandCentre) {
 
 TEST_F(ConfigResolveTest, UppercaseBandAliasesResolve) {
     struct Case { const char* spelling; SpectralMode expected; };
+    // Each band has one estimator, so its alias has one place to go. The
+    // visible band has two, and the alias goes to the sampled one: asking for a
+    // band rather than for an estimator is asking to render it, and vis_fused
+    // is for measuring against rather than rendering with.
     const Case cases[] = {
-        {"VIS", SpectralMode::VIS_Fused},   {"MWIR", SpectralMode::MWIR_Fused},
+        {"VIS", SpectralMode::VIS_Hero},    {"MWIR", SpectralMode::MWIR_Fused},
         {"LWIR", SpectralMode::LWIR_Fused}, {"SWIR", SpectralMode::SWIR_Fused},
         {"NIR", SpectralMode::NIR_Fused},   {"RGB", SpectralMode::RGB},
     };

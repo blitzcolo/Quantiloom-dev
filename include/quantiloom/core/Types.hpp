@@ -365,12 +365,20 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
     } else if (mode_str == "rgb" || mode_str == "RGB") {
         // Fast RGB-only mode (default, no spectral integration)
         return Result(SpectralMode::RGB);
-    } else if (mode_str == "vis_fused" || mode_str == "VIS") {
-        // Visible spectral integration mode (32-wavelength CIE XYZ)
-        return Result(SpectralMode::VIS_Fused);
-    } else if (mode_str == "vis_hero") {
-        // Same band, sampled: four wavelengths per path (CIE XYZ)
+    } else if (mode_str == "vis_hero" || mode_str == "VIS") {
+        // Visible band, sampled: one wavelength drawn per path and rotated into
+        // a quartet, weighted into CIE XYZ by the vertex that drew it. The band
+        // alias resolves here because this is the estimator to render with: it
+        // follows n(lambda) through a dispersive interface, and it costs four
+        // radiances per path rather than thirty-two.
         return Result(SpectralMode::VIS_Hero);
+    } else if (mode_str == "vis_fused") {
+        // The same band by a deterministic 32-point sweep. Kept, and asked for
+        // by name: it has no variance in wavelength, which makes it the
+        // reference the sampled mode is checked against
+        // (scripts/render-tests/check_hero_wavelength.py) and the mode to
+        // render when an answer has to be repeatable rather than converged.
+        return Result(SpectralMode::VIS_Fused);
     } else if (mode_str == "multispectral") {
         return Result(SpectralMode::Multispectral);
     } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
