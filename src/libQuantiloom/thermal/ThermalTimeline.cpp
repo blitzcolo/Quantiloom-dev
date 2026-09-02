@@ -202,7 +202,7 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
 usize ThermalTimeline::CheckpointBytes() const {
     usize total = 0;
     for (const auto& [k, state] : m_checkpoints) {
-        total += (state.temperature_K.size() + state.sunSensitivity_K.size()) * sizeof(f64);
+        total += state.ByteSize();
     }
     return total;
 }

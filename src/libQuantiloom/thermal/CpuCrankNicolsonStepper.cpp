@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <span>
 
 namespace quantiloom::thermal {
 
@@ -69,41 +70,41 @@ f64 LatentCoefficient(const f64 wetnessFactor, const f64 convection_W_m2K) {
            kLatentHeatVaporisation_J_kg;
 }
 
-/// Solve a tridiagonal system in place by Thomas elimination, for one or two
+/// Solve a tridiagonal system in place by Thomas elimination, for any number of
 /// right-hand sides.
 ///
 /// Exact rather than iterative, and O(n) rather than O(n^3): the matrix a
 /// slab produces has three diagonals and nothing else, and a general solver
 /// would spend its time proving that.
 ///
-/// Two right-hand sides because the tangent -- dT/dv, the sensitivity to this
-/// element's own sun visibility -- obeys the same discrete operator as the
-/// temperature and differs only in what drives it. Eliminating once and
-/// applying to both is the whole reason carrying the tangent costs a fraction
-/// of a second solve rather than a whole one.
+/// Several right-hand sides because every tangent this solver carries -- dT/dv
+/// against a column of the sun's history, dT/dp against a material property --
+/// obeys the same discrete operator as the temperature and differs only in what
+/// drives it. Eliminating once and applying to all of them is the whole reason
+/// a tangent costs a fraction of a second solve rather than a whole one, and it
+/// is what keeps the cost of the Nth tangent a back-substitution rather than
+/// another elimination.
 ///
 /// @param lower  sub-diagonal, lower[0] unused
 /// @param diag   main diagonal, overwritten
 /// @param upper  super-diagonal, upper[n-1] unused, overwritten
-/// @param rhs    right-hand side, overwritten with the solution
-/// @param rhs2   optional second right-hand side, same treatment; nullptr to
-///               solve only the first
+/// @param rhs    the right-hand sides, each of length n, each overwritten with
+///               its own solution. The first is the temperature's.
 void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
-                      Vector<f64>& rhs, Vector<f64>* rhs2 = nullptr) {
+                      const std::span<const std::span<f64>> rhs) {
     const usize n = diag.size();
     if (n == 0) return;
 
     for (usize i = 1; i < n; ++i) {
         const f64 factor = lower[i] / diag[i - 1];
         diag[i] -= factor * upper[i - 1];
-        rhs[i] -= factor * rhs[i - 1];
-        if (rhs2) (*rhs2)[i] -= factor * (*rhs2)[i - 1];
+        for (const std::span<f64>& b : rhs) b[i] -= factor * b[i - 1];
     }
-    rhs[n - 1] /= diag[n - 1];
-    if (rhs2) (*rhs2)[n - 1] /= diag[n - 1];
+    for (const std::span<f64>& b : rhs) b[n - 1] /= diag[n - 1];
     for (usize i = n - 1; i-- > 0;) {
-        rhs[i] = (rhs[i] - upper[i] * rhs[i + 1]) / diag[i];
-        if (rhs2) (*rhs2)[i] = ((*rhs2)[i] - upper[i] * (*rhs2)[i + 1]) / diag[i];
+        for (const std::span<f64>& b : rhs) {
+            b[i] = (b[i] - upper[i] * b[i + 1]) / diag[i];
+        }
     }
 }
 
@@ -144,6 +145,13 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // in the state when its turn comes.
     const bool carryTangent = state.HasSensitivity();
     Vector<f64> rhsTangent(carryTangent ? nodes : 0);
+
+    // What the elimination is applied to, built once: the temperature first,
+    // then whichever tangents this state carries. Every element has the same
+    // node count, so the list does not change inside the loop.
+    Vector<std::span<f64>> rightHandSides;
+    rightHandSides.emplace_back(rhs);
+    if (carryTangent) rightHandSides.emplace_back(rhsTangent);
 
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
@@ -357,7 +365,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             }
         }
 
-        SolveTridiagonal(lower, diag, upper, rhs, carryTangent ? &rhsTangent : nullptr);
+        SolveTridiagonal(lower, diag, upper, rightHandSides);
 
         for (u32 i = 0; i < nodes; ++i) {
             // A temperature outside this range is a solver failure rather than

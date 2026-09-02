@@ -183,6 +183,15 @@ struct ThermalState {
     [[nodiscard]] f64 SurfaceSensitivity(const usize element) const {
         return sunSensitivity_K[element * nodeCount];
     }
+
+    /// What one snapshot of this state costs. The timeline stores whole copies
+    /// of it as checkpoints, so this is what a scrub backwards is paid for in
+    /// memory, and it is here rather than at the caller so that a state vector
+    /// added later cannot be left out of the total by being forgotten in one
+    /// file. Every vector this struct owns belongs in the sum.
+    [[nodiscard]] usize ByteSize() const {
+        return (temperature_K.size() + sunSensitivity_K.size()) * sizeof(f64);
+    }
 };
 
 /**
