@@ -82,6 +82,11 @@ public:
     [[nodiscard]] Result<ThermalElementTrajectory, String> ElementTrajectory(
         u32 element, f64 fromHour, f64 toHour, u32 samples);
 
+    /// The flat element index for an instance and one of its triangles.
+    /// False when that instance is not one the solve carries, which is a real
+    /// answer about the geometry rather than a lookup failure.
+    [[nodiscard]] bool ElementFor(u32 instanceIndex, u32 primitiveIndex, u32& out) const;
+
     [[nodiscard]] ThermalSolveStatus Status() const;
 
 private:

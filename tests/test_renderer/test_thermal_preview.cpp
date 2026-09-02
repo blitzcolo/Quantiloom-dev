@@ -377,3 +377,31 @@ TEST_F(ThermalPreviewTest, AProbeSaysWhenItCannotAnswer) {
     EXPECT_DOUBLE_EQ(reversed.value().time_h.front(), 6.0);
     EXPECT_DOUBLE_EQ(reversed.value().time_h.back(), 18.0);
 }
+
+TEST_F(ThermalPreviewTest, APickNamesTheElementAProbeAsksAbout) {
+    // The path from a click in the viewport to a chart of that surface's day:
+    // a pick reports an instance and a triangle within it, the solve indexes
+    // its elements flat, and without this map a host holding a PickResult has
+    // no way to name what it just clicked on.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    quantiloom::PickResult pick;
+    pick.hit = true;
+    pick.instanceIndex = 0;
+    pick.primitiveIndex = 0;
+    auto element = context->ThermalElementAt(pick);
+    ASSERT_TRUE(element.has_value()) << element.error();
+    EXPECT_TRUE(context->GetElementTrajectory(element.value(), 11.0, 13.0, 3).has_value());
+
+    // A ray that reached the sky named nothing, and saying so beats naming
+    // element zero.
+    quantiloom::PickResult missed;
+    missed.hit = false;
+    EXPECT_FALSE(context->ThermalElementAt(missed).has_value());
+
+    quantiloom::PickResult offMesh;
+    offMesh.hit = true;
+    offMesh.instanceIndex = 1u << 20;
+    EXPECT_FALSE(context->ThermalElementAt(offMesh).has_value());
+}

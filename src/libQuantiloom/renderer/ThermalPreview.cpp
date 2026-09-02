@@ -596,6 +596,15 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     return result;
 }
 
+bool ThermalPreview::ElementFor(const u32 instanceIndex, const u32 primitiveIndex,
+                                u32& out) const {
+    if (instanceIndex >= m_impl->mesh.instanceElementBase.size()) return false;
+    const u32 element = m_impl->mesh.instanceElementBase[instanceIndex] + primitiveIndex;
+    if (element >= m_impl->mesh.elements.size()) return false;
+    out = element;
+    return true;
+}
+
 Result<ThermalElementTrajectory, String> ThermalPreview::ElementTrajectory(
     const u32 element, f64 fromHour, f64 toHour, const u32 samples) {
     using TrajectoryResult = Result<ThermalElementTrajectory, String>;

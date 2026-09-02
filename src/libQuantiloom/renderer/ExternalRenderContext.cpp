@@ -2647,6 +2647,23 @@ void ExternalRenderContext::ClearThermalMaterials() {
     if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
 }
 
+Result<u32, String> ExternalRenderContext::ThermalElementAt(const PickResult& pick) const {
+    using ElementResult = Result<u32, String>;
+    if (!m_impl->thermalPreview) {
+        return ElementResult::Err("this context has no thermal solve");
+    }
+    if (!pick.hit) {
+        return ElementResult::Err("that ray reached the sky");
+    }
+    u32 element = 0;
+    if (!m_impl->thermalPreview->ElementFor(pick.instanceIndex, pick.primitiveIndex, element)) {
+        return ElementResult::Err(
+            "that surface is not in the thermal solve -- its material names no "
+            "conductivity, so it keeps whatever temperature it was given");
+    }
+    return ElementResult(element);
+}
+
 Result<ThermalElementTrajectory, String> ExternalRenderContext::GetElementTrajectory(
     const u32 element, const f64 fromHour, const f64 toHour, const u32 samples) {
     if (!m_impl->thermalPreview) {

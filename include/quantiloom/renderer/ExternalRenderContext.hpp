@@ -912,6 +912,21 @@ public:
     Result<ThermalElementTrajectory, String> GetElementTrajectory(
         u32 element, f64 fromHour, f64 toHour, u32 samples = 96);
 
+    /**
+     * @brief The thermal element a pick landed on
+     *
+     * A pick reports an instance and a triangle within it; the solve indexes
+     * its elements by a flat number, and the map between them is the mesh's.
+     * Without this a host holding a PickResult has no way to name the element
+     * GetElementTrajectory wants, which is the whole path from a click in the
+     * viewport to a chart of that surface's day.
+     *
+     * @return An error when there is no solve, the pick did not hit, or the
+     *         instance it hit is not one the solve carries -- geometry that
+     *         does not participate is a real answer, not a zero element.
+     */
+    [[nodiscard]] Result<u32, String> ThermalElementAt(const PickResult& pick) const;
+
     // ========================================================================
     // Scene Editing (Phase 2)
     // ========================================================================
