@@ -71,10 +71,20 @@ struct ThermalConfig {
 
     /// CSV of time-varying forcing: time_h, air_temperature_k,
     /// sun_irradiance_w_m2, sun_azimuth_deg, sun_elevation_deg,
-    /// sky_temperature_k, and optionally diffuse_irradiance_w_m2 and
-    /// relative_humidity. Linearly interpolated, held flat outside its range;
-    /// a row that stops early keeps the defaults for what it did not say.
+    /// sky_temperature_k, and optionally diffuse_irradiance_w_m2,
+    /// relative_humidity, convection_w_m2k and wind_speed_m_s. Linearly
+    /// interpolated, held flat outside its range; a row that stops early keeps
+    /// the defaults for what it did not say.
+    ///
+    /// The last two are two ways of saying the same thing, and the ninth wins:
+    /// a file that carries a measured coefficient is stating what the
+    /// correlations below are estimating.
     String forcingFile;
+
+    /// Where h comes from when the forcing does not state one. Constant by
+    /// default, which is the material's own number and the behaviour of every
+    /// scene written before the others existed.
+    ConvectionLaw convection;
 
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;

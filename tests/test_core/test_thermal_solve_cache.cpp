@@ -451,6 +451,12 @@ TEST(ThermalSolveCacheKey, EveryConfigScalarChangesIt) {
         [](ThermalConfig& c) { c.skyTemperature_K = 260.0; },
         [](ThermalConfig& c) { c.relativeHumidity = 80.0; },
         [](ThermalConfig& c) { c.sunCorrection = false; },
+        [](ThermalConfig& c) { c.convection.model = ConvectionModel::Wind; },
+        [](ThermalConfig& c) { c.convection.windIntercept_W_m2K = 6.0; },
+        [](ThermalConfig& c) { c.convection.windSlope_W_s_m3K = 4.0; },
+        [](ThermalConfig& c) { c.convection.freeCoefficient = 1.6; },
+        [](ThermalConfig& c) { c.convection.referenceHeight_m = 10.0; },
+        [](ThermalConfig& c) { c.convection.stableDamping = 5.0; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {

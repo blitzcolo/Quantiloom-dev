@@ -181,6 +181,12 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         // column -- use the material's own.
         f64 convection_W_m2K = 0.0;
         if (fields >> convection_W_m2K) forcing.convection_W_m2K = convection_W_m2K;
+        // Tenth column, optional on the same terms: the wind speed, which the
+        // convection law turns into a coefficient. A station file has this and
+        // usually does not have the ninth -- an h measured at a surface is
+        // rarer than the wind that sets it.
+        f64 windSpeed_m_s = 0.0;
+        if (fields >> windSpeed_m_s) forcing.windSpeed_m_s = windSpeed_m_s;
 
         const f64 az = azimuth_deg * std::numbers::pi / 180.0;
         const f64 el = elevation_deg * std::numbers::pi / 180.0;
@@ -223,6 +229,7 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
                 a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
             out.convection_W_m2K =
                 a.convection_W_m2K + t * (b.convection_W_m2K - a.convection_W_m2K);
+            out.windSpeed_m_s = a.windSpeed_m_s + t * (b.windSpeed_m_s - a.windSpeed_m_s);
             out.sunDirection = glm::normalize(
                 glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
             return out;
@@ -326,11 +333,26 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
 
     // The caller's stepper if it brought one, otherwise our own. The local
     // outlives the timeline below either way.
-    CpuCrankNicolsonStepper cpuStepper;
-    IThermalStepper& activeStepper = stepper != nullptr ? *stepper : cpuStepper;
+    CpuCrankNicolsonStepper cpuStepper(config.convection);
+    IThermalStepper* chosen = stepper;
+    if (chosen != nullptr && chosen->Convection().model != config.convection.model) {
+        // A stepper that does not evaluate the law this run asked for would
+        // step a different balance and say nothing about it. The fall back is
+        // to the one that does, and it changes the stepper's name, so the
+        // solve cache cannot serve the two for each other either.
+        QL_LOG_INFO("  Thermal stepper: {} does not carry the requested convection law; "
+                    "using {}", chosen->Name(), cpuStepper.Name());
+        chosen = nullptr;
+    }
+    IThermalStepper& activeStepper = chosen != nullptr ? *chosen : cpuStepper;
 
+    f64 fastestWind_m_s = 0.0;
+    for (const auto& [time_h, forcing] : forcingSeries) {
+        fastestWind_m_s = std::max(fastestWind_m_s, forcing.windSpeed_m_s);
+    }
     const f64 shortest = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
-        mesh.elements, materials, config.airTemperature_K);
+        mesh.elements, materials, config.airTemperature_K, config.convection,
+        fastestWind_m_s);
     if (std::isfinite(shortest) && config.timestep_s > shortest) {
         QL_LOG_WARN("  Thermal: timestep {:.0f} s is longer than the shortest surface time "
                     "constant ({:.0f} s). The radiative coupling is explicit, so the "

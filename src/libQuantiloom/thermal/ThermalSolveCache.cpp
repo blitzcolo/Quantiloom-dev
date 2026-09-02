@@ -26,7 +26,7 @@ namespace {
 
 /// Bumped when the *list* of hashed inputs changes -- adding a field would
 /// otherwise leave every existing entry addressable under a new meaning.
-constexpr u32 kKeySchemaVersion = 1u;
+constexpr u32 kKeySchemaVersion = 2u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
@@ -224,6 +224,12 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     hasher.UpdateF64(config.skyTemperature_K);
     hasher.UpdateF64(config.relativeHumidity);
     hasher.UpdateBool(config.sunCorrection);
+    hasher.UpdateU8(static_cast<u8>(config.convection.model));
+    hasher.UpdateF64(config.convection.windIntercept_W_m2K);
+    hasher.UpdateF64(config.convection.windSlope_W_s_m3K);
+    hasher.UpdateF64(config.convection.freeCoefficient);
+    hasher.UpdateF64(config.convection.referenceHeight_m);
+    hasher.UpdateF64(config.convection.stableDamping);
 
     // 6. The lighting sun direction, which is what the exchange traces sun
     //    visibility against -- a separate field from config.sunDirection.

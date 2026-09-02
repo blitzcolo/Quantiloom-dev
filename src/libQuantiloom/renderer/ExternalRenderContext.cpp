@@ -1054,6 +1054,22 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.relativeHumidity = resolved.thermal.relativeHumidity;
             tp.forcingFile = resolved.thermal.forcingFile;
             tp.checkpointStride_h = resolved.thermal.checkpointStride_h;
+            switch (resolved.thermal.convection.model) {
+                case thermal::ConvectionModel::Wind:
+                    tp.convectionModel = ThermalConvectionModel::Wind;
+                    break;
+                case thermal::ConvectionModel::Stability:
+                    tp.convectionModel = ThermalConvectionModel::Stability;
+                    break;
+                case thermal::ConvectionModel::Constant:
+                    tp.convectionModel = ThermalConvectionModel::Constant;
+                    break;
+            }
+            tp.convectionWindA_W_m2K = resolved.thermal.convection.windIntercept_W_m2K;
+            tp.convectionWindB_W_s_m3K = resolved.thermal.convection.windSlope_W_s_m3K;
+            tp.convectionFreeC = resolved.thermal.convection.freeCoefficient;
+            tp.convectionReferenceHeight_m = resolved.thermal.convection.referenceHeight_m;
+            tp.convectionStableDamping = resolved.thermal.convection.stableDamping;
             // The two measurement switches. sunCorrection changes what the
             // solve carries, so the viewport has to be told or it silently
             // renders the corrected field a config asked not to have;

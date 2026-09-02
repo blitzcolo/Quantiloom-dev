@@ -67,6 +67,7 @@ struct Spec {
     f64 checkpointStride_h = 1.0;
     f64 outputStep_h = 0.25;
     bool sunCorrection = true;
+    ConvectionLaw convection;
 
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     f32 area_m2 = 1.0f;
@@ -112,6 +113,12 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * checkpoint_stride_h = 1.0
  * output_step_h       = 0.25                # how often a row is written
  * sun_correction      = true                # carry dT/dv
+ * convection_model    = "constant"          # or "wind", "stability"
+ * convection_wind_a   = 5.7                 # h = a + b U, McAdams
+ * convection_wind_b   = 3.8
+ * convection_free_c   = 1.52                # h_free = C |T_s - T_air|^(1/3)
+ * convection_reference_height_m = 2.0       # where T_air and U are measured
+ * convection_stable_damping     = 10.0      # h / (1 + d Ri) when stable
  *
  * [geometry]                        # what the element is, absent a scene
  * normal       = [0.0, 1.0, 0.0]
@@ -127,6 +134,7 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * diffuse_irradiance_w_m2  = 100.0
  * sky_temperature_k        = 268.0
  * relative_humidity        = 50.0
+ * wind_speed_m_s           = 0.0            # read by the convection law
  * sun_azimuth_deg          = 180.0
  * sun_elevation_deg        = 60.0
  * ```
@@ -160,6 +168,22 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
                        ? InitialCondition::Uniform
                        : InitialCondition::Steady;
 
+    const String convectionModel = config.GetString("solve.convection_model", "constant");
+    if (convectionModel == "wind") {
+        spec.convection.model = ConvectionModel::Wind;
+    } else if (convectionModel == "stability") {
+        spec.convection.model = ConvectionModel::Stability;
+    } else if (convectionModel != "constant") {
+        QL_LOG_WARN("unknown solve.convection_model '{}', expected "
+                    "constant|wind|stability; using constant", convectionModel);
+    }
+    spec.convection.windIntercept_W_m2K = config.GetDouble("solve.convection_wind_a", 5.7);
+    spec.convection.windSlope_W_s_m3K = config.GetDouble("solve.convection_wind_b", 3.8);
+    spec.convection.freeCoefficient = config.GetDouble("solve.convection_free_c", 1.52);
+    spec.convection.referenceHeight_m =
+        config.GetDouble("solve.convection_reference_height_m", 2.0);
+    spec.convection.stableDamping = config.GetDouble("solve.convection_stable_damping", 10.0);
+
     const auto normal = config.GetArray<f32>("geometry.normal");
     if (normal.size() == 3) {
         spec.normal = glm::normalize(glm::vec3(normal[0], normal[1], normal[2]));
@@ -180,6 +204,7 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
         config.GetDouble("forcing.diffuse_irradiance_w_m2", 0.0);
     spec.constant.skyTemperature_K = config.GetDouble("forcing.sky_temperature_k", 268.0);
     spec.constant.relativeHumidity = config.GetDouble("forcing.relative_humidity", 50.0);
+    spec.constant.windSpeed_m_s = config.GetDouble("forcing.wind_speed_m_s", 0.0);
     spec.constant.sunDirection = SunFrom(config.GetDouble("forcing.sun_azimuth_deg", 180.0),
                                          config.GetDouble("forcing.sun_elevation_deg", 60.0));
     return spec;
@@ -340,10 +365,15 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     // Run it
     // ------------------------------------------------------------------
-    CpuCrankNicolsonStepper stepper;
+    CpuCrankNicolsonStepper stepper(spec.convection);
 
+    f64 fastestWind_m_s = spec.constant.windSpeed_m_s;
+    for (const auto& [time_h, forcing] : forcingSeries) {
+        fastestWind_m_s = std::max(fastestWind_m_s, forcing.windSpeed_m_s);
+    }
     const f64 shortest = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
-        elements, materials, spec.constant.airTemperature_K);
+        elements, materials, spec.constant.airTemperature_K, spec.convection,
+        fastestWind_m_s);
     if (std::isfinite(shortest) && spec.timestep_s > shortest) {
         QL_LOG_WARN("timestep {:.0f} s is longer than the surface time constant ({:.0f} s); "
                     "the trajectory is smoothed rather than unstable",

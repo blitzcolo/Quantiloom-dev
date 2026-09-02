@@ -51,10 +51,20 @@ namespace quantiloom::thermal {
  */
 class CpuCrankNicolsonStepper final : public IThermalStepper {
 public:
+    CpuCrankNicolsonStepper() = default;
+    explicit CpuCrankNicolsonStepper(const ConvectionLaw& law) : m_convection(law) {}
+
     void Step(ThermalState& state, const Vector<ThermalElement>& elements,
               const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
               const ThermalForcing& forcing, f64 dt_s,
               const ShortwaveSample& shortwave) override;
+
+    /// Which correlation supplies h when the forcing does not. Held here
+    /// rather than in the forcing because it says how the balance is modelled
+    /// rather than what the weather is doing, and because it is fixed for a
+    /// whole run.
+    void SetConvection(const ConvectionLaw& law) { m_convection = law; }
+    [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
 
     /// Also reachable without an instance, because a caller has to name the
     /// stepper for the solve cache key before it has decided to build one.
@@ -66,9 +76,21 @@ public:
     /// for the explicit radiative coupling to hold. Reported rather than
     /// enforced -- a step twice this is inaccurate rather than unstable, and
     /// which one matters is the caller's judgement.
+    ///
+    /// @param law             which correlation supplies h. Under a wind or
+    ///                        stability law the material's own coefficient is
+    ///                        not what the run will use, and the estimate
+    ///                        takes the larger of the two: too small an h
+    ///                        makes this advisory quieter than it should be.
+    /// @param windSpeed_m_s   the fastest wind the forcing reaches, since that
+    ///                        is where the coefficient peaks
     [[nodiscard]] static f64 ShortestTimeConstantSeconds(
         const Vector<ThermalElement>& elements, const Vector<ThermalMaterial>& materials,
-        f64 referenceTemperature_K);
+        f64 referenceTemperature_K, const ConvectionLaw& law = {},
+        f64 windSpeed_m_s = 0.0);
+
+private:
+    ConvectionLaw m_convection;
 };
 
 }  // namespace quantiloom::thermal

@@ -39,6 +39,79 @@ enum class InteriorBoundary : u8 {
     FixedTemperature  ///< held at interiorTemperature_K, as a room would
 };
 
+/// Where the convective coefficient comes from when the forcing does not state
+/// one outright.
+enum class ConvectionModel : u8 {
+    /// The material's own number, unchanged all day. What every scene written
+    /// before the others existed gets.
+    Constant = 0,
+    /// Forced convection from the wind: h = a + b U.
+    Wind,
+    /// The wind law, corrected for how the air is layered over the surface:
+    /// damped when the surface is colder than the air, floored by free
+    /// convection when it is warmer.
+    Stability
+};
+
+/**
+ * @brief The correlation that turns wind and a temperature difference into h
+ *
+ * A convective coefficient is not a material property, and a constant one
+ * cannot describe a day: it is set by the wind and by whether the air over the
+ * surface is being stirred or is lying stably on top of it, and those reverse
+ * between afternoon and midnight. Measured against a SURFRAD station, one
+ * value fitted to the daytime signal over-warmed the nights by up to 1.8 K.
+ *
+ * That bias is the whole reason for the stability model, and it fixes the sign
+ * of the correction. At night the ground is colder than the air, so convection
+ * is a SOURCE; too large a coefficient pours in heat, and the model has to
+ * make h SMALLER there rather than larger. A cold surface under still air is
+ * stably stratified -- the densest air is already at the bottom, so there is
+ * nothing to overturn and the exchange is suppressed. Free convection is the
+ * opposite case: a surface hotter than the air raises plumes, and that is a
+ * floor under h rather than a cap.
+ *
+ * So the stability law is the wind law damped on the stable side and floored
+ * by free convection on the unstable side:
+ *
+ *     Ri  = g z (T_air - T_s) / (T_air max(U, 0.5)^2)     bulk Richardson
+ *     h   = (a + b U) / (1 + d Ri)                        stable, Ri > 0
+ *     h   = max(a + b U, C |T_s - T_air|^(1/3))           unstable, Ri <= 0
+ *
+ * The stable branch is the Louis 1979 form with its usual d = 10, and it is
+ * floored at 1 W/(m^2 K) -- a real stable layer still exchanges something, and
+ * an h of zero would let a surface radiate to the sky with nothing at all
+ * drawing heat back.
+ *
+ * Held by the stepper rather than by the forcing, because it says how the
+ * balance is modelled rather than what the weather is doing. The wind speed
+ * itself is in ThermalForcing, where the rest of the weather is.
+ */
+struct ConvectionLaw {
+    ConvectionModel model = ConvectionModel::Constant;
+
+    /// McAdams for a flat plate in parallel flow, h = 5.7 + 3.8 U in
+    /// W/(m^2 K) for U in m/s. The same correlation the SURFRAD comparison
+    /// applied outside the renderer before this could do it inside.
+    f64 windIntercept_W_m2K = 5.7;
+    f64 windSlope_W_s_m3K = 3.8;
+
+    /// Free convection over a horizontal plate, h = C |T_s - T_air|^(1/3),
+    /// C in W/(m^2 K^(4/3)). 1.52 is the usual turbulent value. It is a floor
+    /// on the unstable side only: on the stable side there is no free
+    /// convection to have.
+    f64 freeCoefficient = 1.52;
+
+    /// Where the air temperature and the wind are measured, in metres. Two is
+    /// the screen height a weather station reports at, and the Richardson
+    /// number is only meaningful against the height its gradient spans.
+    f64 referenceHeight_m = 2.0;
+    /// The Louis stable-side damping constant, h = h_forced / (1 + d Ri).
+    /// Zero turns the damping off and leaves the wind law with a free-
+    /// convection floor.
+    f64 stableDamping = 10.0;
+};
+
 /**
  * @brief Thermal properties of one material
  *
@@ -232,6 +305,11 @@ struct ThermalForcing {
     /// than the air, so convection is a source, and too large a coefficient
     /// pours in heat that the real stable boundary layer withholds.
     f64 convection_W_m2K = 0.0;
+    /// Wind speed at the reference height, m/s. What ConvectionLaw reads when
+    /// the column above is silent. A file that carries no wind describes a
+    /// calm, which under the stability law is free convection rather than no
+    /// convection at all.
+    f64 windSpeed_m_s = 0.0;
 };
 
 /**

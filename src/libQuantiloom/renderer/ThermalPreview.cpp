@@ -123,8 +123,35 @@ struct ThermalPreview::Impl {
         return n;
     }
 
+    /// The convection law these parameters ask for, as the solver spells it.
+    [[nodiscard]] thermal::ConvectionLaw ConvectionLawFromParams() const {
+        thermal::ConvectionLaw law;
+        switch (params.convectionModel) {
+            case ThermalConvectionModel::Wind:
+                law.model = thermal::ConvectionModel::Wind;
+                break;
+            case ThermalConvectionModel::Stability:
+                law.model = thermal::ConvectionModel::Stability;
+                break;
+            case ThermalConvectionModel::Constant:
+                break;
+        }
+        law.windIntercept_W_m2K = params.convectionWindA_W_m2K;
+        law.windSlope_W_s_m3K = params.convectionWindB_W_s_m3K;
+        law.freeCoefficient = params.convectionFreeC;
+        law.referenceHeight_m = params.convectionReferenceHeight_m;
+        law.stableDamping = params.convectionStableDamping;
+        return law;
+    }
+
     thermal::IThermalStepper& ChooseStepper() {
-        if (gpuStepper && gpuStepper->IsValid() && params.layerCount <= GpuThermalStepper::kMaxNodes) {
+        // The GPU stepper mirrors the constant law and nothing else, so a run
+        // that asked for another one is CPU work. Deciding it here rather than
+        // letting the GPU stepper ignore the law is the difference between a
+        // slower solve and a wrong one.
+        const bool constantLaw = params.convectionModel == ThermalConvectionModel::Constant;
+        if (constantLaw && gpuStepper && gpuStepper->IsValid() &&
+            params.layerCount <= GpuThermalStepper::kMaxNodes) {
             return *gpuStepper;
         }
         return cpuStepper;
@@ -331,6 +358,7 @@ void ThermalPreview::SetParams(const ThermalSolveParams& params) {
     }
     m_impl->timelineDirty = true;
     p = params;
+    m_impl->cpuStepper.SetConvection(m_impl->ConvectionLawFromParams());
 }
 
 void ThermalPreview::SetMaterial(const String& name, const ThermalMaterialParams& params) {
@@ -521,10 +549,9 @@ ThermalSolveStatus ThermalPreview::Status() const {
     status.exchangeRunCount = m_impl->exchangeRunCount;
     status.sunSampleCount = static_cast<u32>(m_impl->sunTable.SampleCount());
     status.currentTime_h = m_impl->currentTime_h;
-    status.stepperName = m_impl->gpuStepper && m_impl->gpuStepper->IsValid() &&
-                         m_impl->params.layerCount <= GpuThermalStepper::kMaxNodes
-                             ? m_impl->gpuStepper->Name()
-                             : m_impl->cpuStepper.Name();
+    // Through the same choice the steps go through, so the status cannot name
+    // one stepper while another runs.
+    status.stepperName = m_impl->ChooseStepper().Name();
     status.error = m_impl->lastError;
     status.sliderStartTime_h = m_impl->params.startTime_h;
 

@@ -108,6 +108,106 @@ void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
     }
 }
 
+/// Gravity, for the buoyancy in the Richardson number below.
+constexpr f64 kGravity_m_s2 = 9.80665;
+
+/// The wind speed the Richardson number is evaluated at. A bulk Richardson
+/// number divides by U^2, so a dead calm would make it infinite; half a metre
+/// per second is the light air a station reports as zero.
+constexpr f64 kMinWind_m_s = 0.5;
+
+/// What a strongly stable layer still exchanges. The damping below has no
+/// bound of its own, and an h of zero would leave a surface radiating to the
+/// sky with nothing at all drawing heat back into it -- which is colder than
+/// any night.
+constexpr f64 kMinStableConvection_W_m2K = 1.0;
+
+/// The convective coefficient for one element at one instant, and the
+/// admittance the matrix sees.
+///
+/// Priority: what the forcing states outright, then the law, then the
+/// material's own constant. The forcing's column wins because a file that
+/// carries a measured h is saying something the correlations are estimating.
+///
+/// The admittance is not h. The convective flux is q = h (T_air - T_s), and
+/// under the stability law h itself depends on T_s, so
+///
+///     dq/dT_s = -h - (T_s - T_air) dh/dT_s
+///
+/// and the matrix wants that whole slope rather than its first term. Both
+/// temperature-dependent branches close in one line:
+///
+///   free convection, h = C |dT|^(1/3):   the second term is h/3, so the
+///                                        admittance is 4h/3
+///   stable damping,  h = h_f/(1 + d Ri): the second term cancels down to
+///                                        h/(1 + d Ri), which is below h
+///
+/// Under the constant and wind laws dh/dT_s is zero and the admittance is h,
+/// which is what keeps those two bit-identical to a run from before this
+/// existed.
+///
+/// The latent term derives its own coefficient from h, and its dependence on
+/// T_s through h is NOT differentiated here -- the same order of
+/// approximation as everything else linearised about the previous step.
+void ConvectionAt(const ConvectionLaw& law, const ThermalForcing& forcing,
+                  const ThermalMaterial& material, const f64 surfaceTemperature_K,
+                  f64& h, f64& admittance_W_m2K) {
+    if (forcing.convection_W_m2K > 0.0) {
+        h = forcing.convection_W_m2K;
+        admittance_W_m2K = h;
+        return;
+    }
+    if (law.model == ConvectionModel::Constant) {
+        h = material.convection_W_m2K;
+        admittance_W_m2K = h;
+        return;
+    }
+
+    h = law.windIntercept_W_m2K + law.windSlope_W_s_m3K * forcing.windSpeed_m_s;
+    admittance_W_m2K = h;
+
+    if (law.model != ConvectionModel::Stability) return;
+
+    // Below a tenth of a degree neither branch has anything to say, and the
+    // cube root's slope runs away.
+    const f64 difference = surfaceTemperature_K - forcing.airTemperature_K;
+    if (std::abs(difference) < 0.1) return;
+
+    if (difference > 0.0) {
+        // Unstable: the surface is hotter than the air above it, so plumes
+        // rise off it. Free convection is a floor under the wind law rather
+        // than a replacement for it.
+        const f64 free_W_m2K = law.freeCoefficient * std::cbrt(difference);
+        if (free_W_m2K > h) {
+            h = free_W_m2K;
+            admittance_W_m2K = h * (4.0 / 3.0);
+        }
+        return;
+    }
+
+    // Stable: the surface is colder than the air, the densest air is already
+    // at the bottom, and there is nothing to overturn. This is the night the
+    // whole model exists for -- convection is a source here, and a coefficient
+    // sized for a well-mixed afternoon pours in heat a real nocturnal layer
+    // withholds.
+    const f64 wind = std::max(forcing.windSpeed_m_s, kMinWind_m_s);
+    const f64 richardson = kGravity_m_s2 * law.referenceHeight_m * (-difference) /
+                           (forcing.airTemperature_K * wind * wind);
+    const f64 damping = 1.0 + law.stableDamping * richardson;
+    if (!(damping > 1.0)) return;
+
+    const f64 damped = h / damping;
+    if (damped <= kMinStableConvection_W_m2K) {
+        // At the floor the coefficient no longer moves with the surface, so
+        // the admittance is the coefficient again.
+        h = kMinStableConvection_W_m2K;
+        admittance_W_m2K = h;
+        return;
+    }
+    h = damped;
+    admittance_W_m2K = h / damping;
+}
+
 /// How far a tangent is allowed to travel. A sensitivity is a derivative, not
 /// a temperature, so the state clamp does not apply to it; this one is here
 /// for the same reason that one is -- a diverging element should stay visible
@@ -257,15 +357,14 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // Convection, which is linear in the unknown and therefore goes into
         // the matrix rather than into the flux.
         //
-        // The forcing's value wins when it has one. A constant cannot describe
-        // a day: the coefficient is set by the wind and by whether the air is
-        // being stirred over the surface or sitting stably on top of it, and
-        // those reverse between afternoon and midnight. The latent term below
-        // derives from this same h, so a forcing that varies it varies the
-        // evaporation with it -- which is right, since both are the same
-        // turbulent exchange carrying different quantities.
-        const f64 h = forcing.convection_W_m2K > 0.0 ? forcing.convection_W_m2K
-                                                     : material.convection_W_m2K;
+        // The forcing's value wins when it has one, then the law, then the
+        // material's constant. The latent term below derives from this same h,
+        // so anything that varies it varies the evaporation with it -- which
+        // is right, since both are the same turbulent exchange carrying
+        // different quantities.
+        f64 h = 0.0;
+        f64 convectiveAdmittance_W_m2K = 0.0;
+        ConvectionAt(m_convection, forcing, material, Ti, h, convectiveAdmittance_W_m2K);
 
         // Evaporation. Non-linear in the unknown like the radiation, but with
         // several times its slope, so this one goes into the matrix as well:
@@ -293,20 +392,27 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // the outside by h, by evaporation, and by the flux above.
         const f64 halfCell = rhoC * dx / (2.0 * dt_s);
         lower[0] = 0.0;
-        diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance_W_m2K);
+        diag[0] = halfCell + 0.5 * (k / dx + convectiveAdmittance_W_m2K + latentAdmittance_W_m2K);
         upper[0] = -0.5 * (k / dx);
+        // The trailing term is what a temperature-dependent h adds, and it is
+        // exactly zero -- and therefore exactly nothing, in floating point --
+        // whenever the admittance is h.
         rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
                  0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2 -
-                 latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0];
+                 latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0] +
+                 0.5 * (convectiveAdmittance_W_m2K - h) * T[0];
 
         // The tangent's face row: the same equation differentiated in v.
         // Term by term against the line above -- the air temperature and the
         // latent flux are constants of v and drop, the explicit long-wave
         // loss contributes its own slope, and the short wave contributes the
-        // only source. What is left of the convection is -h/2 sigma0 rather
-        // than the +h*Tair the temperature gets, and of the evaporation
-        // -Y_lat/2 sigma0, because the flux and the half-implicit correction
-        // cancel to half.
+        // only source. What is left of the convection is -Y_conv/2 sigma0
+        // rather than the +h*Tair the temperature gets, and of the
+        // evaporation -Y_lat/2 sigma0, because the flux and the half-implicit
+        // correction cancel to half. Y_conv rather than h: under a
+        // temperature-dependent law the coefficient moves with the surface,
+        // and the tangent is differentiating the same equation the matrix
+        // solves.
         //
         // The neighbours' share of `incoming` is deliberately NOT
         // differentiated. Its derivative is the off-diagonal of a Jacobian
@@ -320,7 +426,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             const f64 radiativeSlope =
                 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
             rhsTangent[0] = halfCell * sigma[0] - 0.5 * (k / dx) * (sigma[0] - sigma[1]) -
-                            0.5 * h * sigma[0] - radiativeSlope * sigma[0] -
+                            0.5 * convectiveAdmittance_W_m2K * sigma[0] -
+                            radiativeSlope * sigma[0] -
                             0.5 * latentAdmittance_W_m2K * sigma[0] +
                             directPerVisibility_W_m2;
         }
@@ -381,8 +488,21 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
 
 f64 CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
     const Vector<ThermalElement>& elements, const Vector<ThermalMaterial>& materials,
-    const f64 referenceTemperature_K) {
+    const f64 referenceTemperature_K, const ConvectionLaw& law, const f64 windSpeed_m_s) {
     f64 shortest = std::numeric_limits<f64>::infinity();
+
+    // What the law would give at its windiest. The free branch is evaluated at
+    // a ten-degree surface-to-air difference, which is a warm afternoon or a
+    // clear night rather than a worst case -- this is an advisory, and a
+    // number chosen to make it fire on every scene would say nothing.
+    f64 lawCoefficient = 0.0;
+    if (law.model != ConvectionModel::Constant) {
+        lawCoefficient = law.windIntercept_W_m2K + law.windSlope_W_s_m3K * windSpeed_m_s;
+        if (law.model == ConvectionModel::Stability) {
+            lawCoefficient =
+                std::max(lawCoefficient, law.freeCoefficient * std::cbrt(10.0));
+        }
+    }
 
     for (usize e = 0; e < elements.size(); ++e) {
         const u32 id = elements[e].materialId;
@@ -392,6 +512,8 @@ f64 CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
 
         const f64 capacity = static_cast<f64>(material.density_kg_m3) *
                              material.specificHeat_J_kgK * material.thickness_m;
+        const f64 convection = std::max(static_cast<f64>(material.convection_W_m2K),
+                                        lawCoefficient);
         const f64 eps = static_cast<f64>(material.longwaveEmissivity);
         const f64 radiative = 4.0 * eps * kStefanBoltzmann * referenceTemperature_K *
                               referenceTemperature_K * referenceTemperature_K;
@@ -405,11 +527,11 @@ f64 CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
             f64 dq_dT = 0.0;
             SaturationHumidity(referenceTemperature_K, q, dq_dT);
             latent = LatentCoefficient(static_cast<f64>(material.wetnessFactor),
-                                       material.convection_W_m2K) *
+                                       convection) *
                      dq_dT;
         }
 
-        const f64 loss = material.convection_W_m2K + radiative + latent;
+        const f64 loss = convection + radiative + latent;
         if (loss > 0.0) {
             shortest = std::min(shortest, capacity / loss);
         }

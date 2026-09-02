@@ -19,6 +19,16 @@ enum class ThermalInitialCondition : u8 {
     Uniform
 };
 
+/// Where the convective coefficient comes from when the forcing file does not
+/// carry one. Constant is the material's own number all day; Wind is
+/// h = a + b U from the forcing's wind speed; Stability adds free convection,
+/// which is what carries the exchange on a calm night.
+enum class ThermalConvectionModel : u8 {
+    Constant = 0,
+    Wind,
+    Stability
+};
+
 struct ThermalSolveParams {
     f64 startTime_h = 0.0;
     f64 timestep_s = 60.0;
@@ -38,6 +48,20 @@ struct ThermalSolveParams {
     f64 relativeHumidity = 50.0;
     String forcingFile;
     f64 checkpointStride_h = 1.0;
+
+    /// The convection correlation, and its constants: McAdams h = 5.7 + 3.8 U
+    /// for the wind, C |T_s - T_air|^(1/3) with C = 1.52 as the free-convection
+    /// floor when the surface is the warmer, and a Louis damping
+    /// h / (1 + d Ri) over a reference height when it is the colder.
+    /// Anything but Constant is solved on the CPU stepper -- the GPU one does
+    /// not evaluate them, and a step that quietly used a different h would be a
+    /// wrong trajectory rather than a slower one.
+    ThermalConvectionModel convectionModel = ThermalConvectionModel::Constant;
+    f64 convectionWindA_W_m2K = 5.7;
+    f64 convectionWindB_W_s_m3K = 3.8;
+    f64 convectionFreeC = 1.52;
+    f64 convectionReferenceHeight_m = 2.0;
+    f64 convectionStableDamping = 10.0;
 
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;

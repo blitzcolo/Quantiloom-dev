@@ -767,6 +767,32 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         // plain way, and these two land in the same place for the same run.
         out.thermal.dumpElementsFile = config.GetString("thermal.dump_elements", "");
 
+        // Where the convective coefficient comes from when the forcing file
+        // does not carry one outright. Constant is the material's own number
+        // and is what a scene written before the others existed gets.
+        const auto convectionModel = config.GetString("thermal.convection_model", "constant");
+        if (convectionModel == "constant") {
+            out.thermal.convection.model = thermal::ConvectionModel::Constant;
+        } else if (convectionModel == "wind") {
+            out.thermal.convection.model = thermal::ConvectionModel::Wind;
+        } else if (convectionModel == "stability") {
+            out.thermal.convection.model = thermal::ConvectionModel::Stability;
+        } else {
+            diag.Warn("thermal.convection_model",
+                      "  unknown thermal.convection_model '" + convectionModel +
+                          "', expected constant|wind|stability. Using constant.");
+        }
+        out.thermal.convection.windIntercept_W_m2K =
+            config.Get<f64>("thermal.convection_wind_a", 5.7);
+        out.thermal.convection.windSlope_W_s_m3K =
+            config.Get<f64>("thermal.convection_wind_b", 3.8);
+        out.thermal.convection.freeCoefficient =
+            config.Get<f64>("thermal.convection_free_c", 1.52);
+        out.thermal.convection.referenceHeight_m =
+            config.Get<f64>("thermal.convection_reference_height_m", 2.0);
+        out.thermal.convection.stableDamping =
+            config.Get<f64>("thermal.convection_stable_damping", 10.0);
+
         const auto initial = config.GetString("thermal.initial", "steady");
         if (initial == "uniform") {
             out.thermal.initial = thermal::InitialCondition::Uniform;

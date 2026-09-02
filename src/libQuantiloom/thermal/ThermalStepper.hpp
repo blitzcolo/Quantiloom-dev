@@ -69,6 +69,14 @@ public:
                           const SunVisibilityTable& sunTable,
                           std::span<const ThermalBatchStep> steps);
 
+    /// Which convection correlation this stepper evaluates. The default is the
+    /// constant one, which is what an implementation that has not been taught
+    /// the others honestly reports. The host compares it against what the
+    /// config asked for and picks a stepper that matches, rather than letting a
+    /// step quietly use a different h -- that would be a wrong trajectory
+    /// rather than a slower one.
+    [[nodiscard]] virtual ConvectionLaw Convection() const { return {}; }
+
     /// For the log line that says which one ran -- and for the solve cache,
     /// which keys on it: two steppers give answers that differ in the last
     /// bits, so an entry is only valid for the one that produced it. Renaming
