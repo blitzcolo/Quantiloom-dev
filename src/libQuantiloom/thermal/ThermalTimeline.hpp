@@ -46,6 +46,8 @@ public:
         /// step, and lets the shading pass trace one more hour of the shadow's
         /// history instead of assuming it looked like now.
         u32 sunMemoryLags = 0;
+        /// Material parameters to carry a tangent of, beside the sun's.
+        Vector<ThermalParameter> parameters;
     };
 
     ThermalTimeline(const Desc& desc, const Vector<ThermalElement>& elements,

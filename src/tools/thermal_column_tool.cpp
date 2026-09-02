@@ -68,6 +68,7 @@ struct Spec {
     f64 outputStep_h = 0.25;
     bool sunCorrection = true;
     ConvectionLaw convection;
+    Vector<ThermalParameter> parameters;
 
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     f32 area_m2 = 1.0f;
@@ -121,6 +122,8 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * convection_free_c   = 1.52                # h_free = C |T_s - T_air|^(1/3)
  * convection_reference_height_m = 2.0       # where T_air and U are measured
  * convection_stable_damping     = 10.0      # h / (1 + d Ri) when stable
+ * parameter_sensitivities = ["h", "k"]      # dT/dp columns, any of
+ *                                           # h, epsilon, alpha, k, rhoc
  *
  * [geometry]                        # what the element is, absent a scene
  * normal       = [0.0, 1.0, 0.0]
@@ -189,6 +192,16 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
     spec.convection.referenceHeight_m =
         config.GetDouble("solve.convection_reference_height_m", 2.0);
     spec.convection.stableDamping = config.GetDouble("solve.convection_stable_damping", 10.0);
+
+    for (const String& name : config.GetStringArray("solve.parameter_sensitivities")) {
+        const auto parameter = ThermalParameterFromName(name);
+        if (parameter == ThermalParameter::Count) {
+            QL_LOG_WARN("unknown solve.parameter_sensitivities entry '{}', expected "
+                        "h|epsilon|alpha|k|rhoc; ignored", name);
+            continue;
+        }
+        spec.parameters.push_back(parameter);
+    }
 
     const auto normal = config.GetArray<f32>("geometry.normal");
     if (normal.size() == 3) {
@@ -394,6 +407,7 @@ int main(int argc, char** argv) {
     desc.initial = spec.initial;
     desc.initialTemperature_K = spec.initialTemperature_K;
     desc.carrySunSensitivity = spec.sunCorrection;
+    desc.parameters = spec.parameters;
 
     ThermalTimeline timeline(desc, elements, materials, exchange, table, forcingSeries,
                              spec.constant, stepper);
@@ -408,7 +422,11 @@ int main(int argc, char** argv) {
     }
     std::ostream& out = outputPath.empty() ? std::cout : fileOut;
 
-    out << "time_h,T_surface_K,T_back_K,dTdv_K,v,air_K,sky_K,dni_W_m2\n";
+    out << "time_h,T_surface_K,T_back_K,dTdv_K,v,air_K,sky_K,dni_W_m2";
+    for (const ThermalParameter parameter : spec.parameters) {
+        out << ",dTd_" << ThermalParameterName(parameter);
+    }
+    out << '\n';
     out << std::setprecision(9);
 
     const f64 step = spec.outputStep_h > 0.0 ? spec.outputStep_h : 0.25;
@@ -426,7 +444,14 @@ int main(int argc, char** argv) {
             << state.temperature_K[state.nodeCount - 1] << ',';
         if (state.HasSensitivity()) out << state.SurfaceSensitivity(0);
         out << ',' << SampleAt(visibilitySeries, t) << ',' << forcing.airTemperature_K << ','
-            << forcing.skyTemperature_K << ',' << forcing.sunIrradiance_W_m2 << '\n';
+            << forcing.skyTemperature_K << ',' << forcing.sunIrradiance_W_m2;
+        for (usize p = 0; p < spec.parameters.size(); ++p) {
+            out << ',';
+            if (state.HasParameterSensitivity()) {
+                out << state.SurfaceParameterSensitivity(p, 0);
+            }
+        }
+        out << '\n';
     }
 
     QL_LOG_INFO("thermal_column_tool: {} nodes through {:.3f} m, {:.1f} h to {:.1f} h at "

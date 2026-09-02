@@ -105,6 +105,13 @@ struct ThermalConfig {
     /// forcing is one column.
     u32 sunMemoryLags = 0;
 
+    /// Which material parameters to carry a tangent of. Empty by default. What
+    /// they are for is a fit -- h against a station's record is a Gauss-Newton
+    /// and needs a derivative -- and an uncertainty budget, where what a 0.02
+    /// uncertainty in emissivity is worth in kelvin is dT/deps times 0.02.
+    /// Each costs a state vector and a back-substitution per step.
+    Vector<ThermalParameter> parameterSensitivities;
+
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
     /// off exists so the two renders can be compared, which is the only way to
@@ -164,6 +171,11 @@ struct ThermalResult {
     Vector<f32> lagVisibility;
     Vector<glm::vec3> lagDirection;
     u32 lagSlots = 0;
+
+    /// dT/dp at the exposed face, parameter-major over the elements, for the
+    /// parameters `parameters` names. Empty when none was asked for.
+    Vector<f32> parameterSensitivity;
+    Vector<ThermalParameter> parameters;
 
     u32 elementCount = 0;
     u32 participatingElements = 0;
@@ -274,7 +286,9 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
                          const Vector<f32>& lagSensitivity_K = {},
                          const Vector<f32>& lagVisibility = {},
                          const Vector<f64>& lagTime_h = {},
-                         const Vector<glm::vec3>& lagDirection = {});
+                         const Vector<glm::vec3>& lagDirection = {},
+                         const Vector<f32>& parameterSensitivity = {},
+                         const Vector<ThermalParameter>& parameters = {});
 
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.

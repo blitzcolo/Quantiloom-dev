@@ -151,6 +151,13 @@ ThermalTimeline::ThermalTimeline(const Desc& desc,
                 initial.temperature_K.size() * desc.sunMemoryLags, 0.0);
         }
     }
+    // Independent of the sun's tangent: a fit for a material property wants
+    // these whether or not a shadow is being resolved.
+    if (!desc.parameters.empty()) {
+        initial.parameters = desc.parameters;
+        initial.parameterSensitivity.assign(
+            initial.temperature_K.size() * desc.parameters.size(), 0.0);
+    }
 
     if (desc.initial == InitialCondition::Steady) {
         const ThermalForcing startForcing =

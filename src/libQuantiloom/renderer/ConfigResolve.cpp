@@ -795,6 +795,20 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.lateralConduction = config.Get<bool>("thermal.lateral_conduction", false);
         out.thermal.sunMemoryLags = config.Get<u32>("thermal.sun_memory_lags", 0);
 
+        // Which material parameters the solve differentiates itself with
+        // respect to. Named rather than indexed, so a config says what it
+        // wants rather than which slot it wants.
+        for (const String& name : config.GetStringArray("thermal.parameter_sensitivities")) {
+            const auto parameter = thermal::ThermalParameterFromName(name);
+            if (parameter == thermal::ThermalParameter::Count) {
+                diag.Warn("thermal.parameter_sensitivities",
+                          "  unknown thermal parameter '" + name +
+                              "', expected h|epsilon|alpha|k|rhoc. Ignored.");
+                continue;
+            }
+            out.thermal.parameterSensitivities.push_back(parameter);
+        }
+
         const auto initial = config.GetString("thermal.initial", "steady");
         if (initial == "uniform") {
             out.thermal.initial = thermal::InitialCondition::Uniform;

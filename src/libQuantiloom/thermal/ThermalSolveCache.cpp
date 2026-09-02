@@ -250,6 +250,14 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     // already in this key above.
     hasher.UpdateBool(config.lateralConduction);
     hasher.UpdateU32(config.sunMemoryLags);
+    // A run that asked for parameter tangents is not the same run: its entry
+    // is deliberately never stored (they are a diagnostic the format does not
+    // carry), so keying on them is what keeps one from being served an entry
+    // that has none.
+    hasher.UpdateU64(config.parameterSensitivities.size());
+    for (const ThermalParameter parameter : config.parameterSensitivities) {
+        hasher.UpdateU8(static_cast<u8>(parameter));
+    }
 
     // 6. The lighting sun direction, which is what the exchange traces sun
     //    visibility against -- a separate field from config.sunDirection.

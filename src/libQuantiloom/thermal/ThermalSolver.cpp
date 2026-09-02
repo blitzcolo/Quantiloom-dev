@@ -47,7 +47,9 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
                          const Vector<f32>& lagSensitivity_K,
                          const Vector<f32>& lagVisibility,
                          const Vector<f64>& lagTime_h,
-                         const Vector<glm::vec3>& lagDirection) {
+                         const Vector<glm::vec3>& lagDirection,
+                         const Vector<f32>& parameterSensitivity,
+                         const Vector<ThermalParameter>& parameters) {
     std::ofstream out(path);
     if (!out) {
         QL_LOG_WARN("  Thermal: cannot write thermal.dump_elements to '{}'", path);
@@ -105,6 +107,13 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
     for (usize s = 0; s < lagSlots; ++s) {
         out << ",dTdv_lag" << s << "_K,v_lag" << s;
     }
+    const usize parameterCount =
+        parameterSensitivity.size() == parameters.size() * elements.size()
+            ? parameters.size()
+            : 0;
+    for (usize p = 0; p < parameterCount; ++p) {
+        out << ",dTd_" << ThermalParameterName(parameters[p]);
+    }
     out << '\n';
 
     const bool haveTangent = sunSensitivity_K.size() == elements.size();
@@ -128,6 +137,9 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
         for (usize s = 0; s < lagSlots; ++s) {
             out << ',' << lagSensitivity_K[s * elements.size() + e] << ','
                 << lagVisibility[s * elements.size() + e];
+        }
+        for (usize p = 0; p < parameterCount; ++p) {
+            out << ',' << parameterSensitivity[p * elements.size() + e];
         }
         out << '\n';
     }
@@ -447,6 +459,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     desc.initialTemperature_K = config.initialTemperature_K;
     desc.carrySunSensitivity = config.sunCorrection;
     desc.sunMemoryLags = config.sunCorrection ? config.sunMemoryLags : 0u;
+    desc.parameters = config.parameterSensitivities;
 
     ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
                              effectiveTable, forcingSeries, constantForcing, activeStepper);
@@ -510,6 +523,26 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         }
     }
 
+    // The material-parameter tangents, if any were asked for. Unlike the sun's,
+    // these are not zeroed for a face the sun is behind: a surface out of the
+    // sun still responds to its emissivity and its heat capacity.
+    if (state.HasParameterSensitivity()) {
+        const usize n = mesh.elements.size();
+        result.parameters = state.parameters;
+        result.parameterSensitivity.assign(result.parameters.size() * n, 0.0f);
+        for (usize p = 0; p < result.parameters.size(); ++p) {
+            for (usize e = 0; e < n; ++e) {
+                const u32 id = mesh.elements[e].materialId;
+                const bool solved = mesh.elements[e].area_m2 > 0.0f &&
+                                    id < materials.size() &&
+                                    materials[id].ParticipatesInSolve();
+                if (!solved) continue;
+                result.parameterSensitivity[p * n + e] =
+                    static_cast<f32>(state.SurfaceParameterSensitivity(p, e));
+            }
+        }
+    }
+
     f64 sum = 0.0;
     result.minTemperature_K = std::numeric_limits<f64>::max();
     result.maxTemperature_K = std::numeric_limits<f64>::lowest();
@@ -564,7 +597,8 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                             SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
                                                   mesh.elements.size()),
                             result.lagSensitivity_K, result.lagVisibility, lagTime_h,
-                            result.lagDirection);
+                            result.lagDirection, result.parameterSensitivity,
+                            result.parameters);
     }
 
     LogThermalSolveSummary(result);

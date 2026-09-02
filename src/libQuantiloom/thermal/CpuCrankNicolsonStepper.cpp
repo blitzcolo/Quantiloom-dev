@@ -90,14 +90,31 @@ f64 LatentCoefficient(const f64 wetnessFactor, const f64 convection_W_m2K) {
 /// @param upper  super-diagonal, upper[n-1] unused, overwritten
 /// @param rhs    the right-hand sides, each of length n, each overwritten with
 ///               its own solution. The first is the temperature's.
-void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
-                      const std::span<const std::span<f64>> rhs) {
+void FactorTridiagonal(const Vector<f64>& lower, Vector<f64>& diag,
+                       const Vector<f64>& upper) {
+    for (usize i = 1; i < diag.size(); ++i) {
+        diag[i] -= (lower[i] / diag[i - 1]) * upper[i - 1];
+    }
+}
+
+/// Apply a factorisation to right-hand sides. The elimination factor is
+/// recomputed from the already-modified diagonal rather than stored, which is
+/// the same number the factorisation used -- lower[i] / diag[i-1] with diag
+/// as it stands after the sweep reached i-1.
+///
+/// Separate from the factorisation because a tangent in a MATERIAL parameter
+/// needs the temperature this step produced, not the one it started from: the
+/// matrix itself moves with k and rho c, and what that contributes to the
+/// tangent is (dA/dp) T^{n+1}. So those rows can only be built after the
+/// temperature has been back-substituted, and they then reuse the same
+/// factorisation rather than paying for a second one.
+void SolveFactored(const Vector<f64>& lower, const Vector<f64>& diag,
+                   const Vector<f64>& upper, const std::span<const std::span<f64>> rhs) {
     const usize n = diag.size();
-    if (n == 0) return;
+    if (n == 0 || rhs.empty()) return;
 
     for (usize i = 1; i < n; ++i) {
         const f64 factor = lower[i] / diag[i - 1];
-        diag[i] -= factor * upper[i - 1];
         for (const std::span<f64>& b : rhs) b[i] -= factor * b[i - 1];
     }
     for (const std::span<f64>& b : rhs) b[n - 1] /= diag[n - 1];
@@ -106,6 +123,13 @@ void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
             b[i] = (b[i] - upper[i] * b[i + 1]) / diag[i];
         }
     }
+}
+
+void SolveTridiagonal(Vector<f64>& lower, Vector<f64>& diag, Vector<f64>& upper,
+                      const std::span<const std::span<f64>> rhs) {
+    if (diag.empty()) return;
+    FactorTridiagonal(lower, diag, upper);
+    SolveFactored(lower, diag, upper, rhs);
 }
 
 /// Gravity, for the buoyancy in the Richardson number below.
@@ -360,6 +384,25 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     Vector<f64> lateralRateTangent(carryLateral && carryTangent ? nodes : 0, 0.0);
     Vector<f64> lateralRateLag(carryLateral ? static_cast<usize>(lagSlots) * nodes : 0, 0.0);
 
+    // One more right-hand side per material parameter being differentiated.
+    // These are solved after the temperature rather than beside it: the matrix
+    // itself moves with k and rho c, and what that contributes to the tangent
+    // is (dA/dp) T^{n+1}, which does not exist until the temperature has been
+    // back-substituted. They reuse the factorisation.
+    const bool carryParameters = state.HasParameterSensitivity();
+    const usize parameterCount = carryParameters ? state.parameters.size() : 0;
+    Vector<f64> rhsParameter(parameterCount * nodes);
+    Vector<std::span<f64>> parameterSides;
+    for (usize p = 0; p < parameterCount; ++p) {
+        parameterSides.emplace_back(rhsParameter.data() + p * nodes, nodes);
+    }
+    Vector<f64> lateralRateParameter(
+        carryLateral ? parameterCount * nodes : 0, 0.0);
+    Vector<f64> lateralPreviousParameter;
+    if (carryLateral && carryParameters) {
+        lateralPreviousParameter = state.parameterSensitivity;
+    }
+
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
         if (element.materialId >= materials.size()) continue;
@@ -394,6 +437,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             std::fill(lateralRate.begin(), lateralRate.end(), 0.0);
             std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
             std::fill(lateralRateLag.begin(), lateralRateLag.end(), 0.0);
+            std::fill(lateralRateParameter.begin(), lateralRateParameter.end(), 0.0);
         }
         if (carryLateral && element.area_m2 > 0.0f) {
             const f64* Ti = &lateralPrevious[e * nodes];
@@ -424,6 +468,16 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                         rate[i] += g * (Lj[i] - Li[i]);
                     }
                 }
+                for (usize p = 0; p < parameterCount && !lateralPreviousParameter.empty();
+                     ++p) {
+                    const usize block = p * elements.size() * nodes;
+                    const f64* Pi = &lateralPreviousParameter[block + e * nodes];
+                    const f64* Pj = &lateralPreviousParameter[block + j * nodes];
+                    f64* rate = &lateralRateParameter[p * nodes];
+                    for (u32 i = 0; i < nodes; ++i) {
+                        rate[i] += g * (Pj[i] - Pi[i]);
+                    }
+                }
             }
 
             const f64 perCapacity = 1.0 / (rhoC * static_cast<f64>(element.area_m2));
@@ -432,6 +486,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 if (!lateralRateTangent.empty()) lateralRateTangent[i] *= perCapacity;
             }
             for (f64& rate : lateralRateLag) rate *= perCapacity;
+            for (f64& rate : lateralRateParameter) rate *= perCapacity;
         }
 
         // ----------------------------------------------------------------
@@ -444,6 +499,12 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         f64 surfaceFlux_W_m2 = 0.0;
 
         const f64 absorptivity = material.shortwaveAbsorptivity;
+        // The same flux with the coefficient divided out, which is its own
+        // derivative in that coefficient. Accumulated beside the flux rather
+        // than reconstructed later, so the two cannot come to disagree about
+        // which terms are in it.
+        f64 shortwavePerAbsorptivity_W_m2 = 0.0;
+        f64 longwavePerEmissivity_W_m2 = 0.0;
 
         // Sun, direct. cos(theta) against the element's own normal, times the
         // precomputed visibility -- which is what carries the shadow.
@@ -464,6 +525,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 if (e < sunVisibility.size()) {
                     surfaceFlux_W_m2 +=
                         directPerVisibility_W_m2 * static_cast<f64>(sunVisibility[e]);
+                    shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 * cosTheta *
+                                                     static_cast<f64>(sunVisibility[e]);
                 }
             }
         }
@@ -476,6 +539,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         if (forcing.sunIrradiance_W_m2 > 0.0 && e < shortwave.reflectedGain.size()) {
             surfaceFlux_W_m2 += absorptivity * forcing.sunIrradiance_W_m2 *
                                 static_cast<f64>(shortwave.reflectedGain[e]);
+            shortwavePerAbsorptivity_W_m2 += forcing.sunIrradiance_W_m2 *
+                                             static_cast<f64>(shortwave.reflectedGain[e]);
         }
 
         // Sky, diffuse. For an isotropic dome the geometric factor is the
@@ -491,6 +556,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 diffuseGain = static_cast<f64>(exchange.skyFraction[e]);
             }
             surfaceFlux_W_m2 += absorptivity * forcing.diffuseIrradiance_W_m2 * diffuseGain;
+            shortwavePerAbsorptivity_W_m2 += forcing.diffuseIrradiance_W_m2 * diffuseGain;
         }
 
         // Long wave: what the hemisphere sends back, minus what this element
@@ -514,7 +580,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             incoming += static_cast<f64>(exchange.skyFraction[e]) * Tsky * Tsky * Tsky * Tsky;
         }
         const f64 Ti = surfacePrevious[e];
-        surfaceFlux_W_m2 += emissivity * kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
+        longwavePerEmissivity_W_m2 = kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
+        surfaceFlux_W_m2 += emissivity * longwavePerEmissivity_W_m2;
 
         // Convection, which is linear in the unknown and therefore goes into
         // the matrix rather than into the flux.
@@ -711,7 +778,97 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                           : nullptr);
         }
 
-        SolveTridiagonal(lower, diag, upper, rightHandSides);
+        FactorTridiagonal(lower, diag, upper);
+        SolveFactored(lower, diag, upper, rightHandSides);
+
+        // ----------------------------------------------------------------
+        // The material parameters, on the temperature this step just produced
+        // ----------------------------------------------------------------
+        // Same operator again, so the same factorisation, and a source that
+        // is this row's own derivative in the parameter. Three of them touch
+        // only the flux; two move the matrix, and what that contributes is
+        // -(dA/dp) T^{n+1} -- which is why these are built here rather than
+        // beside the tangents above.
+        for (usize p = 0; p < parameterCount; ++p) {
+            const usize block = p * elements.size() * nodes;
+            const f64* sigma = &state.parameterSensitivity[block + e * nodes];
+            f64* out = rhsParameter.data() + p * nodes;
+            buildTangentRows(sigma, out, 0.0,
+                             carryLateral ? &lateralRateParameter[p * nodes] : nullptr);
+
+            const f64 conduction = k / dx;
+            switch (state.parameters[p]) {
+                case ThermalParameter::Absorptivity:
+                    out[0] += shortwavePerAbsorptivity_W_m2;
+                    break;
+
+                case ThermalParameter::Emissivity:
+                    out[0] += longwavePerEmissivity_W_m2;
+                    if (material.interiorBoundary == InteriorBoundary::AmbientInterior) {
+                        const f64 interior = static_cast<f64>(material.interiorTemperature_K);
+                        const f64 Tb = T[last];
+                        out[last] += kStefanBoltzmann *
+                                     (interior * interior * interior * interior -
+                                      Tb * Tb * Tb * Tb);
+                    }
+                    break;
+
+                case ThermalParameter::Convection: {
+                    // Only a free parameter where nothing else decides it: a
+                    // forcing column or a wind law is what h is then, and the
+                    // material's own number does not reach the answer.
+                    if (forcing.convection_W_m2K > 0.0 ||
+                        m_convection.model != ConvectionModel::Constant) {
+                        break;
+                    }
+                    const f64 latentPerH = h > 0.0 ? latentFlux_W_m2 / h : 0.0;
+                    const f64 latentAdmittancePerH =
+                        h > 0.0 ? latentAdmittance_W_m2K / h : 0.0;
+                    out[0] += (forcing.airTemperature_K - T[0]) - latentPerH +
+                              0.5 * (1.0 + latentAdmittancePerH) * (T[0] - rhs[0]);
+                    break;
+                }
+
+                case ThermalParameter::Conductivity: {
+                    // The face and back rows exchange k/dx with their
+                    // neighbour, half explicit and half implicit; the interior
+                    // rows carry it inside r.
+                    out[0] += -0.5 / dx * ((T[0] - T[1]) + (rhs[0] - rhs[1]));
+                    for (u32 i = 1; i + 1 < nodes; ++i) {
+                        const f64 rPerK = r / k;
+                        out[i] += 0.5 * rPerK *
+                                  ((T[i - 1] - 2.0 * T[i] + T[i + 1]) +
+                                   (rhs[i - 1] - 2.0 * rhs[i] + rhs[i + 1]));
+                    }
+                    if (material.interiorBoundary != InteriorBoundary::FixedTemperature) {
+                        out[last] += -0.5 / dx *
+                                     ((T[last] - T[last - 1]) + (rhs[last] - rhs[last - 1]));
+                    }
+                    break;
+                }
+
+                case ThermalParameter::HeatCapacity: {
+                    // rho c scales the capacity up and the Fourier number
+                    // down, so the two rows differ in sign.
+                    out[0] += halfCell / rhoC * (T[0] - rhs[0]);
+                    for (u32 i = 1; i + 1 < nodes; ++i) {
+                        const f64 rPerRhoC = r / rhoC;
+                        out[i] += -0.5 * rPerRhoC *
+                                  ((T[i - 1] - 2.0 * T[i] + T[i + 1]) +
+                                   (rhs[i - 1] - 2.0 * rhs[i] + rhs[i + 1]));
+                    }
+                    if (material.interiorBoundary != InteriorBoundary::FixedTemperature) {
+                        out[last] += halfCell / rhoC * (T[last] - rhs[last]);
+                    }
+                    break;
+                }
+
+                case ThermalParameter::Count:
+                    break;
+            }
+            (void)conduction;
+        }
+        SolveFactored(lower, diag, upper, parameterSides);
 
         for (u32 i = 0; i < nodes; ++i) {
             // A temperature outside this range is a solver failure rather than
@@ -727,6 +884,16 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             for (u32 i = 0; i < nodes; ++i) {
                 slot[i] = std::clamp(rhsLag[static_cast<usize>(s) * nodes + i],
                                      -kMaxSensitivity_K, kMaxSensitivity_K);
+            }
+        }
+        for (usize p = 0; p < parameterCount; ++p) {
+            f64* slot = &state.parameterSensitivity[p * elements.size() * nodes + e * nodes];
+            for (u32 i = 0; i < nodes; ++i) {
+                // The clamp is in kelvin per unit of the parameter, and the
+                // parameters differ by orders of magnitude in scale -- rho c is
+                // millions, emissivity is one. So this is only the NaN guard the
+                // others are, not a statement about a plausible sensitivity.
+                slot[i] = std::clamp(rhsParameter[p * nodes + i], -1e12, 1e12);
             }
         }
     }

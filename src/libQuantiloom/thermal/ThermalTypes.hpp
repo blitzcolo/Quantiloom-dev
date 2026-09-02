@@ -61,6 +61,33 @@ enum class ConvectionModel : u8 {
 };
 
 /**
+ * @brief A material property the trajectory can be differentiated with respect to
+ *
+ * Which ones are worth having is decided by what a fit or an uncertainty
+ * budget needs: the three that set the surface's exchange with the outside,
+ * and the two that set how fast the slab behind it responds.
+ *
+ * The derivative is taken holding the NEIGHBOURS' temperatures fixed, exactly
+ * as dT/dv is -- what it would add is the second-order fact that a warmer
+ * patch warms what can see it. With lateral conduction on, elements that
+ * conduct into each other do share the derivative, which is the right reading
+ * for a fit: one h is fitted for a material, not one per triangle.
+ */
+enum class ThermalParameter : u8 {
+    Convection = 0,   ///< h, W/(m^2 K). Only under the constant law: the others derive it
+    Emissivity,       ///< eps_lw, what the surface radiates with
+    Absorptivity,     ///< alpha_s, the short-wave fraction it absorbs
+    Conductivity,     ///< k, W/(m K)
+    HeatCapacity,     ///< rho c, J/(m^3 K), the two as the balance uses them
+    Count
+};
+
+/// The name a config writes for each, and the name a dump column carries.
+[[nodiscard]] const char* ThermalParameterName(ThermalParameter parameter);
+/// The reverse; Count for a name this build does not know.
+[[nodiscard]] ThermalParameter ThermalParameterFromName(StringView name);
+
+/**
  * @brief The correlation that turns wind and a temperature difference into h
  *
  * A convective coefficient is not a material property, and a constant one
@@ -304,6 +331,15 @@ struct ThermalState {
     /// been claimed yet. Size is the slot count.
     Vector<u32> lagColumn;
 
+    /// dT/dp for each material parameter this state was asked to
+    /// differentiate, in the order `parameters` lists them. Same
+    /// parameter-major layout over the element-major blocks as the lag
+    /// tangents, and the same reason for existing: a number a fit or an
+    /// uncertainty budget needs is the derivative of the trajectory, and the
+    /// trajectory is the only thing that has it.
+    Vector<f64> parameterSensitivity;
+    Vector<ThermalParameter> parameters;
+
     static constexpr u32 kNoLagColumn = 0xFFFFFFFFu;
 
     u32 nodeCount = 0;
@@ -334,15 +370,26 @@ struct ThermalState {
         return lagSensitivity_K[(slot * ElementCount() + element) * nodeCount];
     }
 
+    [[nodiscard]] bool HasParameterSensitivity() const {
+        return !parameters.empty() &&
+               parameterSensitivity.size() == parameters.size() * temperature_K.size();
+    }
+    [[nodiscard]] f64 SurfaceParameterSensitivity(const usize index,
+                                                  const usize element) const {
+        return parameterSensitivity[(index * ElementCount() + element) * nodeCount];
+    }
+
     /// What one snapshot of this state costs. The timeline stores whole copies
     /// of it as checkpoints, so this is what a scrub backwards is paid for in
     /// memory, and it is here rather than at the caller so that a state vector
     /// added later cannot be left out of the total by being forgotten in one
     /// file. Every vector this struct owns belongs in the sum.
     [[nodiscard]] usize ByteSize() const {
-        return (temperature_K.size() + sunSensitivity_K.size() + lagSensitivity_K.size()) *
+        return (temperature_K.size() + sunSensitivity_K.size() + lagSensitivity_K.size() +
+                parameterSensitivity.size()) *
                    sizeof(f64) +
-               lagColumn.size() * sizeof(u32);
+               lagColumn.size() * sizeof(u32) +
+               parameters.size() * sizeof(ThermalParameter);
     }
 };
 

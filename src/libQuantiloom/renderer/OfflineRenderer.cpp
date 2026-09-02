@@ -461,7 +461,11 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     }
 
     // Only reachable with an empty error, so a failed solve is never stored.
-    if (cacheEligible && !cacheKey.empty()) {
+    // Nor is one carrying material-parameter tangents: the entry format does
+    // not hold them -- they are a diagnostic output rather than something the
+    // render reads -- and an entry that came back without them would be a
+    // silently incomplete answer to a run that asked.
+    if (cacheEligible && !cacheKey.empty() && result.parameters.empty()) {
         thermal::StoreThermalSolveCache(cacheFile, cacheKey, result);
     }
 
