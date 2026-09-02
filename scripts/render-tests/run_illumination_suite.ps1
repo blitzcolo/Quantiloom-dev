@@ -199,6 +199,16 @@ Invoke-Checker "mis" @("scripts/render-tests/check_nee_mis.py",
 Invoke-Checker "hero" @("scripts/render-tests/check_hero_wavelength.py") 'error fell .* over' 'FAIL|error fell'
 
 
+# Light that leaves at a wavelength it did not arrive at. Every other check in
+# this suite would pass on a renderer whose transport is diagonal in wavelength,
+# because every other term is; this one puts two illuminants of equal power over
+# the band in front of a dye that absorbs below 500 nm and emits above 550, and
+# asks the emission band to get BRIGHTER as the illuminant's own power there
+# falls. Nothing diagonal can do that. It renders for itself, so there is no
+# Invoke-Render above it.
+Invoke-Checker "fluor" @("scripts/render-tests/check_fluorescence.py") "dye's contribution " "FAIL|dye's contribution"
+
+
 # Whether the answer depends on where the camera stands. Every check above --
 # and every furnace cavity -- views its surface down the surface normal, so
 # NdotV is 1 at every pixel and an emissivity law of the form eps0*f(cos theta)
@@ -230,7 +240,7 @@ if ($thermalOk) {
 }
 
 if ($script:fail -eq 0) {
-    Write-Host "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence and view independence all within tolerance"
+    Write-Host "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence, fluorescence and view independence all within tolerance"
 } else {
     Write-Host "illumination suite: FAILURES above" -ForegroundColor Red
 }

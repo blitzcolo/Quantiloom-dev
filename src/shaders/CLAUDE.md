@@ -150,7 +150,14 @@ Neither is `ctest`; both need a GPU and both run from `build_wsl.sh`.
 | Gate | Asks | Blind to |
 |---|---|---|
 | `run_furnace_suite.sh` | what a surface does with light once it arrives | anything about how it arrives — no sun, no sky, no scene outside the cavity |
-| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness in two bands, indirect, and the two visible estimators against each other | radiometry of the surface itself |
+| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness in two bands, indirect, the two visible estimators against each other, and light leaving at a wavelength it did not arrive at | radiometry of the surface itself |
+
+The last of those, `check_fluorescence.py`, is the only check in the tree that a
+renderer whose transport is diagonal in wavelength cannot pass by accident.
+Every other term is diagonal, so every other check would still be green with
+the coupling removed. It puts two illuminants of equal power over the band in
+front of a dye that absorbs below 500 nm and emits above 550, and asks the
+emission band to get brighter as the illuminant's own power there falls.
 
 `check_hero_wavelength.py` is the illumination suite's `hero` arm and runs with
 it. `check_dispersion.py` covers the RGB path and the two n(lambda) sources,
