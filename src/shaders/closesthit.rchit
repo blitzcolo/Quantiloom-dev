@@ -1013,6 +1013,28 @@ float BoundEmissionRadiance(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                                  lambda_nm) * texScale * misWeight;
 }
 
+// Beer-Lambert at one wavelength, with the attenuation colour read as the
+// spectrum it stands for rather than as three numbers averaged into one.
+//
+// The upsampling is legitimate here and is not everywhere in this block: an
+// attenuation colour is the fraction that survives one attenuation distance,
+// bounded in [0,1] by construction, which is exactly the quantity Jakob &
+// Hanika fit. An extinction coefficient is not bounded and has no such fit,
+// which is why the participating medium below still averages its sigma and
+// only the light it scatters is evaluated per wavelength.
+//
+// Outside 400-780 nm there is no fit to read, so no caller in the infrared
+// reaches this -- see the note on RgbSpectrumAt.
+float BeerLambertAt(float4 attenSpectrum, float lambda, float distance, float attenDist) {
+    if (attenDist <= 0.0 || distance <= 0.0) {
+        return 1.0;
+    }
+    // sigma = -ln(t)/attenDist, transmittance = exp(-sigma d), with the same
+    // floor on t that the RGB form uses to keep the logarithm finite.
+    const float t = max(RgbSpectrumAt(attenSpectrum, lambda), 0.001);
+    return exp(log(t) * distance / attenDist);
+}
+
 // The material weights and the base are float4 because a hero quartet needs
 // four of each, one per wavelength; everything else here -- the roulette, the
 // lobe choice, the direction and its density -- is wavelength independent and
@@ -1242,7 +1264,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Face forward: ensure geometric normal points toward camera (opposite to ray direction)
     float3 rayDir = WorldRayDirection();
-    if (dot(worldGeometricNormal, rayDir) > 0.0) {
+    //
+    // Which side the ray arrived on is recorded here, because after this it
+    // cannot be recovered: both normals are turned to face the ray, so
+    // `dot(rayDir, normal) < 0` is true at every hit and a test written that
+    // way reports "entering" on the way out as well as on the way in. The
+    // transmission block below is the one that has to know the difference.
+    const bool hitBackFace = dot(worldGeometricNormal, rayDir) > 0.0;
+    if (hitBackFace) {
         worldGeometricNormal = -worldGeometricNormal;
     }
 
@@ -4748,8 +4777,23 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float4 transmittance4 = float4(volumeTransmittance, 0.0);
         float4 inScattered4   = float4(inScatteredLight, 0.0);
         if (carriesQuartet) {
+            // One extinction for all four -- sigma is unbounded and has no
+            // spectral fit to read, so the reduction above stands -- but the
+            // sun it scatters does have a spectrum, and that is where the
+            // colour of a hazy day comes from. Sampling it at the camera
+            // wavelength, as the scalar branch above must, would give four
+            // wavelengths one illuminant.
             transmittance4.w = volumeTransmittance.r;
-            inScattered4.w   = inScatteredLight.r;
+            inScattered4 = float4(0.0, 0.0, 0.0, 0.0);
+            if (sigma_t_avg > 0.001 && solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
+                const float scatter = sigma_s.r * phase * sunVisibility *
+                                      (1.0 - volumeTransmittance.r) / sigma_t.r;
+                [unroll]
+                for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
+                    inScattered4[q] =
+                        SampleSunIrradiance(solarSpectralLUT, quartet[q]) * scatter;
+                }
+            }
         }
         output_radiance = output_radiance * transmittance4 + inScattered4;
     }
@@ -4783,12 +4827,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         float3 rayDir = WorldRayDirection();
 
-        // Determine if entering or exiting the medium
-        // Entering: ray direction and normal point in opposite directions (dot < 0)
-        bool entering = dot(rayDir, normal) < 0.0;
+        // Entering or exiting the medium. Read off which face was hit rather
+        // than off the normal: the normal was face-forwarded hundreds of lines
+        // above and answers "entering" either way, which left every
+        // Beer-Lambert guard below unreachable and volume absorption silently
+        // doing nothing in every mode.
+        bool entering = !hitBackFace;
 
-        // Use geometric normal facing the ray
-        float3 N = entering ? normal : -normal;
+        // The shading normal is already turned to face the ray, and that is
+        // the side Refract wants it on whichever way the ray is travelling;
+        // only the pair of indices changes with the direction. Flipping it
+        // here as well was harmless while `entering` was stuck true, and would
+        // have sent an exiting ray somewhere else once it was not -- reflect()
+        // is even in N and does not care, refract() is not and does.
+        float3 N = normal;
 
         // Compute Fresnel reflectance (exact dielectric formula)
         float cosI = abs(dot(N, -rayDir));
@@ -4920,12 +4972,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float L_h = recursivePayload.radiance.r;
 
             if (!entering && material.attenuationDistance > 0.0) {
-                // Beer-Lambert is per-channel RGB data; at one wavelength the
-                // honest reduction is the channel average. A medium carrying a
-                // spectral absorption curve would be sampled at λ_h instead.
-                const float3 atten = BeerLambertAbsorption(
-                    material.attenuationColor, RayTCurrent(), material.attenuationDistance);
-                L_h *= (atten.r + atten.g + atten.b) / 3.0;
+                // One wavelength, so one transmittance: the attenuation colour
+                // is read at lambda_h rather than averaged across channels that
+                // this ray is not carrying. Averaging made a red-absorbing
+                // glass attenuate a blue path by a red glass's mean.
+                L_h *= BeerLambertAt(
+                    FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
+                    lambda_h, RayTCurrent(), material.attenuationDistance);
             }
 
             if (carriesQuartet) {
@@ -5076,15 +5129,49 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     volumeAttenuation = BeerLambertAbsorption(
                         material.attenuationColor, travelDistance, material.attenuationDistance);
                 }
+                // What survives the glass, per whatever this ray carries.
+                //
+                // The RGB triple is only the right answer for a ray that
+                // carries a colour. A ray carrying one wavelength that reads
+                // component 0 of an RGB attenuation gets the RED channel's
+                // absorption at every wavelength -- which is what the visible
+                // band's own indirect bounce was doing, so a red-absorbing
+                // glass dimmed the whole spectrum by its red figure instead of
+                // colouring what came through it.
                 float4 attenuation4 = float4(volumeAttenuation, 0.0);
-                if (carriesQuartet) {
-                    // An RGB attenuation against four wavelengths reduces to
-                    // its average, as it does wherever a medium's colour meets
-                    // a spectrum here; a spectral absorption curve is what
-                    // would let this be evaluated per wavelength instead.
-                    const float a = (volumeAttenuation.r + volumeAttenuation.g +
-                                     volumeAttenuation.b) / 3.0;
-                    attenuation4 = float4(a, a, a, a);
+                if (!entering && material.attenuationDistance > 0.0) {
+                    const float travel = RayTCurrent();
+                    if (carriesQuartet) {
+                        // Four wavelengths, four transmittances, read off the
+                        // spectrum the attenuation colour stands for. This is
+                        // the difference between glass that tints what it
+                        // transmits and glass that only dims it.
+                        const float4 sAtten =
+                            FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor);
+                        [unroll]
+                        for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
+                            attenuation4[q] = BeerLambertAt(sAtten, quartet[q], travel,
+                                                            material.attenuationDistance);
+                        }
+                    } else if (heroSigned != 0.0 && IsVisMode(SPEC_SPECTRAL_MODE)) {
+                        // One wavelength, so one transmittance, at that
+                        // wavelength -- the same reading the dispersive branch
+                        // above makes.
+                        const float a = BeerLambertAt(
+                            FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
+                            abs(heroSigned), travel, material.attenuationDistance);
+                        attenuation4 = float4(a, a, a, 0.0);
+                    } else if (!IsVisMode(SPEC_SPECTRAL_MODE) &&
+                               SPEC_SPECTRAL_MODE != SPECTRAL_MODE_RGB) {
+                        // A band that carries one number per ray gets one
+                        // transmittance, not three: outside the visible there
+                        // is no fit to read the colour as a spectrum, so the
+                        // average is the honest reduction -- the same one the
+                        // participating medium makes, and for the same reason.
+                        const float a = (volumeAttenuation.r + volumeAttenuation.g +
+                                         volumeAttenuation.b) / 3.0;
+                        attenuation4 = float4(a, a, a, 0.0);
+                    }
                 }
                 transmissionRadiance = recursivePayload.radiance * attenuation4;
             }
