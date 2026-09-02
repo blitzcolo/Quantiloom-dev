@@ -90,7 +90,7 @@ void main(inout Payload payload) {
         // RGB mode: Direct RGB sky color (no spectral integration)
         payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
+    } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
         // ================================================================
         // VIS_FUSED mode: 32-wavelength spectral integration
         // ================================================================

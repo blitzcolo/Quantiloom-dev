@@ -113,6 +113,12 @@ AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
     };
     switch (mode) {
         case SpectralMode::VIS_Fused:
+        case SpectralMode::VIS_Hero:
+            // The same 32 points either way: the two visible estimators cover
+            // one band and a bake belongs to the band, not to how a path
+            // samples it. What the sampled mode then does with a wavelength
+            // between two grid points is a question for the shader that reads
+            // the LUT, not for the shape of the bake.
             return fusedGrid("vis", 32);
         case SpectralMode::NIR_Fused:
             return fusedGrid("nir", 16);

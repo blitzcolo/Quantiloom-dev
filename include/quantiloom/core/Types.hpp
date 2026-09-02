@@ -71,6 +71,7 @@ using Wavelength = f32;
  * Controls how the renderer interprets wavelengths and produces output:
  * - RGB: Fast RGB-only pipeline (no spectral integration, best performance)
  * - VIS_Fused: 32-wavelength visible spectral integration with CIE XYZ color matching
+ * - VIS_Hero: the same band by hero-wavelength sampling, four wavelengths a path
  * - Single: Monochromatic rendering at one wavelength (EXR grayscale output)
  * - IR bands: Thermal/near-IR fusion modes with wavelength-specific processing
  *
@@ -88,7 +89,15 @@ enum class SpectralMode : u32 {
     LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
     SWIR_Fused   = 5,  // Short-wave IR fusion 1400-2400nm (outputs EXR + PNG)
     NIR_Fused    = 6,  // Near IR fusion 930-1200nm (outputs EXR + PNG) - reflected solar
-    RGB          = 7   // Fast RGB-only pipeline (no spectral integration, default)
+    RGB          = 7,  // Fast RGB-only pipeline (no spectral integration, default)
+
+    // Same band and same output as VIS_Fused, sampled rather than tabulated:
+    // one path carries four wavelengths drawn per sample instead of the same
+    // 32 at every hit. Both are kept, and the enum is how -- a deterministic
+    // reference and a sampled estimator have to be comparable inside one
+    // binary for either to be checkable against the other. Appended, never
+    // renumbered: the value is a specialization constant the shaders read.
+    VIS_Hero     = 8
 };
 
 // ============================================================================
@@ -359,6 +368,9 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
     } else if (mode_str == "vis_fused" || mode_str == "VIS") {
         // Visible spectral integration mode (32-wavelength CIE XYZ)
         return Result(SpectralMode::VIS_Fused);
+    } else if (mode_str == "vis_hero") {
+        // Same band, sampled: four wavelengths per path (CIE XYZ)
+        return Result(SpectralMode::VIS_Hero);
     } else if (mode_str == "multispectral") {
         return Result(SpectralMode::Multispectral);
     } else if (mode_str == "mwir_fused" || mode_str == "MWIR") {
@@ -395,7 +407,8 @@ struct SpectralBandInfo {
 
 inline std::optional<SpectralBandInfo> GetFusedBandInfo(SpectralMode mode) {
     switch (mode) {
-        case SpectralMode::VIS_Fused:  return SpectralBandInfo{400.0f, 780.0f};
+        case SpectralMode::VIS_Fused:
+        case SpectralMode::VIS_Hero:   return SpectralBandInfo{400.0f, 780.0f};
         case SpectralMode::NIR_Fused:  return SpectralBandInfo{930.0f, 1200.0f};
         case SpectralMode::SWIR_Fused: return SpectralBandInfo{1400.0f, 2400.0f};
         case SpectralMode::MWIR_Fused: return SpectralBandInfo{3000.0f, 5000.0f};
@@ -405,10 +418,19 @@ inline std::optional<SpectralBandInfo> GetFusedBandInfo(SpectralMode mode) {
 }
 
 // IR fused modes render scalar band radiance (grayscale) and need the
-// IR-specific sensor unit handling; VIS_Fused outputs CIE-integrated RGB.
+// IR-specific sensor unit handling; the visible modes output CIE-integrated RGB.
 inline bool IsIRFusedMode(SpectralMode mode) {
     return mode == SpectralMode::NIR_Fused || mode == SpectralMode::SWIR_Fused ||
            mode == SpectralMode::MWIR_Fused || mode == SpectralMode::LWIR_Fused;
+}
+
+// The two visible-band estimators. They differ in how a path picks its
+// wavelengths and in nothing else the rest of the renderer can see: same band,
+// same RGB lighting inputs, same CIE integration to the same output. Every
+// decision outside the estimator itself is about that shared shape, so it asks
+// this rather than naming one of them.
+inline bool IsVisMode(SpectralMode mode) {
+    return mode == SpectralMode::VIS_Fused || mode == SpectralMode::VIS_Hero;
 }
 
 /**

@@ -247,8 +247,8 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     } else {
         diag.Fatal("spectral.mode",
                    "Invalid spectral mode: " + out.modeName +
-                       ". Supported modes: single, rgb, vis_fused, mwir_fused, "
-                       "lwir_fused, swir_fused, multispectral");
+                       ". Supported modes: single, rgb, vis_fused, vis_hero, "
+                       "mwir_fused, lwir_fused, swir_fused, nir_fused, multispectral");
     }
     QL_LOG_INFO("  Spectral mode: {}", out.modeName);
 
@@ -407,7 +407,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     const f32 sunRadiance_spectral = (sunRadiance.r + sunRadiance.g + sunRadiance.b) / 3.0f;
     const f32 skyRadiance_spectral = (skyRadiance.r + skyRadiance.g + skyRadiance.b) / 3.0f;
 
-    if (out.mode == SpectralMode::RGB || out.mode == SpectralMode::VIS_Fused) {
+    if (out.mode == SpectralMode::RGB || IsVisMode(out.mode)) {
         QL_LOG_INFO("  Sun RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",
                     sunRadiance.r, sunRadiance.g, sunRadiance.b);
         QL_LOG_INFO("  Sky RGB radiance: [{:.2f}, {:.2f}, {:.2f}] W*sr^-1*m^-2",

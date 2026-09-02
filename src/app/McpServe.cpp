@@ -192,8 +192,8 @@ mcp::ToolResult ValidateTool(const String& argumentsJson) {
     const String modeName = config.Get<String>("spectral.mode", "rgb");
     if (!ParseSpectralMode(modeName).has_value()) {
         problems.push_back("spectral.mode is '" + modeName +
-                           "'. Supported: single, rgb, vis_fused, nir_fused, swir_fused, "
-                           "mwir_fused, lwir_fused, multispectral.");
+                           "'. Supported: single, rgb, vis_fused, vis_hero, nir_fused, "
+                           "swir_fused, mwir_fused, lwir_fused, multispectral.");
     }
 
     const bool hasGeometry = config.Has("scene.preset") || config.Has("scene.gltf") ||

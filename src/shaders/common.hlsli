@@ -29,6 +29,15 @@
 #define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion
 #define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion - reflected solar
 #define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
+#define SPECTRAL_MODE_VIS_HERO     8  // Visible band by hero-wavelength sampling
+
+// The two visible estimators over one band. Everything that is about the band
+// -- which lighting inputs are RGB, which materials get upsampled, which
+// emitters need a MIS weight, what an output pixel means -- asks this. Only
+// the estimator itself distinguishes them, and it does so by name.
+bool IsVisMode(uint mode) {
+    return mode == SPECTRAL_MODE_VIS_FUSED || mode == SPECTRAL_MODE_VIS_HERO;
+}
 
 // ============================================================================
 // Fused-Mode Integration Bands

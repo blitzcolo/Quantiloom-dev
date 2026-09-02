@@ -1285,6 +1285,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     } else if (params.mode == SpectralMode::VIS_Fused) {
         img.metadata["quality_level"] = "SPECTRAL";
         img.metadata["note"] = "32-wavelength spectral integration";
+    } else if (params.mode == SpectralMode::VIS_Hero) {
+        img.metadata["quality_level"] = "SPECTRAL";
+        img.metadata["note"] = "hero-wavelength spectral sampling";
     } else if (spectra.rgbUpsampledMaterials > 0) {
         img.metadata["quality_level"] = "PREVIEW_ONLY";
         img.metadata["warning"] =

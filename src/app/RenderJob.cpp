@@ -324,10 +324,11 @@ RenderOutcome RenderConfigToFiles(const Config& config,
             outcome.error = "failed to write " + outcome.exrPath;
         }
 
-        // For fused modes (RGB, VIS_FUSED, MWIR, LWIR, SWIR), also save a PNG
-        // preview: these modes output both EXR (HDR/physical) and PNG (LDR).
+        // For fused modes (RGB, the two visible modes, MWIR, LWIR, SWIR), also
+        // save a PNG preview: these modes output both EXR (HDR/physical) and
+        // PNG (LDR).
         const bool isFusedMode =
-            (spectralMode == SpectralMode::RGB || spectralMode == SpectralMode::VIS_Fused ||
+            (spectralMode == SpectralMode::RGB || IsVisMode(spectralMode) ||
              spectralMode == SpectralMode::MWIR_Fused || spectralMode == SpectralMode::LWIR_Fused ||
              spectralMode == SpectralMode::SWIR_Fused);
 

@@ -1643,7 +1643,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // outside: the directly viewed emitter is fine, everything it lights is
     // double.
     float emissiveMisWeight = 1.0;
-    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+    if (IsVisMode(SPEC_SPECTRAL_MODE) ||
         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
         emissiveMisWeight = EmissiveMisWeight(material.emissiveFactor,
                                               material.emissiveTextureIndex,
@@ -1664,8 +1664,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float3 sunRadiance;
     float3 skyRadiance;
 
-    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
-        // RGB and VIS_FUSED modes: Use full RGB lighting
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB || IsVisMode(SPEC_SPECTRAL_MODE)) {
+        // RGB and the visible modes: Use full RGB lighting
         sunRadiance = lut.sunRadiance_rgb;
         skyRadiance = lut.skyRadiance_rgb;
     } else {
@@ -1894,7 +1894,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float4 sDT     = float4(0.0, 0.0, 0.0, -1.0);
     float4 sDielF0 = float4(0.0, 0.0, 0.0, -1.0);
     float4 sF0     = float4(0.0, 0.0, 0.0, -1.0);
-    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+    if (IsVisMode(SPEC_SPECTRAL_MODE) ||
         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
         if (material.spectralReflectanceCurveIndex < 0) {
             sBase = FetchRgbSpectrum(rgbToSpectrumTable, baseColor.rgb);
@@ -2108,7 +2108,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         output_radiance = clamp(output_radiance, 0.0, 1000.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
+    } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
         // ====================================================================
         // VIS_Fused Mode: True 32-Wavelength Spectral Integration
         // ====================================================================
@@ -4495,7 +4495,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // surface reflectance does; that is a data problem, and this is where
         // it plugs in when it is solved.
         const bool isRgbLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
-                                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
+                                IsVisMode(SPEC_SPECTRAL_MODE));
 
         // Create medium properties from material
         MediumProperties medium = CreateMediumFromMaterial(material);
@@ -4700,7 +4700,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // refracts at that wavelength and stays single -- resampling would
         // branch the path count multiplicatively and bias nothing usefully.
         bool heroSplit = materialDisperses &&
-                         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED &&
+                         IsVisMode(SPEC_SPECTRAL_MODE) &&
                          payload.heroLambda <= 0.0;
 
         bool hasDispersion = materialDisperses &&
@@ -4859,7 +4859,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float refractLambda;
             if (payload.heroLambda > 0.0) {
                 refractLambda = payload.heroLambda;
-            } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED ||
+            } else if (IsVisMode(SPEC_SPECTRAL_MODE) ||
                        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
                 refractLambda = 0.0;
             } else {
