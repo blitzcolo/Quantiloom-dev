@@ -61,6 +61,11 @@ public:
         Vector<f32> sunSensitivity_K;
         Vector<f32> sunVisibility;
         glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+        /// The same, per tracked sun column, when the parameters asked for
+        /// any: slot-major sensitivity and visibility, and where the sun was.
+        Vector<f32> lagSensitivity_K;
+        Vector<f32> lagVisibility;
+        Vector<glm::vec3> lagDirection;
         u32 elementCount = 0;
         bool elementCountChanged = false;
         String error;
@@ -71,6 +76,23 @@ public:
     /// Write the solve at the instant last shown, one row per element. Empty
     /// takes the path from the parameters. Returns the file written.
     [[nodiscard]] Result<String, String> DumpElements(const String& pathOrEmpty = "");
+
+    /// One element's history, by replaying the trajectory rather than solving
+    /// again. The hour the viewport is showing is restored before this returns.
+    [[nodiscard]] Result<ThermalElementTrajectory, String> ElementTrajectory(
+        u32 element, f64 fromHour, f64 toHour, u32 samples);
+
+    /// The surface field of dT/dp for one parameter, at the hour on screen,
+    /// one float per element and empty when the solve does not carry that
+    /// parameter. Empty is what a caller must be able to tell from all-zero:
+    /// a tangent nobody asked for is not a tangent that came out flat.
+    [[nodiscard]] Vector<f32> ParameterSensitivityField(
+        ThermalSensitivityParameter parameter) const;
+
+    /// The flat element index for an instance and one of its triangles.
+    /// False when that instance is not one the solve carries, which is a real
+    /// answer about the geometry rather than a lookup failure.
+    [[nodiscard]] bool ElementFor(u32 instanceIndex, u32 primitiveIndex, u32& out) const;
 
     [[nodiscard]] ThermalSolveStatus Status() const;
 

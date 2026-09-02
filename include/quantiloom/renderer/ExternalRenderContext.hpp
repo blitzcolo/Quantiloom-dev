@@ -615,6 +615,20 @@ public:
     void SetDebugMode(DebugVisualizationMode mode);
 
     /**
+     * @brief The one number a debug view may need
+     *
+     * Which number is the view's business. DebugVisualizationMode::
+     * SunSensitivity reads it as the sun column to draw: zero is the whole-day
+     * response, and 1..sunMemoryLags are the individual hours the solve is
+     * remembering. Out of range is clamped rather than refused, because the
+     * number of columns is a property of the solve and a panel can hold a
+     * stale selection across a re-solve.
+     *
+     * Every other view ignores it, and it is zero unless something sets it.
+     */
+    void SetDebugParameter(u32 value);
+
+    /**
      * @brief Get current debug visualization mode
      */
     [[nodiscard]] DebugVisualizationMode GetDebugMode() const;
@@ -883,6 +897,84 @@ public:
      * @brief Status snapshot for the panel
      */
     [[nodiscard]] ThermalSolveStatus GetThermalSolveStatus() const;
+
+    /**
+     * @brief What one element did between two hours
+     *
+     * Replays the trajectory at @p samples evenly spaced instants and reports
+     * the temperatures and, where the stepper decomposes its own balance, the
+     * six fluxes that produced them. Nothing is re-solved: the checkpoints are
+     * already there and this steps between them, which is why a probe is
+     * cheap enough to move around a scene.
+     *
+     * Read-only in every sense that matters -- the field the viewport is
+     * showing is not disturbed, and the hour it is showing is restored before
+     * this returns.
+     *
+     * The fluxes are decomposed by the reference CPU balance whichever stepper
+     * produced the trajectory, so the six numbers do not change with whether
+     * the machine has a GPU. What they describe is the balance AT the state
+     * the trajectory reached, which is the trajectory's own either way.
+     *
+     * @param element  index into the thermal mesh, as a viewport pick reports it
+     * @param fromHour, toHour  the stretch to sample; swapped if given backwards
+     * @param samples  how many instants, at least two
+     *
+     * @return An error when there is no solve, the element is out of range, or
+     *         fewer than two samples were asked for.
+     */
+    Result<ThermalElementTrajectory, String> GetElementTrajectory(
+        u32 element, f64 fromHour, f64 toHour, u32 samples = 96);
+
+    /**
+     * @brief The thermal element a pick landed on
+     *
+     * A pick reports an instance and a triangle within it; the solve indexes
+     * its elements by a flat number, and the map between them is the mesh's.
+     * Without this a host holding a PickResult has no way to name the element
+     * GetElementTrajectory wants, which is the whole path from a click in the
+     * viewport to a chart of that surface's day.
+     *
+     * @return An error when there is no solve, the pick did not hit, or the
+     *         instance it hit is not one the solve carries -- geometry that
+     *         does not participate is a real answer, not a zero element.
+     */
+    [[nodiscard]] Result<u32, String> ThermalElementAt(const PickResult& pick) const;
+
+    /**
+     * @brief Show what a material parameter would do, before the re-solve says so
+     *
+     * The viewport renders T + dT/dp * step instead of T: a first order
+     * preview of a slider, exact in the limit of a small step and wrong in the
+     * way a linearisation is wrong for a large one. What it is for is the wait
+     * -- a re-solve of a day is seconds and a slider is continuous, so the
+     * preview is what the user sees while dragging and the solved field is
+     * what replaces it when they stop.
+     *
+     * A step of zero turns it off, which is the state every scene starts in.
+     * The tangent is a field of the hour like the temperatures, so scrubbing
+     * time moves it too.
+     *
+     * @return An error when the solve does not carry a derivative with respect
+     *         to that parameter. Asking for one is a ThermalSolveParams change
+     *         and rebuilds the trajectory, which is why this does not do it
+     *         quietly on the caller's behalf.
+     */
+    Result<void, String> SetThermalWhatIf(ThermalSensitivityParameter parameter, f64 step);
+
+    /**
+     * @brief The dT/dp field a what-if preview is built on, one value per element
+     *
+     * Kelvin per unit of the parameter, at the hour the viewport is showing.
+     * The panel driving the preview wants it to say what range a slider is
+     * working over; a test wants it because it is the claim the preview makes,
+     * and comparing it against a re-solve is the only reading of that claim
+     * which is not a restatement of the code.
+     *
+     * @return An error when the solve does not carry that derivative.
+     */
+    [[nodiscard]] Result<Vector<f32>, String> GetThermalParameterSensitivity(
+        ThermalSensitivityParameter parameter) const;
 
     // ========================================================================
     // Scene Editing (Phase 2)

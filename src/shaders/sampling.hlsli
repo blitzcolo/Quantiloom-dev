@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 // Quantiloom - Sample Generation
 // ============================================================================
 // Padded Owen-scrambled Sobol' sampling, plus the PCG stream it falls back to.
@@ -146,6 +146,7 @@
 #define SAMPLE_SLOT_LIGHT_UV    3u  // point on that emitter      (2D)
 #define SAMPLE_SLOT_LOBE        4u  // diffuse or specular        (1D)
 #define SAMPLE_SLOT_DIRECTION   5u  // bounce direction           (2D)
+#define SAMPLE_SLOT_FLUOR_LAMBDA 6u // excitation wavelength      (1D)
 
 // ============================================================================
 // Sobol' generator matrix, dimension 1

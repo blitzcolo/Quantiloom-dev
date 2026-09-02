@@ -29,6 +29,15 @@
 #define SPECTRAL_MODE_SWIR_FUSED   5  // Short-wave IR fusion
 #define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion - reflected solar
 #define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
+#define SPECTRAL_MODE_VIS_HERO     8  // Visible band by hero-wavelength sampling
+
+// The two visible estimators over one band. Everything that is about the band
+// -- which lighting inputs are RGB, which materials get upsampled, which
+// emitters need a MIS weight, what an output pixel means -- asks this. Only
+// the estimator itself distinguishes them, and it does so by name.
+bool IsVisMode(uint mode) {
+    return mode == SPECTRAL_MODE_VIS_FUSED || mode == SPECTRAL_MODE_VIS_HERO;
+}
 
 // ============================================================================
 // Fused-Mode Integration Bands
@@ -121,6 +130,8 @@
 #define DEBUG_MODE_IR_EMISSIVITY           61  // IR emissivity
 #define DEBUG_MODE_IR_EMISSION             62  // Thermal emission component
 #define DEBUG_MODE_IR_REFLECTION           63  // IR reflection component
+#define DEBUG_MODE_SUN_SENSITIVITY         64  // dT/dv, how the temperature answers to shade
+#define DEBUG_MODE_THERMAL_SENSITIVITY     65  // dT/dp for the parameter on binding 27
 
 // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
 #define DEBUG_MODE_VERTEX_POSITIONS        70  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)
@@ -188,7 +199,18 @@
 // ============================================================================
 
 struct Payload {
-    float3 radiance;  // Accumulated radiance (W·sr⁻¹·m⁻²)              // 12 bytes
+    // Accumulated radiance (W·sr⁻¹·m⁻²), read two ways today:
+    //
+    //   heroLambda == 0   RGB in .rgb.
+    //   heroLambda != 0   scalar spectral radiance at that wavelength,
+    //                     replicated across .rgb by whichever branch answered.
+    //
+    // A VIS_HERO ray carrying a quartet is the third reading: L(λ_j) per
+    // component, four wavelengths of one path, converted to a colour only by
+    // the vertex that drew them. Every other mode writes .w zero and never
+    // reads it, so a component-wise clamp or finite guard over the whole
+    // float4 is the same arithmetic there as one over .rgb.
+    float4 radiance;                                                     // 16 bytes
 
     // Shadow ray result (set by shadow miss shader)
     // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
@@ -204,6 +226,22 @@ struct Payload {
     uint rngState;    // PCG hash state                                  // 4 bytes
 
     // Hero wavelength, in nm, or 0 for "this ray carries the whole band".
+    //
+    // VIS_HERO reads the sign as well, because it has a third state to say:
+    //
+    //   0    undivided. Only a primary ray, which is where the quartet is
+    //        drawn.
+    //   > 0  a quartet whose hero this is. The other three are derived by
+    //        QuartetLambda and not stored; `radiance` carries L(λ_j) per
+    //        component and no CIE weighting -- the vertex that drew the
+    //        quartet applies that, once, at the end.
+    //   < 0  one wavelength, |heroLambda|, because a dispersive interface
+    //        collapsed the quartet onto it. Scalar out, like every other mode
+    //        that carries a wavelength.
+    //
+    // Every other mode uses only the first two states and never sets a
+    // negative, so a test on the sign distinguishes the readings without
+    // asking which mode is running. What follows describes those two.
     //
     // A ray with heroLambda != 0 reports SCALAR spectral radiance in
     // `radiance`, not RGB, and every band's closest-hit and miss branch honours
@@ -264,7 +302,7 @@ struct Payload {
     // one; which function it is only affects how good the split is.
     float bsdfPdf;    // sr^-1, 0 = not a BSDF sample                     // 4 bytes
 
-    // TOTAL: 36 bytes (under 64-byte RT Core limit)
+    // TOTAL: 40 bytes (under 64-byte RT Core limit)
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into
@@ -866,7 +904,7 @@ struct CameraData {
     uint   debug_mode;     // Debug visualization mode (see DEBUG_MODE_* defines)
     uint   projection;     // CAMERA_PROJECTION_* below
     float  orthoHeight;    // Film-plane height in world units, orthographic only
-    uint   _padding;       // Padding for 16-byte alignment
+    uint   debugParam;     // One number for a debug view; see Camera.hpp
 };
 
 // Must match Camera::Projection in scene/Camera.hpp.
@@ -930,7 +968,7 @@ struct MaterialData {
     int    normalTextureIndex;       // -1 = no normal map                   // Offset: 32-36
     float  normalScale;              // Normal intensity [0, inf]            // Offset: 36-40
     uint   doubleSided;              // 0=single-sided (cull backface), 1=double-sided // Offset: 40-44
-    float  _padding0;                // Explicit padding to align emissiveFactor to 16-byte boundary // Offset: 44-48
+    float  fluorescenceYield;        // Fraction of absorbed light re-emitted, 0 = does not fluoresce // Offset: 44-48
 
     // Emissive (now 16-byte aligned at offset 48)
     float3 emissiveFactor;           // RGB [0, inf] (HDR allowed)           // Offset: 48-60
@@ -1132,8 +1170,8 @@ struct MaterialData {
     // emissiveFactor through the RGB->illuminant path instead. Zero outside the
     // curve's own span, never held flat -- see EvaluateEmissionCurve.
     int    emissiveRadianceCurveIndex;   // Index into spectralCurves (-1 = RGB expansion)          // Offset: 308-312
-    float  _padding3;                    // Padding for alignment                                   // Offset: 312-316
-    float  _padding4;                    // Padding for alignment                                   // Offset: 316-320
+    int    fluorescenceExcitationCurveIndex; // -1 = none; the shape this surface absorbs into the fluorescent channel // Offset: 312-316
+    int    fluorescenceEmissionCurveIndex;   // -1 = none; unit area over the band, so a density per nm // Offset: 316-320
 
     // ========================================================================
     // Per-slot UV transforms (KHR_texture_transform)

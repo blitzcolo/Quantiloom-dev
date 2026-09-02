@@ -85,7 +85,10 @@ struct KeyFixture {
     glm::vec3 exchangeSun{0.3f, 0.8f, 0.1f};
     String gpu = "TestGPU|4318|8712|123456";
     String stepper = "CPU Crank-Nicolson";
-    String version = "0.2.7";
+    // Deliberately not a version this library has: the mutations below have to
+    // change the key, and a release that happens to match the fixture's default
+    // would turn one of them into a no-op.
+    String version = "0.0.0-fixture";
 
     KeyFixture() {
         ThermalElement a;
@@ -416,8 +419,12 @@ TEST(ThermalSolveCacheKey, EveryMaterialFieldChangesIt) {
         // measured IR curve, not from the TOML, and is worth 0.4 K.
         [](ThermalMaterial& m) { m.longwaveEmissivity += 0.01f; },
         [](ThermalMaterial& m) { m.wetnessFactor += 0.1f; },
+        [](ThermalMaterial& m) { m.internalHeat_W_m2 += 10.0f; },
         [](ThermalMaterial& m) { m.interiorBoundary = InteriorBoundary::FixedTemperature; },
+        [](ThermalMaterial& m) { m.interiorBoundary = InteriorBoundary::AmbientInterior; },
         [](ThermalMaterial& m) { m.interiorTemperature_K += 1.0f; },
+        [](ThermalMaterial& m) { m.interiorConvection_W_m2K += 1.0f; },
+        [](ThermalMaterial& m) { m.isShell = !m.isShell; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {
@@ -448,6 +455,13 @@ TEST(ThermalSolveCacheKey, EveryConfigScalarChangesIt) {
         [](ThermalConfig& c) { c.skyTemperature_K = 260.0; },
         [](ThermalConfig& c) { c.relativeHumidity = 80.0; },
         [](ThermalConfig& c) { c.sunCorrection = false; },
+        [](ThermalConfig& c) { c.convection.model = ConvectionModel::Wind; },
+        [](ThermalConfig& c) { c.convection.windIntercept_W_m2K = 6.0; },
+        [](ThermalConfig& c) { c.convection.windSlope_W_s_m3K = 4.0; },
+        [](ThermalConfig& c) { c.convection.freeCoefficient = 1.6; },
+        [](ThermalConfig& c) { c.convection.referenceHeight_m = 10.0; },
+        [](ThermalConfig& c) { c.convection.stableDamping = 5.0; },
+        [](ThermalConfig& c) { c.lateralConduction = true; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {
@@ -478,8 +492,8 @@ TEST(ThermalSolveCacheKey, ProvenanceChangesIt) {
     EXPECT_NE(fixture.Key(), before) << "f32 and f64 steppers must not share an entry";
 
     fixture = KeyFixture();
-    fixture.version = "0.2.7";
-    EXPECT_NE(fixture.Key(), before);
+    fixture.version = "0.3.0";
+    EXPECT_NE(fixture.Key(), before) << "a library version is part of the entry";
 }
 
 TEST(ThermalSolveCacheKey, GpuIdentityStopsAtTheFirstNul) {

@@ -51,7 +51,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
     # Define project only for standalone builds
     project(libQuantiloomTests
-        VERSION 0.2.7
+        VERSION 0.3.0
         DESCRIPTION "libQuantiloom Unit Tests"
         LANGUAGES CXX
     )
@@ -220,6 +220,9 @@ set(TEST_CORE_SOURCES
     test_core/test_shortwave_gains.cpp
     test_core/test_thermal_conduction.cpp
     test_core/test_thermal_convection_forcing.cpp
+    test_core/test_thermal_lateral.cpp
+    test_core/test_thermal_shell.cpp
+    test_core/test_thermal_parameter_sensitivity.cpp
     test_core/test_thermal_element_dump.cpp
     test_core/test_thermal_sun_sensitivity.cpp
     test_core/test_thermal_timeline.cpp

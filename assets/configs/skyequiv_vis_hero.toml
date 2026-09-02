@@ -1,0 +1,58 @@
+# Open-sky equivalence check, visible band -- the switching arm.
+#
+# The same unobstructed ground plane as skyequiv_swir.toml, where every
+# environment bounce ray escapes to the sky and the traced correction is
+# identically zero. In SWIR that leaves a closed form to compare against. In
+# the visible band the reflectance is an upsampled spectrum rather than
+# 1 - emissivity, so there is no closed form to write down; what the two modes
+# have instead is each other.
+#
+# vis_fused renders this scene with no variance at all: the residual is zero
+# per wavelength, the sky and sun are analytic, and the plane is uniform, so
+# every pixel is the same number. vis_hero draws a quartet per sample, so its
+# pixels differ by which wavelengths they drew -- that spread must fall as
+# 1/sqrt(spp) and its mean must land on the deterministic answer. A residual
+# that is not exactly zero shows up as a spread that stops falling.
+#
+# Geometry: python scripts/utils/generate_shadow_scene.py
+# Check:    scripts/render-tests/check_sky_equiv.py, --reference and --max-spread
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+seed = 12345
+output = "skyequiv_vis_hero_output.exr"
+
+[spectral]
+mode = "vis_hero"
+band = "VIS"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/flat_sun_sky.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

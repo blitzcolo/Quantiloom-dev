@@ -88,9 +88,9 @@ void main(inout Payload payload) {
     // Choose sky radiance based on spectral mode
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
-        payload.radiance = lut.skyRadiance_rgb;
+        payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
+    } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
         // ================================================================
         // VIS_FUSED mode: 32-wavelength spectral integration
         // ================================================================
@@ -116,10 +116,26 @@ void main(inout Payload payload) {
         // A ray past a dispersive refraction carries one wavelength; it must
         // bring back that wavelength's sky radiance and no more, or the caller
         // weights the whole band by a single cmf(λ_h) and the sky arrives
-        // hundreds of times too bright.
-        const bool heroRay = (payload.heroLambda > 0.0);
-        const uint sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
+        // hundreds of times too bright. A quartet brings back four, unweighed,
+        // for the same reason and by the same contract.
+        //
+        // Nothing is drawn here. A primary ray that reaches the sky is answered
+        // by the deterministic grid whichever mode is running: the sky is
+        // analytic, and four samples of an analytic function are worse than
+        // thirty-two evaluations of it for the same cost in rays, which is
+        // none.
+        const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+        const bool carriesQuartet = heroMode && (payload.heroLambda > 0.0);
+        const bool heroRay = heroMode ? (payload.heroLambda < 0.0)
+                                      : (payload.heroLambda > 0.0);
+        const float heroLambdaAbs = abs(payload.heroLambda);
+        const float4 quartet = carriesQuartet ? QuartetLambdas(payload.heroLambda)
+                                              : float4(0.0, 0.0, 0.0, 0.0);
+        const uint sampleCount = heroRay ? 1u
+                               : (carriesQuartet ? VIS_HERO_QUARTET
+                                                 : NUM_WAVELENGTH_SAMPLES);
         float heroRadiance = 0.0;
+        float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
 
         // The sky's fallback chroma does not depend on wavelength, so it is
         // fitted once rather than at every sample.
@@ -127,8 +143,9 @@ void main(inout Payload payload) {
             FetchRgbIlluminant(rgbToSpectrumTable, lut.skyRadiance_rgb);
 
         for (uint i = 0; i < sampleCount; ++i) {
-            float lambda = heroRay ? payload.heroLambda
-                                   : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP);
+            float lambda = heroRay ? heroLambdaAbs
+                         : (carriesQuartet ? quartet[min(i, VIS_HERO_QUARTET - 1u)]
+                                           : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP));
 
             // Matching functions and D65 in one fetch; both are needed below.
             float4 cieSample = SampleCIE_LUT(cieCMF_LUT, lambda);
@@ -153,6 +170,15 @@ void main(inout Payload payload) {
                 heroRadiance = sky_radiance_lambda;   // scalar, caller weights it
                 continue;
             }
+            if (carriesQuartet) {
+                // Four scalars, unweighed: the vertex that drew them weights
+                // them, and it is the only one that knows the density.
+                if      (i == 0u) quadRadiance.x = sky_radiance_lambda;
+                else if (i == 1u) quadRadiance.y = sky_radiance_lambda;
+                else if (i == 2u) quadRadiance.z = sky_radiance_lambda;
+                else              quadRadiance.w = sky_radiance_lambda;
+                continue;
+            }
 
             // Riemann sum: XYZ += L(λ) × CMF(λ) × Δλ
             XYZ_accum.x += sky_radiance_lambda * x_bar * LAMBDA_STEP;
@@ -164,7 +190,7 @@ void main(inout Payload payload) {
         XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
-        payload.radiance = ConvertXYZToLinearRGB(XYZ_accum);
+        payload.radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
 
         // Apply chromaticity correction (consistent with closesthit)
         payload.radiance.r *= lut.chromaR_correction;
@@ -173,12 +199,15 @@ void main(inout Payload payload) {
         // After the correction, for the reason given in closesthit.rchit: it
         // scales R and B against G and would turn one scalar into three.
         if (heroRay) {
-            payload.radiance = float3(heroRadiance, heroRadiance, heroRadiance);
+            payload.radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
+        }
+        if (carriesQuartet) {
+            payload.radiance = quadRadiance;
         }
 
         // Validation
-        if (!isfinite(payload.radiance.r) || !isfinite(payload.radiance.g) || !isfinite(payload.radiance.b)) {
-            payload.radiance = float3(0.0, 0.0, 0.0);
+        if (any(!isfinite(payload.radiance))) {
+            payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         }
         payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
 
@@ -196,7 +225,7 @@ void main(inout Payload payload) {
             radiance_spectral = lut.skyRadiance_spectral;
         }
 
-        payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
         // ================================================================
         // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
@@ -265,7 +294,7 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ================================================================
@@ -331,7 +360,7 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
@@ -428,13 +457,13 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else {
         // ================================================================
         // Fallback: Unknown mode (MULTISPECTRAL TBD, etc.)
         // ================================================================
         float radiance_spectral = lut.skyRadiance_spectral;
-        payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     }
 }

@@ -234,6 +234,19 @@ struct ResolvedMaterialSpectra {
     /// rewrite is the reason this is resolved here and not in the shader.
     std::unordered_map<String, i32> materialNameToEmissiveCurve;
 
+    /// Rank-one fluorescence, both indices pointing into the same `curves`.
+    /// Present only when the pair and a nonzero yield were all bound, since
+    /// any one of the three alone describes nothing. Unlike the emission map
+    /// above, nothing here touches emissiveFactor: a fluorescent surface emits
+    /// only what something else lit it with, so it is not a light to sample
+    /// toward, and entering it in the emitter CDF would have next-event
+    /// estimation aim at a surface that is dark on its own.
+    struct FluorescenceSlots {
+        i32 excitationCurve = -1;
+        i32 emissionCurve = -1;
+    };
+    std::unordered_map<String, FluorescenceSlots> materialNameToFluorescence;
+
     Vector<ComplexRefractiveIndexGPU> refractiveIndices;
     std::unordered_map<String, i32> materialNameToRefractiveIndex;
 
@@ -350,6 +363,61 @@ struct ResolvedEmission {
  */
 Result<ResolvedEmission, String> ResolveEmissionSpectrum(
     const EmissionBindingRequest& request, const String& baseDir);
+
+/**
+ * @brief What a material declares about the light it absorbs and gives back at
+ *        another wavelength.
+ *
+ * Rank one: an excitation shape, an emission shape and a scalar yield. Both
+ * front ends hand the samples here already loaded -- a TOML resolves its paths
+ * against the config directory and a glTF against its own -- so that the
+ * normalisation and the energy rules below have exactly one implementation.
+ */
+struct FluorescenceBindingRequest {
+    /// (nm, fraction) pairs. Dimensionless and in [0, 1]: the share of arriving
+    /// light this channel takes at each wavelength.
+    Vector<std::pair<f32, f32>> excitationSamples;
+    /// (nm, value) pairs in any scale. Only the shape is used; the level is
+    /// normalised away, because the yield is what says how much comes back.
+    Vector<std::pair<f32, f32>> emissionSamples;
+    /// Quantum yield, in [0, 1].
+    f32 yield = 0.0f;
+    /// The band being rendered. Both curves are resampled onto it, and the
+    /// emission is normalised to unit area over it.
+    f32 bandMinNm = 400.0f;
+    f32 bandMaxNm = 780.0f;
+    /// For the messages, so a warning names the material it is about.
+    String materialName;
+};
+
+/// One bound fluorescent pair, on the band grid the shader reads.
+struct ResolvedFluorescence {
+    /// ex(lambda), dimensionless, clamped to the band.
+    SpectralCurveGPU excitation;
+    /// em(lambda), a density per nm: it integrates to 1 over the band, so
+    /// `yield` alone carries the strength and the two cannot double-count it.
+    SpectralCurveGPU emission;
+    f32 yield = 0.0f;
+    /// What the emission samples summed to before normalisation, over the band.
+    /// Reported rather than used: a curve whose support is mostly outside the
+    /// band loses most of itself to the clamp, and the number says how much.
+    f32 emissionAreaInBand = 0.0f;
+    /// Not errors. The render proceeds and these are the things that make it
+    /// mean less than it looks like it does.
+    Vector<String> warnings;
+};
+
+/**
+ * @brief Normalise and validate one material's fluorescent pair.
+ *
+ * Rejects a yield outside [0, 1] and an excitation outside [0, 1]: those are
+ * not a bright material but a broken one, and a renderer that accepted them
+ * would report more light leaving a surface than arrived at it. Whether the
+ * REFLECTED and re-emitted shares together exceed one is a question about the
+ * material's reflectance as well, so it is asked by the caller, which has it.
+ */
+Result<ResolvedFluorescence, String> ResolveFluorescence(
+    const FluorescenceBindingRequest& request);
 
 /**
  * @brief The illuminant, resolved from what a scene declares about it.

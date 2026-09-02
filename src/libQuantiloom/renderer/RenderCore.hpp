@@ -485,6 +485,13 @@ struct MaterialGpuIndices {
     // lighting.solar_lut: the only path by which a light in the scene is
     // described by data rather than by an RGB triple expanded through D65.
     i32 emissiveRadianceCurve = -1;
+
+    // Fluorescence, rank one: what the surface absorbs into the fluorescent
+    // channel, and what it gives back. Both or neither -- one alone is a shape
+    // with no partner and the material does not fluoresce. The yield rides on
+    // the Material itself rather than here, being a scalar and not an index.
+    i32 fluorescenceExcitationCurve = -1;
+    i32 fluorescenceEmissionCurve = -1;
 };
 
 /**
@@ -505,7 +512,9 @@ struct MaterialGpuIndices {
                               material.sheenReflectanceCurveIndex,
                               material.clearcoatReflectanceCurveIndex,
                               material.diffuseTransmissionColorCurveIndex,
-                              material.emissiveRadianceCurveIndex};
+                              material.emissiveRadianceCurveIndex,
+                              material.fluorescenceExcitationCurveIndex,
+                              material.fluorescenceEmissionCurveIndex};
 }
 
 /**
@@ -592,6 +601,7 @@ struct PipelineBindings {
     /// bound; one zeroed record when there is no solve, which the header's
     /// w = 0 turns off.
     const GpuBuffer* thermalSunResponse = nullptr;
+    const GpuBuffer* thermalParameterTangent = nullptr;
 };
 
 /**

@@ -215,6 +215,19 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 
     loadedScene = sceneResult.value();
 
+    // The camera and the resolution the config asked for, onto the scene.
+    //
+    // Every mode but one reads them off `resolved` and never looks at the
+    // Scene's copies, which is why those copies sat at their defaults --
+    // rendercore::LoadSceneFromConfig loads geometry and nothing else. The
+    // exception is the hyperspectral path: BatchRenderer takes a `Scene&` and
+    // reads `scene.camera`, `scene.width` and `scene.height` from it. So a
+    // cube was rendered at 1280x720 from the default camera while the log
+    // above printed the resolution the config asked for, and the run exited 0.
+    loadedScene.camera = resolved.camera;
+    loadedScene.width = resolved.width;
+    loadedScene.height = resolved.height;
+
     // A procedural scene brings no materials of its own; material.albedo is
     // what the config offered for that case.
     if (loadedScene.materials.empty()) {
@@ -280,9 +293,13 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // "no solve" is one inert record rather than no descriptor.
     auto uploadSunResponse = [&](const Vector<f32>& sensitivity,
                                  const Vector<f32>& visibility,
-                                 const glm::vec3& sunDirection) {
-        const auto records = rendercore::MakeThermalSunResponse(sensitivity, visibility,
-                                                                sunDirection);
+                                 const glm::vec3& sunDirection,
+                                 const Vector<f32>& lagSensitivity = {},
+                                 const Vector<f32>& lagVisibility = {},
+                                 const Vector<glm::vec3>& lagDirection = {}) {
+        const auto records = rendercore::MakeThermalSunResponse(
+            sensitivity, visibility, sunDirection, lagSensitivity, lagVisibility,
+            lagDirection);
         const usize bytes = records.size() * sizeof(rendercore::ThermalSunResponseGpu);
         thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
             context.GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -393,7 +410,8 @@ void OfflineRenderer::Impl::RunThermalSolver() {
                     cached->surfaceTemperature_K.data(),
                     cached->surfaceTemperature_K.size() * sizeof(f32));
                 uploadSunResponse(cached->sunSensitivity_K, cached->sunVisibility,
-                                  cached->sunDirection);
+                                  cached->sunDirection, cached->lagSensitivity_K,
+                                  cached->lagVisibility, cached->lagDirection);
                 geometry.SetThermalElementBases(cached->instanceElementBase);
                 return;
             }
@@ -456,7 +474,11 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     }
 
     // Only reachable with an empty error, so a failed solve is never stored.
-    if (cacheEligible && !cacheKey.empty()) {
+    // Nor is one carrying material-parameter tangents: the entry format does
+    // not hold them -- they are a diagnostic output rather than something the
+    // render reads -- and an entry that came back without them would be a
+    // silently incomplete answer to a run that asked.
+    if (cacheEligible && !cacheKey.empty() && result.parameters.empty()) {
         thermal::StoreThermalSolveCache(cacheFile, cacheKey, result);
     }
 
@@ -465,7 +487,8 @@ void OfflineRenderer::Impl::RunThermalSolver() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     thermalTemperatureBuffer->Upload(result.surfaceTemperature_K.data(),
                                      result.surfaceTemperature_K.size() * sizeof(f32));
-    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection);
+    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection,
+                      result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.
@@ -696,6 +719,14 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             QL_LOG_INFO("  Material '{}': using diffuse transmission curve index {}",
                         mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToFluorescence.find(mat.name);
+            it != spectra.materialNameToFluorescence.end()) {
+            slots.fluorescenceExcitationCurve = it->second.excitationCurve;
+            slots.fluorescenceEmissionCurve = it->second.emissionCurve;
+            QL_LOG_INFO("  Material '{}': fluorescing, excitation curve {} and "
+                        "emission curve {}",
+                        mat.name, it->second.excitationCurve, it->second.emissionCurve);
+        }
 
         materialIndices.push_back(slots);
     }
@@ -828,6 +859,9 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     cameraData.wavelength_nm = params.wavelengthNm;         // Override with config wavelength
     cameraData.spectral_mode = static_cast<u32>(params.mode);  // Set rendering mode
     cameraData.debug_mode = static_cast<u32>(resolved.debugMode);
+    // Nothing in a config selects a debug view's parameter; the offline
+    // path renders slot zero, which is the whole-day response.
+    cameraData.debugParam = 0;
     pipeline->SetCameraData(cameraData);
 
     pipeline->SetSpecConstants(
@@ -1015,6 +1049,8 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
         hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BIP;
     } else if (formatStr == "geotiff" || formatStr == "GeoTIFF") {
         hsConfig.outputFormat = HyperspectralOutputFormat::GeoTIFF;
+    } else if (formatStr == "exr_spectral" || formatStr == "exr" || formatStr == "EXR") {
+        hsConfig.outputFormat = HyperspectralOutputFormat::EXR_Spectral;
     } else {
         QL_LOG_WARN("Unknown hyperspectral format '{}', using ENVI_BSQ", formatStr);
         hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BSQ;
@@ -1073,8 +1109,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
         QL_LOG_INFO("  Total render time: {:.2f} seconds", hsRenderer.GetLastRenderTime());
         QL_LOG_INFO("  Average time per band: {:.3f} seconds", hsRenderer.GetAverageTimePerBand());
 
-        // Output is already written by HyperspectralRenderer::Render()
-        QL_LOG_INFO("  Output written to: {}.hdr/.dat", hsConfig.outputPath);
+        // Output is already written by HyperspectralRenderer::Render(), under
+        // whichever extensions its format uses.
+        const char* extensions = ".hdr/.dat";
+        switch (hsConfig.outputFormat) {
+            case HyperspectralOutputFormat::GeoTIFF:     extensions = ".tif"; break;
+            case HyperspectralOutputFormat::EXR_Spectral: extensions = ".exr"; break;
+            default: break;
+        }
+        QL_LOG_INFO("  Output written to: {}{}", hsConfig.outputPath, extensions);
     } else {
         output.error = String("Hyperspectral rendering failed: ") +
                        HyperspectralStatusToString(status);
@@ -1266,6 +1309,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     } else if (params.mode == SpectralMode::VIS_Fused) {
         img.metadata["quality_level"] = "SPECTRAL";
         img.metadata["note"] = "32-wavelength spectral integration";
+    } else if (params.mode == SpectralMode::VIS_Hero) {
+        img.metadata["quality_level"] = "SPECTRAL";
+        img.metadata["note"] = "hero-wavelength spectral sampling";
     } else if (spectra.rgbUpsampledMaterials > 0) {
         img.metadata["quality_level"] = "PREVIEW_ONLY";
         img.metadata["warning"] =

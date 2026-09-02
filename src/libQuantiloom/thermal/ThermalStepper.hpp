@@ -69,6 +69,64 @@ public:
                           const SunVisibilityTable& sunTable,
                           std::span<const ThermalBatchStep> steps);
 
+    /// Which convection correlation this stepper evaluates. The default is the
+    /// constant one, which is what an implementation that has not been taught
+    /// the others honestly reports. The host compares it against what the
+    /// config asked for and picks a stepper that matches, rather than letting a
+    /// step quietly use a different h -- that would be a wrong trajectory
+    /// rather than a slower one.
+    [[nodiscard]] virtual ConvectionLaw Convection() const { return {}; }
+
+    /// Whether this stepper evaluates ExchangeGeometry::lateral. False is the
+    /// honest answer for an implementation that has not been taught it, and
+    /// the host picks one that has rather than letting the rows be ignored.
+    [[nodiscard]] virtual bool CarriesLateralConduction() const { return false; }
+
+    /// Whether it integrates the per-column lag tangents, and the material
+    /// parameter tangents, beside the temperature.
+    ///
+    /// These matter more than they look. The state is sized by the DESC, not
+    /// by the stepper, so an implementation that does not integrate them still
+    /// receives the vectors and leaves them at zero -- and zero is a
+    /// derivative, not an absence. A shading pass would then trace a shadow
+    /// against a response of nothing, and a what-if preview would predict that
+    /// no slider changes anything. The host asks first and picks a stepper
+    /// that answers yes, for the same reason it does for the convection law.
+    [[nodiscard]] virtual bool CarriesLagSensitivity() const { return false; }
+    [[nodiscard]] virtual bool CarriesParameterSensitivity() const { return false; }
+
+    /// Whether it solves a thin shell as one column exposed on both sides.
+    /// False is honest for one that gives every triangle its own slab, and the
+    /// host picks one that does not -- a shell solved as two independent slabs
+    /// puts a panel in the sun at the temperature it would have with its back
+    /// against a wall.
+    [[nodiscard]] virtual bool CarriesShells() const { return false; }
+
+    /**
+     * @brief Decompose one element's surface balance at the state it is in
+     *
+     * A query rather than a side effect of stepping: it reads the state and
+     * changes nothing, so a probe can ask about any element at any replayed
+     * hour without the trajectory being aware it was asked. What it must NOT
+     * be is a second reading of the balance -- an implementation answers this
+     * from the same code its own step uses, or it declines.
+     *
+     * @return false when this stepper does not decompose its own balance, in
+     *         which case @p out is untouched. Declining is the honest answer,
+     *         and a caller has to say so rather than show six zeros as if they
+     *         were fluxes.
+     */
+    [[nodiscard]] virtual bool SurfaceFluxesAt(const ThermalState& /*state*/,
+                                               const Vector<ThermalElement>& /*elements*/,
+                                               const Vector<ThermalMaterial>& /*materials*/,
+                                               const ExchangeGeometry& /*exchange*/,
+                                               const ThermalForcing& /*forcing*/,
+                                               const ShortwaveSample& /*shortwave*/,
+                                               u32 /*element*/,
+                                               SurfaceFluxes& /*out*/) const {
+        return false;
+    }
+
     /// For the log line that says which one ran -- and for the solve cache,
     /// which keys on it: two steppers give answers that differ in the last
     /// bits, so an entry is only valid for the one that produced it. Renaming

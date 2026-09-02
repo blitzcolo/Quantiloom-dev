@@ -1,0 +1,10 @@
+# Gives it all back, spread evenly over the band. Paired with the total
+# absorber and a yield of 1, a surface with these two must return exactly the
+# irradiance it received: em normalises to 1/380 per nm, so
+#   yield * em(lambda) * INTEGRAL 1 * E dlambda / pi  =  E / pi
+# at every wavelength, which is the closed form check_fluorescence.py holds it
+# to. It is also the case that found the normalisation reading the band one
+# grid step too wide.
+# wavelength_nm,emission
+400.0,1.0
+780.0,1.0

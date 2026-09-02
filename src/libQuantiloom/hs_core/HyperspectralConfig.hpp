@@ -36,7 +36,7 @@ enum class HyperspectralOutputFormat : u32 {
     ENVI_BIL,       ///< ENVI Band Interleaved by Line
     ENVI_BIP,       ///< ENVI Band Interleaved by Pixel
     GeoTIFF,        ///< Multi-band GeoTIFF (supports up to 65535 bands)
-    EXR_Multipart   ///< OpenEXR multipart (one part per band)
+    EXR_Spectral    ///< OpenEXR, one channel per band (Fichet et al. 2021 layout)
 };
 
 // ============================================================================

@@ -9,6 +9,26 @@
 
 namespace quantiloom::thermal {
 
+const char* ThermalParameterName(const ThermalParameter parameter) {
+    switch (parameter) {
+        case ThermalParameter::Convection:   return "h";
+        case ThermalParameter::Emissivity:   return "epsilon";
+        case ThermalParameter::Absorptivity: return "alpha";
+        case ThermalParameter::Conductivity: return "k";
+        case ThermalParameter::HeatCapacity: return "rhoc";
+        case ThermalParameter::Count:        break;
+    }
+    return "";
+}
+
+ThermalParameter ThermalParameterFromName(const StringView name) {
+    for (u8 i = 0; i < static_cast<u8>(ThermalParameter::Count); ++i) {
+        const auto parameter = static_cast<ThermalParameter>(i);
+        if (name == ThermalParameterName(parameter)) return parameter;
+    }
+    return ThermalParameter::Count;
+}
+
 void SunVisibilityTable::SampleIndices(const f64 t, usize& a, usize& b,
                                        f64& blend) const {
     const usize K = sampleTime_h.size();

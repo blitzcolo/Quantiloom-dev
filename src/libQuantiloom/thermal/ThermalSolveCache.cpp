@@ -26,13 +26,13 @@ namespace {
 
 /// Bumped when the *list* of hashed inputs changes -- adding a field would
 /// otherwise leave every existing entry addressable under a new meaning.
-constexpr u32 kKeySchemaVersion = 1u;
+constexpr u32 kKeySchemaVersion = 3u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
 /// Bumped when the file layout below changes. Independent of the key schema:
 /// one describes what an entry means, the other how it is written down.
-constexpr u32 kCacheFormatVersion = 1u;
+constexpr u32 kCacheFormatVersion = 2u;
 
 constexpr usize kKeyHexLength = 64;
 
@@ -46,6 +46,12 @@ struct CacheHeader {
     u64 instanceBaseCount = 0;
     u64 sensitivityCount = 0;
     u64 visibilityCount = 0;
+    /// Per-column tangents: how many columns, and the two slot-major arrays'
+    /// lengths. Zero slots is an entry from a run that carried none.
+    u64 lagSlots = 0;
+    u64 lagSensitivityCount = 0;
+    u64 lagVisibilityCount = 0;
+    u64 lagDirectionCount = 0;
     f32 sunDirection[3] = {0.0f, 0.0f, 0.0f};
     u32 elementCount = 0;
     u32 participatingElements = 0;
@@ -87,6 +93,10 @@ String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
     hasher.UpdateU64(header.instanceBaseCount);
     hasher.UpdateU64(header.sensitivityCount);
     hasher.UpdateU64(header.visibilityCount);
+    hasher.UpdateU64(header.lagSlots);
+    hasher.UpdateU64(header.lagSensitivityCount);
+    hasher.UpdateU64(header.lagVisibilityCount);
+    hasher.UpdateU64(header.lagDirectionCount);
     hasher.UpdateF32(header.sunDirection[0]);
     hasher.UpdateF32(header.sunDirection[1]);
     hasher.UpdateF32(header.sunDirection[2]);
@@ -107,6 +117,9 @@ String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
     feed(result.instanceElementBase);
     feed(result.sunSensitivity_K);
     feed(result.sunVisibility);
+    feed(result.lagSensitivity_K);
+    feed(result.lagVisibility);
+    feed(result.lagDirection);
     return hasher.FinalizeHex();
 }
 
@@ -199,8 +212,14 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
         hasher.UpdateF32(material.shortwaveAbsorptivity);
         hasher.UpdateF32(material.longwaveEmissivity);
         hasher.UpdateF32(material.wetnessFactor);
+        hasher.UpdateF32(material.internalHeat_W_m2);
         hasher.UpdateU8(static_cast<u8>(material.interiorBoundary));
         hasher.UpdateF32(material.interiorTemperature_K);
+        hasher.UpdateF32(material.interiorConvection_W_m2K);
+        // Changes what the mesh pairs and how the back row is written, so it
+        // changes the trajectory even when nothing else about the material
+        // moved.
+        hasher.UpdateBool(material.isShell);
     }
 
     // 5. The [thermal] scalars. Not dumpElementsFile (an output), not enabled
@@ -224,6 +243,25 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     hasher.UpdateF64(config.skyTemperature_K);
     hasher.UpdateF64(config.relativeHumidity);
     hasher.UpdateBool(config.sunCorrection);
+    hasher.UpdateU8(static_cast<u8>(config.convection.model));
+    hasher.UpdateF64(config.convection.windIntercept_W_m2K);
+    hasher.UpdateF64(config.convection.windSlope_W_s_m3K);
+    hasher.UpdateF64(config.convection.freeCoefficient);
+    hasher.UpdateF64(config.convection.referenceHeight_m);
+    hasher.UpdateF64(config.convection.stableDamping);
+    // The flag alone: the conductances it produces are a deterministic
+    // function of the element bytes and the material table, and both are
+    // already in this key above.
+    hasher.UpdateBool(config.lateralConduction);
+    hasher.UpdateU32(config.sunMemoryLags);
+    // A run that asked for parameter tangents is not the same run: its entry
+    // is deliberately never stored (they are a diagnostic the format does not
+    // carry), so keying on them is what keeps one from being served an entry
+    // that has none.
+    hasher.UpdateU64(config.parameterSensitivities.size());
+    for (const ThermalParameter parameter : config.parameterSensitivities) {
+        hasher.UpdateU8(static_cast<u8>(parameter));
+    }
 
     // 6. The lighting sun direction, which is what the exchange traces sun
     //    visibility against -- a separate field from config.sunDirection.
@@ -259,6 +297,8 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
          static_cast<usize>(in.gcount()) == kKeyHexLength) &&
         ReadPod(in, header.temperatureCount) && ReadPod(in, header.instanceBaseCount) &&
         ReadPod(in, header.sensitivityCount) && ReadPod(in, header.visibilityCount) &&
+        ReadPod(in, header.lagSlots) && ReadPod(in, header.lagSensitivityCount) &&
+        ReadPod(in, header.lagVisibilityCount) && ReadPod(in, header.lagDirectionCount) &&
         ReadPod(in, header.sunDirection) && ReadPod(in, header.elementCount) &&
         ReadPod(in, header.participatingElements) && ReadPod(in, header.exchangeNonZeros) &&
         ReadPod(in, header.stepsTaken) && ReadPod(in, header.minTemperature_K) &&
@@ -295,7 +335,10 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
     const bool countsSane =
         elements > 0 && header.temperatureCount == elements &&
         (header.sensitivityCount == 0 || header.sensitivityCount == elements) &&
-        (header.visibilityCount == 0 || header.visibilityCount == elements);
+        (header.visibilityCount == 0 || header.visibilityCount == elements) &&
+        header.lagSensitivityCount == header.lagSlots * elements &&
+        header.lagVisibilityCount == header.lagSlots * elements &&
+        header.lagDirectionCount == header.lagSlots;
     if (!countsSane) {
         QL_LOG_WARN("  Thermal cache: {} has inconsistent element counts; solving instead",
                     file.string());
@@ -310,6 +353,10 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
     result.instanceElementBase.resize(static_cast<usize>(header.instanceBaseCount));
     result.sunSensitivity_K.resize(static_cast<usize>(header.sensitivityCount));
     result.sunVisibility.resize(static_cast<usize>(header.visibilityCount));
+    result.lagSlots = static_cast<u32>(header.lagSlots);
+    result.lagSensitivity_K.resize(static_cast<usize>(header.lagSensitivityCount));
+    result.lagVisibility.resize(static_cast<usize>(header.lagVisibilityCount));
+    result.lagDirection.resize(static_cast<usize>(header.lagDirectionCount));
 
     const auto readArray = [&in](auto& vec) {
         if (vec.empty()) {
@@ -321,7 +368,9 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
         return in.gcount() == bytes;
     };
     if (!readArray(result.surfaceTemperature_K) || !readArray(result.instanceElementBase) ||
-        !readArray(result.sunSensitivity_K) || !readArray(result.sunVisibility)) {
+        !readArray(result.sunSensitivity_K) || !readArray(result.sunVisibility) ||
+        !readArray(result.lagSensitivity_K) || !readArray(result.lagVisibility) ||
+        !readArray(result.lagDirection)) {
         QL_LOG_WARN("  Thermal cache: {} is truncated; solving instead", file.string());
         return std::nullopt;
     }
@@ -386,6 +435,10 @@ bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex
         header.instanceBaseCount = result.instanceElementBase.size();
         header.sensitivityCount = result.sunSensitivity_K.size();
         header.visibilityCount = result.sunVisibility.size();
+        header.lagSlots = result.lagSlots;
+        header.lagSensitivityCount = result.lagSensitivity_K.size();
+        header.lagVisibilityCount = result.lagVisibility.size();
+        header.lagDirectionCount = result.lagDirection.size();
         header.sunDirection[0] = result.sunDirection.x;
         header.sunDirection[1] = result.sunDirection.y;
         header.sunDirection[2] = result.sunDirection.z;
@@ -404,6 +457,10 @@ bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex
         WritePod(out, header.instanceBaseCount);
         WritePod(out, header.sensitivityCount);
         WritePod(out, header.visibilityCount);
+        WritePod(out, header.lagSlots);
+        WritePod(out, header.lagSensitivityCount);
+        WritePod(out, header.lagVisibilityCount);
+        WritePod(out, header.lagDirectionCount);
         WritePod(out, header.sunDirection);
         WritePod(out, header.elementCount);
         WritePod(out, header.participatingElements);
@@ -425,6 +482,9 @@ bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex
         writeArray(result.instanceElementBase);
         writeArray(result.sunSensitivity_K);
         writeArray(result.sunVisibility);
+        writeArray(result.lagSensitivity_K);
+        writeArray(result.lagVisibility);
+        writeArray(result.lagDirection);
 
         const String digest = DigestEntry(header, result);
         out.write(digest.data(), kKeyHexLength);

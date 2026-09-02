@@ -32,6 +32,7 @@ public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
 public: bool quantiloom::Material::HasAnisotropy(void)const
 public: bool quantiloom::Material::HasClearcoat(void)const
 public: bool quantiloom::Material::HasDiffuseTransmission(void)const
+public: bool quantiloom::Material::HasFluorescence(void)const
 public: bool quantiloom::Material::HasIRData(void)const
 public: bool quantiloom::Material::HasQuantiloomRef(void)const
 public: bool quantiloom::Material::HasSheen(void)const
@@ -57,6 +58,7 @@ public: class quantiloom::Result<class std::basic_string<char,struct std::char_t
 public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredString(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::DumpThermalElements(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetMaterialEmissionSpectrum(unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<class std::vector<float,class std::allocator<float> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::GetThermalParameterSensitivity(enum quantiloom::ThermalSensitivityParameter)const
 public: class quantiloom::Result<double,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<double>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<float>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<float,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredFloat(class std::basic_string_view<char,struct std::char_traits<char> >)const
@@ -67,9 +69,11 @@ public: class quantiloom::Result<struct glm::vec<4,float,0>,class std::basic_str
 public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureDisplayImage(void)
 public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureScreenshot(void)
 public: class quantiloom::Result<struct quantiloom::PickResult,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Pick(unsigned int,unsigned int)
+public: class quantiloom::Result<struct quantiloom::ThermalElementTrajectory,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::GetElementTrajectory(unsigned int,double,double,unsigned int)
 public: class quantiloom::Result<unsigned __int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::DuplicateNode(unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::ThermalElementAt(struct quantiloom::PickResult const &)const
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadEnvironmentMap(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadScene(class quantiloom::Config const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromConfig(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
@@ -77,6 +81,7 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetSolarSpectralLUTFromSpec(struct quantiloom::SolarLutSpec const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalTime(double)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalWhatIf(enum quantiloom::ThermalSensitivityParameter,double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::RegisterTool(struct quantiloom::mcp::ToolDef const &)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
@@ -221,6 +226,7 @@ public: void quantiloom::ExternalRenderContext::SetCameraLookAt(struct glm::vec<
 public: void quantiloom::ExternalRenderContext::SetCameraProjection(enum quantiloom::CameraProjection,float)
 public: void quantiloom::ExternalRenderContext::SetCameraViewMatrix(struct glm::mat<4,4,float,0> const &)
 public: void quantiloom::ExternalRenderContext::SetDebugMode(enum quantiloom::DebugVisualizationMode)
+public: void quantiloom::ExternalRenderContext::SetDebugParameter(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetDisplayEnhancementParams(struct quantiloom::DisplayEnhancementParams const &)
 public: void quantiloom::ExternalRenderContext::SetGPUSensorEnabled(bool)
 public: void quantiloom::ExternalRenderContext::SetGPUSensorParams(struct quantiloom::SensorParams const &)

@@ -802,6 +802,69 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     }
 
     // ========================================================================
+    // QUANTILOOM_materials_fluorescence extension
+    // ========================================================================
+    // Light absorbed at one wavelength and given back at another, rank one:
+    //   "extensions": {
+    //     "QUANTILOOM_materials_fluorescence": {
+    //       "excitationCurve": "path/to/excitation.csv",
+    //       "emissionCurve": "path/to/emission.csv",
+    //       "yield": 0.6
+    //     }
+    //   }
+    //
+    // Paths resolve against the glTF's own directory, which is why the curves
+    // are read here rather than passed along as strings; the normalisation and
+    // the energy rules are ResolveFluorescence's, so both this and the TOML
+    // keys reach one implementation. What lands on the material is samples, and
+    // ResolveMaterialSpectra turns them into curve indices.
+    //
+    // No emissiveFactor is written, deliberately. A fluorescent surface emits
+    // only what something else lit it with, and the emitter-sampling table
+    // collects triangles by luminance(emissiveFactor): a triple here would put
+    // this surface in that table and have next-event estimation aim at a light
+    // that is dark on its own.
+    if (auto fluoIt = gltfMaterial.extensions.find("QUANTILOOM_materials_fluorescence");
+        fluoIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading QUANTILOOM_materials_fluorescence extension for material '{}'",
+                    mat.name);
+
+        const tinygltf::Value& fluoExt = fluoIt->second;
+        const std::filesystem::path fluoDir =
+            std::filesystem::path(gltfFilePath).parent_path();
+
+        const auto loadInto = [&](const char* key, Vector<std::pair<f32, f32>>& into) {
+            if (!fluoExt.Has(key)) return;
+            const auto curvePath = fluoExt.Get(key).Get<std::string>();
+            if (auto result = SpectralIO::LoadSpectralCurveCSV(fluoDir / curvePath);
+                result.has_value()) {
+                into = result.value();
+                QL_LOG_INFO("    Loaded {}: {} ({} points)", key, curvePath, into.size());
+            } else {
+                QL_LOG_ERROR("    Failed to load {} '{}': {}", key, curvePath, result.error());
+            }
+        };
+        loadInto("excitationCurve", mat.fluorescenceExcitationCurve);
+        loadInto("emissionCurve", mat.fluorescenceEmissionCurve);
+
+        if (fluoExt.Has("yield")) {
+            mat.fluorescenceYield = static_cast<f32>(fluoExt.Get("yield").GetNumberAsDouble());
+            QL_LOG_INFO("    yield: {:.4g}", mat.fluorescenceYield);
+        }
+
+        // One half is not a description of anything, and a scene that carries
+        // one half is more likely to have a typo than an intention. Said here
+        // rather than left to the binder, because the binder never sees a
+        // material that dropped a curve on a failed load.
+        if (mat.fluorescenceExcitationCurve.empty() !=
+            mat.fluorescenceEmissionCurve.empty()) {
+            QL_LOG_WARN("    Material '{}': only one of the two fluorescence curves "
+                        "loaded, so the material will not fluoresce",
+                        mat.name);
+        }
+    }
+
+    // ========================================================================
     // QUANTILOOM_materials_dispersion extension (wavelength-dependent IOR)
     // ========================================================================
     // Custom extension for spectral rendering with chromatic dispersion.

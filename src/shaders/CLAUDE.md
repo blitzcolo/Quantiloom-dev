@@ -39,9 +39,13 @@ Three consequences worth knowing before touching any of it:
 
 - **An open scene is unchanged, exactly.** Every bounce ray escapes and the miss
   shader returns the base it is subtracted from, so `Corr` is zero to the bit —
-  verified in `check_sky_equiv.py`, and the reason that check has no tolerance
-  for Monte Carlo noise. Deleting an analytic term and letting the ray carry the
-  whole integral would be the same in expectation and far noisier.
+  verified in `check_sky_equiv.py` in SWIR against a closed form and in the
+  visible band against the other estimator, and the reason that check has no
+  tolerance for Monte Carlo noise. The visible arm asserts it as a frame whose
+  every pixel is one number: with the residual zero and the sky analytic, the
+  deterministic mode has nothing left to vary. Deleting an analytic term and
+  letting the ray carry the whole integral would be the same in expectation and
+  far noisier.
 - **An isothermal cavity is exact at 1 spp**, by the same argument run backwards:
   the incoming radiance *is* the base, so the furnace gate keeps working.
 - **Russian roulette is unbiased without a closure.** Killing a path leaves the
@@ -52,6 +56,29 @@ Both factors are evaluated at the **same** sampled wavelength, carried in
 `Payload::heroLambda`. That correlation is the point of the ray — `⟨ρ⟩⟨L⟩` is not
 `⟨ρL⟩`, and a quartz cavity was 1.15% wrong when the bands sent a whole-band ray
 and multiplied by a band average. One ray either way.
+
+`heroLambda` reads three ways, and every consumer has to branch on the sign
+rather than on the value:
+
+| `heroLambda` | the ray carries | who sets it |
+|---|---|---|
+| `0` | nothing yet: a primary ray, or a band mode's own sweep | raygen, and it is where `VIS_Hero` draws the quartet |
+| `> 0` | a quartet, `λⱼ = 400 + mod(λ_h − 400 + j·95, 380)`, four radiances out in `Payload::radiance` and no CIE weighting applied | the vertex that drew it |
+| `< 0` | one wavelength `|heroLambda|`, a quartet collapsed by a dispersive interface, one scalar back | the refraction, `VIS_Hero` only |
+
+The quartet is derived from `λ_h` wherever it is needed and never stored: the
+rotation is a group action on the band, so the *set* does not depend on which
+member was drawn, and the balance heuristic's denominator collapses to one
+scalar `S = Σₖ p(λₖ)` that any vertex can recompute. That is what lets four
+wavelengths ride a 40-byte payload.
+
+**Transport is diagonal in λ, and that is an assumption rather than a
+convention.** A wavelength in is a wavelength out at each vertex, which is why
+the four members of a quartet can share one geometric path and one set of
+sampling decisions. Any effect that moves energy between wavelengths —
+fluorescence, phosphorescence, Raman — breaks the diagonal and cannot be added
+by extending a spectrum: it needs a term evaluated at a second wavelength that
+the path did not draw.
 
 RGB mode has none of this and spawns no bounce ray from an opaque surface. It is
 the interactive preview; leave it that way.
@@ -123,13 +150,21 @@ Neither is `ctest`; both need a GPU and both run from `build_wsl.sh`.
 | Gate | Asks | Blind to |
 |---|---|---|
 | `run_furnace_suite.sh` | what a surface does with light once it arrives | anything about how it arrives — no sun, no sky, no scene outside the cavity |
-| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness, indirect | radiometry of the surface itself |
+| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness in two bands, indirect, the two visible estimators against each other, and light leaving at a wavelength it did not arrive at | radiometry of the surface itself |
 
-A third pair, `check_dispersion.py` and `check_hero_wavelength.py`, is run by
-neither gate and has to be invoked by hand. Both edit
-`assets/models/prism_*.gltf` in place and restore it in a `finally`, so they
-cannot run concurrently with each other or with anything else reading those
-models.
+The last of those, `check_fluorescence.py`, is the only check in the tree that a
+renderer whose transport is diagonal in wavelength cannot pass by accident.
+Every other term is diagonal, so every other check would still be green with
+the coupling removed. It puts two illuminants of equal power over the band in
+front of a dye that absorbs below 500 nm and emits above 550, and asks the
+emission band to get brighter as the illuminant's own power there falls.
+
+`check_hero_wavelength.py` is the illumination suite's `hero` arm and runs with
+it. `check_dispersion.py` covers the RGB path and the two n(lambda) sources,
+and is still invoked by hand. Both edit `assets/models/prism_*.gltf` in place
+and restore it in a `finally`, so they cannot run concurrently with each other
+or with anything else reading those models -- which is also why the suite runs
+its arms in sequence.
 
 Both spent six weeks red for a reason that was in no shader: three copies of
 the prism models sat under `assets/configs/assets/models/`, and
@@ -139,6 +174,10 @@ nothing loads renders identically to the unpatched one — which
 `check_dispersion` reported as "switching dispersion on changed nothing", and
 `check_hero_wavelength` reported as a bias floor, because its reference and its
 test case then differed only by a config-injected IOR that *did* take effect.
+That checker's dispersion arm now reads its signal against a floor measured
+from the renderer -- two dispersion values a fraction of a percent apart, same
+seed, same code path -- rather than against a constant, so a change that
+reaches nothing lands at a ratio near 1 instead of passing on noise.
 The duplicates are deleted and `ResolveConfigPath` now warns when a path
 resolves two ways. If a checker ever again insists a shader change did nothing,
 read the render log's `Loading glTF model:` line before believing it.

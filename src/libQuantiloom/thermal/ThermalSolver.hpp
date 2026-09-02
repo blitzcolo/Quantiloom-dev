@@ -71,10 +71,46 @@ struct ThermalConfig {
 
     /// CSV of time-varying forcing: time_h, air_temperature_k,
     /// sun_irradiance_w_m2, sun_azimuth_deg, sun_elevation_deg,
-    /// sky_temperature_k, and optionally diffuse_irradiance_w_m2 and
-    /// relative_humidity. Linearly interpolated, held flat outside its range;
-    /// a row that stops early keeps the defaults for what it did not say.
+    /// sky_temperature_k, and optionally diffuse_irradiance_w_m2,
+    /// relative_humidity, convection_w_m2k and wind_speed_m_s. Linearly
+    /// interpolated, held flat outside its range; a row that stops early keeps
+    /// the defaults for what it did not say.
+    ///
+    /// The last two are two ways of saying the same thing, and the ninth wins:
+    /// a file that carries a measured coefficient is stating what the
+    /// correlations below are estimating.
     String forcingFile;
+
+    /// Where h comes from when the forcing does not state one. Constant by
+    /// default, which is the material's own number and the behaviour of every
+    /// scene written before the others existed.
+    ConvectionLaw convection;
+
+    /// Let heat cross the edge between two triangles of one object, rather
+    /// than giving every element an independent column. Off by default, which
+    /// is the model the solver had: right for dry sand at an hour's timescale,
+    /// where heat diffuses three centimetres, and wrong for a metal panel at
+    /// any timescale. The term is explicit, so a scene that turns it on gets
+    /// a timestep advisory of its own.
+    bool lateralConduction = false;
+
+    /// How many of the sun's most recent columns get a tangent of their own.
+    /// Zero is the behaviour this solver had: one tangent for the whole day's
+    /// visibility, which a shading pass applies with the shadow it traces now
+    /// -- right for a still sun, and an over-correction under a moving one,
+    /// where a pixel shaded now may have been lit an hour ago and the ground
+    /// under it is still warm. Each slot moves one column's worth of that from
+    /// assumed to traced, and costs a state vector, an elimination pass and a
+    /// ray per shaded pixel. Only meaningful with a forcing file: constant
+    /// forcing is one column.
+    u32 sunMemoryLags = 0;
+
+    /// Which material parameters to carry a tangent of. Empty by default. What
+    /// they are for is a fit -- h against a station's record is a Gauss-Newton
+    /// and needs a derivative -- and an uncertainty budget, where what a 0.02
+    /// uncertainty in emissivity is worth in kelvin is dT/deps times 0.02.
+    /// Each costs a state vector and a back-substitution per step.
+    Vector<ThermalParameter> parameterSensitivities;
 
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
@@ -121,6 +157,25 @@ struct ThermalResult {
     /// owns this and it need not agree with [lighting] sun_direction, so the
     /// shading pass has to be told rather than assume.
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+
+    /// The same three things per tracked sun column: dT/dv_k and v_k per
+    /// element, both slot-major, and where the sun was for that column. What
+    /// they let a shading pass do is trace the pixel's own visibility toward
+    /// each of those past sun positions instead of assuming its shadow history
+    /// looks like its present shadow.
+    ///
+    /// These are a REFINEMENT of sunSensitivity_K, not a replacement: that one
+    /// still holds the whole day's answer, and the part of it not attributed to
+    /// a tracked column is what a shading pass applies against the present sun.
+    Vector<f32> lagSensitivity_K;
+    Vector<f32> lagVisibility;
+    Vector<glm::vec3> lagDirection;
+    u32 lagSlots = 0;
+
+    /// dT/dp at the exposed face, parameter-major over the elements, for the
+    /// parameters `parameters` names. Empty when none was asked for.
+    Vector<f32> parameterSensitivity;
+    Vector<ThermalParameter> parameters;
 
     u32 elementCount = 0;
     u32 participatingElements = 0;
@@ -217,12 +272,23 @@ void LogThermalSolveSummary(const ThermalResult& result);
 ///                       element whose hemisphere is mostly sky, and a file
 ///                       where sky_fraction is far from one says the reference
 ///                       does not apply.
+/// @param lagSensitivity_K  slot-major dT/dv_k, or empty when no column was
+///                       tracked. Written as a pair of columns per slot, with
+///                       the hour each belongs to in the header -- which is
+///                       what a study of the moving shadow reads to evaluate
+///                       the correction outside the renderer.
 void DumpThermalElements(const String& path, const Vector<ThermalElement>& elements,
                          const Vector<ThermalMaterial>& materials,
                          const ExchangeGeometry& geometry,
                          const Vector<f32>& temperature_K,
                          const Vector<f32>& sunSensitivity_K,
-                         const Vector<f32>& visibility);
+                         const Vector<f32>& visibility,
+                         const Vector<f32>& lagSensitivity_K = {},
+                         const Vector<f32>& lagVisibility = {},
+                         const Vector<f64>& lagTime_h = {},
+                         const Vector<glm::vec3>& lagDirection = {},
+                         const Vector<f32>& parameterSensitivity = {},
+                         const Vector<ThermalParameter>& parameters = {});
 
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.

@@ -110,10 +110,14 @@ Assert-ExitZero "test gate"
 Assert-ExitZero "ABI gate"
 
 # --- Physics gates -----------------------------------------------------------
-# Eight isothermal furnace cavities against Planck, then the illumination suite:
-# sun occlusion per band, an open sky whose traced bounce must contribute
-# exactly zero, a Cornell box lit only by emissive geometry, and the MIS check
-# that light sampling and BSDF sampling estimate the same image.
+# Eight isothermal furnace cavities against Planck, then the illumination
+# suite's seven arms: sun occlusion per band, an open sky whose traced bounce
+# must contribute exactly zero, the same ground in the visible where the two
+# visible modes are held to each other, a Cornell box lit only by emissive
+# geometry, the MIS check that light sampling and BSDF sampling estimate the
+# same image, the convergence of the sampled visible estimator against the
+# deterministic one, a fluorescent transfer between two wavelength bands, and
+# view independence.
 #
 # Exit 3 means no usable GPU. That is a warning, not a failure -- the same call
 # the unit suite makes for its GPU cases -- but it does mean this build was

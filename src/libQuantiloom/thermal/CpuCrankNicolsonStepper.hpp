@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalStepper.hpp"
 
 namespace quantiloom::thermal {
@@ -51,10 +52,49 @@ namespace quantiloom::thermal {
  */
 class CpuCrankNicolsonStepper final : public IThermalStepper {
 public:
+    CpuCrankNicolsonStepper() = default;
+    explicit CpuCrankNicolsonStepper(const ConvectionLaw& law) : m_convection(law) {}
+
     void Step(ThermalState& state, const Vector<ThermalElement>& elements,
               const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
               const ThermalForcing& forcing, f64 dt_s,
               const ShortwaveSample& shortwave) override;
+
+    /// Which correlation supplies h when the forcing does not. Held here
+    /// rather than in the forcing because it says how the balance is modelled
+    /// rather than what the weather is doing, and because it is fixed for a
+    /// whole run.
+    void SetConvection(const ConvectionLaw& law) { m_convection = law; }
+
+    /// The two faces of each thin shell, from ThermalMesh::shellPartner.
+    ///
+    /// A pair shares one column: the lower index owns it and is stepped with a
+    /// full surface balance at BOTH ends, the higher index is not stepped at
+    /// all, and the owner's back-node temperature is written into the
+    /// partner's surface slot at the end of the step. Every consumer -- the
+    /// radiative exchange, the render's temperature buffer, a dump, a probe --
+    /// then reads the partner's real temperature without knowing a shell is
+    /// involved.
+    ///
+    /// Empty is every scene that declares no shells, and the rows below are
+    /// then exactly the rows they were.
+    void SetShellPartners(Vector<u32> partners) { m_shellPartner = std::move(partners); }
+    [[nodiscard]] bool CarriesShells() const override { return true; }
+    [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
+    [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
+    [[nodiscard]] bool CarriesLagSensitivity() const override { return true; }
+    [[nodiscard]] bool CarriesParameterSensitivity() const override { return true; }
+
+    /// Answered from the same EvaluateSurfaceBalance the step uses, so what a
+    /// probe shows is what the trajectory was built from rather than a second
+    /// opinion about it.
+    [[nodiscard]] bool SurfaceFluxesAt(const ThermalState& state,
+                                       const Vector<ThermalElement>& elements,
+                                       const Vector<ThermalMaterial>& materials,
+                                       const ExchangeGeometry& exchange,
+                                       const ThermalForcing& forcing,
+                                       const ShortwaveSample& shortwave, u32 element,
+                                       SurfaceFluxes& out) const override;
 
     /// Also reachable without an instance, because a caller has to name the
     /// stepper for the solve cache key before it has decided to build one.
@@ -66,9 +106,24 @@ public:
     /// for the explicit radiative coupling to hold. Reported rather than
     /// enforced -- a step twice this is inaccurate rather than unstable, and
     /// which one matters is the caller's judgement.
+    ///
+    /// @param law             which correlation supplies h. Under a wind or
+    ///                        stability law the material's own coefficient is
+    ///                        not what the run will use, and the estimate
+    ///                        takes the larger of the two: too small an h
+    ///                        makes this advisory quieter than it should be.
+    /// @param windSpeed_m_s   the fastest wind the forcing reaches, since that
+    ///                        is where the coefficient peaks
     [[nodiscard]] static f64 ShortestTimeConstantSeconds(
         const Vector<ThermalElement>& elements, const Vector<ThermalMaterial>& materials,
-        f64 referenceTemperature_K);
+        f64 referenceTemperature_K, const ConvectionLaw& law = {},
+        f64 windSpeed_m_s = 0.0);
+
+private:
+    ConvectionLaw m_convection;
+    /// Element -> the triangle on the other side of the same shell, or
+    /// ThermalMesh::kNoShellPartner. Empty when nothing is a shell.
+    Vector<u32> m_shellPartner;
 };
 
 }  // namespace quantiloom::thermal

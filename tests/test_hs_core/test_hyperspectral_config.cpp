@@ -353,7 +353,7 @@ TEST(HyperspectralConfigTest, OutputFormatGeoTIFF) {
 
 TEST(HyperspectralConfigTest, OutputFormatEXR) {
     HyperspectralConfig config;
-    config.outputFormat = HyperspectralOutputFormat::EXR_Multipart;
+    config.outputFormat = HyperspectralOutputFormat::EXR_Spectral;
 
-    EXPECT_EQ(config.outputFormat, HyperspectralOutputFormat::EXR_Multipart);
+    EXPECT_EQ(config.outputFormat, HyperspectralOutputFormat::EXR_Spectral);
 }

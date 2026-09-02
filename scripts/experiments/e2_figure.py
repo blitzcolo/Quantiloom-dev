@@ -95,7 +95,7 @@ def table(results):
     lags = []
     for window in results["windows"]:
         for key in ("measured_e0.96", "modelled_e0.96",
-                    "measured_windh_e0.96"):
+                    "measured_windh_e0.96", "measured_stability_e0.96"):
             entry = window["modes"].get(key)
             if not entry:
                 continue
@@ -103,8 +103,13 @@ def table(results):
                 "window": window["label"],
                 "days_evaluated": len(window["days"]) - results["spinup_days"],
                 "forcing": entry["mode"],
-                "convection": ("wind-driven" if entry.get("wind_driven_h")
-                               else "constant"),
+                "convection": {"material": "constant",
+                               "wind_h": "wind-driven",
+                               "stability": "stability"}.get(
+                                   entry.get("convection",
+                                             "wind_h" if entry.get("wind_driven_h")
+                                             else "material"),
+                                   "constant"),
                 "day_rmse_k": entry["day"]["rmse_k"],
                 "day_mae_k": entry["day"]["mae_k"],
                 "day_bias_k": entry["day"]["bias_k"],
@@ -114,7 +119,10 @@ def table(results):
                 "peak_lag_h": entry["peak_lag_h"]["median"],
                 "calibration": window["days"][0] == results["calibration_window"],
             })
-            if entry["mode"] == "measured" and not entry.get("wind_driven_h"):
+            # The lag statistic is quoted for one configuration, the measured
+            # sky on the material's own constant coefficient. Every other row
+            # would fold a second variable into one number.
+            if key == "measured_e0.96":
                 lags += entry["peak_lag_h"]["per_day"]
 
     lines = ["| Window (DOY) | Days | Sky | Convection | Day RMSE | Day MAE | "

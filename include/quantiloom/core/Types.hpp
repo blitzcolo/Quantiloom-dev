@@ -71,6 +71,7 @@ using Wavelength = f32;
  * Controls how the renderer interprets wavelengths and produces output:
  * - RGB: Fast RGB-only pipeline (no spectral integration, best performance)
  * - VIS_Fused: 32-wavelength visible spectral integration with CIE XYZ color matching
+ * - VIS_Hero: the same band by hero-wavelength sampling, four wavelengths a path
  * - Single: Monochromatic rendering at one wavelength (EXR grayscale output)
  * - IR bands: Thermal/near-IR fusion modes with wavelength-specific processing
  *
@@ -88,7 +89,15 @@ enum class SpectralMode : u32 {
     LWIR_Fused   = 4,  // Long-wave IR fusion 8000-12000nm (outputs EXR + PNG)
     SWIR_Fused   = 5,  // Short-wave IR fusion 1400-2400nm (outputs EXR + PNG)
     NIR_Fused    = 6,  // Near IR fusion 930-1200nm (outputs EXR + PNG) - reflected solar
-    RGB          = 7   // Fast RGB-only pipeline (no spectral integration, default)
+    RGB          = 7,  // Fast RGB-only pipeline (no spectral integration, default)
+
+    // Same band and same output as VIS_Fused, sampled rather than tabulated:
+    // one path carries four wavelengths drawn per sample instead of the same
+    // 32 at every hit. Both are kept, and the enum is how -- a deterministic
+    // reference and a sampled estimator have to be comparable inside one
+    // binary for either to be checkable against the other. Appended, never
+    // renumbered: the value is a specialization constant the shaders read.
+    VIS_Hero     = 8
 };
 
 // ============================================================================
@@ -165,6 +174,12 @@ enum class DebugVisualizationMode : u32 {
     IREmissivity = 61,     // IR emissivity (grayscale)
     IREmission = 62,       // Thermal emission component
     IRReflection = 63,     // IR reflection component
+    // How the field answers to two things it was differentiated with respect
+    // to. Both are derivatives the solve already carries: the first is what
+    // the shadow-edge correction is worth per triangle, the second is what a
+    // material slider would do before the re-solve says so.
+    SunSensitivity = 64,   // |dT/dv|, kelvin per unit sun visibility
+    ThermalSensitivity = 65, // dT/dp for the parameter the host uploaded, signed
 
     // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
     VertexPositions = 70,  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)
@@ -356,8 +371,19 @@ inline Result<SpectralMode, String> ParseSpectralMode(const StringView mode_str)
     } else if (mode_str == "rgb" || mode_str == "RGB") {
         // Fast RGB-only mode (default, no spectral integration)
         return Result(SpectralMode::RGB);
-    } else if (mode_str == "vis_fused" || mode_str == "VIS") {
-        // Visible spectral integration mode (32-wavelength CIE XYZ)
+    } else if (mode_str == "vis_hero" || mode_str == "VIS") {
+        // Visible band, sampled: one wavelength drawn per path and rotated into
+        // a quartet, weighted into CIE XYZ by the vertex that drew it. The band
+        // alias resolves here because this is the estimator to render with: it
+        // follows n(lambda) through a dispersive interface, and it costs four
+        // radiances per path rather than thirty-two.
+        return Result(SpectralMode::VIS_Hero);
+    } else if (mode_str == "vis_fused") {
+        // The same band by a deterministic 32-point sweep. Kept, and asked for
+        // by name: it has no variance in wavelength, which makes it the
+        // reference the sampled mode is checked against
+        // (scripts/render-tests/check_hero_wavelength.py) and the mode to
+        // render when an answer has to be repeatable rather than converged.
         return Result(SpectralMode::VIS_Fused);
     } else if (mode_str == "multispectral") {
         return Result(SpectralMode::Multispectral);
@@ -395,7 +421,8 @@ struct SpectralBandInfo {
 
 inline std::optional<SpectralBandInfo> GetFusedBandInfo(SpectralMode mode) {
     switch (mode) {
-        case SpectralMode::VIS_Fused:  return SpectralBandInfo{400.0f, 780.0f};
+        case SpectralMode::VIS_Fused:
+        case SpectralMode::VIS_Hero:   return SpectralBandInfo{400.0f, 780.0f};
         case SpectralMode::NIR_Fused:  return SpectralBandInfo{930.0f, 1200.0f};
         case SpectralMode::SWIR_Fused: return SpectralBandInfo{1400.0f, 2400.0f};
         case SpectralMode::MWIR_Fused: return SpectralBandInfo{3000.0f, 5000.0f};
@@ -405,10 +432,19 @@ inline std::optional<SpectralBandInfo> GetFusedBandInfo(SpectralMode mode) {
 }
 
 // IR fused modes render scalar band radiance (grayscale) and need the
-// IR-specific sensor unit handling; VIS_Fused outputs CIE-integrated RGB.
+// IR-specific sensor unit handling; the visible modes output CIE-integrated RGB.
 inline bool IsIRFusedMode(SpectralMode mode) {
     return mode == SpectralMode::NIR_Fused || mode == SpectralMode::SWIR_Fused ||
            mode == SpectralMode::MWIR_Fused || mode == SpectralMode::LWIR_Fused;
+}
+
+// The two visible-band estimators. They differ in how a path picks its
+// wavelengths and in nothing else the rest of the renderer can see: same band,
+// same RGB lighting inputs, same CIE integration to the same output. Every
+// decision outside the estimator itself is about that shared shape, so it asks
+// this rather than naming one of them.
+inline bool IsVisMode(SpectralMode mode) {
+    return mode == SpectralMode::VIS_Fused || mode == SpectralMode::VIS_Hero;
 }
 
 /**

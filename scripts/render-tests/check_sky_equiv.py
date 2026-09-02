@@ -28,6 +28,16 @@ SWIR because it is the band whose reflectance fallback is exactly 1 - emissivity
 NIR would route through ConvertLinearRGBToSpectrum instead, whose value at 1 um
 is not a number this test could state in closed form.
 
+The visible band has no closed form here either, for the same reason: its
+reflectance is an upsampled spectrum rather than 1 - emissivity. What the two
+visible modes have instead is each other, so --reference names a render to
+compare against rather than the formula above. The deterministic mode is the one
+that carries the zero-variance claim into the visible band, and --max-spread
+asserts it: with the residual exactly zero, an analytic sky and a uniform plane,
+every pixel of that frame is the same number. vis_hero draws a quartet per
+sample, so its pixels differ by which wavelengths they drew; what it must match
+is the deterministic mean.
+
 Exit code 0 = pass, 1 = fail.
 """
 
@@ -71,28 +81,71 @@ def main():
     p.add_argument("exr")
     p.add_argument("--tol", type=float, default=0.005,
                    help="relative tolerance (default 0.5%%)")
+    p.add_argument("--reference", metavar="EXR",
+                   help="compare against this render instead of the closed form, "
+                        "for a band where the reflectance has no closed form")
+    p.add_argument("--max-spread", type=float, metavar="REL",
+                   help="also require the frame's own max-min to be below this "
+                        "fraction of its mean")
+    p.add_argument("--reference-max-spread", type=float, metavar="REL",
+                   help="the same bound on the --reference frame; 0 asserts the "
+                        "deterministic mode's zero-variance claim at zero tolerance")
     args = p.parse_args()
 
     if not pathlib.Path(args.exr).exists():
         print(f"ERROR: {args.exr} not found")
         sys.exit(1)
 
-    ref = reference_radiance()
     img = read_exr_channel(args.exr)
+    if args.reference:
+        if not pathlib.Path(args.reference).exists():
+            print(f"ERROR: {args.reference} not found")
+            sys.exit(1)
+        ref_img = read_exr_channel(args.reference)
+        ref = float(ref_img.mean())
+        ref_spread = float(ref_img.max() - ref_img.min())
+        source = f"{args.reference} (mean, spread {ref_spread:.3e})"
+    else:
+        ref = reference_radiance()
+        source = f"closed form, rho={RHO}, cos={COS_THETA}"
+
     mean_val = float(img.mean())
     spread = float(img.max() - img.min())
     rel_err = abs(mean_val - ref) / ref if ref > 0 else 0.0
 
-    print(f"Reference: {ref:.6e} W/sr/m²/nm  (rho={RHO}, cos={COS_THETA})")
+    print(f"Reference: {ref:.6e} W/sr/m^2/nm  ({source})")
     print(f"Image:     {img.shape[1]}x{img.shape[0]}")
     print(f"ROI mean:  {mean_val:.6e}")
-    print(f"Spread:    {spread:.3e}  (must be ~0: no occluders, no variance)")
+    print(f"Spread:    {spread:.3e}  ({spread / mean_val if mean_val else 0.0:.3e} of the mean)")
     print(f"Rel error: {rel_err:.4%}")
 
+    failed = False
     if rel_err > args.tol:
         print(f"FAIL: error {rel_err:.4%} exceeds tolerance {args.tol:.4%} -- "
               f"a factor near 2 means the traced bounce is being added on top of "
               f"the analytic sky term rather than correcting it")
+        failed = True
+
+    def check_spread(label, value, mean, bound):
+        if bound is None:
+            return False
+        rel = value / mean if mean else 0.0
+        if rel <= bound:
+            return False
+        print(f"FAIL: {label} spread {rel:.3e} of the mean exceeds {bound:.3e} -- "
+              f"this scene has one material, one illumination and a residual that "
+              f"is zero by construction, so anything that varies pixel to pixel is "
+              f"variance that should not be here")
+        return True
+
+    failed |= check_spread("image", spread, mean_val, args.max_spread)
+    if args.reference:
+        failed |= check_spread("reference", ref_spread, ref, args.reference_max_spread)
+    elif args.reference_max_spread is not None:
+        print("ERROR: --reference-max-spread needs --reference")
+        sys.exit(1)
+
+    if failed:
         sys.exit(1)
     print("PASS")
     sys.exit(0)

@@ -59,7 +59,12 @@ struct CameraData {
     // is the same 80 bytes it has always been and no layout moves.
     u32 projection;          // 0 = perspective, 1 = orthographic
     f32 orthoHeight;         // World-space height of the film plane when orthographic
-    u32 _padding;            // Padding for 16-byte alignment (total: 80 bytes)
+    // One number a debug view may need, from the last of the padding words.
+    // Which number is the view's business: DebugVisualizationMode::
+    // SunSensitivity reads it as the sun column to draw, of the ones the solve
+    // is remembering. Zero is the whole-day one and is what every other view
+    // and every non-debug render leaves it at. (Total: 80 bytes.)
+    u32 debugParam;
 };
 
 /**

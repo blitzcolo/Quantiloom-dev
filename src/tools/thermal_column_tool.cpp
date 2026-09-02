@@ -67,6 +67,8 @@ struct Spec {
     f64 checkpointStride_h = 1.0;
     f64 outputStep_h = 0.25;
     bool sunCorrection = true;
+    ConvectionLaw convection;
+    Vector<ThermalParameter> parameters;
 
     glm::vec3 normal{0.0f, 1.0f, 0.0f};
     f32 area_m2 = 1.0f;
@@ -99,8 +101,10 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * shortwave_absorptivity    = 0.72
  * ir_emissivity             = 0.90
  * wetness_factor            = 0.0
- * interior_bc               = "adiabatic"   # or "fixed"
+ * internal_heat_w_m2        = 0.0           # a flux into the back face
+ * interior_bc               = "adiabatic"   # or "fixed", "ambient"
  * interior_temperature_k    = 293.15
+ * interior_convection_h_w_m2k = 3.0         # back face, for "ambient"
  *
  * [solve]                           # keys named as [thermal] names them
  * start_time_h        = 0.0
@@ -112,6 +116,14 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * checkpoint_stride_h = 1.0
  * output_step_h       = 0.25                # how often a row is written
  * sun_correction      = true                # carry dT/dv
+ * convection_model    = "constant"          # or "wind", "stability"
+ * convection_wind_a   = 5.7                 # h = a + b U, McAdams
+ * convection_wind_b   = 3.8
+ * convection_free_c   = 1.52                # h_free = C |T_s - T_air|^(1/3)
+ * convection_reference_height_m = 2.0       # where T_air and U are measured
+ * convection_stable_damping     = 10.0      # h / (1 + d Ri) when stable
+ * parameter_sensitivities = ["h", "k"]      # dT/dp columns, any of
+ *                                           # h, epsilon, alpha, k, rhoc
  *
  * [geometry]                        # what the element is, absent a scene
  * normal       = [0.0, 1.0, 0.0]
@@ -127,6 +139,7 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * diffuse_irradiance_w_m2  = 100.0
  * sky_temperature_k        = 268.0
  * relative_humidity        = 50.0
+ * wind_speed_m_s           = 0.0            # read by the convection law
  * sun_azimuth_deg          = 180.0
  * sun_elevation_deg        = 60.0
  * ```
@@ -143,10 +156,14 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
     m.shortwaveAbsorptivity = config.GetFloat("column.shortwave_absorptivity", 0.72f);
     m.longwaveEmissivity = config.GetFloat("column.ir_emissivity", 0.90f);
     m.wetnessFactor = config.GetFloat("column.wetness_factor", 0.0f);
+    m.internalHeat_W_m2 = config.GetFloat("column.internal_heat_w_m2", 0.0f);
     m.interiorTemperature_K = config.GetFloat("column.interior_temperature_k", 293.15f);
-    m.interiorBoundary = config.GetString("column.interior_bc", "adiabatic") == "fixed"
-                             ? InteriorBoundary::FixedTemperature
-                             : InteriorBoundary::Adiabatic;
+    m.interiorConvection_W_m2K =
+        config.GetFloat("column.interior_convection_h_w_m2k", 3.0f);
+    const String interiorBc = config.GetString("column.interior_bc", "adiabatic");
+    m.interiorBoundary = interiorBc == "fixed"  ? InteriorBoundary::FixedTemperature
+                         : interiorBc == "ambient" ? InteriorBoundary::AmbientInterior
+                                                   : InteriorBoundary::Adiabatic;
 
     spec.startTime_h = config.GetDouble("solve.start_time_h", 0.0);
     spec.endTime_h = config.GetDouble("solve.end_time_h", 24.0);
@@ -159,6 +176,32 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
     spec.initial = config.GetString("solve.initial", "steady") == "uniform"
                        ? InitialCondition::Uniform
                        : InitialCondition::Steady;
+
+    const String convectionModel = config.GetString("solve.convection_model", "constant");
+    if (convectionModel == "wind") {
+        spec.convection.model = ConvectionModel::Wind;
+    } else if (convectionModel == "stability") {
+        spec.convection.model = ConvectionModel::Stability;
+    } else if (convectionModel != "constant") {
+        QL_LOG_WARN("unknown solve.convection_model '{}', expected "
+                    "constant|wind|stability; using constant", convectionModel);
+    }
+    spec.convection.windIntercept_W_m2K = config.GetDouble("solve.convection_wind_a", 5.7);
+    spec.convection.windSlope_W_s_m3K = config.GetDouble("solve.convection_wind_b", 3.8);
+    spec.convection.freeCoefficient = config.GetDouble("solve.convection_free_c", 1.52);
+    spec.convection.referenceHeight_m =
+        config.GetDouble("solve.convection_reference_height_m", 2.0);
+    spec.convection.stableDamping = config.GetDouble("solve.convection_stable_damping", 10.0);
+
+    for (const String& name : config.GetStringArray("solve.parameter_sensitivities")) {
+        const auto parameter = ThermalParameterFromName(name);
+        if (parameter == ThermalParameter::Count) {
+            QL_LOG_WARN("unknown solve.parameter_sensitivities entry '{}', expected "
+                        "h|epsilon|alpha|k|rhoc; ignored", name);
+            continue;
+        }
+        spec.parameters.push_back(parameter);
+    }
 
     const auto normal = config.GetArray<f32>("geometry.normal");
     if (normal.size() == 3) {
@@ -180,6 +223,7 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
         config.GetDouble("forcing.diffuse_irradiance_w_m2", 0.0);
     spec.constant.skyTemperature_K = config.GetDouble("forcing.sky_temperature_k", 268.0);
     spec.constant.relativeHumidity = config.GetDouble("forcing.relative_humidity", 50.0);
+    spec.constant.windSpeed_m_s = config.GetDouble("forcing.wind_speed_m_s", 0.0);
     spec.constant.sunDirection = SunFrom(config.GetDouble("forcing.sun_azimuth_deg", 180.0),
                                          config.GetDouble("forcing.sun_elevation_deg", 60.0));
     return spec;
@@ -340,10 +384,15 @@ int main(int argc, char** argv) {
     // ------------------------------------------------------------------
     // Run it
     // ------------------------------------------------------------------
-    CpuCrankNicolsonStepper stepper;
+    CpuCrankNicolsonStepper stepper(spec.convection);
 
+    f64 fastestWind_m_s = spec.constant.windSpeed_m_s;
+    for (const auto& [time_h, forcing] : forcingSeries) {
+        fastestWind_m_s = std::max(fastestWind_m_s, forcing.windSpeed_m_s);
+    }
     const f64 shortest = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
-        elements, materials, spec.constant.airTemperature_K);
+        elements, materials, spec.constant.airTemperature_K, spec.convection,
+        fastestWind_m_s);
     if (std::isfinite(shortest) && spec.timestep_s > shortest) {
         QL_LOG_WARN("timestep {:.0f} s is longer than the surface time constant ({:.0f} s); "
                     "the trajectory is smoothed rather than unstable",
@@ -358,6 +407,7 @@ int main(int argc, char** argv) {
     desc.initial = spec.initial;
     desc.initialTemperature_K = spec.initialTemperature_K;
     desc.carrySunSensitivity = spec.sunCorrection;
+    desc.parameters = spec.parameters;
 
     ThermalTimeline timeline(desc, elements, materials, exchange, table, forcingSeries,
                              spec.constant, stepper);
@@ -372,7 +422,11 @@ int main(int argc, char** argv) {
     }
     std::ostream& out = outputPath.empty() ? std::cout : fileOut;
 
-    out << "time_h,T_surface_K,T_back_K,dTdv_K,v,air_K,sky_K,dni_W_m2\n";
+    out << "time_h,T_surface_K,T_back_K,dTdv_K,v,air_K,sky_K,dni_W_m2";
+    for (const ThermalParameter parameter : spec.parameters) {
+        out << ",dTd_" << ThermalParameterName(parameter);
+    }
+    out << '\n';
     out << std::setprecision(9);
 
     const f64 step = spec.outputStep_h > 0.0 ? spec.outputStep_h : 0.25;
@@ -390,7 +444,14 @@ int main(int argc, char** argv) {
             << state.temperature_K[state.nodeCount - 1] << ',';
         if (state.HasSensitivity()) out << state.SurfaceSensitivity(0);
         out << ',' << SampleAt(visibilitySeries, t) << ',' << forcing.airTemperature_K << ','
-            << forcing.skyTemperature_K << ',' << forcing.sunIrradiance_W_m2 << '\n';
+            << forcing.skyTemperature_K << ',' << forcing.sunIrradiance_W_m2;
+        for (usize p = 0; p < spec.parameters.size(); ++p) {
+            out << ',';
+            if (state.HasParameterSensitivity()) {
+                out << state.SurfaceParameterSensitivity(p, 0);
+            }
+        }
+        out << '\n';
     }
 
     QL_LOG_INFO("thermal_column_tool: {} nodes through {:.3f} m, {:.1f} h to {:.1f} h at "

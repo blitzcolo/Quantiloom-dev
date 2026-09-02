@@ -22,7 +22,7 @@ namespace {
 /// full sun -- which is what a scene with no shadowing precompute is.
 void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& exchange,
                        const f64 time_h, const usize n, Vector<f32>& visibility,
-                       Vector<f32>& reflected) {
+                       Vector<f32>& reflected, ShortwaveSample* columns = nullptr) {
     // The visibility is the same interpolation the renderer asks for by name
     // when it needs v_element, so it lives in one place -- the two disagreeing
     // would put the shading correction's reference point somewhere the solve
@@ -36,6 +36,13 @@ void SampleShortwaveAt(const SunVisibilityTable& table, const ExchangeGeometry& 
         f64 blend = 0.0;
         table.SampleIndices(time_h, a, b, blend);
         const f32 bf = static_cast<f32>(blend);
+
+        if (columns != nullptr) {
+            columns->columnA = a;
+            columns->columnB = b;
+            columns->columnBlend = blend;
+            columns->columnsKnown = true;
+        }
 
         const f32* reflectedA = table.ReflectedColumn(a);
         const f32* reflectedB = table.ReflectedColumn(b);
@@ -135,6 +142,21 @@ ThermalTimeline::ThermalTimeline(const Desc& desc,
     // the tangent on for every stepper downstream.
     if (desc.carrySunSensitivity) {
         initial.sunSensitivity_K.assign(initial.temperature_K.size(), 0.0);
+        // One tangent per tracked column, and no column tracked yet: at t = 0
+        // the whole of the answer is in the whole-day tangent, which is where
+        // the shading pass looks when a column is not tracked.
+        if (desc.sunMemoryLags > 0 && sunTable.SampleCount() > 1) {
+            initial.lagColumn.assign(desc.sunMemoryLags, ThermalState::kNoLagColumn);
+            initial.lagSensitivity_K.assign(
+                initial.temperature_K.size() * desc.sunMemoryLags, 0.0);
+        }
+    }
+    // Independent of the sun's tangent: a fit for a material property wants
+    // these whether or not a shadow is being resolved.
+    if (!desc.parameters.empty()) {
+        initial.parameters = desc.parameters;
+        initial.parameterSensitivity.assign(
+            initial.temperature_K.size() * desc.parameters.size(), 0.0);
     }
 
     if (desc.initial == InitialCondition::Steady) {
@@ -189,20 +211,45 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
             SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
         Vector<f32> sunVis;
         Vector<f32> reflected;
+        ShortwaveSample sample;
         SampleShortwaveAt(m_sunTable, m_exchange, t_mid, m_elements.size(), sunVis,
-                          reflected);
+                          reflected, &sample);
+        sample.sunVisibility = sunVis;
+        sample.reflectedGain = reflected;
+        sample.diffuseGain = m_sunTable.diffuseGain;
         m_stepper.Step(m_scratch, m_elements, m_materials, m_exchange, forcing,
-                       remainder_s, {sunVis, reflected, m_sunTable.diffuseGain});
+                       remainder_s, sample);
         ++m_lastStepCount;
     }
 
     return m_scratch;
 }
 
+bool ThermalTimeline::SurfaceFluxesAt(const f64 time_h, const u32 element,
+                                      SurfaceFluxes& out,
+                                      const IThermalStepper& decomposer) {
+    if (element >= m_elements.size()) return false;
+
+    const ThermalState& state = StateAt(time_h);
+    const ThermalForcing forcing = SampleForcing(m_forcingSeries, time_h, m_constantForcing);
+
+    Vector<f32> sunVis;
+    Vector<f32> reflected;
+    ShortwaveSample sample;
+    SampleShortwaveAt(m_sunTable, m_exchange, time_h, m_elements.size(), sunVis, reflected,
+                      &sample);
+    sample.sunVisibility = sunVis;
+    sample.reflectedGain = reflected;
+    sample.diffuseGain = m_sunTable.diffuseGain;
+
+    return decomposer.SurfaceFluxesAt(state, m_elements, m_materials, m_exchange, forcing,
+                                      sample, element, out);
+}
+
 usize ThermalTimeline::CheckpointBytes() const {
     usize total = 0;
     for (const auto& [k, state] : m_checkpoints) {
-        total += (state.temperature_K.size() + state.sunSensitivity_K.size()) * sizeof(f64);
+        total += state.ByteSize();
     }
     return total;
 }

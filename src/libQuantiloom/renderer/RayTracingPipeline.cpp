@@ -288,7 +288,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(27);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients, 26 thermal sun response
+    std::vector<VkDescriptorSetLayoutBinding> bindings(28);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients, 26 thermal sun response, 27 thermal parameter tangent
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -585,9 +585,29 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[26].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[26].pImmutableSamplers = nullptr;
 
+    // Binding 27: how each element's temperature responds to one material
+    // parameter (StructuredBuffer<float>), and by how much to move it.
+    //
+    // Element 0 is the step: dp, the amount the parameter is being asked
+    // "what if" about, and zero when nothing is. Element 1 + thermalElementBase
+    // + PrimitiveIndex() is dT/dp for that triangle. So the shader adds
+    // tangent[1 + e] * tangent[0] to the temperature and a scene that is not
+    // previewing anything binds a single zero, which the step of zero turns
+    // off without a branch of its own.
+    //
+    // The step lives here rather than in LightingParams because that struct
+    // has no room left -- both its padding floats are spoken for, and growing
+    // it changes the SDK/Studio pairing hash. Which is also why binding 26
+    // carries its own header.
+    bindings[27].binding = 27;
+    bindings[27].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[27].descriptorCount = 1;
+    bindings[27].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[27].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(27, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(28, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -618,7 +638,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 18;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table + thermal sun response
+    poolSizes[2].descriptorCount = 19;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table + thermal sun response + thermal parameter tangent
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1524,6 +1544,28 @@ void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) c
     write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     write.dstSet = m_descriptorSet;
     write.dstBinding = 26;
+    write.dstArrayElement = 0;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &bufferInfo;
+
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+void RayTracingPipeline::BindThermalTangentBuffer(const GpuBuffer& buffer) const {
+    VkDevice device = m_context.GetDevice();
+
+    QL_LOG_DEBUG("Binding thermal parameter tangent buffer to descriptor set (binding 27)");
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer.GetHandle();
+    bufferInfo.offset = 0;
+    bufferInfo.range = VK_WHOLE_SIZE;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = m_descriptorSet;
+    write.dstBinding = 27;
     write.dstArrayElement = 0;
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     write.descriptorCount = 1;

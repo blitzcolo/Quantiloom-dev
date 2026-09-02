@@ -131,6 +131,11 @@ struct ExternalRenderContext::Impl {
     /// one, and reading one is a device loss rather than a wrong colour.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
     std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
+    std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
+    /// What the tangent buffer currently holds, so a repeat ask is a
+    /// no-op rather than a reupload and an accumulation reset.
+    ThermalSensitivityParameter whatIfParameter = ThermalSensitivityParameter::Convection;
+    f32 whatIfStep = 0.0f;
     std::unique_ptr<rendercore::ThermalPreview> thermalPreview;
     /// Why the last SetThermalTime did not produce temperatures. Held here
     /// rather than only in the preview because the reasons the facade rejects
@@ -169,6 +174,9 @@ struct ExternalRenderContext::Impl {
     // Rendering state
     SpectralMode spectralMode = SpectralMode::RGB;  // Default: Fast RGB mode
     DebugVisualizationMode debugMode = DebugVisualizationMode::None;  // Debug visualization mode
+    /// The one number a debug view may need. Zero for every view that
+    /// needs none, which is all of them but one.
+    u32 debugParam = 0;
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
     LightingParams lightingParams;
@@ -192,7 +200,15 @@ struct ExternalRenderContext::Impl {
     /// count changed, so a scrub is a plain upload with no wait.
     bool UploadThermalSunResponse(const Vector<f32>& sunSensitivity_K,
                                   const Vector<f32>& sunVisibility,
-                                  const glm::vec3& sunDirection);
+                                  const glm::vec3& sunDirection,
+                                  const Vector<f32>& lagSensitivity_K = {},
+                                  const Vector<f32>& lagVisibility = {},
+                                  const Vector<glm::vec3>& lagDirection = {});
+
+    /// The what-if tangent field and its step, on binding 27. Same contract as
+    /// the sun response above: true when the buffer moved and the descriptor
+    /// has to be rewritten.
+    bool UploadThermalTangent(const Vector<f32>& tangent, f32 step);
 
     // Environment map state. True exactly while `envMap` holds a real map that
     // loaded, false while it holds the black placeholder. UploadLightingParams
@@ -351,6 +367,7 @@ struct ExternalRenderContext::Impl {
         thermalPreview.reset();
         thermalTemperatureBuffer.reset();
         thermalSunResponseBuffer.reset();
+        thermalParameterTangentBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -1054,6 +1071,24 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.relativeHumidity = resolved.thermal.relativeHumidity;
             tp.forcingFile = resolved.thermal.forcingFile;
             tp.checkpointStride_h = resolved.thermal.checkpointStride_h;
+            switch (resolved.thermal.convection.model) {
+                case thermal::ConvectionModel::Wind:
+                    tp.convectionModel = ThermalConvectionModel::Wind;
+                    break;
+                case thermal::ConvectionModel::Stability:
+                    tp.convectionModel = ThermalConvectionModel::Stability;
+                    break;
+                case thermal::ConvectionModel::Constant:
+                    tp.convectionModel = ThermalConvectionModel::Constant;
+                    break;
+            }
+            tp.convectionWindA_W_m2K = resolved.thermal.convection.windIntercept_W_m2K;
+            tp.convectionWindB_W_s_m3K = resolved.thermal.convection.windSlope_W_s_m3K;
+            tp.convectionFreeC = resolved.thermal.convection.freeCoefficient;
+            tp.convectionReferenceHeight_m = resolved.thermal.convection.referenceHeight_m;
+            tp.convectionStableDamping = resolved.thermal.convection.stableDamping;
+            tp.lateralConduction = resolved.thermal.lateralConduction;
+            tp.sunMemoryLags = resolved.thermal.sunMemoryLags;
             // The two measurement switches. sunCorrection changes what the
             // solve carries, so the viewport has to be told or it silently
             // renders the corrected field a config asked not to have;
@@ -1061,11 +1096,39 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             // write here is DumpThermalElements() rather than the solve.
             tp.sunCorrection = resolved.thermal.sunCorrection;
             tp.dumpElementsFile = resolved.thermal.dumpElementsFile;
+            tp.parameterSensitivities.clear();
+            for (const thermal::ThermalParameter p : resolved.thermal.parameterSensitivities) {
+                switch (p) {
+                    case thermal::ThermalParameter::Convection:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Convection);
+                        break;
+                    case thermal::ThermalParameter::Emissivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Emissivity);
+                        break;
+                    case thermal::ThermalParameter::Absorptivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Absorptivity);
+                        break;
+                    case thermal::ThermalParameter::Conductivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Conductivity);
+                        break;
+                    case thermal::ThermalParameter::HeatCapacity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::HeatCapacity);
+                        break;
+                    case thermal::ThermalParameter::Count:
+                        break;
+                }
+            }
             SetThermalSolveParams(tp);
 
             ClearThermalMaterials();
             for (const auto& [name, mat] : spectra.thermalMaterials) {
                 ThermalMaterialParams tmp;
+                tmp.isShell = mat.isShell;
                 tmp.conductivity_W_mK = mat.conductivity_W_mK;
                 tmp.density_kg_m3 = mat.density_kg_m3;
                 tmp.specificHeat_J_kgK = mat.specificHeat_J_kgK;
@@ -1073,9 +1136,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 tmp.convection_W_m2K = mat.convection_W_m2K;
                 tmp.shortwaveAbsorptivity = mat.shortwaveAbsorptivity;
                 tmp.wetnessFactor = mat.wetnessFactor;
+                tmp.internalHeat_W_m2 = mat.internalHeat_W_m2;
                 tmp.interiorFixedTemperature =
                     mat.interiorBoundary == thermal::InteriorBoundary::FixedTemperature;
+                tmp.interiorAmbient =
+                    mat.interiorBoundary == thermal::InteriorBoundary::AmbientInterior;
                 tmp.interiorTemperature_K = mat.interiorTemperature_K;
+                tmp.interiorConvection_W_m2K = mat.interiorConvection_W_m2K;
                 SetThermalMaterial(name, tmp);
                 ++report.thermalMaterialsApplied;
             }
@@ -1244,9 +1311,11 @@ const Scene* ExternalRenderContext::GetScene() const {
 // rather than at each of the nine call sites.
 bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
-    const glm::vec3& sunDirection) {
-    const auto records =
-        rendercore::MakeThermalSunResponse(sunSensitivity_K, sunVisibility, sunDirection);
+    const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K,
+    const Vector<f32>& lagVisibility, const Vector<glm::vec3>& lagDirection) {
+    const auto records = rendercore::MakeThermalSunResponse(
+        sunSensitivity_K, sunVisibility, sunDirection, lagSensitivity_K, lagVisibility,
+        lagDirection);
     const VkDeviceSize bytes =
         records.size() * sizeof(rendercore::ThermalSunResponseGpu);
 
@@ -1259,6 +1328,35 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
             VMA_MEMORY_USAGE_CPU_TO_GPU);
     }
     thermalSunResponseBuffer->Upload(records.data(), bytes);
+    return reallocate;
+}
+
+/// Put a per-element tangent field and its step on binding 27.
+///
+/// One float of step at index 0 and one tangent per element after it. Empty
+/// tangents mean nothing is being previewed, which is a single zero: the
+/// shader's multiply by the step then costs nothing and needs no branch.
+///
+/// @return true when the buffer was reallocated, which is what tells the
+///         caller the descriptor has to be rewritten.
+bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangent,
+                                                       const f32 step) {
+    Vector<f32> records;
+    records.reserve(tangent.size() + 1);
+    records.push_back(tangent.empty() ? 0.0f : step);
+    records.insert(records.end(), tangent.begin(), tangent.end());
+    if (records.size() < 2) records.push_back(0.0f);
+
+    const VkDeviceSize bytes = records.size() * sizeof(f32);
+    const bool reallocate =
+        !thermalParameterTangentBuffer || thermalParameterTangentBuffer->GetSize() != bytes;
+    if (reallocate) {
+        if (thermalParameterTangentBuffer) vkDeviceWaitIdle(device);
+        thermalParameterTangentBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    thermalParameterTangentBuffer->Upload(records.data(), bytes);
     return reallocate;
 }
 
@@ -1409,6 +1507,7 @@ void ExternalRenderContext::RenderFrame(
     cameraData.wavelength_nm = m_impl->wavelength_nm;
     cameraData.spectral_mode = static_cast<u32>(m_impl->spectralMode);
     cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
+    cameraData.debugParam = m_impl->debugParam;
     m_impl->pipeline->SetCameraData(cameraData);
 
     // The shader branches on the SPEC_SPECTRAL_MODE specialization constant,
@@ -2076,6 +2175,13 @@ u32 ExternalRenderContext::GetSPP() const {
 // Debug Visualization
 // ============================================================================
 
+void ExternalRenderContext::SetDebugParameter(const u32 value) {
+    if (m_impl->debugParam != value) {
+        m_impl->debugParam = value;
+        ResetAccumulation();
+    }
+}
+
 void ExternalRenderContext::SetDebugMode(DebugVisualizationMode mode) {
     if (m_impl->debugMode != mode) {
         m_impl->debugMode = mode;
@@ -2593,6 +2699,81 @@ void ExternalRenderContext::ClearThermalMaterials() {
     if (m_impl->thermalPreview) m_impl->thermalPreview->ClearMaterials();
 }
 
+Result<u32, String> ExternalRenderContext::ThermalElementAt(const PickResult& pick) const {
+    using ElementResult = Result<u32, String>;
+    if (!m_impl->thermalPreview) {
+        return ElementResult::Err("this context has no thermal solve");
+    }
+    if (!pick.hit) {
+        return ElementResult::Err("that ray reached the sky");
+    }
+    u32 element = 0;
+    if (!m_impl->thermalPreview->ElementFor(pick.instanceIndex, pick.primitiveIndex, element)) {
+        return ElementResult::Err(
+            "that surface is not in the thermal solve -- its material names no "
+            "conductivity, so it keeps whatever temperature it was given");
+    }
+    return ElementResult(element);
+}
+
+Result<Vector<f32>, String> ExternalRenderContext::GetThermalParameterSensitivity(
+    const ThermalSensitivityParameter parameter) const {
+    using FieldResult = Result<Vector<f32>, String>;
+    if (!m_impl->thermalPreview) {
+        return FieldResult::Err("this context has no thermal solve");
+    }
+    auto field = m_impl->thermalPreview->ParameterSensitivityField(parameter);
+    if (field.empty()) {
+        return FieldResult::Err(
+            "this solve does not carry a derivative with respect to that parameter -- "
+            "ask for it in ThermalSolveParams::parameterSensitivities, which rebuilds "
+            "the trajectory");
+    }
+    return FieldResult(std::move(field));
+}
+
+Result<void, String> ExternalRenderContext::SetThermalWhatIf(
+    const ThermalSensitivityParameter parameter, const f64 step) {
+    using WhatIfResult = Result<void, String>;
+    if (!m_impl->thermalPreview) {
+        return WhatIfResult::Err("this context has no thermal solve");
+    }
+
+    m_impl->whatIfParameter = parameter;
+    m_impl->whatIfStep = static_cast<f32>(step);
+
+    Vector<f32> tangent;
+    if (step != 0.0) {
+        tangent = m_impl->thermalPreview->ParameterSensitivityField(parameter);
+        if (tangent.empty()) {
+            m_impl->whatIfStep = 0.0f;
+            m_impl->UploadThermalTangent({}, 0.0f);
+            if (m_impl->pipeline) {
+                m_impl->pipeline->BindThermalTangentBuffer(
+                    *m_impl->thermalParameterTangentBuffer);
+            }
+            return WhatIfResult::Err(
+                "this solve does not carry a derivative with respect to that "
+                "parameter -- ask for it in ThermalSolveParams::parameterSensitivities, "
+                "which rebuilds the trajectory");
+        }
+    }
+
+    if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
+        m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+    }
+    ResetAccumulation();
+    return WhatIfResult();
+}
+
+Result<ThermalElementTrajectory, String> ExternalRenderContext::GetElementTrajectory(
+    const u32 element, const f64 fromHour, const f64 toHour, const u32 samples) {
+    if (!m_impl->thermalPreview) {
+        return Result<ThermalElementTrajectory, String>::Err("this context has no thermal solve");
+    }
+    return m_impl->thermalPreview->ElementTrajectory(element, fromHour, toHour, samples);
+}
+
 Result<String, String> ExternalRenderContext::DumpThermalElements(const String& pathOrEmpty) {
     if (!m_impl->thermalPreview) {
         return Result<String, String>::Err("this context has no thermal solve");
@@ -2613,9 +2794,12 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
             m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
+            m_impl->UploadThermalTangent({}, 0.0f);
+            m_impl->whatIfStep = 0.0f;
             if (m_impl->pipeline) {
                 m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
                 m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
+                m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
             }
 
             m_impl->geometry.SetThermalElementBases({});
@@ -2674,9 +2858,21 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     // Reallocating is what needs the wait and the rebind, and that only
     // happens when the element count changes -- the helper says which it did.
     if (m_impl->UploadThermalSunResponse(result.sunSensitivity_K, result.sunVisibility,
-                                         result.sunDirection) &&
+                                         result.sunDirection, result.lagSensitivity_K,
+                                         result.lagVisibility, result.lagDirection) &&
         m_impl->pipeline) {
         m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
+    }
+
+    // The what-if tangent is a field of the hour exactly as the temperatures
+    // are, so a scrub has to move it too -- otherwise the preview would show
+    // noon's derivative over midnight's field.
+    if (m_impl->whatIfStep != 0.0f) {
+        const auto tangent =
+            m_impl->thermalPreview->ParameterSensitivityField(m_impl->whatIfParameter);
+        if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
+            m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+        }
     }
 
     ResetAccumulation();
@@ -3351,6 +3547,10 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
     UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
+    // Binding 27 the same way: a descriptor the shader reads has to be written
+    // whether or not anything is previewing, and a step of zero is what "not
+    // previewing" looks like from the shader's side.
+    UploadThermalTangent({}, 0.0f);
     thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
 }
 
@@ -3387,6 +3587,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
+    bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);

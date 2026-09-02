@@ -94,14 +94,25 @@ TEST(TypesTest, ParseSpectralModeRGB) {
 }
 
 TEST(TypesTest, ParseSpectralModeVISFused) {
-    // "vis_fused" and "VIS" map to visible spectral integration mode
+    // Both visible modes are reachable by their own name.
     auto res1 = ParseSpectralMode("vis_fused");
     EXPECT_TRUE(res1.has_value());
     EXPECT_EQ(res1.value(), SpectralMode::VIS_Fused);
 
-    auto res2 = ParseSpectralMode("VIS");
+    auto res2 = ParseSpectralMode("vis_hero");
     EXPECT_TRUE(res2.has_value());
-    EXPECT_EQ(res2.value(), SpectralMode::VIS_Fused);
+    EXPECT_EQ(res2.value(), SpectralMode::VIS_Hero);
+}
+
+TEST(TypesTest, TheBandAliasNamesTheSampledMode) {
+    // "VIS" is the band, and asking for a band rather than an estimator gets
+    // the one to render with: four sampled wavelengths a path, which follows
+    // n(lambda) through a dispersive interface. vis_fused stays reachable, and
+    // only by name, because what it is for is being the reference.
+    auto res = ParseSpectralMode("VIS");
+    ASSERT_TRUE(res.has_value());
+    EXPECT_EQ(res.value(), SpectralMode::VIS_Hero);
+    EXPECT_TRUE(IsVisMode(res.value()));
 }
 
 TEST(TypesTest, ParseSpectralModeMultispectral) {
@@ -174,6 +185,7 @@ TEST(TypesTest, SpectralModeEnumValues) {
     //   #define SPECTRAL_MODE_SWIR_FUSED   5
     //   #define SPECTRAL_MODE_NIR_FUSED    6
     //   #define SPECTRAL_MODE_RGB          7
+    //   #define SPECTRAL_MODE_VIS_HERO     8
 
     EXPECT_EQ(static_cast<u32>(SpectralMode::Single), 0u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::VIS_Fused), 1u);
@@ -183,6 +195,46 @@ TEST(TypesTest, SpectralModeEnumValues) {
     EXPECT_EQ(static_cast<u32>(SpectralMode::SWIR_Fused), 5u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::NIR_Fused), 6u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::RGB), 7u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::VIS_Hero), 8u);
+}
+
+// The comment above is a promise; this reads the shader and checks it. The
+// value travels as a specialization constant, so a renumbering that compiles
+// on both sides silently renders one mode's scene with another's estimator.
+TEST(TypesTest, ShaderSpectralModeDefinesMatchTheEnum) {
+    const std::filesystem::path hlsl =
+        std::filesystem::path(QUANTILOOM_SOURCE_ROOT) / "src" / "shaders" / "common.hlsli";
+    std::ifstream in(hlsl);
+    ASSERT_TRUE(in.is_open()) << "cannot open " << hlsl.string();
+
+    std::unordered_map<std::string, u32> defines;
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ls(line);
+        std::string hash, name, value;
+        if (!(ls >> hash >> name >> value)) continue;
+        if (hash != "#define") continue;
+        if (name.rfind("SPECTRAL_MODE_", 0) != 0) continue;
+        defines[name] = static_cast<u32>(std::stoul(value));
+    }
+
+    const std::pair<const char*, SpectralMode> modes[] = {
+        {"SPECTRAL_MODE_SINGLE",        SpectralMode::Single},
+        {"SPECTRAL_MODE_VIS_FUSED",     SpectralMode::VIS_Fused},
+        {"SPECTRAL_MODE_MULTISPECTRAL", SpectralMode::Multispectral},
+        {"SPECTRAL_MODE_MWIR_FUSED",    SpectralMode::MWIR_Fused},
+        {"SPECTRAL_MODE_LWIR_FUSED",    SpectralMode::LWIR_Fused},
+        {"SPECTRAL_MODE_SWIR_FUSED",    SpectralMode::SWIR_Fused},
+        {"SPECTRAL_MODE_NIR_FUSED",     SpectralMode::NIR_Fused},
+        {"SPECTRAL_MODE_RGB",           SpectralMode::RGB},
+        {"SPECTRAL_MODE_VIS_HERO",      SpectralMode::VIS_Hero},
+    };
+    EXPECT_EQ(defines.size(), std::size(modes))
+        << "common.hlsli defines a mode the enum does not list, or the reverse";
+    for (const auto& [name, mode] : modes) {
+        ASSERT_TRUE(defines.count(name)) << "missing " << name;
+        EXPECT_EQ(defines[name], static_cast<u32>(mode)) << name;
+    }
 }
 
 TEST(TypesTest, SpectralModeEnumSize) {
@@ -200,7 +252,8 @@ TEST(TypesTest, SpectralModeAllModesAccepted) {
         "mwir_fused",    // MWIR_Fused
         "lwir_fused",    // LWIR_Fused
         "swir_fused",    // SWIR_Fused
-        "nir_fused"      // NIR_Fused
+        "nir_fused",     // NIR_Fused
+        "vis_hero"       // VIS_Hero (hero-wavelength sampling of the same band)
     };
 
     for (const char* modeStr : modeStrings) {
@@ -435,5 +488,23 @@ TEST(TypesTest, IsThermalIRFusedMode) {
     EXPECT_TRUE(IsIRFusedMode(SpectralMode::NIR_Fused));
     EXPECT_FALSE(IsIRFusedMode(SpectralMode::RGB));
     EXPECT_FALSE(IsIRFusedMode(SpectralMode::VIS_Fused));
+    EXPECT_FALSE(IsIRFusedMode(SpectralMode::VIS_Hero));
     EXPECT_FALSE(IsIRFusedMode(SpectralMode::Single));
+}
+
+TEST(TypesTest, TheTwoVisibleModesShareABand) {
+    EXPECT_TRUE(IsVisMode(SpectralMode::VIS_Fused));
+    EXPECT_TRUE(IsVisMode(SpectralMode::VIS_Hero));
+    EXPECT_FALSE(IsVisMode(SpectralMode::RGB));
+    EXPECT_FALSE(IsVisMode(SpectralMode::Single));
+    EXPECT_FALSE(IsVisMode(SpectralMode::NIR_Fused));
+
+    // Same band edges, or the two are not comparable and neither can serve as
+    // the other's reference.
+    const auto fused = GetFusedBandInfo(SpectralMode::VIS_Fused);
+    const auto hero = GetFusedBandInfo(SpectralMode::VIS_Hero);
+    ASSERT_TRUE(fused.has_value());
+    ASSERT_TRUE(hero.has_value());
+    EXPECT_FLOAT_EQ(fused->lambdaMinNm, hero->lambdaMinNm);
+    EXPECT_FLOAT_EQ(fused->lambdaMaxNm, hero->lambdaMaxNm);
 }

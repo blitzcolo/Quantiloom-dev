@@ -27,6 +27,15 @@ suite, `scripts/check_exports.sh` against `docs/abi/*.golden`, the furnace
 cavities, and the illumination suite. The export gate prints what to do when it
 trips; `src/libQuantiloom/CLAUDE.md` has the rule it enforces.
 
+The illumination suite has seven arms: `nir`/`swir`/`mwir` occlusion, `open`
+(SWIR open sky against a closed form), `open:vis` (the same ground in the
+visible, where the deterministic mode must render with a spread of exactly zero
+and the sampled one must land on its mean), `bleed`, `mis`, `hero` (the two
+visible estimators against each other), `fluor` (a transfer between two
+wavelength bands, the one check a renderer diagonal in λ cannot pass by
+accident), and `view`. `check_dispersion.py` covers the RGB path and the two
+n(λ) sources and is still run by hand.
+
 **The Windows path is `./build_windows.ps1` then `./install_windows.ps1`, and it
 must stay equivalent.** Both paths install the same SDK to the same prefix and
 Quantiloom-Qt cannot tell which produced it, so a gate added to one belongs in
@@ -41,9 +50,21 @@ integrals and RMSE over EXR images — and Python is portable in a way bash is n
 refuses without it (`-Force` overrides), since two scripts cannot enforce an
 order between themselves the way one script's `set -e` does.
 
+**Nothing a gate prints may be non-ASCII.** A Windows console on a CJK locale
+encodes stdout as GBK, so a `print` carrying a combining macron or a superscript
+two raises `UnicodeEncodeError`, the checker exits 1, and the gate fails before
+it has measured anything. Under WSL the locale is UTF-8 and the same script is
+fine, which is what let two of them carry it unnoticed. Write `W/sr/m^2/nm`, not
+`W/sr/m²/nm`.
+
+To run the PowerShell gates from here: `$env:PYTHON` at an interpreter with
+numpy and OpenEXR (`H:\paper-exp\.venv\Scripts\python.exe` has both; the
+miniconda base has numpy only), then the two `run_*_suite.ps1` directly. Their
+output is line for line the bash twins'.
+
 ## Tests
 
-1279 tests run in ~9 s, and the binary reruns without rebuilding. They link the
+1366 tests run in ~8 s, and the binary reruns without rebuilding. They link the
 objects, not the DLL, so internal code is testable without being exported.
 
 ```bash
@@ -52,8 +73,8 @@ objects, not the DLL, so internal code is testable without being exported.
 ```
 
 `ctest` registers a single aggregate test here, so `ctest -R` cannot select a case —
-always use `--gtest_filter`. 10 SKIPPED is the normal baseline: 8 BC7 (deliberately
-off, see `build_wsl.sh`) and 2 EXR multipart (unimplemented). A test needing an asset
+always use `--gtest_filter`. 8 SKIPPED is the normal baseline: the BC7 cases,
+deliberately off, see `build_wsl.sh`. A test needing an asset
 must build its path from `QUANTILOOM_SOURCE_ROOT`, never a relative or absolute one —
 those resolve against the caller's cwd and skip on miss, so a wrong path reads as
 "no test data" rather than as a failure.
@@ -191,6 +212,64 @@ error that scales every wavelength equally, so it changes nothing about the
 colour and reads as an exposure mistake rather than a unit one. It cost a
 debugging round already.
 
+## Two visible modes, and the band alias picks the sampled one
+
+`vis_hero` draws one wavelength per path and rotates it into a quartet
+(`λⱼ = 400 + mod(λ_h − 400 + j·95, 380)`), weights the four into CIE XYZ at the
+vertex that drew them, and follows n(λ) through a dispersive interface. Four
+radiances a path rather than thirty-two. `vis_fused` is the same band by a
+deterministic 32-point sweep, kept permanently and reachable only by name.
+
+Which is not a fallback but a job: it has no variance in wavelength at all,
+which makes it the reference the sampled mode is measured against and the mode
+to ask for when an answer has to be repeatable rather than converged. Both live
+in one binary because the checks compare them inside one render session.
+
+`spectral.mode = "VIS"` resolves to `vis_hero`: every other band alias has one
+estimator to go to, and asking for a band rather than for an estimator is
+asking to render it.
+
+The illumination suite's `hero` arm holds the pair together — the sampled
+mode's error must fall faster than 2× per 16× samples, and its signed luminance
+error at 1024 spp must stay under 0.3%. Luminance and not the channels, because
+the 32-point Riemann sum of a D65-shaped illuminant reads Z about 0.6% high
+while Y is 0.001% low: the *reference* is the biased one in blue, the check
+reports it per channel, and holding all three to a bound would be holding the
+sampled mode to the reference's quadrature error.
+
+## Light can leave at a wavelength it did not arrive at
+
+Transport is diagonal in λ everywhere else, which is what lets four wavelengths
+share one geometric path. Fluorescence is the term that is not, and it is why
+the payload could not simply carry more wavelengths.
+
+Rank one, which is what published data supports: an excitation shape, an
+emission shape and a quantum yield, on `MaterialDataCPU`'s three former padding
+words (offsets 44, 312, 316 — the struct is still 656 bytes). Both a TOML's
+five `fluorescence_*` keys and a glTF's `QUANTILOOM_materials_fluorescence`
+reach one resolver, which normalises the emission to unit area over the band
+because a spectrofluorimeter reports counts and the yield is what says how much
+comes back.
+
+One sample of the excitation integral per vertex, on a slot of its own so a
+scene without fluorescence draws nothing:
+`M ~ ex(λ_f) E(λ_f) / p(λ_f)`, with E the irradiance already established at
+that vertex and no ray traced for it. The scalar enters the shared wavelength
+loop as `yield · em(λ) · M / π`, which is what makes the 32-point sweep, the
+quartet and a collapsed hero ray agree without three implementations.
+
+**No `emissiveFactor` is written**, on either path. A fluorescent surface emits
+only what something else lit it with, and the emitter-sampling table collects
+triangles by `luminance(emissiveFactor)` — a triple there would have next-event
+estimation aim at a light that is dark on its own.
+
+`check_fluorescence.py` is the illumination suite's `fluor` arm and the only
+check in the tree a diagonal renderer cannot pass by accident: two illuminants
+of equal power over the band, the second with twice as much below 500 nm, in
+front of a dye that absorbs on [400, 500] and emits on [550, 650]. At 600 nm
+the second illuminant carries 0.643 of the first and the dye's contribution
+moves 1.90×.
+
 ## Thermography
 
 Four things a thermal scene can now do that it could not, each independent of
@@ -286,7 +365,10 @@ Two traps if you touch it:
 ### What the balance is made of
 
 Six fluxes at the exposed face, three of which no config asks for directly —
-they are geometry, computed once per trajectory:
+they are geometry, computed once per trajectory. (A probe reports six too, but
+grouped differently: the three short-wave rows below are one term there, and
+conduction into the slab and across shared edges are the other two. Same
+balance, decomposed for a different question.)
 
 | Flux | Where it comes from | Off when |
 |---|---|---|
@@ -310,13 +392,71 @@ temperature is several times the linearised radiative one, so it is Newton-
 linearised into `diag[0]` and `rhs[0]` beside the convection. Left explicit it
 oscillates at a minute per step.
 
-The forcing CSV is eight columns, the last two optional and defaulted:
+The forcing CSV is ten columns, the last four optional and defaulted:
 `time_h, air_k, dni, sun_azimuth_deg, sun_elevation_deg, sky_k,
-diffuse_w_m2, relative_humidity`. A file written before those existed keeps
-its meaning exactly. A constant-forcing run reads `[thermal]
-diffuse_irradiance_w_m2` and `[atmosphere] relative_humidity` — the humidity
-is deliberately *not* duplicated into `[thermal]`, since a scene with two of
-them would be a scene with two atmospheres.
+diffuse_w_m2, relative_humidity, convection_w_m2k, wind_speed_m_s`. A file
+written before any of those existed keeps its meaning exactly. A
+constant-forcing run reads `[thermal] diffuse_irradiance_w_m2` and
+`[atmosphere] relative_humidity` — the humidity is deliberately *not*
+duplicated into `[thermal]`, since a scene with two of them would be a scene
+with two atmospheres.
+
+The last two columns are two ways of saying the same thing about h, and the
+ninth wins: a file carrying a measured coefficient is stating what the
+correlations are estimating. Absent both, `[thermal] convection_model` decides
+— `constant` is the material's own number all day, `wind` is McAdams
+`h = a + b U` off the tenth column, and `stability` adds the free-convection
+floor `C |T_s − T_air|^(1/3)` that carries the exchange on a calm night, with a
+Louis damping over `convection_reference_height_m` when the surface is the
+colder. `a`, `b`, `C` and the damping are `convection_wind_a`,
+`convection_wind_b`, `convection_free_c` and `convection_stable_damping`.
+Anything but `constant` is CPU-stepper work.
+
+Three more `[thermal]` keys change what the solve carries rather than what it
+computes, and each rebuilds the trajectory: `lateral_conduction` lets heat
+cross the edge between two triangles of one object, `sun_memory_lags` gives
+that many of the sun's recent columns a tangent of their own so a shading pass
+can trace a shadow at the hour it was cast, and `parameter_sensitivities`
+(`["h", "epsilon", "alpha", "k", "rhoc"]`) differentiates the trajectory with
+respect to material parameters. All three are CPU-stepper work too.
+
+`[[materials]] shell = true` says a material's triangles are two sides of one
+thin slab rather than a surface with something behind it: a car panel, a road
+sign, a tent, an aircraft skin. An asset models such a thing as two sheets, and
+solved as written that is two independent slabs each insulated against a wall
+that is not there -- a panel in the sun comes out as hot as if it were bolted to
+masonry, and the shaded face sits wherever the initial condition left it.
+
+The pair shares one column. `ThermalMesh` pairs two triangles of one primitive
+whose normals oppose and whose centroids are within a small multiple of the
+material's own thickness; the lower index owns the column and is stepped with a
+full surface balance at BOTH ends -- the back one evaluated with the partner's
+normal, sky fraction and view factors, through the same `EvaluateSurfaceBalance`
+the front uses. The higher index is not stepped, and the owner's back-node
+temperature is written into its surface slot, so the radiative exchange, the
+render's temperature buffer, a dump and a probe all read it without knowing a
+shell is involved.
+
+Two things the pairing will not do: cross a primitive, since two panels a
+millimetre apart are geometrically indistinguishable from one shell and the
+conductance between them is one nobody supplied; and pair faces that point the
+same way, which is a floor and a ceiling. Triangles of a shell material that
+found no partner are counted and logged -- the rule is a heuristic over geometry
+nobody authored for it, and a material that declared itself a shell and paired a
+tenth of its triangles is a modelling problem rather than a solver one.
+
+The back face carries no shadow-edge tangent. What the column holds is dT/dv for
+the OWNER's visibility, and the shading pass would pair that derivative with the
+partner's own visibility, which is a different quantity; the partner's tangent
+is therefore zero, meaning its triangle gets one temperature with no
+sub-triangle correction.
+
+On a material: `internal_heat_w_m2` is a flux entering the back face — an
+engine, a battery, a compartment, and the only way a shaded surface can be the
+warmest thing in an infrared scene. `interior_bc` chooses what is behind it:
+`adiabatic`, `fixed` at `interior_temperature_k`, or `ambient`, which convects
+to it through `interior_convection_h_w_m2k`. A source under `fixed` does
+nothing, since a pinned node absorbs whatever reaches it, and binding says so.
 
 ### Getting a thermogram onto a screen
 
@@ -393,8 +533,22 @@ computed once at construction.
 Crank-Nicolson math in f32 via `thermal_step.comp.hlsl`. Each element is one
 thread; the Thomas solve is thread-local (max 32 nodes); inter-element
 radiative coupling reads from a ping-pong surface buffer. `StepMany`
-dispatches entire batches in a single `ExecuteImmediate`. Falls back to the
-CPU stepper when no GPU is available or `nodeCount > 32`.
+dispatches entire batches in a single `ExecuteImmediate`.
+
+**The host picks the stepper, and it picks CPU for anything the GPU one does
+not carry.** That is `ChooseStepper` in `ThermalPreview`, and the list is the
+GPU stepper's honest limits rather than a performance preference: no GPU,
+`nodeCount > 32`, a convection law that is not the constant one, lateral
+conduction, `sunMemoryLags > 0`, or a non-empty `parameterSensitivities`.
+
+The last two matter more than they look. The state is sized by the timeline's
+`Desc`, not by the stepper, so a stepper that does not integrate a tangent
+still receives the vector and hands it back at zero — and zero is a
+derivative, not an absence. A shading pass would then trace a shadow against a
+response of nothing and a what-if preview would predict that no slider changes
+anything, with every other check still green. The interface says which it
+carries (`CarriesLateralConduction`, `CarriesLagSensitivity`,
+`CarriesParameterSensitivity`) and the host asks before choosing.
 
 **ThermalPreview** (`renderer/ThermalPreview.hpp`) is the internal subsystem
 class owned by `ExternalRenderContext::Impl`. It holds the mesh, exchange
@@ -411,6 +565,41 @@ taken at, and the short-wave gains baked from them. Built by
 hemisphere rays skipped) whenever the forcing file has more than one row;
 constant forcing gets a single column from the exchange. Each solver step
 interpolates between the two nearest columns.
+
+### What the viewport can ask a solve
+
+Four facade calls, all read-only against the trajectory except the last, which
+moves a scalar and re-renders:
+
+| call | answers |
+|---|---|
+| `ThermalElementAt(pick)` | which element a click landed on. Says no for a ray that reached the sky, and for geometry whose material declares no conductivity — that one is not in the solve at all, which is a fact about the scene rather than a lookup that failed |
+| `GetElementTrajectory(element, from, to, samples)` | that element's temperatures over a stretch of the day, and the six surface fluxes that produced them: absorbed sun, net long wave, convection, evaporation, conduction into the slab, conduction across shared edges. All W/m², positive into the face, summing to what the surface is storing |
+| `GetThermalParameterSensitivity(parameter)` | the dT/dp field, one value per element, at the hour on screen |
+| `SetThermalWhatIf(parameter, step)` | renders `T + dT/dp * step` instead of `T` — a first-order preview of a slider, which is what makes it followable during a drag when a re-solve is not |
+
+Nothing is re-solved for any of them. A trajectory replays from checkpoints and
+restores the hour the viewport was showing before it returns, which a test
+holds it to: a probe is a question about the past, not a request to move.
+
+The fluxes are decomposed by `EvaluateSurfaceBalance`, the same function the
+CPU step builds its right-hand side from — one reading of the balance, because
+two would drift. And they are decomposed by the CPU stepper whichever one
+produced the trajectory: the balance is a pure function of the state, so the
+six numbers do not change with whether the machine has a GPU, and the state
+they describe is the trajectory's own either way.
+
+**Binding 27** carries the what-if field: a step at index 0 and one dT/dp per
+element after it, so a scene previewing nothing binds a single zero and the
+shader's multiply costs nothing and needs no branch. The step rides in the
+buffer rather than in `LightingParams` because that struct has no room left —
+both its padding floats are spoken for, and growing it changes the SDK/Studio
+pairing hash. Binding 26 carries its own header for the same reason.
+
+Two debug views read the same derivatives directly:
+`DebugVisualizationMode::SunSensitivity` draws |dT/dv|, which is what the
+shadow-edge correction is worth per triangle and therefore where a coarser mesh
+cost something; `ThermalSensitivity` draws dT/dp signed.
 
 ### Invalidation rules
 
@@ -481,6 +670,17 @@ Four things to know before touching it:
 
 Naming `thermal.dump_elements` opts out in both directions: the dump needs the
 exchange's sky fractions, which an entry does not carry.
+
+`kKeySchemaVersion` is at **3** and `kCacheFormatVersion` at **2**. The first
+bumps when a new input joins the key — the convection law and its constants, `lateral_conduction`,
+`sun_memory_lags`, `parameter_sensitivities`, `internal_heat_w_m2` and the
+interior boundary all did — and `kCacheFormatVersion` bumps when the stored
+result grows an array, which the lag and parameter tangents did. Adding an
+input without bumping the first serves a stale field; adding an output without
+bumping the second reads past the end of an old file. Each new field wants an
+`EveryMaterialFieldChangesIt` or `EveryConfigScalarChangesIt` case beside it in
+`test_thermal_solve_cache.cpp`, which is what makes a forgotten one a failing
+test rather than a wrong render.
 
 `QUANTILOOM_THERMAL_GPU_STEPPER=1` runs the offline trajectory on
 `GpuThermalStepper` (`kMaxNodes = 32`, else it falls back and says so). **Off by

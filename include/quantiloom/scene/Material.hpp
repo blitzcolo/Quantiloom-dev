@@ -552,6 +552,58 @@ struct QL_API Material {
     String emissiveCurveSource;
 
     // ========================================================================
+    // Fluorescence
+    // ========================================================================
+    // Light absorbed at one wavelength and re-emitted at another, which is the
+    // one thing a spectral renderer cannot express by extending a spectrum:
+    // transport is diagonal in lambda everywhere else, and this is the term
+    // that is off the diagonal.
+    //
+    // Rank one, which is the standard approximation and the one measured data
+    // is usually published as: an excitation shape, an emission shape and a
+    // scalar. What a surface re-radiates at lambda_out is
+    //
+    //     yield * em(lambda_out) * INTEGRAL ex(lambda_in) E(lambda_in) dlambda_in / pi
+    //
+    // with ex dimensionless in [0, 1] (the fraction of arriving light this
+    // channel takes) and em normalised to unit area over the band, so that it
+    // is a density per nm and the yield alone says how much of what was
+    // absorbed comes back. A full Donaldson matrix would carry the pairwise
+    // detail this factorisation drops; rank one is what makes it a curve pair
+    // rather than a table, and it is what the published data supports.
+    //
+    // >= 0 indexes the same shared curve array as spectralReflectanceCurveIndex.
+    // Both indices and the yield have to be set for the material to fluoresce;
+    // -1 and 0 are the defaults, so a scene that does not ask for this is
+    // bit-identical.
+    //
+    // Deliberately NOT written into emissiveFactor. A fluorescent surface is
+    // not a lamp: it emits only what something else lit, so it has no radiance
+    // of its own to sample toward, and the emitter CDF collects triangles by
+    // luminance(emissiveFactor). Writing one here would enter it in that table
+    // and have next-event estimation sample a light that is dark until lit.
+    i32 fluorescenceExcitationCurveIndex = -1;
+    i32 fluorescenceEmissionCurveIndex = -1;
+
+    // Where a scene file's own pair lands before it is registered. A glTF
+    // carrying QUANTILOOM_materials_fluorescence resolves its paths against its
+    // own directory, which only the loader knows, so the loader reads the CSVs
+    // and ResolveMaterialSpectra turns them into the two indices above. A
+    // config's [material_overrides] entry skips these and goes straight to the
+    // indices, and where both name one material the config wins: naming it
+    // explicitly is how a scene author corrects an asset they cannot edit.
+    Vector<std::pair<f32, f32>> fluorescenceExcitationCurve;  // (wavelength_nm, fraction)
+    Vector<std::pair<f32, f32>> fluorescenceEmissionCurve;    // (wavelength_nm, shape)
+
+    // Quantum yield: the fraction of absorbed photons re-emitted, in [0, 1].
+    // Above 1 is not a bright material but a broken one, and binding rejects it.
+    f32 fluorescenceYield = 0.0f;
+
+    // Where the pair came from, kept so a config round-trips and a UI can show
+    // what is bound. Empty when nothing is.
+    String fluorescenceSource;
+
+    // ========================================================================
     // Utilities
     // ========================================================================
 
@@ -656,6 +708,14 @@ struct QL_API Material {
     // Validate Kirchhoff's law: ε + ρ + τ ≤ 1 at all wavelengths
     // Returns true if valid, false if energy conservation violated
     [[nodiscard]] bool ValidateIRKirchhoffLaw() const;
+
+    // Both curves and a nonzero yield, because any one of the three alone
+    // describes nothing: a shape with no strength, or a strength with no shape.
+    [[nodiscard]] bool HasFluorescence() const {
+        return fluorescenceExcitationCurveIndex >= 0 &&
+               fluorescenceEmissionCurveIndex >= 0 &&
+               fluorescenceYield > 0.0f;
+    }
 
     // Check if material has IR data
     [[nodiscard]] bool HasIRData() const {

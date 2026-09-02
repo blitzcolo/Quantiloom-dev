@@ -197,10 +197,19 @@ def solve(args):
     WORK.mkdir(parents=True, exist_ok=True)
     base = BASE_CONFIG.read_text(encoding="utf-8")
 
+    # Three arms of the same solve. "raw" is the uncorrected field, one
+    # temperature per triangle. "corr" carries the whole-day tangent, which a
+    # shading pass applies with the shadow it traces now. "lag" carries a
+    # tangent per recent sun column as well, so the pass can trace the pixel's
+    # shadow at the hour it was cast -- which is the arm a MOVING shadow is
+    # supposed to need and a frozen one is not.
+    arms = ["corr", "raw"]
+    if args.memory_lags > 0:
+        arms.append("lag")
+
     for divisions in args.divisions:
-        for corrected in (True, False):
-            tag = (f"{divisions}_{'corr' if corrected else 'raw'}"
-                   f"{args.suffix}")
+        for arm in arms:
+            tag = f"{divisions}_{arm}{args.suffix}"
             dump = WORK / f"elements_{tag}.csv"
             config = WORK / f"desert_{tag}.toml"
             text = (base
@@ -218,9 +227,14 @@ def solve(args):
                     # promoted to a failure.
                     .replace('forcing_file = "desert_day.csv"',
                              f'forcing_file = "{(args.forcing or FORCING).as_posix()}"'))
-            if not corrected:
+            if arm == "raw":
                 text = text.replace("[thermal]\nenabled = true",
                                     "[thermal]\nenabled = true\nsun_correction = false")
+            elif arm == "lag":
+                text = text.replace(
+                    "[thermal]\nenabled = true",
+                    f"[thermal]\nenabled = true\n"
+                    f"sun_memory_lags = {args.memory_lags}")
             if not args.render:
                 # The dump is what the sweep measures; a full-resolution render
                 # is only needed for the figure pair.
@@ -332,6 +346,11 @@ file = "{ACTIVE_FORCING[0].as_posix()}"
                         "x": float(point[0]), "z": float(point[2]),
                         "visibility_disc": at_evaluation,
                         "visibility_binary": binary,
+                        # The whole history, not only the instant: a correction
+                        # that traces the shadow at an EARLIER hour needs this
+                        # point's visibility then, and recomputing it would
+                        # mean re-tracing every ray.
+                        "visibility_history": [round(float(v), 6) for v in series],
                         "T_ref_K": float(last[1])})
         if index % 25 == 0:
             print(f"  {index}/{TRANSECT_POINTS}  v={at_evaluation:.3f}  "
@@ -339,6 +358,7 @@ file = "{ACTIVE_FORCING[0].as_posix()}"
 
     (WORK / f"reference{args.suffix}.json").write_text(json.dumps({
         "evaluate_h": EVALUATE_H, "shadow_centre": shadow.tolist(),
+        "history_times_h": [float(t) for t in times],
         "across": across.tolist(), "sphere_centre": centre.tolist(),
         "sphere_radius": radius, "disc_rays": DISC_RAYS,
         "solar_angular_radius_rad": SOLAR_ANGULAR_RADIUS,
@@ -362,6 +382,9 @@ def main():
                              "not sweep")
     parser.add_argument("--suffix", default="",
                         help="tag appended to the output names")
+    parser.add_argument("--memory-lags", type=int, default=0,
+                        help="solve a third arm carrying this many per-column "
+                             "sun tangents, for the moving-shadow comparison")
     args = parser.parse_args()
 
     if args.forcing is not None:

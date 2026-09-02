@@ -439,7 +439,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
             case HyperspectralOutputFormat::GeoTIFF:
                 writeSuccess = WriteGeoTIFF(config.outputPath + ".tif");
                 break;
-            case HyperspectralOutputFormat::EXR_Multipart:
+            case HyperspectralOutputFormat::EXR_Spectral:
                 writeSuccess = WriteEXR(config.outputPath + ".exr");
                 break;
         }

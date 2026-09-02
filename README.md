@@ -14,13 +14,23 @@ One mode per render, set by `spectral.mode` in the scene TOML.
 | `spectral.mode` | Output | Range |
 |---|---|---|
 | `rgb` | RGB (default, no spectral integration — fastest) | 650 / 550 / 450 nm |
-| `vis_fused` | Visible, 32-wavelength CIE XYZ → sRGB | 400 – 780 nm |
+| `vis_hero` | Visible, four sampled wavelengths a path → CIE XYZ → sRGB. Also spelled `VIS` | 400 – 780 nm |
+| `vis_fused` | The same band by a deterministic 32-wavelength sweep | 400 – 780 nm |
 | `nir_fused` | Near IR, reflected solar | 930 – 1200 nm |
 | `swir_fused` | Short-wave IR | 1400 – 2400 nm |
 | `mwir_fused` | Mid-wave IR, thermal | 3000 – 5000 nm |
 | `lwir_fused` | Long-wave IR, thermal | 8000 – 12000 nm |
 | `single` | One wavelength, greyscale EXR | any covered λ |
 | `multispectral` | Hyperspectral cube | configurable grid |
+
+The two visible modes estimate one integral and live in one binary. `vis_hero`
+draws a wavelength per path and rotates it into a quartet, so it follows
+n(lambda) through a dispersive interface and costs four radiances rather than
+thirty-two; `vis_fused` sweeps a fixed grid, so it has no variance in wavelength
+at all. That makes the second the reference the first is measured against
+(`scripts/render-tests/check_hero_wavelength.py`, the illumination suite's
+`hero` arm) and the mode to ask for when an answer has to be repeatable rather
+than converged.
 
 `GetFusedBandInfo()` in `core/Types.hpp` is the authority for these ranges; the
 shader constants in `common.hlsli` are asserted against it by a unit test. Do
