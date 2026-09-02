@@ -29,6 +29,21 @@ enum class ThermalConvectionModel : u8 {
     Stability
 };
 
+/// A material parameter the solve can carry a derivative with respect to,
+/// beside the sun-visibility one it always carries. Each costs a state vector
+/// and an elimination pass per step, so they are asked for by name rather than
+/// all carried: a fit wants one or two, a viewport usually wants none.
+///
+/// Mirrors thermal::ThermalParameter, which is where the derivatives are
+/// actually taken; this is the spelling that crosses the SDK boundary.
+enum class ThermalSensitivityParameter : u8 {
+    Convection = 0,  ///< h, W/(m^2 K). Only under the constant law
+    Emissivity,      ///< eps_lw, what the surface radiates with
+    Absorptivity,    ///< alpha_s, the short-wave fraction it absorbs
+    Conductivity,    ///< k, W/(m K)
+    HeatCapacity     ///< rho c, J/(m^3 K)
+};
+
 struct ThermalSolveParams {
     f64 startTime_h = 0.0;
     f64 timestep_s = 60.0;
@@ -84,6 +99,16 @@ struct ThermalSolveParams {
     /// the tangent out of the solve state, so the trajectory neither carries
     /// nor pays for it. Changing it therefore rebuilds the timeline.
     bool sunCorrection = true;
+
+    /// Material parameters to differentiate the trajectory with respect to.
+    /// Empty is the default and costs nothing. What they are for is a fit --
+    /// dT/dh against a measured series is what turns a guessed convection
+    /// coefficient into a measured one -- and a viewport that wants to show
+    /// what a slider would do before the re-solve finishes.
+    ///
+    /// Like sunCorrection, this sizes the state rather than being read later,
+    /// so changing it rebuilds the timeline.
+    Vector<ThermalSensitivityParameter> parameterSensitivities;
 
     /// Where DumpThermalElements() writes, when it is called with no path of
     /// its own. Empty for the scenes that never want one.

@@ -245,3 +245,33 @@ TEST_F(ThermalPreviewTest, DiffuseIrradianceWarmsASceneWithNoDirectSun) {
     EXPECT_GT(context->GetThermalSolveStatus().meanTemperature_K,
               overcastWithoutDiffuse + 5.0);
 }
+
+TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
+    // A derivative is carried beside the trajectory, not inside it. If asking
+    // for one moved the temperatures, every number the viewport showed would
+    // depend on what the panel happened to have selected -- and the fit these
+    // exist for would be fitting against a perturbed solve.
+    //
+    // The interactive path could not ask for them at all until the list
+    // crossed the SDK boundary: the config path set them on the resolver's own
+    // parameter block, which the viewport never sees.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.airTemperature_K = 293.15;
+    params.sunIrradiance_W_m2 = 800.0;
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 plain = context->GetThermalSolveStatus().meanTemperature_K;
+    ASSERT_GT(plain, 0.0);
+
+    params.parameterSensitivities = {ThermalSensitivityParameter::Convection,
+                                     ThermalSensitivityParameter::Conductivity};
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    EXPECT_NEAR(context->GetThermalSolveStatus().meanTemperature_K, plain, 1e-9)
+        << "carrying a tangent perturbed the trajectory it is a tangent of";
+}

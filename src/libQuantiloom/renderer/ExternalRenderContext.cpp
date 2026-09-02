@@ -1082,6 +1082,33 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             // write here is DumpThermalElements() rather than the solve.
             tp.sunCorrection = resolved.thermal.sunCorrection;
             tp.dumpElementsFile = resolved.thermal.dumpElementsFile;
+            tp.parameterSensitivities.clear();
+            for (const thermal::ThermalParameter p : resolved.thermal.parameterSensitivities) {
+                switch (p) {
+                    case thermal::ThermalParameter::Convection:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Convection);
+                        break;
+                    case thermal::ThermalParameter::Emissivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Emissivity);
+                        break;
+                    case thermal::ThermalParameter::Absorptivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Absorptivity);
+                        break;
+                    case thermal::ThermalParameter::Conductivity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::Conductivity);
+                        break;
+                    case thermal::ThermalParameter::HeatCapacity:
+                        tp.parameterSensitivities.push_back(
+                            ThermalSensitivityParameter::HeatCapacity);
+                        break;
+                    case thermal::ThermalParameter::Count:
+                        break;
+                }
+            }
             SetThermalSolveParams(tp);
 
             ClearThermalMaterials();

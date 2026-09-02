@@ -379,6 +379,30 @@ struct ThermalPreview::Impl {
         desc.carrySunSensitivity = params.sunCorrection;
         desc.sunMemoryLags = params.sunCorrection ? params.sunMemoryLags : 0u;
 
+        // Material tangents, by the same rule and for the same reason: they
+        // size the state, so they reach the desc and SetParams rebuilds.
+        desc.parameters.clear();
+        desc.parameters.reserve(params.parameterSensitivities.size());
+        for (const ThermalSensitivityParameter p : params.parameterSensitivities) {
+            switch (p) {
+                case ThermalSensitivityParameter::Convection:
+                    desc.parameters.push_back(thermal::ThermalParameter::Convection);
+                    break;
+                case ThermalSensitivityParameter::Emissivity:
+                    desc.parameters.push_back(thermal::ThermalParameter::Emissivity);
+                    break;
+                case ThermalSensitivityParameter::Absorptivity:
+                    desc.parameters.push_back(thermal::ThermalParameter::Absorptivity);
+                    break;
+                case ThermalSensitivityParameter::Conductivity:
+                    desc.parameters.push_back(thermal::ThermalParameter::Conductivity);
+                    break;
+                case ThermalSensitivityParameter::HeatCapacity:
+                    desc.parameters.push_back(thermal::ThermalParameter::HeatCapacity);
+                    break;
+            }
+        }
+
         // Every argument but the desc is held by reference for the timeline's
         // lifetime, so all of them are members -- a local would be read after
         // it went out of scope.
