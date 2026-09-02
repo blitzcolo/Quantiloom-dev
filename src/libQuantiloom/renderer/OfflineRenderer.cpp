@@ -215,6 +215,19 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 
     loadedScene = sceneResult.value();
 
+    // The camera and the resolution the config asked for, onto the scene.
+    //
+    // Every mode but one reads them off `resolved` and never looks at the
+    // Scene's copies, which is why those copies sat at their defaults --
+    // rendercore::LoadSceneFromConfig loads geometry and nothing else. The
+    // exception is the hyperspectral path: BatchRenderer takes a `Scene&` and
+    // reads `scene.camera`, `scene.width` and `scene.height` from it. So a
+    // cube was rendered at 1280x720 from the default camera while the log
+    // above printed the resolution the config asked for, and the run exited 0.
+    loadedScene.camera = resolved.camera;
+    loadedScene.width = resolved.width;
+    loadedScene.height = resolved.height;
+
     // A procedural scene brings no materials of its own; material.albedo is
     // what the config offered for that case.
     if (loadedScene.materials.empty()) {

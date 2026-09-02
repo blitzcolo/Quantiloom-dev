@@ -3233,6 +3233,53 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
         }
 
+        // 8. What the surface radiates, and the sky it reflects.
+        // ====================================================================
+        // Everything above this is reflected sunlight, which is the whole of
+        // the signal at 550 nm and none of it at 10 um. Without these two terms
+        // a single-wavelength render of a 310 K plate in the dark came back
+        // exactly zero, and a hyperspectral cube in a thermal band -- which is
+        // rendered band by band through this mode -- came back a cube of zeros
+        // with the run exiting 0.
+        //
+        // Same two terms the fused thermal bands compute, at the one
+        // wavelength this mode has: Kirchhoff's emissivity against Planck, and
+        // the downwelling the remaining reflectance returns. The bounce
+        // residual above already corrects the second against what the scene
+        // actually sees, exactly as it does in those bands, so the base here is
+        // the same analytic sky it subtracts -- a different one would turn the
+        // residual into a bias.
+        //
+        // Guarded on the wavelength rather than run always: below about 3 um a
+        // 300 K Planck radiance is many orders below the reflected solar term
+        // and adding it would only cost a Planck evaluation per hit in the
+        // bands where it says nothing. The threshold is the MWIR band edge,
+        // which is where the fused modes start carrying it too.
+        if (lambda >= SPECTRAL_MWIR_LAMBDA_MIN) {
+            const float T_single = GetSurfaceTemperatureK(
+                material, geoInfo, PrimitiveIndex(), uv,
+                WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+
+            // Kirchhoff, and spectral wherever a curve says so: the same
+            // reflectance that varies across the surface varies what it
+            // radiates, which is what a thermal image is of.
+            float emissivity_s = GetEffectiveIREmissivity(material, metallic, roughness);
+            if (material.spectralReflectanceCurveIndex >= 0) {
+                const float rho_s = EvaluateEndmemberReflectanceW(
+                    spectralCurves, material, endmemberW, lambda);
+                emissivity_s = saturate(1.0 - rho_s - material.irTransmittance);
+            }
+            const float reflectance_s =
+                saturate(1.0 - emissivity_s - material.irTransmittance);
+
+            if (T_single > 0.0) {
+                radiance_spectral += emissivity_s * IRPlanckRadiance(T_single, lambda);
+            }
+            radiance_spectral += reflectance_s *
+                IRDownwellingRadiance(atmos, 0, lambda, lut.atmosphereTemperature_K,
+                                      lut.skyEmissivityClear);
+        }
+
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
         if (atmosEnabled) {
             float tau_l = SampleAtmosTau(atmos, atmosNNData, 0, atmosA);
