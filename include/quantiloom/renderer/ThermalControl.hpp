@@ -63,6 +63,10 @@ struct ThermalSolveParams {
     f64 convectionReferenceHeight_m = 2.0;
     f64 convectionStableDamping = 10.0;
 
+    /// Let heat cross the edge between two triangles of one object. Off by
+    /// default, and CPU-only for the same reason the convection laws are.
+    bool lateralConduction = false;
+
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
     /// off exists so the two renders can be compared, which is the only way to

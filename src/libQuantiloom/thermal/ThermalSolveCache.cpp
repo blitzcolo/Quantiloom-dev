@@ -232,6 +232,10 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     hasher.UpdateF64(config.convection.freeCoefficient);
     hasher.UpdateF64(config.convection.referenceHeight_m);
     hasher.UpdateF64(config.convection.stableDamping);
+    // The flag alone: the conductances it produces are a deterministic
+    // function of the element bytes and the material table, and both are
+    // already in this key above.
+    hasher.UpdateBool(config.lateralConduction);
 
     // 6. The lighting sun direction, which is what the exchange traces sun
     //    visibility against -- a separate field from config.sunDirection.

@@ -65,6 +65,7 @@ public:
     /// whole run.
     void SetConvection(const ConvectionLaw& law) { m_convection = law; }
     [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
+    [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
 
     /// Also reachable without an instance, because a caller has to name the
     /// stepper for the solve cache key before it has decided to build one.

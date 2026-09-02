@@ -1070,6 +1070,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.convectionFreeC = resolved.thermal.convection.freeCoefficient;
             tp.convectionReferenceHeight_m = resolved.thermal.convection.referenceHeight_m;
             tp.convectionStableDamping = resolved.thermal.convection.stableDamping;
+            tp.lateralConduction = resolved.thermal.lateralConduction;
             // The two measurement switches. sunCorrection changes what the
             // solve carries, so the viewport has to be told or it silently
             // renders the corrected field a config asked not to have;

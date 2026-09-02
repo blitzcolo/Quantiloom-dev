@@ -77,6 +77,11 @@ public:
     /// rather than a slower one.
     [[nodiscard]] virtual ConvectionLaw Convection() const { return {}; }
 
+    /// Whether this stepper evaluates ExchangeGeometry::lateral. False is the
+    /// honest answer for an implementation that has not been taught it, and
+    /// the host picks one that has rather than letting the rows be ignored.
+    [[nodiscard]] virtual bool CarriesLateralConduction() const { return false; }
+
     /// For the log line that says which one ran -- and for the solve cache,
     /// which keys on it: two steppers give answers that differ in the last
     /// bits, so an entry is only valid for the one that produced it. Renaming

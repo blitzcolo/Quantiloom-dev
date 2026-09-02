@@ -276,7 +276,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                               const SunVisibilityTable& sunTable, IThermalStepper* stepper) {
     ThermalResult result;
 
-    ThermalMesh mesh = BuildThermalMesh(scene);
+    ThermalMesh mesh = BuildThermalMesh(scene, {.contacts = config.lateralConduction});
     result.elementCount = static_cast<u32>(mesh.elements.size());
     result.instanceElementBase = std::move(mesh.instanceElementBase);
     if (mesh.elements.empty()) {
@@ -300,14 +300,36 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     }
     result.exchangeNonZeros = static_cast<u32>(exchange.viewFactors.NonZeros());
 
-    const ExchangeGeometry openSky = MakeOpenSkyExchange(mesh.elements.size());
-    const ExchangeGeometry& geometry =
-        exchange.skyFraction.size() == mesh.elements.size() ? exchange : openSky;
-    if (&geometry == &openSky && !exchange.skyFraction.empty()) {
+    ExchangeGeometry openSky = MakeOpenSkyExchange(mesh.elements.size());
+    const bool haveExchange = exchange.skyFraction.size() == mesh.elements.size();
+    if (!haveExchange && !exchange.skyFraction.empty()) {
         QL_LOG_WARN("  Thermal: the exchange geometry has {} rows for {} elements; "
                     "falling back to open sky",
                     exchange.skyFraction.size(), mesh.elements.size());
     }
+
+    // Lateral conduction is mesh-derived and the caller's exchange is const,
+    // so a scene that asks for it pays one copy of the view factors. Only that
+    // scene does: with the term off, `withLateral` stays empty and the
+    // reference below binds to the caller's rows as it always has.
+    ExchangeGeometry withLateral;
+    if (config.lateralConduction) {
+        withLateral = haveExchange ? exchange : std::move(openSky);
+        withLateral.lateral = BuildLateralConduction(mesh, materials);
+        if (withLateral.lateral.NonZeros() == 0) {
+            QL_LOG_WARN("  Thermal: lateral_conduction is on but no two triangles of any "
+                        "object share an edge whose materials both solve; the term does "
+                        "nothing");
+        }
+        if (mesh.nonManifoldEdgeCount > 0) {
+            QL_LOG_WARN("  Thermal: {} edges are shared by more than two triangles; each is "
+                        "joined to the first two",
+                        mesh.nonManifoldEdgeCount);
+        }
+    }
+    const ExchangeGeometry& geometry = config.lateralConduction ? withLateral
+                                       : haveExchange           ? exchange
+                                                                : openSky;
 
     // Synthesise a single-column sun table from the exchange when no table
     // is provided. This preserves the old behaviour: one sun direction for
@@ -347,6 +369,11 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                     "using {}", chosen->Name(), cpuStepper.Name());
         chosen = nullptr;
     }
+    if (chosen != nullptr && config.lateralConduction && !chosen->CarriesLateralConduction()) {
+        QL_LOG_INFO("  Thermal stepper: {} does not carry lateral conduction; using {}",
+                    chosen->Name(), cpuStepper.Name());
+        chosen = nullptr;
+    }
     IThermalStepper& activeStepper = chosen != nullptr ? *chosen : cpuStepper;
 
     f64 fastestWind_m_s = 0.0;
@@ -362,6 +389,26 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                     "result is smoothed rather than unstable -- shorten the step if the "
                     "fastest surface matters.",
                     config.timestep_s, shortest);
+    }
+
+    // The lateral term is explicit rather than half-implicit, so its limit is
+    // a stability one rather than an accuracy one: past about twice this the
+    // field oscillates between neighbours instead of smoothing.
+    if (config.lateralConduction) {
+        const f64 lateralTau =
+            LateralTimeConstantSeconds(geometry.lateral, mesh.elements, materials);
+        if (std::isfinite(lateralTau)) {
+            QL_LOG_INFO("  Thermal: lateral conduction over {} joins, shortest lateral "
+                        "time constant {:.0f} s",
+                        geometry.lateral.NonZeros() / 2, lateralTau);
+            if (config.timestep_s > 2.0 * lateralTau) {
+                QL_LOG_WARN("  Thermal: timestep {:.0f} s is past twice the shortest "
+                            "lateral time constant ({:.0f} s). The lateral term is "
+                            "explicit, so this one oscillates rather than smooths -- "
+                            "shorten the step or coarsen the mesh.",
+                            config.timestep_s, lateralTau);
+            }
+        }
     }
 
     ThermalTimeline::Desc desc;

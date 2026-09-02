@@ -236,6 +236,20 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         surfacePrevious[i] = state.Surface(i);
     }
 
+    // Lateral conduction is explicit, and it reaches every node rather than
+    // only the surface, so it needs the whole field as it was -- otherwise an
+    // element would conduct against neighbours that have already moved, which
+    // is a Gauss-Seidel sweep whose answer depends on the element order.
+    // Allocated only for a scene that asked, since it doubles the state.
+    const bool carryLateral = exchange.lateral.RowCount() == elements.size() &&
+                              !exchange.lateral.value.empty();
+    Vector<f64> lateralPrevious;
+    Vector<f64> lateralPreviousSensitivity;
+    if (carryLateral) {
+        lateralPrevious = state.temperature_K;
+        if (state.HasSensitivity()) lateralPreviousSensitivity = state.sunSensitivity_K;
+    }
+
     Vector<f64> lower(nodes), diag(nodes), upper(nodes), rhs(nodes);
 
     // The tangent rides in the same matrix, so it needs a second right-hand
@@ -252,6 +266,15 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     Vector<std::span<f64>> rightHandSides;
     rightHandSides.emplace_back(rhs);
     if (carryTangent) rightHandSides.emplace_back(rhsTangent);
+
+    // The lateral gain of each node of the element being stepped, in K/s. One
+    // rate per node rather than one per element because the two faces of a
+    // slab can be at very different temperatures and conduct sideways at
+    // different rates; the node's own cell height cancels out of it, so the
+    // form is the same for the half cells at the faces and the whole cells
+    // between them.
+    Vector<f64> lateralRate(carryLateral ? nodes : 0, 0.0);
+    Vector<f64> lateralRateTangent(carryLateral && carryTangent ? nodes : 0, 0.0);
 
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
@@ -271,6 +294,56 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         const f64 r = (k * dt_s) / (rhoC * dx * dx);
 
         f64* T = &state.temperature_K[e * nodes];
+
+        // ----------------------------------------------------------------
+        // Sideways, to whatever this element shares an edge with
+        // ----------------------------------------------------------------
+        // Explicit, from the snapshot, and applied to the tangents on the same
+        // terms as to the temperature -- a neighbour that steps into shade
+        // cools this element too, and leaving that out of the tangent would
+        // make dT/dv describe a column the solver is no longer stepping.
+        //
+        // g_ij is a conductance per metre of slab depth, so dividing by the
+        // element's heat capacity per unit area leaves a rate that does not
+        // depend on which node it is applied to.
+        if (carryLateral && element.area_m2 > 0.0f) {
+            std::fill(lateralRate.begin(), lateralRate.end(), 0.0);
+            if (!lateralRateTangent.empty()) {
+                std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
+            }
+
+            const f64* Ti = &lateralPrevious[e * nodes];
+            const f64* Si = lateralPreviousSensitivity.empty()
+                                ? nullptr
+                                : &lateralPreviousSensitivity[e * nodes];
+
+            for (u32 nz = exchange.lateral.rowStart[e]; nz < exchange.lateral.rowStart[e + 1];
+                 ++nz) {
+                const u32 j = exchange.lateral.column[nz];
+                const f64 g = exchange.lateral.value[nz];
+                const f64* Tj = &lateralPrevious[j * nodes];
+                for (u32 i = 0; i < nodes; ++i) {
+                    lateralRate[i] += g * (Tj[i] - Ti[i]);
+                }
+                if (Si != nullptr && !lateralRateTangent.empty()) {
+                    const f64* Sj = &lateralPreviousSensitivity[j * nodes];
+                    for (u32 i = 0; i < nodes; ++i) {
+                        lateralRateTangent[i] += g * (Sj[i] - Si[i]);
+                    }
+                }
+            }
+
+            const f64 perCapacity = 1.0 / (rhoC * static_cast<f64>(element.area_m2));
+            for (u32 i = 0; i < nodes; ++i) {
+                lateralRate[i] *= perCapacity;
+                if (!lateralRateTangent.empty()) lateralRateTangent[i] *= perCapacity;
+            }
+        } else if (carryLateral) {
+            std::fill(lateralRate.begin(), lateralRate.end(), 0.0);
+            if (!lateralRateTangent.empty()) {
+                std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
+            }
+        }
 
         // ----------------------------------------------------------------
         // The exposed face
@@ -401,6 +474,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                  0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2 -
                  latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0] +
                  0.5 * (convectiveAdmittance_W_m2K - h) * T[0];
+        if (carryLateral) rhs[0] += halfCell * dt_s * lateralRate[0];
 
         // The tangent's face row: the same equation differentiated in v.
         // Term by term against the line above -- the air temperature and the
@@ -430,6 +504,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                             radiativeSlope * sigma[0] -
                             0.5 * latentAdmittance_W_m2K * sigma[0] +
                             directPerVisibility_W_m2;
+            if (carryLateral) rhsTangent[0] += halfCell * dt_s * lateralRateTangent[0];
         }
 
         // ----------------------------------------------------------------
@@ -440,9 +515,11 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             diag[i] = 1.0 + r;
             upper[i] = -0.5 * r;
             rhs[i] = T[i] + 0.5 * r * (T[i - 1] - 2.0 * T[i] + T[i + 1]);
+            if (carryLateral) rhs[i] += dt_s * lateralRate[i];
             if (carryTangent) {
                 rhsTangent[i] =
                     sigma[i] + 0.5 * r * (sigma[i - 1] - 2.0 * sigma[i] + sigma[i + 1]);
+                if (carryLateral) rhsTangent[i] += dt_s * lateralRateTangent[i];
             }
         }
 
@@ -493,6 +570,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             upper[last] = 0.0;
             rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
                         backFlux_W_m2 + 0.5 * backAdmittance_W_m2K * T[last];
+            if (carryLateral) rhs[last] += halfCell * dt_s * lateralRate[last];
             if (carryTangent) {
                 // The sun reaches none of this, so every term above is a
                 // constant of v but the admittance, which acts on the tangent
@@ -501,6 +579,9 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                    0.5 * (k / dx) * (sigma[last] - sigma[last - 1]) -
                                    0.5 * backAdmittance_W_m2K * sigma[last] -
                                    backRadiativeSlope_W_m2K * sigma[last];
+                if (carryLateral) {
+                    rhsTangent[last] += halfCell * dt_s * lateralRateTangent[last];
+                }
             }
         }
 

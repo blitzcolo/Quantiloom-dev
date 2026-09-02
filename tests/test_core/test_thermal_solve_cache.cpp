@@ -460,6 +460,7 @@ TEST(ThermalSolveCacheKey, EveryConfigScalarChangesIt) {
         [](ThermalConfig& c) { c.convection.freeCoefficient = 1.6; },
         [](ThermalConfig& c) { c.convection.referenceHeight_m = 10.0; },
         [](ThermalConfig& c) { c.convection.stableDamping = 5.0; },
+        [](ThermalConfig& c) { c.lateralConduction = true; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {

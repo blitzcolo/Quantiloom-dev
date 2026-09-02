@@ -86,6 +86,14 @@ struct ThermalConfig {
     /// scene written before the others existed.
     ConvectionLaw convection;
 
+    /// Let heat cross the edge between two triangles of one object, rather
+    /// than giving every element an independent column. Off by default, which
+    /// is the model the solver had: right for dry sand at an hour's timescale,
+    /// where heat diffuses three centimetres, and wrong for a metal panel at
+    /// any timescale. The term is explicit, so a scene that turns it on gets
+    /// a timestep advisory of its own.
+    bool lateralConduction = false;
+
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
     /// off exists so the two renders can be compared, which is the only way to

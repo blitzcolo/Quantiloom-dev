@@ -47,6 +47,7 @@ struct ThermalPreview::Impl {
     bool sunTableDirty = true;
     bool materialTableDirty = true;
     bool timelineDirty = true;
+    bool lateralDirty = true;
 
     // Cached state
     thermal::ThermalMesh mesh;
@@ -145,11 +146,12 @@ struct ThermalPreview::Impl {
     }
 
     thermal::IThermalStepper& ChooseStepper() {
-        // The GPU stepper mirrors the constant law and nothing else, so a run
-        // that asked for another one is CPU work. Deciding it here rather than
-        // letting the GPU stepper ignore the law is the difference between a
-        // slower solve and a wrong one.
-        const bool constantLaw = params.convectionModel == ThermalConvectionModel::Constant;
+        // The GPU stepper mirrors the constant law, one column per element and
+        // nothing else, so a run that asked for more is CPU work. Deciding it
+        // here rather than letting the GPU stepper ignore what it was handed is
+        // the difference between a slower solve and a wrong one.
+        const bool constantLaw = params.convectionModel == ThermalConvectionModel::Constant &&
+                                 !params.lateralConduction;
         if (constantLaw && gpuStepper && gpuStepper->IsValid() &&
             params.layerCount <= GpuThermalStepper::kMaxNodes) {
             return *gpuStepper;
@@ -361,6 +363,12 @@ void ThermalPreview::SetParams(const ThermalSolveParams& params) {
     if (params.forcingFile != p.forcingFile || params.startTime_h != p.startTime_h) {
         m_impl->sunTableDirty = true;
     }
+    if (params.lateralConduction != p.lateralConduction) {
+        // The mesh only carries its shared edges when it was asked to, so
+        // turning this on is a geometry rebuild rather than a flag flip.
+        m_impl->exchangeDirty = true;
+        m_impl->lateralDirty = true;
+    }
     m_impl->timelineDirty = true;
     p = params;
     m_impl->cpuStepper.SetConvection(m_impl->ConvectionLawFromParams());
@@ -418,9 +426,16 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
         return result;
     }
 
+    // Read the flags before the rebuilds below clear them: the lateral
+    // conductances depend on both the mesh and the material table, and are
+    // built after each has settled.
+    const bool geometryWasDirty = m_impl->exchangeDirty;
+    const bool materialsWereDirty = m_impl->materialTableDirty;
+
     // Rebuild mesh if geometry changed
     if (m_impl->exchangeDirty) {
-        m_impl->mesh = thermal::BuildThermalMesh(scene);
+        m_impl->mesh = thermal::BuildThermalMesh(
+            scene, {.contacts = m_impl->params.lateralConduction});
     }
 
     if (m_impl->mesh.elements.empty()) {
@@ -448,6 +463,18 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     // Rebuild exchange if geometry changed
     if (m_impl->exchangeDirty) {
         m_impl->RebuildExchange(tlas);
+    }
+
+    // The lateral conductances ride in the exchange, which is what every
+    // stepper is handed. They depend on the mesh and the material table, so
+    // they are rebuilt whenever either was -- and cleared when the parameter
+    // goes off, or a scene that turned it off would keep conducting.
+    if (geometryWasDirty || materialsWereDirty || m_impl->lateralDirty) {
+        m_impl->exchange.lateral =
+            m_impl->params.lateralConduction
+                ? thermal::BuildLateralConduction(m_impl->mesh, m_impl->materials)
+                : thermal::CsrMatrix{};
+        m_impl->lateralDirty = false;
     }
 
     // Rebuild the sun columns if the geometry, the forcing file or the sun

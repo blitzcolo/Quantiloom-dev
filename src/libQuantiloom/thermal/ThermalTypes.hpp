@@ -232,6 +232,19 @@ struct ExchangeGeometry {
     CsrMatrix viewFactors;
     Vector<f32> skyFraction;      ///< s_i, the unoccluded part of the hemisphere
     Vector<f32> sunVisibility;    ///< 0 = shadowed, 1 = full sun, fractional at an edge
+
+    /// Who touches whom, and how well heat crosses the join: g_ij in W/(m K),
+    /// the conductance per metre of slab depth between two elements sharing an
+    /// edge. Empty is the model this solver had until now, where every element
+    /// is an independent column and a shadow edge is therefore as sharp as the
+    /// mesh -- which is right for dry sand at an hour's timescale and wrong for
+    /// a metal panel at any.
+    ///
+    /// Beside the view factors rather than in them because it is the same
+    /// question asked of contact rather than of sight, and because putting it
+    /// here is what lets every stepper reach it: they all already take an
+    /// ExchangeGeometry.
+    CsrMatrix lateral;
 };
 
 /**
