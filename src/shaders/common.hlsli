@@ -203,10 +203,11 @@ struct Payload {
     //   heroLambda != 0   scalar spectral radiance at that wavelength,
     //                     replicated across .rgb by whichever branch answered.
     //
-    // .w is written zero at every construction site and read nowhere, which is
-    // what a four-wavelength carrier needs of the sites that predate it: a
-    // component-wise clamp or finite guard over the whole float4 is then the
-    // same arithmetic as one over .rgb, and the clamps below are left whole.
+    // A VIS_HERO ray carrying a quartet is the third reading: L(λ_j) per
+    // component, four wavelengths of one path, converted to a colour only by
+    // the vertex that drew them. Every other mode writes .w zero and never
+    // reads it, so a component-wise clamp or finite guard over the whole
+    // float4 is the same arithmetic there as one over .rgb.
     float4 radiance;                                                     // 16 bytes
 
     // Shadow ray result (set by shadow miss shader)
@@ -223,6 +224,22 @@ struct Payload {
     uint rngState;    // PCG hash state                                  // 4 bytes
 
     // Hero wavelength, in nm, or 0 for "this ray carries the whole band".
+    //
+    // VIS_HERO reads the sign as well, because it has a third state to say:
+    //
+    //   0    undivided. Only a primary ray, which is where the quartet is
+    //        drawn.
+    //   > 0  a quartet whose hero this is. The other three are derived by
+    //        QuartetLambda and not stored; `radiance` carries L(λ_j) per
+    //        component and no CIE weighting -- the vertex that drew the
+    //        quartet applies that, once, at the end.
+    //   < 0  one wavelength, |heroLambda|, because a dispersive interface
+    //        collapsed the quartet onto it. Scalar out, like every other mode
+    //        that carries a wavelength.
+    //
+    // Every other mode uses only the first two states and never sets a
+    // negative, so a test on the sign distinguishes the readings without
+    // asking which mode is running. What follows describes those two.
     //
     // A ray with heroLambda != 0 reports SCALAR spectral radiance in
     // `radiance`, not RGB, and every band's closest-hit and miss branch honours

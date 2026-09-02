@@ -297,6 +297,54 @@ float VisibleWavelengthPDF(float lambda) {
     return VIS_IS_K * (1.0 - th * th) / VIS_IS_TRANGE;
 }
 
+// ============================================================================
+// The hero quartet
+// ============================================================================
+// One draw gives four wavelengths: the hero and three rotations of it, evenly
+// spaced around the band treated as a circle. A single path then answers for
+// four wavelengths instead of one, which is where the variance goes -- the
+// four are maximally spread, so their CIE weights are never all small at once
+// the way a single unlucky draw's can be.
+//
+// The rotation matters for more than spread. It is a group action on the band
+// and it preserves the measure, so the SET the four form does not depend on
+// which of them was drawn: hero λ_1 would have produced the same four. That
+// makes the four ways of arriving at this set four sampling techniques for one
+// integral, and the balance heuristic over them collapses to a single scalar
+//
+//     S = Σ_k p(λ_k)
+//
+// shared by all four and computable from any one of them. The estimator is
+// then Σ_j L(λ_j) cmf(λ_j) / S, with no per-wavelength weight to carry: which
+// is why a path can carry four radiances and nothing else.
+//
+// Reference: Wilkie et al., "Hero Wavelength Spectral Sampling", EGSR 2014.
+// ============================================================================
+
+#define VIS_HERO_QUARTET 4u
+
+float QuartetLambda(float heroLambda, uint j) {
+    const float span = SPECTRAL_VIS_LAMBDA_MAX - SPECTRAL_VIS_LAMBDA_MIN;
+    const float step = span / float(VIS_HERO_QUARTET);
+    return SPECTRAL_VIS_LAMBDA_MIN +
+           fmod(heroLambda - SPECTRAL_VIS_LAMBDA_MIN + float(j) * step, span);
+}
+
+// The four at once, in the order the estimator reads them.
+float4 QuartetLambdas(float heroLambda) {
+    return float4(QuartetLambda(heroLambda, 0u), QuartetLambda(heroLambda, 1u),
+                  QuartetLambda(heroLambda, 2u), QuartetLambda(heroLambda, 3u));
+}
+
+// S above. Recomputed wherever it is needed rather than carried: it is four
+// evaluations of a tanh, against a payload component that would have to be
+// found from somewhere.
+float QuartetMisDenominator(float heroLambda) {
+    const float4 l = QuartetLambdas(heroLambda);
+    return VisibleWavelengthPDF(l.x) + VisibleWavelengthPDF(l.y) +
+           VisibleWavelengthPDF(l.z) + VisibleWavelengthPDF(l.w);
+}
+
 // Individual channel accessors for LUT version
 float SampleCIE_X_LUT(StructuredBuffer<float4> cieLUT, float lambda) {
     return SampleCIE_XYZ_LUT(cieLUT, lambda).x;

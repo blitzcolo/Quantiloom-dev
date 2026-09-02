@@ -1013,11 +1013,19 @@ float BoundEmissionRadiance(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                                  lambda_nm) * texScale * misWeight;
 }
 
-float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
-                             float roughness, float qSpec,
-                             float wDiffuse, float wSpecular, float rrSurvive,
-                             float L_base_b, float lambda_b, AnisoFrame aniso,
-                             inout Payload payload)
+// The material weights and the base are float4 because a hero quartet needs
+// four of each, one per wavelength; everything else here -- the roulette, the
+// lobe choice, the direction and its density -- is wavelength independent and
+// stays scalar, which is the whole reason one ray can answer for four
+// wavelengths. A caller with a single wavelength passes scalars and HLSL
+// splats them, so all four components carry the same arithmetic and `.x` is
+// the answer. A caller with fewer than four leaves the rest zero, and zero
+// times anything is the zero it reads back.
+float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
+                              float roughness, float qSpec,
+                              float4 wDiffuse, float4 wSpecular, float rrSurvive,
+                              float4 L_base_b, float lambda_b, AnisoFrame aniso,
+                              inout Payload payload)
 {
     if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
         return 0.0;
@@ -1026,7 +1034,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // see one lobe.
     roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
 
-    float weight = 1.0;
+    float4 weight = 1.0;
     if (payload.depth >= BOUNCE_DEPTH_DETERMINISTIC) {
         // Never reached at depth 0, so this draw has no stratified slot: it is
         // a deep-path decision and PCG is the right source for it.
@@ -1048,7 +1056,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     } else {
         weight *= wDiffuse / max(1.0 - qSpec, 1e-4);
     }
-    if (weight == 0.0) {
+    if (all(weight == 0.0)) {
         return 0.0;
     }
 
@@ -1139,9 +1147,10 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     // correlation is visible.
     payload.rngState = child.rngState;
 
-    // Scalar spectral radiance at lambda_b, by the contract on
-    // Payload::heroLambda.
-    return weight * (child.radiance.r - L_base_b);
+    // Spectral radiance at the wavelength or wavelengths the child was told to
+    // carry, by the contract on Payload::heroLambda. A scalar child replicates
+    // its one answer across .rgb, so component 0 is right either way.
+    return weight * (child.radiance - L_base_b);
 }
 
 // ============================================================================
@@ -1154,6 +1163,35 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // (primary) value survives: raygen snapshots its own payload right after
     // the primary trace, and recursive rays carry separate Payload instances.
     payload.primaryHitT = RayTCurrent();
+
+    // ========================================================================
+    // Which wavelengths this invocation answers for
+    // ========================================================================
+    // Three states, read off the sign of payload.heroLambda -- see the field's
+    // own comment for what each means. Only VIS_HERO has all three; every
+    // other mode leaves heroSigned at what it was handed and the flags below
+    // false, so nothing here changes what they do.
+    //
+    // The draw is here, at the first surface a primary ray reaches, and not in
+    // raygen: raygen is mode-independent, with neither the CIE table nor the
+    // lighting parameters bound, and a primary ray that misses is answered by
+    // an analytic sky that the deterministic grid integrates better than four
+    // samples of it could. Reusing SAMPLE_SLOT_LAMBDA costs nothing -- the
+    // slot exists for the bounce's wavelength, and in this mode the bounce
+    // carries the quartet instead of drawing one.
+    const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+    float heroSigned = payload.heroLambda;
+    if (heroMode && heroSigned == 0.0) {
+        heroSigned = SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_LAMBDA));
+    }
+
+    // Four radiances that only the vertex which drew them may weigh, against a
+    // scalar that any vertex may.
+    const bool   carriesQuartet = heroMode && (heroSigned > 0.0);
+    const bool   quartetRoot    = carriesQuartet && (payload.heroLambda == 0.0);
+    const float4 quartet        = carriesQuartet ? QuartetLambdas(heroSigned)
+                                                 : float4(0.0, 0.0, 0.0, 0.0);
+    const float  quartetS       = carriesQuartet ? QuartetMisDenominator(heroSigned) : 1.0;
 
     // ========================================================================
     // Get instance geometry info for multi-BLAS support
@@ -2077,7 +2115,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Spectral Mode Selection: Choose rendering pipeline based on mode
     // ========================================================================
 
-    float3 output_radiance;
+    // Four components because a hero quartet needs four; every other mode
+    // writes .w zero and never reads it.
+    float4 output_radiance;
 
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // ====================================================================
@@ -2089,7 +2129,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // This is the FASTEST mode with no spectral integration overhead.
         // For physically-correct spectral rendering, use VIS_FUSED mode.
         // ====================================================================
-        output_radiance = radiance;
+        output_radiance = float4(radiance, 0.0);
 
         // NN atmosphere composition per RGB channel (iLambda 0/1/2 = R/G/B,
         // baked at 650/550/450 nm through the vis network)
@@ -2104,7 +2144,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Validation: clamp and sanitize to prevent NaN/Inf
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
-            output_radiance = float3(0.0, 0.0, 0.0);
+            output_radiance = float4(0.0, 0.0, 0.0, 0.0);
         }
         output_radiance = clamp(output_radiance, 0.0, 1000.0);
 
@@ -2155,9 +2195,23 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // whole band along this path would be integrating light that never
         // came this way. It reports scalar spectral radiance and the surface
         // that sampled λ_h converts it back.
-        const bool  heroRay = (payload.heroLambda > 0.0);
-        const uint  sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
+        //
+        // Which sign says so depends on the estimator: the deterministic grid
+        // has only the two states and reads a positive wavelength as single,
+        // while the quartet reserves positive for itself and marks a collapse
+        // negative. Both mean the same thing here.
+        const bool  heroRay = heroMode ? (heroSigned < 0.0)
+                                       : (payload.heroLambda > 0.0);
+        const float heroLambdaAbs = abs(heroSigned);
+        const uint  sampleCount = heroRay ? 1u
+                                : (carriesQuartet ? VIS_HERO_QUARTET
+                                                  : NUM_WAVELENGTH_SAMPLES);
         float heroRadiance = 0.0;
+
+        // The quartet's four radiances, and the four corrections that go with
+        // them. Untouched by every other reading, which leaves them zero.
+        float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
+        float4 quadBounce   = float4(0.0, 0.0, 0.0, 0.0);
 
         // ====================================================================
         // Indirect light: the traced correction
@@ -2199,46 +2253,32 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float visNeeScale = 0.0;
         // The bounce's BRDF terms, kept so the loop evaluates the same f the
         // bounce samples. wDiffuse is per-wavelength, so what is carried out is
-        // everything except rho: kD_b, and the pieces of the specular lobe.
-        float visKD = 0.0, visF = 0.0, visQSpec = 0.0, visNdotV = 0.0;
+        // everything except rho: kD_b, and the pieces of the specular lobe. Four
+        // of each where a quartet is carried, one otherwise -- the loop below
+        // reads component 0 in that case and never the rest.
+        float4 visKD = float4(0.0, 0.0, 0.0, 0.0);
+        float4 visF  = float4(0.0, 0.0, 0.0, 0.0);
+        float visQSpec = 0.0, visNdotV = 0.0;
         {
             // Drawn against a curve shaped like the colour matching functions
             // rather than flat, so that cmf(lambda_b)/pdf below does not swing
             // by 4x with nothing but the draw. See SampleVisibleWavelength.
             // A hero ray has no choice to make -- its wavelength was fixed by
-            // the refraction that created it.
-            const float lambda_b = heroRay
-                ? payload.heroLambda
-                : SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_LAMBDA));
+            // the refraction that created it -- and a quartet has four already,
+            // which is why it draws nothing here and the slot was free for it.
+            float lambda_b = heroSigned;
+            if (!carriesQuartet) {
+                lambda_b = heroRay
+                    ? heroLambdaAbs
+                    : SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_LAMBDA));
+            }
 
-            // Reflectance and Fresnel at lambda_b, by the rules the loop uses.
-            const float rho_b = (material.spectralReflectanceCurveIndex >= 0)
-                ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b)
-                : RgbSpectrumAt(sBase, lambda_b);
-
-            const float F0_b = RgbSpectrumAt(sF0, lambda_b);
+            // How many wavelengths the correction answers for. The body of the
+            // loop below is the straight-line evaluation this block always did,
+            // run once for a single wavelength and four times for a quartet.
+            const uint bounceCount = carriesQuartet ? VIS_HERO_QUARTET : 1u;
 
             const float NdotV_b = max(dot(normal, V), 0.0);
-            const float F_b     = FresnelSchlickF90(NdotV_b, F0_b, specularF90);
-            const float kD_b    = (1.0 - F_b) * (1.0 - metallic);
-
-            // Sheen at lambda_b, folded into the cosine lobe rather than given
-            // a lobe of its own.
-            //
-            // The bounce's two lobes are selected by one scalar, and the f that
-            // NEE evaluates is derived by inverting the bounce's own weights --
-            // so a third lobe would have to be added to the selection, the pdf
-            // and that inversion together, or the two strategies stop estimating
-            // the same integral. What is added instead is a cosine lobe whose
-            // directional albedo is exactly the sheen lobe's, which keeps the
-            // energy right and costs the angular shape of the sheen response to
-            // indirect light. The sun, which is where the velvet rim actually
-            // comes from, is a delta light outside MIS and gets the real lobe.
-            const float rhoSheen_b = hasSheen
-                ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda_b, true)
-                : 0.0;
-            const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_b, sheenRoughness);
-            const float wSheen_b = sheenE * rhoSheen_b;
 
             // Pick the specular lobe about as often as it carries energy. The
             // floor keeps a rough dielectric's specular reachable; metals go to
@@ -2255,6 +2295,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // and still gains diffuse interreflection; only a metal, whose
             // diffuse term is identically zero, gets no bounce at all there.
             // Lifting this needs the miss shader to sample the map.
+            //
+            // Wavelength independent, both of them, which is the reason one ray
+            // can be shared by four wavelengths at all: the lobe it takes and
+            // whether it survives are decided for the surface, not for a colour.
             const float qSpec_b = (useIBL && !hasEnvMap)
                 ? clamp(lerp(FresnelSchlickF90(NdotV_b, (F0.r + F0.g + F0.b) / 3.0, specularF90), 1.0, metallic),
                         0.05, 1.0)
@@ -2268,12 +2312,64 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 clamp(lerp(max(baseColor.r, max(baseColor.g, baseColor.b)), 1.0, metallic),
                       0.0, 0.95);
 
-            // The base both lobes are measured against: the uniform sky dome at
-            // lambda_b, which is what L_ambient reflects and -- prefiltering a
-            // uniform dome being the identity -- what L_ibl reflects too.
-            const float sky_b = hasSpectralSolarLUT
-                ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
-                : 0.0;
+            // The material's response at each wavelength the correction carries,
+            // and the base each is measured against.
+            float4 wDiffuse4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 wSpecular4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 wDt4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 sky4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 kD4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 F4 = float4(0.0, 0.0, 0.0, 0.0);
+
+            for (uint j = 0; j < bounceCount; ++j) {
+                const float lambda_j = carriesQuartet ? quartet[j] : lambda_b;
+
+                // Reflectance and Fresnel at lambda_j, by the rules the loop uses.
+                const float rho_j = (material.spectralReflectanceCurveIndex >= 0)
+                    ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_j)
+                    : RgbSpectrumAt(sBase, lambda_j);
+
+                const float F0_j = RgbSpectrumAt(sF0, lambda_j);
+                const float F_j  = FresnelSchlickF90(NdotV_b, F0_j, specularF90);
+                const float kD_j = (1.0 - F_j) * (1.0 - metallic);
+
+                // Sheen at lambda_j, folded into the cosine lobe rather than
+                // given a lobe of its own.
+                //
+                // The bounce's two lobes are selected by one scalar, and the f
+                // that NEE evaluates is derived by inverting the bounce's own
+                // weights -- so a third lobe would have to be added to the
+                // selection, the pdf and that inversion together, or the two
+                // strategies stop estimating the same integral. What is added
+                // instead is a cosine lobe whose directional albedo is exactly
+                // the sheen lobe's, which keeps the energy right and costs the
+                // angular shape of the sheen response to indirect light. The
+                // sun, which is where the velvet rim actually comes from, is a
+                // delta light outside MIS and gets the real lobe.
+                const float rhoSheen_j = hasSheen
+                    ? EvaluateSheenReflectance(spectralCurves, material, sSheen, lambda_j, true)
+                    : 0.0;
+                const float sheenScale_j = SheenAlbedoScaling(rhoSheen_j, NdotV_b, sheenRoughness);
+                const float wSheen_j = sheenE * rhoSheen_j;
+
+                // The base both lobes are measured against: the uniform sky dome
+                // at lambda_j, which is what L_ambient reflects and -- prefiltering
+                // a uniform dome being the identity -- what L_ibl reflects too.
+                sky4[j] = hasSpectralSolarLUT
+                    ? SampleSkyIrradiance(solarSpectralLUT, lambda_j) / PI
+                    : 0.0;
+
+                wDiffuse4[j] = (kD_j * rho_j * dtBase * sheenScale_j + wSheen_j) * ccBase +
+                               ccWeight * ccE;
+                wSpecular4[j] = F_j * sheenScale_j * ccBase;
+                if (hasDT) {
+                    const float rhoDt_j = EvaluateDiffuseTransmissionColor(
+                        spectralCurves, material, sDT, lambda_j, true);
+                    wDt4[j] = kD_j * dt * rhoDt_j * ccBase;
+                }
+                kD4[j] = kD_j;
+                F4[j]  = F_j;
+            }
 
             const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
 
@@ -2288,18 +2384,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     visNeeScale = NdotWl *
                                   PowerHeuristic(visLight.pdfSolid, pdfBsdfAtLight) /
                                   visLight.pdfSolid;
-                    visKD     = kD_b;
-                    visF      = F_b;
+                    visKD     = kD4;
+                    visF      = F4;
                     visQSpec  = qSpec_b;
                     visNdotV  = NdotV_b;
                 }
             }
 
-            const float  corr_b = TraceEnvBounceResidual(
+            const float4 corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                (kD_b * rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE,
-                F_b * sheenScale_b * ccBase, rrSurvive_b,
-                sky_b, lambda_b, aniso, payload);
+                wDiffuse4, wSpecular4, rrSurvive_b,
+                sky4, lambda_b, aniso, payload);
 
             // The transmitted half, traced into the BACK hemisphere. Reusing
             // the residual machinery with a flipped normal gets the cosine
@@ -2314,21 +2409,28 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // qSpec = 0 because there is no specular transmission lobe here --
             // this is Lambertian by definition -- which also makes V, NdotV and
             // roughness inert in the call.
-            float corr_dt = 0.0;
-            if (hasDT) {
-                const float rhoDt_b = EvaluateDiffuseTransmissionColor(
-                    spectralCurves, material, sDT, lambda_b, true);
-                const float wDt_b = kD_b * dt * rhoDt_b * ccBase;
-                if (wDt_b > 0.0) {
-                    corr_dt = TraceEnvBounceResidual(
-                        visHitPos, -normal, V, NdotV_b, roughness, 0.0,
-                        wDt_b, 0.0, wDt_b, sky_b, lambda_b, IsotropicFrame(), payload);
-                }
+            float4 corr_dt = float4(0.0, 0.0, 0.0, 0.0);
+            // The roulette is one decision for the whole ray, so it survives on
+            // the brightest wavelength it carries; a single-wavelength caller
+            // leaves the other three at zero and this is that one's weight.
+            const float rrDt = max(max(wDt4.x, wDt4.y), max(wDt4.z, wDt4.w));
+            if (hasDT && rrDt > 0.0) {
+                corr_dt = TraceEnvBounceResidual(
+                    visHitPos, -normal, V, NdotV_b, roughness, 0.0,
+                    wDt4, float4(0.0, 0.0, 0.0, 0.0), rrDt,
+                    sky4, lambda_b, IsotropicFrame(), payload);
             }
 
-            if (heroRay) {
+            if (carriesQuartet) {
+                // Four corrections at the four wavelengths the surface is being
+                // evaluated at, so they are neither weighed by a matching
+                // function nor divided by a density: they are added to the four
+                // radiances in the loop, before the atmosphere composes them,
+                // and the vertex that drew the quartet weighs the sum once.
+                quadBounce = corr_b + corr_dt;
+            } else if (heroRay) {
                 // Scalar: the surface that sampled lambda_h owns the weighting.
-                heroBounce = corr_b;
+                heroBounce = corr_b.x + corr_dt.x;
             } else {
                 // XYZ = L(lambda_b) * cmf(lambda_b) / pdf. Same estimator and
                 // same normalisation as the deterministic grid below, which
@@ -2342,7 +2444,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         0.0, float(NUM_WAVELENGTH_SAMPLES - 1));
                     tau_b = SampleAtmosTau(atmos, atmosNNData, atmosIdx_b, atmosA);
                 }
-                XYZ_bounce = (corr_b + corr_dt) * tau_b / VisibleWavelengthPDF(lambda_b) *
+                XYZ_bounce = (corr_b.x + corr_dt.x) * tau_b / VisibleWavelengthPDF(lambda_b) *
                              SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_b);
             }
         }
@@ -2400,14 +2502,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
         // Modern GPUs handle small loops efficiently without forced unrolling
         for (uint i = 0; i < sampleCount; ++i) {
-            float lambda = heroRay ? payload.heroLambda
-                                   : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP);
+            // Which of the four this iteration is, for the quantities the
+            // bounce settled per wavelength. Clamped because a deterministic
+            // sweep runs past four and reads component 0 throughout.
+            const uint qi = carriesQuartet ? min(i, VIS_HERO_QUARTET - 1u) : 0u;
 
-            // The atmosphere LUT is baked on the fixed grid, so a hero
+            float lambda = heroRay ? heroLambdaAbs
+                         : (carriesQuartet ? quartet[qi]
+                                           : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP));
+
+            // The atmosphere LUT is baked on the fixed grid, so a sampled
             // wavelength has no index of its own -- take the nearest. The
             // grid is 12.3 nm apart and tau/lpath vary slowly across it, but
             // this is an approximation the deterministic path does not make.
-            const uint atmosIdx = heroRay
+            const uint atmosIdx = (heroRay || carriesQuartet)
                 ? (uint)clamp(round((lambda - LAMBDA_MIN_VIS) / LAMBDA_STEP),
                               0.0, float(NUM_WAVELENGTH_SAMPLES - 1))
                 : i;
@@ -2578,9 +2686,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // the bounce folded it into.
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
-                    (visKD * rho_lambda * dtBase * sheenScale_lambda +
+                    (visKD[qi] * rho_lambda * dtBase * sheenScale_lambda +
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
-                    visF * sheenScale_lambda * ccBase, aniso);
+                    visF[qi] * sheenScale_lambda * ccBase, aniso);
                 const float L_light = hasNeeCurve
                     ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda)
                     : RgbIlluminantAt(iNee, cieSample.w, lambda);
@@ -2588,6 +2696,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee;
+
+            // The quartet's indirect correction at this wavelength, added
+            // before the atmosphere composes the surface rather than after:
+            // the correction is part of what the surface sends, and the
+            // deterministic path weighs its own correction by tau for the same
+            // reason.
+            if (carriesQuartet) {
+                L_lambda += quadBounce[qi];
+            }
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
@@ -2602,6 +2719,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // indirect correction is at this same wavelength, so it adds
                 // straight in.
                 heroRadiance = L_lambda + heroBounce;
+                continue;
+            }
+
+            if (carriesQuartet) {
+                // Held, not weighed. This vertex may not be the one that drew
+                // these four wavelengths, and only that one knows the density
+                // they were drawn against; it applies the matching functions
+                // and the shared denominator once, at the end of the path.
+                if      (i == 0u) quadRadiance.x = L_lambda;
+                else if (i == 1u) quadRadiance.y = L_lambda;
+                else if (i == 2u) quadRadiance.z = L_lambda;
+                else              quadRadiance.w = L_lambda;
                 continue;
             }
 
@@ -2640,7 +2769,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
-        output_radiance = ConvertXYZToLinearRGB(XYZ_accum);
+        output_radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
 
         // ====================================================================
         // CHROMATICITY CORRECTION for Equal-Integral CIE CMF Data
@@ -2668,15 +2797,24 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // treat it as one -- only the refracting surface reads it, and it
         // multiplies by cmf(λ_h)/pdf to make a colour.
         if (heroRay) {
-            output_radiance = float3(heroRadiance, heroRadiance, heroRadiance);
+            output_radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
+        }
+
+        // A quartet is four radiances and not a colour either, for the same
+        // reason and one more: the conversion below belongs to the vertex that
+        // drew the four, which is not necessarily this one. It is applied once,
+        // at the end of main(), after the medium and the transmission have had
+        // their say -- so what leaves here is the four numbers.
+        if (carriesQuartet) {
+            output_radiance = quadRadiance;
         }
 
         // NOTE: IBL is now integrated in the spectral loop above (L_ibl term)
         // No need to add iblSpecular separately
 
         // Validation: clamp and sanitize to prevent NaN/Inf
-        if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
-            output_radiance = float3(0.0, 0.0, 0.0);  // Fallback to black
+        if (any(!isfinite(output_radiance))) {
+            output_radiance = float4(0.0, 0.0, 0.0, 0.0);  // Fallback to black
         }
         // SYMMETRIC, for the reason raygen.rgen gives at its own clamp, plus a
         // second one that applies to every band.
@@ -2954,14 +3092,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                     ccWeight * ccE,
                 F_scalar.r * sheenScale_s * ccBase, rrSurvive_s,
-                skyRadiance_lambda, 0.0, aniso, payload);
+                skyRadiance_lambda, 0.0, aniso, payload).x;
 
             // The transmitted half against the back hemisphere, as VIS_FUSED.
             if (wDt_s > 0.0) {
                 radiance_spectral += TraceEnvBounceResidual(
                     singleHitPos, -normal, V, NdotV_s, roughness, 0.0,
                     wDt_s * ccBase, 0.0, wDt_s * ccBase,
-                    skyRadiance_lambda, 0.0, IsotropicFrame(), payload);
+                    skyRadiance_lambda, 0.0, IsotropicFrame(), payload).x;
             }
         }
 
@@ -2980,7 +3118,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
 
         // Output as grayscale (replicate scalar to RGB for display)
-        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
         // ====================================================================
@@ -3108,11 +3246,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, aniso, payload);
+            L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
                 swirHitPos, -normal, V, NdotV_swir, roughness, 0.0,
-                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload);
+                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -3290,7 +3428,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
-        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ====================================================================
@@ -3401,11 +3539,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
-            L_base_b, lambda_b, aniso, payload);
+            L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
                 nirHitPos, -normal, V, NdotV_nir, roughness, 0.0,
-                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload);
+                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -3557,7 +3695,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // occlusion; see the note at the VIS_FUSED clamp.
         radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
-        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
         // ====================================================================
@@ -3684,7 +3822,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float bounceCorr = TraceEnvBounceResidual(
             irHitPos, normal, V, NdotV, roughness,
             (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
-            L_base_b, lambda_b, aniso, payload);
+            L_base_b, lambda_b, aniso, payload).x;
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
         // A hero ray runs one iteration at its own wavelength and reports a
@@ -3940,7 +4078,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         // Output as grayscale (IR images are single-channel)
-        output_radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else {
         // ====================================================================
@@ -3954,7 +4092,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
         radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
 
-        output_radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     }
 
     // ========================================================================
@@ -4143,12 +4281,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             case DEBUG_MODE_XYZ:
                 // For spectral modes, this would show XYZ values
                 // For RGB mode, show a placeholder
-                debug_output = output_radiance;  // Current output as fallback
+                debug_output = output_radiance.rgb;  // Current output as fallback
                 break;
 
             case DEBUG_MODE_BEFORE_CHROMA:
                 // RGB before chromaticity correction (same as XYZ for now)
-                debug_output = output_radiance;
+                debug_output = output_radiance.rgb;
                 break;
 
             case DEBUG_MODE_SPECTRAL_REFL: {
@@ -4494,8 +4632,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // the honest reduction until a medium can carry a curve the way a
         // surface reflectance does; that is a data problem, and this is where
         // it plugs in when it is solved.
+        //
+        // A hero quartet is not RGB-like either, for the same reason a thermal
+        // band is not: its four components are four wavelengths, and a
+        // per-channel sigma would answer three of them with numbers meant for
+        // red, green and blue. It takes the average with the spectral bands
+        // until a medium can carry a curve.
         const bool isRgbLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
-                                IsVisMode(SPEC_SPECTRAL_MODE));
+                                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
 
         // Create medium properties from material
         MediumProperties medium = CreateMediumFromMaterial(material);
@@ -4598,7 +4742,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Final = surface_radiance × transmittance + in_scattered
         // ====================================================================
 
-        output_radiance = output_radiance * volumeTransmittance + inScatteredLight;
+        // The fourth component is a fourth wavelength where a quartet is
+        // carried and unused zero everywhere else, so it takes the same scalar
+        // the other three take there and nothing here otherwise.
+        float4 transmittance4 = float4(volumeTransmittance, 0.0);
+        float4 inScattered4   = float4(inScatteredLight, 0.0);
+        if (carriesQuartet) {
+            transmittance4.w = volumeTransmittance.r;
+            inScattered4.w   = inScatteredLight.r;
+        }
+        output_radiance = output_radiance * transmittance4 + inScattered4;
     }
 
     // ========================================================================
@@ -4660,7 +4813,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Cauchy formula: n(λ) = n_d + dispersion × 0.01 / λ²
         // ====================================================================
 
-        float3 transmissionRadiance = float3(0.0, 0.0, 0.0);
+        float4 transmissionRadiance = float4(0.0, 0.0, 0.0, 0.0);
 
         // PCG random number for reflection/refraction decision
         uint rngState = payload.rngState;
@@ -4686,7 +4839,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         recursivePayload.depth = payload.depth + 1;
         recursivePayload.rngState = rngState;
 
-        recursivePayload.heroLambda = payload.heroLambda;
+        recursivePayload.heroLambda = heroSigned;
 
         // A material disperses if it carries an Abbe number or a measured
         // n(lambda) table. Nothing here is specific to glass: any medium with n
@@ -4699,9 +4852,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ray samples one. A ray that already carries a hero wavelength
         // refracts at that wavelength and stays single -- resampling would
         // branch the path count multiplicatively and bias nothing usefully.
+        //
+        // A quartet reaches here too, and for it this is where the four become
+        // one: n(λ) sends them four ways and a path can follow one. It does not
+        // draw, having a hero already; a ray that was collapsed by an earlier
+        // interface does not split again.
         bool heroSplit = materialDisperses &&
-                         IsVisMode(SPEC_SPECTRAL_MODE) &&
-                         payload.heroLambda <= 0.0;
+                         (carriesQuartet ||
+                          (IsVisMode(SPEC_SPECTRAL_MODE) && payload.heroLambda == 0.0));
 
         bool hasDispersion = materialDisperses &&
                              (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB);
@@ -4728,14 +4886,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Wavelength is where the noise goes. Nothing outside a dispersive
             // refraction samples it, so an ordinary scene is unaffected.
             // ================================================================
-            uint heroState = payload.rngState * 747796405u + 2891336453u;
-            uint heroWord = ((heroState >> ((heroState >> 28u) + 4u)) ^ heroState)
-                            * 277803737u;
-            heroWord = (heroWord >> 22u) ^ heroWord;
-            payload.rngState = heroState;
+            float lambda_h = heroSigned;
+            if (!carriesQuartet) {
+                uint heroState = payload.rngState * 747796405u + 2891336453u;
+                uint heroWord = ((heroState >> ((heroState >> 28u) + 4u)) ^ heroState)
+                                * 277803737u;
+                heroWord = (heroWord >> 22u) ^ heroWord;
+                payload.rngState = heroState;
 
-            const float u_lambda = float(heroWord) / 4294967296.0;
-            const float lambda_h = SampleVisibleWavelength(u_lambda);
+                const float u_lambda = float(heroWord) / 4294967296.0;
+                lambda_h = SampleVisibleWavelength(u_lambda);
+            }
 
             const float ior_h = RefractionIOR(material, lambda_h);
             const float n1 = entering ? 1.0 : ior_h;
@@ -4746,7 +4907,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (length(refractDir) < 0.001) F = 1.0;   // total internal reflection
 
             recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-            recursivePayload.heroLambda = lambda_h;
+            // Negative: one wavelength, and no longer a quartet. Positive is
+            // what the deterministic grid means by a hero ray, and it has no
+            // third state to confuse this with.
+            recursivePayload.heroLambda = carriesQuartet ? -lambda_h : lambda_h;
             recursivePayload.rngState = payload.rngState;
             recursiveRay.Direction = (xi < F) ? reflectDir : refractDir;
 
@@ -4764,14 +4928,29 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 L_h *= (atten.r + atten.g + atten.b) / 3.0;
             }
 
-            const float3 cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_h);
-            float3 XYZ_h = L_h * cmf / VisibleWavelengthPDF(lambda_h);
-            XYZ_h /= CIE_Y_INTEGRAL;
+            if (carriesQuartet) {
+                // What the surviving wavelength brings back, scaled so that the
+                // root's division by the shared denominator leaves exactly
+                // L_h/p(λ_h) -- the single-wavelength estimator, unchanged by
+                // having been reached through a quartet. The first component is
+                // the hero's own, so no matching function is applied here
+                // either; the root applies cmf(λ_0) = cmf(λ_h) to it.
+                //
+                // On the MIS side the weight is one: a refracted direction at
+                // this interface can only be generated by the wavelength that
+                // was bent to it, so there is no other technique to share with.
+                transmissionRadiance = float4(
+                    L_h * quartetS / VisibleWavelengthPDF(lambda_h), 0.0, 0.0, 0.0);
+            } else {
+                const float3 cmf = SampleCIE_XYZ_LUT(cieCMF_LUT, lambda_h);
+                float3 XYZ_h = L_h * cmf / VisibleWavelengthPDF(lambda_h);
+                XYZ_h /= CIE_Y_INTEGRAL;
 
-            float3 heroRgb = ConvertXYZToLinearRGB(XYZ_h);
-            heroRgb.r *= lut.chromaR_correction;
-            heroRgb.b *= lut.chromaB_correction;
-            transmissionRadiance = heroRgb;
+                float3 heroRgb = ConvertXYZToLinearRGB(XYZ_h);
+                heroRgb.r *= lut.chromaR_correction;
+                heroRgb.b *= lut.chromaB_correction;
+                transmissionRadiance = float4(heroRgb, 0.0);
+            }
 
         } else if (hasDispersion && SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
             // ================================================================
@@ -4836,7 +5015,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 else channelRadiance.b = channelValue;
             }
 
-            transmissionRadiance = channelRadiance;
+            transmissionRadiance = float4(channelRadiance, 0.0);
 
         } else {
             // ================================================================
@@ -4857,8 +5036,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // bounce, a bounce that then passes through a window has to refract
             // at the wavelength it was sampled for, not at pushConsts.camera.wavelength_nm.
             float refractLambda;
-            if (payload.heroLambda > 0.0) {
-                refractLambda = payload.heroLambda;
+            if (heroSigned != 0.0) {
+                refractLambda = abs(heroSigned);
             } else if (IsVisMode(SPEC_SPECTRAL_MODE) ||
                        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
                 refractLambda = 0.0;
@@ -4888,7 +5067,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
 
             if (reflected) {
-                transmissionRadiance = recursivePayload.radiance.rgb;
+                transmissionRadiance = recursivePayload.radiance;
             } else {
                 // Apply Beer-Lambert absorption on the refraction path
                 float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
@@ -4897,7 +5076,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     volumeAttenuation = BeerLambertAbsorption(
                         material.attenuationColor, travelDistance, material.attenuationDistance);
                 }
-                transmissionRadiance = recursivePayload.radiance.rgb * volumeAttenuation;
+                float4 attenuation4 = float4(volumeAttenuation, 0.0);
+                if (carriesQuartet) {
+                    // An RGB attenuation against four wavelengths reduces to
+                    // its average, as it does wherever a medium's colour meets
+                    // a spectrum here; a spectral absorption curve is what
+                    // would let this be evaluated per wavelength instead.
+                    const float a = (volumeAttenuation.r + volumeAttenuation.g +
+                                     volumeAttenuation.b) / 3.0;
+                    attenuation4 = float4(a, a, a, a);
+                }
+                transmissionRadiance = recursivePayload.radiance * attenuation4;
             }
         }
 
@@ -4905,5 +5094,32 @@ void main(inout Payload payload, in HitAttributes attribs) {
         output_radiance = lerp(output_radiance, transmissionRadiance, transmissionWeight);
     }
 
-    payload.radiance = float4(output_radiance, 0.0);
+    // ========================================================================
+    // The quartet becomes a colour, once, where it was drawn
+    // ========================================================================
+    //     XYZ = sum_j L(lambda_j) cmf(lambda_j) / S
+    //
+    // with S the denominator every one of the four shares -- see
+    // QuartetMisDenominator. Everything between the draw and this line, the
+    // surface and its correction and whatever medium or glass the path went
+    // through, has been carrying four radiances so that the matching functions
+    // are applied in exactly one place. A ray that is only carrying the four
+    // upward falls through and hands them on.
+    if (quartetRoot) {
+        float3 XYZ_hero = float3(0.0, 0.0, 0.0);
+        [unroll]
+        for (uint q = 0u; q < VIS_HERO_QUARTET; ++q) {
+            XYZ_hero += output_radiance[q] * SampleCIE_XYZ_LUT(cieCMF_LUT, quartet[q]);
+        }
+        XYZ_hero /= (quartetS * CIE_Y_INTEGRAL);
+
+        float3 heroRgb = ConvertXYZToLinearRGB(XYZ_hero);
+        heroRgb.r *= lut.chromaR_correction;
+        heroRgb.b *= lut.chromaB_correction;
+        output_radiance = float4(heroRgb, 0.0);
+    }
+
+    // Every mode but a quartet carrier writes zero into the fourth component
+    // and reads it nowhere, so this one assignment serves all of them.
+    payload.radiance = output_radiance;
 }

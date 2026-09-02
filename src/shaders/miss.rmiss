@@ -116,10 +116,26 @@ void main(inout Payload payload) {
         // A ray past a dispersive refraction carries one wavelength; it must
         // bring back that wavelength's sky radiance and no more, or the caller
         // weights the whole band by a single cmf(λ_h) and the sky arrives
-        // hundreds of times too bright.
-        const bool heroRay = (payload.heroLambda > 0.0);
-        const uint sampleCount = heroRay ? 1u : NUM_WAVELENGTH_SAMPLES;
+        // hundreds of times too bright. A quartet brings back four, unweighed,
+        // for the same reason and by the same contract.
+        //
+        // Nothing is drawn here. A primary ray that reaches the sky is answered
+        // by the deterministic grid whichever mode is running: the sky is
+        // analytic, and four samples of an analytic function are worse than
+        // thirty-two evaluations of it for the same cost in rays, which is
+        // none.
+        const bool heroMode = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_HERO);
+        const bool carriesQuartet = heroMode && (payload.heroLambda > 0.0);
+        const bool heroRay = heroMode ? (payload.heroLambda < 0.0)
+                                      : (payload.heroLambda > 0.0);
+        const float heroLambdaAbs = abs(payload.heroLambda);
+        const float4 quartet = carriesQuartet ? QuartetLambdas(payload.heroLambda)
+                                              : float4(0.0, 0.0, 0.0, 0.0);
+        const uint sampleCount = heroRay ? 1u
+                               : (carriesQuartet ? VIS_HERO_QUARTET
+                                                 : NUM_WAVELENGTH_SAMPLES);
         float heroRadiance = 0.0;
+        float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
 
         // The sky's fallback chroma does not depend on wavelength, so it is
         // fitted once rather than at every sample.
@@ -127,8 +143,9 @@ void main(inout Payload payload) {
             FetchRgbIlluminant(rgbToSpectrumTable, lut.skyRadiance_rgb);
 
         for (uint i = 0; i < sampleCount; ++i) {
-            float lambda = heroRay ? payload.heroLambda
-                                   : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP);
+            float lambda = heroRay ? heroLambdaAbs
+                         : (carriesQuartet ? quartet[min(i, VIS_HERO_QUARTET - 1u)]
+                                           : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP));
 
             // Matching functions and D65 in one fetch; both are needed below.
             float4 cieSample = SampleCIE_LUT(cieCMF_LUT, lambda);
@@ -153,6 +170,15 @@ void main(inout Payload payload) {
                 heroRadiance = sky_radiance_lambda;   // scalar, caller weights it
                 continue;
             }
+            if (carriesQuartet) {
+                // Four scalars, unweighed: the vertex that drew them weights
+                // them, and it is the only one that knows the density.
+                if      (i == 0u) quadRadiance.x = sky_radiance_lambda;
+                else if (i == 1u) quadRadiance.y = sky_radiance_lambda;
+                else if (i == 2u) quadRadiance.z = sky_radiance_lambda;
+                else              quadRadiance.w = sky_radiance_lambda;
+                continue;
+            }
 
             // Riemann sum: XYZ += L(λ) × CMF(λ) × Δλ
             XYZ_accum.x += sky_radiance_lambda * x_bar * LAMBDA_STEP;
@@ -175,9 +201,12 @@ void main(inout Payload payload) {
         if (heroRay) {
             payload.radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
         }
+        if (carriesQuartet) {
+            payload.radiance = quadRadiance;
+        }
 
         // Validation
-        if (!isfinite(payload.radiance.r) || !isfinite(payload.radiance.g) || !isfinite(payload.radiance.b)) {
+        if (any(!isfinite(payload.radiance))) {
             payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         }
         payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
