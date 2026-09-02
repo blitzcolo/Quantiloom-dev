@@ -136,6 +136,13 @@ struct ThermalMaterialParams {
     /// compartment. The only way a shaded surface can be the warmest thing in
     /// an infrared scene.
     f32 internalHeat_W_m2 = 0.0f;
+    /// Two sides of one thin slab rather than a surface with something behind
+    /// it. The pair shares a column with a full surface balance at each end,
+    /// and the three interior fields below then have nothing to act on.
+    ///
+    /// Turning it on repairs the mesh, not just a flag: the pairing is found
+    /// while the geometry is being walked.
+    bool isShell = false;
     bool interiorFixedTemperature = false;
     /// The back face convects and radiates to interiorTemperature_K instead of
     /// being insulated. A panel over a bay rather than a wall. Ignored when

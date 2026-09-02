@@ -284,6 +284,7 @@ struct ThermalPreview::Impl {
                 materials[m].shortwaveAbsorptivity = it->second.shortwaveAbsorptivity;
                 materials[m].wetnessFactor = it->second.wetnessFactor;
                 materials[m].internalHeat_W_m2 = it->second.internalHeat_W_m2;
+                materials[m].isShell = it->second.isShell;
                 materials[m].longwaveEmissivity = emissivity;
                 materials[m].interiorBoundary =
                     it->second.interiorFixedTemperature
@@ -448,6 +449,14 @@ void ThermalPreview::SetParams(const ThermalSolveParams& params) {
 }
 
 void ThermalPreview::SetMaterial(const String& name, const ThermalMaterialParams& params) {
+    // A shell is found while the geometry is walked, so turning one on is a
+    // mesh rebuild rather than a flag on the table -- the same reason lateral
+    // conduction is.
+    const auto existing = m_impl->materialParams.find(name);
+    if (existing == m_impl->materialParams.end() ||
+        existing->second.isShell != params.isShell) {
+        m_impl->exchangeDirty = true;
+    }
     m_impl->materialParams[name] = params;
     m_impl->materialTableDirty = true;
     m_impl->timelineDirty = true;

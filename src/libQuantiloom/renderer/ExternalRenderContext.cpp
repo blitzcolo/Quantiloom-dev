@@ -1128,6 +1128,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             ClearThermalMaterials();
             for (const auto& [name, mat] : spectra.thermalMaterials) {
                 ThermalMaterialParams tmp;
+                tmp.isShell = mat.isShell;
                 tmp.conductivity_W_mK = mat.conductivity_W_mK;
                 tmp.density_kg_m3 = mat.density_kg_m3;
                 tmp.specificHeat_J_kgK = mat.specificHeat_J_kgK;
