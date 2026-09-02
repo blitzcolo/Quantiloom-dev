@@ -966,7 +966,7 @@ struct MaterialData {
     int    normalTextureIndex;       // -1 = no normal map                   // Offset: 32-36
     float  normalScale;              // Normal intensity [0, inf]            // Offset: 36-40
     uint   doubleSided;              // 0=single-sided (cull backface), 1=double-sided // Offset: 40-44
-    float  _padding0;                // Explicit padding to align emissiveFactor to 16-byte boundary // Offset: 44-48
+    float  fluorescenceYield;        // Fraction of absorbed light re-emitted, 0 = does not fluoresce // Offset: 44-48
 
     // Emissive (now 16-byte aligned at offset 48)
     float3 emissiveFactor;           // RGB [0, inf] (HDR allowed)           // Offset: 48-60
@@ -1168,8 +1168,8 @@ struct MaterialData {
     // emissiveFactor through the RGB->illuminant path instead. Zero outside the
     // curve's own span, never held flat -- see EvaluateEmissionCurve.
     int    emissiveRadianceCurveIndex;   // Index into spectralCurves (-1 = RGB expansion)          // Offset: 308-312
-    float  _padding3;                    // Padding for alignment                                   // Offset: 312-316
-    float  _padding4;                    // Padding for alignment                                   // Offset: 316-320
+    int    fluorescenceExcitationCurveIndex; // -1 = none; the shape this surface absorbs into the fluorescent channel // Offset: 312-316
+    int    fluorescenceEmissionCurveIndex;   // -1 = none; unit area over the band, so a density per nm // Offset: 316-320
 
     // ========================================================================
     // Per-slot UV transforms (KHR_texture_transform)

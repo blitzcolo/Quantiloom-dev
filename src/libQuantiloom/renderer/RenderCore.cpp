@@ -1075,8 +1075,13 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.diffuseTransmissionColorTextureIndex = material.diffuseTransmissionColorTextureIndex;
     cpuMat.diffuseTransmissionColorCurveIndex = indices.diffuseTransmissionColorCurve;
 
-    cpuMat._padding3 = 0.0f;
-    cpuMat._padding4 = 0.0f;
+    // Fluorescence. The yield comes off the Material and the two shapes out of
+    // the resolved indices, which is the same split every other measured curve
+    // has: a scalar the material carries, a curve the scene registered.
+    cpuMat.fluorescenceYield = material.fluorescenceYield;
+    cpuMat.fluorescenceExcitationCurveIndex = indices.fluorescenceExcitationCurve;
+    cpuMat.fluorescenceEmissionCurveIndex = indices.fluorescenceEmissionCurve;
+
 
     // UV transforms (KHR_texture_transform), one per glTF texture slot
     PackUvTransform(material.baseColorUv,

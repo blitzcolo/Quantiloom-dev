@@ -19,7 +19,10 @@ struct MaterialDataCPU {
     i32 normalTextureIndex;                  // offset  32,  4
     f32 normalScale;                         // offset  36,  4
     u32 doubleSided;                         // offset  40,  4
-    f32 _padding0;                           // offset  44,  4
+    // Quantum yield, 0 for everything that does not fluoresce. Took _padding0,
+    // which was there to align emissiveFactor to 16 and still is: a float in
+    // its place occupies the same four bytes.
+    f32 fluorescenceYield;                   // offset  44,  4  (was _padding0)
 
     glm::vec3 emissiveFactor;                // offset  48, 12
     i32 emissiveTextureIndex;                // offset  60,  4
@@ -106,8 +109,13 @@ struct MaterialDataCPU {
     // are unchanged -- see Material::emissiveRadianceCurveIndex for what it
     // means and why emissiveFactor is rewritten to match when it is set.
     i32 emissiveRadianceCurveIndex;          // offset 308,  4
-    f32 _padding3;                           // offset 312,  4
-    f32 _padding4;                           // offset 316,  4
+
+    // Fluorescence, rank one: an excitation shape, an emission shape and the
+    // yield at offset 44. Took _padding3 and _padding4, so sizeof and every
+    // offset are unchanged and the array below still starts at 320. -1 means
+    // the material does not fluoresce, which is the default everywhere.
+    i32 fluorescenceExcitationCurveIndex;    // offset 312,  4  (was _padding3)
+    i32 fluorescenceEmissionCurveIndex;      // offset 316,  4  (was _padding4)
 
     // Per-slot UV transforms (KHR_texture_transform), pre-multiplied by
     // ConvertMaterial into a 2x3 affine:  uv' = M * uv + offset,  with M packed
@@ -118,8 +126,8 @@ struct MaterialDataCPU {
     // {float4, float2} pair because that pair is 24 bytes, and a float4 at an
     // odd multiple of 8 would not be 16-byte aligned -- HLSL would pad the
     // element and the two layouts would silently disagree. Which is also why
-    // the three words of padding above are there: they carry the array start
-    // from 308 up to 320.
+    // there were three words of padding above: they carried the array start
+    // from 308 up to 320, and the three fields that took them keep it there.
     glm::vec4 uvTransformMat[14];            // offset 320, 224
     glm::vec2 uvTransformOffset[14];         // offset 544, 112
 };  // 656 bytes total
@@ -151,6 +159,7 @@ static_assert(sizeof(MaterialDataCPU) == 656);
 static_assert(offsetof(MaterialDataCPU, baseColorTextureIndex)       ==  16);
 static_assert(offsetof(MaterialDataCPU, normalTextureIndex)          ==  32);
 static_assert(offsetof(MaterialDataCPU, doubleSided)                 ==  40);
+static_assert(offsetof(MaterialDataCPU, fluorescenceYield)           ==  44);
 static_assert(offsetof(MaterialDataCPU, emissiveFactor)              ==  48);
 static_assert(offsetof(MaterialDataCPU, emissiveTextureIndex)        ==  60);
 static_assert(offsetof(MaterialDataCPU, alphaMode)                   ==  64);
@@ -199,6 +208,8 @@ static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorFactor) == 288);
 static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorTextureIndex) == 300);
 static_assert(offsetof(MaterialDataCPU, diffuseTransmissionColorCurveIndex) == 304);
 static_assert(offsetof(MaterialDataCPU, emissiveRadianceCurveIndex)  == 308);
+static_assert(offsetof(MaterialDataCPU, fluorescenceExcitationCurveIndex) == 312);
+static_assert(offsetof(MaterialDataCPU, fluorescenceEmissionCurveIndex)   == 316);
 static_assert(offsetof(MaterialDataCPU, uvTransformMat)              == 320);
 static_assert(offsetof(MaterialDataCPU, uvTransformOffset)           == 544);
 

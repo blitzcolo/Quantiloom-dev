@@ -143,6 +143,71 @@ TransformKeys ParseTransformKeys(const Config& table) {
     return out;
 }
 
+/// Register one resolved fluorescent pair and say what it will do to the light.
+///
+/// Both front ends land here, so the indices, the yield, the source string and
+/// the energy question are answered once. The energy question is asked here
+/// rather than inside ResolveFluorescence because it is about the material as a
+/// whole: what leaves a surface is what it reflects PLUS what it re-emits, and
+/// only this side of the call knows the reflectance.
+void BindFluorescence(const String& name, Material& mat,
+                      const ResolvedFluorescence& resolved, const String& source,
+                      ResolvedMaterialSpectra& out, Diagnostics& diag) {
+    for (const auto& warning : resolved.warnings) {
+        diag.Warn("fluorescence", "    '" + name + "': " + warning);
+    }
+
+    const auto excitationIndex = static_cast<i32>(out.curves.size());
+    out.curves.push_back(resolved.excitation);
+    const auto emissionIndex = static_cast<i32>(out.curves.size());
+    out.curves.push_back(resolved.emission);
+
+    out.materialNameToFluorescence[name] = {excitationIndex, emissionIndex};
+    mat.fluorescenceExcitationCurveIndex = excitationIndex;
+    mat.fluorescenceEmissionCurveIndex = emissionIndex;
+    mat.fluorescenceYield = resolved.yield;
+    mat.fluorescenceSource = source;
+
+    // rho(lambda) + yield * ex(lambda) > 1 means more light leaves than arrives
+    // at that wavelength. A warning and not an error: the two are measured
+    // separately and their sum near a peak can cross 1 by a little without the
+    // material being impossible, whereas crossing it by a lot means one of the
+    // two is on the wrong scale. Against the bound reflectance curve where
+    // there is one, and against the base colour's largest channel otherwise,
+    // which is the most reflective the surface can be in any case.
+    const SpectralCurveGPU* reflectance = nullptr;
+    if (auto it = out.materialNameToCurve.find(name); it != out.materialNameToCurve.end() &&
+        it->second >= 0 && static_cast<size_t>(it->second) < out.curves.size()) {
+        reflectance = &out.curves[static_cast<size_t>(it->second)];
+    }
+    const f32 rgbRho = std::max({mat.baseColorFactor.r, mat.baseColorFactor.g,
+                                 mat.baseColorFactor.b});
+
+    f32 worst = 0.0f;
+    f32 worstLambda = 0.0f;
+    for (u32 i = 0; i < resolved.excitation.numSamples; ++i) {
+        const f32 lambda = resolved.excitation.GetWavelength(i);
+        const f32 rho = reflectance ? reflectance->Evaluate(lambda) : rgbRho;
+        const f32 total = rho + resolved.yield * resolved.excitation.values[i];
+        if (total > worst) { worst = total; worstLambda = lambda; }
+    }
+    if (worst > 1.0f) {
+        diag.Warn("fluorescence",
+                  "    '" + name + "': reflected plus re-emitted reaches " +
+                      std::to_string(worst) + " at " +
+                      std::to_string(static_cast<i32>(worstLambda)) +
+                      " nm, which is more light than arrives. The renderer will "
+                      "do as it is told; check that the excitation curve and the "
+                      "reflectance are not describing the same absorption twice.");
+    }
+
+    QL_LOG_INFO("  Material '{}': fluorescence from '{}', yield {:.4g}, "
+                "excitation → curve index {}, emission → curve index {} "
+                "(area {:.4g} in band before normalising)",
+                name, source, resolved.yield, excitationIndex, emissionIndex,
+                resolved.emissionAreaInBand);
+}
+
 }  // namespace
 
 /// Resolve a path the config named, against the config's own directory when
@@ -858,6 +923,170 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
 }
 
 // ============================================================================
+// Fluorescence
+// ============================================================================
+
+Result<ResolvedFluorescence, String> ResolveFluorescence(
+    const FluorescenceBindingRequest& request) {
+    using FluoResult = Result<ResolvedFluorescence, String>;
+
+    if (request.excitationSamples.empty()) {
+        return FluoResult::Err("the excitation curve is empty");
+    }
+    if (request.emissionSamples.empty()) {
+        return FluoResult::Err("the emission curve is empty");
+    }
+    if (!(request.yield >= 0.0f) || request.yield > 1.0f) {
+        return FluoResult::Err(
+            "fluorescence_yield is " + std::to_string(request.yield) +
+            "; a quantum yield is a fraction of absorbed photons re-emitted and "
+            "cannot exceed 1. Above it, a surface returns more light than reached it.");
+    }
+
+    ResolvedFluorescence out;
+    out.yield = request.yield;
+
+    // Excitation: a fraction, so it has to be one. A curve given in percent, or
+    // an absorption coefficient mistaken for a fraction, lands here rather than
+    // in a render that quietly makes light.
+    for (const auto& [lambda, value] : request.excitationSamples) {
+        if (value < 0.0f || value > 1.0f) {
+            return FluoResult::Err(
+                "the excitation curve reaches " + std::to_string(value) + " at " +
+                std::to_string(static_cast<i32>(lambda)) +
+                " nm; it is the fraction of arriving light absorbed into the "
+                "fluorescent channel and must lie in [0, 1]. A table in percent "
+                "needs dividing by 100.");
+        }
+    }
+    for (const auto& [lambda, value] : request.emissionSamples) {
+        if (value < 0.0f) {
+            return FluoResult::Err(
+                "the emission curve is negative (" + std::to_string(value) + " at " +
+                std::to_string(static_cast<i32>(lambda)) + " nm)");
+        }
+    }
+
+    // Overlap with the band, asked before resampling rather than inferred from
+    // the result. SpectralCurveGPU::FromCPUBand falls back to the curve's own
+    // grid when there is no overlap, which is right for a reflectance -- the
+    // curve is still the best information there is about the material -- and
+    // wrong here: a pair that lands entirely outside the band being rendered
+    // describes light arriving and leaving at wavelengths this render does not
+    // have, and normalising the emission over an empty intersection would put
+    // the whole curve back at full strength somewhere it does not belong.
+    const auto overlaps = [&](const Vector<std::pair<f32, f32>>& samples) {
+        return samples.back().first > request.bandMinNm &&
+               samples.front().first < request.bandMaxNm;
+    };
+    const auto bandText = [&] {
+        return "[" + std::to_string(static_cast<i32>(request.bandMinNm)) + ", " +
+               std::to_string(static_cast<i32>(request.bandMaxNm)) + "] nm";
+    };
+    if (!overlaps(request.emissionSamples)) {
+        return FluoResult::Err(
+            "the emission curve covers [" +
+            std::to_string(static_cast<i32>(request.emissionSamples.front().first)) + ", " +
+            std::to_string(static_cast<i32>(request.emissionSamples.back().first)) +
+            "] nm, entirely outside the " + bandText() +
+            " being rendered, so there is no wavelength for the absorbed light to "
+            "come back at. A curve measured in the visible says nothing about an "
+            "infrared band.");
+    }
+    if (!overlaps(request.excitationSamples)) {
+        return FluoResult::Err(
+            "the excitation curve covers [" +
+            std::to_string(static_cast<i32>(request.excitationSamples.front().first)) + ", " +
+            std::to_string(static_cast<i32>(request.excitationSamples.back().first)) +
+            "] nm, entirely outside the " + bandText() +
+            " being rendered, so nothing in this render would ever excite it. "
+            "Excitation below 400 nm is not expressible: the visible band starts "
+            "there, and a path carries no wavelength outside the band it renders.");
+    }
+
+    SpectralCurve exCpu;
+    exCpu.samples = request.excitationSamples;
+    out.excitation =
+        SpectralCurveGPU::FromCPUBand(exCpu, request.bandMinNm, request.bandMaxNm);
+
+    SpectralCurve emCpu;
+    emCpu.samples = request.emissionSamples;
+    out.emission =
+        SpectralCurveGPU::FromCPUBand(emCpu, request.bandMinNm, request.bandMaxNm);
+
+    // The emission shape becomes a density per nm, integrating to 1 over the
+    // band. Two reasons it is done here rather than left to the shader: the
+    // published curves carry no absolute level at all (a spectrofluorimeter
+    // reports counts), so a level read off one would be an artefact of the
+    // instrument; and with the area fixed at 1, `yield` is the only number that
+    // says how much comes back, which is what makes the energy rule above a
+    // rule about one quantity rather than about a product of two.
+    f64 area = 0.0;
+    for (u32 i = 0; i < out.emission.numSamples; ++i) {
+        area += static_cast<f64>(out.emission.values[i]);
+    }
+    area *= static_cast<f64>(out.emission.stepSize_nm);
+    out.emissionAreaInBand = static_cast<f32>(area);
+
+    if (!(area > 0.0)) {
+        return FluoResult::Err(
+            "the emission curve overlaps the band being rendered but is zero "
+            "throughout it, so there is nothing to normalise and no wavelength "
+            "for the absorbed light to come back at");
+    }
+    const f32 inverseArea = static_cast<f32>(1.0 / area);
+    for (u32 i = 0; i < out.emission.numSamples; ++i) {
+        out.emission.values[i] *= inverseArea;
+    }
+
+    // How much of each curve the band actually holds. Both are clamped at the
+    // band edges, and a pair whose overlap is small is a pair mostly outside
+    // the render: worth saying, not worth refusing, because a band edge cutting
+    // a tail is normal and a band edge cutting the peak is not.
+    const auto span = [](const Vector<std::pair<f32, f32>>& samples) {
+        return std::pair<f32, f32>{samples.front().first, samples.back().first};
+    };
+    const auto [exLo, exHi] = span(request.excitationSamples);
+    const auto [emLo, emHi] = span(request.emissionSamples);
+    if (exLo > request.bandMinNm + 1.0f || exHi < request.bandMaxNm - 1.0f) {
+        out.warnings.push_back(
+            "the excitation curve covers [" + std::to_string(static_cast<i32>(exLo)) +
+            ", " + std::to_string(static_cast<i32>(exHi)) +
+            "] nm and is held at its endpoints outside that");
+    }
+    if (emLo > request.bandMinNm || emHi < request.bandMaxNm) {
+        out.warnings.push_back(
+            "the emission curve covers [" + std::to_string(static_cast<i32>(emLo)) +
+            ", " + std::to_string(static_cast<i32>(emHi)) +
+            "] nm; the part outside the band is normalised away with the rest, so "
+            "the yield describes what comes back INSIDE the band");
+    }
+
+    // Stokes shift: fluorescence emits at longer wavelengths than it absorbs,
+    // and a pair that does not is either mislabelled or swapped. Compared at
+    // the peaks, which is where the two curves are least ambiguous.
+    const auto peakOf = [](const Vector<std::pair<f32, f32>>& samples) {
+        f32 best = samples.front().first, bestValue = samples.front().second;
+        for (const auto& [lambda, value] : samples) {
+            if (value > bestValue) { bestValue = value; best = lambda; }
+        }
+        return best;
+    };
+    const f32 exPeak = peakOf(request.excitationSamples);
+    const f32 emPeak = peakOf(request.emissionSamples);
+    if (emPeak <= exPeak) {
+        out.warnings.push_back(
+            "the emission peak (" + std::to_string(static_cast<i32>(emPeak)) +
+            " nm) is not above the excitation peak (" +
+            std::to_string(static_cast<i32>(exPeak)) +
+            " nm); fluorescence emits at longer wavelengths than it absorbs, so "
+            "the two curves may be the wrong way round");
+    }
+
+    return FluoResult(std::move(out));
+}
+
+// ============================================================================
 // The illuminant
 // ============================================================================
 
@@ -1301,6 +1530,67 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                             gpu.startWavelength_nm, gpu.GetWavelength(gpu.numSamples - 1),
                             gpu.stepSize_nm, index, it->emissiveFactor.r,
                             it->emissiveFactor.g, it->emissiveFactor.b);
+            }
+        }
+
+        // ------------------------------------------------------------------
+        // fluorescence: what this surface absorbs at one wavelength and gives
+        // back at another
+        // ------------------------------------------------------------------
+        // The one term that is off the diagonal in lambda. Five keys, and all
+        // of the first four or none: a shape with no partner describes nothing,
+        // and defaulting the missing half to something would be inventing the
+        // physics the pair exists to state.
+        //
+        // Both curves load through the emission-spectrum reader, which is what
+        // gives them the _column keys: a fluorimeter's export has the
+        // excitation and emission in adjacent columns of one file more often
+        // than it has two files. What the reader loads is a shape either way,
+        // and ResolveFluorescence is what decides what the shape means.
+        if (matTable.Has("fluorescence_excitation_curve") ||
+            matTable.Has("fluorescence_emission_curve") ||
+            matTable.Has("fluorescence_yield")) {
+            const String exSource = matTable.GetString("fluorescence_excitation_curve", "");
+            const String emSource = matTable.GetString("fluorescence_emission_curve", "");
+            const f32 yield = matTable.GetFloat("fluorescence_yield", 0.0f);
+
+            if (exSource.empty() || emSource.empty()) {
+                diag.Fatal("fluorescence",
+                           "  '" + name +
+                               "': fluorescence needs both curves. Give "
+                               "fluorescence_excitation_curve and "
+                               "fluorescence_emission_curve, or neither.");
+            } else {
+                auto exLoaded = SpectralIO::LoadEmissionSpectrum(
+                    exSource, options.baseDir,
+                    static_cast<u32>(matTable.GetInt("fluorescence_excitation_curve_column", 2)));
+                auto emLoaded = SpectralIO::LoadEmissionSpectrum(
+                    emSource, options.baseDir,
+                    static_cast<u32>(matTable.GetInt("fluorescence_emission_curve_column", 2)));
+
+                if (!exLoaded) {
+                    diag.Fatal("fluorescence",
+                               "  '" + name + "': excitation curve: " + exLoaded.error());
+                } else if (!emLoaded) {
+                    diag.Fatal("fluorescence",
+                               "  '" + name + "': emission curve: " + emLoaded.error());
+                } else {
+                    FluorescenceBindingRequest request;
+                    request.excitationSamples = exLoaded.value().samples;
+                    request.emissionSamples = emLoaded.value().samples;
+                    request.yield = yield;
+                    request.bandMinNm = bandMinNm;
+                    request.bandMaxNm = bandMaxNm;
+                    request.materialName = name;
+
+                    auto bound = ResolveFluorescence(request);
+                    if (!bound) {
+                        diag.Fatal("fluorescence", "  '" + name + "': " + bound.error());
+                    } else {
+                        BindFluorescence(name, *it, bound.value(),
+                                         exSource + " / " + emSource, out, diag);
+                    }
+                }
             }
         }
 
@@ -1847,6 +2137,41 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     if (boundFromScene > 0) {
         QL_LOG_INFO("  Bound {} reflectance curve(s) declared by the scene file",
                     boundFromScene);
+    }
+
+    // ------------------------------------------------------------------
+    // Fluorescence the SCENE FILE bound
+    // ------------------------------------------------------------------
+    // Same shape as the loop above and the same precedence: a glTF's
+    // QUANTILOOM_materials_fluorescence lands as sample vectors on the
+    // Material, and a [material_overrides] entry that already bound a pair for
+    // that name wins, because naming it explicitly is how a scene author
+    // corrects an asset they cannot edit.
+    for (auto& mat : scene.materials) {
+        if (mat.fluorescenceExcitationCurve.empty() ||
+            mat.fluorescenceEmissionCurve.empty()) {
+            continue;
+        }
+        if (out.materialNameToFluorescence.count(mat.name) > 0) continue;
+
+        FluorescenceBindingRequest request;
+        request.excitationSamples = mat.fluorescenceExcitationCurve;
+        request.emissionSamples = mat.fluorescenceEmissionCurve;
+        request.yield = mat.fluorescenceYield;
+        request.bandMinNm = bandMinNm;
+        request.bandMaxNm = bandMaxNm;
+        request.materialName = mat.name;
+
+        auto bound = ResolveFluorescence(request);
+        if (!bound) {
+            diag.Fatal("fluorescence",
+                       "  '" + mat.name + "' (from the scene file): " + bound.error());
+            continue;
+        }
+        BindFluorescence(mat.name, mat, bound.value(),
+                         mat.fluorescenceSource.empty() ? String("the scene file")
+                                                        : mat.fluorescenceSource,
+                         out, diag);
     }
 
     QL_LOG_INFO("  Total spectral curves from CSV: {}", out.curves.size());

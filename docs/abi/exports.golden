@@ -32,6 +32,7 @@ public: bool quantiloom::ExternalRenderContext::RestoreNode(unsigned int)
 public: bool quantiloom::Material::HasAnisotropy(void)const
 public: bool quantiloom::Material::HasClearcoat(void)const
 public: bool quantiloom::Material::HasDiffuseTransmission(void)const
+public: bool quantiloom::Material::HasFluorescence(void)const
 public: bool quantiloom::Material::HasIRData(void)const
 public: bool quantiloom::Material::HasQuantiloomRef(void)const
 public: bool quantiloom::Material::HasSheen(void)const

@@ -1663,3 +1663,121 @@ TEST_F(ConfigResolveTest, ScenesWithoutAnEmissiveCurveAreUntouched) {
     EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.r, 15.0f);
     EXPECT_FLOAT_EQ(scene.materials[0].emissiveFactor.b, 12.0f);
 }
+
+// ============================================================================
+// Fluorescence
+// ============================================================================
+// The one term that is off the diagonal in wavelength, so the rules about it
+// cannot be inherited from anything else in this file. Both front ends reach
+// ResolveFluorescence, which is what these pin.
+
+namespace {
+
+// A pair with a real Stokes shift: absorbs blue, emits green. Triangular, so
+// the peaks and the area are both arithmetic rather than guessed at.
+FluorescenceBindingRequest MakeFluorescenceRequest(f32 yield = 0.5f) {
+    FluorescenceBindingRequest request;
+    request.excitationSamples = {{400.0f, 0.0f}, {450.0f, 0.8f}, {500.0f, 0.0f},
+                                 {780.0f, 0.0f}};
+    request.emissionSamples = {{400.0f, 0.0f}, {500.0f, 0.0f}, {550.0f, 12.0f},
+                               {600.0f, 0.0f}, {780.0f, 0.0f}};
+    request.yield = yield;
+    request.bandMinNm = 400.0f;
+    request.bandMaxNm = 780.0f;
+    request.materialName = "Test";
+    return request;
+}
+
+}  // namespace
+
+// The published curves carry no absolute level -- a spectrofluorimeter reports
+// counts -- so the level is normalised away and the yield is left as the only
+// number that says how much comes back. Two curves of the same shape and
+// different heights must therefore resolve to the same emission.
+TEST(ConfigResolveFluorescence, TheEmissionIsADensityThatIntegratesToOne) {
+    auto resolved = ResolveFluorescence(MakeFluorescenceRequest());
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& em = resolved.value().emission;
+    ASSERT_GT(em.numSamples, 0u);
+    f64 area = 0.0;
+    for (u32 i = 0; i < em.numSamples; ++i) area += em.values[i];
+    area *= em.stepSize_nm;
+    EXPECT_NEAR(area, 1.0, 1e-3);
+
+    auto request = MakeFluorescenceRequest();
+    for (auto& [lambda, value] : request.emissionSamples) value *= 1000.0f;
+    auto scaled = ResolveFluorescence(request);
+    ASSERT_TRUE(scaled.has_value()) << scaled.error();
+    for (u32 i = 0; i < em.numSamples; ++i) {
+        EXPECT_NEAR(scaled.value().emission.values[i], em.values[i], 1e-6f)
+            << "sample " << i << ": the level of the emission curve is not information";
+    }
+    // The area before normalising is reported, because it is how much of the
+    // curve the band actually held.
+    EXPECT_GT(resolved.value().emissionAreaInBand, 0.0f);
+    EXPECT_NEAR(scaled.value().emissionAreaInBand,
+                1000.0f * resolved.value().emissionAreaInBand,
+                0.01f * scaled.value().emissionAreaInBand);
+}
+
+// A quantum yield is the fraction of absorbed photons re-emitted. Above one is
+// not a bright material but a broken one: the surface returns more light than
+// reached it, at every wavelength, for as many bounces as the path has.
+TEST(ConfigResolveFluorescence, AYieldAboveOneIsRejected) {
+    EXPECT_FALSE(ResolveFluorescence(MakeFluorescenceRequest(1.001f)).has_value());
+    EXPECT_FALSE(ResolveFluorescence(MakeFluorescenceRequest(-0.1f)).has_value());
+    EXPECT_TRUE(ResolveFluorescence(MakeFluorescenceRequest(1.0f)).has_value());
+    EXPECT_TRUE(ResolveFluorescence(MakeFluorescenceRequest(0.0f)).has_value());
+}
+
+// The excitation is a fraction too, and the common way to get it wrong is a
+// table published in percent.
+TEST(ConfigResolveFluorescence, AnExcitationAboveOneIsRejected) {
+    auto request = MakeFluorescenceRequest();
+    for (auto& [lambda, value] : request.excitationSamples) value *= 100.0f;
+    auto resolved = ResolveFluorescence(request);
+    ASSERT_FALSE(resolved.has_value());
+    EXPECT_NE(resolved.error().find("percent"), String::npos)
+        << "the message should say what to do about it: " << resolved.error();
+}
+
+// An emission curve measured in the visible says nothing about an infrared
+// band, and normalising a curve with no area would divide by zero and hand the
+// shader an infinity.
+TEST(ConfigResolveFluorescence, AnEmissionOutsideTheBandIsRejected) {
+    auto request = MakeFluorescenceRequest();
+    request.bandMinNm = 3000.0f;
+    request.bandMaxNm = 5000.0f;
+    EXPECT_FALSE(ResolveFluorescence(request).has_value());
+}
+
+// Fluorescence emits at longer wavelengths than it absorbs. A pair the other
+// way round is a pair of files swapped, which is worth saying and not worth
+// refusing -- the renderer will do as it is told.
+TEST(ConfigResolveFluorescence, SwappedCurvesAreWarnedAboutRatherThanRefused) {
+    auto request = MakeFluorescenceRequest();
+    std::swap(request.excitationSamples, request.emissionSamples);
+    // The emission curve's peak of 12 is outside [0, 1] as an excitation, so
+    // scale it down: the point of this case is the ORDER, not the range.
+    for (auto& [lambda, value] : request.excitationSamples) value /= 12.0f;
+
+    auto resolved = ResolveFluorescence(request);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    bool sawIt = false;
+    for (const auto& warning : resolved.value().warnings) {
+        sawIt = sawIt || warning.find("wrong way round") != String::npos;
+    }
+    EXPECT_TRUE(sawIt) << "a swapped pair should be reported";
+}
+
+// Nothing about a scene that does not ask for this changes, which is what makes
+// the whole of it inert until something binds a pair.
+TEST(ConfigResolveFluorescence, AMaterialDoesNotFluoresceByDefault) {
+    Material mat;
+    EXPECT_EQ(mat.fluorescenceExcitationCurveIndex, -1);
+    EXPECT_EQ(mat.fluorescenceEmissionCurveIndex, -1);
+    EXPECT_FLOAT_EQ(mat.fluorescenceYield, 0.0f);
+    EXPECT_TRUE(mat.fluorescenceSource.empty());
+    EXPECT_FALSE(mat.HasFluorescence());
+}

@@ -129,6 +129,9 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     mat.sheenReflectanceCurveIndex = 7;
     mat.clearcoatReflectanceCurveIndex = 8;
     mat.diffuseTransmissionColorCurveIndex = 9;
+    mat.emissiveRadianceCurveIndex = 10;
+    mat.fluorescenceExcitationCurveIndex = 11;
+    mat.fluorescenceEmissionCurveIndex = 12;
 
     const auto gpu = rendercore::ConvertMaterial(mat, 550.0f,
                                                  rendercore::IndicesFromMaterial(mat));
@@ -142,6 +145,60 @@ TEST(RenderCoreConvertMaterial, IndicesFromMaterialCarriesEverySlot) {
     EXPECT_EQ(gpu.sheenReflectanceCurveIndex, 7);
     EXPECT_EQ(gpu.clearcoatReflectanceCurveIndex, 8);
     EXPECT_EQ(gpu.diffuseTransmissionColorCurveIndex, 9);
+    EXPECT_EQ(gpu.emissiveRadianceCurveIndex, 10);
+    // The two that were added last, and the reason this test lists all of them:
+    // MaterialGpuIndices is initialised positionally, so a slot appended to the
+    // struct and not to the initialiser compiles and uploads the wrong index.
+    EXPECT_EQ(gpu.fluorescenceExcitationCurveIndex, 11);
+    EXPECT_EQ(gpu.fluorescenceEmissionCurveIndex, 12);
+}
+
+// The yield is a scalar the Material carries rather than an index the caller
+// resolves, so it takes a different route to the GPU struct than the two curves
+// beside it and needs saying separately.
+TEST(RenderCoreConvertMaterial, TheFluorescenceYieldComesOffTheMaterial) {
+    Material mat;
+    mat.fluorescenceYield = 0.62f;
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f);
+    EXPECT_FLOAT_EQ(gpu.fluorescenceYield, 0.62f);
+
+    // And nothing fluoresces by default, in either half of the description.
+    const auto plain = rendercore::ConvertMaterial(Material{}, 550.0f);
+    EXPECT_FLOAT_EQ(plain.fluorescenceYield, 0.0f);
+    EXPECT_EQ(plain.fluorescenceExcitationCurveIndex, -1);
+    EXPECT_EQ(plain.fluorescenceEmissionCurveIndex, -1);
+}
+
+// A fluorescent surface must not enter the emitter-sampling table: it emits
+// only what something else lit it with, so a triple here would have next-event
+// estimation aim at a light that is dark on its own.
+TEST(RenderCoreConvertMaterial, FluorescenceLeavesTheEmissiveFactorAlone) {
+    Material mat;
+    mat.fluorescenceExcitationCurveIndex = 3;
+    mat.fluorescenceEmissionCurveIndex = 4;
+    mat.fluorescenceYield = 1.0f;
+    ASSERT_TRUE(mat.HasFluorescence());
+
+    const auto gpu = rendercore::ConvertMaterial(mat, 550.0f,
+                                                 rendercore::IndicesFromMaterial(mat));
+    EXPECT_EQ(gpu.emissiveFactor, glm::vec3(0.0f));
+}
+
+// Any one of the three alone describes nothing: a shape with no strength, or a
+// strength with no shape.
+TEST(RenderCoreConvertMaterial, FluorescenceNeedsBothCurvesAndAYield) {
+    Material mat;
+    EXPECT_FALSE(mat.HasFluorescence());
+
+    mat.fluorescenceExcitationCurveIndex = 3;
+    EXPECT_FALSE(mat.HasFluorescence());
+    mat.fluorescenceEmissionCurveIndex = 4;
+    EXPECT_FALSE(mat.HasFluorescence()) << "no yield is no fluorescence";
+    mat.fluorescenceYield = 0.5f;
+    EXPECT_TRUE(mat.HasFluorescence());
+
+    mat.fluorescenceEmissionCurveIndex = -1;
+    EXPECT_FALSE(mat.HasFluorescence()) << "one curve is no fluorescence";
 }
 
 // ============================================================================

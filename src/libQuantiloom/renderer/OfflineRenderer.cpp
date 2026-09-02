@@ -706,6 +706,14 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             QL_LOG_INFO("  Material '{}': using diffuse transmission curve index {}",
                         mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToFluorescence.find(mat.name);
+            it != spectra.materialNameToFluorescence.end()) {
+            slots.fluorescenceExcitationCurve = it->second.excitationCurve;
+            slots.fluorescenceEmissionCurve = it->second.emissionCurve;
+            QL_LOG_INFO("  Material '{}': fluorescing, excitation curve {} and "
+                        "emission curve {}",
+                        mat.name, it->second.excitationCurve, it->second.emissionCurve);
+        }
 
         materialIndices.push_back(slots);
     }
