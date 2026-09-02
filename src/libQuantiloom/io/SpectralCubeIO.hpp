@@ -5,7 +5,8 @@
  * Supports reading and writing hyperspectral data cubes in common formats:
  * - ENVI (Environmental Data Analysis): Industry standard for remote sensing
  * - GeoTIFF: Multi-band TIFF with metadata
- * - OpenEXR: HDR format with multipart support
+ * - OpenEXR: HDR format, spectral layout of Fichet et al. 2021 (one channel
+ *   per band, wavelength in the channel name)
  *
  * ENVI Format Details:
  * - Header file (.hdr): ASCII metadata describing data cube
@@ -69,7 +70,7 @@ const char* ENVIInterleaveToString(ENVIInterleave interleave);
  * Supported formats:
  * - ENVI (.hdr + .dat): Industry standard hyperspectral format
  * - GeoTIFF (.tif): Multi-band raster with metadata
- * - OpenEXR (.exr): HDR format with multipart support
+ * - OpenEXR (.exr): HDR format, one channel per band (Fichet et al. 2021)
  *
  * Example usage:
  * @code
@@ -156,14 +157,18 @@ public:
     // ========================================================================
 
     /**
-     * @brief Write SpectralCube to OpenEXR multipart format
+     * @brief Write SpectralCube to a spectral OpenEXR file
      *
-     * Creates an EXR file with one part per wavelength band.
-     * Each part is named "band_XXXnm" where XXX is the wavelength.
+     * Single part, one f32 channel per band, in the layout of Fichet,
+     * Pacanowski and Wilkie 2021 (JCGT 10(3)): channels are named
+     * "S0.<wavelength>nm" with a comma for the decimal separator, and the
+     * header carries `spectralLayoutVersion` and `emissiveUnits`. The cube's
+     * own metadata is written alongside as string attributes.
      *
      * @param cube SpectralCube to write
      * @param path Output path (should end with .exr)
-     * @return true on success
+     * @return true on success; false for an invalid cube or two bands at one
+     *         wavelength, whose channel names would collide
      */
     static bool WriteEXR(
         const SpectralCube& cube,
@@ -171,7 +176,11 @@ public:
     );
 
     /**
-     * @brief Read SpectralCube from OpenEXR multipart format
+     * @brief Read SpectralCube from a spectral OpenEXR file
+     *
+     * Bands are ordered by the wavelength parsed out of each channel name, not
+     * by channel order, which OpenEXR sorts alphabetically. Channels that name
+     * no wavelength (an RGB proxy, an alpha) are skipped.
      *
      * @param path Input path
      * @return Result containing SpectralCube or error message

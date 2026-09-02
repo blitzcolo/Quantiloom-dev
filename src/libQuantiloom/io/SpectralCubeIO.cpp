@@ -6,21 +6,27 @@
  */
 
 #include "io/SpectralCubeIO.hpp"
+#include "io/ImageIO.hpp"
 #include "core/Log.hpp"
 
 #include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
+#include <charconv>
 #include <cstring>
 #include <filesystem>
 #include <optional>
+#include <set>
+#include <string_view>
+#include <utility>
 
-// OpenEXR headers - DISABLED due to static initialization conflict with VMA
-// See: https://github.com/AcademySoftwareFoundation/openexr/issues/1234
-// The multipart OpenEXR API causes shutdown crashes when used alongside
-// Vulkan/VMA in the same process. Using ENVI format for SpectralCube I/O instead.
-// Single-image EXR I/O via ImageIO is unaffected.
+// OpenEXR is reached through ImageIO, which writes a single part. The multipart
+// API is what brought a shutdown crash here, through a static initialisation
+// order it shares with VMA
+// (https://github.com/AcademySoftwareFoundation/openexr/issues/1234), and the
+// spectral layout below wants one part anyway.
 
 namespace quantiloom {
 
@@ -480,20 +486,200 @@ Result<SpectralCube, String> SpectralCubeIO::ReadGeoTIFF(const String& path) {
 // OpenEXR Format Implementation
 // ============================================================================
 
-// NOTE: Full OpenEXR multipart implementation causes shutdown crash due to
-// static initialization order issues with VMA/Vulkan. Using stub implementations
-// for now. SpectralCube EXR I/O will be implemented via ImageIO utilities.
+// The layout is Fichet, Pacanowski and Wilkie 2021 (JCGT 10(3)): one channel
+// per band in a single part, the wavelength spelled into the channel name, and
+// string attributes saying which layout and which units. ART, Mitsuba and the
+// spectral-exr tools read it, which is the whole reason to prefer it over a
+// private convention -- a cube leaves here as something another renderer can
+// open, rather than as an image with sixty-four channels named by us.
+//
+// A cube this renderer writes is emissive and unpolarised, so the Stokes
+// component is always 0 and the prefix is always "S0.".
+
+namespace {
+
+constexpr const char* kSpectralLayoutVersion = "1.0";
+
+// Per band, per steradian, per square metre, per nanometre: the cube holds a
+// spectral radiance density, not a band integral, and the layout's usual
+// "W.m^-2.sr^-1" would be the wrong statement by a factor of the bandwidth.
+constexpr const char* kDefaultEmissiveUnits = "W.m^-2.sr^-1.nm^-1";
+
+// The wavelength as a channel name spells it: the shortest decimal that reads
+// back as the same f32, with a comma for the decimal separator because a dot is
+// OpenEXR's layer separator.
+String WavelengthToChannelText(const f32 wavelength_nm) {
+    char buf[32];
+    String text;
+    if (auto [end, ec] = std::to_chars(buf, buf + sizeof(buf), wavelength_nm);
+        ec == std::errc{}) {
+        text.assign(buf, end);
+    } else {
+        text = std::to_string(wavelength_nm);  // unreachable for an f32 in 32 bytes
+    }
+    std::replace(text.begin(), text.end(), '.', ',');
+    return text;
+}
+
+String EmissiveChannelName(const f32 wavelength_nm) {
+    return "S0." + WavelengthToChannelText(wavelength_nm) + "nm";
+}
+
+// Nanometres per unit of the suffix a channel name ends in, or 0 for a suffix
+// this reader does not know. Only the metre family: the layout also allows a
+// frequency axis, which this cube has no way to hold.
+f32 ChannelUnitToNanometres(const std::string_view unit) {
+    if (unit == "nm") return 1.0f;
+    if (unit == "pm") return 1.0e-3f;
+    if (unit == "um") return 1.0e3f;
+    if (unit == "mm") return 1.0e6f;
+    if (unit == "cm") return 1.0e7f;
+    if (unit == "dm") return 1.0e8f;
+    if (unit == "m")  return 1.0e9f;
+    return 0.0f;
+}
+
+// The wavelength a spectral channel name carries, in nm, or nothing for a
+// channel that is not one under this prefix -- an RGB proxy, an alpha, a Stokes
+// component beyond the first.
+std::optional<f32> ChannelNameToWavelength(
+    const String& name,
+    const std::string_view prefix
+) {
+    if (name.size() <= prefix.size() ||
+        std::string_view(name).substr(0, prefix.size()) != prefix) {
+        return std::nullopt;
+    }
+
+    const String body = name.substr(prefix.size());
+
+    // The unit is the trailing run of letters. It cannot be ambiguous: a number
+    // never ends in one, and an exponent's 'e' is always followed by a digit.
+    size_t unitStart = body.size();
+    while (unitStart > 0 &&
+           std::isalpha(static_cast<unsigned char>(body[unitStart - 1])) != 0) {
+        --unitStart;
+    }
+
+    const f32 scale = ChannelUnitToNanometres(std::string_view(body).substr(unitStart));
+    if (scale <= 0.0f) return std::nullopt;
+
+    String number = body.substr(0, unitStart);
+    std::replace(number.begin(), number.end(), ',', '.');
+
+    f32 value = 0.0f;
+    const char* first = number.data();
+    const char* last = first + number.size();
+    const auto [ptr, ec] = std::from_chars(first, last, value);
+    if (ec != std::errc{} || ptr != last) return std::nullopt;
+
+    return value * scale;
+}
+
+}  // namespace
 
 bool SpectralCubeIO::WriteEXR(
     const SpectralCube& cube,
     const String& path
 ) {
-    LOG_WARN("SpectralCubeIO::WriteEXR not yet implemented - use ENVI format instead");
-    return false;
+    if (!cube.IsValid()) {
+        LOG_ERROR("Cannot write invalid SpectralCube");
+        return false;
+    }
+
+    Image image(cube.width, cube.height, cube.nbands);
+
+    // Two bands at one wavelength would collide in the channel list, which is a
+    // name-keyed map: the file would come back with fewer bands than it was
+    // given and no error anywhere.
+    std::set<String> seen;
+    for (u32 b = 0; b < cube.nbands; ++b) {
+        String name = EmissiveChannelName(cube.wavelengths[b]);
+        if (!seen.insert(name).second) {
+            LOG_ERROR("Two bands share the wavelength {} nm; EXR channel names would collide",
+                      cube.wavelengths[b]);
+            return false;
+        }
+        image.channelNames[b] = std::move(name);
+    }
+
+    // BSQ to channel-last.
+    for (u32 b = 0; b < cube.nbands; ++b) {
+        for (u32 y = 0; y < cube.height; ++y) {
+            for (u32 x = 0; x < cube.width; ++x) {
+                image(x, y, b) = cube(x, y, b);
+            }
+        }
+    }
+
+    image.metadata = cube.metadata;
+    image.metadata["spectralLayoutVersion"] = kSpectralLayoutVersion;
+    if (!image.metadata.contains("emissiveUnits")) {
+        image.metadata["emissiveUnits"] = kDefaultEmissiveUnits;
+    }
+
+    if (!ImageIO::WriteEXR(path, image)) {
+        return false;
+    }
+
+    LOG_INFO("Wrote spectral EXR cube: {} ({} x {} x {} bands, {}-{} nm)",
+             path, cube.width, cube.height, cube.nbands,
+             cube.wavelengths.front(), cube.wavelengths.back());
+    return true;
 }
 
 Result<SpectralCube, String> SpectralCubeIO::ReadEXR(const String& path) {
-    return Result<SpectralCube, String>::Err("SpectralCubeIO::ReadEXR not yet implemented - use ENVI format instead");
+    std::optional<Image> image = ImageIO::ReadEXR(path);
+    if (!image.has_value()) {
+        return Result<SpectralCube, String>::Err("Failed to read EXR file: " + path);
+    }
+
+    // A channel list is a name-keyed map, so the order a file hands back is
+    // alphabetical -- "S0.1000nm" arrives before "S0.400nm" -- and the band
+    // order has to come from the wavelengths themselves.
+    Vector<std::pair<f32, u32>> bands;
+    for (const std::string_view prefix : {"S0.", "T."}) {
+        for (u32 c = 0; c < image->channels && c < image->channelNames.size(); ++c) {
+            if (auto wavelength = ChannelNameToWavelength(image->channelNames[c], prefix)) {
+                bands.emplace_back(*wavelength, c);
+            }
+        }
+        if (!bands.empty()) break;  // emissive or reflective, never a mixture
+    }
+
+    if (bands.empty()) {
+        return Result<SpectralCube, String>::Err(
+            "No spectral channels (S0.<wavelength>nm) in EXR file: " + path);
+    }
+
+    std::ranges::sort(bands);
+
+    const u32 nbands = static_cast<u32>(bands.size());
+    SpectralCube cube(image->width, image->height, nbands,
+                      bands.front().first, bands.back().first);
+
+    for (u32 b = 0; b < nbands; ++b) {
+        cube.wavelengths[b] = bands[b].first;
+    }
+    if (nbands == 1) {
+        cube.delta_lambda = 0.0f;  // the constructor divides by nbands - 1
+    }
+
+    for (u32 b = 0; b < nbands; ++b) {
+        const u32 c = bands[b].second;
+        for (u32 y = 0; y < cube.height; ++y) {
+            for (u32 x = 0; x < cube.width; ++x) {
+                cube(x, y, b) = (*image)(x, y, c);
+            }
+        }
+    }
+
+    cube.metadata = image->metadata;
+
+    LOG_INFO("Read spectral EXR cube: {} x {} x {} bands, {}-{} nm",
+             cube.width, cube.height, cube.nbands, cube.lambda_min, cube.lambda_max);
+
+    return std::move(cube);
 }
 
 // ============================================================================

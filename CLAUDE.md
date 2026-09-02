@@ -43,7 +43,7 @@ order between themselves the way one script's `set -e` does.
 
 ## Tests
 
-1279 tests run in ~9 s, and the binary reruns without rebuilding. They link the
+1326 tests run in ~12 s, and the binary reruns without rebuilding. They link the
 objects, not the DLL, so internal code is testable without being exported.
 
 ```bash
@@ -52,8 +52,8 @@ objects, not the DLL, so internal code is testable without being exported.
 ```
 
 `ctest` registers a single aggregate test here, so `ctest -R` cannot select a case —
-always use `--gtest_filter`. 10 SKIPPED is the normal baseline: 8 BC7 (deliberately
-off, see `build_wsl.sh`) and 2 EXR multipart (unimplemented). A test needing an asset
+always use `--gtest_filter`. 8 SKIPPED is the normal baseline: the BC7 cases,
+deliberately off, see `build_wsl.sh`. A test needing an asset
 must build its path from `QUANTILOOM_SOURCE_ROOT`, never a relative or absolute one —
 those resolve against the caller's cwd and skip on miss, so a wrong path reads as
 "no test data" rather than as a failure.

@@ -33,8 +33,10 @@ wavelength_min_nm = 400.0         # Start wavelength
 wavelength_max_nm = 700.0         # End wavelength
 wavelength_step_nm = 50.0         # Step size (50nm = 7 bands for quick test)
 
-# Output format: "envi_bsq", "envi_bil", "envi_bip", "geotiff"
-# ENVI_BSQ is the standard format for remote sensing software
+# Output format: "envi_bsq", "envi_bil", "envi_bip", "geotiff", "exr_spectral"
+# ENVI_BSQ is the standard format for remote sensing software; "exr_spectral"
+# writes one OpenEXR channel per band in the layout of Fichet et al. 2021,
+# which ART, Mitsuba and the spectral-exr tools read
 output_format = "envi_bsq"
 
 # GPU-accelerated spectral reconstruction (10-40x faster)

@@ -3,7 +3,7 @@
 // ============================================================================
 // Tests cover:
 // - ENVI format writing and reading (BSQ, BIL, BIP)
-// - EXR multipart format writing and reading
+// - Spectral EXR writing and reading (one channel per band)
 // - Interleave conversion correctness
 // - Wavelength metadata preservation
 // - Round-trip data integrity
@@ -190,13 +190,10 @@ TEST_F(SpectralCubeIOTest, ENVIWavelengthPreservation) {
 // ============================================================================
 // EXR Format Tests
 // ============================================================================
-// NOTE: EXR multipart format is temporarily disabled due to static initialization
-// conflict with VMA/Vulkan. These tests are skipped until the issue is resolved.
-// See SpectralCubeIO.cpp for details.
+// Single part, one channel per band, wavelength in the channel name: the
+// spectral layout of Fichet et al. 2021. See SpectralCubeIO.cpp.
 
 TEST_F(SpectralCubeIOTest, WriteReadEXR_Small) {
-    GTEST_SKIP() << "EXR multipart disabled due to VMA static initialization conflict";
-
     auto cube = CreateTestCube(16, 12, 8, 400.0f, 700.0f);
     String path = (testDir / "test_cube.exr").string();
 
@@ -212,11 +209,16 @@ TEST_F(SpectralCubeIOTest, WriteReadEXR_Small) {
     EXPECT_EQ(loaded.nbands, cube.nbands);
 
     EXPECT_TRUE(CompareCubes(cube, loaded));
+
+    // The channel name is the only record of a wavelength, and these are not
+    // round numbers: 300 nm over seven intervals.
+    ASSERT_EQ(loaded.wavelengths.size(), cube.wavelengths.size());
+    for (u32 b = 0; b < cube.nbands; ++b) {
+        EXPECT_NEAR(loaded.wavelengths[b], cube.wavelengths[b], 1e-3f) << "band " << b;
+    }
 }
 
 TEST_F(SpectralCubeIOTest, WriteReadEXR_Wavelengths) {
-    GTEST_SKIP() << "EXR multipart disabled due to VMA static initialization conflict";
-
     SpectralCube cube(8, 8, 4, 3000.0f, 5000.0f);
     cube.wavelengths = {3000.0f, 3500.0f, 4000.0f, 5000.0f};
 
@@ -224,11 +226,63 @@ TEST_F(SpectralCubeIOTest, WriteReadEXR_Wavelengths) {
     ASSERT_TRUE(SpectralCubeIO::WriteEXR(cube, path));
 
     auto result = SpectralCubeIO::ReadEXR(path);
-    ASSERT_TRUE(result.has_value());
+    ASSERT_TRUE(result.has_value()) << result.error();
 
-    // EXR stores wavelength as float attribute
     const SpectralCube& loaded = result.value();
     EXPECT_EQ(loaded.nbands, 4);
+
+    // A non-uniform axis survives, because each band carries its own wavelength
+    // rather than a start and a step.
+    ASSERT_EQ(loaded.wavelengths.size(), 4);
+    EXPECT_NEAR(loaded.wavelengths[0], 3000.0f, 1e-2f);
+    EXPECT_NEAR(loaded.wavelengths[1], 3500.0f, 1e-2f);
+    EXPECT_NEAR(loaded.wavelengths[2], 4000.0f, 1e-2f);
+    EXPECT_NEAR(loaded.wavelengths[3], 5000.0f, 1e-2f);
+
+    // The file says which layout it is, so another renderer can tell.
+    ASSERT_TRUE(loaded.metadata.contains("spectralLayoutVersion"));
+    EXPECT_EQ(loaded.metadata.at("spectralLayoutVersion"), "1.0");
+    ASSERT_TRUE(loaded.metadata.contains("emissiveUnits"));
+}
+
+TEST_F(SpectralCubeIOTest, EXRBandOrderComesFromWavelengthNotChannelName) {
+    // An OpenEXR channel list is name-sorted, and these four names sort
+    // "S0.1000nm", "S0.1650nm", "S0.400nm", "S0.550nm" -- a different order
+    // from the one the cube was written in.
+    SpectralCube cube(4, 4, 4, 400.0f, 1650.0f);
+    cube.wavelengths = {400.0f, 550.0f, 1000.0f, 1650.0f};
+
+    // One constant per band, so a permuted band is visible in the data.
+    for (u32 b = 0; b < cube.nbands; ++b) {
+        for (u32 y = 0; y < cube.height; ++y) {
+            for (u32 x = 0; x < cube.width; ++x) {
+                cube(x, y, b) = static_cast<f32>((b + 1) * 10);
+            }
+        }
+    }
+
+    String path = (testDir / "test_exr_order.exr").string();
+    ASSERT_TRUE(SpectralCubeIO::WriteEXR(cube, path));
+
+    auto result = SpectralCubeIO::ReadEXR(path);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const SpectralCube& loaded = result.value();
+    ASSERT_EQ(loaded.nbands, 4);
+    for (u32 b = 0; b < 4; ++b) {
+        EXPECT_NEAR(loaded.wavelengths[b], cube.wavelengths[b], 1e-2f) << "band " << b;
+        EXPECT_NEAR(loaded(0, 0, b), static_cast<f32>((b + 1) * 10), 1e-5f) << "band " << b;
+    }
+}
+
+TEST_F(SpectralCubeIOTest, EXRRejectsTwoBandsAtOneWavelength) {
+    // Their channel names would collide in the header's name-keyed channel
+    // list, and the file would come back a band short with no error anywhere.
+    SpectralCube cube(4, 4, 3, 400.0f, 600.0f);
+    cube.wavelengths = {400.0f, 500.0f, 500.0f};
+
+    String path = (testDir / "test_exr_dup.exr").string();
+    EXPECT_FALSE(SpectralCubeIO::WriteEXR(cube, path));
 }
 
 // ============================================================================

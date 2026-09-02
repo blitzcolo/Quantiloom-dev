@@ -13,7 +13,7 @@
  * - PNG: 1 (grayscale), 3 (RGB), 4 (RGBA) channels, 8-bit per channel
  *
  * Format conversions:
- * - EXR: f32 CPU data → HALF (f16) on disk (OpenEXR default)
+ * - EXR: f32 CPU data → f32 on disk (Imf::FLOAT channels, not the f16 default)
  * - PNG: f32 HDR → u8 LDR with sRGB gamma encoding
  *
  * Channel naming (EXR only):

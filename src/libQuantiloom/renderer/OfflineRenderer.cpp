@@ -1015,6 +1015,8 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
         hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BIP;
     } else if (formatStr == "geotiff" || formatStr == "GeoTIFF") {
         hsConfig.outputFormat = HyperspectralOutputFormat::GeoTIFF;
+    } else if (formatStr == "exr_spectral" || formatStr == "exr" || formatStr == "EXR") {
+        hsConfig.outputFormat = HyperspectralOutputFormat::EXR_Spectral;
     } else {
         QL_LOG_WARN("Unknown hyperspectral format '{}', using ENVI_BSQ", formatStr);
         hsConfig.outputFormat = HyperspectralOutputFormat::ENVI_BSQ;
@@ -1073,8 +1075,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
         QL_LOG_INFO("  Total render time: {:.2f} seconds", hsRenderer.GetLastRenderTime());
         QL_LOG_INFO("  Average time per band: {:.3f} seconds", hsRenderer.GetAverageTimePerBand());
 
-        // Output is already written by HyperspectralRenderer::Render()
-        QL_LOG_INFO("  Output written to: {}.hdr/.dat", hsConfig.outputPath);
+        // Output is already written by HyperspectralRenderer::Render(), under
+        // whichever extensions its format uses.
+        const char* extensions = ".hdr/.dat";
+        switch (hsConfig.outputFormat) {
+            case HyperspectralOutputFormat::GeoTIFF:     extensions = ".tif"; break;
+            case HyperspectralOutputFormat::EXR_Spectral: extensions = ".exr"; break;
+            default: break;
+        }
+        QL_LOG_INFO("  Output written to: {}{}", hsConfig.outputPath, extensions);
     } else {
         output.error = String("Hyperspectral rendering failed: ") +
                        HyperspectralStatusToString(status);
