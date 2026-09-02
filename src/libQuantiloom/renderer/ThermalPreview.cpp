@@ -187,13 +187,20 @@ struct ThermalPreview::Impl {
 
     thermal::IThermalStepper& ChooseStepper() {
         // The GPU stepper mirrors the constant law, one column per element and
-        // nothing else, so a run that asked for more is CPU work. Deciding it
-        // here rather than letting the GPU stepper ignore what it was handed is
-        // the difference between a slower solve and a wrong one.
+        // one sun tangent, and nothing else -- so a run that asked for more is
+        // CPU work. Deciding it here rather than letting the GPU stepper ignore
+        // what it was handed is the difference between a slower solve and a
+        // wrong one, and the derivatives are where "wrong" is hardest to see:
+        // the state is sized by the descriptor, so a stepper that does not
+        // integrate them hands back zeros, and a zero derivative is an answer
+        // rather than an absence.
         const bool constantLaw = params.convectionModel == ThermalConvectionModel::Constant &&
                                  !params.lateralConduction;
         if (constantLaw && gpuStepper && gpuStepper->IsValid() &&
-            params.layerCount <= GpuThermalStepper::kMaxNodes) {
+            params.layerCount <= GpuThermalStepper::kMaxNodes &&
+            (params.sunMemoryLags == 0 || gpuStepper->CarriesLagSensitivity()) &&
+            (params.parameterSensitivities.empty() ||
+             gpuStepper->CarriesParameterSensitivity())) {
             return *gpuStepper;
         }
         return cpuStepper;
@@ -594,6 +601,51 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     }
 
     return result;
+}
+
+Vector<f32> ThermalPreview::ParameterSensitivityField(
+    const ThermalSensitivityParameter parameter) const {
+    Vector<f32> field;
+    if (!m_impl->timeline) return field;
+
+    // Which slot, if any: the solve carries the parameters a config or a host
+    // asked for, in the order it was given them, and a parameter nobody asked
+    // for has no column to read.
+    const auto wanted = [parameter] {
+        switch (parameter) {
+            case ThermalSensitivityParameter::Convection:
+                return thermal::ThermalParameter::Convection;
+            case ThermalSensitivityParameter::Emissivity:
+                return thermal::ThermalParameter::Emissivity;
+            case ThermalSensitivityParameter::Absorptivity:
+                return thermal::ThermalParameter::Absorptivity;
+            case ThermalSensitivityParameter::Conductivity:
+                return thermal::ThermalParameter::Conductivity;
+            case ThermalSensitivityParameter::HeatCapacity:
+                return thermal::ThermalParameter::HeatCapacity;
+        }
+        return thermal::ThermalParameter::Count;
+    }();
+
+    const thermal::ThermalState& state = m_impl->timeline->StateAt(m_impl->currentTime_h);
+    if (!state.HasParameterSensitivity()) return field;
+
+    usize slot = state.parameters.size();
+    for (usize i = 0; i < state.parameters.size(); ++i) {
+        if (state.parameters[i] == wanted) { slot = i; break; }
+    }
+    if (slot == state.parameters.size()) return field;
+
+    const usize n = m_impl->mesh.elements.size();
+    field.assign(n, 0.0f);
+    for (usize e = 0; e < n; ++e) {
+        const u32 id = m_impl->mesh.elements[e].materialId;
+        const bool solved = m_impl->mesh.elements[e].area_m2 > 0.0f &&
+                            id < m_impl->materials.size() &&
+                            m_impl->materials[id].ParticipatesInSolve();
+        field[e] = solved ? static_cast<f32>(state.SurfaceParameterSensitivity(slot, e)) : 0.0f;
+    }
+    return field;
 }
 
 bool ThermalPreview::ElementFor(const u32 instanceIndex, const u32 primitiveIndex,

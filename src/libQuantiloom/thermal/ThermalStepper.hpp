@@ -82,6 +82,19 @@ public:
     /// the host picks one that has rather than letting the rows be ignored.
     [[nodiscard]] virtual bool CarriesLateralConduction() const { return false; }
 
+    /// Whether it integrates the per-column lag tangents, and the material
+    /// parameter tangents, beside the temperature.
+    ///
+    /// These matter more than they look. The state is sized by the DESC, not
+    /// by the stepper, so an implementation that does not integrate them still
+    /// receives the vectors and leaves them at zero -- and zero is a
+    /// derivative, not an absence. A shading pass would then trace a shadow
+    /// against a response of nothing, and a what-if preview would predict that
+    /// no slider changes anything. The host asks first and picks a stepper
+    /// that answers yes, for the same reason it does for the convection law.
+    [[nodiscard]] virtual bool CarriesLagSensitivity() const { return false; }
+    [[nodiscard]] virtual bool CarriesParameterSensitivity() const { return false; }
+
     /**
      * @brief Decompose one element's surface balance at the state it is in
      *

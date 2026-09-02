@@ -82,6 +82,13 @@ public:
     [[nodiscard]] Result<ThermalElementTrajectory, String> ElementTrajectory(
         u32 element, f64 fromHour, f64 toHour, u32 samples);
 
+    /// The surface field of dT/dp for one parameter, at the hour on screen,
+    /// one float per element and empty when the solve does not carry that
+    /// parameter. Empty is what a caller must be able to tell from all-zero:
+    /// a tangent nobody asked for is not a tangent that came out flat.
+    [[nodiscard]] Vector<f32> ParameterSensitivityField(
+        ThermalSensitivityParameter parameter) const;
+
     /// The flat element index for an instance and one of its triangles.
     /// False when that instance is not one the solve carries, which is a real
     /// answer about the geometry rather than a lookup failure.

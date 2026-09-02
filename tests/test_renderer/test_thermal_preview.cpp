@@ -252,9 +252,11 @@ TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
     // depend on what the panel happened to have selected -- and the fit these
     // exist for would be fitting against a perturbed solve.
     //
-    // The interactive path could not ask for them at all until the list
-    // crossed the SDK boundary: the config path set them on the resolver's own
-    // parameter block, which the viewport never sees.
+    // One tangent against two, rather than none against one, because asking
+    // for any of them moves the solve onto the CPU stepper: the GPU one does
+    // not integrate them, and the two steppers differ in their last bits by
+    // construction. So the comparison here holds the stepper fixed and varies
+    // only what it is carrying, which is the claim being made.
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
 
     ThermalSolveParams params;
@@ -262,18 +264,47 @@ TEST_F(ThermalPreviewTest, AskingForAMaterialTangentChangesNoTemperature) {
     params.exchangeTopK = 8;
     params.airTemperature_K = 293.15;
     params.sunIrradiance_W_m2 = 800.0;
+    params.parameterSensitivities = {ThermalSensitivityParameter::Convection};
     context->SetThermalSolveParams(params);
     ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
-    const f64 plain = context->GetThermalSolveStatus().meanTemperature_K;
-    ASSERT_GT(plain, 0.0);
+    const f64 one = context->GetThermalSolveStatus().meanTemperature_K;
+    ASSERT_GT(one, 0.0);
 
     params.parameterSensitivities = {ThermalSensitivityParameter::Convection,
                                      ThermalSensitivityParameter::Conductivity};
     context->SetThermalSolveParams(params);
     ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
 
-    EXPECT_NEAR(context->GetThermalSolveStatus().meanTemperature_K, plain, 1e-9)
-        << "carrying a tangent perturbed the trajectory it is a tangent of";
+    EXPECT_NEAR(context->GetThermalSolveStatus().meanTemperature_K, one, 1e-9)
+        << "carrying a second tangent perturbed the trajectory both are tangents of";
+}
+
+TEST_F(ThermalPreviewTest, ASolveThatCannotCarryATangentDoesNotRun) {
+    // The bug this pins: the state is sized by the descriptor, so a stepper
+    // that does not integrate the material tangents still receives the vectors
+    // and hands them back at zero. A zero derivative reads as "no parameter
+    // changes anything", which is an answer rather than an absence, and every
+    // check above it passes while it is wrong.
+    //
+    // What makes it observable without reaching into the stepper choice: the
+    // tangent has to come out nonzero for a scene under a sun.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.airTemperature_K = 293.15;
+    params.sunIrradiance_W_m2 = 800.0;
+    params.parameterSensitivities = {ThermalSensitivityParameter::Convection};
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    auto field =
+        context->GetThermalParameterSensitivity(ThermalSensitivityParameter::Convection);
+    ASSERT_TRUE(field.has_value()) << field.error();
+    ASSERT_FALSE(field.value().empty());
+    EXPECT_LT(field.value()[0], 0.0)
+        << "more convection cools a surface the sun is heating, so dT/dh is negative";
 }
 
 TEST_F(ThermalPreviewTest, AnElementTrajectoryReplaysWithoutMovingTheViewport) {
@@ -404,4 +435,100 @@ TEST_F(ThermalPreviewTest, APickNamesTheElementAProbeAsksAbout) {
     offMesh.hit = true;
     offMesh.instanceIndex = 1u << 20;
     EXPECT_FALSE(context->ThermalElementAt(offMesh).has_value());
+}
+
+TEST_F(ThermalPreviewTest, TheWhatIfPreviewMatchesASolveToFirstOrder) {
+    // What the preview claims: T + dT/dp * step is what a re-solve at p + step
+    // would produce, in the limit of a small step. The claim is checkable
+    // without the GPU at all -- the trajectory carries the tangent and the
+    // solve carries the answer -- so this compares the two on the mean.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.airTemperature_K = 293.15;
+    params.sunIrradiance_W_m2 = 800.0;
+    params.parameterSensitivities = {ThermalSensitivityParameter::Convection};
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 base = context->GetThermalSolveStatus().meanTemperature_K;
+    ASSERT_GT(base, 0.0);
+
+    auto before = context->GetElementTrajectory(0, 12.0, 12.0 + 1.0 / 60.0, 2);
+    ASSERT_TRUE(before.has_value()) << before.error();
+    const f64 baseElement = before.value().surfaceTemperature_K.front();
+
+    auto tangent =
+        context->GetThermalParameterSensitivity(ThermalSensitivityParameter::Convection);
+    ASSERT_TRUE(tangent.has_value()) << tangent.error();
+    ASSERT_FALSE(tangent.value().empty());
+    // Nonzero, and this is not a formality: a stepper that does not integrate
+    // the tangent still receives the vector the descriptor sized and hands it
+    // back at zero, which reads as "no slider changes anything" rather than as
+    // "nobody integrated this". That is the failure this whole test exists to
+    // catch, and it was the state of the GPU path until the host was taught to
+    // ask whether a stepper carries what it is being given.
+    ASSERT_NE(tangent.value()[0], 0.0f)
+        << "the solve carried the parameter and produced a derivative of nothing";
+
+    // A step small enough for the linearisation to hold: h is 10 W/m^2K in the
+    // config's material, and half a unit of it is a five percent change.
+    constexpr f64 kStep = 0.5;
+    ASSERT_TRUE(context->SetThermalWhatIf(ThermalSensitivityParameter::Convection, kStep)
+                    .has_value());
+
+    // What the solve says for the same change, by making it for real.
+    ThermalMaterialParams warmer;
+    warmer.conductivity_W_mK = 1.4f;
+    warmer.density_kg_m3 = 2300.0f;
+    warmer.specificHeat_J_kgK = 880.0f;
+    warmer.thickness_m = 0.2f;
+    warmer.convection_W_m2K = 10.0f + static_cast<f32>(kStep);
+    warmer.shortwaveAbsorptivity = 0.6f;
+    context->SetThermalMaterial("CheckerGround", warmer);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 solved = context->GetThermalSolveStatus().meanTemperature_K;
+
+    // The solve moved, so there is something for the preview to predict.
+    ASSERT_GT(std::abs(solved - base), 0.01)
+        << "half a unit of h changed nothing, so this proves nothing";
+
+    // And the tangent predicts that move. Per element, against the element the
+    // probe can also read, so this is the derivative compared with a finite
+    // difference of the thing it is the derivative of.
+    auto after = context->GetElementTrajectory(0, 12.0, 12.0 + 1.0 / 60.0, 2);
+    ASSERT_TRUE(after.has_value()) << after.error();
+    const f64 solvedElement = after.value().surfaceTemperature_K.front();
+
+    EXPECT_NEAR(solvedElement, baseElement + tangent.value()[0] * kStep,
+                0.1 * std::abs(solvedElement - baseElement) + 0.02)
+        << "dT/dh = " << tangent.value()[0] << " K per W/m2K predicted "
+        << (baseElement + tangent.value()[0] * kStep) << ", the solve gave "
+        << solvedElement << " from " << baseElement;
+}
+
+TEST_F(ThermalPreviewTest, AWhatIfForAParameterNobodyAskedForIsRefused) {
+    // The tangent is sized into the state, so previewing a parameter the solve
+    // does not carry cannot be answered by looking harder -- it needs a
+    // different solve. Said, rather than shown as a preview of zero.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalSolveParams params;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.parameterSensitivities = {ThermalSensitivityParameter::Convection};
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+
+    auto refused = context->SetThermalWhatIf(ThermalSensitivityParameter::Conductivity, 0.1);
+    EXPECT_FALSE(refused.has_value());
+    EXPECT_NE(refused.error().find("parameterSensitivities"), String::npos)
+        << "the message should say what to do about it: " << refused.error();
+
+    // Zero is always accepted: it is how a host turns the preview off, and a
+    // host that has just switched parameters should not have to know whether
+    // the old one was carried.
+    EXPECT_TRUE(context->SetThermalWhatIf(ThermalSensitivityParameter::Conductivity, 0.0)
+                    .has_value());
 }

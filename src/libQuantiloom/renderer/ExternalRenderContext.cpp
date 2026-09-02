@@ -131,6 +131,11 @@ struct ExternalRenderContext::Impl {
     /// one, and reading one is a device loss rather than a wrong colour.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
     std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
+    std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
+    /// What the tangent buffer currently holds, so a repeat ask is a
+    /// no-op rather than a reupload and an accumulation reset.
+    ThermalSensitivityParameter whatIfParameter = ThermalSensitivityParameter::Convection;
+    f32 whatIfStep = 0.0f;
     std::unique_ptr<rendercore::ThermalPreview> thermalPreview;
     /// Why the last SetThermalTime did not produce temperatures. Held here
     /// rather than only in the preview because the reasons the facade rejects
@@ -196,6 +201,11 @@ struct ExternalRenderContext::Impl {
                                   const Vector<f32>& lagSensitivity_K = {},
                                   const Vector<f32>& lagVisibility = {},
                                   const Vector<glm::vec3>& lagDirection = {});
+
+    /// The what-if tangent field and its step, on binding 27. Same contract as
+    /// the sun response above: true when the buffer moved and the descriptor
+    /// has to be rewritten.
+    bool UploadThermalTangent(const Vector<f32>& tangent, f32 step);
 
     // Environment map state. True exactly while `envMap` holds a real map that
     // loaded, false while it holds the black placeholder. UploadLightingParams
@@ -354,6 +364,7 @@ struct ExternalRenderContext::Impl {
         thermalPreview.reset();
         thermalTemperatureBuffer.reset();
         thermalSunResponseBuffer.reset();
+        thermalParameterTangentBuffer.reset();
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
@@ -1313,6 +1324,35 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
             VMA_MEMORY_USAGE_CPU_TO_GPU);
     }
     thermalSunResponseBuffer->Upload(records.data(), bytes);
+    return reallocate;
+}
+
+/// Put a per-element tangent field and its step on binding 27.
+///
+/// One float of step at index 0 and one tangent per element after it. Empty
+/// tangents mean nothing is being previewed, which is a single zero: the
+/// shader's multiply by the step then costs nothing and needs no branch.
+///
+/// @return true when the buffer was reallocated, which is what tells the
+///         caller the descriptor has to be rewritten.
+bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangent,
+                                                       const f32 step) {
+    Vector<f32> records;
+    records.reserve(tangent.size() + 1);
+    records.push_back(tangent.empty() ? 0.0f : step);
+    records.insert(records.end(), tangent.begin(), tangent.end());
+    if (records.size() < 2) records.push_back(0.0f);
+
+    const VkDeviceSize bytes = records.size() * sizeof(f32);
+    const bool reallocate =
+        !thermalParameterTangentBuffer || thermalParameterTangentBuffer->GetSize() != bytes;
+    if (reallocate) {
+        if (thermalParameterTangentBuffer) vkDeviceWaitIdle(device);
+        thermalParameterTangentBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+    }
+    thermalParameterTangentBuffer->Upload(records.data(), bytes);
     return reallocate;
 }
 
@@ -2664,6 +2704,56 @@ Result<u32, String> ExternalRenderContext::ThermalElementAt(const PickResult& pi
     return ElementResult(element);
 }
 
+Result<Vector<f32>, String> ExternalRenderContext::GetThermalParameterSensitivity(
+    const ThermalSensitivityParameter parameter) const {
+    using FieldResult = Result<Vector<f32>, String>;
+    if (!m_impl->thermalPreview) {
+        return FieldResult::Err("this context has no thermal solve");
+    }
+    auto field = m_impl->thermalPreview->ParameterSensitivityField(parameter);
+    if (field.empty()) {
+        return FieldResult::Err(
+            "this solve does not carry a derivative with respect to that parameter -- "
+            "ask for it in ThermalSolveParams::parameterSensitivities, which rebuilds "
+            "the trajectory");
+    }
+    return FieldResult(std::move(field));
+}
+
+Result<void, String> ExternalRenderContext::SetThermalWhatIf(
+    const ThermalSensitivityParameter parameter, const f64 step) {
+    using WhatIfResult = Result<void, String>;
+    if (!m_impl->thermalPreview) {
+        return WhatIfResult::Err("this context has no thermal solve");
+    }
+
+    m_impl->whatIfParameter = parameter;
+    m_impl->whatIfStep = static_cast<f32>(step);
+
+    Vector<f32> tangent;
+    if (step != 0.0) {
+        tangent = m_impl->thermalPreview->ParameterSensitivityField(parameter);
+        if (tangent.empty()) {
+            m_impl->whatIfStep = 0.0f;
+            m_impl->UploadThermalTangent({}, 0.0f);
+            if (m_impl->pipeline) {
+                m_impl->pipeline->BindThermalTangentBuffer(
+                    *m_impl->thermalParameterTangentBuffer);
+            }
+            return WhatIfResult::Err(
+                "this solve does not carry a derivative with respect to that "
+                "parameter -- ask for it in ThermalSolveParams::parameterSensitivities, "
+                "which rebuilds the trajectory");
+        }
+    }
+
+    if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
+        m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+    }
+    ResetAccumulation();
+    return WhatIfResult();
+}
+
 Result<ThermalElementTrajectory, String> ExternalRenderContext::GetElementTrajectory(
     const u32 element, const f64 fromHour, const f64 toHour, const u32 samples) {
     if (!m_impl->thermalPreview) {
@@ -2692,9 +2782,12 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
             m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
+            m_impl->UploadThermalTangent({}, 0.0f);
+            m_impl->whatIfStep = 0.0f;
             if (m_impl->pipeline) {
                 m_impl->pipeline->BindThermalTemperatureBuffer(*m_impl->thermalTemperatureBuffer);
                 m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
+                m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
             }
 
             m_impl->geometry.SetThermalElementBases({});
@@ -2757,6 +2850,17 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
                                          result.lagVisibility, result.lagDirection) &&
         m_impl->pipeline) {
         m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
+    }
+
+    // The what-if tangent is a field of the hour exactly as the temperatures
+    // are, so a scrub has to move it too -- otherwise the preview would show
+    // noon's derivative over midnight's field.
+    if (m_impl->whatIfStep != 0.0f) {
+        const auto tangent =
+            m_impl->thermalPreview->ParameterSensitivityField(m_impl->whatIfParameter);
+        if (m_impl->UploadThermalTangent(tangent, m_impl->whatIfStep) && m_impl->pipeline) {
+            m_impl->pipeline->BindThermalTangentBuffer(*m_impl->thermalParameterTangentBuffer);
+        }
     }
 
     ResetAccumulation();
@@ -3431,6 +3535,10 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
     UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
+    // Binding 27 the same way: a descriptor the shader reads has to be written
+    // whether or not anything is previewing, and a step of zero is what "not
+    // previewing" looks like from the shader's side.
+    UploadThermalTangent({}, 0.0f);
     thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
 }
 
@@ -3467,6 +3575,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
+    bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);

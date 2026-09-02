@@ -927,6 +927,41 @@ public:
      */
     [[nodiscard]] Result<u32, String> ThermalElementAt(const PickResult& pick) const;
 
+    /**
+     * @brief Show what a material parameter would do, before the re-solve says so
+     *
+     * The viewport renders T + dT/dp * step instead of T: a first order
+     * preview of a slider, exact in the limit of a small step and wrong in the
+     * way a linearisation is wrong for a large one. What it is for is the wait
+     * -- a re-solve of a day is seconds and a slider is continuous, so the
+     * preview is what the user sees while dragging and the solved field is
+     * what replaces it when they stop.
+     *
+     * A step of zero turns it off, which is the state every scene starts in.
+     * The tangent is a field of the hour like the temperatures, so scrubbing
+     * time moves it too.
+     *
+     * @return An error when the solve does not carry a derivative with respect
+     *         to that parameter. Asking for one is a ThermalSolveParams change
+     *         and rebuilds the trajectory, which is why this does not do it
+     *         quietly on the caller's behalf.
+     */
+    Result<void, String> SetThermalWhatIf(ThermalSensitivityParameter parameter, f64 step);
+
+    /**
+     * @brief The dT/dp field a what-if preview is built on, one value per element
+     *
+     * Kelvin per unit of the parameter, at the hour the viewport is showing.
+     * The panel driving the preview wants it to say what range a slider is
+     * working over; a test wants it because it is the claim the preview makes,
+     * and comparing it against a re-solve is the only reading of that claim
+     * which is not a restatement of the code.
+     *
+     * @return An error when the solve does not carry that derivative.
+     */
+    [[nodiscard]] Result<Vector<f32>, String> GetThermalParameterSensitivity(
+        ThermalSensitivityParameter parameter) const;
+
     // ========================================================================
     // Scene Editing (Phase 2)
     // ========================================================================

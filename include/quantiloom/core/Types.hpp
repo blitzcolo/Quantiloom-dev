@@ -174,6 +174,12 @@ enum class DebugVisualizationMode : u32 {
     IREmissivity = 61,     // IR emissivity (grayscale)
     IREmission = 62,       // Thermal emission component
     IRReflection = 63,     // IR reflection component
+    // How the field answers to two things it was differentiated with respect
+    // to. Both are derivatives the solve already carries: the first is what
+    // the shadow-edge correction is worth per triangle, the second is what a
+    // material slider would do before the re-solve says so.
+    SunSensitivity = 64,   // |dT/dv|, kelvin per unit sun visibility
+    ThermalSensitivity = 65, // dT/dp for the parameter the host uploaded, signed
 
     // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
     VertexPositions = 70,  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)

@@ -112,6 +112,17 @@
 // rather than read from lightingParams.
 [[vk::binding(26, 0)]] StructuredBuffer<float4> thermalSunResponse;
 
+// How those temperatures respond to one material parameter (binding 27), and
+// by how much to move it. Element 0 is the step dp -- zero when nothing is
+// being asked -- and element 1 + thermalElementBase + PrimitiveIndex() is
+// dT/dp for that triangle. A first-order preview of a slider, in other words:
+// the field a re-solve would produce, before the re-solve, and exactly right
+// in the limit of a small step.
+//
+// The step rides in the buffer rather than in LightingParams because that
+// struct has no room left. See RayTracingPipeline's binding table.
+[[vk::binding(27, 0)]] StructuredBuffer<float> thermalParameterTangent;
+
 // ============================================================================
 // Path Depth
 // ============================================================================
@@ -438,7 +449,13 @@ float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo
         const uint element = geoInfo.thermalElementBase + primitiveIndex;
         const float solved = thermalTemperatures[element];
         if (solved > 0.0) {
-            return solved + ThermalSunVisibilityCorrectionK(element, hitPos, payload);
+            // The what-if step, first order. Zero whenever nothing is being
+            // previewed, which is a multiply rather than a branch and costs
+            // one buffer read on a path that already makes several.
+            const float step = thermalParameterTangent[0];
+            const float whatIf = step * thermalParameterTangent[1 + element];
+            return solved + whatIf +
+                   ThermalSunVisibilityCorrectionK(element, hitPos, payload);
         }
     }
 
@@ -4421,6 +4438,40 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                       payload);
                 if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
                 debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
+                break;
+            }
+
+            case DEBUG_MODE_SUN_SENSITIVITY: {
+                // How many kelvin this surface would move if the sun went from
+                // fully hidden to fully seen. It is what the shadow-edge
+                // correction is worth, per triangle, and it is the number that
+                // says where a coarser mesh would have cost something -- red
+                // wherever a triangle straddles an edge the solve could not see.
+                float sensitivity = 0.0;
+                if (geoInfo.thermalElementBase != 0xFFFFFFFFu &&
+                    thermalSunResponse[0].w > 0.0) {
+                    const uint element = geoInfo.thermalElementBase + PrimitiveIndex();
+                    sensitivity = abs(thermalSunResponse[1 + element].x);
+                }
+                // 0 to 20 K, which is the range a real scene spans: a thin
+                // metal sheet swings tens of degrees across a shadow edge and
+                // a masonry wall barely notices.
+                debug_output = TemperatureToColor(200.0 + sensitivity * 15.0, 200.0, 500.0);
+                break;
+            }
+
+            case DEBUG_MODE_THERMAL_SENSITIVITY: {
+                // dT/dp for whichever material parameter the host uploaded,
+                // signed: blue where raising the parameter cools the surface,
+                // red where it warms it. Which parameter is the host's business
+                // -- the buffer says nothing about it, and the panel that asked
+                // is the thing that knows.
+                float sensitivity = 0.0;
+                if (geoInfo.thermalElementBase != 0xFFFFFFFFu) {
+                    const uint element = geoInfo.thermalElementBase + PrimitiveIndex();
+                    sensitivity = thermalParameterTangent[1 + element];
+                }
+                debug_output = TemperatureToColor(350.0 + sensitivity * 15.0, 200.0, 500.0);
                 break;
             }
 

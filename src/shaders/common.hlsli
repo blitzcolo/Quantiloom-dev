@@ -130,6 +130,8 @@ bool IsVisMode(uint mode) {
 #define DEBUG_MODE_IR_EMISSIVITY           61  // IR emissivity
 #define DEBUG_MODE_IR_EMISSION             62  // Thermal emission component
 #define DEBUG_MODE_IR_REFLECTION           63  // IR reflection component
+#define DEBUG_MODE_SUN_SENSITIVITY         64  // dT/dv, how the temperature answers to shade
+#define DEBUG_MODE_THERMAL_SENSITIVITY     65  // dT/dp for the parameter on binding 27
 
 // Geometry Diagnostics (70-79) - For debugging mesh/index corruption
 #define DEBUG_MODE_VERTEX_POSITIONS        70  // Hash of 3 vertex positions (R=v0, G=v1, B=v2)

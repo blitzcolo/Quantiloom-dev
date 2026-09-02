@@ -601,6 +601,7 @@ struct PipelineBindings {
     /// bound; one zeroed record when there is no solve, which the header's
     /// w = 0 turns off.
     const GpuBuffer* thermalSunResponse = nullptr;
+    const GpuBuffer* thermalParameterTangent = nullptr;
 };
 
 /**

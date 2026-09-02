@@ -346,6 +346,7 @@ public:
     /// element. What lets the shader resolve a shadow finer than the triangle
     /// the solver ran on. Always bound; one zeroed record when there is none.
     void BindThermalSunResponseBuffer(const GpuBuffer& buffer) const;
+    void BindThermalTangentBuffer(const GpuBuffer& buffer) const;
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();

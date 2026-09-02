@@ -66,6 +66,8 @@ public:
     void SetConvection(const ConvectionLaw& law) { m_convection = law; }
     [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
     [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
+    [[nodiscard]] bool CarriesLagSensitivity() const override { return true; }
+    [[nodiscard]] bool CarriesParameterSensitivity() const override { return true; }
 
     /// Answered from the same EvaluateSurfaceBalance the step uses, so what a
     /// probe shows is what the trajectory was built from rather than a second
