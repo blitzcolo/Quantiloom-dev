@@ -5,7 +5,7 @@ Usage:
     python check_furnace.py <output.exr> <band> [--tol 0.002]
 
   band = LWIR | MWIR
-  Default tolerance: 0.2% for ε=1, override with --tol for partial-emitter tests.
+  Default tolerance: 0.2% for emissivity 1, override with --tol for partial emitters.
 
 Exit code 0 = pass, 1 = fail.
 """
@@ -73,7 +73,7 @@ def main():
     args = parser.parse_args()
 
     ref = reference_radiance(args.temp, args.band)
-    print(f"Reference: B̄({args.temp}K, {args.band}) = {ref:.6e} W/sr/m²/nm")
+    print(f"Reference: mean B({args.temp}K, {args.band}) = {ref:.6e} W/sr/m^2/nm")
 
     exr_path = pathlib.Path(args.exr)
     if not exr_path.exists():
@@ -86,7 +86,7 @@ def main():
 
     # The whole image. This used to sample a central 3x3 patch to stay at
     # near-normal incidence, because the reflected term carried "a known
-    # π-factor weighting issue" that made off-axis pixels wrong -- the missing
+    # pi-factor weighting issue" that made off-axis pixels wrong -- the missing
     # 1/PI in the IR environment reflection, since fixed. Sampling everything
     # is the stronger test: an isothermal cavity must return B(T) from every
     # direction, so the whole frame is signal, and an orientation-dependent

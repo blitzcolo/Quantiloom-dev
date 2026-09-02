@@ -50,6 +50,18 @@ integrals and RMSE over EXR images — and Python is portable in a way bash is n
 refuses without it (`-Force` overrides), since two scripts cannot enforce an
 order between themselves the way one script's `set -e` does.
 
+**Nothing a gate prints may be non-ASCII.** A Windows console on a CJK locale
+encodes stdout as GBK, so a `print` carrying a combining macron or a superscript
+two raises `UnicodeEncodeError`, the checker exits 1, and the gate fails before
+it has measured anything. Under WSL the locale is UTF-8 and the same script is
+fine, which is what let two of them carry it unnoticed. Write `W/sr/m^2/nm`, not
+`W/sr/m²/nm`.
+
+To run the PowerShell gates from here: `$env:PYTHON` at an interpreter with
+numpy and OpenEXR (`H:\paper-exp\.venv\Scripts\python.exe` has both; the
+miniconda base has numpy only), then the two `run_*_suite.ps1` directly. Their
+output is line for line the bash twins'.
+
 ## Tests
 
 1366 tests run in ~8 s, and the binary reruns without rebuilding. They link the

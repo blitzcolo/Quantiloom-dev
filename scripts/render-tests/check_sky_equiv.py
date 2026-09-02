@@ -113,7 +113,7 @@ def main():
     spread = float(img.max() - img.min())
     rel_err = abs(mean_val - ref) / ref if ref > 0 else 0.0
 
-    print(f"Reference: {ref:.6e} W/sr/m²/nm  ({source})")
+    print(f"Reference: {ref:.6e} W/sr/m^2/nm  ({source})")
     print(f"Image:     {img.shape[1]}x{img.shape[0]}")
     print(f"ROI mean:  {mean_val:.6e}")
     print(f"Spread:    {spread:.3e}  ({spread / mean_val if mean_val else 0.0:.3e} of the mean)")

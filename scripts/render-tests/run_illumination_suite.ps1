@@ -97,12 +97,20 @@ function Invoke-Render([string]$Config, [string]$Label) {
 # Run a checker and print its verdict line, mirroring the shell version's
 # capture-then-branch: the checker's own exit code decides, not whether a
 # pattern matched.
+# FirstOnly and Squeeze exist so this reads the same as the bash twin's
+# `head -1` and `tr -s ' '`: a checker that reports the same statistic twice
+# would otherwise print both here and one line there, and a line whose columns
+# are padded for a report reads badly squeezed into a one-line summary.
 function Invoke-Checker([string]$Label, [string[]]$Command, [string]$PassPattern,
-                        [string]$FailPattern) {
+                        [string]$FailPattern, [switch]$FirstOnly, [switch]$Squeeze) {
     Write-Host ("{0,-8} " -f $Label) -NoNewline
     $report = (& $Py @Command 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) {
-        Write-Host (((($report -split "`n") | Where-Object { $_ -match $PassPattern }) -join '').Trim()) -NoNewline
+        $lines = ($report -split "`n") | Where-Object { $_ -match $PassPattern }
+        if ($FirstOnly) { $lines = $lines | Select-Object -First 1 }
+        $text = ($lines -join '').Trim()
+        if ($Squeeze) { $text = $text -replace '\s+', ' ' }
+        Write-Host $text -NoNewline
         Write-Host "  PASS"
     } else {
         if ($LASTEXITCODE -eq 3) {
@@ -196,7 +204,7 @@ Invoke-Checker "mis" @("scripts/render-tests/check_nee_mis.py",
 # assets/models/prism_dispersion.gltf in place and restores it afterwards; it
 # cannot run beside anything else reading that model. It renders for itself, so
 # there is no Invoke-Render above it.
-Invoke-Checker "hero" @("scripts/render-tests/check_hero_wavelength.py") 'error fell .* over' 'FAIL|error fell'
+Invoke-Checker "hero" @("scripts/render-tests/check_hero_wavelength.py") 'error fell .* over' 'FAIL|error fell' -FirstOnly
 
 
 # Light that leaves at a wavelength it did not arrive at. Every other check in
@@ -206,7 +214,7 @@ Invoke-Checker "hero" @("scripts/render-tests/check_hero_wavelength.py") 'error 
 # asks the emission band to get BRIGHTER as the illuminant's own power there
 # falls. Nothing diagonal can do that. It renders for itself, so there is no
 # Invoke-Render above it.
-Invoke-Checker "fluor" @("scripts/render-tests/check_fluorescence.py") "dye's contribution " "FAIL|dye's contribution"
+Invoke-Checker "fluor" @("scripts/render-tests/check_fluorescence.py") "dye's contribution " "FAIL|dye's contribution" -Squeeze
 
 
 # Whether the answer depends on where the camera stands. Every check above --
