@@ -29,6 +29,18 @@
 #               one closed form. Catches a view-dependent albedo -- which every
 #               other check here is blind to, because they all point the camera
 #               down the surface normal, where such a law is the identity.
+#   open:vis    The same open ground in the visible band, rendered by both
+#               visible modes. The deterministic one must come out with no
+#               variance at all -- one material, one illumination, a residual
+#               that is zero per wavelength -- and the sampled one must land on
+#               its mean. The SWIR arm above has a closed form to check against;
+#               this one has the other estimator, which is what makes it a
+#               switching check rather than a second copy of the same sum.
+#   hero        The two visible estimators against each other on a full frame,
+#               and n(lambda) against a floor measured from the renderer rather
+#               than assumed. Catches an estimator whose error stops falling
+#               with sample count, which is what every wrong weight, missing
+#               density or misplaced matching function looks like.
 #   mis         The same box rendered with light sampling on and off, which
 #               estimate the same integral and so must agree. Catches emitted
 #               radiance counted by both strategies at full weight -- which the
@@ -109,6 +121,32 @@ else
     fi
 fi
 
+# The same open ground in the visible band, where the reflectance is an
+# upsampled spectrum rather than 1 - emissivity and so has no closed form to
+# compare against. The two visible modes have each other instead: vis_fused
+# renders this scene with no variance at all, and vis_hero must land on its
+# mean. A residual that is not identically zero shows up in the first as a
+# frame that is no longer constant, and a bounce added on top of the analytic
+# sky rather than correcting it shows up in the second as a factor near two.
+for m in fused hero; do
+    log=$("$CLI" "assets/configs/skyequiv_vis_${m}.toml" 2>&1)
+    if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+        echo "RENDER FAILED  skyequiv_vis_${m}"
+        printf '%s\n' "$log" | tail -5 >&2
+        fail=1
+    fi
+done
+printf '%-8s ' "open:vis"
+if report=$("$PY" scripts/render-tests/check_sky_equiv.py \
+                skyequiv_vis_hero_output.exr \
+                --reference skyequiv_vis_fused_output.exr \
+                --reference-max-spread 0.0); then
+    echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
+else
+    echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
+    fail=1
+fi
+
 # Indirect light in the visible band. The only emitter is the ceiling panel and
 # the camera cannot see it, so every lit pixel here arrived by bouncing. This
 # asserts that indirect light EXISTS and carries the wall's colour; whether
@@ -155,6 +193,30 @@ else
         exit 3
     fi
     echo "$report" | grep -E 'worst region|FAIL|worst for' | tr '\n' ' '; echo
+    fail=1
+fi
+
+
+# The two visible estimators against each other. vis_fused sweeps 32 fixed
+# wavelengths along one path; vis_hero draws one and rotates it into a quartet.
+# They estimate the same integral, so on a scene with no dispersion the second
+# must converge to the first, and the error must fall like noise rather than
+# settle on a floor. The predecessor of this estimator failed exactly there.
+#
+# This one renders the prism scene too, which means it edits
+# assets/models/prism_dispersion.gltf in place and restores it afterwards; it
+# cannot run beside anything else reading that model.
+printf '%-8s ' "hero"
+if report=$("$PY" scripts/render-tests/check_hero_wavelength.py); then
+    echo "$report" | grep -E 'error fell .* over' | head -1 | sed 's/^[[:space:]]*//' \
+        | tr -d '\n'; echo '  PASS'
+else
+    hero_status=$?
+    if [ "$hero_status" = 3 ]; then
+        echo "illumination suite: no usable GPU, nothing measured" >&2
+        exit 3
+    fi
+    echo "$report" | grep -E 'FAIL|error fell' | tr '\n' ' '; echo
     fail=1
 fi
 
@@ -206,7 +268,7 @@ for pair in "reflective:skyequiv_swir_output.exr:viewangle_swir_oblique_output.e
 done
 
 if [ "$fail" = 0 ]; then
-    echo "illumination suite: occlusion, open sky, indirect, MIS and view independence all within tolerance"
+    echo "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence and view independence all within tolerance"
 else
     echo "illumination suite: FAILURES above" >&2
 fi

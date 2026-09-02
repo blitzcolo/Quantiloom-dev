@@ -138,6 +138,26 @@ if (Invoke-Render "assets/configs/skyequiv_swir.toml" "skyequiv_swir") {
                             "skyequiv_swir_output.exr") 'Rel error' 'Rel error|FAIL'
 }
 
+# The same open ground in the visible band, where the reflectance is an
+# upsampled spectrum rather than 1 - emissivity and so has no closed form to
+# compare against. The two visible modes have each other instead: vis_fused
+# renders this scene with no variance at all, and vis_hero must land on its
+# mean. A residual that is not identically zero shows up in the first as a
+# frame that is no longer constant, and a bounce added on top of the analytic
+# sky rather than correcting it shows up in the second as a factor near two.
+$visOpen = $true
+foreach ($m in @("fused", "hero")) {
+    if (-not (Invoke-Render "assets/configs/skyequiv_vis_${m}.toml" "skyequiv_vis_${m}")) {
+        $visOpen = $false
+    }
+}
+if ($visOpen) {
+    Invoke-Checker "open:vis" @("scripts/render-tests/check_sky_equiv.py",
+                                "skyequiv_vis_hero_output.exr",
+                                "--reference", "skyequiv_vis_fused_output.exr",
+                                "--reference-max-spread", "0.0") 'Rel error' 'Rel error|FAIL'
+}
+
 # Indirect light in the visible band. The only emitter is the ceiling panel and
 # the camera cannot see it, so every lit pixel here arrived by bouncing. This
 # asserts that indirect light EXISTS and carries the wall's colour; whether
@@ -164,6 +184,19 @@ $MisSpp = if ($env:MIS_SPP) { $env:MIS_SPP } else { "2048" }
 $MisRes = if ($env:MIS_RES) { $env:MIS_RES } else { "192" }
 Invoke-Checker "mis" @("scripts/render-tests/check_nee_mis.py",
                        "--spp", $MisSpp, "--resolution", $MisRes) 'worst region' 'worst region|worst for|FAIL'
+
+
+# The two visible estimators against each other. vis_fused sweeps 32 fixed
+# wavelengths along one path; vis_hero draws one and rotates it into a quartet.
+# They estimate the same integral, so on a scene with no dispersion the second
+# must converge to the first, and the error must fall like noise rather than
+# settle on a floor. The predecessor of this estimator failed exactly there.
+#
+# This one renders the prism scene too, which means it edits
+# assets/models/prism_dispersion.gltf in place and restores it afterwards; it
+# cannot run beside anything else reading that model. It renders for itself, so
+# there is no Invoke-Render above it.
+Invoke-Checker "hero" @("scripts/render-tests/check_hero_wavelength.py") 'error fell .* over' 'FAIL|error fell'
 
 
 # Whether the answer depends on where the camera stands. Every check above --
@@ -197,7 +230,7 @@ if ($thermalOk) {
 }
 
 if ($script:fail -eq 0) {
-    Write-Host "illumination suite: occlusion, open sky, indirect, MIS and view independence all within tolerance"
+    Write-Host "illumination suite: occlusion, open sky in two bands, indirect, MIS, hero convergence and view independence all within tolerance"
 } else {
     Write-Host "illumination suite: FAILURES above" -ForegroundColor Red
 }

@@ -2541,9 +2541,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                            : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP));
 
             // The atmosphere LUT is baked on the fixed grid, so a sampled
-            // wavelength has no index of its own -- take the nearest. The
-            // grid is 12.3 nm apart and tau/lpath vary slowly across it, but
-            // this is an approximation the deterministic path does not make.
+            // wavelength has no index of its own -- take the nearest bin. The
+            // table holds the bin MEAN of tau over each 12.3 nm step (see
+            // BoxAverage in AtmosphereBaker.cpp), so nearest reads exactly the
+            // quantity the deterministic sweep reads for that bin and the two
+            // estimators integrate one function. Interpolating between bin
+            // averages would give this path a piecewise-linear tau the
+            // reference never sums, which is a bias between the modes rather
+            // than a fix for one.
             const uint atmosIdx = (heroRay || carriesQuartet)
                 ? (uint)clamp(round((lambda - LAMBDA_MIN_VIS) / LAMBDA_STEP),
                               0.0, float(NUM_WAVELENGTH_SAMPLES - 1))

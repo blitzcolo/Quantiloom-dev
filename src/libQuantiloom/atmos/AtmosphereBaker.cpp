@@ -90,11 +90,20 @@ AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
     //
     // The shaders index this grid by their spectral loop counter, so the grid
     // points ARE the loop's wavelengths. Rays that carry a sampled wavelength
-    // instead -- a dispersive refraction, or an environment bounce -- have no
-    // index of their own and take the nearest grid point. tau and L_path vary
-    // slowly enough across a step for that to be reasonable, but it is an
-    // approximation the deterministic path does not make, and coarsening any
-    // count below widens it.
+    // instead -- a hero wavelength, a quartet member, an environment bounce --
+    // have no index of their own and take the nearest grid point.
+    //
+    // Nearest rather than interpolated, and that is the accurate choice here
+    // rather than the cheap one: BoxAverage below fills each entry with the
+    // MEAN of the network's output over the bin around its wavelength, so the
+    // table is a piecewise-constant tau, not a set of point samples. A sampled
+    // wavelength landing in a bin therefore reads the same quantity the
+    // deterministic sweep reads for that bin, and the two estimators integrate
+    // one function. Interpolating between bin averages would build a
+    // piecewise-linear function that is neither tau nor what the reference
+    // sums, which is a systematic difference between the two modes introduced
+    // to remove one that was not there. Coarsening any count below widens the
+    // bins, and with them the piecewise-constant step.
     auto uniformGrid = [](const char* band, double lo, double hi, int n) {
         AtmosLambdaGrid g;
         g.band = band;

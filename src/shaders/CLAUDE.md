@@ -123,13 +123,14 @@ Neither is `ctest`; both need a GPU and both run from `build_wsl.sh`.
 | Gate | Asks | Blind to |
 |---|---|---|
 | `run_furnace_suite.sh` | what a surface does with light once it arrives | anything about how it arrives — no sun, no sky, no scene outside the cavity |
-| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness, indirect | radiometry of the surface itself |
+| `run_illumination_suite.sh` | how light reaches a surface: occlusion, open-sky exactness in two bands, indirect, and the two visible estimators against each other | radiometry of the surface itself |
 
-A third pair, `check_dispersion.py` and `check_hero_wavelength.py`, is run by
-neither gate and has to be invoked by hand. Both edit
-`assets/models/prism_*.gltf` in place and restore it in a `finally`, so they
-cannot run concurrently with each other or with anything else reading those
-models.
+`check_hero_wavelength.py` is the illumination suite's `hero` arm and runs with
+it. `check_dispersion.py` covers the RGB path and the two n(lambda) sources,
+and is still invoked by hand. Both edit `assets/models/prism_*.gltf` in place
+and restore it in a `finally`, so they cannot run concurrently with each other
+or with anything else reading those models -- which is also why the suite runs
+its arms in sequence.
 
 Both spent six weeks red for a reason that was in no shader: three copies of
 the prism models sat under `assets/configs/assets/models/`, and
@@ -139,6 +140,10 @@ nothing loads renders identically to the unpatched one — which
 `check_dispersion` reported as "switching dispersion on changed nothing", and
 `check_hero_wavelength` reported as a bias floor, because its reference and its
 test case then differed only by a config-injected IOR that *did* take effect.
+That checker's dispersion arm now reads its signal against a floor measured
+from the renderer -- two dispersion values a fraction of a percent apart, same
+seed, same code path -- rather than against a constant, so a change that
+reaches nothing lands at a ratio near 1 instead of passing on noise.
 The duplicates are deleted and `ResolveConfigPath` now warns when a path
 resolves two ways. If a checker ever again insists a shader change did nothing,
 read the render log's `Loading glTF model:` line before believing it.
