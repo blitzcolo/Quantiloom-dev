@@ -615,6 +615,20 @@ public:
     void SetDebugMode(DebugVisualizationMode mode);
 
     /**
+     * @brief The one number a debug view may need
+     *
+     * Which number is the view's business. DebugVisualizationMode::
+     * SunSensitivity reads it as the sun column to draw: zero is the whole-day
+     * response, and 1..sunMemoryLags are the individual hours the solve is
+     * remembering. Out of range is clamped rather than refused, because the
+     * number of columns is a property of the solve and a panel can hold a
+     * stale selection across a re-solve.
+     *
+     * Every other view ignores it, and it is zero unless something sets it.
+     */
+    void SetDebugParameter(u32 value);
+
+    /**
      * @brief Get current debug visualization mode
      */
     [[nodiscard]] DebugVisualizationMode GetDebugMode() const;

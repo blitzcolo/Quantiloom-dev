@@ -4495,10 +4495,16 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // says where a coarser mesh would have cost something -- red
                 // wherever a triangle straddles an edge the solve could not see.
                 float sensitivity = 0.0;
-                if (geoInfo.thermalElementBase != 0xFFFFFFFFu &&
-                    thermalSunResponse[0].w > 0.0) {
+                const uint stride = (uint)thermalSunResponse[0].w;
+                if (geoInfo.thermalElementBase != 0xFFFFFFFFu && stride > 0u) {
+                    // Same addressing the correction itself uses: the records
+                    // are strided by the number of columns carried, and slot 0
+                    // is the whole day. debugParam picks which of the
+                    // remembered hours to draw, clamped so a stale selection
+                    // reads the last one rather than another element's record.
                     const uint element = geoInfo.thermalElementBase + PrimitiveIndex();
-                    sensitivity = abs(thermalSunResponse[1 + element].x);
+                    const uint slot = min(pushConsts.camera.debugParam, stride - 1u);
+                    sensitivity = abs(thermalSunResponse[stride * (1u + element) + slot].x);
                 }
                 // 0 to 20 K, which is the range a real scene spans: a thin
                 // metal sheet swings tens of degrees across a shadow edge and

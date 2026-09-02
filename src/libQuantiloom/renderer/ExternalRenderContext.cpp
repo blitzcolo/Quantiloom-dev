@@ -174,6 +174,9 @@ struct ExternalRenderContext::Impl {
     // Rendering state
     SpectralMode spectralMode = SpectralMode::RGB;  // Default: Fast RGB mode
     DebugVisualizationMode debugMode = DebugVisualizationMode::None;  // Debug visualization mode
+    /// The one number a debug view may need. Zero for every view that
+    /// needs none, which is all of them but one.
+    u32 debugParam = 0;
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
     LightingParams lightingParams;
@@ -1503,6 +1506,7 @@ void ExternalRenderContext::RenderFrame(
     cameraData.wavelength_nm = m_impl->wavelength_nm;
     cameraData.spectral_mode = static_cast<u32>(m_impl->spectralMode);
     cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
+    cameraData.debugParam = m_impl->debugParam;
     m_impl->pipeline->SetCameraData(cameraData);
 
     // The shader branches on the SPEC_SPECTRAL_MODE specialization constant,
@@ -2169,6 +2173,13 @@ u32 ExternalRenderContext::GetSPP() const {
 // ============================================================================
 // Debug Visualization
 // ============================================================================
+
+void ExternalRenderContext::SetDebugParameter(const u32 value) {
+    if (m_impl->debugParam != value) {
+        m_impl->debugParam = value;
+        ResetAccumulation();
+    }
+}
 
 void ExternalRenderContext::SetDebugMode(DebugVisualizationMode mode) {
     if (m_impl->debugMode != mode) {

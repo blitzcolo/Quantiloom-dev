@@ -859,6 +859,9 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     cameraData.wavelength_nm = params.wavelengthNm;         // Override with config wavelength
     cameraData.spectral_mode = static_cast<u32>(params.mode);  // Set rendering mode
     cameraData.debug_mode = static_cast<u32>(resolved.debugMode);
+    // Nothing in a config selects a debug view's parameter; the offline
+    // path renders slot zero, which is the whole-day response.
+    cameraData.debugParam = 0;
     pipeline->SetCameraData(cameraData);
 
     pipeline->SetSpecConstants(

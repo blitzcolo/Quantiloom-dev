@@ -904,7 +904,7 @@ struct CameraData {
     uint   debug_mode;     // Debug visualization mode (see DEBUG_MODE_* defines)
     uint   projection;     // CAMERA_PROJECTION_* below
     float  orthoHeight;    // Film-plane height in world units, orthographic only
-    uint   _padding;       // Padding for 16-byte alignment
+    uint   debugParam;     // One number for a debug view; see Camera.hpp
 };
 
 // Must match Camera::Projection in scene/Camera.hpp.

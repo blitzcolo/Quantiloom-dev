@@ -226,6 +226,7 @@ public: void quantiloom::ExternalRenderContext::SetCameraLookAt(struct glm::vec<
 public: void quantiloom::ExternalRenderContext::SetCameraProjection(enum quantiloom::CameraProjection,float)
 public: void quantiloom::ExternalRenderContext::SetCameraViewMatrix(struct glm::mat<4,4,float,0> const &)
 public: void quantiloom::ExternalRenderContext::SetDebugMode(enum quantiloom::DebugVisualizationMode)
+public: void quantiloom::ExternalRenderContext::SetDebugParameter(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetDisplayEnhancementParams(struct quantiloom::DisplayEnhancementParams const &)
 public: void quantiloom::ExternalRenderContext::SetGPUSensorEnabled(bool)
 public: void quantiloom::ExternalRenderContext::SetGPUSensorParams(struct quantiloom::SensorParams const &)
