@@ -277,6 +277,35 @@ struct ThermalState {
     /// nothing. Size it like temperature_K to turn it on.
     Vector<f64> sunSensitivity_K;
 
+    /// dT/dv_k for a sliding window of the most recent sun columns: how far
+    /// each node would move per unit of this element's visibility IN COLUMN k
+    /// alone, rather than across the whole day at once.
+    ///
+    /// Why both. sunSensitivity_K above answers "what if this element had seen
+    /// more sun, all day", and a shading pass applies it with the visibility
+    /// difference it traces NOW -- which assumes the pixel's shadow history
+    /// matches its present shadow. Under a moving sun it does not: a pixel
+    /// that is shaded now may have been lit an hour ago, and the ground under
+    /// it is still warm. Each of these answers "what if this element had seen
+    /// more sun AT THAT HOUR", and a shading pass can trace the pixel's own
+    /// visibility toward each of those sun positions.
+    ///
+    /// The window is the point rather than a limitation. What is not in it is
+    /// not lost: the shading pass applies (total - sum of the tracked columns)
+    /// with the present sun, which is exactly what it did before any of this
+    /// existed. So a slot count of zero is the old behaviour, and each slot
+    /// moves one column's worth of the answer from "assume the history looks
+    /// like now" to "trace it".
+    ///
+    /// Layout: slot-major over the element-major blocks, so slot s owns
+    /// [s * ElementCount() * nodeCount, (s+1) * ...).
+    Vector<f64> lagSensitivity_K;
+    /// Which sun column each slot tracks, kNoLagColumn for a slot that has not
+    /// been claimed yet. Size is the slot count.
+    Vector<u32> lagColumn;
+
+    static constexpr u32 kNoLagColumn = 0xFFFFFFFFu;
+
     u32 nodeCount = 0;
 
     [[nodiscard]] usize ElementCount() const {
@@ -294,13 +323,26 @@ struct ThermalState {
         return sunSensitivity_K[element * nodeCount];
     }
 
+    /// How many sun columns this state tracks separately. Zero is the whole of
+    /// the old behaviour.
+    [[nodiscard]] u32 LagSlots() const { return static_cast<u32>(lagColumn.size()); }
+    [[nodiscard]] bool HasLagSensitivity() const {
+        return !lagColumn.empty() &&
+               lagSensitivity_K.size() == lagColumn.size() * temperature_K.size();
+    }
+    [[nodiscard]] f64 SurfaceLagSensitivity(const usize slot, const usize element) const {
+        return lagSensitivity_K[(slot * ElementCount() + element) * nodeCount];
+    }
+
     /// What one snapshot of this state costs. The timeline stores whole copies
     /// of it as checkpoints, so this is what a scrub backwards is paid for in
     /// memory, and it is here rather than at the caller so that a state vector
     /// added later cannot be left out of the total by being forgotten in one
     /// file. Every vector this struct owns belongs in the sum.
     [[nodiscard]] usize ByteSize() const {
-        return (temperature_K.size() + sunSensitivity_K.size()) * sizeof(f64);
+        return (temperature_K.size() + sunSensitivity_K.size() + lagSensitivity_K.size()) *
+                   sizeof(f64) +
+               lagColumn.size() * sizeof(u32);
     }
 };
 
@@ -411,6 +453,17 @@ struct ShortwaveSample {
     std::span<const f32> sunVisibility;
     std::span<const f32> reflectedGain;
     std::span<const f32> diffuseGain;
+
+    /// Which two sun columns the visibility above was interpolated from, and
+    /// how far between them. A step that knows this can attribute its
+    /// short-wave source to the columns that produced it, which is what the
+    /// per-column tangents need; one that does not -- the steady-state
+    /// relaxation, a caller that passes only a visibility -- leaves
+    /// `columnsKnown` false and the per-column tangents alone.
+    usize columnA = 0;
+    usize columnB = 0;
+    f64 columnBlend = 0.0;
+    bool columnsKnown = false;
 };
 
 /// One step in a batch, carrying the forcing and where in the sun table it is.

@@ -419,6 +419,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     desc.initial = config.initial;
     desc.initialTemperature_K = config.initialTemperature_K;
     desc.carrySunSensitivity = config.sunCorrection;
+    desc.sunMemoryLags = config.sunCorrection ? config.sunMemoryLags : 0u;
 
     ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
                              effectiveTable, forcingSeries, constantForcing, activeStepper);
@@ -440,6 +441,46 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         result.sunVisibility =
             SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
                                   mesh.elements.size());
+    }
+
+    // The per-column tangents, and the sun position each belongs to. A slot
+    // that was never claimed, or a column the table cannot say where the sun
+    // was for, is dropped: the shading pass would have nothing to trace toward,
+    // and what a dropped slot holds is already inside sunSensitivity_K.
+    const bool haveLags = haveTangent && state.HasLagSensitivity() &&
+                          effectiveTable.sampleDirection.size() ==
+                              effectiveTable.SampleCount();
+    if (haveLags) {
+        const usize n = mesh.elements.size();
+        result.lagSlots = state.LagSlots();
+        result.lagSensitivity_K.assign(result.lagSlots * n, 0.0f);
+        result.lagVisibility.assign(result.lagSlots * n, 0.0f);
+        result.lagDirection.assign(result.lagSlots, glm::vec3(0.0f, 1.0f, 0.0f));
+
+        for (u32 s = 0; s < result.lagSlots; ++s) {
+            const u32 column = state.lagColumn[s];
+            if (column >= effectiveTable.SampleCount()) continue;
+
+            const glm::vec3 direction = effectiveTable.sampleDirection[column];
+            result.lagDirection[s] = direction;
+            const f32* visibility = effectiveTable.Column(column);
+
+            for (usize e = 0; e < n; ++e) {
+                const u32 id = mesh.elements[e].materialId;
+                const bool solved = mesh.elements[e].area_m2 > 0.0f &&
+                                    id < materials.size() &&
+                                    materials[id].ParticipatesInSolve();
+                if (!solved) continue;
+                result.lagVisibility[s * n + e] = visibility[e];
+                // Same rule as the whole-day tangent, against this column's own
+                // sun: a face the sun was behind then would have been dark
+                // however finely the shader resolved it.
+                if (glm::dot(mesh.elements[e].normal, direction) > 0.0f) {
+                    result.lagSensitivity_K[s * n + e] =
+                        static_cast<f32>(state.SurfaceLagSensitivity(s, e));
+                }
+            }
+        }
     }
 
     f64 sum = 0.0;

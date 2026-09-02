@@ -192,7 +192,10 @@ struct ExternalRenderContext::Impl {
     /// count changed, so a scrub is a plain upload with no wait.
     bool UploadThermalSunResponse(const Vector<f32>& sunSensitivity_K,
                                   const Vector<f32>& sunVisibility,
-                                  const glm::vec3& sunDirection);
+                                  const glm::vec3& sunDirection,
+                                  const Vector<f32>& lagSensitivity_K = {},
+                                  const Vector<f32>& lagVisibility = {},
+                                  const Vector<glm::vec3>& lagDirection = {});
 
     // Environment map state. True exactly while `envMap` holds a real map that
     // loaded, false while it holds the black placeholder. UploadLightingParams
@@ -1071,6 +1074,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             tp.convectionReferenceHeight_m = resolved.thermal.convection.referenceHeight_m;
             tp.convectionStableDamping = resolved.thermal.convection.stableDamping;
             tp.lateralConduction = resolved.thermal.lateralConduction;
+            tp.sunMemoryLags = resolved.thermal.sunMemoryLags;
             // The two measurement switches. sunCorrection changes what the
             // solve carries, so the viewport has to be told or it silently
             // renders the corrected field a config asked not to have;
@@ -1265,9 +1269,11 @@ const Scene* ExternalRenderContext::GetScene() const {
 // rather than at each of the nine call sites.
 bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
-    const glm::vec3& sunDirection) {
-    const auto records =
-        rendercore::MakeThermalSunResponse(sunSensitivity_K, sunVisibility, sunDirection);
+    const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K,
+    const Vector<f32>& lagVisibility, const Vector<glm::vec3>& lagDirection) {
+    const auto records = rendercore::MakeThermalSunResponse(
+        sunSensitivity_K, sunVisibility, sunDirection, lagSensitivity_K, lagVisibility,
+        lagDirection);
     const VkDeviceSize bytes =
         records.size() * sizeof(rendercore::ThermalSunResponseGpu);
 
@@ -2695,7 +2701,8 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     // Reallocating is what needs the wait and the rebind, and that only
     // happens when the element count changes -- the helper says which it did.
     if (m_impl->UploadThermalSunResponse(result.sunSensitivity_K, result.sunVisibility,
-                                         result.sunDirection) &&
+                                         result.sunDirection, result.lagSensitivity_K,
+                                         result.lagVisibility, result.lagDirection) &&
         m_impl->pipeline) {
         m_impl->pipeline->BindThermalSunResponseBuffer(*m_impl->thermalSunResponseBuffer);
     }

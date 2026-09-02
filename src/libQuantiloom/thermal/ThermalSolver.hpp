@@ -94,6 +94,17 @@ struct ThermalConfig {
     /// a timestep advisory of its own.
     bool lateralConduction = false;
 
+    /// How many of the sun's most recent columns get a tangent of their own.
+    /// Zero is the behaviour this solver had: one tangent for the whole day's
+    /// visibility, which a shading pass applies with the shadow it traces now
+    /// -- right for a still sun, and an over-correction under a moving one,
+    /// where a pixel shaded now may have been lit an hour ago and the ground
+    /// under it is still warm. Each slot moves one column's worth of that from
+    /// assumed to traced, and costs a state vector, an elimination pass and a
+    /// ray per shaded pixel. Only meaningful with a forcing file: constant
+    /// forcing is one column.
+    u32 sunMemoryLags = 0;
+
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
     /// off exists so the two renders can be compared, which is the only way to
@@ -139,6 +150,20 @@ struct ThermalResult {
     /// owns this and it need not agree with [lighting] sun_direction, so the
     /// shading pass has to be told rather than assume.
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+
+    /// The same three things per tracked sun column: dT/dv_k and v_k per
+    /// element, both slot-major, and where the sun was for that column. What
+    /// they let a shading pass do is trace the pixel's own visibility toward
+    /// each of those past sun positions instead of assuming its shadow history
+    /// looks like its present shadow.
+    ///
+    /// These are a REFINEMENT of sunSensitivity_K, not a replacement: that one
+    /// still holds the whole day's answer, and the part of it not attributed to
+    /// a tracked column is what a shading pass applies against the present sun.
+    Vector<f32> lagSensitivity_K;
+    Vector<f32> lagVisibility;
+    Vector<glm::vec3> lagDirection;
+    u32 lagSlots = 0;
 
     u32 elementCount = 0;
     u32 participatingElements = 0;

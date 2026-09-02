@@ -88,7 +88,10 @@ struct ThermalPreview::Impl {
     /// @return the element count, so callers do not size it a second way
     u32 ExtractField(const thermal::ThermalState& state, const f64 time_h,
                      Vector<f32>& temperature_K, Vector<f32>& sunSensitivity_K,
-                     Vector<f32>& visibility, glm::vec3& sunDirection) const {
+                     Vector<f32>& visibility, glm::vec3& sunDirection,
+                     Vector<f32>* lagSensitivity_K = nullptr,
+                     Vector<f32>* lagVisibility = nullptr,
+                     Vector<glm::vec3>* lagDirection = nullptr) const {
         const u32 n = static_cast<u32>(mesh.elements.size());
         temperature_K.assign(n, 0.0f);
         // Left empty rather than zeroed when the tangent was not carried: zero
@@ -118,6 +121,43 @@ struct ThermalPreview::Impl {
                 // itself.
                 if (glm::dot(mesh.elements[e].normal, sunDirection) <= 0.0f) {
                     sunSensitivity_K[e] = 0.0f;
+                }
+            }
+        }
+
+        // The same three things per tracked sun column. A slot the table
+        // cannot place the sun for is left at zero, and what it holds stays
+        // inside sunSensitivity_K, which is where the shading pass looks when
+        // a column is not carried.
+        if (lagSensitivity_K == nullptr) return n;
+        lagSensitivity_K->clear();
+        lagVisibility->clear();
+        lagDirection->clear();
+        if (!haveTangent || !state.HasLagSensitivity() ||
+            sunTable.sampleDirection.size() != sunTable.SampleCount()) {
+            return n;
+        }
+
+        const u32 slots = state.LagSlots();
+        lagSensitivity_K->assign(static_cast<usize>(slots) * n, 0.0f);
+        lagVisibility->assign(static_cast<usize>(slots) * n, 0.0f);
+        lagDirection->assign(slots, glm::vec3(0.0f));
+        for (u32 s = 0; s < slots; ++s) {
+            const u32 column = state.lagColumn[s];
+            if (column >= sunTable.SampleCount()) continue;
+            const glm::vec3 direction = sunTable.sampleDirection[column];
+            (*lagDirection)[s] = direction;
+            const f32* columnVisibility = sunTable.Column(column);
+            for (usize e = 0; e < n; ++e) {
+                const u32 id = mesh.elements[e].materialId;
+                if (!(mesh.elements[e].area_m2 > 0.0f) || id >= materials.size() ||
+                    !materials[id].ParticipatesInSolve()) {
+                    continue;
+                }
+                (*lagVisibility)[s * n + e] = columnVisibility[e];
+                if (glm::dot(mesh.elements[e].normal, direction) > 0.0f) {
+                    (*lagSensitivity_K)[s * n + e] =
+                        static_cast<f32>(state.SurfaceLagSensitivity(s, e));
                 }
             }
         }
@@ -337,6 +377,7 @@ struct ThermalPreview::Impl {
         // later, so it has to reach the desc -- and SetParams marks the
         // timeline dirty for every change, which is what makes it take.
         desc.carrySunSensitivity = params.sunCorrection;
+        desc.sunMemoryLags = params.sunCorrection ? params.sunMemoryLags : 0u;
 
         // Every argument but the desc is held by reference for the timeline's
         // lifetime, so all of them are members -- a local would be read after
@@ -498,7 +539,8 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
     // pass needs to resolve a shadow finer than one triangle.
     const u32 n = m_impl->ExtractField(state, time_h, result.surfaceTemperature_K,
                                        result.sunSensitivity_K, result.sunVisibility,
-                                       result.sunDirection);
+                                       result.sunDirection, &result.lagSensitivity_K,
+                                       &result.lagVisibility, &result.lagDirection);
     result.instanceElementBase = m_impl->mesh.instanceElementBase;
     result.elementCount = n;
     result.elementCountChanged = (n != m_impl->lastElementCount);

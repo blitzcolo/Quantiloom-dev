@@ -371,40 +371,64 @@ float4 SampleEndmemberWeights(MaterialData material, float2 uv) {
 // L leaves the surface on the side the sun is actually on either way. The
 // case the flip would have got wrong -- a face genuinely turned away -- is
 // already zero, because the host ships no sensitivity for it.
+// A moving sun makes that one correction an assumption as well as a fix. The
+// tangent it applies answers "what if this element had seen more sun, all
+// day", and applying it with the shadow traced NOW assumes the pixel's shadow
+// history looks like its present shadow. Under a sun that moved, it does not:
+// a pixel shaded now may have been lit an hour ago, and the ground under it is
+// still warm. So the buffer may also carry a few of the sun's recent columns,
+// each with its own (dT/dv_k, v_k) and its own sun position, and each is
+// traced where it actually was. The first record is what is left over -- the
+// part of the day not attributed to a carried column -- and is applied against
+// the present sun exactly as before, so with no columns carried this is the
+// same function it was.
 float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload payload) {
     const float4 header = thermalSunResponse[0];
-    if (header.w == 0.0) {
+    const uint stride = (uint)header.w;   // 0 off, else 1 + the columns carried
+    if (stride == 0) {
         return 0.0;
     }
 
-    const float2 response = thermalSunResponse[1 + element].xy;  // (dT/dv, v_element)
-    // A tenth of a kelvin is below what a cooled thermal camera resolves, and
-    // the ray is the whole cost of this -- so the threshold is what keeps a
-    // night scene, an indoor scene and every non-solar band paying nothing.
-    if (abs(response.x) < 0.1) {
-        return 0.0;
+    const uint base = stride * (1 + element);
+    float correction = 0.0;
+
+    for (uint j = 0; j < stride; ++j) {
+        const float2 response = thermalSunResponse[base + j].xy;  // (dT/dv, v)
+        // A tenth of a kelvin is below what a cooled thermal camera resolves,
+        // and the ray is the whole cost of this -- so the threshold is what
+        // keeps a night scene, an indoor scene and every non-solar band paying
+        // nothing, and it is applied per column so an hour that no longer
+        // matters costs nothing either.
+        if (abs(response.x) < 0.1) {
+            continue;
+        }
+
+        const float3 toSun = (j == 0) ? header.xyz : thermalSunResponse[j].xyz;
+
+        RayDesc sunRay;
+        sunRay.Origin = hitPos + toSun * 1e-3;
+        sunRay.Direction = toSun;
+        sunRay.TMin = 0.0;
+        sunRay.TMax = 1e10;
+
+        Payload sunPayload;
+        sunPayload.radiance = float3(0.0, 0.0, 0.0);
+        sunPayload.isShadowed = 1;   // cleared by shadow_miss
+        sunPayload.depth = 0;
+        sunPayload.rngState = 0;
+        sunPayload.heroLambda = payload.heroLambda;
+        sunPayload.primaryHitT = -1.0;
+        sunPayload.bsdfPdf = 0.0;
+
+        TraceRay(scene,
+                 RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
+                 0xFF, 0, 0, 1, sunRay, sunPayload);
+
+        const float visible = (sunPayload.isShadowed == 0) ? 1.0 : 0.0;
+        correction += (visible - response.y) * response.x;
     }
 
-    RayDesc sunRay;
-    sunRay.Origin = hitPos + header.xyz * 1e-3;
-    sunRay.Direction = header.xyz;
-    sunRay.TMin = 0.0;
-    sunRay.TMax = 1e10;
-
-    Payload sunPayload;
-    sunPayload.radiance = float3(0.0, 0.0, 0.0);
-    sunPayload.isShadowed = 1;   // cleared by shadow_miss
-    sunPayload.depth = 0;
-    sunPayload.rngState = 0;
-    sunPayload.heroLambda = payload.heroLambda;
-    sunPayload.primaryHitT = -1.0;
-    sunPayload.bsdfPdf = 0.0;
-
-    TraceRay(scene, RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
-             0xFF, 0, 0, 1, sunRay, sunPayload);
-
-    const float visible = (sunPayload.isShadowed == 0) ? 1.0 : 0.0;
-    return (visible - response.y) * response.x;
+    return correction;
 }
 
 float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo,

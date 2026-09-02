@@ -67,6 +67,14 @@ struct ThermalSolveParams {
     /// default, and CPU-only for the same reason the convection laws are.
     bool lateralConduction = false;
 
+    /// How many of the sun's recent columns carry a tangent of their own, so a
+    /// shading pass can trace the pixel's shadow at the hour it was cast
+    /// instead of assuming it looked like now. Zero is the old behaviour; each
+    /// slot costs a state vector, an elimination pass and a ray per shaded
+    /// pixel, and only a forcing file with several sun columns has anything
+    /// for them to track.
+    u32 sunMemoryLags = 0;
+
     /// Carry dT/dv through the trajectory, so the shading pass can resolve a
     /// shadow edge inside a triangle rather than at its border. On by default;
     /// off exists so the two renders can be compared, which is the only way to

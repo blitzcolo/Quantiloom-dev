@@ -208,6 +208,49 @@ void ConvectionAt(const ConvectionLaw& law, const ThermalForcing& forcing,
     admittance_W_m2K = h / damping;
 }
 
+/// Claim a slot for sun column @p column, evicting the oldest tracked one when
+/// every slot is taken, and return which slot it is -- or the slot count when
+/// this state tracks none, or when the column is older than everything already
+/// tracked.
+///
+/// Evicting does not lose the evicted column's answer. What a slot holds is a
+/// piece of sunSensitivity_K, and the shading pass applies the remainder --
+/// the total less what the slots hold -- against the present sun exactly as it
+/// did before slots existed. So a column leaving the window moves from "traced
+/// at its own hour" back to "assumed to look like now", which is a loss of
+/// resolution rather than a loss of energy.
+u32 ClaimLagSlot(ThermalState& state, const u32 column) {
+    const u32 slots = state.LagSlots();
+    if (slots == 0) return 0;
+
+    u32 oldest = 0;
+    for (u32 s = 0; s < slots; ++s) {
+        if (state.lagColumn[s] == column) return s;
+        if (state.lagColumn[s] == ThermalState::kNoLagColumn) {
+            oldest = s;
+            break;
+        }
+        if (state.lagColumn[oldest] != ThermalState::kNoLagColumn &&
+            state.lagColumn[s] < state.lagColumn[oldest]) {
+            oldest = s;
+        }
+    }
+
+    // A column older than every one tracked is history the window has already
+    // moved past; leave the slots as they are rather than throwing away a
+    // newer column for it.
+    if (state.lagColumn[oldest] != ThermalState::kNoLagColumn &&
+        column < state.lagColumn[oldest]) {
+        return slots;
+    }
+
+    state.lagColumn[oldest] = column;
+    const usize block = state.temperature_K.size();
+    std::fill(state.lagSensitivity_K.begin() + static_cast<isize>(oldest * block),
+              state.lagSensitivity_K.begin() + static_cast<isize>((oldest + 1) * block), 0.0);
+    return oldest;
+}
+
 /// How far a tangent is allowed to travel. A sensitivity is a derivative, not
 /// a temperature, so the state clamp does not apply to it; this one is here
 /// for the same reason that one is -- a diverging element should stay visible
@@ -245,9 +288,11 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                               !exchange.lateral.value.empty();
     Vector<f64> lateralPrevious;
     Vector<f64> lateralPreviousSensitivity;
+    Vector<f64> lateralPreviousLag;
     if (carryLateral) {
         lateralPrevious = state.temperature_K;
         if (state.HasSensitivity()) lateralPreviousSensitivity = state.sunSensitivity_K;
+        if (state.HasLagSensitivity()) lateralPreviousLag = state.lagSensitivity_K;
     }
 
     Vector<f64> lower(nodes), diag(nodes), upper(nodes), rhs(nodes);
@@ -260,12 +305,50 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     const bool carryTangent = state.HasSensitivity();
     Vector<f64> rhsTangent(carryTangent ? nodes : 0);
 
+    // One more right-hand side per tracked sun column, and one source weight
+    // each: what fraction of this step's short wave came from that column.
+    // Only the two columns the step is interpolating between are non-zero, so
+    // the rest ride along as pure decay -- which is the whole of what "the
+    // ground is still warm from an hour ago" means.
+    // Stepped whenever they exist, sourced only when the step knows which
+    // columns it came from: a tangent that decayed on some steps and not
+    // others would not be the derivative of anything.
+    const bool carryLags = carryTangent && state.HasLagSensitivity();
+    const u32 lagSlots = carryLags ? state.LagSlots() : 0u;
+    Vector<f64> rhsLag(static_cast<usize>(lagSlots) * nodes);
+    Vector<f64> lagWeight(lagSlots, 0.0);
+    if (carryLags && shortwave.columnsKnown) {
+        const f64 blend = std::clamp(shortwave.columnBlend, 0.0, 1.0);
+        const f64 weights[2] = {1.0 - blend, blend};
+        const u32 columns[2] = {static_cast<u32>(shortwave.columnA),
+                                static_cast<u32>(shortwave.columnB)};
+
+        for (i32 i = 0; i < 2; ++i) {
+            if (weights[i] > 0.0) ClaimLagSlot(state, columns[i]);
+        }
+        // Read the weights back off the slots rather than off the claims: with
+        // a one-slot window the second claim evicts the first, and a source
+        // written to a slot that no longer tracks its column would be
+        // attributed to the wrong hour. What is dropped here stays in the
+        // total, which is where the shading pass looks for it.
+        for (u32 s = 0; s < lagSlots; ++s) {
+            for (i32 i = 0; i < 2; ++i) {
+                if (weights[i] > 0.0 && state.lagColumn[s] == columns[i]) {
+                    lagWeight[s] += weights[i];
+                }
+            }
+        }
+    }
+
     // What the elimination is applied to, built once: the temperature first,
     // then whichever tangents this state carries. Every element has the same
     // node count, so the list does not change inside the loop.
     Vector<std::span<f64>> rightHandSides;
     rightHandSides.emplace_back(rhs);
     if (carryTangent) rightHandSides.emplace_back(rhsTangent);
+    for (u32 s = 0; s < lagSlots; ++s) {
+        rightHandSides.emplace_back(rhsLag.data() + static_cast<usize>(s) * nodes, nodes);
+    }
 
     // The lateral gain of each node of the element being stepped, in K/s. One
     // rate per node rather than one per element because the two faces of a
@@ -275,6 +358,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // between them.
     Vector<f64> lateralRate(carryLateral ? nodes : 0, 0.0);
     Vector<f64> lateralRateTangent(carryLateral && carryTangent ? nodes : 0, 0.0);
+    Vector<f64> lateralRateLag(carryLateral ? static_cast<usize>(lagSlots) * nodes : 0, 0.0);
 
     for (usize e = 0; e < elements.size(); ++e) {
         const ThermalElement& element = elements[e];
@@ -306,12 +390,12 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // g_ij is a conductance per metre of slab depth, so dividing by the
         // element's heat capacity per unit area leaves a rate that does not
         // depend on which node it is applied to.
-        if (carryLateral && element.area_m2 > 0.0f) {
+        if (carryLateral) {
             std::fill(lateralRate.begin(), lateralRate.end(), 0.0);
-            if (!lateralRateTangent.empty()) {
-                std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
-            }
-
+            std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
+            std::fill(lateralRateLag.begin(), lateralRateLag.end(), 0.0);
+        }
+        if (carryLateral && element.area_m2 > 0.0f) {
             const f64* Ti = &lateralPrevious[e * nodes];
             const f64* Si = lateralPreviousSensitivity.empty()
                                 ? nullptr
@@ -331,6 +415,15 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                         lateralRateTangent[i] += g * (Sj[i] - Si[i]);
                     }
                 }
+                for (u32 s = 0; s < lagSlots && !lateralPreviousLag.empty(); ++s) {
+                    const usize block = s * elements.size() * nodes;
+                    const f64* Li = &lateralPreviousLag[block + e * nodes];
+                    const f64* Lj = &lateralPreviousLag[block + j * nodes];
+                    f64* rate = &lateralRateLag[static_cast<usize>(s) * nodes];
+                    for (u32 i = 0; i < nodes; ++i) {
+                        rate[i] += g * (Lj[i] - Li[i]);
+                    }
+                }
             }
 
             const f64 perCapacity = 1.0 / (rhoC * static_cast<f64>(element.area_m2));
@@ -338,11 +431,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 lateralRate[i] *= perCapacity;
                 if (!lateralRateTangent.empty()) lateralRateTangent[i] *= perCapacity;
             }
-        } else if (carryLateral) {
-            std::fill(lateralRate.begin(), lateralRate.end(), 0.0);
-            if (!lateralRateTangent.empty()) {
-                std::fill(lateralRateTangent.begin(), lateralRateTangent.end(), 0.0);
-            }
+            for (f64& rate : lateralRateLag) rate *= perCapacity;
         }
 
         // ----------------------------------------------------------------
@@ -494,18 +583,10 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // second-order fact that a colder patch of ground makes its
         // neighbours very slightly colder too. Keeping it out is what makes
         // this a per-element quantity a shader can apply per pixel.
-        f64* sigma = nullptr;
-        if (carryTangent) {
-            sigma = &state.sunSensitivity_K[e * nodes];
-            const f64 radiativeSlope =
-                4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
-            rhsTangent[0] = halfCell * sigma[0] - 0.5 * (k / dx) * (sigma[0] - sigma[1]) -
-                            0.5 * convectiveAdmittance_W_m2K * sigma[0] -
-                            radiativeSlope * sigma[0] -
-                            0.5 * latentAdmittance_W_m2K * sigma[0] +
-                            directPerVisibility_W_m2;
-            if (carryLateral) rhsTangent[0] += halfCell * dt_s * lateralRateTangent[0];
-        }
+        // The one term of the face row that only a tangent uses. Hoisted so the
+        // rows below can be written once and applied to every tangent this
+        // state carries.
+        const f64 radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
 
         // ----------------------------------------------------------------
         // The interior
@@ -516,26 +597,20 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             upper[i] = -0.5 * r;
             rhs[i] = T[i] + 0.5 * r * (T[i - 1] - 2.0 * T[i] + T[i + 1]);
             if (carryLateral) rhs[i] += dt_s * lateralRate[i];
-            if (carryTangent) {
-                rhsTangent[i] =
-                    sigma[i] + 0.5 * r * (sigma[i - 1] - 2.0 * sigma[i] + sigma[i + 1]);
-                if (carryLateral) rhsTangent[i] += dt_s * lateralRateTangent[i];
-            }
         }
 
         // ----------------------------------------------------------------
         // The back face
         // ----------------------------------------------------------------
         const u32 last = nodes - 1;
+        f64 backAdmittance_W_m2K = 0.0;
+        f64 backRadiativeSlope_W_m2K = 0.0;
         if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
             // A Dirichlet row: whatever is behind this surface holds it there.
             lower[last] = 0.0;
             diag[last] = 1.0;
             upper[last] = 0.0;
             rhs[last] = material.interiorTemperature_K;
-            // A room held at its own temperature does not care about the sun,
-            // so the tangent's Dirichlet value is zero rather than that one.
-            if (carryTangent) rhsTangent[last] = 0.0;
         } else {
             // A half cell at the back, exchanging with the node in front of it
             // and with whatever the boundary says is behind it. Adiabatic is
@@ -547,8 +622,6 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // whole. The back-face exchange is linear in the unknown, so it
             // splits between the two sides the way the front face's convection
             // does.
-            f64 backAdmittance_W_m2K = 0.0;
-            f64 backRadiativeSlope_W_m2K = 0.0;
             f64 backFlux_W_m2 = material.internalHeat_W_m2;
             if (material.interiorBoundary == InteriorBoundary::AmbientInterior) {
                 const f64 interior = static_cast<f64>(material.interiorTemperature_K);
@@ -571,18 +644,71 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
                         backFlux_W_m2 + 0.5 * backAdmittance_W_m2K * T[last];
             if (carryLateral) rhs[last] += halfCell * dt_s * lateralRate[last];
-            if (carryTangent) {
-                // The sun reaches none of this, so every term above is a
-                // constant of v but the admittance, which acts on the tangent
-                // the way it acts on the temperature.
-                rhsTangent[last] = halfCell * sigma[last] -
-                                   0.5 * (k / dx) * (sigma[last] - sigma[last - 1]) -
-                                   0.5 * backAdmittance_W_m2K * sigma[last] -
-                                   backRadiativeSlope_W_m2K * sigma[last];
-                if (carryLateral) {
-                    rhsTangent[last] += halfCell * dt_s * lateralRateTangent[last];
-                }
+        }
+
+        // ----------------------------------------------------------------
+        // Every tangent, through the same rows
+        // ----------------------------------------------------------------
+        // The same equation differentiated in v. Term by term against the
+        // temperature's rows: the air temperature, the latent flux and
+        // everything behind the back face are constants of v and drop; the
+        // explicit long-wave loss contributes its own slope; the short wave
+        // contributes the only source. What is left of the convection is
+        // -Y_conv/2 sigma rather than the +h*Tair the temperature gets, and of
+        // the evaporation -Y_lat/2 sigma, because the flux and the
+        // half-implicit correction cancel to half. Y_conv rather than h: under
+        // a temperature-dependent law the coefficient moves with the surface.
+        //
+        // The neighbours' share of `incoming` is deliberately NOT
+        // differentiated. Its derivative is the off-diagonal of a Jacobian
+        // over every element that sees this one, and what it would add is the
+        // second-order fact that a colder patch of ground makes its
+        // neighbours very slightly colder too. Keeping it out is what makes
+        // this a per-element quantity a shader can apply per pixel.
+        //
+        // Written once and applied to each: the tangent against the whole
+        // day's visibility, and one per tracked sun column, which differ only
+        // in how much of this step's short wave is theirs.
+        const auto buildTangentRows = [&](const f64* sigma, f64* out, const f64 source,
+                                          const f64* lateral) {
+            out[0] = halfCell * sigma[0] - 0.5 * (k / dx) * (sigma[0] - sigma[1]) -
+                     0.5 * convectiveAdmittance_W_m2K * sigma[0] -
+                     radiativeSlope * sigma[0] -
+                     0.5 * latentAdmittance_W_m2K * sigma[0] + source;
+            if (lateral != nullptr) out[0] += halfCell * dt_s * lateral[0];
+
+            for (u32 i = 1; i + 1 < nodes; ++i) {
+                out[i] = sigma[i] + 0.5 * r * (sigma[i - 1] - 2.0 * sigma[i] + sigma[i + 1]);
+                if (lateral != nullptr) out[i] += dt_s * lateral[i];
             }
+
+            if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
+                // A room held at its own temperature does not care about the
+                // sun, so the tangent's Dirichlet value is zero rather than
+                // the temperature's.
+                out[last] = 0.0;
+                return;
+            }
+            out[last] = halfCell * sigma[last] -
+                        0.5 * (k / dx) * (sigma[last] - sigma[last - 1]) -
+                        0.5 * backAdmittance_W_m2K * sigma[last] -
+                        backRadiativeSlope_W_m2K * sigma[last];
+            if (lateral != nullptr) out[last] += halfCell * dt_s * lateral[last];
+        };
+
+        f64* sigma = nullptr;
+        if (carryTangent) {
+            sigma = &state.sunSensitivity_K[e * nodes];
+            buildTangentRows(sigma, rhsTangent.data(), directPerVisibility_W_m2,
+                             carryLateral ? lateralRateTangent.data() : nullptr);
+        }
+        for (u32 s = 0; s < lagSlots; ++s) {
+            const usize block = s * elements.size() * nodes + e * nodes;
+            buildTangentRows(&state.lagSensitivity_K[block],
+                             rhsLag.data() + static_cast<usize>(s) * nodes,
+                             directPerVisibility_W_m2 * lagWeight[s],
+                             carryLateral ? &lateralRateLag[static_cast<usize>(s) * nodes]
+                                          : nullptr);
         }
 
         SolveTridiagonal(lower, diag, upper, rightHandSides);
@@ -594,6 +720,13 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             T[i] = std::clamp(rhs[i], 1.0, 5000.0);
             if (carryTangent) {
                 sigma[i] = std::clamp(rhsTangent[i], -kMaxSensitivity_K, kMaxSensitivity_K);
+            }
+        }
+        for (u32 s = 0; s < lagSlots; ++s) {
+            f64* slot = &state.lagSensitivity_K[s * elements.size() * nodes + e * nodes];
+            for (u32 i = 0; i < nodes; ++i) {
+                slot[i] = std::clamp(rhsLag[static_cast<usize>(s) * nodes + i],
+                                     -kMaxSensitivity_K, kMaxSensitivity_K);
             }
         }
     }

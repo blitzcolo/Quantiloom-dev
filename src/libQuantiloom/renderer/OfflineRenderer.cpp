@@ -280,9 +280,13 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // "no solve" is one inert record rather than no descriptor.
     auto uploadSunResponse = [&](const Vector<f32>& sensitivity,
                                  const Vector<f32>& visibility,
-                                 const glm::vec3& sunDirection) {
-        const auto records = rendercore::MakeThermalSunResponse(sensitivity, visibility,
-                                                                sunDirection);
+                                 const glm::vec3& sunDirection,
+                                 const Vector<f32>& lagSensitivity = {},
+                                 const Vector<f32>& lagVisibility = {},
+                                 const Vector<glm::vec3>& lagDirection = {}) {
+        const auto records = rendercore::MakeThermalSunResponse(
+            sensitivity, visibility, sunDirection, lagSensitivity, lagVisibility,
+            lagDirection);
         const usize bytes = records.size() * sizeof(rendercore::ThermalSunResponseGpu);
         thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
             context.GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -393,7 +397,8 @@ void OfflineRenderer::Impl::RunThermalSolver() {
                     cached->surfaceTemperature_K.data(),
                     cached->surfaceTemperature_K.size() * sizeof(f32));
                 uploadSunResponse(cached->sunSensitivity_K, cached->sunVisibility,
-                                  cached->sunDirection);
+                                  cached->sunDirection, cached->lagSensitivity_K,
+                                  cached->lagVisibility, cached->lagDirection);
                 geometry.SetThermalElementBases(cached->instanceElementBase);
                 return;
             }
@@ -465,7 +470,8 @@ void OfflineRenderer::Impl::RunThermalSolver() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     thermalTemperatureBuffer->Upload(result.surfaceTemperature_K.data(),
                                      result.surfaceTemperature_K.size() * sizeof(f32));
-    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection);
+    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection,
+                      result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.

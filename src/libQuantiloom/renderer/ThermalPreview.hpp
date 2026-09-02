@@ -61,6 +61,11 @@ public:
         Vector<f32> sunSensitivity_K;
         Vector<f32> sunVisibility;
         glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};
+        /// The same, per tracked sun column, when the parameters asked for
+        /// any: slot-major sensitivity and visibility, and where the sun was.
+        Vector<f32> lagSensitivity_K;
+        Vector<f32> lagVisibility;
+        Vector<glm::vec3> lagDirection;
         u32 elementCount = 0;
         bool elementCountChanged = false;
         String error;

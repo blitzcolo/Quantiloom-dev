@@ -793,6 +793,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.convection.stableDamping =
             config.Get<f64>("thermal.convection_stable_damping", 10.0);
         out.thermal.lateralConduction = config.Get<bool>("thermal.lateral_conduction", false);
+        out.thermal.sunMemoryLags = config.Get<u32>("thermal.sun_memory_lags", 0);
 
         const auto initial = config.GetString("thermal.initial", "steady");
         if (initial == "uniform") {

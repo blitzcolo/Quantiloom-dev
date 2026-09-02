@@ -43,15 +43,21 @@ namespace quantiloom::rendercore {
  * @brief One record of binding 26
  *
  * Index 0 is the header: `a` is the sun direction the solve used at the
- * rendered instant (from surface toward the sun) and `b` is 1 when the rest of
- * the buffer is real. The direction is carried rather than read from
+ * rendered instant (from surface toward the sun) and `b` is 0 when the buffer
+ * is inert and `1 + M` otherwise, where M is how many past sun columns the
+ * buffer also carries. The direction is carried rather than read from
  * LightingParams because the forcing CSV owns it and it need not match
  * `[lighting] sun_direction`.
  *
- * Index `1 + thermalElementBase + PrimitiveIndex()` is an element: `a.x` is
- * dT/dv in kelvin per unit visibility, `a.y` is the visibility the solve used,
- * and the rest is padding. The +1 is confined to this buffer -- the element
- * bases themselves stay exactly what the exchange precompute uses.
+ * Records 1..M, when M > 0, are those past columns: `a` is where the sun was
+ * for each, in the same convention.
+ *
+ * After them the elements start, `1 + M` records each, so element i begins at
+ * `(1 + M) * (1 + thermalElementBase + PrimitiveIndex())`. The first of its
+ * records is the present sun -- `a.x` the sensitivity not attributed to any
+ * carried column, `a.y` the visibility the solve used -- and record j is
+ * column j's own (dT/dv_j, v_j). With M = 0 that formula is `1 + element` and
+ * the layout is byte for byte the one that existed before columns did.
  */
 struct ThermalSunResponseGpu {
     glm::vec3 a{0.0f};
@@ -66,9 +72,20 @@ static_assert(sizeof(ThermalSunResponseGpu) == 16);
  * two per-element arrays are missing or disagree about their length. The
  * descriptor has to be valid whether or not a solve ran, and one inert record
  * is cheaper than a buffer of zeros nobody reads.
+ *
+ * The present-sun record carries `sunSensitivity_K` MINUS what the carried
+ * columns hold, because the shader adds the terms rather than choosing between
+ * them: the sum over the records is the whole day's sensitivity either way,
+ * and the split decides only how much of it is traced at its own hour rather
+ * than assumed to look like now.
+ *
+ * @param lagSensitivity_K  slot-major, M * elements, or empty for none
+ * @param lagVisibility     slot-major, the same size
+ * @param lagDirection      M entries; a slot whose direction is zero is dropped
  */
 [[nodiscard]] Vector<ThermalSunResponseGpu> MakeThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
-    const glm::vec3& sunDirection);
+    const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K = {},
+    const Vector<f32>& lagVisibility = {}, const Vector<glm::vec3>& lagDirection = {});
 
 }  // namespace quantiloom::rendercore

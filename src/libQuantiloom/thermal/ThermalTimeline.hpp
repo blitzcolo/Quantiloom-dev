@@ -40,6 +40,12 @@ public:
         /// on by default because every renderer wants it and only a caller
         /// that just needs bulk temperatures should turn it off.
         bool carrySunSensitivity = true;
+        /// How many of the sun's most recent columns to carry a tangent of
+        /// their own, beside the whole-day one. Zero is the old behaviour;
+        /// each slot costs another state vector, another elimination pass per
+        /// step, and lets the shading pass trace one more hour of the shadow's
+        /// history instead of assuming it looked like now.
+        u32 sunMemoryLags = 0;
     };
 
     ThermalTimeline(const Desc& desc, const Vector<ThermalElement>& elements,

@@ -63,8 +63,15 @@ void IThermalStepper::StepMany(ThermalState& state,
                         blend, n, reflected);
         }
 
-        Step(state, elements, materials, exchange, step.forcing, step.dt_s,
-             {sunVis, reflected, sunTable.diffuseGain});
+        // The columns travel with the sample rather than only their blend, so
+        // a step can attribute its short wave to the hours that produced it.
+        ShortwaveSample sample{sunVis, reflected, sunTable.diffuseGain};
+        sample.columnA = step.sunSampleA;
+        sample.columnB = step.sunSampleB;
+        sample.columnBlend = step.sunBlend;
+        sample.columnsKnown = haveTable;
+
+        Step(state, elements, materials, exchange, step.forcing, step.dt_s, sample);
     }
 }
 
