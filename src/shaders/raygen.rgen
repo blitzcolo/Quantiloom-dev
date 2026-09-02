@@ -132,7 +132,7 @@ void main() {
     // ========================================================================
     // Initialize payload
     Payload payload;
-    payload.radiance = float3(0.0, 0.0, 0.0);
+    payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
 
     // Initialize shadow flag (will be set by shadow miss shader)
     payload.isShadowed = 0;
@@ -195,7 +195,7 @@ void main() {
     // - Ready for EXR export (no tone mapping, no gamma correction)
     // ========================================================================
 
-    float3 linearHDR = payload.radiance;
+    float3 linearHDR = payload.radiance.rgb;
 
     // Clamp to a reasonable HDR range, so a firefly cannot dominate the
     // accumulation. SYMMETRIC on purpose -- the lower bound used to be 0.

@@ -412,7 +412,7 @@ float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload
         sunRay.TMax = 1e10;
 
         Payload sunPayload;
-        sunPayload.radiance = float3(0.0, 0.0, 0.0);
+        sunPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         sunPayload.isShadowed = 1;   // cleared by shadow_miss
         sunPayload.depth = 0;
         sunPayload.rngState = 0;
@@ -919,7 +919,7 @@ bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
     shadowRay.TMax      = s.dist * 0.999;
 
     Payload shadowPayload;
-    shadowPayload.radiance    = float3(0.0, 0.0, 0.0);
+    shadowPayload.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     shadowPayload.isShadowed  = 1;   // cleared by shadow_miss
     shadowPayload.depth       = 0;
     shadowPayload.rngState    = 0;
@@ -1121,7 +1121,7 @@ float TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV
     bounceRay.TMax      = 1e9;
 
     Payload child;
-    child.radiance    = float3(0.0, 0.0, 0.0);
+    child.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     child.isShadowed  = 0;
     child.depth       = payload.depth + 1;
     child.rngState    = payload.rngState;
@@ -1795,7 +1795,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Initialize shadow payload - assume shadowed (will be cleared by shadow_miss)
         Payload shadowPayload;
-        shadowPayload.radiance = float3(0.0, 0.0, 0.0);
+        shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         shadowPayload.isShadowed = 1;  // Assume shadowed, shadow_miss will clear this
         shadowPayload.heroLambda = payload.heroLambda;
         shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample; carries no emission
@@ -1843,7 +1843,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 dtRay.TMax = 1e10;
 
                 Payload dtPayload;
-                dtPayload.radiance = float3(0.0, 0.0, 0.0);
+                dtPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
                 dtPayload.isShadowed = 1;
                 dtPayload.heroLambda = payload.heroLambda;
                 dtPayload.bsdfPdf = 0.0;
@@ -4455,7 +4455,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         }
 
         // Apply debug output and return early
-        payload.radiance = debug_output;
+        payload.radiance = float4(debug_output, 0.0);
         return;
     }
 
@@ -4561,7 +4561,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowRay.TMax = 10000.0;
 
         Payload shadowPayload;
-        shadowPayload.radiance = float3(0.0, 0.0, 0.0);
+        shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         shadowPayload.isShadowed = 1;  // Assume shadowed until miss shader says otherwise
         shadowPayload.heroLambda = payload.heroLambda;
         shadowPayload.depth = payload.depth + 1;
@@ -4745,7 +4745,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             const float3 refractDir = Refract(rayDir, N, n1 / n2);
             if (length(refractDir) < 0.001) F = 1.0;   // total internal reflection
 
-            recursivePayload.radiance = float3(0.0, 0.0, 0.0);
+            recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
             recursivePayload.heroLambda = lambda_h;
             recursivePayload.rngState = payload.rngState;
             recursiveRay.Direction = (xi < F) ? reflectDir : refractDir;
@@ -4803,7 +4803,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
                 if (hasTIR) F = 1.0;
 
-                recursivePayload.radiance = float3(0.0, 0.0, 0.0);
+                recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
 
                 // Use same random decision for all channels for consistency
                 if (xi < F) {
@@ -4878,7 +4878,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             if (hasTIR) F = 1.0;
 
-            recursivePayload.radiance = float3(0.0, 0.0, 0.0);
+            recursivePayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
 
             // Single trace call site: pick the direction first, then trace.
             // Duplicating TraceRay per branch multiplies the static recursive
@@ -4888,7 +4888,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
 
             if (reflected) {
-                transmissionRadiance = recursivePayload.radiance;
+                transmissionRadiance = recursivePayload.radiance.rgb;
             } else {
                 // Apply Beer-Lambert absorption on the refraction path
                 float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
@@ -4897,7 +4897,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     volumeAttenuation = BeerLambertAbsorption(
                         material.attenuationColor, travelDistance, material.attenuationDistance);
                 }
-                transmissionRadiance = recursivePayload.radiance * volumeAttenuation;
+                transmissionRadiance = recursivePayload.radiance.rgb * volumeAttenuation;
             }
         }
 
@@ -4905,5 +4905,5 @@ void main(inout Payload payload, in HitAttributes attribs) {
         output_radiance = lerp(output_radiance, transmissionRadiance, transmissionWeight);
     }
 
-    payload.radiance = output_radiance;
+    payload.radiance = float4(output_radiance, 0.0);
 }

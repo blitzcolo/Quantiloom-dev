@@ -88,7 +88,7 @@ void main(inout Payload payload) {
     // Choose sky radiance based on spectral mode
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
-        payload.radiance = lut.skyRadiance_rgb;
+        payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED) {
         // ================================================================
@@ -164,7 +164,7 @@ void main(inout Payload payload) {
         XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
-        payload.radiance = ConvertXYZToLinearRGB(XYZ_accum);
+        payload.radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
 
         // Apply chromaticity correction (consistent with closesthit)
         payload.radiance.r *= lut.chromaR_correction;
@@ -173,12 +173,12 @@ void main(inout Payload payload) {
         // After the correction, for the reason given in closesthit.rchit: it
         // scales R and B against G and would turn one scalar into three.
         if (heroRay) {
-            payload.radiance = float3(heroRadiance, heroRadiance, heroRadiance);
+            payload.radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
         }
 
         // Validation
         if (!isfinite(payload.radiance.r) || !isfinite(payload.radiance.g) || !isfinite(payload.radiance.b)) {
-            payload.radiance = float3(0.0, 0.0, 0.0);
+            payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         }
         payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
 
@@ -196,7 +196,7 @@ void main(inout Payload payload) {
             radiance_spectral = lut.skyRadiance_spectral;
         }
 
-        payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
         // ================================================================
         // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
@@ -265,7 +265,7 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ================================================================
@@ -331,7 +331,7 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
@@ -428,13 +428,13 @@ void main(inout Payload payload) {
         }
         radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
-        payload.radiance = float3(radiance_avg, radiance_avg, radiance_avg);
+        payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
     } else {
         // ================================================================
         // Fallback: Unknown mode (MULTISPECTRAL TBD, etc.)
         // ================================================================
         float radiance_spectral = lut.skyRadiance_spectral;
-        payload.radiance = float3(radiance_spectral, radiance_spectral, radiance_spectral);
+        payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     }
 }

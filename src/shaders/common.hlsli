@@ -188,7 +188,17 @@
 // ============================================================================
 
 struct Payload {
-    float3 radiance;  // Accumulated radiance (W·sr⁻¹·m⁻²)              // 12 bytes
+    // Accumulated radiance (W·sr⁻¹·m⁻²), read two ways today:
+    //
+    //   heroLambda == 0   RGB in .rgb.
+    //   heroLambda != 0   scalar spectral radiance at that wavelength,
+    //                     replicated across .rgb by whichever branch answered.
+    //
+    // .w is written zero at every construction site and read nowhere, which is
+    // what a four-wavelength carrier needs of the sites that predate it: a
+    // component-wise clamp or finite guard over the whole float4 is then the
+    // same arithmetic as one over .rgb, and the clamps below are left whole.
+    float4 radiance;                                                     // 16 bytes
 
     // Shadow ray result (set by shadow miss shader)
     // 0 = not shadowed (ray reached light), 1 = shadowed (ray hit occluder)
@@ -264,7 +274,7 @@ struct Payload {
     // one; which function it is only affects how good the split is.
     float bsdfPdf;    // sr^-1, 0 = not a BSDF sample                     // 4 bytes
 
-    // TOTAL: 36 bytes (under 64-byte RT Core limit)
+    // TOTAL: 40 bytes (under 64-byte RT Core limit)
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into
