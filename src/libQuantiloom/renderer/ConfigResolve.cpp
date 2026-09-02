@@ -1543,18 +1543,35 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             props.shortwaveAbsorptivity =
                 matTable.GetFloat("shortwave_absorptivity", 0.7f);
             props.wetnessFactor = matTable.GetFloat("wetness_factor", 0.0f);
+            props.internalHeat_W_m2 = matTable.GetFloat("internal_heat_w_m2", 0.0f);
             props.interiorTemperature_K =
                 matTable.GetFloat("interior_temperature_k", 293.15f);
+            props.interiorConvection_W_m2K =
+                matTable.GetFloat("interior_convection_h_w_m2k", 3.0f);
 
             const auto boundary = matTable.GetString("interior_bc", "adiabatic");
             if (boundary == "fixed") {
                 props.interiorBoundary = thermal::InteriorBoundary::FixedTemperature;
             } else if (boundary == "adiabatic") {
                 props.interiorBoundary = thermal::InteriorBoundary::Adiabatic;
+            } else if (boundary == "ambient") {
+                props.interiorBoundary = thermal::InteriorBoundary::AmbientInterior;
             } else {
                 diag.Warn("materials.interior_bc",
                           "  Material '" + name + "': unknown interior_bc '" + boundary +
-                              "', expected adiabatic|fixed. Using adiabatic.");
+                              "', expected adiabatic|fixed|ambient. Using adiabatic.");
+            }
+
+            // A pinned back node absorbs whatever is put into it, so an
+            // internal source there changes nothing. Saying so beats letting a
+            // scene carry a number that does not reach the answer.
+            if (props.internalHeat_W_m2 != 0.0f &&
+                props.interiorBoundary == thermal::InteriorBoundary::FixedTemperature) {
+                diag.Warn("materials.internal_heat_w_m2",
+                          "  Material '" + name +
+                              "': internal_heat_w_m2 has no effect under "
+                              "interior_bc = \"fixed\", which holds the back node at a "
+                              "temperature whatever flux reaches it.");
             }
 
             out.thermalMaterials[name] = props;

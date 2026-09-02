@@ -233,11 +233,16 @@ struct ThermalPreview::Impl {
                 materials[m].convection_W_m2K = it->second.convection_W_m2K;
                 materials[m].shortwaveAbsorptivity = it->second.shortwaveAbsorptivity;
                 materials[m].wetnessFactor = it->second.wetnessFactor;
+                materials[m].internalHeat_W_m2 = it->second.internalHeat_W_m2;
                 materials[m].longwaveEmissivity = emissivity;
-                materials[m].interiorBoundary = it->second.interiorFixedTemperature
-                    ? thermal::InteriorBoundary::FixedTemperature
-                    : thermal::InteriorBoundary::Adiabatic;
+                materials[m].interiorBoundary =
+                    it->second.interiorFixedTemperature
+                        ? thermal::InteriorBoundary::FixedTemperature
+                    : it->second.interiorAmbient
+                        ? thermal::InteriorBoundary::AmbientInterior
+                        : thermal::InteriorBoundary::Adiabatic;
                 materials[m].interiorTemperature_K = it->second.interiorTemperature_K;
+                materials[m].interiorConvection_W_m2K = it->second.interiorConvection_W_m2K;
                 ++named;
             }
         }

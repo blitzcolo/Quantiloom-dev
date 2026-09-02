@@ -33,10 +33,17 @@
 namespace quantiloom::thermal {
 
 /// How a surface's back face is held. A wall has room behind it at a known
-/// temperature; a free-standing plate has nothing.
+/// temperature; a free-standing plate has nothing; a panel over a bay has air.
 enum class InteriorBoundary : u8 {
     Adiabatic = 0,  ///< no heat crosses the back face
-    FixedTemperature  ///< held at interiorTemperature_K, as a room would
+    FixedTemperature,  ///< held at interiorTemperature_K, as a room would
+    /// Convecting to air at interiorTemperature_K, and radiating to a
+    /// background at the same temperature. What a thin panel with its back
+    /// open to a shaded interior has: a fuselage skin over a bay, a sign, a
+    /// fence. Distinct from Adiabatic, which is a panel whose back is
+    /// perfectly insulated, and from FixedTemperature, which pins the back
+    /// node itself and lets a slab of any thickness dump heat into it.
+    AmbientInterior
 };
 
 /// Where the convective coefficient comes from when the forcing does not state
@@ -150,8 +157,25 @@ struct ThermalMaterial {
     /// balance.
     f32 wetnessFactor = 0.0f;
 
+    /// A flux entering the back face, W/m^2 of surface. What is behind the
+    /// surface rather than what falls on it: an engine, a battery, a compartment
+    /// with people in it. Positive heats the slab from behind, which is the
+    /// only way a shaded surface can be warmer than everything around it --
+    /// and in an infrared scene that is the whole signature.
+    ///
+    /// Read by the Adiabatic and AmbientInterior boundaries. Under
+    /// FixedTemperature the back node is pinned, so whatever flux is applied
+    /// there is absorbed by the thing doing the pinning and changes nothing;
+    /// the config warns rather than pretending.
+    f32 internalHeat_W_m2 = 0.0f;
+
     InteriorBoundary interiorBoundary = InteriorBoundary::Adiabatic;
+    /// The temperature behind the surface: what FixedTemperature pins the back
+    /// node to, and what AmbientInterior convects and radiates against.
     f32 interiorTemperature_K = 293.15f;
+    /// Convective coefficient at the back face, W/(m^2 K), for
+    /// AmbientInterior. Still air inside a bay rather than the wind outside it.
+    f32 interiorConvection_W_m2K = 3.0f;
 
     [[nodiscard]] bool ParticipatesInSolve() const { return conductivity_W_mK > 0.0f; }
 };

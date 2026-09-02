@@ -199,8 +199,10 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
         hasher.UpdateF32(material.shortwaveAbsorptivity);
         hasher.UpdateF32(material.longwaveEmissivity);
         hasher.UpdateF32(material.wetnessFactor);
+        hasher.UpdateF32(material.internalHeat_W_m2);
         hasher.UpdateU8(static_cast<u8>(material.interiorBoundary));
         hasher.UpdateF32(material.interiorTemperature_K);
+        hasher.UpdateF32(material.interiorConvection_W_m2K);
     }
 
     // 5. The [thermal] scalars. Not dumpElementsFile (an output), not enabled

@@ -460,15 +460,47 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // so the tangent's Dirichlet value is zero rather than that one.
             if (carryTangent) rhsTangent[last] = 0.0;
         } else {
-            // Adiabatic: the mirror condition, a half cell exchanging only
-            // with the node in front of it.
+            // A half cell at the back, exchanging with the node in front of it
+            // and with whatever the boundary says is behind it. Adiabatic is
+            // the mirror condition -- nothing behind -- and the two flux terms
+            // below are then both zero, which is exactly the row this was
+            // before either existed.
+            //
+            // The internal source is a flux and enters the right-hand side
+            // whole. The back-face exchange is linear in the unknown, so it
+            // splits between the two sides the way the front face's convection
+            // does.
+            f64 backAdmittance_W_m2K = 0.0;
+            f64 backRadiativeSlope_W_m2K = 0.0;
+            f64 backFlux_W_m2 = material.internalHeat_W_m2;
+            if (material.interiorBoundary == InteriorBoundary::AmbientInterior) {
+                const f64 interior = static_cast<f64>(material.interiorTemperature_K);
+                const f64 hBack = static_cast<f64>(material.interiorConvection_W_m2K);
+                // Radiation to a background at the interior temperature,
+                // linearised about the previous back-face temperature exactly
+                // as the exposed face linearises its own T^4.
+                const f64 Tb = T[last];
+                const f64 radiative = emissivity * kStefanBoltzmann *
+                                      (interior * interior * interior * interior -
+                                       Tb * Tb * Tb * Tb);
+                backAdmittance_W_m2K = hBack;
+                backRadiativeSlope_W_m2K = 4.0 * emissivity * kStefanBoltzmann * Tb * Tb * Tb;
+                backFlux_W_m2 += hBack * (interior - Tb) + radiative;
+            }
+
             lower[last] = -0.5 * (k / dx);
-            diag[last] = halfCell + 0.5 * (k / dx);
+            diag[last] = halfCell + 0.5 * (k / dx + backAdmittance_W_m2K);
             upper[last] = 0.0;
-            rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]);
+            rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
+                        backFlux_W_m2 + 0.5 * backAdmittance_W_m2K * T[last];
             if (carryTangent) {
+                // The sun reaches none of this, so every term above is a
+                // constant of v but the admittance, which acts on the tangent
+                // the way it acts on the temperature.
                 rhsTangent[last] = halfCell * sigma[last] -
-                                   0.5 * (k / dx) * (sigma[last] - sigma[last - 1]);
+                                   0.5 * (k / dx) * (sigma[last] - sigma[last - 1]) -
+                                   0.5 * backAdmittance_W_m2K * sigma[last] -
+                                   backRadiativeSlope_W_m2K * sigma[last];
             }
         }
 

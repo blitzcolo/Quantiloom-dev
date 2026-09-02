@@ -632,3 +632,165 @@ TEST(ThermalConductionTest, TheTimeConstantIsWhatTheSchemeIsJudgedAgainst) {
     EXPECT_NEAR(CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(elements, materials, 300.0),
                 expected, expected * 1e-9);
 }
+
+// ============================================================================
+// What is behind the surface
+// ============================================================================
+
+namespace {
+
+/// A slab that conducts poorly enough to hold a gradient through its depth,
+/// which is what the internal-source case is measuring.
+ThermalMaterial GradientMaterial() {
+    ThermalMaterial material;
+    material.conductivity_W_mK = 1.0f;
+    material.density_kg_m3 = 2000.0f;
+    material.specificHeat_J_kgK = 900.0f;
+    material.thickness_m = 0.10f;
+    material.convection_W_m2K = 10.0f;
+    material.shortwaveAbsorptivity = 0.0f;
+    material.longwaveEmissivity = 0.0f;  // convection only, so the level is simple
+    material.interiorBoundary = InteriorBoundary::Adiabatic;
+    return material;
+}
+
+/// Step to steady state with a long timestep, the way the timeline's own
+/// relaxation does.
+void RelaxTo(ThermalState& state, const Vector<ThermalElement>& elements,
+             const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
+             const ThermalForcing& forcing) {
+    CpuCrankNicolsonStepper stepper;
+    for (i32 i = 0; i < 400; ++i) {
+        stepper.Step(state, elements, materials, exchange, forcing, 3600.0,
+                     {exchange.sunVisibility});
+    }
+}
+
+}  // namespace
+
+TEST(ThermalInteriorTest, AnInternalSourceGivesTheLinearProfileFouriersLawAsksFor) {
+    // In steady state every watt entering the back has to leave through the
+    // front, so the flux through the slab is uniform and Fourier's law fixes
+    // the gradient outright:
+    //
+    //     T_back - T_front = q d / k
+    //
+    // independently of what the front face is exchanging with -- which is what
+    // makes it a closed form rather than a fit.
+    const auto elements = OneElement();
+    ThermalMaterial material = GradientMaterial();
+    material.internalHeat_W_m2 = 100.0f;
+    const Vector<ThermalMaterial> materials{material};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+    forcing.sunIrradiance_W_m2 = 0.0;
+
+    ThermalState state = MakeState(1, 21, 290.0);
+    RelaxTo(state, elements, materials, exchange, forcing);
+
+    const u32 last = state.nodeCount - 1;
+    const f64 expected = static_cast<f64>(material.internalHeat_W_m2) *
+                         material.thickness_m / material.conductivity_W_mK;
+    EXPECT_NEAR(state.temperature_K[last] - state.Surface(0), expected, 1e-3)
+        << "a uniform flux through a slab is a linear profile";
+
+    // And the level: convection alone carries the same 100 W/m^2 away.
+    EXPECT_NEAR(state.Surface(0),
+                forcing.airTemperature_K + 100.0 / material.convection_W_m2K, 1e-3);
+}
+
+TEST(ThermalInteriorTest, NoInternalSourceIsTheSlabThatWasThereBefore) {
+    // The default has to leave every existing scene where it was, to the bit.
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> silent{GradientMaterial()};
+    ThermalMaterial zeroed = GradientMaterial();
+    zeroed.internalHeat_W_m2 = 0.0f;
+    const Vector<ThermalMaterial> explicitZero{zeroed};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+
+    ThermalState a = MakeState(1, 21, 300.0);
+    ThermalState b = MakeState(1, 21, 300.0);
+    RelaxTo(a, elements, silent, exchange, forcing);
+    RelaxTo(b, elements, explicitZero, exchange, forcing);
+
+    for (u32 i = 0; i < a.nodeCount; ++i) {
+        EXPECT_DOUBLE_EQ(a.temperature_K[i], b.temperature_K[i]) << "node " << i;
+    }
+}
+
+TEST(ThermalInteriorTest, AnAmbientBackFaceSheddsHeatAnInsulatedOneCannot) {
+    // A panel over a bay against a panel whose back is insulated. With a
+    // source behind both, the one that can lose heat backwards runs cooler --
+    // and the split is what a two-sided thin plate has that a wall does not.
+    const auto elements = OneElement();
+
+    ThermalMaterial insulated = GradientMaterial();
+    insulated.internalHeat_W_m2 = 100.0f;
+
+    ThermalMaterial open = insulated;
+    open.interiorBoundary = InteriorBoundary::AmbientInterior;
+    open.interiorTemperature_K = 290.0f;
+    open.interiorConvection_W_m2K = 10.0f;
+
+    const auto exchange = MakeOpenSkyExchange(1);
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+
+    ThermalState hot = MakeState(1, 21, 290.0);
+    ThermalState split = MakeState(1, 21, 290.0);
+    RelaxTo(hot, elements, Vector<ThermalMaterial>{insulated}, exchange, forcing);
+    RelaxTo(split, elements, Vector<ThermalMaterial>{open}, exchange, forcing);
+
+    EXPECT_LT(split.Surface(0), hot.Surface(0))
+        << "a face that can lose heat backwards leaves less of it to the front";
+    EXPECT_GT(split.Surface(0), forcing.airTemperature_K);
+
+    // The source enters AT the back node, so the two paths out of it are not
+    // symmetric: backwards it meets h_b alone, forwards it meets the slab and
+    // the front film in series. With g = k/d,
+    //
+    //     T_back  = T_air + q / (h_b + g h_f / (g + h_f))
+    //     T_front = T_air + (T_back - T_air) g / (g + h_f)
+    //
+    // which for 100 W/m^2 through k/d = 10 between two 10 W/(m^2 K) films is
+    // 296.67 K at the back and 293.33 K at the front -- a third of the rise an
+    // insulated back would have given.
+    const f64 g = static_cast<f64>(open.conductivity_W_mK) / open.thickness_m;
+    const f64 hFront = static_cast<f64>(open.convection_W_m2K);
+    const f64 hBack = static_cast<f64>(open.interiorConvection_W_m2K);
+    const f64 series = g * hFront / (g + hFront);
+    const f64 backRise = static_cast<f64>(open.internalHeat_W_m2) / (hBack + series);
+    EXPECT_NEAR(split.temperature_K[split.nodeCount - 1],
+                forcing.airTemperature_K + backRise, 1e-3);
+    EXPECT_NEAR(split.Surface(0),
+                forcing.airTemperature_K + backRise * g / (g + hFront), 1e-3);
+}
+
+TEST(ThermalInteriorTest, AnAmbientBackFaceAtEquilibriumMovesNothing) {
+    // Air, sky and interior all at one temperature: nothing anywhere has a
+    // gradient to drive it, so a boundary that added a spurious flux would
+    // show up as a slab that drifts off that temperature.
+    const auto elements = OneElement();
+    ThermalMaterial material = GradientMaterial();
+    material.interiorBoundary = InteriorBoundary::AmbientInterior;
+    material.interiorTemperature_K = 290.0f;
+    material.longwaveEmissivity = 0.9f;
+    const Vector<ThermalMaterial> materials{material};
+
+    const auto exchange = MakeOpenSkyExchange(1);
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 290.0;
+    forcing.skyTemperature_K = 290.0;
+
+    ThermalState state = MakeState(1, 21, 290.0);
+    RelaxTo(state, elements, materials, exchange, forcing);
+
+    for (u32 i = 0; i < state.nodeCount; ++i) {
+        EXPECT_NEAR(state.temperature_K[i], 290.0, 1e-6) << "node " << i;
+    }
+}

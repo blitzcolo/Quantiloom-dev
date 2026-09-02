@@ -419,8 +419,11 @@ TEST(ThermalSolveCacheKey, EveryMaterialFieldChangesIt) {
         // measured IR curve, not from the TOML, and is worth 0.4 K.
         [](ThermalMaterial& m) { m.longwaveEmissivity += 0.01f; },
         [](ThermalMaterial& m) { m.wetnessFactor += 0.1f; },
+        [](ThermalMaterial& m) { m.internalHeat_W_m2 += 10.0f; },
         [](ThermalMaterial& m) { m.interiorBoundary = InteriorBoundary::FixedTemperature; },
+        [](ThermalMaterial& m) { m.interiorBoundary = InteriorBoundary::AmbientInterior; },
         [](ThermalMaterial& m) { m.interiorTemperature_K += 1.0f; },
+        [](ThermalMaterial& m) { m.interiorConvection_W_m2K += 1.0f; },
     };
 
     for (usize i = 0; i < mutations.size(); ++i) {

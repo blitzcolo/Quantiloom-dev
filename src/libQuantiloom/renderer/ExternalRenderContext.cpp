@@ -1089,9 +1089,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 tmp.convection_W_m2K = mat.convection_W_m2K;
                 tmp.shortwaveAbsorptivity = mat.shortwaveAbsorptivity;
                 tmp.wetnessFactor = mat.wetnessFactor;
+                tmp.internalHeat_W_m2 = mat.internalHeat_W_m2;
                 tmp.interiorFixedTemperature =
                     mat.interiorBoundary == thermal::InteriorBoundary::FixedTemperature;
+                tmp.interiorAmbient =
+                    mat.interiorBoundary == thermal::InteriorBoundary::AmbientInterior;
                 tmp.interiorTemperature_K = mat.interiorTemperature_K;
+                tmp.interiorConvection_W_m2K = mat.interiorConvection_W_m2K;
                 SetThermalMaterial(name, tmp);
                 ++report.thermalMaterialsApplied;
             }

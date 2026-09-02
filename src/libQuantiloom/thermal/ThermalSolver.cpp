@@ -68,10 +68,13 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
             << " alpha_sw=" << mat.shortwaveAbsorptivity
             << " eps_lw=" << mat.longwaveEmissivity
             << " wetness=" << mat.wetnessFactor
+            << " q_internal=" << mat.internalHeat_W_m2
             << " interior_bc="
             << (mat.interiorBoundary == InteriorBoundary::FixedTemperature ? "fixed"
-                                                                          : "adiabatic")
+                : mat.interiorBoundary == InteriorBoundary::AmbientInterior ? "ambient"
+                                                                           : "adiabatic")
             << " interior_K=" << mat.interiorTemperature_K
+            << " interior_h=" << mat.interiorConvection_W_m2K
             << " solves=" << (mat.ParticipatesInSolve() ? 1 : 0) << '\n';
     }
 

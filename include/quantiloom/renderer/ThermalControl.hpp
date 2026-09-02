@@ -95,8 +95,17 @@ struct ThermalMaterialParams {
     /// 0 for dry, 1 for open water. Evaporation is what puts a lawn ten
     /// degrees below the pavement beside it under the same sun.
     f32 wetnessFactor = 0.0f;
+    /// A flux entering the back face, W/m^2: an engine, a battery, a
+    /// compartment. The only way a shaded surface can be the warmest thing in
+    /// an infrared scene.
+    f32 internalHeat_W_m2 = 0.0f;
     bool interiorFixedTemperature = false;
+    /// The back face convects and radiates to interiorTemperature_K instead of
+    /// being insulated. A panel over a bay rather than a wall. Ignored when
+    /// interiorFixedTemperature pins the node outright.
+    bool interiorAmbient = false;
     f32 interiorTemperature_K = 293.15f;
+    f32 interiorConvection_W_m2K = 3.0f;
 };
 
 struct ThermalSolveStatus {

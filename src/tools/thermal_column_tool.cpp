@@ -100,8 +100,10 @@ glm::vec3 SunFrom(const f64 azimuth_deg, const f64 elevation_deg) {
  * shortwave_absorptivity    = 0.72
  * ir_emissivity             = 0.90
  * wetness_factor            = 0.0
- * interior_bc               = "adiabatic"   # or "fixed"
+ * internal_heat_w_m2        = 0.0           # a flux into the back face
+ * interior_bc               = "adiabatic"   # or "fixed", "ambient"
  * interior_temperature_k    = 293.15
+ * interior_convection_h_w_m2k = 3.0         # back face, for "ambient"
  *
  * [solve]                           # keys named as [thermal] names them
  * start_time_h        = 0.0
@@ -151,10 +153,14 @@ Spec ReadSpec(const Config& config, const std::filesystem::path& specDir) {
     m.shortwaveAbsorptivity = config.GetFloat("column.shortwave_absorptivity", 0.72f);
     m.longwaveEmissivity = config.GetFloat("column.ir_emissivity", 0.90f);
     m.wetnessFactor = config.GetFloat("column.wetness_factor", 0.0f);
+    m.internalHeat_W_m2 = config.GetFloat("column.internal_heat_w_m2", 0.0f);
     m.interiorTemperature_K = config.GetFloat("column.interior_temperature_k", 293.15f);
-    m.interiorBoundary = config.GetString("column.interior_bc", "adiabatic") == "fixed"
-                             ? InteriorBoundary::FixedTemperature
-                             : InteriorBoundary::Adiabatic;
+    m.interiorConvection_W_m2K =
+        config.GetFloat("column.interior_convection_h_w_m2k", 3.0f);
+    const String interiorBc = config.GetString("column.interior_bc", "adiabatic");
+    m.interiorBoundary = interiorBc == "fixed"  ? InteriorBoundary::FixedTemperature
+                         : interiorBc == "ambient" ? InteriorBoundary::AmbientInterior
+                                                   : InteriorBoundary::Adiabatic;
 
     spec.startTime_h = config.GetDouble("solve.start_time_h", 0.0);
     spec.endTime_h = config.GetDouble("solve.end_time_h", 24.0);
