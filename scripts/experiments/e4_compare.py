@@ -45,8 +45,27 @@ TANGENT_GATE_K = 0.1     # closesthit.rchit skips the correction below this
 EDGE_BAND_M = 2.0        # the +/- band the paper reports an RMSE over
 
 
+def read_lag_columns(path):
+    """The `# lag column k: time_h=... sun=x,y,z` lines of a dump."""
+    columns = []
+    for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
+        if not line.startswith("# lag column "):
+            continue
+        fields = {}
+        for token in line.split(":", 1)[1].split():
+            key, _, value = token.partition("=")
+            fields[key] = value
+        columns.append({"time_h": float(fields["time_h"]),
+                        "sun": [float(v) for v in fields["sun"].split(",")]})
+    return columns
+
+
 def evaluate(divisions, reference, work, suffix=""):
-    """Both fields at every transect point, for one mesh."""
+    """Every field at every transect point, for one mesh.
+
+    The multi-lag arm is only evaluated when its dump is there: it is a third
+    solve, and a sweep run without --memory-lags does not have one.
+    """
     _, corrected = e4.read_dump(work / f"elements_{divisions}_corr{suffix}.csv")
     _, raw = e4.read_dump(work / f"elements_{divisions}_raw{suffix}.csv")
 
@@ -57,13 +76,36 @@ def evaluate(divisions, reference, work, suffix=""):
     sky = corrected["sky_fraction"].astype(float)
     raw_temperature = raw["T_K"].astype(float)
 
+    # The arm that traces the shadow at the hour it was cast. Its correction is
+    # the same one term per carried column plus the remainder against the
+    # present sun -- exactly what closesthit.rchit sums, evaluated here so the
+    # comparison is against the pointwise reference rather than against a
+    # render.
+    lag_path = work / f"elements_{divisions}_lag{suffix}.csv"
+    lag = None
+    if lag_path.is_file():
+        _, lag_data = e4.read_dump(lag_path)
+        lag_columns = read_lag_columns(lag_path)
+        lag = {
+            "T_K": lag_data["T_K"].astype(float),
+            "total": np.array([float(v) if v.strip() else 0.0
+                               for v in lag_data["dTdv_K"]]),
+            "v_element": lag_data["v_element"].astype(float),
+            "columns": lag_columns,
+            "tangent": [lag_data[f"dTdv_lag{k}_K"].astype(float)
+                        for k in range(len(lag_columns))],
+            "visibility": [lag_data[f"v_lag{k}"].astype(float)
+                           for k in range(len(lag_columns))],
+        }
+        history_times = np.array(reference["history_times_h"])
+
     rows = []
     for point in reference["points"]:
         index = e4.element_index(point["x"], point["z"], divisions)
         gate = abs(tangent[index]) >= TANGENT_GATE_K
         correction = ((point["visibility_binary"] - element_visibility[index])
                       * tangent[index]) if gate else 0.0
-        rows.append({
+        row = {
             "offset_m": point["offset_m"],
             "element": int(index),
             "T_ref_K": point["T_ref_K"],
@@ -74,7 +116,28 @@ def evaluate(divisions, reference, work, suffix=""):
             "v_element": float(element_visibility[index]),
             "dTdv_K": float(tangent[index]),
             "sky_fraction": float(sky[index]),
-        })
+        }
+
+        if lag is not None:
+            history = np.array(point["visibility_history"])
+            attributed = 0.0
+            total_correction = 0.0
+            for k, column in enumerate(lag["columns"]):
+                slope = float(lag["tangent"][k][index])
+                attributed += slope
+                if abs(slope) < TANGENT_GATE_K:
+                    continue
+                # The point's own visibility at that hour, which is what the
+                # shader would have traced toward that column's sun.
+                v_point = float(np.interp(column["time_h"], history_times, history))
+                total_correction += (v_point - float(lag["visibility"][k][index])) * slope
+            remainder = float(lag["total"][index]) - attributed
+            if abs(remainder) >= TANGENT_GATE_K:
+                total_correction += ((point["visibility_binary"] -
+                                      float(lag["v_element"][index])) * remainder)
+            row["T_memory_K"] = float(lag["T_K"][index] + total_correction)
+
+        rows.append(row)
     return rows
 
 
@@ -95,12 +158,15 @@ def statistics(rows):
             "bias_K": float(np.mean(error)),
         }
 
-    return {
+    out = {
         "uncorrected": summarise(uncorrected),
         "corrected": summarise(corrected),
         "contrast_K": float(reference.max() - reference.min()),
         "sky_fraction_min": float(min(r["sky_fraction"] for r in rows)),
     }
+    if all("T_memory_K" in r for r in rows):
+        out["memory"] = summarise(np.array([r["T_memory_K"] for r in rows]))
+    return out
 
 
 def figure(results, reference, out_path):
@@ -123,12 +189,19 @@ def figure(results, reference, out_path):
         axis.plot(offsets,
                   np.array([r["T_corrected_K"] for r in rows]) - reference_t,
                   color="#c1121f", lw=1.1, label="with $dT/dv$ correction")
+        if "memory" in stats:
+            axis.plot(offsets,
+                      np.array([r["T_memory_K"] for r in rows]) - reference_t,
+                      color="#0b6e4f", lw=1.1,
+                      label="with the shadow's history")
         edge = results[divisions]["edge_m"]
         axis.set_ylabel("error (K)")
-        axis.text(0.015, 0.86,
-                  f"{divisions}$^2$  ({edge:.2f} m triangle)   "
-                  f"max |err| {stats['uncorrected']['max_abs_K']:.2f} K "
-                  f"$\\rightarrow$ {stats['corrected']['max_abs_K']:.2f} K",
+        caption = (f"{divisions}$^2$  ({edge:.2f} m triangle)   "
+                   f"max |err| {stats['uncorrected']['max_abs_K']:.2f} K "
+                   f"$\\rightarrow$ {stats['corrected']['max_abs_K']:.2f} K")
+        if "memory" in stats:
+            caption += f" $\\rightarrow$ {stats['memory']['max_abs_K']:.2f} K"
+        axis.text(0.015, 0.86, caption,
                   transform=axis.transAxes, fontsize=8.5, va="top")
         axis.spines["top"].set_visible(False)
         axis.spines["right"].set_visible(False)

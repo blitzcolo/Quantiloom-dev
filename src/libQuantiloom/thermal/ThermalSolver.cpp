@@ -43,7 +43,11 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
                          const ExchangeGeometry& geometry,
                          const Vector<f32>& temperature_K,
                          const Vector<f32>& sunSensitivity_K,
-                         const Vector<f32>& visibility) {
+                         const Vector<f32>& visibility,
+                         const Vector<f32>& lagSensitivity_K,
+                         const Vector<f32>& lagVisibility,
+                         const Vector<f64>& lagTime_h,
+                         const Vector<glm::vec3>& lagDirection) {
     std::ofstream out(path);
     if (!out) {
         QL_LOG_WARN("  Thermal: cannot write thermal.dump_elements to '{}'", path);
@@ -78,11 +82,30 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
             << " solves=" << (mat.ParticipatesInSolve() ? 1 : 0) << '\n';
     }
 
+    // Which hour each tracked sun column belongs to, and where the sun was
+    // then. Without these the per-column pairs below are unattributable, and
+    // the study that reads them has to guess.
+    const usize lagSlots =
+        lagTime_h.size() == lagDirection.size() &&
+                lagSensitivity_K.size() == lagTime_h.size() * elements.size() &&
+                lagVisibility.size() == lagSensitivity_K.size()
+            ? lagTime_h.size()
+            : 0;
+    for (usize s = 0; s < lagSlots; ++s) {
+        out << "# lag column " << s << ": time_h=" << lagTime_h[s]
+            << " sun=" << lagDirection[s].x << ',' << lagDirection[s].y << ','
+            << lagDirection[s].z << '\n';
+    }
+
     // dTdv_K is empty rather than zero when the tangent was not carried:
     // zero is a temperature that does not move, which is a different claim
     // from not having asked.
     out << "element,centroid_x,centroid_y,centroid_z,normal_x,normal_y,normal_z,"
-           "area_m2,material_id,solved,T_K,dTdv_K,v_element,sky_fraction\n";
+           "area_m2,material_id,solved,T_K,dTdv_K,v_element,sky_fraction";
+    for (usize s = 0; s < lagSlots; ++s) {
+        out << ",dTdv_lag" << s << "_K,v_lag" << s;
+    }
+    out << '\n';
 
     const bool haveTangent = sunSensitivity_K.size() == elements.size();
     for (usize e = 0; e < elements.size(); ++e) {
@@ -102,6 +125,10 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
         if (e < visibility.size()) out << visibility[e];
         out << ',';
         if (e < geometry.skyFraction.size()) out << geometry.skyFraction[e];
+        for (usize s = 0; s < lagSlots; ++s) {
+            out << ',' << lagSensitivity_K[s * elements.size() + e] << ','
+                << lagVisibility[s * elements.size() + e];
+        }
         out << '\n';
     }
     QL_LOG_INFO("  Thermal: wrote {} elements to {}", elements.size(), path);
@@ -522,10 +549,22 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     }
 
     if (!config.dumpElementsFile.empty()) {
+        Vector<f64> lagTime_h;
+        if (haveLags) {
+            lagTime_h.reserve(result.lagSlots);
+            for (u32 s = 0; s < result.lagSlots; ++s) {
+                const u32 column = state.lagColumn[s];
+                lagTime_h.push_back(column < effectiveTable.SampleCount()
+                                        ? effectiveTable.sampleTime_h[column]
+                                        : 0.0);
+            }
+        }
         DumpThermalElements(config.dumpElementsFile, mesh.elements, materials, geometry,
                             result.surfaceTemperature_K, result.sunSensitivity_K,
                             SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
-                                                  mesh.elements.size()));
+                                                  mesh.elements.size()),
+                            result.lagSensitivity_K, result.lagVisibility, lagTime_h,
+                            result.lagDirection);
     }
 
     LogThermalSolveSummary(result);

@@ -260,12 +260,21 @@ void LogThermalSolveSummary(const ThermalResult& result);
 ///                       element whose hemisphere is mostly sky, and a file
 ///                       where sky_fraction is far from one says the reference
 ///                       does not apply.
+/// @param lagSensitivity_K  slot-major dT/dv_k, or empty when no column was
+///                       tracked. Written as a pair of columns per slot, with
+///                       the hour each belongs to in the header -- which is
+///                       what a study of the moving shadow reads to evaluate
+///                       the correction outside the renderer.
 void DumpThermalElements(const String& path, const Vector<ThermalElement>& elements,
                          const Vector<ThermalMaterial>& materials,
                          const ExchangeGeometry& geometry,
                          const Vector<f32>& temperature_K,
                          const Vector<f32>& sunSensitivity_K,
-                         const Vector<f32>& visibility);
+                         const Vector<f32>& visibility,
+                         const Vector<f32>& lagSensitivity_K = {},
+                         const Vector<f32>& lagVisibility = {},
+                         const Vector<f64>& lagTime_h = {},
+                         const Vector<glm::vec3>& lagDirection = {});
 
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.
