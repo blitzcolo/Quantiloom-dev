@@ -492,7 +492,7 @@ TEST(ThermalSolveCacheKey, ProvenanceChangesIt) {
     EXPECT_NE(fixture.Key(), before) << "f32 and f64 steppers must not share an entry";
 
     fixture = KeyFixture();
-    fixture.version = "0.2.7";
+    fixture.version = "0.3.0";
     EXPECT_NE(fixture.Key(), before) << "a library version is part of the entry";
 }
 
