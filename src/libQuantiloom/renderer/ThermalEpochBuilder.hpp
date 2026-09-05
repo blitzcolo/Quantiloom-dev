@@ -40,6 +40,7 @@
 #include "thermal/ThermalMesh.hpp"
 #include "thermal/ThermalTypes.hpp"
 
+#include <functional>
 #include <vulkan/vulkan.h>
 
 namespace quantiloom::rendercore {
@@ -88,6 +89,12 @@ struct EpochBuildInput {
     /// When non-zero the sun table is kept whole in every epoch; see the file
     /// comment.
     u32 sunMemoryLags = 0;
+
+    /// Called just before each epoch is measured, with its index and how many
+    /// there are. The build is synchronous and on the caller's thread, so
+    /// this is how a host says "building epoch 3 of 24" while it waits. It
+    /// must not touch the scene or the context it was called from.
+    std::function<void(u32 epoch, u32 count)> onEpoch;
 };
 
 /**

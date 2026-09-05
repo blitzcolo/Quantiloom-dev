@@ -208,6 +208,35 @@ TEST_F(BatchManifestTest, MaterialOverridesMergeByNameWhileMaterialsArraysReplac
     EXPECT_EQ(merged.value().GetTableArray("materials").size(), 2u);
 }
 
+TEST_F(BatchManifestTest, AQuotedKeyReachesAMaterialAMergeRenamed) {
+    // Two [[models]] that bring a material of the same name leave the second
+    // one called "<model>/<name>", and TOML spells a key with a slash in it
+    // between quotes. The tokeniser keeps the quotes and hands the whole token
+    // to the TOML parser, so the dotted form works with no special case here
+    // -- which is what this pins, since the rename rule would be useless from
+    // a manifest otherwise.
+    auto base = Config::Parse("[material_overrides.\"block/Material\"]\n"
+                              "ir_temperature_k = 300.0\nir_emissivity = 0.85\n");
+    ASSERT_TRUE(base.has_value());
+
+    const auto manifest = Write(
+        "m.txt", "a.toml | material_overrides.\"block/Material\".ir_temperature_k=320.0\n");
+    auto entries = ParseManifest(manifest);
+    ASSERT_TRUE(entries.has_value()) << entries.error();
+
+    auto merged = ApplyEntryOverrides(base.value(), entries.value()[0]);
+    ASSERT_TRUE(merged.has_value()) << merged.error();
+
+    // Config's own paths split on dots only, so the slash needs no quoting
+    // on the way back out.
+    EXPECT_FLOAT_EQ(
+        merged.value().GetFloat("material_overrides.block/Material.ir_temperature_k", 0.0f),
+        320.0f);
+    EXPECT_FLOAT_EQ(
+        merged.value().GetFloat("material_overrides.block/Material.ir_emissivity", 0.0f),
+        0.85f);
+}
+
 TEST_F(BatchManifestTest, TheSameConfigMayAppearOnEveryLine) {
     // Which is what a sequence is: one scene, one line per frame.
     const auto manifest = Write("m.txt",

@@ -19,6 +19,7 @@
 #include "renderer/VulkanContext.hpp"
 #include "thermal/ThermalTypes.hpp"
 
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <vulkan/vulkan.h>
@@ -76,6 +77,19 @@ public:
      * about geometry.
      */
     void SetEpochPlan(Vector<f64> times_s, Vector<f64> from_h);
+
+    /**
+     * @brief Who to tell as the epochs are measured
+     *
+     * Building a schedule walks the scene through every epoch and measures
+     * each one, synchronously, on the thread that asked for the hour. With a
+     * couple of dozen epochs over a large scene that is minutes with nothing
+     * on screen changing. The callback is called once per epoch, just before
+     * it is measured, with the index and the count -- enough for a status
+     * line. It marks nothing dirty; it is a statement about reporting, not
+     * geometry. An empty callback turns it off.
+     */
+    void SetEpochProgressCallback(std::function<void(u32 epoch, u32 count)> callback);
 
     struct SolveResult {
         Vector<f32> surfaceTemperature_K;

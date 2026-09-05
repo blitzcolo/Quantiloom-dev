@@ -171,6 +171,9 @@ struct ExternalRenderContext::Impl {
         void Restore() override;
     };
     TimelineEpochHost epochHost;
+    /// Kept here as well as in the preview, because the preview is rebuilt
+    /// with the pipeline and the host registered before either existed.
+    std::function<void(u32, u32)> thermalEpochProgress;
 
     /// Work out where the geometry has to be re-measured, and tell the preview.
     /// Called when the trajectories change -- a config applied, a gizmo drag
@@ -3133,6 +3136,14 @@ glm::mat4 ExternalRenderContext::GetNodeRestTransform(const u32 nodeIndex) const
     return m_impl->timeline.RestOf(*m_impl->scene, nodeIndex);
 }
 
+void ExternalRenderContext::SetThermalEpochProgressCallback(
+    std::function<void(u32 epoch, u32 count)> callback) {
+    m_impl->thermalEpochProgress = std::move(callback);
+    if (m_impl->thermalPreview) {
+        m_impl->thermalPreview->SetEpochProgressCallback(m_impl->thermalEpochProgress);
+    }
+}
+
 ThermalSolveStatus ExternalRenderContext::GetThermalSolveStatus() const {
     ThermalSolveStatus status;
     if (m_impl->thermalPreview) {
@@ -3813,6 +3824,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     // previewing" looks like from the shader's side.
     UploadThermalTangent({}, 0.0f);
     thermalPreview = std::make_unique<rendercore::ThermalPreview>(*contextAdapter);
+    thermalPreview->SetEpochProgressCallback(thermalEpochProgress);
 }
 
 void ExternalRenderContext::Impl::CreateBRDFLut() {

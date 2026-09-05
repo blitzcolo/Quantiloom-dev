@@ -726,6 +726,17 @@ timeline that spans a month wants a tick every hundred and fifty seconds and
 way round). Every time-valued key also accepts a unit: `"15s"`, `"90min"`,
 `"36h"`, `"2.5d"`. `end_s = 2592000` is a number nobody checks.
 
+Several files become one `Scene` through `scene/SceneMerge.cpp`. Node names get
+a `<model>/` prefix, so a `[[nodes]]` entry says `name = "car/Wheel_FL"`.
+Material names stay bare until two files bring the same one; the later model's
+is then renamed `<model>/<name>` (the log says so). Such a material is
+addressed with a quoted key wherever TOML needs one --
+`[material_overrides."block/Material"]` in a config, and
+`material_overrides."block/Material".ir_temperature_k=320.0` on a `batch`
+manifest line, which the tokeniser passes to the TOML parser quotes and all
+(`BatchManifestTest.AQuotedKeyReachesAMaterialAMergeRenamed` pins it). The slash
+needs no quoting in `Config::Get` paths, which split on dots only.
+
 ### Three grammars, because three kinds of author write them
 
 One spec is in exactly one form, and `ConfigResolve.cpp` carries the full
@@ -773,9 +784,48 @@ runs from there (8640 watches a day in ten seconds). `TimelineInfo` reports
 both, and `SetTimelineThermalMapping` changes them at runtime.
 
 `thermal_geometry = "epochs"` is what makes a moving scene thermally honest --
-see the epoch section above. `"reference"` freezes the geometry at
-`thermal_reference_s` and solves once, which is right when the motion does not
-matter thermally.
+the next section. `"reference"` freezes the geometry at `thermal_reference_s`
+and solves once, which is right when the motion does not matter thermally.
+
+### Thermal geometry epochs
+
+A scene that moves is solved ONCE, across piecewise-static spans. Each epoch
+freezes the geometry at its own start instant and carries its own
+`ExchangeGeometry` and `SunVisibilityTable` (`thermal/ThermalTypes.hpp`,
+`ThermalGeometrySchedule`); one `ThermalState` walks through all of them, so
+the ground a truck has just left goes on warming while the ground it parked
+on cools, with the transient in between. A frozen geometry would say the truck
+was always there or never was; re-solving per frame would throw the history
+away.
+
+- **Planning** (`thermal/ThermalEpochs.cpp`, `PlanEpochTimes`): candidates are
+  the start, every keyframe and segment boundary, and a `thermal_epoch_stride_s`
+  grid while something is moving; a candidate at which no node's
+  `PoseDisplacement` since the last kept boundary exceeds
+  `thermal_epoch_min_move_m` is dropped. The stride defaults to one thermal
+  timestep in clock seconds, so with a large `thermal_time_scale` it is the
+  minimum move that decides how many epochs survive -- the demo says so.
+- **Building** (`renderer/ThermalEpochBuilder.cpp`): the host walks the scene
+  to each epoch (`EpochGeometryHost::ApplyEpoch`, a TLAS refit), meshes it,
+  runs the exchange precompute and the sun columns for that span, then
+  restores the clock. Contacts, shell pairing and instance bases come from
+  epoch zero, because rigid motion changes none of them. Each epoch keeps only
+  the forcing rows inside its span (plus one either side for interpolation);
+  `sun_memory_lags > 0` keeps the whole table with a warning, since the lag
+  indexes columns.
+- **Stepping** (`ThermalTimeline::StepRange`): batches end at the next
+  checkpoint or the next epoch boundary, whichever is first, and each batch
+  steps with its epoch's exchange and sun table.
+- **Cost, and telling someone about it**: the build is K refits, K exchange
+  precomputes and K sets of sun columns, synchronous on the calling thread.
+  It happens on the first hour asked for after the plan changes -- a config
+  applied, a gizmo drag finished -- and never on a scrub. `ExternalRenderContext::
+  SetThermalEpochProgressCallback` fires once per epoch just before it is
+  measured, with the index and the count, so a host can say "building epoch 3
+  of 24" instead of freezing. It reports; it dirties nothing.
+- **The cache** hashes every epoch's `from_h` and elements (schema 4), so a
+  static scene's entries survive and a truck two metres further along in
+  epoch three is a different solve.
 
 ### Rendering a sequence
 

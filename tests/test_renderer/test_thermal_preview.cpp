@@ -656,6 +656,38 @@ TEST_F(ThermalPreviewTest, ScrubbingTheClockCostsNoExchangePrecompute) {
         << "moving the clock re-measured the world";
 }
 
+TEST_F(ThermalPreviewTest, TheHostIsToldWhichEpochIsBeingMeasured) {
+    // The build is synchronous on the caller's thread, so this callback is
+    // the only way a window can say "building epoch 3 of 24" rather than
+    // freezing. Registered before the config so the very first plan reports.
+    Vector<std::pair<u32, u32>> calls;
+    context->SetThermalEpochProgressCallback(
+        [&calls](u32 epoch, u32 count) { calls.emplace_back(epoch, count); });
+
+    ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
+    const u32 epochs = context->GetThermalSolveStatus().thermalEpochCount;
+    ASSERT_GT(epochs, 1u);
+
+    ASSERT_EQ(calls.size(), epochs) << "one call per epoch, no more, no fewer";
+    for (u32 e = 0; e < epochs; ++e) {
+        EXPECT_EQ(calls[e].first, e) << "epochs are reported in the order they are built";
+        EXPECT_EQ(calls[e].second, epochs);
+    }
+
+    // Moving the clock along an existing plan measures nothing, so it has
+    // nothing to report either.
+    calls.clear();
+    for (const f64 t : {2.0, 7.0}) {
+        ASSERT_TRUE(context->SetTimelineTime(t).has_value());
+    }
+    EXPECT_TRUE(calls.empty()) << "a scrub reported progress on a build that did not happen";
+
+    // An empty callback turns it off; a plan change then builds silently.
+    context->SetThermalEpochProgressCallback({});
+    ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
+    EXPECT_TRUE(calls.empty());
+}
+
 TEST_F(ThermalPreviewTest, TheHourFollowsTheClock) {
     ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
 

@@ -56,6 +56,7 @@
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
+#include <functional>
 #include <memory>
 #include <atomic>
 
@@ -949,6 +950,24 @@ public:
      * @brief Status snapshot for the panel
      */
     [[nodiscard]] ThermalSolveStatus GetThermalSolveStatus() const;
+
+    /**
+     * @brief Be told which geometry epoch is being measured
+     *
+     * A scene whose `[[models]]` move is solved across piecewise-static
+     * epochs, and the first hour asked for after the plan changes -- a config
+     * applied, a gizmo drag finished -- measures every one of them: a TLAS
+     * refit, an exchange precompute and the sun columns, per epoch, on the
+     * calling thread, with nothing on screen changing meanwhile. The callback
+     * fires once per epoch just before it is measured, with the index and the
+     * count, so a host can say "building epoch 3 of 24" instead of freezing.
+     *
+     * Called on the thread that asked for the hour, from inside that call.
+     * It must not call back into this context. Moving the clock along an
+     * existing plan measures nothing and calls nothing. An empty callback
+     * turns it off, which is the state every context starts in.
+     */
+    void SetThermalEpochProgressCallback(std::function<void(u32 epoch, u32 count)> callback);
 
     /**
      * @brief What one element did between two hours

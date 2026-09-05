@@ -66,6 +66,7 @@ struct ThermalPreview::Impl {
     EpochGeometryHost* epochHost = nullptr;
     Vector<f64> epochTimes_s;
     Vector<f64> epochFrom_h;
+    std::function<void(u32, u32)> epochProgress;
 
     std::unique_ptr<thermal::ThermalTimeline> timeline;
     Vector<std::pair<f64, thermal::ThermalForcing>> forcingSeries;
@@ -354,6 +355,7 @@ struct ThermalPreview::Impl {
             input.forcingSeries = &forcingSeries;
             input.fallbackSunDirection = fallbackSunDirection;
             input.sunMemoryLags = params.sunCorrection ? params.sunMemoryLags : 0u;
+            input.onEpoch = epochProgress;
 
             thermal::ThermalMesh epoch0;
             thermal::ThermalGeometrySchedule built =
@@ -579,6 +581,10 @@ void ThermalPreview::SetEpochPlan(Vector<f64> times_s, Vector<f64> from_h) {
     // A statement about geometry, so it costs what a geometry change costs.
     m_impl->exchangeDirty = true;
     m_impl->timelineDirty = true;
+}
+
+void ThermalPreview::SetEpochProgressCallback(std::function<void(u32, u32)> callback) {
+    m_impl->epochProgress = std::move(callback);
 }
 
 void ThermalPreview::InvalidateGeometry() {

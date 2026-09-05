@@ -93,6 +93,9 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
     schedule.epochs.reserve(count);
 
     for (usize e = 0; e < count; ++e) {
+        if (input.onEpoch) {
+            input.onEpoch(static_cast<u32>(e), static_cast<u32>(count));
+        }
         const f64 t_s = input.epochTimes_s[e];
         const VkAccelerationStructureKHR tlas = host.ApplyEpoch(t_s);
 
