@@ -1,0 +1,100 @@
+# ============================================================================
+# Quantiloom - KHR_materials_emissive_strength test scene
+# ============================================================================
+# Five unit cubes in a row, all authoring the same emissiveFactor of
+# [0.1, 0.5, 0.9] and differing only in the scalar the extension carries:
+#
+#   x = -6  Emit1   no extension at all
+#   x = -3  Emit2   emissiveStrength 2
+#   x =  0  Emit4   emissiveStrength 4
+#   x = +3  Emit8   emissiveStrength 8
+#   x = +6  Emit16  emissiveStrength 16
+#
+# What to look for: a monotone ramp of brightness left to right, doubling at
+# each step. A loader that drops the extension renders five identical cubes,
+# which is what this repo did until the strength was parsed -- and it is a
+# failure mode no single-material scene can show, because one cube on its own
+# looks perfectly reasonable at any brightness.
+#
+# The sun and sky are off, so every photon in frame started on one of the five
+# cubes and the ramp cannot be an artefact of shading. The backdrop behind them
+# emits nothing of its own -- a strength multiplies emission rather than
+# introducing it -- so what lights it is the cubes, and it brightens from left
+# to right along with them.
+#
+# ============================================================================
+# Why there is nothing to configure here
+# ============================================================================
+# Unlike the other extensions this one has no TOML key of its own, no material
+# override and no spectral curve. The loader folds the strength into
+# emissiveFactor, because that is already the HDR radiance scale every consumer
+# reads: the emissive term in the closest-hit shader, the host-side NEE CDF in
+# CollectEmissiveTriangles, the shader's EmissiveMisWeight, and the
+# [[materials]] emissive override. Storing the scalar separately would oblige
+# each of those to remember to form the product, and the host CDF and the
+# shader MIS weight have to agree exactly or the estimator is biased.
+#
+# So [[materials]] emissive = [...] still means the absolute emitted radiance,
+# and setting it here overrides the folded value outright rather than scaling
+# it a second time.
+#
+# Binding a measured spectrum composes with the strength for free, which is the
+# clearest argument for folding at load. emissive_scale = "match_luminance",
+# the default, normalises the curve to the luminance of the material's emissive
+# RGB -- and that RGB is now the folded one, so a d65 curve bound to Emit16
+# comes out sixteen times the same curve bound to Emit1. Nothing in the
+# resolver had to learn what a strength is. Under emissive_scale = "absolute"
+# the curve carries its own radiometric level and the strength is ignored,
+# which is what absolute means.
+#
+# ============================================================================
+# The infrared bands
+# ============================================================================
+# emissiveFactor is a visible-basis RGB triple, so MWIR and LWIR ignore it as
+# they always have: thermal self-emission there comes from ir_emissivity and
+# the surface temperature through Planck's law, which is a different physical
+# quantity that happens to share the word "emissive". Multiplying a Kelvin
+# figure by a glTF authoring convenience is exactly the confusion the band
+# split exists to prevent.
+# ============================================================================
+
+[renderer]
+resolution = [1280, 400]
+spp = 64                        # emitters seen directly; noise is low
+output = "gltf_emissive_strength_output.exr"
+
+[spectral]
+mode = "vis_fused"
+basis_file = "assets/spectral/quantiloom_basis_v3_usgs.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_usgs.json"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/glTF-Sample-Assets/Models/EmissiveStrengthTest/glTF/EmissiveStrengthTest.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+# Head on, far enough back that all five cubes and a margin of backdrop fit.
+position = [0.0, 0.0, 14.0]
+look_at  = [0.0, 0.0, 0.0]
+up       = [0.0, 1.0, 0.0]
+fov_y    = 24.0
+
+[lighting]
+# Nothing external. Every lit pixel is emission by construction.
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+# The emissive colour arrives as an RGB triple, so it is upsampled rather than
+# measured. That is a preview, not a measurement, and this says so.
+fail_on_srgb_upsample = false
+log_material_sources = true
+
+[sensor]
+enabled = false                 # raw radiance, so the ramp is not a tone curve

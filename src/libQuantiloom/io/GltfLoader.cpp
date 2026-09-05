@@ -729,6 +729,53 @@ Material GltfLoader::ParseMaterial(const void* gltfModelPtr, int materialIndex,
     }
 
     // ========================================================================
+    // KHR_materials_emissive_strength extension (HDR emitters)
+    // ========================================================================
+    // glTF extension format:
+    //   "extensions": {
+    //     "KHR_materials_emissive_strength": {
+    //       "emissiveStrength": 16.0
+    //     }
+    //   }
+    //
+    // The core spec clamps emissiveFactor to [0, 1], so anything brighter than
+    // a nominal white emitter has to carry the excess in this scalar. The
+    // operator is one multiply: emissive = emissiveFactor * emissiveStrength,
+    // with the emissive texture still multiplying on top of that.
+    //
+    // The strength is FOLDED into mat.emissiveFactor rather than stored beside
+    // it, because emissiveFactor is already the final HDR radiance scale that
+    // every consumer reads: the shader's emissive term, the host-side NEE CDF
+    // in CollectEmissiveTriangles, the shader's EmissiveMisWeight, the
+    // has-an-emitter test in TimelineState, and the [materials] emissive TOML
+    // override. Host CDF and shader MIS weight must agree exactly, and folding
+    // here is what keeps them agreeing for free. It is also what the USD
+    // MaterialX path already does with emission * emission_color.
+    if (auto emissiveStrengthExtIt = gltfMaterial.extensions.find("KHR_materials_emissive_strength");
+        emissiveStrengthExtIt != gltfMaterial.extensions.end()) {
+        QL_LOG_INFO("  Loading KHR_materials_emissive_strength extension for material '{}'", mat.name);
+
+        const tinygltf::Value& emissiveStrengthExt = emissiveStrengthExtIt->second;
+
+        if (emissiveStrengthExt.Has("emissiveStrength")) {
+            f32 strength = static_cast<f32>(emissiveStrengthExt.Get("emissiveStrength").GetNumberAsDouble());
+
+            // The extension declares [0, inf). A negative strength would flip
+            // the emitter into a sink that the NEE CDF cannot represent -- its
+            // luminance weights would go negative -- so refuse it here rather
+            // than let it reach the renderer.
+            if (strength < 0.0f) {
+                QL_LOG_WARN("    emissiveStrength {:.3f} is negative, clamped to 0", strength);
+                strength = 0.0f;
+            }
+
+            mat.emissiveFactor *= strength;
+            QL_LOG_INFO("    emissiveStrength: {:.3f} -> emissiveFactor [{:.3f}, {:.3f}, {:.3f}]",
+                        strength, mat.emissiveFactor.r, mat.emissiveFactor.g, mat.emissiveFactor.b);
+        }
+    }
+
+    // ========================================================================
     // KHR_materials_ior extension (index of refraction)
     // ========================================================================
     // glTF extension format:

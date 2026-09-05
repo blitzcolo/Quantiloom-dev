@@ -830,6 +830,145 @@ TEST_F(GltfLoaderTest, MaterialWithoutTheNewExtensionsKeepsTheDefaults) {
 }
 
 // ============================================================================
+// KHR_materials_emissive_strength
+// ============================================================================
+// The strength does not survive as a field of its own: it is folded into
+// emissiveFactor at load, because that is the value the NEE CDF, the MIS
+// weight and the TOML emissive override all read. So every assertion here is
+// about a product, and the asset is built to make the product unambiguous --
+// five materials with one emissiveFactor between them and five strengths.
+// ============================================================================
+
+TEST_F(GltfLoaderTest, FoldsEmissiveStrengthIntoTheEmissiveFactor) {
+    auto modelPath = GetModelPath("EmissiveStrengthTest");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "EmissiveStrengthTest model not found";
+    }
+
+    auto result = GltfLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.materials.empty());
+
+    // Every emitter in the asset authors the same colour; only the strength
+    // differs, so a loader that drops the extension renders five identical
+    // cubes and passes any test that only looks at one of them.
+    const glm::vec3 authored(0.1f, 0.5f, 0.9f);
+
+    auto findMaterial = [&scene](const std::string& name) -> const Material* {
+        for (const auto& mat : scene.materials) {
+            if (mat.name == name) {
+                return &mat;
+            }
+        }
+        return nullptr;
+    };
+
+    struct Expectation {
+        const char* name;
+        float strength;
+    };
+    const Expectation cases[] = {
+        {"Emit1", 1.0f},   // no extension at all: the multiply must not happen
+        {"Emit2", 2.0f},
+        {"Emit4", 4.0f},
+        {"Emit8", 8.0f},
+        {"Emit16", 16.0f},
+    };
+
+    for (const auto& [name, strength] : cases) {
+        const Material* mat = findMaterial(name);
+        ASSERT_NE(mat, nullptr) << "expected material " << name;
+
+        const glm::vec3 expected = authored * strength;
+        EXPECT_NEAR(mat->emissiveFactor.r, expected.r, 1e-4f) << name;
+        EXPECT_NEAR(mat->emissiveFactor.g, expected.g, 1e-4f) << name;
+        EXPECT_NEAR(mat->emissiveFactor.b, expected.b, 1e-4f) << name;
+    }
+
+    // Emit16 is the one that proves the fold happened: 0.9 * 16 is 14.4, which
+    // the [0, 1] clamp of the core specification cannot express at all.
+    const Material* brightest = findMaterial("Emit16");
+    ASSERT_NE(brightest, nullptr);
+    EXPECT_GT(brightest->emissiveFactor.b, 1.0f)
+        << "a folded strength is the only way emissiveFactor exceeds 1";
+
+    // And a material with no emission stays dark: strength multiplies what is
+    // there, it does not introduce emission.
+    const Material* backdrop = findMaterial("FlatBackdrop");
+    ASSERT_NE(backdrop, nullptr);
+    EXPECT_EQ(backdrop->emissiveFactor, glm::vec3(0.0f));
+}
+
+// A negative strength is outside the extension's declared [0, inf) range, and
+// it is not merely invalid: it would put negative luminance into the emissive
+// CDF that CollectEmissiveTriangles builds, which cannot be sampled. The
+// loader clamps rather than propagates.
+TEST_F(GltfLoaderTest, ClampsNegativeEmissiveStrengthToZero) {
+    const char* gltfJson = R"JSON({
+  "asset": { "version": "2.0" },
+  "extensionsUsed": [ "KHR_materials_emissive_strength" ],
+  "materials": [
+    {
+      "name": "NegativeStrength",
+      "emissiveFactor": [ 0.1, 0.5, 0.9 ],
+      "extensions": {
+        "KHR_materials_emissive_strength": { "emissiveStrength": -3.0 }
+      }
+    },
+    {
+      "name": "ZeroStrength",
+      "emissiveFactor": [ 0.1, 0.5, 0.9 ],
+      "extensions": {
+        "KHR_materials_emissive_strength": { "emissiveStrength": 0.0 }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [ { "attributes": { "POSITION": 0 }, "material": 0 } ]
+    }
+  ],
+  "nodes": [ { "mesh": 0 } ],
+  "scenes": [ { "nodes": [ 0 ] } ],
+  "scene": 0,
+  "accessors": [
+    {
+      "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [ 0.0, 0.0, 0.0 ], "max": [ 1.0, 1.0, 0.0 ]
+    }
+  ],
+  "bufferViews": [ { "buffer": 0, "byteOffset": 0, "byteLength": 36 } ],
+  "buffers": [
+    {
+      "byteLength": 36,
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"
+    }
+  ]
+})JSON";
+
+    const std::filesystem::path tempPath =
+        std::filesystem::temp_directory_path() / "quantiloom_negative_emissive_strength.gltf";
+    {
+        std::ofstream file(tempPath);
+        ASSERT_TRUE(file.is_open());
+        file << gltfJson;
+    }
+
+    auto result = GltfLoader::LoadFromFile(tempPath.string());
+    std::filesystem::remove(tempPath);
+
+    ASSERT_TRUE(result.has_value());
+    Scene& scene = *result;
+    ASSERT_EQ(scene.materials.size(), 2u);
+
+    for (const auto& mat : scene.materials) {
+        EXPECT_EQ(mat.emissiveFactor, glm::vec3(0.0f))
+            << mat.name << " must not emit";
+    }
+}
+
+// ============================================================================
 // KHR_materials_variants
 // ============================================================================
 // Everything about this extension resolves by index. MaterialsVariantsShoe is

@@ -25,6 +25,9 @@
  * - KHR_materials_sheen (factors and textures)
  * - KHR_materials_specular, KHR_materials_anisotropy,
  *   KHR_materials_clearcoat, KHR_materials_diffuse_transmission
+ * - KHR_materials_emissive_strength (folded into emissiveFactor at load, so
+ *   that the NEE CDF, the MIS weight and the TOML emissive override all see
+ *   one number rather than a product they each have to remember to form)
  * - KHR_materials_variants (selected by name at load time, see GltfLoadOptions)
  * - KHR_texture_transform (per texture slot)
  * - alphaMode MASK and BLEND, through an any-hit stage. MASK is a binary test
@@ -40,8 +43,8 @@
  * - Cameras/lights (use Quantiloom config instead)
  * - A second UV set: only TEXCOORD_0 is read, so a textureInfo naming
  *   texCoord 1 is warned about and sampled against set 0
- * - Other KHR_materials_* extensions (iridescence, emissive_strength,
- *   pbrSpecularGlossiness, ...), which are ignored silently
+ * - Other KHR_materials_* extensions (iridescence, pbrSpecularGlossiness,
+ *   ...), which are ignored silently
  *
  * Uses tinygltf library for glTF parsing.
  *

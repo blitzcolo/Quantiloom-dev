@@ -409,6 +409,7 @@ dedicated validation scene for each:
 | `KHR_texture_transform` | Per-texture-slot UV transform |
 | `KHR_materials_variants` | Load-time variant selection |
 | `KHR_materials_ior` / `transmission` / `volume` / `dispersion` | Index of refraction, transmission, volume absorption, Cauchy dispersion |
+| `KHR_materials_emissive_strength` | HDR emitter scale, folded into `emissiveFactor` at load so the NEE CDF, the MIS weight and the TOML `emissive` override read one value |
 
 **Why the full MIS four-tuple, not just BSDF evaluation?**  Modifying only
 the evaluation without updating the PDF breaks the MIS weights—the result
