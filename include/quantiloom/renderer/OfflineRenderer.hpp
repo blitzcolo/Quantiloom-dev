@@ -35,6 +35,7 @@
 #include "core/Platform.hpp"
 #include "core/Config.hpp"
 #include "core/Image.hpp"
+#include "renderer/TimelineControl.hpp"
 
 #include <functional>
 #include <memory>
@@ -230,11 +231,31 @@ public:
     /**
      * @brief Trace the scene and read the frame back
      *
+     * Re-entrant: call it again after SetTimelineTime and it renders the scene
+     * as it now is. Which is the whole difference between a sequence and a
+     * batch -- one device, one scene load, one thermal setup, N frames.
+     *
      * @throws std::runtime_error if a queue submit or fence wait fails, which on
      *         this path usually means a device loss or a driver timeout -- there
      *         is no partial result worth returning.
      */
     OfflineRenderOutput Render();
+
+    /**
+     * @brief Move the clock to @p t_s
+     *
+     * Puts every animated node where its trajectory says, refits the
+     * acceleration structure, and -- when the two are mapped -- puts the
+     * thermal field for the hour that second corresponds to where the shader
+     * reads it. The trajectory is stepped forward rather than replayed, so
+     * rendering a day in order costs about what rendering its last hour costs.
+     *
+     * A config with no [timeline] accepts this and does nothing.
+     */
+    Result<void, String> SetTimelineTime(f64 t_s);
+
+    /// The clock, where it stands, and what it drives.
+    [[nodiscard]] TimelineInfo GetTimelineInfo() const;
 
 private:
     OfflineRenderer();

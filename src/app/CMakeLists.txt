@@ -38,6 +38,8 @@ add_executable(Quantiloom
     BatchManifest.cpp
     BatchManifest.hpp
     RenderJob.cpp
+    SequenceJob.cpp
+    SequenceJob.hpp
     RenderJob.hpp
     McpServe.cpp
     McpServe.hpp

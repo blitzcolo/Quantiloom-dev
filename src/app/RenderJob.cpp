@@ -263,6 +263,54 @@ Image BuildPreview(const Image& img, const SpectralMode mode, const u32 width, c
 
 }  // namespace
 
+void WriteFrameOutputs(const Config& config, OfflineRenderOutput& rendered,
+                       const SpectralMode spectralMode, RenderOutcome& outcome) {
+    Image& img = rendered.radiance;
+
+    // Before the sensor chain, which overwrites img with its own noisy
+    // preview: the temperature map is of the scene, not of the detector.
+    if (PostprocessConfig::IsThermographyEnabled(config)) {
+        WriteApparentTemperature(config, rendered, img, spectralMode, outcome.exrPath,
+                                 outcome);
+    }
+
+    if (PostprocessConfig::IsSensorEnabled(config)) {
+        ApplySensorChain(config, rendered, img, outcome.exrPath, outcome.width, outcome.height);
+    } else {
+        QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
+    }
+
+    if (ImageIO::WriteEXR(outcome.exrPath, img)) {
+        QL_LOG_INFO("  [OK] Saved spectral image to {}", outcome.exrPath);
+    } else {
+        QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outcome.exrPath);
+        outcome.error = "failed to write " + outcome.exrPath;
+    }
+
+    // For fused modes (RGB, the two visible modes, MWIR, LWIR, SWIR), also
+    // save a PNG preview: these modes output both EXR (HDR/physical) and
+    // PNG (LDR).
+    const bool isFusedMode =
+        (spectralMode == SpectralMode::RGB || IsVisMode(spectralMode) ||
+         spectralMode == SpectralMode::MWIR_Fused || spectralMode == SpectralMode::LWIR_Fused ||
+         spectralMode == SpectralMode::SWIR_Fused);
+
+    if (isFusedMode) {
+        const std::filesystem::path exrPath(outcome.exrPath);
+        const std::filesystem::path pngPath =
+            exrPath.parent_path() / (exrPath.stem().string() + ".png");
+
+        outcome.preview = BuildPreview(img, spectralMode, outcome.width, outcome.height);
+
+        if (ImageIO::WritePNG(pngPath.string(), outcome.preview)) {
+            QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
+            outcome.pngPath = pngPath.string();
+        } else {
+            QL_LOG_WARN("  [WARN] Failed to save PNG preview to {}", pngPath.string());
+        }
+    }
+}
+
 RenderOutcome RenderConfigToFiles(const Config& config, const String& atmosphereModelPackFallback) {
     OfflineRenderer::InitParams initParams;
     initParams.atmosphereModelPackFallback = atmosphereModelPackFallback;
@@ -302,50 +350,7 @@ RenderOutcome RenderConfigToFiles(const Config& config,
     // The hyperspectral cube streams itself to disk band by band; there is no
     // frame to save. Everything below is the single-frame output stage.
     if (!rendered.wroteItsOwnOutput) {
-        Image& img = rendered.radiance;
-
-        // Before the sensor chain, which overwrites img with its own noisy
-        // preview: the temperature map is of the scene, not of the detector.
-        if (PostprocessConfig::IsThermographyEnabled(config)) {
-            WriteApparentTemperature(config, rendered, img, spectralMode, outcome.exrPath,
-                                     outcome);
-        }
-
-        if (PostprocessConfig::IsSensorEnabled(config)) {
-            ApplySensorChain(config, rendered, img, outcome.exrPath, outcome.width, outcome.height);
-        } else {
-            QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
-        }
-
-        if (ImageIO::WriteEXR(outcome.exrPath, img)) {
-            QL_LOG_INFO("  [OK] Saved spectral image to {}", outcome.exrPath);
-        } else {
-            QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outcome.exrPath);
-            outcome.error = "failed to write " + outcome.exrPath;
-        }
-
-        // For fused modes (RGB, the two visible modes, MWIR, LWIR, SWIR), also
-        // save a PNG preview: these modes output both EXR (HDR/physical) and
-        // PNG (LDR).
-        const bool isFusedMode =
-            (spectralMode == SpectralMode::RGB || IsVisMode(spectralMode) ||
-             spectralMode == SpectralMode::MWIR_Fused || spectralMode == SpectralMode::LWIR_Fused ||
-             spectralMode == SpectralMode::SWIR_Fused);
-
-        if (isFusedMode) {
-            const std::filesystem::path exrPath(outcome.exrPath);
-            const std::filesystem::path pngPath =
-                exrPath.parent_path() / (exrPath.stem().string() + ".png");
-
-            outcome.preview = BuildPreview(img, spectralMode, outcome.width, outcome.height);
-
-            if (ImageIO::WritePNG(pngPath.string(), outcome.preview)) {
-                QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
-                outcome.pngPath = pngPath.string();
-            } else {
-                QL_LOG_WARN("  [WARN] Failed to save PNG preview to {}", pngPath.string());
-            }
-        }
+        WriteFrameOutputs(config, rendered, spectralMode, outcome);
     }
 
     outcome.seconds = std::chrono::duration<f64>(std::chrono::steady_clock::now() - started).count();

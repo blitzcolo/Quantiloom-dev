@@ -616,9 +616,19 @@ that the next `SetThermalTime` resolves lazily:
 | SetParams (forcing/sun fields changed) | — | dirty | — | dirty |
 | SetParams (timestep/layers/initial changed) | — | — | — | dirty |
 | SetLighting/SetSunDirection (no forcing file) | — | dirty | — | dirty |
+| Timeline move (`SetTimelineTime`) | — | — | — | — |
 
 A `RefitAccelerationStructure` during a gizmo drag only sets the flag (O(1)
 per frame). The cost is deferred to the first scrub after the drag finalizes.
+
+Moving the clock is deliberately absent from that table. The trajectory the
+epochs were measured from has not changed, so nothing about the geometry is
+stale -- `SetTimelineTime` refits the TLAS through a private path that skips
+`InvalidateGeometry` precisely so that scrubbing costs no exchange precompute.
+What DOES invalidate the plan is a change to a rest pose or the node set: the
+public `RefitAccelerationStructure` and `RebuildAccelerationStructure` both
+re-run `PlanEpochTimes` after invalidating, because where the trajectory takes
+a node moved when the node's rest pose did.
 
 The short-wave gains have **no flag of their own**. They depend on the
 geometry, the sun columns and the absorptivities, and every event that
@@ -701,6 +711,90 @@ correctness bug:
 |---|---|---|
 | `quantiloom_core` | `libquantiloom_tests`, `fusion_tool` | everything, `QL_API` irrelevant |
 | `libQuantiloom` | CLI, `libSpectraForge`, Quantiloom-Qt | only `QL_API`, only `include/quantiloom/` |
+
+## A scene can have a clock, and several models
+
+Until 0.4.0 a config named one scene file and placed it once. It can now name
+`[[models]]`, each with a rest pose and a trajectory, against a `[timeline]`
+that says what a second is.
+
+Seconds are canonical; a tick is the frame grid those seconds are sampled on,
+and `ticks_per_second` relates them -- the job USD gives `timeCodesPerSecond`
+and Minecraft gives its twenty ticks a second. It is a **double**, because a
+timeline that spans a month wants a tick every hundred and fifty seconds and
+0.006667 is a legal answer (`seconds_per_tick` says the same thing the other
+way round). Every time-valued key also accepts a unit: `"15s"`, `"90min"`,
+`"36h"`, `"2.5d"`. `end_s = 2592000` is a number nobody checks.
+
+### Three grammars, because three kinds of author write them
+
+One spec is in exactly one form, and `ConfigResolve.cpp` carries the full
+syntax in a comment beside where it is read.
+
+- **Keyframes** (`[[models.motion.keys]]`, or `keys_file` for a CSV of them),
+  with `step` / `linear` / `cubic` interpolation and `hold` / `loop` outside
+  the authored range. What an exporter writes, and what glTF, USD and DIRSIG
+  all agree on. Cubic is Catmull-Rom on position and an eased slerp on
+  rotation -- deliberately not squad, which would need tangent quaternions
+  nobody authors.
+- **Piecewise expressions** (`[[models.motion.segments]]`), in `t` (global
+  seconds) and `s` (seconds into the segment). ExprTk compiles them, behind
+  `scene/MotionExpr.cpp`, which is the only translation unit that includes the
+  header -- it costs most of a minute and `/bigobj` to build.
+- **Parametric engines** (`[models.motion.location]` / `.orientation`):
+  straight line, circle, spin, along_velocity, look_at. The handful of motions
+  common enough in sensor simulation that spelling them either other way is
+  busywork.
+
+### The composition, and why `[[nodes]]` records a rest pose
+
+    world(t) = M_model(t) * R_model * M_node(t) * R_node
+
+`R_model` is the `[[models]]` rest pose and `R_node` is what the file placed
+the node at. The model's track moves the whole model in world space; a node's
+own `[nodes.motion]` moves it within its model, which is what makes a wheel
+spin about its axle rather than about the world origin.
+
+So `[[nodes]]` writes the REST pose for a node the clock moves -- where it
+would stand with every trajectory at the identity. A pose meaning "where it is
+at `time_s`" would be wrong at every other instant. A gizmo drag at t = 30 goes
+the other way: `SetNodeTransform` solves the composition for `R_node`, so the
+edit is at every tick. `GetNodeRestTransform` is what a host saves.
+
+None of this touches `Scene`, `SceneNode` or `Material`: they are the layout
+contract with Studio and cannot grow a field. The animation is a side table
+keyed by node index (`renderer/TimelineState.hpp`).
+
+### The thermal hour follows the clock
+
+With a `[timeline]`, `thermal.time_h` stops meaning "the hour to render" and
+means "the hour at `start_s`"; `thermal_time_scale` says how fast the clock
+runs from there (8640 watches a day in ten seconds). `TimelineInfo` reports
+both, and `SetTimelineThermalMapping` changes them at runtime.
+
+`thermal_geometry = "epochs"` is what makes a moving scene thermally honest --
+see the epoch section above. `"reference"` freezes the geometry at
+`thermal_reference_s` and solves once, which is right when the motion does not
+matter thermally.
+
+### Rendering a sequence
+
+    Quantiloom.exe sequence <config.toml> --from-tick A --to-tick B --every N \
+        --output "out/frame_{tick:05}.exr"
+
+One renderer for the whole run: the scene is loaded once, the acceleration
+structure built once, the thermal schedule measured once and its trajectory
+STEPPED FORWARD between frames rather than restarted. Rendering a day in order
+therefore costs about what rendering its last hour costs. `--dry-run` lists the
+frames without building a device.
+
+`batch` with a `timeline.time_s=` per line still works and is the slow path: a
+renderer per frame, with the solve cache making the thermal half cheap on a
+re-run.
+
+The sampling seed is `renderer.seed` mixed with the tick, so two frames of one
+sequence get different patterns while a re-run of either gets the same one it
+got before.
 
 ## Conventions
 

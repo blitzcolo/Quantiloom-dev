@@ -1181,6 +1181,69 @@ OfflineRenderOutput OfflineRenderer::Render() {
     return m_impl->RenderSingleFrame();
 }
 
+Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
+    Impl& impl = *m_impl;
+    if (!impl.timeline.Present()) {
+        impl.timeline.SetCurrent(t_s);
+        return Result<void, String>::Ok();
+    }
+
+    const Vector<u32> moved = impl.timeline.Apply(impl.loadedScene, t_s);
+    if (!moved.empty() && impl.geometry.IsValid()) {
+        if (!impl.geometry.RefitTlas(*impl.contextRef, impl.loadedScene)) {
+            impl.geometry.RebuildTlas(*impl.contextRef, impl.loadedScene);
+            if (impl.pipeline) {
+                impl.pipeline->BindAccelerationStructure(impl.geometry.Tlas().GetHandle());
+                if (impl.geometry.InstanceCount() > 0) {
+                    impl.pipeline->BindInstanceGeometryBuffer(impl.geometry.InstanceInfo());
+                }
+            }
+        }
+
+        // The emitter list holds world-space triangles, so a lamp that moved is
+        // sampled where it used to be until it is rebuilt. Only a lamp: a rock
+        // that moved changes nothing in it.
+        const bool emitterMoved =
+            std::any_of(impl.timeline.Animated().begin(), impl.timeline.Animated().end(),
+                        [&moved](const rendercore::AnimatedNode& animated) {
+                            return animated.emissive &&
+                                   std::find(moved.begin(), moved.end(), animated.node) !=
+                                       moved.end();
+                        });
+        if (emitterMoved) {
+            const auto emissiveTris =
+                impl.resolved.enableLightSampling
+                    ? rendercore::CollectEmissiveTriangles(impl.loadedScene)
+                    : Vector<rendercore::EmissiveTriangleGPU>{};
+            impl.emissiveTriangleBuffer =
+                rendercore::CreateEmissiveTriangleBuffer(*impl.contextRef, emissiveTris);
+            impl.lightingParams.emissiveTriangleCount =
+                static_cast<u32>(emissiveTris.size());
+            impl.lightingParams.emissiveTotalPower =
+                emissiveTris.empty() ? 0.0f : emissiveTris.back().cumulativePower;
+            if (impl.lightingParamsBuffer) {
+                impl.lightingParamsBuffer->Upload(&impl.lightingParams, sizeof(LightingParams));
+            }
+            if (impl.pipeline) {
+                impl.pipeline->BindEmissiveTriangleBuffer(*impl.emissiveTriangleBuffer);
+            }
+        }
+    }
+
+    impl.UploadThermalFieldAt(impl.ThermalHourNow());
+    return Result<void, String>::Ok();
+}
+
+TimelineInfo OfflineRenderer::GetTimelineInfo() const {
+    TimelineInfo info = m_impl->timeline.Info();
+    if (m_impl->thermalSession) {
+        info.thermalEpochCount = m_impl->thermalSession->EpochCount();
+        info.currentThermalEpoch =
+            m_impl->thermalSession->EpochAt(m_impl->ThermalHourNow());
+    }
+    return info;
+}
+
 OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     VulkanContext& context = *contextRef;
 
@@ -1315,7 +1378,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     }
 
     try {
-        u32 frameIndex = 0;
+        // Which frame of the clock this is. Zero for a still render, and the
+        // tick index for a sequence -- so two frames of one sequence get
+        // different sampling patterns while a re-run of either gets the same
+        // one it got before.
+        const TimelineInfo timelineInfo = timeline.Info();
+        const u32 frameIndex =
+            timelineInfo.present
+                ? static_cast<u32>(std::max<i64>(timelineInfo.TickOf(timeline.Current_s()), 0))
+                : 0u;
         f32 totalGpuMs = 0.0f;
 
         // Per-sample seeds for the path tracer. Deterministic by default so

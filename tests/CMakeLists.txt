@@ -329,7 +329,10 @@ set(TEST_MAIN_SOURCE
 # for want of a target.
 set(TEST_APP_SOURCES
     test_app/test_batch_manifest.cpp
+    test_app/test_sequence_job.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/app/BatchManifest.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/app/SequenceJob.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/app/RenderJob.cpp
 )
 
 # Combine all test sources

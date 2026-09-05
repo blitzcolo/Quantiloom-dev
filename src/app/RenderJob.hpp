@@ -68,6 +68,21 @@ struct RenderOutcome {
  *               fallback, the config's own directory, and -- for batch mode --
  *               the shared device the render runs on.
  */
+/**
+ * @brief Post-process one rendered frame and write its files
+ *
+ * The apparent-temperature map when [thermography] asked for one, then the
+ * sensor chain, then the EXR, then the PNG preview for the fused modes. Split
+ * out of RenderConfigToFiles so that a sequence -- which renders many frames
+ * through one renderer and names each of them itself -- writes them exactly
+ * the way a single render does.
+ *
+ * @param outcome  `exrPath`, `width` and `height` are read; `pngPath`,
+ *                 `tappPath`, `preview` and `error` are written.
+ */
+void WriteFrameOutputs(const Config& config, OfflineRenderOutput& rendered,
+                       SpectralMode spectralMode, RenderOutcome& outcome);
+
 RenderOutcome RenderConfigToFiles(const Config& config,
                                   const OfflineRenderer::InitParams& init);
 

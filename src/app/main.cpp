@@ -16,6 +16,7 @@
 #include "core/Config.hpp"
 
 #include "BatchJob.hpp"
+#include "SequenceJob.hpp"
 #include "McpServe.hpp"
 #include "RenderJob.hpp"
 #include "Version.hpp"
@@ -91,6 +92,7 @@ void PrintHelp(const char* progname) {
         << "Usage:\n"
         << "  " << progname << " <config.toml> [options]\n"
         << "  " << progname << " batch <list.txt> [options]\n"
+        << "  " << progname << " sequence <config.toml> [options]\n"
         << "  " << progname << " serve [--port N]\n"
         << "  " << progname << " --help\n"
         << "  " << progname << " --version\n"
@@ -99,6 +101,8 @@ void PrintHelp(const char* progname) {
         << "  <config.toml>          Scene configuration file (required)\n"
         << "  batch <list.txt>       Render every config the list names, in order,\n"
         << "                         reusing one GPU device across all of them\n"
+        << "  sequence <config.toml> Render the config's [timeline] tick by tick on one\n"
+        << "                         device, moving the clock between frames\n"
         << "  serve                  Answer MCP on 127.0.0.1 so an agent can render\n"
         << "  --port N               Port for serve mode (default 8766)\n"
         << "  -h, --help             Show this help message and exit\n"
@@ -136,6 +140,24 @@ void PrintHelp(const char* progname) {
         << "  [[materials]] in an override: arrays are replaced whole, so an array\n"
         << "  override would delete every material it does not name.\n"
         << "\n"
+        << "Sequence options:\n"
+        << "  --from-tick N          First tick (default 0)\n"
+        << "  --to-tick N            Last tick, inclusive (default: the end of the\n"
+        << "                         timeline)\n"
+        << "  --every N              Render every Nth tick (default 1)\n"
+        << "  --output TEMPLATE      Where the frames go. {tick} and {time_s} are\n"
+        << "                         filled in, each with an optional format:\n"
+        << "                         {tick:05} pads to five digits, {time_s:.3f} gives\n"
+        << "                         three decimals. Default: renderer.output with\n"
+        << "                         _{tick:05} before its extension\n"
+        << "  --dry-run              List the frames and exit without rendering them\n"
+        << "\n"
+        << "  One renderer for the whole sequence: the scene is loaded once, the\n"
+        << "  acceleration structure built once, and the thermal trajectory stepped\n"
+        << "  forward rather than restarted -- so rendering a day in order costs about\n"
+        << "  what rendering its last hour costs. `batch` with a timeline.time_s per\n"
+        << "  line still works and is the slow path.\n"
+        << "\n"
         << "Spectral modes (set in config file [spectral] section):\n"
         << "  rgb                    Standard RGB rendering\n"
         << "  single                 Single-wavelength monochromatic rendering\n"
@@ -157,6 +179,7 @@ void PrintHelp(const char* progname) {
         << "  " << progname << " batch scenes.txt --output-dir renders\n"
         << "  " << progname << " batch scenes.txt --override preview.toml --dry-run\n"
         << "  " << progname << " batch assets/configs/thermal_sequence/manifest.txt\n"
+        << "  " << progname << " sequence assets/configs/timeline_demo.toml --every 4\n"
         << "\n"
         << "Homepage: https://github.com/blitzcolo/Quantiloom-dev\n";
 }
@@ -254,6 +277,44 @@ int RunApp(int argc, char* argv[]) {
         }
 
         const int code = app::RunBatch(options);
+        Log::Shutdown();
+        return code;
+    }
+
+    // ========================================================================
+    // sequence → render one configuration's timeline, tick by tick
+    // ========================================================================
+    if (std::strcmp(argv[1], "sequence") == 0) {
+        if (argc < 3) {
+            std::cerr << "Error: sequence needs a config file.\n"
+                         "Usage: " << argv[0] << " sequence <config.toml> [options]\n";
+            Log::Shutdown();
+            return 1;
+        }
+
+        app::SequenceOptions options;
+        options.configPath = argv[2];
+        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+
+        for (int i = 3; i < argc; ++i) {
+            if (std::strcmp(argv[i], "--from-tick") == 0 && i + 1 < argc) {
+                options.fromTick = std::strtoll(argv[++i], nullptr, 10);
+            } else if (std::strcmp(argv[i], "--to-tick") == 0 && i + 1 < argc) {
+                options.toTick = std::strtoll(argv[++i], nullptr, 10);
+            } else if (std::strcmp(argv[i], "--every") == 0 && i + 1 < argc) {
+                options.every = static_cast<u32>(std::strtoul(argv[++i], nullptr, 10));
+            } else if (std::strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+                options.outputTemplate = argv[++i];
+            } else if (std::strcmp(argv[i], "--dry-run") == 0) {
+                options.dryRun = true;
+            } else {
+                std::cerr << "Error: unrecognised option for sequence: " << argv[i] << "\n";
+                Log::Shutdown();
+                return 1;
+            }
+        }
+
+        const int code = app::RunSequence(options);
         Log::Shutdown();
         return code;
     }

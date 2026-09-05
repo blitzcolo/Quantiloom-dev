@@ -1,0 +1,167 @@
+# ============================================================================
+# A truck drives across the sand, parks, and the ground remembers
+# ============================================================================
+# The scene the timeline was built for. Two models in one config: the desert
+# plane, and a block that drives across it for four seconds and then stands
+# still. The clock runs ten seconds and each of those seconds is an hour of
+# simulated time, so the render walks a morning while the block covers eight
+# metres and stops.
+#
+# What to look at is the ground. A frozen geometry would say the block was
+# always where it ends up, or never there at all; re-solving per frame would
+# throw away the history. This solves once across piecewise-static geometry
+# epochs, so the sand the block left goes on warming back up and the sand it
+# parked on cools, with the transient in between.
+#
+#   Quantiloom.exe assets/configs/timeline_demo.toml
+#   Quantiloom.exe sequence assets/configs/timeline_demo.toml --every 10
+#
+# ============================================================================
+
+[renderer]
+resolution = [512, 512]
+spp = 16
+seed = 21628
+output = "renders/timeline/timeline_demo.exr"
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+basis_file = "assets/spectral/quantiloom_basis_v3_merged.qlbin"
+materials_json = "assets/spectral/quantiloom_materials_merged.json"
+
+[scene]
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+# ----------------------------------------------------------------------------
+# The clock
+# ----------------------------------------------------------------------------
+[timeline]
+start_s = 0
+end_s = "10s"
+ticks_per_second = 20          # 201 ticks over the ten seconds
+
+# One second of clock is one hour of sun. `thermal.time_h` below stops meaning
+# "the hour to render" and starts meaning "the hour at start_s".
+thermal_time_scale = 3600
+
+thermal_geometry = "epochs"
+# Both of these are deliberately coarser than their defaults, and the reason is
+# the time scale above: one thermal timestep is 60 simulated seconds, which at
+# 3600x is a sixtieth of a second of clock -- so the default stride would offer
+# six hundred candidate boundaries over this timeline. What actually decides
+# how many survive is the minimum move, and two metres is about the scale at
+# which the shadow under a block this size lands somewhere new.
+thermal_epoch_stride_s = 0.5
+thermal_epoch_min_move_m = 2.0
+
+# ----------------------------------------------------------------------------
+# The models
+# ----------------------------------------------------------------------------
+[[models]]
+file = "../models/desert/desert_51.gltf"
+name = "ground"
+
+[[models]]
+file = "../models/cube.glb"
+name = "block"
+scale = [1.5, 1.5, 1.5]
+
+# Form one of three: keyframes. Two of them, linearly interpolated, and the
+# range ends at four seconds -- `extrapolate = "hold"` is the default, so after
+# that the block simply stands where it stopped. Which is the whole point of
+# the scene.
+[models.motion]
+interpolation = "linear"
+extrapolate = "hold"
+
+[[models.motion.keys]]
+t = 0
+position = [-8.0, 0.0, 0.0]
+
+[[models.motion.keys]]
+t = "4s"
+position = [0.0, 0.0, 0.0]
+
+# The other two forms, for reference. A piecewise expression in `t` (global
+# seconds) and `s` (seconds into the segment):
+#
+#   [[models.motion.segments]]
+#   from = 4
+#   to = 10
+#   position = ["2*s", "0", "0.3*sin(3*s)"]
+#
+# ...or a parametric engine:
+#
+#   [models.motion.location]
+#   type = "linear"
+#   heading_deg = 90
+#   speed_m_s = 2.0
+#   [models.motion.orientation]
+#   type = "along_velocity"
+
+[camera]
+position = [-6.0, 6.0, 9.0]
+look_at = [0.0, 0.5, 0.0]
+up = [0.0, 1.0, 0.0]
+fov_y = 45.0
+
+[lighting]
+# Owned by the forcing CSV for the solve; kept roughly consistent with the
+# hours this timeline covers so the shading and the temperatures agree about
+# where the sun is.
+sun_direction = [-0.6857, 0.7232, 0.0819]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 313.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 313.0
+relative_humidity = 20.0
+
+[thermal]
+enabled = true
+# The hour at the timeline's START, because [timeline] drives the rest. Day 4
+# at 04:00, with three days of spin-up behind it; ten seconds of clock takes it
+# to 14:00.
+time_h = 76.0
+start_time_h = 0.0
+timestep_s = 60.0
+layers = 10
+initial = "steady"
+checkpoint_stride_h = 6.0
+forcing_file = "desert/desert_day.csv"
+exchange_rays = 128
+exchange_top_k = 16
+
+[[materials]]
+name = "DesertGround"
+thermal_conductivity_w_mk = 0.30
+density_kg_m3 = 1600.0
+specific_heat_j_kgk = 800.0
+thickness_m = 0.15
+convection_h_w_m2k = 14.0
+shortwave_absorptivity = 0.72
+ir_emissivity = 0.90
+interior_bc = "adiabatic"
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Brown loamy fine sand (87P3468)"
+
+[[materials]]
+name = "ShadowSphere"
+ir_emissivity = 0.90
+ir_temperature_k = 310.0
+spectral_material_type = "quantiloom_merged"
+spectral_material_ref = "Olive green gloss paint (0385UUUPNT)"
+
+[thermography]
+enabled = false
+
+[sensor]
+enabled = false
