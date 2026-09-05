@@ -439,6 +439,27 @@ void Config::Print() const {
     Log::Info("Configuration:\n{}", oss.str());
 }
 
+String Config::ToToml() const {
+    std::ostringstream oss;
+    oss << m_impl->root;
+    return oss.str();
+}
+
+String Config::ToToml(StringView topLevelKey) const {
+    const auto it = m_impl->root.find(topLevelKey);
+    if (it == m_impl->root.end()) return {};
+
+    // Wrapped in a table of its own so the key is written as a header rather
+    // than as a bare value: what comes out of ToToml("models") has to be
+    // pasteable, and `[[models]]` is only a table array when it is announced
+    // as one.
+    toml::table wrapper;
+    wrapper.insert(it->first, it->second);
+    std::ostringstream oss;
+    oss << wrapper;
+    return oss.str();
+}
+
 // ============================================================================
 // Template Specializations
 // ============================================================================

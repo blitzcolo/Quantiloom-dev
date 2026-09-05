@@ -1,5 +1,8 @@
 #include "renderer/RenderCore.hpp"
 
+#include "renderer/ConfigResolve.hpp"
+#include "scene/SceneMerge.hpp"
+
 #include "core/Log.hpp"
 #include "core/CIE_CMF_Data.hpp"
 #include "core/D65Illuminant.hpp"
@@ -22,7 +25,31 @@
 
 namespace quantiloom::rendercore {
 
-Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& baseDir) {
+namespace {
+
+/// A model file is USD when it says so and glTF otherwise. Two loaders, one
+/// list of suffixes, and no config key to disagree with the file name.
+bool LooksLikeUsd(const String& path) {
+    const usize dot = path.find_last_of('.');
+    if (dot == String::npos) return false;
+    String suffix = path.substr(dot);
+    std::transform(suffix.begin(), suffix.end(), suffix.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return suffix == ".usd" || suffix == ".usda" || suffix == ".usdc" || suffix == ".usdz";
+}
+
+}  // namespace
+
+Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& baseDir,
+                                          const ResolvedRenderConfig* resolved,
+                                          SceneLoadInfo* info) {
+    Scene scene;
+    bool loadedAnything = false;
+
+    // `scene.usd` / `scene.gltf` first, unchanged and still exclusive of each
+    // other. A config may name one of them AND [[models]]; the single file is
+    // then the backdrop the models are placed against, and its nodes carry no
+    // model index.
     if (config.Has("scene.usd")) {
         const auto usdPath = ResolveConfigPath(config.Get<String>("scene.usd"), baseDir);
         QL_LOG_INFO("Loading USD scene: {}", usdPath);
@@ -31,10 +58,9 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         if (!result.has_value()) {
             return Result<Scene, String>::Err("Failed to load USD: " + result.error());
         }
-        return Result<Scene, String>(std::move(result.value()));
-    }
-
-    if (config.Has("scene.gltf")) {
+        scene = std::move(result.value());
+        loadedAnything = true;
+    } else if (config.Has("scene.gltf")) {
         const auto gltfPath = ResolveConfigPath(config.Get<String>("scene.gltf"), baseDir);
         QL_LOG_INFO("Loading glTF model: {}", gltfPath);
 
@@ -50,11 +76,61 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         if (!result.has_value()) {
             return Result<Scene, String>::Err("Failed to load glTF: " + result.error());
         }
-        return Result<Scene, String>(std::move(result.value()));
+        scene = std::move(result.value());
+        loadedAnything = true;
     }
 
-    return Result<Scene, String>::Err(
-        "No scene.usd or scene.gltf in config -- nothing to render");
+    if (info != nullptr) {
+        info->nodeModel.assign(scene.nodes.size(), SceneLoadInfo::kNoModel);
+    }
+
+    // [[models]], in file order. The resolver has already turned each entry
+    // into a path, a name and a rest pose; all that is left is to read the
+    // file and slot its indices in behind whatever is already here.
+    if (resolved != nullptr && !resolved->models.empty()) {
+        for (u32 modelIndex = 0; modelIndex < resolved->models.size(); ++modelIndex) {
+            const ModelEntry& model = resolved->models[modelIndex];
+            QL_LOG_INFO("Loading model '{}': {}", model.name, model.file);
+
+            Scene part;
+            if (LooksLikeUsd(model.file)) {
+                auto result = UsdLoader::LoadFromFile(model.file);
+                if (!result.has_value()) {
+                    return Result<Scene, String>::Err("Failed to load model '" + model.name +
+                                                      "' (" + model.file + "): " + result.error());
+                }
+                part = std::move(result.value());
+            } else {
+                GltfLoadOptions options;
+                if (!model.variant.empty()) options.variant = model.variant;
+                auto result = GltfLoader::LoadFromFile(model.file, options);
+                if (!result.has_value()) {
+                    return Result<Scene, String>::Err("Failed to load model '" + model.name +
+                                                      "' (" + model.file + "): " + result.error());
+                }
+                part = std::move(result.value());
+            }
+
+            scene::AppendScene(scene, std::move(part), model.name, model.rest);
+            loadedAnything = true;
+
+            if (info != nullptr) {
+                info->nodeModel.resize(scene.nodes.size(), modelIndex);
+                info->modelNames.push_back(model.name);
+                ++info->modelsLoaded;
+            }
+        }
+        QL_LOG_INFO("Scene: {} model(s) merged, {} nodes, {} materials, {} textures",
+                    resolved->models.size(), scene.nodes.size(), scene.materials.size(),
+                    scene.textures.size());
+    }
+
+    if (!loadedAnything) {
+        return Result<Scene, String>::Err(
+            "No scene.usd, scene.gltf or [[models]] in config -- nothing to render");
+    }
+
+    return Result<Scene, String>(std::move(scene));
 }
 
 namespace {

@@ -124,6 +124,9 @@ add_library(quantiloom_core OBJECT
     renderer/RenderCore.hpp
     renderer/ConfigResolve.cpp
     renderer/ConfigResolve.hpp
+    renderer/TimelineState.cpp
+    renderer/TimelineState.hpp
+    ${QL_PUBLIC_INC}/renderer/TimelineControl.hpp
     renderer/SpectralUnmixer.cpp
     renderer/SpectralUnmixer.hpp
     renderer/TemperatureTextureLoader.cpp
@@ -160,6 +163,13 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/scene/Texture.hpp
     scene/Scene.cpp
     ${QL_PUBLIC_INC}/scene/Scene.hpp
+    scene/Motion.cpp
+    scene/Motion.hpp
+    scene/MotionExpr.cpp
+    scene/MotionSpec.cpp
+    scene/MotionSpec.hpp
+    scene/SceneMerge.cpp
+    scene/SceneMerge.hpp
 
     # Thermal module (surface energy balance; the temperatures a thermogram is of)
     thermal/ThermalTypes.hpp
@@ -287,8 +297,16 @@ target_link_libraries(quantiloom_core
         OpenEXR::OpenEXR
         Imath::Imath
         tinygltf
+        exprtk
         glm::glm  # Link privately for build, consumers use find_package(glm)
 )
+
+# ExprTk is one 1.5 MB header of deeply nested templates: MSVC runs out of
+# sections in the object file without /bigobj. Only the one translation unit
+# that includes it pays.
+if(MSVC)
+    set_source_files_properties(scene/MotionExpr.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
 
 # OpenUSD linking (conditional)
 if(QUANTILOOM_USE_OPENUSD)

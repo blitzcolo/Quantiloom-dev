@@ -120,6 +120,14 @@ struct ConfigApplyReport {
     bool thermalSolveEnabled = false;
     u32 thermalMaterialsApplied = 0;
 
+    /// @name [timeline] and [[models]]
+    /// @{
+    bool timelinePresent = false;         ///< A [timeline] section was read.
+    u32 modelsLoaded = 0;                 ///< [[models]] files that loaded.
+    u32 motionTracks = 0;                 ///< Trajectories that compiled, models plus nodes.
+    u32 thermalEpochs = 0;                ///< Piecewise-static spans the thermal solve was cut into.
+    /// @}
+
     /// @name Keys a windowed context cannot honour, echoed for the host
     /// @{
     /// renderer.resolution. A viewport renders at its own size; the CLI does not.

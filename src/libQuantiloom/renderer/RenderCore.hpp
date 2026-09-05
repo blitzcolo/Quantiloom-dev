@@ -87,8 +87,29 @@ namespace quantiloom::rendercore {
  *        relative to the working directory. Both conventions are in use; see
  *        ResolveConfigPath.
  */
+struct ResolvedRenderConfig;
+
+/**
+ * @brief Which `[[models]]` entry each node came from
+ *
+ * Filled alongside the scene so the timeline can pair a node with the
+ * trajectory its model carries without parsing the `<model>/` prefix back out
+ * of the node's name -- names are for people and for configs, not for lookups.
+ */
+struct SceneLoadInfo {
+    /// A node that came from `scene.gltf`/`scene.usd` rather than a
+    /// `[[models]]` entry. It can still be moved by `[nodes.motion]`.
+    static constexpr u32 kNoModel = 0xFFFFFFFFu;
+
+    Vector<u32> nodeModel;       ///< one per Scene::nodes entry
+    Vector<String> modelNames;   ///< in `[[models]]` order
+    u32 modelsLoaded = 0;
+};
+
 Result<Scene, String> LoadSceneFromConfig(const Config& config,
-                                          const String& baseDir = {});
+                                          const String& baseDir = {},
+                                          const ResolvedRenderConfig* resolved = nullptr,
+                                          SceneLoadInfo* info = nullptr);
 
 /**
  * @brief Resolve a path a config named, against the config's own directory

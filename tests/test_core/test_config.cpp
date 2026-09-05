@@ -534,3 +534,69 @@ TEST_F(ConfigTest, MergeOverrideWinsAcrossTypes) {
     EXPECT_TRUE(merged.HasSection("renderer"));
     EXPECT_EQ(merged.Get<i32>("renderer.spp", 0), 16);
 }
+
+// ============================================================================
+// ToToml: a section a host cannot edit, it can still carry
+// ============================================================================
+// Quantiloom Studio writes configurations key by key, and [[models]] with its
+// motion tables is a grammar it has no business knowing. Reading the block out
+// and writing it back unchanged is what lets a trajectory survive a save from
+// a host that cannot author one.
+
+TEST(ConfigToTomlTest, RoundTripsThroughAParse) {
+    const auto original = Config::Parse(R"(
+[renderer]
+spp = 64
+resolution = [640, 480]
+
+[[models]]
+file = "car.glb"
+name = "car"
+
+[models.motion]
+interpolation = "cubic"
+
+[[models.motion.keys]]
+t = 0.0
+position = [0.0, 0.0, 0.0]
+)");
+    ASSERT_TRUE(original.has_value());
+
+    const auto again = Config::Parse(original.value().ToToml());
+    ASSERT_TRUE(again.has_value()) << original.value().ToToml();
+
+    EXPECT_EQ(again.value().GetInt("renderer.spp"), 64);
+    const auto models = again.value().GetTableArray("models");
+    ASSERT_EQ(models.size(), 1u);
+    EXPECT_EQ(models[0].GetString("file"), "car.glb");
+    EXPECT_EQ(models[0].GetString("motion.interpolation"), "cubic");
+    ASSERT_EQ(models[0].GetTableArray("motion.keys").size(), 1u);
+}
+
+TEST(ConfigToTomlTest, OneTopLevelKeyComesBackPasteable) {
+    const auto original = Config::Parse(R"(
+[renderer]
+spp = 64
+
+[[models]]
+file = "car.glb"
+name = "car"
+)");
+    ASSERT_TRUE(original.has_value());
+
+    const String block = original.value().ToToml("models");
+    EXPECT_NE(block.find("[[models]]"), String::npos);
+    EXPECT_EQ(block.find("spp"), String::npos);
+
+    // ...and parses on its own, which is the whole point.
+    const auto reparsed = Config::Parse(block);
+    ASSERT_TRUE(reparsed.has_value()) << block;
+    ASSERT_EQ(reparsed.value().GetTableArray("models").size(), 1u);
+    EXPECT_EQ(reparsed.value().GetTableArray("models")[0].GetString("name"), "car");
+}
+
+TEST(ConfigToTomlTest, AnAbsentKeyGivesAnEmptyString) {
+    const auto original = Config::Parse("[renderer]\nspp = 1\n");
+    ASSERT_TRUE(original.has_value());
+    EXPECT_TRUE(original.value().ToToml("models").empty());
+}

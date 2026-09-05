@@ -15,6 +15,7 @@
 #include "renderer/ConfigResolve.hpp"
 #include "core/Blackbody.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 
@@ -1807,4 +1808,178 @@ TEST(ConfigResolveFluorescence, AMaterialDoesNotFluoresceByDefault) {
     EXPECT_FLOAT_EQ(mat.fluorescenceYield, 0.0f);
     EXPECT_TRUE(mat.fluorescenceSource.empty());
     EXPECT_FALSE(mat.HasFluorescence());
+}
+
+// ============================================================================
+// [timeline] and [[models]]
+// ============================================================================
+// The clock and the models it moves. Read here rather than in either host, for
+// the same reason as everything above it: a timeline that meant one thing to
+// the CLI and another to Studio would be a scene that renders two ways.
+
+TEST_F(ConfigResolveTest, NoTimelineSectionMeansNoClock) {
+    auto config = Parse({});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FALSE(resolved.value().timeline.present);
+    EXPECT_TRUE(resolved.value().models.empty());
+}
+
+TEST_F(ConfigResolveTest, TimelineDefaultsToTwentyTicksASecond) {
+    auto config = Parse({.trailing = "[timeline]\nend_s = 8\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& timeline = resolved.value().timeline;
+    EXPECT_TRUE(timeline.present);
+    EXPECT_DOUBLE_EQ(timeline.start_s, 0.0);
+    EXPECT_DOUBLE_EQ(timeline.end_s, 8.0);
+    EXPECT_DOUBLE_EQ(timeline.ticksPerSecond, 20.0);
+    EXPECT_DOUBLE_EQ(timeline.time_s, 0.0);
+    EXPECT_DOUBLE_EQ(timeline.thermalTimeScale, 1.0);
+}
+
+TEST_F(ConfigResolveTest, SecondsPerTickIsTheOtherWayOfSayingTickRate) {
+    auto config = Parse({.trailing = "[timeline]\nend_s = \"30d\"\nseconds_per_tick = 150\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& timeline = resolved.value().timeline;
+    EXPECT_NEAR(timeline.ticksPerSecond, 1.0 / 150.0, 1e-12);
+    EXPECT_DOUBLE_EQ(timeline.end_s, 30.0 * 86400.0);
+}
+
+TEST_F(ConfigResolveTest, GivingBothTickFormsWarnsAndTakesTheRate) {
+    auto config = Parse({.trailing =
+        "[timeline]\nend_s = 8\nticks_per_second = 25\nseconds_per_tick = 150\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().timeline.ticksPerSecond, 25.0);
+
+    const bool warned = std::any_of(
+        report.messages.begin(), report.messages.end(), [](const ConfigApplyMessage& m) {
+            return m.key == "timeline.ticks_per_second";
+        });
+    EXPECT_TRUE(warned);
+}
+
+TEST_F(ConfigResolveTest, ANonPositiveTickRateFallsBackToTwenty) {
+    auto config = Parse({.trailing = "[timeline]\nend_s = 8\nticks_per_second = 0\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().timeline.ticksPerSecond, 20.0);
+}
+
+TEST_F(ConfigResolveTest, TimeValuesAcceptUnits) {
+    auto config = Parse({.trailing =
+        "[timeline]\nstart_s = \"1h\"\nend_s = \"1.5h\"\ntime_s = \"70min\"\n"
+        "thermal_epoch_stride_s = \"5min\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& timeline = resolved.value().timeline;
+    EXPECT_DOUBLE_EQ(timeline.start_s, 3600.0);
+    EXPECT_DOUBLE_EQ(timeline.end_s, 5400.0);
+    EXPECT_DOUBLE_EQ(timeline.time_s, 4200.0);
+    EXPECT_DOUBLE_EQ(timeline.thermalEpochStride_s, 300.0);
+}
+
+TEST_F(ConfigResolveTest, TimeIsClampedIntoTheSpan) {
+    auto config = Parse({.trailing = "[timeline]\nend_s = 8\ntime_s = 99\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().timeline.time_s, 8.0);
+}
+
+TEST_F(ConfigResolveTest, AnAbsentEndTakesTheLastAuthoredInstant) {
+    auto config = Parse({.trailing = R"(
+[timeline]
+start_s = 0
+
+[[models]]
+file = "car.glb"
+name = "car"
+[[models.motion.keys]]
+t = 0
+position = [0, 0, 0]
+[[models.motion.keys]]
+t = "6s"
+position = [10, 0, 0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().timeline.end_s, 6.0);
+}
+
+TEST_F(ConfigResolveTest, ModelsCarryNameFileRestAndMotion) {
+    auto config = Parse({.trailing = R"(
+[timeline]
+end_s = 8
+
+[[models]]
+file = "car.glb"
+translation = [1.0, 2.0, 3.0]
+[models.motion.location]
+type = "linear"
+velocity = [3, 0, 0]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& models = resolved.value().models;
+    ASSERT_EQ(models.size(), 1u);
+    EXPECT_EQ(models[0].name, "car");  // the file stem, since none was given
+    EXPECT_FLOAT_EQ(models[0].rest[3][1], 2.0f);
+    ASSERT_TRUE(models[0].motion.has_value());
+    EXPECT_EQ(models[0].motion->form, scene::MotionForm::Engine);
+}
+
+TEST_F(ConfigResolveTest, ADuplicateModelNameIsRenamedWithAWarning) {
+    auto config = Parse({.trailing = R"(
+[timeline]
+end_s = 8
+
+[[models]]
+file = "a.glb"
+name = "car"
+
+[[models]]
+file = "b.glb"
+name = "car"
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& models = resolved.value().models;
+    ASSERT_EQ(models.size(), 2u);
+    EXPECT_EQ(models[0].name, "car");
+    EXPECT_EQ(models[1].name, "car_2");
+}
+
+TEST_F(ConfigResolveTest, AModelWithNoFileIsFatalToTheCli) {
+    auto config = Parse({.trailing = "[timeline]\nend_s = 8\n\n[[models]]\nname = \"car\"\n"});
+    auto resolved = ResolveStrict(config);
+    EXPECT_FALSE(resolved.has_value());
+}
+
+TEST_F(ConfigResolveTest, AModelWithNoFileIsSkippedByAnEditor) {
+    auto config = Parse({.trailing =
+        "[timeline]\nend_s = 8\n\n[[models]]\nname = \"car\"\n\n[[models]]\nfile = \"b.glb\"\n"});
+    auto resolved = ResolveLenient(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    ASSERT_EQ(resolved.value().models.size(), 1u);
+    EXPECT_EQ(resolved.value().models[0].name, "b");
+}
+
+TEST_F(ConfigResolveTest, EpochsCanBeAskedForByName) {
+    auto config = Parse({.trailing =
+        "[timeline]\nend_s = 8\nthermal_geometry = \"epochs\"\nthermal_time_scale = 8640\n"
+        "thermal_epoch_min_move_m = 0.5\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& timeline = resolved.value().timeline;
+    EXPECT_EQ(timeline.thermalGeometry, TimelineConfig::ThermalGeometry::Epochs);
+    EXPECT_DOUBLE_EQ(timeline.thermalTimeScale, 8640.0);
+    EXPECT_DOUBLE_EQ(timeline.thermalEpochMinMove_m, 0.5);
 }

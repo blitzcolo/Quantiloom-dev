@@ -208,6 +208,30 @@ public:
     /// Print the entire config to stdout (for debugging)
     void Print() const;
 
+    // ========================================================================
+    // Serialisation
+    // ========================================================================
+
+    /// The whole document as TOML text
+    ///
+    /// Exists because Quantiloom Studio writes configurations by hand, key by
+    /// key, and there are now sections -- `[[models]]` and the motion tables
+    /// under them -- whose grammar it has no business knowing. A section it
+    /// cannot edit it can still carry: read it in, write it back out, byte for
+    /// byte the same trajectory.
+    ///
+    /// toml++ decides the formatting, so this is not the input file
+    /// character-for-character; it is a document that parses to the same
+    /// values.
+    [[nodiscard]] String ToToml() const;
+
+    /// One top-level key, still nested under its own name
+    ///
+    /// `ToToml("models")` gives a `[[models]]` block that can be pasted into
+    /// another document unchanged. An absent key gives an empty string, which
+    /// is what a host wants to append when the section was not there.
+    [[nodiscard]] String ToToml(StringView topLevelKey) const;
+
 private:
     // PIMPL - hide toml++ types
     struct Impl;

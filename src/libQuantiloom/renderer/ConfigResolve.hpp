@@ -61,6 +61,7 @@
 #include "renderer/ConfigApply.hpp"
 #include "renderer/LightingParams.hpp"
 #include "scene/Camera.hpp"
+#include "scene/Motion.hpp"
 #include "scene/Scene.hpp"
 
 #include <glm/glm.hpp>
@@ -81,6 +82,66 @@ namespace quantiloom::rendercore {
  * that reads a file a config pointed at has to agree about this.
  */
 String ResolveConfigPath(const String& path, const String& baseDir);
+
+/**
+ * @brief The global clock a scene is rendered against
+ *
+ * Seconds are the unit everything is stated in; a tick is a frame of the grid
+ * those seconds are sampled on, and `ticksPerSecond` is what relates them --
+ * the same job USD gives `timeCodesPerSecond` and Minecraft gives its twenty
+ * ticks a second. It is a double on purpose: a timeline that spans a month
+ * wants a tick every hundred and fifty seconds, and 0.006667 is a legal
+ * answer.
+ *
+ * Absent from a config, `present` is false and nothing below it means
+ * anything -- a static scene is still a scene.
+ */
+struct TimelineConfig {
+    bool present = false;
+
+    f64 start_s = 0.0;
+    f64 end_s = 0.0;
+    /// > 0. Its reciprocal is `seconds_per_tick`, which a config may write
+    /// instead when that reads better.
+    f64 ticksPerSecond = 20.0;
+    /// Where the timeline stands for this render. Defaults to `start_s`.
+    f64 time_s = 0.0;
+
+    /// Seconds of thermal simulation per second of timeline. A day watched in
+    /// ten seconds is 8640; a truck driven in real time is 1.
+    f64 thermalTimeScale = 1.0;
+
+    /// What the thermal solve does about geometry that moves.
+    ///
+    /// Reference freezes it at one instant and solves once, which is what a
+    /// scene whose motion does not matter thermally wants. Epochs cuts the
+    /// solve into piecewise-static spans, each with its own view factors and
+    /// sun visibility and all of them sharing one temperature state -- so
+    /// ground a truck parked on cools while the ground it left warms back up,
+    /// with the transient in between rather than a step.
+    enum class ThermalGeometry : u8 { Reference, Epochs };
+    ThermalGeometry thermalGeometry = ThermalGeometry::Reference;
+
+    /// Reference mode only: the instant the geometry is frozen at.
+    f64 thermalReference_s = 0.0;
+    /// Epochs mode: the longest an epoch may run while something is moving.
+    /// Zero means "one thermal timestep", which is the finest division the
+    /// stepper can tell apart.
+    f64 thermalEpochStride_s = 0.0;
+    /// A candidate boundary that moved nothing further than this is dropped.
+    f64 thermalEpochMinMove_m = 0.05;
+};
+
+/**
+ * @brief One `[[models]]` entry: a file, where it rests, and how it moves
+ */
+struct ModelEntry {
+    String file;      ///< already through ResolveConfigPath
+    String name;      ///< unique within the config; prefixes the model's node names
+    String variant;   ///< KHR_materials_variants, empty for the default
+    glm::mat4 rest{1.0f};
+    std::optional<scene::MotionSpec> motion;
+};
 
 /**
  * @brief Everything a scene TOML says that does not depend on the scene file.
@@ -165,6 +226,14 @@ struct ResolvedRenderConfig {
 
     // [hyperspectral], echoed rather than resolved: the cube renderer reads it
     bool hasHyperspectralSection = false;
+
+    /// [timeline] -- the global clock. `present` is false for a static scene,
+    /// and every host is expected to check that before reading the rest.
+    TimelineConfig timeline;
+
+    /// [[models]] in file order. Loaded after `scene.gltf`/`scene.usd`, which
+    /// stay legal and may coexist with them.
+    Vector<ModelEntry> models;
 };
 
 /**
@@ -280,6 +349,11 @@ struct ResolvedMaterialSpectra {
     u32 nodesTransformed = 0;
     u32 nodesDuplicated = 0;
     u32 nodesRemoved = 0;
+
+    /// `[nodes.motion]`, paired with the node index the name resolved to. Read
+    /// here rather than in ResolveRenderConfig because this is the pass that
+    /// already knows what a node name means.
+    Vector<std::pair<u32, scene::MotionSpec>> nodeMotion;
 };
 
 /**

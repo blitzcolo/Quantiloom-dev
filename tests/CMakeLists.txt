@@ -239,6 +239,8 @@ set(TEST_SCENE_SOURCES
     test_scene/test_mesh.cpp
     test_scene/test_mesh_optimizer.cpp
     test_scene/test_scene.cpp
+    test_scene/test_motion.cpp
+    test_scene/test_scene_merge.cpp
 )
 
 # IO tests

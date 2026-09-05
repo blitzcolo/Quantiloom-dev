@@ -6,6 +6,7 @@
  */
 
 #include "renderer/ConfigResolve.hpp"
+#include "scene/MotionSpec.hpp"
 
 #include "core/Blackbody.hpp"
 #include "core/RgbToSpectrum.hpp"
@@ -914,6 +915,221 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                     out.thermal.startTime_h, out.thermal.time_h, out.thermal.timestep_s,
                     out.thermal.nodeCount, out.thermal.airTemperature_K,
                     out.thermal.skyTemperature_K);
+    }
+
+
+    // ------------------------------------------------------------------
+    // [timeline] and [[models]]
+    // ------------------------------------------------------------------
+    // A global clock, and the models it moves. Seconds are the unit; a tick is
+    // the frame grid those seconds are sampled on.
+    //
+    //   [timeline]
+    //   start_s = 0                 # any time value may be a number of seconds
+    //   end_s = "8s"                # or a string with a unit: "15s" "90min"
+    //   ticks_per_second = 20       #   "36h" "2.5d"
+    //   # seconds_per_tick = 150    # the same thing said the other way round
+    //   time_s = 2.5                # where the clock stands for this render
+    //   thermal_time_scale = 1.0    # thermal seconds per timeline second
+    //   thermal_geometry = "epochs" # "epochs" | "reference"
+    //   thermal_reference_s = 0     # reference: the instant geometry freezes at
+    //   thermal_epoch_stride_s = "60s"   # epochs: longest span while moving
+    //   thermal_epoch_min_move_m = 0.05  # a boundary that moved less is dropped
+    //
+    //   [[models]]
+    //   file = "assets/models/car.glb"
+    //   name = "car"                # unique; prefixes this model's node names
+    //   variant = "Red"             # KHR_materials_variants
+    //   translation = [0, 0, 0]     # the rest pose, in the [[nodes]] grammar
+    //   rotation_euler_degrees = [0, 90, 0]
+    //
+    //   [models.motion]             # one of three forms; see scene/Motion.hpp
+    //   interpolation = "linear"    # step | linear | cubic
+    //   extrapolate = "hold"        # hold | loop
+    //   keys_file = "car.csv"       # 1a: t,x,y,z[,qx,qy,qz,qw] per row
+    //   [[models.motion.keys]]      # 1b: inline keyframes
+    //   t = 0
+    //   position = [0, 0, 0]
+    //   rotation_euler_degrees = [0, 0, 0]   # or rotation_quat = [x, y, z, w]
+    //   [[models.motion.segments]]  # 2: expressions in t (global) and s (local)
+    //   from = 4
+    //   to = 8
+    //   position = ["8 + 2*s", "0", "0.3*sin(3*s)"]
+    //   [models.motion.location]    # 3: parametric engines
+    //   type = "linear"             # linear | circle
+    //   velocity = [3, 0, 0]        # or heading_deg + speed_m_s
+    //   [models.motion.orientation]
+    //   type = "along_velocity"     # fixed | spin | along_velocity | look_at
+    //
+    // `[[nodes]]` takes the same `[nodes.motion]` table, applied after the
+    // model's own; the two compose as
+    //     world(t) = M_model(t) * R_model * M_node(t) * R_node
+    // with R the rest poses -- which is what `[[nodes]]` writes for a node that
+    // moves, since a pose that meant "where it is at time_s" would stop meaning
+    // anything the moment the clock moved.
+    {
+        auto pathOf = [&](const String& path) {
+            return ResolveConfigPath(path, options.baseDir);
+        };
+        auto reportWarnings = [&](const String& key, const Vector<String>& warnings) {
+            for (const String& text : warnings) diag.Warn(key, text);
+        };
+
+        TimelineConfig& timeline = out.timeline;
+        timeline.present = config.HasSection("timeline");
+        if (timeline.present) {
+            auto section = config.GetTable("timeline");
+            const Config& table = *section;
+            Vector<String> warnings;
+
+            timeline.start_s = scene::ReadDuration(table, "start_s", "timeline", warnings).value_or(0.0);
+
+            const bool hasTps = table.Has("ticks_per_second");
+            const bool hasSpt = table.Has("seconds_per_tick");
+            if (hasTps && hasSpt) {
+                diag.Warn("timeline.ticks_per_second",
+                          "timeline: ticks_per_second and seconds_per_tick both given; "
+                          "ticks_per_second wins");
+            }
+            if (hasTps) {
+                timeline.ticksPerSecond = table.GetDouble("ticks_per_second", 20.0);
+            } else if (hasSpt) {
+                const f64 spt = table.GetDouble("seconds_per_tick", 0.05);
+                timeline.ticksPerSecond = (spt > 0.0) ? 1.0 / spt : 0.0;
+            }
+            if (!(timeline.ticksPerSecond > 0.0)) {
+                diag.Warn("timeline.ticks_per_second",
+                          "timeline: the tick rate must be positive; using 20 ticks per second");
+                timeline.ticksPerSecond = 20.0;
+            }
+
+            const auto end = scene::ReadDuration(table, "end_s", "timeline", warnings);
+            timeline.end_s = end.value_or(timeline.start_s);
+
+            timeline.thermalTimeScale = table.GetDouble("thermal_time_scale", 1.0);
+            if (!(timeline.thermalTimeScale > 0.0)) {
+                diag.Warn("timeline.thermal_time_scale",
+                          "timeline: thermal_time_scale must be positive; using 1");
+                timeline.thermalTimeScale = 1.0;
+            }
+
+            const String geometry = table.GetString("thermal_geometry", "");
+            if (geometry == "reference") {
+                timeline.thermalGeometry = TimelineConfig::ThermalGeometry::Reference;
+            } else if (geometry == "epochs") {
+                timeline.thermalGeometry = TimelineConfig::ThermalGeometry::Epochs;
+            } else if (!geometry.empty()) {
+                diag.Warn("timeline.thermal_geometry",
+                          "timeline.thermal_geometry: \"" + geometry +
+                              "\" is not one of epochs, reference; choosing by whether anything "
+                              "moves");
+            }
+            timeline.thermalReference_s =
+                scene::ReadDuration(table, "thermal_reference_s", "timeline", warnings)
+                    .value_or(timeline.start_s);
+            timeline.thermalEpochStride_s =
+                scene::ReadDuration(table, "thermal_epoch_stride_s", "timeline", warnings).value_or(0.0);
+            timeline.thermalEpochMinMove_m = table.GetDouble("thermal_epoch_min_move_m", 0.05);
+
+            timeline.time_s =
+                scene::ReadDuration(table, "time_s", "timeline", warnings).value_or(timeline.start_s);
+
+            reportWarnings("timeline", warnings);
+        }
+
+        // [[models]]. Only the names, the paths, the rest poses and the
+        // trajectories: loading the files is a scene job and happens in
+        // LoadSceneFromConfig, which is the one place that knows what a Scene is.
+        std::unordered_map<String, u32> nameCounts;
+        for (const Config& entry : config.GetTableArray("models")) {
+            const String file = entry.GetString("file", "");
+            if (file.empty()) {
+                // Required, not fatal: the CLI refuses the config and an
+                // editor carries on with the models that did name a file.
+                (void)diag.Required("models.file", "[[models]] entry has no `file`");
+                continue;
+            }
+
+            ModelEntry model;
+            model.file = ResolveConfigPath(file, options.baseDir);
+            model.variant = entry.GetString("variant", "");
+
+            String name = entry.GetString("name", "");
+            if (name.empty()) name = std::filesystem::path(file).stem().string();
+            if (name.empty()) name = "model";
+            if (const auto seen = nameCounts.find(name); seen != nameCounts.end()) {
+                const String unique = name + "_" + std::to_string(++seen->second);
+                diag.Warn("models.name", "[[models]] name \"" + name +
+                                             "\" is already taken; this one becomes \"" + unique +
+                                             "\"");
+                name = unique;
+            }
+            nameCounts.emplace(name, 1);
+            model.name = name;
+
+            const TransformKeys keys = ParseTransformKeys(entry);
+            if (keys.present && !keys.valid) {
+                diag.Warn("models.matrix",
+                          "[[models]] \"" + model.name + "\": `matrix` needs 16 numbers, found " +
+                              std::to_string(keys.matrixCount) + "; rest pose left as identity");
+            } else if (keys.valid) {
+                model.rest = keys.transform;
+            }
+
+            if (auto motionTable = entry.GetTable("motion")) {
+                Vector<String> warnings;
+                model.motion = scene::ParseMotionSpec(*motionTable, timeline.start_s,
+                                                      "models." + model.name, pathOf, warnings);
+                reportWarnings("models.motion", warnings);
+            }
+
+            out.models.push_back(std::move(model));
+        }
+
+        // A timeline with no end of its own runs to the last thing anybody
+        // authored. Better than refusing: the end is derivable, and a scene
+        // that only wanted to watch a truck drive should not have to restate
+        // when the truck stops.
+        if (timeline.present && !config.Has("timeline.end_s")) {
+            f64 authored = timeline.start_s;
+            for (const ModelEntry& model : out.models) {
+                if (!model.motion) continue;
+                for (const auto& key : model.motion->keys) authored = std::max(authored, key.t_s);
+                for (const auto& segment : model.motion->segments) {
+                    authored = std::max(authored, segment.to_s);
+                }
+            }
+            timeline.end_s = authored;
+            if (authored <= timeline.start_s) {
+                diag.Warn("timeline.end_s",
+                          "timeline has no `end_s` and nothing in it is animated; the clock spans "
+                          "a single instant");
+            } else {
+                diag.Info("timeline.end_s",
+                          "timeline.end_s not given; taking the last authored instant, " +
+                              std::to_string(authored) + " s");
+            }
+        }
+        if (timeline.present && timeline.end_s < timeline.start_s) {
+            diag.Warn("timeline.end_s",
+                      "timeline ends before it starts; end_s is clamped to start_s");
+            timeline.end_s = timeline.start_s;
+        }
+        if (timeline.present) {
+            timeline.time_s = std::clamp(timeline.time_s, timeline.start_s, timeline.end_s);
+            if (out.models.empty() || std::none_of(out.models.begin(), out.models.end(),
+                                                   [](const ModelEntry& m) {
+                                                       return m.motion.has_value();
+                                                   })) {
+                diag.Info("timeline",
+                          "[timeline] is present but no [[models]] entry moves; the clock still "
+                          "drives the thermal hour");
+            }
+            QL_LOG_INFO("  Timeline: {:.3f} s to {:.3f} s at {:g} tick/s, {} model(s), "
+                        "thermal scale {:g}",
+                        timeline.start_s, timeline.end_s, timeline.ticksPerSecond,
+                        out.models.size(), timeline.thermalTimeScale);
+        }
     }
 
     if (diag.failed()) {
@@ -2022,6 +2238,13 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     //   matrix = [ ... 16 numbers, column-major ... ]
     //
     // Grammar shared with [[duplicates]]; see ParseTransformKeys.
+    //
+    // A node may also carry `[nodes.motion]`, the same trajectory grammar
+    // `[models.motion]` uses, applied after its model's. For such a node the
+    // transform above is its REST pose -- where it would stand with every
+    // trajectory at the identity -- rather than where it stands at any
+    // particular instant, because a pose that meant the latter would stop
+    // meaning anything as soon as the clock moved.
     for (const auto& nodeTable : config.GetTableArray("nodes")) {
         const auto name = nodeTable.GetString("name", "");
         if (name.empty()) continue;
@@ -2033,12 +2256,29 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                       "  [[nodes]] names '" + name + "', which the scene has no node by");
             continue;
         }
+        const u32 nodeIndex = static_cast<u32>(std::distance(scene.nodes.begin(), it));
+
+        bool hasMotion = false;
+        if (auto motionTable = nodeTable.GetTable("motion")) {
+            Vector<String> warnings;
+            auto spec = scene::ParseMotionSpec(
+                *motionTable, resolved.timeline.start_s, "nodes." + name,
+                [&](const String& path) { return ResolveConfigPath(path, options.baseDir); },
+                warnings);
+            for (const String& text : warnings) diag.Warn("nodes.motion", text);
+            if (spec) {
+                out.nodeMotion.emplace_back(nodeIndex, std::move(*spec));
+                hasMotion = true;
+            }
+        }
 
         const TransformKeys keys = ParseTransformKeys(nodeTable);
         if (!keys.present) {
-            diag.Warn("nodes",
-                      "  [[nodes]] '" + name + "' sets no transform; give translation, "
-                      "rotation_euler_degrees and scale, or matrix");
+            if (!hasMotion) {
+                diag.Warn("nodes",
+                          "  [[nodes]] '" + name + "' sets no transform; give translation, "
+                          "rotation_euler_degrees and scale, or matrix");
+            }
             continue;
         }
         if (!keys.valid) {

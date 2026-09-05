@@ -296,6 +296,22 @@ if(tinygltf_ADDED)
     message(STATUS "tinygltf v3.0.0 added (header-only glTF 2.0 loader)")
 endif()
 
+# ExprTk: the mathematical expression parser behind [[models.motion.segments]].
+# Header-only, and a big header: it is included by exactly one translation unit
+# (scene/MotionExpr.cpp), which is also the only one that needs /bigobj.
+CPMAddPackage(
+    NAME exprtk
+    GIT_TAG 0.0.3
+    GITHUB_REPOSITORY ArashPartow/exprtk
+    DOWNLOAD_ONLY YES
+)
+
+if(exprtk_ADDED)
+    add_library(exprtk INTERFACE)
+    target_include_directories(exprtk INTERFACE ${exprtk_SOURCE_DIR})
+    message(STATUS "ExprTk v0.0.3 added (header-only expression parser)")
+endif()
+
 # nlohmann/json: JSON parser (header-only), used by the safetensors reader
 CPMAddPackage(
     NAME nlohmann_json
