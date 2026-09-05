@@ -22,6 +22,7 @@
 #include "thermal/ThermalStepper.hpp"
 
 #include <map>
+#include <memory>
 
 namespace quantiloom::thermal {
 
@@ -50,6 +51,30 @@ public:
         Vector<ThermalParameter> parameters;
     };
 
+    /**
+     * @brief A trajectory over a geometry that changes in steps
+     *
+     * Every epoch must carry the same number of elements in the same order --
+     * rigid motion, so only centroids and normals differ. That is what lets
+     * one state vector cross a boundary: the temperature of element i means
+     * the same surface on both sides of it.
+     *
+     * @param schedule  outlives this, like everything else here. Epoch zero's
+     *                  geometry is what the steady-state relaxation, the
+     *                  participation count and the time-constant estimate all
+     *                  use, since they describe the world the trajectory
+     *                  starts in.
+     */
+    ThermalTimeline(const Desc& desc, const ThermalGeometrySchedule& schedule,
+                    const Vector<ThermalMaterial>& materials,
+                    const Vector<std::pair<f64, ThermalForcing>>& forcingSeries,
+                    const ThermalForcing& constantForcing, IThermalStepper& stepper);
+
+    /// One geometry for the whole run.
+    ///
+    /// Copies @p elements into an owned single-epoch schedule -- the one place
+    /// here that copies rather than referencing. Kept because it is what every
+    /// caller with nothing moving wants to write, and what the tests do write.
     ThermalTimeline(const Desc& desc, const Vector<ThermalElement>& elements,
                     const Vector<ThermalMaterial>& materials,
                     const ExchangeGeometry& exchange,
@@ -89,23 +114,47 @@ public:
     [[nodiscard]] u32 ParticipatingElements() const { return m_participatingElements; }
     [[nodiscard]] f64 ShortestTimeConstant_s() const { return m_shortestTau; }
 
+    [[nodiscard]] u32 EpochCount() const {
+        return static_cast<u32>(m_schedule->Count());
+    }
+    [[nodiscard]] u32 EpochAt(f64 time_h) const {
+        return static_cast<u32>(m_schedule->EpochAt(time_h));
+    }
+    /// The geometry in force at @p time_h -- what SurfaceFluxesAt decomposed
+    /// against, and what a field extracted at that hour must read its normals
+    /// from.
+    [[nodiscard]] const ThermalGeometryEpoch& GeometryAt(f64 time_h) const {
+        return m_schedule->At(time_h);
+    }
+
 private:
     i64 GridIndex(f64 time_h) const;
     f64 GridTime(i64 k) const;
     void StepRange(ThermalState& state, i64 from, i64 to);
+    /// Which epoch a grid step belongs to, from the boundaries precomputed at
+    /// construction. Asked per batch rather than per step.
+    usize EpochForStep(i64 k) const;
+    void Initialise();
 
     Desc m_desc;
 
-    const Vector<ThermalElement>& m_elements;
+    /// Only the single-geometry constructor uses this; the other one binds
+    /// straight to the caller's. Declared first so it outlives the reference.
+    std::unique_ptr<ThermalGeometrySchedule> m_ownedSchedule;
+    const ThermalGeometrySchedule* m_schedule = nullptr;
+
     const Vector<ThermalMaterial>& m_materials;
-    const ExchangeGeometry& m_exchange;
-    const SunVisibilityTable& m_sunTable;
     const Vector<std::pair<f64, ThermalForcing>>& m_forcingSeries;
     ThermalForcing m_constantForcing;
     IThermalStepper& m_stepper;
 
+    /// Grid step at which each epoch begins. Entry 0 is always 0; entry e is
+    /// ceil((from_h - startTime_h) * 3600 / dt), so a boundary that falls
+    /// inside a step belongs to the step after it.
+    Vector<i64> m_epochBoundaryStep;
+
     std::map<i64, ThermalState> m_checkpoints;
-    i64 m_checkpointStride;  // in grid steps
+    i64 m_checkpointStride = 1;  // in grid steps
     ThermalState m_scratch;
     u32 m_lastStepCount = 0;
     u32 m_participatingElements = 0;

@@ -310,97 +310,148 @@ void LogThermalSolveSummary(const ThermalResult& result) {
                 result.meanTemperature_K);
 }
 
-ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
-                              const ExchangeGeometry& exchange,
-                              const SunVisibilityTable& sunTable, IThermalStepper* stepper) {
-    ThermalResult result;
+// ============================================================================
+// A solve kept alive
+// ============================================================================
+// What used to be the whole of RunThermalSolve, cut where the setup ends and
+// the question begins. RunThermalSolve is now Build followed by one FieldAt;
+// a sequence is Build followed by many.
+
+struct ThermalSolveSession::Impl {
+    ThermalConfig config;
+    ThermalMesh mesh;
+    Vector<ThermalMaterial> materials;
+    ThermalGeometrySchedule schedule;
+    Vector<std::pair<f64, ThermalForcing>> forcingSeries;
+    ThermalForcing constantForcing;
+
+    CpuCrankNicolsonStepper cpuStepper;
+    IThermalStepper* active = nullptr;
+    std::unique_ptr<ThermalTimeline> timeline;
+
+    u32 participatingElements = 0;
+    u32 exchangeNonZeros = 0;
+
+    explicit Impl(const ConvectionLaw& law) : cpuStepper(law) {}
+};
+
+ThermalSolveSession::ThermalSolveSession() = default;
+ThermalSolveSession::~ThermalSolveSession() = default;
+
+Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
+    const Scene& scene, const ThermalConfig& config, ThermalGeometrySchedule schedule,
+    IThermalStepper* stepper) {
+    using BuildResult = Result<std::unique_ptr<ThermalSolveSession>, String>;
+
+    auto session = std::unique_ptr<ThermalSolveSession>(new ThermalSolveSession());
+    session->m_impl = std::make_unique<Impl>(config.convection);
+    Impl& impl = *session->m_impl;
+    impl.config = config;
 
     // Materials first: the shell pairing needs to know which of them are
     // shells and how thick they are, so the mesh cannot be built before them.
     u32 named = 0;
-    const Vector<ThermalMaterial> materials = BuildSolvedMaterials(scene, config, &named);
+    impl.materials = BuildSolvedMaterials(scene, config, &named);
     if (named == 0) {
-        result.error = "no material in the scene has thermal properties; "
-                       "set thermal_conductivity_w_mk on at least one";
-        return result;
+        return BuildResult::Err("no material in the scene has thermal properties; "
+                                "set thermal_conductivity_w_mk on at least one");
     }
 
-    ThermalMesh mesh =
-        BuildThermalMesh(scene, MeshOptionsFor(materials, config.lateralConduction));
-    result.elementCount = static_cast<u32>(mesh.elements.size());
-    result.instanceElementBase = std::move(mesh.instanceElementBase);
-    if (mesh.elements.empty()) {
-        result.error = "the scene has no triangles to solve on";
-        return result;
+    // The mesh is built at whatever pose the scene is in now, and only its
+    // TOPOLOGY is used from here: the instance bases, the shell partners, the
+    // shared edges. All three are invariant under the rigid motion an epoch
+    // schedule is made of, so this does not have to match any particular epoch.
+    // The per-epoch geometry -- centroids and normals -- lives in the schedule.
+    impl.mesh = BuildThermalMesh(scene, MeshOptionsFor(impl.materials,
+                                                      config.lateralConduction));
+    if (impl.mesh.elements.empty()) {
+        return BuildResult::Err("the scene has no triangles to solve on");
+    }
+    const usize n = impl.mesh.elements.size();
+
+    impl.schedule = std::move(schedule);
+    if (impl.schedule.Empty()) {
+        impl.schedule = ThermalGeometrySchedule::Single(MakeOpenSkyExchange(n), {});
     }
 
-    for (const ThermalElement& element : mesh.elements) {
-        if (element.area_m2 > 0.0f && element.materialId < materials.size() &&
-            materials[element.materialId].ParticipatesInSolve()) {
-            ++result.participatingElements;
-        }
-    }
-    result.exchangeNonZeros = static_cast<u32>(exchange.viewFactors.NonZeros());
-
-    ExchangeGeometry openSky = MakeOpenSkyExchange(mesh.elements.size());
-    const bool haveExchange = exchange.skyFraction.size() == mesh.elements.size();
-    if (!haveExchange && !exchange.skyFraction.empty()) {
-        QL_LOG_WARN("  Thermal: the exchange geometry has {} rows for {} elements; "
-                    "falling back to open sky",
-                    exchange.skyFraction.size(), mesh.elements.size());
-    }
-
-    // Lateral conduction is mesh-derived and the caller's exchange is const,
-    // so a scene that asks for it pays one copy of the view factors. Only that
-    // scene does: with the term off, `withLateral` stays empty and the
-    // reference below binds to the caller's rows as it always has.
-    ExchangeGeometry withLateral;
+    // Lateral conduction is mesh-derived and invariant under rigid motion, so
+    // it is built once and shared by every epoch's exchange.
+    CsrMatrix lateral;
     if (config.lateralConduction) {
-        withLateral = haveExchange ? exchange : std::move(openSky);
-        withLateral.lateral = BuildLateralConduction(mesh, materials);
-        if (withLateral.lateral.NonZeros() == 0) {
+        lateral = BuildLateralConduction(impl.mesh, impl.materials);
+        if (lateral.NonZeros() == 0) {
             QL_LOG_WARN("  Thermal: lateral_conduction is on but no two triangles of any "
                         "object share an edge whose materials both solve; the term does "
                         "nothing");
         }
-        if (mesh.nonManifoldEdgeCount > 0) {
+        if (impl.mesh.nonManifoldEdgeCount > 0) {
             QL_LOG_WARN("  Thermal: {} edges are shared by more than two triangles; each is "
                         "joined to the first two",
-                        mesh.nonManifoldEdgeCount);
+                        impl.mesh.nonManifoldEdgeCount);
         }
     }
-    const ExchangeGeometry& geometry = config.lateralConduction ? withLateral
-                                       : haveExchange           ? exchange
-                                                                : openSky;
 
-    // Synthesise a single-column sun table from the exchange when no table
-    // is provided. This preserves the old behaviour: one sun direction for
-    // the entire run.
-    SunVisibilityTable effectiveTable = sunTable;
-    if (effectiveTable.SampleCount() == 0 && !geometry.sunVisibility.empty()) {
-        effectiveTable.sampleTime_h = {config.startTime_h};
-        effectiveTable.visibility = geometry.sunVisibility;
-        effectiveTable.sampleDirection = {config.sunDirection};
+    for (usize e = 0; e < impl.schedule.Count(); ++e) {
+        ThermalGeometryEpoch& epoch = impl.schedule.epochs[e];
+
+        // The single-geometry case says nothing about elements, because the
+        // mesh above already is them.
+        if (epoch.elements.empty()) epoch.elements = impl.mesh.elements;
+        if (epoch.elements.size() != n) {
+            return BuildResult::Err("epoch " + std::to_string(e) + " has " +
+                                    std::to_string(epoch.elements.size()) +
+                                    " elements where the mesh has " + std::to_string(n));
+        }
+
+        if (epoch.exchange.skyFraction.size() != n) {
+            if (!epoch.exchange.skyFraction.empty()) {
+                QL_LOG_WARN("  Thermal: the exchange geometry has {} rows for {} elements; "
+                            "falling back to open sky",
+                            epoch.exchange.skyFraction.size(), n);
+            }
+            epoch.exchange = MakeOpenSkyExchange(n);
+        }
+        epoch.exchange.lateral = lateral;
+
+        // Synthesise a single-column sun table from the exchange when none was
+        // given. This preserves the old behaviour: one sun direction for the
+        // whole run.
+        if (epoch.sunTable.SampleCount() == 0 && !epoch.exchange.sunVisibility.empty()) {
+            epoch.sunTable.sampleTime_h = {config.startTime_h};
+            epoch.sunTable.visibility = epoch.exchange.sunVisibility;
+            epoch.sunTable.sampleDirection = {config.sunDirection};
+        }
+
+        // What the short wave does off the other surfaces, per sun column.
+        // Depends on geometry and absorptivity and nothing else, so it is baked
+        // once per epoch rather than gathered again on every step -- and skipped
+        // when the builder that produced this schedule already did it.
+        if (epoch.sunTable.diffuseGain.empty()) {
+            BakeShortwaveGains(epoch.exchange, epoch.elements, impl.materials,
+                               epoch.sunTable);
+        }
     }
 
-    // What the short wave does off the other surfaces, per sun column. Depends
-    // on geometry and absorptivity and nothing else, so it is baked once here
-    // rather than gathered again on every step.
-    BakeShortwaveGains(geometry, mesh.elements, materials, effectiveTable);
+    impl.exchangeNonZeros =
+        static_cast<u32>(impl.schedule.epochs.front().exchange.viewFactors.NonZeros());
+    for (const ThermalElement& element : impl.mesh.elements) {
+        if (element.area_m2 > 0.0f && element.materialId < impl.materials.size() &&
+            impl.materials[element.materialId].ParticipatesInSolve()) {
+            ++impl.participatingElements;
+        }
+    }
 
-    const auto forcingSeries = LoadForcingCsv(config.forcingFile);
+    impl.forcingSeries = LoadForcingCsv(config.forcingFile);
 
-    ThermalForcing constantForcing;
-    constantForcing.airTemperature_K = config.airTemperature_K;
-    constantForcing.sunIrradiance_W_m2 = config.sunIrradiance_W_m2;
-    constantForcing.diffuseIrradiance_W_m2 = config.diffuseIrradiance_W_m2;
-    constantForcing.sunDirection = config.sunDirection;
-    constantForcing.skyTemperature_K = config.skyTemperature_K;
-    constantForcing.relativeHumidity = config.relativeHumidity;
+    impl.constantForcing = {};
+    impl.constantForcing.airTemperature_K = config.airTemperature_K;
+    impl.constantForcing.sunIrradiance_W_m2 = config.sunIrradiance_W_m2;
+    impl.constantForcing.diffuseIrradiance_W_m2 = config.diffuseIrradiance_W_m2;
+    impl.constantForcing.sunDirection = config.sunDirection;
+    impl.constantForcing.skyTemperature_K = config.skyTemperature_K;
+    impl.constantForcing.relativeHumidity = config.relativeHumidity;
 
-    // The caller's stepper if it brought one, otherwise our own. The local
-    // outlives the timeline below either way.
-    CpuCrankNicolsonStepper cpuStepper(config.convection);
+    // The caller's stepper if it brought one, otherwise our own.
     IThermalStepper* chosen = stepper;
     if (chosen != nullptr && chosen->Convection().model != config.convection.model) {
         // A stepper that does not evaluate the law this run asked for would
@@ -408,28 +459,28 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         // to the one that does, and it changes the stepper's name, so the
         // solve cache cannot serve the two for each other either.
         QL_LOG_INFO("  Thermal stepper: {} does not carry the requested convection law; "
-                    "using {}", chosen->Name(), cpuStepper.Name());
+                    "using {}", chosen->Name(), impl.cpuStepper.Name());
         chosen = nullptr;
     }
     if (chosen != nullptr && config.lateralConduction && !chosen->CarriesLateralConduction()) {
         QL_LOG_INFO("  Thermal stepper: {} does not carry lateral conduction; using {}",
-                    chosen->Name(), cpuStepper.Name());
+                    chosen->Name(), impl.cpuStepper.Name());
         chosen = nullptr;
     }
-    if (chosen != nullptr && mesh.shellPairCount > 0 && !chosen->CarriesShells()) {
+    if (chosen != nullptr && impl.mesh.shellPairCount > 0 && !chosen->CarriesShells()) {
         QL_LOG_INFO("  Thermal stepper: {} solves a shell as two independent slabs; "
-                    "using {}", chosen->Name(), cpuStepper.Name());
+                    "using {}", chosen->Name(), impl.cpuStepper.Name());
         chosen = nullptr;
     }
-    cpuStepper.SetShellPartners(mesh.shellPartner);
-    IThermalStepper& activeStepper = chosen != nullptr ? *chosen : cpuStepper;
+    impl.cpuStepper.SetShellPartners(impl.mesh.shellPartner);
+    impl.active = (chosen != nullptr) ? chosen : &impl.cpuStepper;
 
     f64 fastestWind_m_s = 0.0;
-    for (const auto& [time_h, forcing] : forcingSeries) {
+    for (const auto& [time_h, forcing] : impl.forcingSeries) {
         fastestWind_m_s = std::max(fastestWind_m_s, forcing.windSpeed_m_s);
     }
     const f64 shortest = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
-        mesh.elements, materials, config.airTemperature_K, config.convection,
+        impl.mesh.elements, impl.materials, config.airTemperature_K, config.convection,
         fastestWind_m_s);
     if (std::isfinite(shortest) && config.timestep_s > shortest) {
         QL_LOG_WARN("  Thermal: timestep {:.0f} s is longer than the shortest surface time "
@@ -444,11 +495,11 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     // field oscillates between neighbours instead of smoothing.
     if (config.lateralConduction) {
         const f64 lateralTau =
-            LateralTimeConstantSeconds(geometry.lateral, mesh.elements, materials);
+            LateralTimeConstantSeconds(lateral, impl.mesh.elements, impl.materials);
         if (std::isfinite(lateralTau)) {
             QL_LOG_INFO("  Thermal: lateral conduction over {} joins, shortest lateral "
                         "time constant {:.0f} s",
-                        geometry.lateral.NonZeros() / 2, lateralTau);
+                        lateral.NonZeros() / 2, lateralTau);
             if (config.timestep_s > 2.0 * lateralTau) {
                 QL_LOG_WARN("  Thermal: timestep {:.0f} s is past twice the shortest "
                             "lateral time constant ({:.0f} s). The lateral term is "
@@ -470,26 +521,61 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     desc.sunMemoryLags = config.sunCorrection ? config.sunMemoryLags : 0u;
     desc.parameters = config.parameterSensitivities;
 
-    ThermalTimeline timeline(desc, mesh.elements, materials, geometry,
-                             effectiveTable, forcingSeries, constantForcing, activeStepper);
+    impl.timeline = std::make_unique<ThermalTimeline>(desc, impl.schedule, impl.materials,
+                                                      impl.forcingSeries,
+                                                      impl.constantForcing, *impl.active);
+    return BuildResult(std::move(session));
+}
 
-    const ThermalState& state = timeline.StateAt(config.time_h);
-    result.stepsTaken = timeline.LastStepCount();
+u32 ThermalSolveSession::EpochCount() const {
+    return static_cast<u32>(m_impl->schedule.Count());
+}
+
+u32 ThermalSolveSession::EpochAt(const f64 time_h) const {
+    return static_cast<u32>(m_impl->schedule.EpochAt(time_h));
+}
+
+u32 ThermalSolveSession::ElementCount() const {
+    return static_cast<u32>(m_impl->mesh.elements.size());
+}
+
+const ThermalGeometrySchedule& ThermalSolveSession::Schedule() const {
+    return m_impl->schedule;
+}
+
+ThermalResult ThermalSolveSession::FieldAt(const f64 time_h) {
+    Impl& impl = *m_impl;
+    ThermalResult result;
+
+    // The geometry in force at this hour, which is where the normals come from:
+    // whether the sun is behind an element is a question about where that
+    // element is NOW, not about where it started.
+    const ThermalGeometryEpoch& epoch = impl.schedule.At(time_h);
+    const Vector<ThermalElement>& elements = epoch.elements;
+    const SunVisibilityTable& effectiveTable = epoch.sunTable;
+    const ExchangeGeometry& geometry = epoch.exchange;
+
+    result.elementCount = static_cast<u32>(elements.size());
+    result.instanceElementBase = impl.mesh.instanceElementBase;
+    result.participatingElements = impl.participatingElements;
+    result.exchangeNonZeros = impl.exchangeNonZeros;
+
+    const ThermalState& state = impl.timeline->StateAt(time_h);
+    result.stepsTaken = impl.timeline->LastStepCount();
 
     // ------------------------------------------------------------------
     // What the renderer reads
     // ------------------------------------------------------------------
-    result.surfaceTemperature_K.resize(mesh.elements.size());
+    result.surfaceTemperature_K.resize(elements.size());
     // What the shading pass needs to undo the per-triangle quantisation of the
     // shadow: the tangent, and the visibility it was taken about.
     const bool haveTangent = state.HasSensitivity();
     result.sunDirection =
-        SampleForcing(forcingSeries, config.time_h, constantForcing).sunDirection;
+        SampleForcing(impl.forcingSeries, time_h, impl.constantForcing).sunDirection;
     if (haveTangent) {
-        result.sunSensitivity_K.assign(mesh.elements.size(), 0.0f);
+        result.sunSensitivity_K.assign(elements.size(), 0.0f);
         result.sunVisibility =
-            SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
-                                  mesh.elements.size());
+            SampleSunVisibilityAt(effectiveTable, geometry, time_h, elements.size());
     }
 
     // The per-column tangents, and the sun position each belongs to. A slot
@@ -500,7 +586,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                           effectiveTable.sampleDirection.size() ==
                               effectiveTable.SampleCount();
     if (haveLags) {
-        const usize n = mesh.elements.size();
+        const usize n = elements.size();
         result.lagSlots = state.LagSlots();
         result.lagSensitivity_K.assign(result.lagSlots * n, 0.0f);
         result.lagVisibility.assign(result.lagSlots * n, 0.0f);
@@ -515,16 +601,16 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
             const f32* visibility = effectiveTable.Column(column);
 
             for (usize e = 0; e < n; ++e) {
-                const u32 id = mesh.elements[e].materialId;
-                const bool solved = mesh.elements[e].area_m2 > 0.0f &&
-                                    id < materials.size() &&
-                                    materials[id].ParticipatesInSolve();
+                const u32 id = elements[e].materialId;
+                const bool solved = elements[e].area_m2 > 0.0f &&
+                                    id < impl.materials.size() &&
+                                    impl.materials[id].ParticipatesInSolve();
                 if (!solved) continue;
                 result.lagVisibility[s * n + e] = visibility[e];
                 // Same rule as the whole-day tangent, against this column's own
                 // sun: a face the sun was behind then would have been dark
                 // however finely the shader resolved it.
-                if (glm::dot(mesh.elements[e].normal, direction) > 0.0f) {
+                if (glm::dot(elements[e].normal, direction) > 0.0f) {
                     result.lagSensitivity_K[s * n + e] =
                         static_cast<f32>(state.SurfaceLagSensitivity(s, e));
                 }
@@ -536,15 +622,15 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     // these are not zeroed for a face the sun is behind: a surface out of the
     // sun still responds to its emissivity and its heat capacity.
     if (state.HasParameterSensitivity()) {
-        const usize n = mesh.elements.size();
+        const usize n = elements.size();
         result.parameters = state.parameters;
         result.parameterSensitivity.assign(result.parameters.size() * n, 0.0f);
         for (usize p = 0; p < result.parameters.size(); ++p) {
             for (usize e = 0; e < n; ++e) {
-                const u32 id = mesh.elements[e].materialId;
-                const bool solved = mesh.elements[e].area_m2 > 0.0f &&
-                                    id < materials.size() &&
-                                    materials[id].ParticipatesInSolve();
+                const u32 id = elements[e].materialId;
+                const bool solved = elements[e].area_m2 > 0.0f &&
+                                    id < impl.materials.size() &&
+                                    impl.materials[id].ParticipatesInSolve();
                 if (!solved) continue;
                 result.parameterSensitivity[p * n + e] =
                     static_cast<f32>(state.SurfaceParameterSensitivity(p, e));
@@ -556,10 +642,10 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
     result.minTemperature_K = std::numeric_limits<f64>::max();
     result.maxTemperature_K = std::numeric_limits<f64>::lowest();
 
-    for (usize e = 0; e < mesh.elements.size(); ++e) {
-        const u32 id = mesh.elements[e].materialId;
-        const bool solved = mesh.elements[e].area_m2 > 0.0f && id < materials.size() &&
-                            materials[id].ParticipatesInSolve();
+    for (usize e = 0; e < elements.size(); ++e) {
+        const u32 id = elements[e].materialId;
+        const bool solved = elements[e].area_m2 > 0.0f && id < impl.materials.size() &&
+                            impl.materials[id].ParticipatesInSolve();
         const f64 T = solved ? state.Surface(e) : 0.0;
         result.surfaceTemperature_K[e] = static_cast<f32>(T);
         if (haveTangent) {
@@ -573,7 +659,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
             // viewer, so it cannot tell this case from a hit on the back of a
             // sun-facing triangle -- which has the same temperature as the
             // front and does want the correction.
-            if (glm::dot(mesh.elements[e].normal, result.sunDirection) <= 0.0f) {
+            if (glm::dot(elements[e].normal, result.sunDirection) <= 0.0f) {
                 result.sunSensitivity_K[e] = 0.0f;
             }
         }
@@ -590,7 +676,7 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
         result.maxTemperature_K = 0.0;
     }
 
-    if (!config.dumpElementsFile.empty()) {
+    if (!impl.config.dumpElementsFile.empty()) {
         Vector<f64> lagTime_h;
         if (haveLags) {
             lagTime_h.reserve(result.lagSlots);
@@ -601,17 +687,40 @@ ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
                                         : 0.0);
             }
         }
-        DumpThermalElements(config.dumpElementsFile, mesh.elements, materials, geometry,
+        DumpThermalElements(impl.config.dumpElementsFile, elements, impl.materials, geometry,
                             result.surfaceTemperature_K, result.sunSensitivity_K,
-                            SampleSunVisibilityAt(effectiveTable, geometry, config.time_h,
-                                                  mesh.elements.size()),
+                            SampleSunVisibilityAt(effectiveTable, geometry, time_h,
+                                                  elements.size()),
                             result.lagSensitivity_K, result.lagVisibility, lagTime_h,
                             result.lagDirection, result.parameterSensitivity,
                             result.parameters);
     }
 
+    return result;
+}
+
+ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
+                              ThermalGeometrySchedule schedule, IThermalStepper* stepper) {
+    auto session = ThermalSolveSession::Build(scene, config, std::move(schedule), stepper);
+    if (!session) {
+        ThermalResult result;
+        result.error = session.error();
+        return result;
+    }
+
+    ThermalResult result = (*session)->FieldAt(config.time_h);
     LogThermalSolveSummary(result);
     return result;
+}
+
+ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
+                              const ExchangeGeometry& exchange,
+                              const SunVisibilityTable& sunTable, IThermalStepper* stepper) {
+    // The single-geometry spelling. Its epoch brings no elements of its own:
+    // the session's mesh is them, and copying it would be a second copy of the
+    // largest thing here.
+    return RunThermalSolve(scene, config,
+                           ThermalGeometrySchedule::Single(exchange, sunTable), stepper);
 }
 
 }  // namespace quantiloom::thermal

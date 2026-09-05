@@ -37,7 +37,10 @@
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
+#include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
+#include "renderer/TimelineState.hpp"
+#include "thermal/ThermalEpochs.hpp"
 #include "core/LibVersion.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
@@ -186,14 +189,64 @@ struct OfflineRenderer::Impl {
         }
     }
 
+    // ------------------------------------------------------------------
+    // The clock, and the thermal solve it drives
+    // ------------------------------------------------------------------
+
+    /// Which nodes move, and where they would stand if they did not. Inert for
+    /// a config with no [timeline].
+    rendercore::TimelineState timeline;
+
+    /// Kept alive across frames: setting up a solve is a mesh, a stepper, a
+    /// steady state and a schedule, and a sequence would otherwise pay for all
+    /// of it per frame -- and lose the checkpoints that make the next hour
+    /// cheap.
+    std::unique_ptr<thermal::ThermalSolveSession> thermalSession;
+    /// Outlives the session, which holds a pointer to it.
+    std::unique_ptr<rendercore::GpuThermalStepper> thermalGpuStepper;
+    thermal::ThermalConfig thermalConfig;
+    thermal::ThermalMesh thermalMesh;
+    Vector<thermal::ThermalMaterial> thermalSolvedMaterials;
+    String thermalStepperName;
+    String thermalGpuIdentity;
+    bool thermalCacheEligible = false;
+    std::filesystem::path thermalCacheDir;
+    /// What the last upload put on the GPU, so an hour that lands on the same
+    /// field is not re-uploaded.
+    f64 thermalUploadedHour = std::numeric_limits<f64>::quiet_NaN();
+
+    /// Lends the scene to the epoch builder.
+    struct OfflineEpochHost final : rendercore::EpochGeometryHost {
+        Impl* owner = nullptr;
+        f64 restore_s = 0.0;
+        bool captured = false;
+        VkAccelerationStructureKHR ApplyEpoch(f64 t_s) override;
+        void Restore() override;
+    };
+    OfflineEpochHost epochHost;
+
     SetupResult BuildScene();
     SetupResult BuildIlluminants();
     SetupResult BuildPipeline();
-    /// Run the surface energy balance, if the scene asked for one, and leave
-    /// its temperatures in thermalTemperatureBuffer. Always leaves a valid
-    /// buffer behind -- a single zero entry when there was no solve -- because
-    /// an unbound descriptor is not a valid one.
-    void RunThermalSolver();
+
+    /// Set up the surface energy balance, if the scene asked for one: mesh,
+    /// stepper, geometry schedule, trajectory. Leaves nothing on the GPU --
+    /// that is UploadThermalFieldAt's job -- except on the cache-hit path,
+    /// where the field is all there was to fetch.
+    void BuildThermalSession();
+
+    /// Put the field at one hour where the shader reads it. Always leaves a
+    /// valid buffer behind -- a single zero entry when there was no solve --
+    /// because an unbound descriptor is not a valid one.
+    void UploadThermalFieldAt(f64 time_h);
+
+    /// Put one field on the GPU, rebinding only when the buffer had to grow.
+    /// An empty result is the "no solve" record every path must still leave.
+    void UploadThermalResult(const thermal::ThermalResult& result);
+
+    /// The hour the timeline's current second maps to, or the config's own
+    /// `thermal.time_h` when there is no timeline.
+    [[nodiscard]] f64 ThermalHourNow() const;
 
     OfflineRenderOutput RenderHyperspectral();
     OfflineRenderOutput RenderSingleFrame();
@@ -208,7 +261,9 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
 
     QL_LOG_INFO("Loading scene...");
 
-    auto sceneResult = rendercore::LoadSceneFromConfig(config, configOptions.baseDir);
+    rendercore::SceneLoadInfo sceneInfo;
+    auto sceneResult =
+        rendercore::LoadSceneFromConfig(config, configOptions.baseDir, &resolved, &sceneInfo);
     if (!sceneResult.has_value()) {
         return SetupResult::Err("Failed to load scene: " + sceneResult.error());
     }
@@ -260,6 +315,15 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
         }
     }
 
+    // The clock, once [[nodes]] has had its say: the rest poses it snapshots
+    // are the ones that pass just wrote.
+    timeline = rendercore::TimelineState::Build(loadedScene, resolved.timeline,
+                                                resolved.models, sceneInfo,
+                                                spectra.nodeMotion, configReport);
+    if (timeline.Present()) {
+        timeline.Apply(loadedScene, resolved.timeline.time_s);
+    }
+
     // Endmember weight maps, unmixed out of the base colours. Here because it
     // needs both what the resolve just produced (the endmember colours) and
     // what the upload is about to destroy (the base-colour pixels): the window
@@ -285,48 +349,103 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     return SetupResult::Ok();
 }
 
-void OfflineRenderer::Impl::RunThermalSolver() {
+void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& result) {
     VulkanContext& context = *contextRef;
+
+    // Uploaded in place whenever the size did not move, which is every frame of
+    // a sequence: the pipeline's descriptor points at the buffer OBJECT, so
+    // replacing it without rebinding would leave the shader reading memory that
+    // has been freed.
+    const auto upload = [&](std::unique_ptr<GpuBuffer>& buffer, const void* data,
+                            usize bytes, auto&& rebind) {
+        if (buffer && buffer->GetSize() == bytes) {
+            buffer->Upload(data, bytes);
+            return;
+        }
+        buffer = std::make_unique<GpuBuffer>(context.GetAllocator(), bytes,
+                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        buffer->Upload(data, bytes);
+        // Null before BuildPipeline runs, which is the first call; the pipeline
+        // picks these up from the bindings struct then.
+        if (pipeline) rebind(*buffer);
+    };
+
+    const f32 zero = 0.0f;
+    const bool empty = result.surfaceTemperature_K.empty();
+    upload(thermalTemperatureBuffer,
+           empty ? static_cast<const void*>(&zero)
+                 : static_cast<const void*>(result.surfaceTemperature_K.data()),
+           empty ? sizeof(f32) : result.surfaceTemperature_K.size() * sizeof(f32),
+           [this](const GpuBuffer& b) { pipeline->BindThermalTemperatureBuffer(b); });
 
     // The sun response goes up wherever the temperatures do, including on
     // every failure path: binding 26 has no partially-bound flag either, so
     // "no solve" is one inert record rather than no descriptor.
-    auto uploadSunResponse = [&](const Vector<f32>& sensitivity,
-                                 const Vector<f32>& visibility,
-                                 const glm::vec3& sunDirection,
-                                 const Vector<f32>& lagSensitivity = {},
-                                 const Vector<f32>& lagVisibility = {},
-                                 const Vector<glm::vec3>& lagDirection = {}) {
-        const auto records = rendercore::MakeThermalSunResponse(
-            sensitivity, visibility, sunDirection, lagSensitivity, lagVisibility,
-            lagDirection);
-        const usize bytes = records.size() * sizeof(rendercore::ThermalSunResponseGpu);
-        thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        thermalSunResponseBuffer->Upload(records.data(), bytes);
-    };
+    const auto records = rendercore::MakeThermalSunResponse(
+        result.sunSensitivity_K, result.sunVisibility, result.sunDirection,
+        result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
+    upload(thermalSunResponseBuffer, records.data(),
+           records.size() * sizeof(rendercore::ThermalSunResponseGpu),
+           [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(b); });
 
-    auto bindEmpty = [&] {
-        const f32 zero = 0.0f;
-        thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
-        uploadSunResponse({}, {}, glm::vec3(0.0f));
-    };
+    // Point the instances at their elements. This is the whole of how a
+    // triangle in the shader finds the temperature the balance gave it.
+    if (!result.instanceElementBase.empty()) {
+        geometry.SetThermalElementBases(result.instanceElementBase);
+    }
+}
+
+VkAccelerationStructureKHR OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(const f64 t_s) {
+    if (!captured) {
+        restore_s = owner->timeline.Current_s();
+        captured = true;
+    }
+    owner->timeline.Apply(owner->loadedScene, t_s);
+    if (owner->geometry.IsValid()) {
+        if (!owner->geometry.RefitTlas(*owner->contextRef, owner->loadedScene)) {
+            owner->geometry.RebuildTlas(*owner->contextRef, owner->loadedScene);
+        }
+    }
+    return owner->geometry.IsValid() ? owner->geometry.Tlas().GetHandle() : VK_NULL_HANDLE;
+}
+
+void OfflineRenderer::Impl::OfflineEpochHost::Restore() {
+    if (!captured) return;
+    owner->timeline.Apply(owner->loadedScene, restore_s);
+    if (owner->geometry.IsValid()) {
+        if (!owner->geometry.RefitTlas(*owner->contextRef, owner->loadedScene)) {
+            owner->geometry.RebuildTlas(*owner->contextRef, owner->loadedScene);
+        }
+    }
+    captured = false;
+}
+
+f64 OfflineRenderer::Impl::ThermalHourNow() const {
+    if (timeline.Present() && timeline.ThermalMapped()) {
+        return timeline.HourAt(timeline.Current_s());
+    }
+    return resolved.thermal.time_h;
+}
+
+void OfflineRenderer::Impl::BuildThermalSession() {
+    VulkanContext& context = *contextRef;
 
     if (!resolved.thermal.enabled) {
-        bindEmpty();
         return;
     }
 
     QL_LOG_INFO("Running the thermal solver...");
 
-    thermal::ThermalConfig thermalConfig = resolved.thermal;
+    thermalConfig = resolved.thermal;
     thermalConfig.materials = spectra.thermalMaterials;
+    if (timeline.Present()) {
+        // With a clock, `thermal.time_h` is the hour the timeline starts at.
+        timeline.SetThermalMapping(resolved.thermal.time_h,
+                                   resolved.timeline.thermalTimeScale);
+    }
 
-    const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(loadedScene);
+    thermalMesh = thermal::BuildThermalMesh(loadedScene);
 
     // Which stepper will run, decided before the key is built: CPU and GPU
     // differ in f64 versus f32, so the answer they give is part of what an
@@ -337,86 +456,105 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // gives different floats, so it cannot be judged by the byte-equality the
     // rest of this path is held to -- what it is actually for is the wait
     // while authoring a scene, where 165 s per material edit is the cost.
-    //
-    // Note this builds the stepper's pipeline before the cache is consulted,
-    // so a hit throws that setup away. Deferring it would mean naming the
-    // stepper in the key before knowing whether it will start, and then owing
-    // a second key when it does not. The waste is a pipeline creation on a
-    // switch that is off by default and, when on, is being used for the runs
-    // that miss anyway.
-    std::unique_ptr<rendercore::GpuThermalStepper> gpuStepper;
     thermal::IThermalStepper* stepper = nullptr;
-    const char* stepperName = thermal::CpuCrankNicolsonStepper::kName;
+    thermalStepperName = thermal::CpuCrankNicolsonStepper::kName;
     if (EnvFlagEnabled("QUANTILOOM_THERMAL_GPU_STEPPER")) {
         if (thermalConfig.nodeCount > rendercore::GpuThermalStepper::kMaxNodes) {
             QL_LOG_INFO("  Thermal stepper: CPU ({} layers is past the GPU stepper's {})",
                         thermalConfig.nodeCount, rendercore::GpuThermalStepper::kMaxNodes);
         } else {
-            gpuStepper = std::make_unique<rendercore::GpuThermalStepper>(context);
-            if (gpuStepper->IsValid()) {
-                stepper = gpuStepper.get();
-                stepperName = stepper->Name();
+            thermalGpuStepper = std::make_unique<rendercore::GpuThermalStepper>(context);
+            if (thermalGpuStepper->IsValid()) {
+                stepper = thermalGpuStepper.get();
+                thermalStepperName = stepper->Name();
             } else {
-                gpuStepper.reset();
+                thermalGpuStepper.reset();
                 QL_LOG_INFO("  Thermal stepper: CPU (the GPU stepper would not start)");
             }
         }
     }
-    QL_LOG_INFO("  Thermal stepper: {}", stepperName);
+    QL_LOG_INFO("  Thermal stepper: {}", thermalStepperName);
 
-    // Has this exact solve already been done? The key covers the mesh, the
-    // materials as merged, the [thermal] scalars, the forcing file's contents,
-    // the lighting sun direction, the stepper, this library's version and this
-    // GPU -- see ThermalSolveCache.hpp for why each is there. A hit skips the
-    // view-factor precompute as well as the trajectory.
-    //
-    // Naming a dump file opts out both ways: the dump needs the exchange's sky
-    // fractions, which an entry does not carry, so a hit could not write it.
     const auto cacheSettings = thermal::ResolveThermalSolveCacheSettings();
-    const bool cacheEligible = cacheSettings.enabled && thermalConfig.dumpElementsFile.empty();
-    String cacheKey;
-    std::filesystem::path cacheFile;
-    if (cacheEligible) {
+    thermalCacheEligible = cacheSettings.enabled && thermalConfig.dumpElementsFile.empty();
+    thermalCacheDir = cacheSettings.directory;
+    thermalSolvedMaterials = thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
+    {
         const VkPhysicalDeviceProperties& gpu = context.GetDeviceProperties();
-        const Vector<thermal::ThermalMaterial> solvedMaterials =
-            thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
-
-        thermal::ThermalSolveCacheKeyInputs keyInputs;
-        keyInputs.mesh = &mesh;
-        keyInputs.solvedMaterials = &solvedMaterials;
-        keyInputs.config = &thermalConfig;
-        keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
-        const String gpuIdentity =
+        thermalGpuIdentity =
             thermal::MakeGpuIdentity(StringView(gpu.deviceName, sizeof(gpu.deviceName)),
                                      gpu.vendorID, gpu.deviceID, gpu.driverVersion);
-        keyInputs.gpuIdentity = gpuIdentity;
-        keyInputs.stepperName = stepperName;
+    }
+
+    // A static scene can ask the cache before measuring anything, which is
+    // where the saving is: a hit skips the view-factor precompute as well as
+    // the trajectory. A scene with a clock cannot -- the schedule is part of
+    // what the key describes, and there is no way to know it without building
+    // it -- so there the cache saves the stepping and not the measuring.
+    if (!timeline.Present() && thermalCacheEligible) {
+        thermal::ThermalSolveCacheKeyInputs keyInputs;
+        keyInputs.mesh = &thermalMesh;
+        keyInputs.solvedMaterials = &thermalSolvedMaterials;
+        keyInputs.config = &thermalConfig;
+        keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
+        keyInputs.gpuIdentity = thermalGpuIdentity;
+        keyInputs.stepperName = thermalStepperName;
         keyInputs.libVersion = version::LibVersionString;
-        cacheKey = thermal::ComputeThermalSolveCacheKey(keyInputs);
+        const String cacheKey = thermal::ComputeThermalSolveCacheKey(keyInputs);
 
         if (!cacheKey.empty()) {
-            cacheFile = cacheSettings.directory / (cacheKey + ".qltc");
+            const std::filesystem::path cacheFile = thermalCacheDir / (cacheKey + ".qltc");
             if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey)) {
                 QL_LOG_INFO("  Thermal cache: hit ({}...)", cacheKey.substr(0, 12));
                 // The gate line, from the entry rather than from a solve. A
                 // render served from cache has to be indistinguishable in the
                 // log from one that was not.
                 thermal::LogThermalSolveSummary(*cached);
-
-                thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-                    context.GetAllocator(), cached->surfaceTemperature_K.size() * sizeof(f32),
-                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-                thermalTemperatureBuffer->Upload(
-                    cached->surfaceTemperature_K.data(),
-                    cached->surfaceTemperature_K.size() * sizeof(f32));
-                uploadSunResponse(cached->sunSensitivity_K, cached->sunVisibility,
-                                  cached->sunDirection, cached->lagSensitivity_K,
-                                  cached->lagVisibility, cached->lagDirection);
-                geometry.SetThermalElementBases(cached->instanceElementBase);
+                UploadThermalResult(*cached);
+                thermalUploadedHour = thermalConfig.time_h;
                 return;
             }
             QL_LOG_INFO("  Thermal cache: miss; solving");
         }
+    }
+
+    // Where the geometry has to be measured. One entry unless the clock moves
+    // something far enough to matter.
+    Vector<f64> epochTimes_s{0.0};
+    Vector<f64> epochFrom_h{0.0};
+    const bool wantEpochs =
+        timeline.Present() && timeline.HasMotion() &&
+        resolved.timeline.thermalGeometry ==
+            rendercore::TimelineConfig::ThermalGeometry::Epochs;
+    if (timeline.Present()) {
+        thermal::EpochPlanInput plan;
+        plan.start_s = resolved.timeline.start_s;
+        plan.end_s = resolved.timeline.end_s;
+        plan.minMove_m = static_cast<f32>(resolved.timeline.thermalEpochMinMove_m);
+        plan.stride_s = (resolved.timeline.thermalEpochStride_s > 0.0)
+                            ? resolved.timeline.thermalEpochStride_s
+                            : thermalConfig.timestep_s /
+                                  std::max(resolved.timeline.thermalTimeScale, 1e-9);
+        if (wantEpochs) {
+            Vector<f64> changeTimes =
+                timeline.ChangeTimes(resolved.timeline.start_s, resolved.timeline.end_s);
+            for (const rendercore::AnimatedNode& animated : timeline.Animated()) {
+                thermal::EpochPlanInput::Node node;
+                node.boundRadius_m = animated.boundRadius_m;
+                node.poseAt = [this, &animated](f64 t) { return timeline.PoseAt(animated, t); };
+                node.changeTimes = std::move(changeTimes);
+                changeTimes.clear();
+                plan.nodes.push_back(std::move(node));
+            }
+            epochTimes_s = thermal::PlanEpochTimes(plan);
+        } else {
+            // Reference mode: one geometry, frozen at the instant the config
+            // named.
+            epochTimes_s = {resolved.timeline.thermalReference_s};
+        }
+        epochFrom_h.clear();
+        epochFrom_h.reserve(epochTimes_s.size());
+        for (const f64 t : epochTimes_s) epochFrom_h.push_back(timeline.HourAt(t));
     }
 
     // The view factors. On the GPU where there is one to run them on: the same
@@ -424,75 +562,101 @@ void OfflineRenderer::Impl::RunThermalSolver() {
     // the render already built. A failure here is not a failed render -- the
     // solver falls back to treating every surface as seeing open sky, which
     // is right for a scene with nothing to shade anything else and too cold at
-    // night for a street. It says which one it used.
-    thermal::ExchangeGeometry exchange;
-    thermal::SunVisibilityTable sunTable;
-    {
-        rendercore::ThermalExchangePrecompute precompute(context);
-        if (precompute.IsValid() && geometry.IsValid()) {
-            rendercore::ThermalExchangePrecompute::Params params;
-            params.hemisphereRays = resolved.thermal.exchangeRays;
-            params.topK = resolved.thermal.exchangeTopK;
-            params.sunDirection = resolved.lighting.sunDirection;
-            exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
-                                      mesh.instanceElementBase, params);
+    // night for a street.
+    epochHost.owner = this;
+    rendercore::EpochBuildInput buildInput;
+    buildInput.epochTimes_s = epochTimes_s;
+    buildInput.epochFrom_h = epochFrom_h;
+    buildInput.meshOptions = thermal::MeshOptionsFor(thermalSolvedMaterials,
+                                                     thermalConfig.lateralConduction);
+    buildInput.materials = &thermalSolvedMaterials;
+    buildInput.precompute.hemisphereRays = resolved.thermal.exchangeRays;
+    buildInput.precompute.topK = resolved.thermal.exchangeTopK;
+    buildInput.precompute.sunDirection = resolved.lighting.sunDirection;
+    const auto forcingSeries = thermal::LoadForcingCsv(thermalConfig.forcingFile);
+    buildInput.forcingSeries = &forcingSeries;
+    buildInput.fallbackSunDirection = resolved.lighting.sunDirection;
+    buildInput.sunMemoryLags =
+        thermalConfig.sunCorrection ? thermalConfig.sunMemoryLags : 0u;
 
-            // Build a sun visibility table from the forcing file's sun
-            // directions, so the solver tracks shadow changes through the day.
-            // For constant forcing (no CSV) this is a single column equal to
-            // exchange.sunVisibility — RunThermalSolve synthesises that itself.
-            const auto forcingSeries =
-                thermal::LoadForcingCsv(thermalConfig.forcingFile);
-            if (!forcingSeries.empty() && forcingSeries.size() > 1) {
-                Vector<glm::vec3> directions;
-                sunTable.sampleTime_h.reserve(forcingSeries.size());
-                for (const auto& [t, f] : forcingSeries) {
-                    sunTable.sampleTime_h.push_back(t);
-                    directions.push_back(f.sunDirection);
-                }
-                sunTable.visibility = precompute.RunSunVisibility(
-                    geometry.Tlas().GetHandle(), mesh.elements,
-                    mesh.instanceElementBase, directions);
-                // Kept beside the columns because the one-bounce bake needs to
-                // know where the sun was to work out what was lit.
-                sunTable.sampleDirection = std::move(directions);
-            }
-        }
-        if (exchange.skyFraction.empty()) {
-            QL_LOG_WARN("  Thermal: no view factors; every surface will be treated as "
-                        "seeing open sky");
-        }
+    thermal::ThermalGeometrySchedule schedule = rendercore::BuildThermalGeometrySchedule(
+        context, epochHost, loadedScene, buildInput, nullptr);
+    if (schedule.Empty() || schedule.epochs.front().exchange.skyFraction.empty()) {
+        QL_LOG_WARN("  Thermal: no view factors; every surface will be treated as "
+                    "seeing open sky");
     }
 
-    const thermal::ThermalResult result =
-        thermal::RunThermalSolve(loadedScene, thermalConfig, exchange, sunTable, stepper);
-    if (!result.error.empty()) {
+    auto session = thermal::ThermalSolveSession::Build(loadedScene, thermalConfig,
+                                                       std::move(schedule), stepper);
+    if (!session) {
         QL_LOG_WARN("  Thermal: {}; the scene keeps the temperatures it was given",
-                    result.error);
-        bindEmpty();
+                    session.error());
         return;
     }
+    thermalSession = std::move(*session);
+    if (thermalSession->EpochCount() > 1) {
+        QL_LOG_INFO("  Thermal: {} geometry epoch(s) over the timeline",
+                    thermalSession->EpochCount());
+    }
+}
 
-    // Only reachable with an empty error, so a failed solve is never stored.
-    // Nor is one carrying material-parameter tangents: the entry format does
-    // not hold them -- they are a diagnostic output rather than something the
-    // render reads -- and an entry that came back without them would be a
-    // silently incomplete answer to a run that asked.
-    if (cacheEligible && !cacheKey.empty() && result.parameters.empty()) {
-        thermal::StoreThermalSolveCache(cacheFile, cacheKey, result);
+void OfflineRenderer::Impl::UploadThermalFieldAt(const f64 time_h) {
+    if (thermalSession == nullptr) {
+        // Either there is no solve, or BuildThermalSession already uploaded a
+        // cached field. The buffers must exist either way.
+        if (!thermalTemperatureBuffer) UploadThermalResult({});
+        return;
+    }
+    if (thermalUploadedHour == time_h) return;
+
+    thermal::ThermalResult result;
+    bool served = false;
+
+    String cacheKey;
+    std::filesystem::path cacheFile;
+    if (thermalCacheEligible) {
+        thermalConfig.time_h = time_h;
+        thermal::ThermalSolveCacheKeyInputs keyInputs;
+        keyInputs.mesh = &thermalMesh;
+        keyInputs.solvedMaterials = &thermalSolvedMaterials;
+        keyInputs.config = &thermalConfig;
+        keyInputs.schedule = &thermalSession->Schedule();
+        keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
+        keyInputs.gpuIdentity = thermalGpuIdentity;
+        keyInputs.stepperName = thermalStepperName;
+        keyInputs.libVersion = version::LibVersionString;
+        cacheKey = thermal::ComputeThermalSolveCacheKey(keyInputs);
+        if (!cacheKey.empty()) {
+            cacheFile = thermalCacheDir / (cacheKey + ".qltc");
+            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey)) {
+                QL_LOG_INFO("  Thermal cache: hit ({}...)", cacheKey.substr(0, 12));
+                result = std::move(*cached);
+                served = true;
+            }
+        }
     }
 
-    thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), result.surfaceTemperature_K.size() * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    thermalTemperatureBuffer->Upload(result.surfaceTemperature_K.data(),
-                                     result.surfaceTemperature_K.size() * sizeof(f32));
-    uploadSunResponse(result.sunSensitivity_K, result.sunVisibility, result.sunDirection,
-                      result.lagSensitivity_K, result.lagVisibility, result.lagDirection);
+    if (!served) {
+        result = thermalSession->FieldAt(time_h);
+        if (!result.error.empty()) {
+            QL_LOG_WARN("  Thermal: {}; the scene keeps the temperatures it was given",
+                        result.error);
+            UploadThermalResult({});
+            return;
+        }
+        // Only reachable with an empty error, so a failed solve is never
+        // stored. Nor is one carrying material-parameter tangents: the entry
+        // format does not hold them -- they are a diagnostic output rather than
+        // something the render reads -- and an entry that came back without
+        // them would be a silently incomplete answer to a run that asked.
+        if (thermalCacheEligible && !cacheKey.empty() && result.parameters.empty()) {
+            thermal::StoreThermalSolveCache(cacheFile, cacheKey, result);
+        }
+    }
 
-    // Point the instances at their elements. This is the whole of how a
-    // triangle in the shader finds the temperature the balance gave it.
-    geometry.SetThermalElementBases(result.instanceElementBase);
+    thermal::LogThermalSolveSummary(result);
+    UploadThermalResult(result);
+    thermalUploadedHour = time_h;
 }
 
 SetupResult OfflineRenderer::Impl::BuildIlluminants() {
@@ -984,7 +1148,8 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
     // geometry, because the view factors are cast against the acceleration
     // structure it built; before the pipeline, because what comes out is a
     // buffer the pipeline binds.
-    impl.RunThermalSolver();
+    impl.BuildThermalSession();
+    impl.UploadThermalFieldAt(impl.ThermalHourNow());
 
     impl.lightingParamsBuffer = std::make_unique<GpuBuffer>(
         impl.contextRef->GetAllocator(),

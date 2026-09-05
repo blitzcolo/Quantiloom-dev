@@ -102,8 +102,21 @@ void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& eleme
 
 }  // namespace
 
-ThermalTimeline::ThermalTimeline(const Desc& desc,
-                                 const Vector<ThermalElement>& elements,
+ThermalTimeline::ThermalTimeline(const Desc& desc, const ThermalGeometrySchedule& schedule,
+                                 const Vector<ThermalMaterial>& materials,
+                                 const Vector<std::pair<f64, ThermalForcing>>& forcingSeries,
+                                 const ThermalForcing& constantForcing,
+                                 IThermalStepper& stepper)
+    : m_desc(desc)
+    , m_schedule(&schedule)
+    , m_materials(materials)
+    , m_forcingSeries(forcingSeries)
+    , m_constantForcing(constantForcing)
+    , m_stepper(stepper) {
+    Initialise();
+}
+
+ThermalTimeline::ThermalTimeline(const Desc& desc, const Vector<ThermalElement>& elements,
                                  const Vector<ThermalMaterial>& materials,
                                  const ExchangeGeometry& exchange,
                                  const SunVisibilityTable& sunTable,
@@ -111,69 +124,105 @@ ThermalTimeline::ThermalTimeline(const Desc& desc,
                                  const ThermalForcing& constantForcing,
                                  IThermalStepper& stepper)
     : m_desc(desc)
-    , m_elements(elements)
+    , m_ownedSchedule(std::make_unique<ThermalGeometrySchedule>(
+          ThermalGeometrySchedule::Single(exchange, sunTable, elements)))
+    , m_schedule(m_ownedSchedule.get())
     , m_materials(materials)
-    , m_exchange(exchange)
-    , m_sunTable(sunTable)
     , m_forcingSeries(forcingSeries)
     , m_constantForcing(constantForcing)
     , m_stepper(stepper) {
+    Initialise();
+}
+
+void ThermalTimeline::Initialise() {
     const f64 strideSteps =
-        (desc.checkpointStride_h * 3600.0) / std::max(desc.timestep_s, 1e-6);
+        (m_desc.checkpointStride_h * 3600.0) / std::max(m_desc.timestep_s, 1e-6);
     m_checkpointStride = std::max(static_cast<i64>(std::round(strideSteps)), i64{1});
 
+    // Where each epoch begins on the step grid. A boundary that falls inside a
+    // step belongs to the step AFTER it: a step is integrated with one
+    // geometry, and the one it spends most of itself in is the one it should
+    // be -- but ceil is the choice that keeps a boundary from being applied
+    // before it happens, which matters more than half a step of accuracy.
+    const ThermalGeometrySchedule& schedule = *m_schedule;
+    m_epochBoundaryStep.assign(schedule.Count(), 0);
+    for (usize e = 1; e < schedule.Count(); ++e) {
+        const f64 elapsed_s = (schedule.epochs[e].from_h - m_desc.startTime_h) * 3600.0;
+        m_epochBoundaryStep[e] =
+            std::max(static_cast<i64>(std::ceil(elapsed_s / m_desc.timestep_s)), i64{0});
+    }
+
+    // Everything below describes the world the trajectory STARTS in, which is
+    // epoch zero: it reaches back forever, so a query before the timeline
+    // begins is a query about it.
+    const Vector<ThermalElement>& elements = schedule.epochs.front().elements;
+    const ExchangeGeometry& exchange = schedule.epochs.front().exchange;
+    const SunVisibilityTable& sunTable = schedule.epochs.front().sunTable;
+
     for (const ThermalElement& el : elements) {
-        if (el.area_m2 > 0.0f && el.materialId < materials.size() &&
-            materials[el.materialId].ParticipatesInSolve()) {
+        if (el.area_m2 > 0.0f && el.materialId < m_materials.size() &&
+            m_materials[el.materialId].ParticipatesInSolve()) {
             ++m_participatingElements;
         }
     }
     m_shortestTau = CpuCrankNicolsonStepper::ShortestTimeConstantSeconds(
-        elements, materials, desc.initialTemperature_K);
+        elements, m_materials, m_desc.initialTemperature_K);
 
     // Initial state
     ThermalState initial;
-    initial.nodeCount = std::max(2u, desc.nodeCount);
+    initial.nodeCount = std::max(2u, m_desc.nodeCount);
     initial.temperature_K.assign(elements.size() * initial.nodeCount,
-                                 desc.initialTemperature_K);
+                                 m_desc.initialTemperature_K);
     // Zero, and it means what it says: at t = 0 nothing that has happened yet
     // depends on the sun, so the trajectory's derivative with respect to sun
     // visibility starts at nothing and accumulates. Sizing it is what turns
     // the tangent on for every stepper downstream.
-    if (desc.carrySunSensitivity) {
+    if (m_desc.carrySunSensitivity) {
         initial.sunSensitivity_K.assign(initial.temperature_K.size(), 0.0);
         // One tangent per tracked column, and no column tracked yet: at t = 0
         // the whole of the answer is in the whole-day tangent, which is where
         // the shading pass looks when a column is not tracked.
-        if (desc.sunMemoryLags > 0 && sunTable.SampleCount() > 1) {
-            initial.lagColumn.assign(desc.sunMemoryLags, ThermalState::kNoLagColumn);
+        if (m_desc.sunMemoryLags > 0 && sunTable.SampleCount() > 1) {
+            initial.lagColumn.assign(m_desc.sunMemoryLags, ThermalState::kNoLagColumn);
             initial.lagSensitivity_K.assign(
-                initial.temperature_K.size() * desc.sunMemoryLags, 0.0);
+                initial.temperature_K.size() * m_desc.sunMemoryLags, 0.0);
         }
     }
     // Independent of the sun's tangent: a fit for a material property wants
     // these whether or not a shadow is being resolved.
-    if (!desc.parameters.empty()) {
-        initial.parameters = desc.parameters;
+    if (!m_desc.parameters.empty()) {
+        initial.parameters = m_desc.parameters;
         initial.parameterSensitivity.assign(
-            initial.temperature_K.size() * desc.parameters.size(), 0.0);
+            initial.temperature_K.size() * m_desc.parameters.size(), 0.0);
     }
 
-    if (desc.initial == InitialCondition::Steady) {
+    if (m_desc.initial == InitialCondition::Steady) {
         const ThermalForcing startForcing =
-            SampleForcing(forcingSeries, desc.startTime_h, constantForcing);
+            SampleForcing(m_forcingSeries, m_desc.startTime_h, m_constantForcing);
 
         Vector<f32> startSunVis;
         Vector<f32> startReflected;
-        SampleShortwaveAt(sunTable, exchange, desc.startTime_h, elements.size(),
+        SampleShortwaveAt(sunTable, exchange, m_desc.startTime_h, elements.size(),
                           startSunVis, startReflected);
 
-        RelaxToSteadyState(initial, elements, materials, exchange,
+        RelaxToSteadyState(initial, elements, m_materials, exchange,
                            {startSunVis, startReflected, sunTable.diffuseGain},
-                           startForcing, stepper);
+                           startForcing, m_stepper);
     }
 
     m_checkpoints[0] = std::move(initial);
+}
+
+usize ThermalTimeline::EpochForStep(const i64 k) const {
+    usize found = 0;
+    for (usize e = 1; e < m_epochBoundaryStep.size(); ++e) {
+        if (m_epochBoundaryStep[e] <= k) {
+            found = e;
+        } else {
+            break;
+        }
+    }
+    return found;
 }
 
 const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
@@ -207,17 +256,18 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
     if (remainder_s > 0.01) {
         // Off-grid: do a partial step into scratch (discarded next call)
         const f64 t_mid = gridTime + 0.5 * remainder_s / 3600.0;
+        const ThermalGeometryEpoch& epoch = m_schedule->At(t_mid);
         const ThermalForcing forcing =
             SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
         Vector<f32> sunVis;
         Vector<f32> reflected;
         ShortwaveSample sample;
-        SampleShortwaveAt(m_sunTable, m_exchange, t_mid, m_elements.size(), sunVis,
-                          reflected, &sample);
+        SampleShortwaveAt(epoch.sunTable, epoch.exchange, t_mid, epoch.elements.size(),
+                          sunVis, reflected, &sample);
         sample.sunVisibility = sunVis;
         sample.reflectedGain = reflected;
-        sample.diffuseGain = m_sunTable.diffuseGain;
-        m_stepper.Step(m_scratch, m_elements, m_materials, m_exchange, forcing,
+        sample.diffuseGain = epoch.sunTable.diffuseGain;
+        m_stepper.Step(m_scratch, epoch.elements, m_materials, epoch.exchange, forcing,
                        remainder_s, sample);
         ++m_lastStepCount;
     }
@@ -228,7 +278,8 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
 bool ThermalTimeline::SurfaceFluxesAt(const f64 time_h, const u32 element,
                                       SurfaceFluxes& out,
                                       const IThermalStepper& decomposer) {
-    if (element >= m_elements.size()) return false;
+    const ThermalGeometryEpoch& epoch = m_schedule->At(time_h);
+    if (element >= epoch.elements.size()) return false;
 
     const ThermalState& state = StateAt(time_h);
     const ThermalForcing forcing = SampleForcing(m_forcingSeries, time_h, m_constantForcing);
@@ -236,14 +287,14 @@ bool ThermalTimeline::SurfaceFluxesAt(const f64 time_h, const u32 element,
     Vector<f32> sunVis;
     Vector<f32> reflected;
     ShortwaveSample sample;
-    SampleShortwaveAt(m_sunTable, m_exchange, time_h, m_elements.size(), sunVis, reflected,
-                      &sample);
+    SampleShortwaveAt(epoch.sunTable, epoch.exchange, time_h, epoch.elements.size(), sunVis,
+                      reflected, &sample);
     sample.sunVisibility = sunVis;
     sample.reflectedGain = reflected;
-    sample.diffuseGain = m_sunTable.diffuseGain;
+    sample.diffuseGain = epoch.sunTable.diffuseGain;
 
-    return decomposer.SurfaceFluxesAt(state, m_elements, m_materials, m_exchange, forcing,
-                                      sample, element, out);
+    return decomposer.SurfaceFluxesAt(state, epoch.elements, m_materials, epoch.exchange,
+                                      forcing, sample, element, out);
 }
 
 usize ThermalTimeline::CheckpointBytes() const {
@@ -282,20 +333,35 @@ void ThermalTimeline::StepRange(ThermalState& state, const i64 from, const i64 t
         const i64 nextCp = ((k / m_checkpointStride) + 1) * m_checkpointStride;
         if (nextCp < batchEnd) batchEnd = nextCp;
 
+        // ...and never across a geometry change. A batch is stepped against
+        // one exchange and one sun table, so an epoch boundary inside it would
+        // integrate part of the span with the wrong world.
+        const usize epochIndex = EpochForStep(k);
+        for (usize e = epochIndex + 1; e < m_epochBoundaryStep.size(); ++e) {
+            if (m_epochBoundaryStep[e] > k) {
+                if (m_epochBoundaryStep[e] < batchEnd) batchEnd = m_epochBoundaryStep[e];
+                break;
+            }
+        }
+        const ThermalGeometryEpoch& epoch = m_schedule->epochs[epochIndex];
+
         batch.clear();
         for (i64 step = k; step < batchEnd; ++step) {
             const f64 t_mid = GridTime(step) + 0.5 * m_desc.timestep_s / 3600.0;
             ThermalBatchStep bs;
             bs.forcing = SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
             bs.dt_s = m_desc.timestep_s;
-            if (m_sunTable.SampleCount() > 0) {
-                m_sunTable.SampleIndices(t_mid, bs.sunSampleA, bs.sunSampleB, bs.sunBlend);
+            // The column indices are into THIS epoch's table, which may be a
+            // subset of the forcing file's rows -- so they are taken from the
+            // epoch rather than from any shared one.
+            if (epoch.sunTable.SampleCount() > 0) {
+                epoch.sunTable.SampleIndices(t_mid, bs.sunSampleA, bs.sunSampleB, bs.sunBlend);
             }
             batch.push_back(bs);
         }
 
-        m_stepper.StepMany(state, m_elements, m_materials, m_exchange,
-                           m_sunTable, batch);
+        m_stepper.StepMany(state, epoch.elements, m_materials, epoch.exchange,
+                           epoch.sunTable, batch);
         m_lastStepCount += static_cast<u32>(batch.size());
         k = batchEnd;
 

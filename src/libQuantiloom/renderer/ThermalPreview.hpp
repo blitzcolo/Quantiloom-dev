@@ -34,6 +34,8 @@ class IThermalStepper;
 
 namespace rendercore {
 
+class EpochGeometryHost;
+
 class ThermalPreview {
 public:
     explicit ThermalPreview(VulkanContext& context);
@@ -50,6 +52,30 @@ public:
 
     void InvalidateGeometry();
     void InvalidateMaterialEmissivity();
+
+    /**
+     * @brief Who moves the scene when the geometry has to be measured again
+     *
+     * Optional. Without it the preview measures the world once, wherever the
+     * scene happens to be -- which is right for a scene that does not move and
+     * is what every scene did before there was a timeline.
+     *
+     * The host is borrowed, not owned, and must outlive this.
+     */
+    void SetEpochHost(EpochGeometryHost* host);
+
+    /**
+     * @brief When to measure it
+     *
+     * @param times_s  timeline seconds, from thermal::PlanEpochTimes
+     * @param from_h   the same instants as solve hours; entry 0 is ignored,
+     *                 since epoch zero reaches back forever
+     *
+     * One entry or none is the static case and costs exactly what it did
+     * before. Setting this marks the exchange dirty, because it is a statement
+     * about geometry.
+     */
+    void SetEpochPlan(Vector<f64> times_s, Vector<f64> from_h);
 
     struct SolveResult {
         Vector<f32> surfaceTemperature_K;

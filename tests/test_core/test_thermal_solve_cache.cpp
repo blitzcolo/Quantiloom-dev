@@ -633,3 +633,98 @@ TEST(ThermalSolveCacheSettingsTest, DirectoryOverrideIsTakenAsWritten) {
 
     SetEnv("QUANTILOOM_THERMAL_CACHE_DIR", nullptr);
 }
+
+// ============================================================================
+// The geometry schedule is part of what an entry stands for
+// ============================================================================
+// A truck two metres further along in epoch three gives a different trajectory
+// at every hour after it. A key that described only the mesh would serve the
+// old answer, and nothing downstream would notice.
+
+namespace {
+
+ThermalGeometryEpoch EpochAt(f64 from_h, const glm::vec3& centroid) {
+    ThermalGeometryEpoch epoch;
+    epoch.from_h = from_h;
+    ThermalElement element;
+    element.centroid = centroid;
+    element.area_m2 = 1.0f;
+    element.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+    element.materialId = 0;
+    epoch.elements = {element};
+    return epoch;
+}
+
+String KeyWithSchedule(const KeyFixture& fixture, const ThermalGeometrySchedule* schedule) {
+    ThermalSolveCacheKeyInputs inputs;
+    inputs.mesh = &fixture.mesh;
+    inputs.solvedMaterials = &fixture.materials;
+    inputs.config = &fixture.config;
+    inputs.schedule = schedule;
+    inputs.exchangeSunDirection = fixture.exchangeSun;
+    inputs.gpuIdentity = fixture.gpu;
+    inputs.stepperName = fixture.stepper;
+    inputs.libVersion = fixture.version;
+    return ComputeThermalSolveCacheKey(inputs);
+}
+
+}  // namespace
+
+TEST(ThermalSolveCacheKeyTest, TheSameScheduleGivesTheSameKey) {
+    const KeyFixture fixture;
+
+    ThermalGeometrySchedule a;
+    a.epochs.push_back(EpochAt(-1e308, glm::vec3(0.0f)));
+    a.epochs.push_back(EpochAt(6.0, glm::vec3(2.0f, 0.0f, 0.0f)));
+
+    ThermalGeometrySchedule b = a;
+
+    EXPECT_EQ(KeyWithSchedule(fixture, &a), KeyWithSchedule(fixture, &b));
+    EXPECT_FALSE(KeyWithSchedule(fixture, &a).empty());
+}
+
+TEST(ThermalSolveCacheKeyTest, MovingOneEpochsGeometryChangesTheKey) {
+    const KeyFixture fixture;
+
+    ThermalGeometrySchedule a;
+    a.epochs.push_back(EpochAt(-1e308, glm::vec3(0.0f)));
+    a.epochs.push_back(EpochAt(6.0, glm::vec3(2.0f, 0.0f, 0.0f)));
+
+    ThermalGeometrySchedule b = a;
+    b.epochs[1].elements[0].centroid = glm::vec3(4.0f, 0.0f, 0.0f);
+
+    EXPECT_NE(KeyWithSchedule(fixture, &a), KeyWithSchedule(fixture, &b));
+}
+
+TEST(ThermalSolveCacheKeyTest, MovingABoundaryChangesTheKey) {
+    const KeyFixture fixture;
+
+    ThermalGeometrySchedule a;
+    a.epochs.push_back(EpochAt(-1e308, glm::vec3(0.0f)));
+    a.epochs.push_back(EpochAt(6.0, glm::vec3(2.0f, 0.0f, 0.0f)));
+
+    ThermalGeometrySchedule b = a;
+    b.epochs[1].from_h = 7.0;
+
+    EXPECT_NE(KeyWithSchedule(fixture, &a), KeyWithSchedule(fixture, &b));
+}
+
+TEST(ThermalSolveCacheKeyTest, AnExtraEpochChangesTheKey) {
+    const KeyFixture fixture;
+
+    ThermalGeometrySchedule a;
+    a.epochs.push_back(EpochAt(-1e308, glm::vec3(0.0f)));
+
+    ThermalGeometrySchedule b = a;
+    b.epochs.push_back(EpochAt(6.0, glm::vec3(0.0f)));
+
+    EXPECT_NE(KeyWithSchedule(fixture, &a), KeyWithSchedule(fixture, &b));
+}
+
+TEST(ThermalSolveCacheKeyTest, NoScheduleIsTheStaticCase) {
+    const KeyFixture fixture;
+    // The single-geometry path passes nothing, and has to keep hashing the way
+    // it did -- otherwise every static scene's cache would be invalidated by
+    // the existence of a feature it does not use.
+    EXPECT_EQ(KeyWithSchedule(fixture, nullptr), fixture.Key());
+}

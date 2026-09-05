@@ -6,6 +6,7 @@
 #include "thermal/ThermalTypes.hpp"
 
 #include <algorithm>
+#include <limits>
 
 namespace quantiloom::thermal {
 
@@ -53,6 +54,35 @@ void SunVisibilityTable::SampleIndices(const f64 t, usize& a, usize& b,
     a = b - 1;
     const f64 span = sampleTime_h[b] - sampleTime_h[a];
     blend = span > 0.0 ? (t - sampleTime_h[a]) / span : 0.0;
+}
+
+usize ThermalGeometrySchedule::EpochAt(const f64 time_h) const {
+    if (epochs.size() <= 1) return 0;
+    // Linear rather than a binary search: the count is the number of times
+    // something in the scene moved far enough to matter, which is tens, and a
+    // scan of tens of doubles is not worth being clever about.
+    usize found = 0;
+    for (usize e = 1; e < epochs.size(); ++e) {
+        if (epochs[e].from_h <= time_h) {
+            found = e;
+        } else {
+            break;
+        }
+    }
+    return found;
+}
+
+ThermalGeometrySchedule ThermalGeometrySchedule::Single(ExchangeGeometry exchange,
+                                                        SunVisibilityTable sunTable,
+                                                        Vector<ThermalElement> elements) {
+    ThermalGeometrySchedule schedule;
+    ThermalGeometryEpoch epoch;
+    epoch.from_h = -std::numeric_limits<f64>::infinity();
+    epoch.elements = std::move(elements);
+    epoch.exchange = std::move(exchange);
+    epoch.sunTable = std::move(sunTable);
+    schedule.epochs.push_back(std::move(epoch));
+    return schedule;
 }
 
 }  // namespace quantiloom::thermal

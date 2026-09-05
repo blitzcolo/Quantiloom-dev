@@ -28,6 +28,7 @@
 
 #include <glm/glm.hpp>
 
+#include <limits>
 #include <span>
 
 namespace quantiloom::thermal {
@@ -539,6 +540,73 @@ struct SunVisibilityTable {
     /// Interpolation indices and blend for time @p t: result is
     /// (1-blend)*Column(a) + blend*Column(b).
     void SampleIndices(f64 t, usize& a, usize& b, f64& blend) const;
+};
+
+/**
+ * @brief One span over which the geometry does not move
+ *
+ * The thermal solve wants a fixed set of surfaces: view factors, sky fractions
+ * and sun visibility are all statements about where things are, and computing
+ * them is the expensive part. A scene where something drives past would either
+ * have to re-do all of it every step (which is a re-solve per frame, and loses
+ * the history that makes a thermal answer worth having) or freeze the geometry
+ * at one instant (which says the truck was always there, or never).
+ *
+ * An epoch is the third answer: the trajectory is cut into spans, each with its
+ * own geometry and its own exchange, and ONE temperature state is carried
+ * across all of them. So the ground a truck parked on cools while the ground it
+ * left warms back up, with the transient in between rather than a step -- which
+ * is the thing a step function cannot produce and the thing an infrared scene
+ * is usually about.
+ *
+ * The geometry is frozen at the epoch's START. Epoch zero's `from_h` is
+ * -infinity: whatever the solve does before the timeline begins -- the steady
+ * state relaxation, an early query -- happens in the world as it was at the
+ * start.
+ *
+ * Rigid motion only, and the solve depends on it: every epoch must produce the
+ * same elements in the same order, differing only in centroid and normal. That
+ * is what lets a state vector cross a boundary at all.
+ */
+struct ThermalGeometryEpoch {
+    /// When this geometry takes over, in the solve's own hours. Epoch zero is
+    /// -infinity.
+    f64 from_h = -std::numeric_limits<f64>::infinity();
+    /// The timeline second the geometry was sampled at, for diagnostics.
+    f64 timelineTime_s = 0.0;
+
+    /// World-space elements as of `from_h`. May be left empty by a caller that
+    /// has only one geometry: ThermalSolveSession fills it from its own mesh,
+    /// which is the same list.
+    Vector<ThermalElement> elements;
+    ExchangeGeometry exchange;
+    SunVisibilityTable sunTable;
+};
+
+/**
+ * @brief The epochs a solve runs through, in time order
+ *
+ * One entry is the ordinary case and means nothing moved.
+ */
+struct ThermalGeometrySchedule {
+    Vector<ThermalGeometryEpoch> epochs;
+
+    [[nodiscard]] usize Count() const { return epochs.size(); }
+    [[nodiscard]] bool Empty() const { return epochs.empty(); }
+
+    /// Index of the epoch covering @p time_h: the last one whose `from_h` is
+    /// at or before it. Zero for anything earlier, since epoch zero reaches
+    /// back forever.
+    [[nodiscard]] usize EpochAt(f64 time_h) const;
+
+    [[nodiscard]] const ThermalGeometryEpoch& At(f64 time_h) const {
+        return epochs[EpochAt(time_h)];
+    }
+
+    /// The single-geometry schedule: one epoch reaching back forever.
+    [[nodiscard]] static ThermalGeometrySchedule Single(ExchangeGeometry exchange,
+                                                        SunVisibilityTable sunTable,
+                                                        Vector<ThermalElement> elements = {});
 };
 
 /**

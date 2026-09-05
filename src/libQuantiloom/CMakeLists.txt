@@ -131,6 +131,8 @@ add_library(quantiloom_core OBJECT
     renderer/SpectralUnmixer.hpp
     renderer/TemperatureTextureLoader.cpp
     renderer/TemperatureTextureLoader.hpp
+    renderer/ThermalEpochBuilder.cpp
+    renderer/ThermalEpochBuilder.hpp
     renderer/ThermalExchangePrecompute.cpp
     renderer/ThermalExchangePrecompute.hpp
     renderer/GpuThermalStepper.cpp
@@ -182,6 +184,8 @@ add_library(quantiloom_core OBJECT
     thermal/ThermalMesh.hpp
     thermal/ShortwaveGains.cpp
     thermal/ShortwaveGains.hpp
+    thermal/ThermalEpochs.cpp
+    thermal/ThermalEpochs.hpp
     thermal/ThermalTimeline.cpp
     thermal/ThermalTimeline.hpp
     thermal/ThermalSolver.cpp

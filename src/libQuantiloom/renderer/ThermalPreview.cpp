@@ -7,6 +7,7 @@
 
 #include "core/Log.hpp"
 #include "renderer/GpuThermalStepper.hpp"
+#include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalExchangePrecompute.hpp"
 #include "scene/Scene.hpp"
 #include "thermal/CpuCrankNicolsonStepper.hpp"
@@ -56,8 +57,16 @@ struct ThermalPreview::Impl {
     /// Per material, the fraction of its area that is actually there. Built
     /// beside the material table, from CPU texels the loader retained.
     Vector<f32> materialCoverage;
-    thermal::ExchangeGeometry exchange;
-    thermal::SunVisibilityTable sunTable;
+    /// One entry unless something in the scene moves. Always non-empty once
+    /// RebuildSchedule has run; epoch zero is the world the trajectory starts
+    /// in and the one Status() describes.
+    thermal::ThermalGeometrySchedule schedule;
+    /// Who moves the scene between epochs, and when. Null host or a plan of
+    /// one is the static case, which measures the world where it stands.
+    EpochGeometryHost* epochHost = nullptr;
+    Vector<f64> epochTimes_s;
+    Vector<f64> epochFrom_h;
+
     std::unique_ptr<thermal::ThermalTimeline> timeline;
     Vector<std::pair<f64, thermal::ThermalForcing>> forcingSeries;
     thermal::ThermalForcing constantForcing;
@@ -77,6 +86,16 @@ struct ThermalPreview::Impl {
 
     explicit Impl(VulkanContext& ctx) : context(ctx) {
         gpuStepper = std::make_unique<GpuThermalStepper>(ctx);
+        schedule = thermal::ThermalGeometrySchedule::Single({}, {});
+    }
+
+    /// The world the trajectory starts in. What the status line, the element
+    /// dump and every "how many sun columns are there" question mean.
+    [[nodiscard]] const thermal::ExchangeGeometry& Exchange0() const {
+        return schedule.epochs.front().exchange;
+    }
+    [[nodiscard]] const thermal::SunVisibilityTable& SunTable0() const {
+        return schedule.epochs.front().sunTable;
     }
 
     /// The per-element field at one instant: the temperature, the tangent the
@@ -100,9 +119,16 @@ struct ThermalPreview::Impl {
         sunSensitivity_K.clear();
         visibility.clear();
         const bool haveTangent = state.HasSensitivity();
+        const thermal::ThermalGeometryEpoch& epoch = schedule.At(time_h);
+        // Where the surfaces are at this hour. Falls back to the mesh for the
+        // window between construction and the first solve, when the schedule
+        // is still the empty placeholder.
+        const Vector<thermal::ThermalElement>& shape =
+            (epoch.elements.size() == n) ? epoch.elements : mesh.elements;
         if (haveTangent) {
             sunSensitivity_K.assign(n, 0.0f);
-            visibility = thermal::SampleSunVisibilityAt(sunTable, exchange, time_h, n);
+            visibility =
+                thermal::SampleSunVisibilityAt(epoch.sunTable, epoch.exchange, time_h, n);
         }
         sunDirection =
             thermal::SampleForcing(forcingSeries, time_h, constantForcing).sunDirection;
@@ -119,7 +145,7 @@ struct ThermalPreview::Impl {
                 // zero at any resolution, so the correction is too. See the
                 // offline solver for why the shader cannot make this test
                 // itself.
-                if (glm::dot(mesh.elements[e].normal, sunDirection) <= 0.0f) {
+                if (glm::dot(shape[e].normal, sunDirection) <= 0.0f) {
                     sunSensitivity_K[e] = 0.0f;
                 }
             }
@@ -134,7 +160,7 @@ struct ThermalPreview::Impl {
         lagVisibility->clear();
         lagDirection->clear();
         if (!haveTangent || !state.HasLagSensitivity() ||
-            sunTable.sampleDirection.size() != sunTable.SampleCount()) {
+            epoch.sunTable.sampleDirection.size() != epoch.sunTable.SampleCount()) {
             return n;
         }
 
@@ -144,10 +170,10 @@ struct ThermalPreview::Impl {
         lagDirection->assign(slots, glm::vec3(0.0f));
         for (u32 s = 0; s < slots; ++s) {
             const u32 column = state.lagColumn[s];
-            if (column >= sunTable.SampleCount()) continue;
-            const glm::vec3 direction = sunTable.sampleDirection[column];
+            if (column >= epoch.sunTable.SampleCount()) continue;
+            const glm::vec3 direction = epoch.sunTable.sampleDirection[column];
             (*lagDirection)[s] = direction;
-            const f32* columnVisibility = sunTable.Column(column);
+            const f32* columnVisibility = epoch.sunTable.Column(column);
             for (usize e = 0; e < n; ++e) {
                 const u32 id = mesh.elements[e].materialId;
                 if (!(mesh.elements[e].area_m2 > 0.0f) || id >= materials.size() ||
@@ -155,7 +181,7 @@ struct ThermalPreview::Impl {
                     continue;
                 }
                 (*lagVisibility)[s * n + e] = columnVisibility[e];
-                if (glm::dot(mesh.elements[e].normal, direction) > 0.0f) {
+                if (glm::dot(shape[e].normal, direction) > 0.0f) {
                     (*lagSensitivity_K)[s * n + e] =
                         static_cast<f32>(state.SurfaceLagSensitivity(s, e));
                 }
@@ -300,34 +326,90 @@ struct ThermalPreview::Impl {
         materialTableDirty = false;
     }
 
-    void RebuildExchange(VkAccelerationStructureKHR tlas) {
+    /// Measure the world: view factors, sky fractions and sun visibility, once
+    /// per epoch.
+    ///
+    /// Two paths, and the difference is only whether anything moves. With a
+    /// host and more than one epoch the shared builder walks the scene through
+    /// them; otherwise this is what it always was -- one exchange and one sun
+    /// table, computed where the scene stands.
+    void RebuildSchedule(const Scene& scene, VkAccelerationStructureKHR tlas) {
+        forcingSeries = thermal::LoadForcingCsv(params.forcingFile);
+
+        // With epochs there is no cheap sun-only path: the columns are traced
+        // against each epoch's own geometry, so getting them means walking the
+        // scene through all of them anyway. A forcing file changed mid-session
+        // therefore costs what a geometry change costs, which is rare enough
+        // to be worth not complicating this for.
+        if (epochHost != nullptr && epochTimes_s.size() > 1) {
+            EpochBuildInput input;
+            input.epochTimes_s = epochTimes_s;
+            input.epochFrom_h = epochFrom_h;
+            input.meshOptions = thermal::MeshOptionsFor(materials, params.lateralConduction);
+            input.materials = &materials;
+            input.materialCoverage = materialCoverage;
+            input.precompute.hemisphereRays = params.exchangeRays;
+            input.precompute.topK = params.exchangeTopK;
+            input.precompute.sunDirection = fallbackSunDirection;
+            input.forcingSeries = &forcingSeries;
+            input.fallbackSunDirection = fallbackSunDirection;
+            input.sunMemoryLags = params.sunCorrection ? params.sunMemoryLags : 0u;
+
+            thermal::ThermalMesh epoch0;
+            thermal::ThermalGeometrySchedule built =
+                BuildThermalGeometrySchedule(context, *epochHost, scene, input, &epoch0);
+            if (!built.Empty()) {
+                schedule = std::move(built);
+                // Epoch zero's mesh is the one that carries the topology: the
+                // instance bases the shader indexes with, the shell pairing,
+                // the shared edges. Rigid motion changes none of them.
+                mesh = std::move(epoch0);
+                cpuStepper.SetShellPartners(mesh.shellPartner);
+                exchangeRunCount += static_cast<u32>(schedule.Count());
+                exchangeDirty = false;
+                sunTableDirty = false;
+                return;
+            }
+            QL_LOG_WARN("  Thermal epochs: the schedule could not be built; falling back "
+                        "to one geometry");
+        }
+
+        RebuildSingleGeometry(tlas);
+    }
+
+    /// One exchange and one sun table, computed where the scene stands. What
+    /// every scene did before there was a timeline, and what a scene with
+    /// nothing moving still does.
+    void RebuildSingleGeometry(VkAccelerationStructureKHR tlas) {
+        thermal::ExchangeGeometry exchange;
         ThermalExchangePrecompute precompute(context);
         precompute.SetMaterialCoverage(materialCoverage);
-        if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
+
+        const bool reuseExchange =
+            !exchangeDirty && schedule.Count() == 1 &&
+            schedule.epochs.front().exchange.skyFraction.size() == mesh.elements.size();
+        if (reuseExchange) {
+            // Only the sun moved -- a new forcing file, a new fallback
+            // direction. Who sees whom has not changed, and the hemisphere
+            // trace is the expensive half; keeping it is why the sun table has
+            // a dirty flag of its own.
+            exchange = std::move(schedule.epochs.front().exchange);
+        } else if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
             ThermalExchangePrecompute::Params ep;
             ep.hemisphereRays = params.exchangeRays;
             ep.topK = params.exchangeTopK;
             ep.sunDirection = fallbackSunDirection;
-            exchange = precompute.Run(tlas, mesh.elements,
-                                      mesh.instanceElementBase, ep);
+            exchange = precompute.Run(tlas, mesh.elements, mesh.instanceElementBase, ep);
             ++exchangeRunCount;
         } else {
             exchange = thermal::MakeOpenSkyExchange(mesh.elements.size());
         }
-        exchangeDirty = false;
-        // The sun visibility the exchange carries is one direction's worth,
-        // and the table is built from it, so it has to follow.
-        sunTableDirty = true;
-    }
 
-    /// Where the sun is, at every hour the forcing file names. A run with a
-    /// diurnal CSV gets one column per row, so the shadows move through the
-    /// day the way they do offline; a run with constant forcing gets the
-    /// single column the exchange already computed.
-    void RebuildSunTable(VkAccelerationStructureKHR tlas) {
-        forcingSeries = thermal::LoadForcingCsv(params.forcingFile);
-        sunTable = {};
-
+        // Where the sun is, at every hour the forcing file names. A run with a
+        // diurnal CSV gets one column per row, so the shadows move through the
+        // day the way they do offline; a run with constant forcing gets the
+        // single column the exchange already computed.
+        thermal::SunVisibilityTable sunTable;
         if (forcingSeries.size() > 1 && tlas != VK_NULL_HANDLE) {
             Vector<glm::vec3> directions;
             directions.reserve(forcingSeries.size());
@@ -337,8 +419,6 @@ struct ThermalPreview::Impl {
                 directions.push_back(forcing.sunDirection);
             }
 
-            ThermalExchangePrecompute precompute(context);
-            precompute.SetMaterialCoverage(materialCoverage);
             if (precompute.IsValid()) {
                 sunTable.visibility = precompute.RunSunVisibility(
                     tlas, mesh.elements, mesh.instanceElementBase, directions);
@@ -349,12 +429,16 @@ struct ThermalPreview::Impl {
                 sunTable = {};  // the dispatch failed; fall through to one column
             }
         }
-
         if (sunTable.SampleCount() == 0 && !exchange.sunVisibility.empty()) {
             sunTable.sampleTime_h = {params.startTime_h};
             sunTable.visibility = exchange.sunVisibility;
             sunTable.sampleDirection = {fallbackSunDirection};
         }
+
+        schedule = thermal::ThermalGeometrySchedule::Single(std::move(exchange),
+                                                            std::move(sunTable),
+                                                            mesh.elements);
+        exchangeDirty = false;
         sunTableDirty = false;
     }
 
@@ -370,8 +454,11 @@ struct ThermalPreview::Impl {
         // The short-wave gains depend on the geometry, the sun columns and the
         // absorptivities, and every one of those sets timelineDirty on its way
         // through -- so baking here keeps them fresh without a flag of their
-        // own.
-        thermal::BakeShortwaveGains(exchange, mesh.elements, materials, sunTable);
+        // own. Once per epoch, because each has its own of all three.
+        for (thermal::ThermalGeometryEpoch& epoch : schedule.epochs) {
+            thermal::BakeShortwaveGains(epoch.exchange, epoch.elements, materials,
+                                        epoch.sunTable);
+        }
 
         thermal::ThermalTimeline::Desc desc;
         desc.startTime_h = params.startTime_h;
@@ -417,8 +504,7 @@ struct ThermalPreview::Impl {
         // it went out of scope.
         auto& stepper = ChooseStepper();
         timeline = std::make_unique<thermal::ThermalTimeline>(
-            desc, mesh.elements, materials, exchange,
-            sunTable, forcingSeries, constantForcing, stepper);
+            desc, schedule, materials, forcingSeries, constantForcing, stepper);
 
         timelineDirty = false;
     }
@@ -478,6 +564,21 @@ void ThermalPreview::SetFallbackSunDirection(const glm::vec3& dir) {
         m_impl->timelineDirty = true;
     }
     m_impl->fallbackSunDirection = glm::normalize(dir);
+}
+
+void ThermalPreview::SetEpochHost(EpochGeometryHost* host) {
+    if (m_impl->epochHost == host) return;
+    m_impl->epochHost = host;
+    m_impl->exchangeDirty = true;
+    m_impl->timelineDirty = true;
+}
+
+void ThermalPreview::SetEpochPlan(Vector<f64> times_s, Vector<f64> from_h) {
+    m_impl->epochTimes_s = std::move(times_s);
+    m_impl->epochFrom_h = std::move(from_h);
+    // A statement about geometry, so it costs what a geometry change costs.
+    m_impl->exchangeDirty = true;
+    m_impl->timelineDirty = true;
 }
 
 void ThermalPreview::InvalidateGeometry() {
@@ -548,28 +649,29 @@ ThermalPreview::SolveResult ThermalPreview::SolveAt(
         return fail("no material in the scene has thermal properties");
     }
 
-    // Rebuild exchange if geometry changed
-    if (m_impl->exchangeDirty) {
-        m_impl->RebuildExchange(tlas);
+    // Measure the world, once per epoch, if the geometry or the sun moved.
+    // The two flags used to buy a cheaper sun-only rebuild; they still do for
+    // a scene with one geometry, and for a schedule the walk is the same walk
+    // either way.
+    if (m_impl->exchangeDirty || m_impl->sunTableDirty) {
+        m_impl->RebuildSchedule(scene, tlas);
+        m_impl->timelineDirty = true;
     }
 
     // The lateral conductances ride in the exchange, which is what every
     // stepper is handed. They depend on the mesh and the material table, so
     // they are rebuilt whenever either was -- and cleared when the parameter
-    // goes off, or a scene that turned it off would keep conducting.
+    // goes off, or a scene that turned it off would keep conducting. Shared by
+    // every epoch: rigid motion cannot change which triangles share an edge.
     if (geometryWasDirty || materialsWereDirty || m_impl->lateralDirty) {
-        m_impl->exchange.lateral =
+        const thermal::CsrMatrix lateral =
             m_impl->params.lateralConduction
                 ? thermal::BuildLateralConduction(m_impl->mesh, m_impl->materials)
                 : thermal::CsrMatrix{};
+        for (thermal::ThermalGeometryEpoch& epoch : m_impl->schedule.epochs) {
+            epoch.exchange.lateral = lateral;
+        }
         m_impl->lateralDirty = false;
-    }
-
-    // Rebuild the sun columns if the geometry, the forcing file or the sun
-    // moved. Cheap next to the exchange -- no hemisphere rays, one dispatch
-    // per column -- which is why it is worth having its own flag.
-    if (m_impl->sunTableDirty) {
-        m_impl->RebuildSunTable(tlas);
         m_impl->timelineDirty = true;
     }
 
@@ -767,14 +869,20 @@ Result<String, String> ThermalPreview::DumpElements(const String& pathOrEmpty) {
     // has whether or not anyone asked how its temperature responds to it. The
     // offline writer emits it either way, and two writers that disagreed about
     // one column would be the second dialect this function exists to prevent.
+    const thermal::ThermalGeometryEpoch& epoch = m_impl->schedule.At(m_impl->currentTime_h);
     if (visibility.empty()) {
-        visibility = thermal::SampleSunVisibilityAt(m_impl->sunTable, m_impl->exchange,
+        visibility = thermal::SampleSunVisibilityAt(epoch.sunTable, epoch.exchange,
                                                     m_impl->currentTime_h, n);
     }
 
-    thermal::DumpThermalElements(path, m_impl->mesh.elements, m_impl->materials,
-                                 m_impl->exchange, temperature_K, sunSensitivity_K,
-                                 visibility);
+    // The elements as of the hour on screen: a dump has to describe the world
+    // the picture beside it was taken in, and in a scene with epochs that is
+    // not where the mesh was built.
+    const Vector<thermal::ThermalElement>& shape =
+        (epoch.elements.size() == m_impl->mesh.elements.size()) ? epoch.elements
+                                                                : m_impl->mesh.elements;
+    thermal::DumpThermalElements(path, shape, m_impl->materials, epoch.exchange,
+                                 temperature_K, sunSensitivity_K, visibility);
     return path;
 }
 
@@ -784,9 +892,12 @@ ThermalSolveStatus ThermalPreview::Status() const {
     status.solveValid = m_impl->timeline != nullptr && m_impl->lastError.empty();
     status.exchangeValid = !m_impl->exchangeDirty;
     status.elementCount = static_cast<u32>(m_impl->mesh.elements.size());
-    status.exchangeNonZeros = static_cast<u32>(m_impl->exchange.viewFactors.NonZeros());
+    status.exchangeNonZeros = static_cast<u32>(m_impl->Exchange0().viewFactors.NonZeros());
     status.exchangeRunCount = m_impl->exchangeRunCount;
-    status.sunSampleCount = static_cast<u32>(m_impl->sunTable.SampleCount());
+    status.sunSampleCount = static_cast<u32>(m_impl->SunTable0().SampleCount());
+    status.thermalEpochCount = static_cast<u32>(m_impl->schedule.Count());
+    status.currentThermalEpoch =
+        static_cast<u32>(m_impl->schedule.EpochAt(m_impl->currentTime_h));
     status.currentTime_h = m_impl->currentTime_h;
     // Through the same choice the steps go through, so the status cannot name
     // one stepper while another runs.

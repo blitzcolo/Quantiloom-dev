@@ -27,8 +27,10 @@
 #include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 
+#include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalPreview.hpp"
 #include "renderer/TimelineState.hpp"
+#include "thermal/ThermalEpochs.hpp"
 #include "core/Log.hpp"
 #include "core/CacheDirectory.hpp"
 #include "core/CIE_CMF_Data.hpp"
@@ -151,6 +153,29 @@ struct ExternalRenderContext::Impl {
     /// Which nodes the clock moves, and where they would stand if it did not.
     /// Empty and inert for a scene that declared no [timeline].
     rendercore::TimelineState timeline;
+
+    /// `thermal.timestep_s`, kept because it is the default epoch stride: a
+    /// boundary finer than one step is one the solver cannot tell from no
+    /// boundary at all.
+    f64 thermalTimestep_s = 60.0;
+
+    /// Lends the scene to the epoch builder and takes it back. Declared here
+    /// rather than made on demand because ThermalPreview holds the pointer
+    /// across solves.
+    struct TimelineEpochHost final : rendercore::EpochGeometryHost {
+        Impl* owner = nullptr;
+        f64 restore_s = 0.0;
+        bool captured = false;
+
+        VkAccelerationStructureKHR ApplyEpoch(f64 t_s) override;
+        void Restore() override;
+    };
+    TimelineEpochHost epochHost;
+
+    /// Work out where the geometry has to be re-measured, and tell the preview.
+    /// Called when the trajectories change -- a config applied, a gizmo drag
+    /// finished, a topology edit -- and never when the clock merely moves.
+    void RefreshEpochPlan();
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -1022,9 +1047,11 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     m_impl->timeline = rendercore::TimelineState::Build(
         *m_impl->scene, resolved.timeline, resolved.models, sceneInfo, spectra.nodeMotion,
         report);
+    m_impl->thermalTimestep_s = resolved.thermal.timestep_s;
     if (m_impl->timeline.Present()) {
         m_impl->ApplyTimelinePose(resolved.timeline.time_s);
     }
+    m_impl->RefreshEpochPlan();
 
     // 6. Illuminant, then lighting. UploadLightingParams is the only legal
     //    writer of that buffer -- it substitutes the atmosphere's air
@@ -1208,6 +1235,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             QL_LOG_WARN("ApplyConfig: thermal solve failed: {}", ex.what());
             SetThermalSolveEnabled(false);
         }
+        report.thermalEpochs = GetThermalSolveStatus().thermalEpochCount;
     } else {
         SetThermalSolveEnabled(false);
     }
@@ -2973,6 +3001,81 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s) {
     return moved;
 }
 
+VkAccelerationStructureKHR ExternalRenderContext::Impl::TimelineEpochHost::ApplyEpoch(
+    const f64 t_s) {
+    if (!captured) {
+        // Where the clock actually stands, so Restore can put it back. Taken
+        // on the first call rather than handed in, because the builder is
+        // reached through the preview and the preview does not know about
+        // timelines.
+        restore_s = owner->timeline.Current_s();
+        captured = true;
+    }
+    owner->ApplyTimelinePose(t_s);
+    return owner->geometry.IsValid() ? owner->geometry.Tlas().GetHandle() : VK_NULL_HANDLE;
+}
+
+void ExternalRenderContext::Impl::TimelineEpochHost::Restore() {
+    if (!captured) return;
+    owner->ApplyTimelinePose(restore_s);
+    captured = false;
+}
+
+void ExternalRenderContext::Impl::RefreshEpochPlan() {
+    if (!thermalPreview) return;
+
+    const rendercore::TimelineConfig& config = timeline.Config();
+    const bool wantEpochs =
+        timeline.Present() && timeline.HasMotion() &&
+        config.thermalGeometry == rendercore::TimelineConfig::ThermalGeometry::Epochs;
+    if (!wantEpochs) {
+        // Reference mode, or nothing moves: measure the world once, where the
+        // scene stands. Which is also what every scene did before the clock
+        // existed.
+        thermalPreview->SetEpochHost(nullptr);
+        thermalPreview->SetEpochPlan({}, {});
+        return;
+    }
+
+    thermal::EpochPlanInput input;
+    input.start_s = config.start_s;
+    input.end_s = config.end_s;
+    input.minMove_m = static_cast<f32>(config.thermalEpochMinMove_m);
+    // One thermal timestep is the finest division worth making: the stepper
+    // integrates one geometry per step, so two boundaries inside one step are
+    // the same as one. `thermal_time_scale` is what turns a thermal second
+    // into a timeline second.
+    input.stride_s = (config.thermalEpochStride_s > 0.0)
+                         ? config.thermalEpochStride_s
+                         : thermalTimestep_s / std::max(config.thermalTimeScale, 1e-9);
+
+    // The discontinuities go on the first node: the planner unions the
+    // candidates anyway, and repeating them per node would only make the list
+    // longer.
+    Vector<f64> changeTimes = timeline.ChangeTimes(config.start_s, config.end_s);
+    for (const rendercore::AnimatedNode& animated : timeline.Animated()) {
+        thermal::EpochPlanInput::Node node;
+        node.boundRadius_m = animated.boundRadius_m;
+        node.poseAt = [this, &animated](f64 t) { return timeline.PoseAt(animated, t); };
+        node.changeTimes = std::move(changeTimes);
+        changeTimes.clear();
+        input.nodes.push_back(std::move(node));
+    }
+
+    const Vector<f64> times = thermal::PlanEpochTimes(input);
+    Vector<f64> from_h;
+    from_h.reserve(times.size());
+    for (const f64 t : times) from_h.push_back(timeline.HourAt(t));
+
+    QL_LOG_INFO("  Thermal epochs: {} planned over {:.3f} s (stride {:g} s, min move {:g} m)",
+                times.size(), config.end_s - config.start_s, input.stride_s,
+                config.thermalEpochMinMove_m);
+
+    epochHost.owner = this;
+    thermalPreview->SetEpochHost(&epochHost);
+    thermalPreview->SetEpochPlan(times, std::move(from_h));
+}
+
 Result<void, String> ExternalRenderContext::SetTimelineTime(const f64 t_s) {
     if (!m_impl->scene) {
         return Result<void, String>::Err("no scene loaded");
@@ -3070,7 +3173,11 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     // exactly as it does the TLAS.
     m_impl->RebuildEmissiveGeometry();
 
-    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateGeometry();
+    if (m_impl->thermalPreview) {
+        m_impl->thermalPreview->InvalidateGeometry();
+        // A rest pose moved, so where the trajectory takes it moved too.
+        m_impl->RefreshEpochPlan();
+    }
 }
 
 void ExternalRenderContext::RefitAccelerationStructure() {
@@ -3093,7 +3200,10 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     // its old one, which reads as a light that has stopped illuminating.
     m_impl->RebuildEmissiveGeometry();
 
-    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateGeometry();
+    if (m_impl->thermalPreview) {
+        m_impl->thermalPreview->InvalidateGeometry();
+        m_impl->RefreshEpochPlan();
+    }
 }
 
 // ============================================================================

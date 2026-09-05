@@ -126,6 +126,97 @@ enabled = false
         return std::move(result.value());
     }
 
+    /// The same scene as a moving `[[models]]` entry against a clock, so the
+    /// thermal solve has to cut itself into epochs. The ground is the scene
+    /// file; the thing that moves is a second copy of it, driven along +X.
+    Config MakeMovingThermalConfig() const {
+        const String toml = String(R"(
+[renderer]
+resolution = [64, 64]
+spp = 1
+
+[spectral]
+mode = "lwir_fused"
+band = "LWIR"
+
+[scene]
+default_temperature_k = 288.15
+
+[timeline]
+start_s = 0
+end_s = 10
+ticks_per_second = 10
+time_s = 0
+thermal_time_scale = 3600
+thermal_geometry = "epochs"
+thermal_epoch_stride_s = 2
+thermal_epoch_min_move_m = 0.5
+
+[[models]]
+file = ")") + QUANTILOOM_SOURCE_ROOT + R"(/assets/models/endmember_checker.glb"
+name = "ground"
+
+[[models]]
+file = ")" + QUANTILOOM_SOURCE_ROOT + R"(/assets/models/endmember_checker.glb"
+name = "mover"
+translation = [0.0, 3.0, 0.0]
+
+[models.motion.location]
+type = "linear"
+velocity = [2.0, 0.0, 0.0]
+
+[camera]
+position = [0.0, 14.0, 6.0]
+look_at  = [0.0, 0.0, 0.0]
+fov_y    = 50.0
+
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance  = [0.0, 0.0, 0.0]
+sky_radiance  = [0.0, 0.0, 0.0]
+
+[atmosphere]
+preset = "disabled"
+sky_model = "clear_sky"
+air_temperature_k = 293.15
+relative_humidity = 50.0
+
+[thermal]
+enabled = true
+time_h = 12.0
+start_time_h = 0.0
+timestep_s = 60.0
+layers = 10
+initial = "steady"
+sun_irradiance_w_m2 = 900.0
+exchange_rays = 32
+exchange_top_k = 8
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[[materials]]
+name = "CheckerGround"
+ir_emissivity = 0.92
+thermal_conductivity_w_mk = 1.4
+density_kg_m3 = 2300.0
+specific_heat_j_kgk = 880.0
+thickness_m = 0.2
+convection_h_w_m2k = 10.0
+shortwave_absorptivity = 0.6
+interior_bc = "adiabatic"
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
+)";
+        auto result = Config::Parse(toml);
+        EXPECT_TRUE(result.has_value()) << result.error();
+        return std::move(result.value());
+    }
+
     std::unique_ptr<ExternalRenderContext> context;
     std::filesystem::path testDir;
 };
@@ -531,4 +622,54 @@ TEST_F(ThermalPreviewTest, AWhatIfForAParameterNobodyAskedForIsRefused) {
     // the old one was carried.
     EXPECT_TRUE(context->SetThermalWhatIf(ThermalSensitivityParameter::Conductivity, 0.0)
                     .has_value());
+}
+
+// ============================================================================
+// Geometry epochs
+// ============================================================================
+// A scene where something drives past is measured more than once, and the
+// measuring is the expensive part -- so the thing to pin is that it happens
+// when the trajectory changes and not when the clock merely moves.
+
+TEST_F(ThermalPreviewTest, AMovingModelCutsTheSolveIntoEpochs) {
+    const auto report = context->ApplyConfig(MakeMovingThermalConfig());
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+    ASSERT_TRUE(report.timelinePresent);
+    EXPECT_EQ(report.modelsLoaded, 2u);
+
+    const ThermalSolveStatus status = context->GetThermalSolveStatus();
+    EXPECT_GT(status.thermalEpochCount, 1u) << status.error;
+    EXPECT_EQ(report.thermalEpochs, status.thermalEpochCount);
+}
+
+TEST_F(ThermalPreviewTest, ScrubbingTheClockCostsNoExchangePrecompute) {
+    ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
+
+    const u32 before = context->GetThermalSolveStatus().exchangeRunCount;
+    ASSERT_GT(before, 0u);
+
+    for (const f64 t : {2.0, 5.0, 8.0, 3.0}) {
+        ASSERT_TRUE(context->SetTimelineTime(t).has_value());
+    }
+
+    EXPECT_EQ(context->GetThermalSolveStatus().exchangeRunCount, before)
+        << "moving the clock re-measured the world";
+}
+
+TEST_F(ThermalPreviewTest, TheHourFollowsTheClock) {
+    ASSERT_TRUE(context->ApplyConfig(MakeMovingThermalConfig()).ok());
+
+    // thermal_time_scale = 3600, so one timeline second is one simulated hour,
+    // counted from thermal.time_h = 12.
+    ASSERT_TRUE(context->SetTimelineTime(3.0).has_value());
+
+    const TimelineInfo info = context->GetTimelineInfo();
+    EXPECT_TRUE(info.thermalMapped);
+    EXPECT_NEAR(info.currentThermalHour, 15.0, 1e-9);
+    EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 15.0, 1e-9);
+}
+
+TEST_F(ThermalPreviewTest, AStaticSceneStillHasExactlyOneEpoch) {
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+    EXPECT_EQ(context->GetThermalSolveStatus().thermalEpochCount, 1u);
 }

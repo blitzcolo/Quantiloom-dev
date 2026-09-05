@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 #include <fstream>
 #include <string>
 
@@ -26,7 +27,7 @@ namespace {
 
 /// Bumped when the *list* of hashed inputs changes -- adding a field would
 /// otherwise leave every existing entry addressable under a new meaning.
-constexpr u32 kKeySchemaVersion = 3u;
+constexpr u32 kKeySchemaVersion = 4u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
@@ -198,6 +199,22 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     hasher.UpdateSized(elements.data(), elements.size() * sizeof(ThermalElement));
     const auto& bases = inputs.mesh->instanceElementBase;
     hasher.UpdateSized(bases.data(), bases.size() * sizeof(u32));
+
+    // 3b. ...and where it goes, when it goes anywhere. Each epoch's own
+    //     elements are the geometry the solve ran on for that span, so all of
+    //     them are inputs to the hour finally asked for. A schedule of one
+    //     epoch with no elements of its own is the static case and contributes
+    //     only its count, which keeps it hashing the same as no schedule.
+    const usize epochCount = (inputs.schedule != nullptr) ? inputs.schedule->Count() : 0;
+    hasher.UpdateU64(epochCount);
+    for (usize e = 0; e < epochCount; ++e) {
+        const ThermalGeometryEpoch& epoch = inputs.schedule->epochs[e];
+        // -infinity is epoch zero's reach-back; it hashes as a fixed sentinel
+        // rather than as whatever bits an infinity happens to be.
+        hasher.UpdateF64(std::isfinite(epoch.from_h) ? epoch.from_h : -1.0e308);
+        hasher.UpdateSized(epoch.elements.data(),
+                           epoch.elements.size() * sizeof(ThermalElement));
+    }
 
     // 4. The materials the solve will use, field by field: ThermalMaterial
     //    has padding after its u8 enum, and hashing that would make the key

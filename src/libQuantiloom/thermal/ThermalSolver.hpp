@@ -18,6 +18,8 @@
 #include "thermal/ThermalStepper.hpp"
 #include "thermal/ThermalTypes.hpp"
 
+#include <memory>
+
 #include <unordered_map>
 
 namespace quantiloom::thermal {
@@ -212,6 +214,62 @@ struct ThermalResult {
                                             const ExchangeGeometry& exchange,
                                             const SunVisibilityTable& sunTable = {},
                                             IThermalStepper* stepper = nullptr);
+
+/**
+ * @brief The same solve over a geometry that changes in steps
+ *
+ * @param schedule  the epochs, from ThermalEpochBuilder. An empty one is the
+ *                  open-sky fallback; a single epoch with no elements of its
+ *                  own takes them from the mesh this builds.
+ */
+[[nodiscard]] ThermalResult RunThermalSolve(const Scene& scene, const ThermalConfig& config,
+                                            ThermalGeometrySchedule schedule,
+                                            IThermalStepper* stepper = nullptr);
+
+/**
+ * @brief A solve kept alive, so that a second hour costs a step rather than a run
+ *
+ * RunThermalSolve builds a mesh, chooses a stepper, relaxes to steady state and
+ * then answers one question. For a single frame that is exactly right. For a
+ * sequence it is the same expensive setup per frame, and worse: the trajectory
+ * restarts, so the checkpoints that make a scrub cheap are thrown away between
+ * every pair of frames.
+ *
+ * This is the same code with the setup separated from the question. Build once,
+ * ask FieldAt as many times as there are frames, and the trajectory is stepped
+ * forward rather than replayed -- which is also what makes rendering a day in
+ * order cost about what rendering its last hour costs.
+ *
+ * Held on the heap because the timeline inside it holds references to the mesh,
+ * the materials and the schedule beside it.
+ */
+class ThermalSolveSession {
+public:
+    static Result<std::unique_ptr<ThermalSolveSession>, String> Build(
+        const Scene& scene, const ThermalConfig& config, ThermalGeometrySchedule schedule,
+        IThermalStepper* stepper = nullptr);
+
+    ~ThermalSolveSession();
+    ThermalSolveSession(const ThermalSolveSession&) = delete;
+    ThermalSolveSession& operator=(const ThermalSolveSession&) = delete;
+
+    /// The field at one hour. Everything a ThermalResult carries, taken
+    /// against the geometry in force at that hour.
+    [[nodiscard]] ThermalResult FieldAt(f64 time_h);
+
+    [[nodiscard]] u32 EpochCount() const;
+    /// Which epoch an hour falls in, for the status line.
+    [[nodiscard]] u32 EpochAt(f64 time_h) const;
+    [[nodiscard]] u32 ElementCount() const;
+    /// The geometry this session runs over. The solve cache keys on it, and
+    /// there is no second copy of it to key on.
+    [[nodiscard]] const ThermalGeometrySchedule& Schedule() const;
+
+private:
+    ThermalSolveSession();
+    struct Impl;
+    std::unique_ptr<Impl> m_impl;
+};
 
 /**
  * @brief The per-material properties the solve will actually use

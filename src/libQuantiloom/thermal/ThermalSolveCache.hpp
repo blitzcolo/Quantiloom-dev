@@ -93,6 +93,17 @@ struct ThermalSolveCacheKeyInputs {
     /// excluded (the first two are not solve inputs, the third arrives already
     /// merged in solvedMaterials).
     const ThermalConfig* config = nullptr;
+    /// The epochs the solve will run through, when it runs through more than
+    /// one. Every one of them is an input: a truck two metres further along in
+    /// epoch three gives a different trajectory at every hour after it, and a
+    /// key that only described the mesh would serve the old answer.
+    ///
+    /// Null, or a schedule of one epoch with no elements of its own, is the
+    /// single-geometry case and adds nothing to the key beyond the mesh -- so
+    /// an entry written before epochs existed still matches a run without
+    /// them, once the schema version is accounted for.
+    const ThermalGeometrySchedule* schedule = nullptr;
+
     /// [lighting] sun_direction, which is what the exchange precompute traces
     /// sun visibility against. Not the same field as config->sunDirection and
     /// not redundant with it.
