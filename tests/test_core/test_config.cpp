@@ -600,3 +600,47 @@ TEST(ConfigToTomlTest, AnAbsentKeyGivesAnEmptyString) {
     ASSERT_TRUE(original.has_value());
     EXPECT_TRUE(original.value().ToToml("models").empty());
 }
+
+TEST(ConfigToTomlTest, ASectionComesBackOneKeyPerLine) {
+    // Quantiloom Studio carries `[timeline]` through a save as text, because
+    // it has no reading of what those keys mean -- but it does own one of
+    // them, `time_s`, and strips it out with a line filter on the way in.
+    // That filter is only correct while a section serialises as a header
+    // followed by one `key = value` per line, which is what this pins.
+    const auto config = Config::Parse(R"(
+[timeline]
+start_s = 0
+end_s = 8.0
+ticks_per_second = 20.0
+time_s = 2.5
+thermal_geometry = "epochs"
+)");
+    ASSERT_TRUE(config.has_value());
+
+    const String block = config.value().ToToml("timeline");
+    ASSERT_FALSE(block.empty());
+
+    bool sawHeader = false;
+    u32 keyLines = 0;
+    std::istringstream stream(block);
+    String line;
+    while (std::getline(stream, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        usize begin = 0;
+        while (begin < line.size() && line[begin] == ' ') ++begin;
+        line = line.substr(begin);
+        if (line.empty()) continue;
+        if (line.front() == '[') {
+            EXPECT_EQ(line, "[timeline]");
+            sawHeader = true;
+            continue;
+        }
+        EXPECT_NE(line.find(" = "), String::npos) << "not a key/value line: " << line;
+        ++keyLines;
+    }
+    EXPECT_TRUE(sawHeader);
+    EXPECT_EQ(keyLines, 5u);
+
+    // ...and the one Studio owns is findable by the prefix it filters on.
+    EXPECT_NE(block.find("time_s = "), String::npos);
+}

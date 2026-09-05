@@ -84,6 +84,30 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         info->nodeModel.assign(scene.nodes.size(), SceneLoadInfo::kNoModel);
     }
 
+    // A caller that did not resolve the config for itself still gets its
+    // [[models]]. Two of them exist -- ExternalRenderContext::LoadScene, and
+    // anything reaching this through the two-argument overload -- and both
+    // used to report "nothing to render" for a config whose whole scene was
+    // [[models]], which is a true statement about what they read and a false
+    // one about the file.
+    //
+    // Resolving here rather than teaching each caller to: the entries' meaning
+    // is ResolveRenderConfig's, and a second reading of `file`, `name` and the
+    // rest is exactly what this project keeps removing.
+    ResolvedRenderConfig ownResolved;
+    if (resolved == nullptr && !config.GetTableArray("models").empty()) {
+        ConfigApplyOptions options;
+        options.baseDir = baseDir;
+        // Lenient: a caller that only wants the geometry is not the one to
+        // refuse the file over a missing renderer key.
+        options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::WarnAndDefault;
+        ConfigApplyReport report;
+        if (auto own = ResolveRenderConfig(config, options, report)) {
+            ownResolved = std::move(own.value());
+            resolved = &ownResolved;
+        }
+    }
+
     // [[models]], in file order. The resolver has already turned each entry
     // into a path, a name and a rest pose; all that is left is to read the
     // file and slot its indices in behind whatever is already here.
