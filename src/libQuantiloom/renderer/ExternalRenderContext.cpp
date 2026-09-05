@@ -28,6 +28,7 @@
 #include "atmos/AtmosphereBaker.hpp"
 
 #include "renderer/ThermalPreview.hpp"
+#include "renderer/TimelineState.hpp"
 #include "core/Log.hpp"
 #include "core/CacheDirectory.hpp"
 #include "core/CIE_CMF_Data.hpp"
@@ -142,6 +143,14 @@ struct ExternalRenderContext::Impl {
     /// a solve -- no scene, no acceleration structure -- never reach it, and a
     /// panel that can only say "no result" leaves the user guessing.
     String thermalLastError;
+    /// Mirrors what SetThermalSolveEnabled was last told. The preview owns the
+    /// same bit, but asking it means building a whole status snapshot, and the
+    /// timeline asks on every tick.
+    bool thermalEnabled = false;
+
+    /// Which nodes the clock moves, and where they would stand if it did not.
+    /// Empty and inert for a scene that declared no [timeline].
+    rendercore::TimelineState timeline;
 
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
@@ -574,6 +583,18 @@ struct ExternalRenderContext::Impl {
     void BuildAccelerationStructures();
     void UpdateGpuResources();
     void RebuildEmissiveGeometry();
+
+    /// Move the animated nodes to @p t_s and make the GPU agree.
+    ///
+    /// Deliberately NOT ExternalRenderContext::RefitAccelerationStructure:
+    /// that one invalidates the thermal preview's geometry, which is right for
+    /// a gizmo drag (it changed a rest pose, so the epoch plan is stale) and
+    /// wrong for a scrub (the trajectory the epochs were planned from has not
+    /// changed at all). Scrubbing a timeline must not cost an exchange
+    /// precompute.
+    ///
+    /// @return the nodes that actually moved
+    Vector<u32> ApplyTimelinePose(f64 t_s);
     // Config's renderer.enable_light_sampling. Held here rather than in
     // LightingParams, which has no bits left: turning it off is expressed by
     // publishing an emitter count of zero, which is the same thing the shader
@@ -862,7 +883,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
 
     // 2. The scene itself, its path resolved the same way every other path in
     //    the file is.
-    auto sceneResult = rendercore::LoadSceneFromConfig(config, options.baseDir);
+    rendercore::SceneLoadInfo sceneInfo;
+    auto sceneResult =
+        rendercore::LoadSceneFromConfig(config, options.baseDir, &resolved, &sceneInfo);
     if (!sceneResult.has_value()) {
         report.messages.push_back({ConfigApplyMessage::Severity::Error, "scene",
                                    "Failed to load scene: " + sceneResult.error()});
@@ -991,6 +1014,17 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     //    why the two above are already in place.
     m_impl->AdoptScene(std::move(loadedScene));
     report.sceneLoaded = true;
+
+    // 5b. The clock, built against the adopted scene because the rest poses it
+    //     snapshots are the ones [[nodes]] just finished writing. Applied
+    //     before the thermal block below, so that a solve started here sees the
+    //     geometry where `time_s` puts it rather than where the files did.
+    m_impl->timeline = rendercore::TimelineState::Build(
+        *m_impl->scene, resolved.timeline, resolved.models, sceneInfo, spectra.nodeMotion,
+        report);
+    if (m_impl->timeline.Present()) {
+        m_impl->ApplyTimelinePose(resolved.timeline.time_s);
+    }
 
     // 6. Illuminant, then lighting. UploadLightingParams is the only legal
     //    writer of that buffer -- it substitutes the atmosphere's air
@@ -1153,8 +1187,17 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             SetThermalSolveEnabled(true);
             report.thermalSolveEnabled = true;
 
-            if (auto thermalResult = SetThermalTime(resolved.thermal.time_h);
-                !thermalResult.has_value()) {
+            // With a clock, `thermal.time_h` stops meaning "the hour to
+            // render" and starts meaning "the hour at the timeline's start" --
+            // the hour to render is whatever `time_s` maps to from there.
+            f64 hour = resolved.thermal.time_h;
+            if (m_impl->timeline.Present()) {
+                m_impl->timeline.SetThermalMapping(resolved.thermal.time_h,
+                                                   resolved.timeline.thermalTimeScale);
+                hour = m_impl->timeline.HourAt(resolved.timeline.time_s);
+            }
+
+            if (auto thermalResult = SetThermalTime(hour); !thermalResult.has_value()) {
                 report.messages.push_back({ConfigApplyMessage::Severity::Warning,
                                            "thermal", thermalResult.error()});
                 QL_LOG_WARN("ApplyConfig: thermal solve: {}", thermalResult.error());
@@ -2331,6 +2374,12 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
     // Update the node's transform in the scene
     m_impl->scene->nodes[nodeIndex].transform = transform;
 
+    // If the clock moves this node, the edit is about its REST pose, not about
+    // this instant: the trajectory will overwrite `transform` on the next tick
+    // either way. Solving the composition for R_node here is what makes a
+    // gizmo drag at t = 30 still be there at t = 0.
+    m_impl->timeline.SetWorldPose(nodeIndex, transform);
+
     QL_LOG_DEBUG("SetNodeTransform: Updated node {} transform", nodeIndex);
 }
 
@@ -2783,6 +2832,7 @@ Result<String, String> ExternalRenderContext::DumpThermalElements(const String& 
 
 void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
     if (!m_impl->thermalPreview) return;
+    m_impl->thermalEnabled = enabled;
     m_impl->thermalPreview->SetEnabled(enabled);
 
     if (!enabled && m_impl->thermalTemperatureBuffer) {
@@ -2877,6 +2927,107 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
 
     ResetAccumulation();
     return Result<void, String>::Ok();
+}
+
+// ============================================================================
+// The timeline
+// ============================================================================
+
+Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s) {
+    if (!scene) return {};
+
+    Vector<u32> moved = timeline.Apply(*scene, t_s);
+    if (moved.empty()) return moved;
+
+    if (geometry.IsValid()) {
+        // Same handle, updated in place -- no rebind, no device idle. The
+        // refit's own barriers order it against tracing already in flight.
+        if (!geometry.RefitTlas(*contextAdapter, *scene)) {
+            // A refit is refused only when the instance count moved, which a
+            // trajectory cannot do. Rebuilding is the honest recovery for
+            // whatever did.
+            QL_LOG_DEBUG("Timeline: refit refused, rebuilding the TLAS");
+            vkDeviceWaitIdle(device);
+            geometry.RebuildTlas(*contextAdapter, *scene);
+            if (pipeline) {
+                pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
+                if (geometry.InstanceCount() > 0) {
+                    pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
+                }
+            }
+        }
+    }
+
+    // The emitter list holds world-space triangles, so a lamp that moved is
+    // sampled where it used to be until the list is rebuilt. Only a lamp: a
+    // rock that moved changes nothing in it, and rebuilding per tick for every
+    // scene would put a full walk of the geometry on the scrub path.
+    const bool emitterMoved =
+        std::any_of(timeline.Animated().begin(), timeline.Animated().end(),
+                    [&moved](const rendercore::AnimatedNode& animated) {
+                        return animated.emissive &&
+                               std::find(moved.begin(), moved.end(), animated.node) != moved.end();
+                    });
+    if (emitterMoved) RebuildEmissiveGeometry();
+
+    return moved;
+}
+
+Result<void, String> ExternalRenderContext::SetTimelineTime(const f64 t_s) {
+    if (!m_impl->scene) {
+        return Result<void, String>::Err("no scene loaded");
+    }
+    if (!m_impl->timeline.Present()) {
+        // Legal and quiet: a static scene has a clock that does nothing, and a
+        // host driving one transport for every document should not have to ask
+        // first.
+        m_impl->timeline.SetCurrent(t_s);
+        return Result<void, String>::Ok();
+    }
+
+    m_impl->ApplyTimelinePose(t_s);
+
+    // The hour follows the clock when the two are mapped. SetThermalTime
+    // resets accumulation itself, so this does not do it twice.
+    if (m_impl->thermalEnabled && m_impl->timeline.ThermalMapped()) {
+        auto solved = SetThermalTime(m_impl->timeline.HourAt(t_s));
+        if (!solved.has_value()) {
+            ResetAccumulation();
+            return solved;
+        }
+        return Result<void, String>::Ok();
+    }
+
+    ResetAccumulation();
+    return Result<void, String>::Ok();
+}
+
+TimelineInfo ExternalRenderContext::GetTimelineInfo() const {
+    TimelineInfo info = m_impl->timeline.Info();
+    if (m_impl->thermalPreview && m_impl->thermalEnabled) {
+        try {
+            const ThermalSolveStatus status = m_impl->thermalPreview->Status();
+            info.thermalEpochCount = status.thermalEpochCount;
+            info.currentThermalEpoch = status.currentThermalEpoch;
+        } catch (...) {
+            // A status snapshot that throws says nothing about the clock.
+        }
+    }
+    return info;
+}
+
+Result<void, String> ExternalRenderContext::SetTimelineThermalMapping(const f64 hourAtStart_h,
+                                                                      const f64 scale) {
+    if (!m_impl->timeline.Present()) {
+        return Result<void, String>::Err("this scene has no timeline");
+    }
+    m_impl->timeline.SetThermalMapping(hourAtStart_h, scale);
+    return SetTimelineTime(m_impl->timeline.Current_s());
+}
+
+glm::mat4 ExternalRenderContext::GetNodeRestTransform(const u32 nodeIndex) const {
+    if (!m_impl->scene) return glm::mat4(1.0f);
+    return m_impl->timeline.RestOf(*m_impl->scene, nodeIndex);
 }
 
 ThermalSolveStatus ExternalRenderContext::GetThermalSolveStatus() const {

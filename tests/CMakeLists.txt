@@ -280,6 +280,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_config_duplicates.cpp
     test_renderer/test_scene_edit.cpp
     test_renderer/test_tlas_refit.cpp
+    test_renderer/test_timeline_context.cpp
     test_renderer/test_interactive_bench.cpp
 )
 

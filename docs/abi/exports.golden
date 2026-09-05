@@ -82,6 +82,8 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetSolarSpectralLUTFromSpec(struct quantiloom::SolarLutSpec const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalTime(double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalWhatIf(enum quantiloom::ThermalSensitivityParameter,double)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetTimelineThermalMapping(double,double)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetTimelineTime(double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::RegisterTool(struct quantiloom::mcp::ToolDef const &)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
@@ -91,6 +93,8 @@ public: class quantiloom::SpectralIO & quantiloom::SpectralIO::operator=(class q
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::ExternalRenderContext::GetPipelineCachePath(void)const
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::Get<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::GetString(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::ToToml(class std::basic_string_view<char,struct std::char_traits<char> >)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::ToToml(void)const
 public: class std::unordered_map<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,struct std::hash<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,struct std::equal_to<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >,class std::allocator<struct std::pair<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const ,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > > quantiloom::Config::GetSection(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class std::vector<__int64,class std::allocator<__int64> > quantiloom::Config::GetArray<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class std::vector<bool,class std::allocator<bool> > quantiloom::Config::GetArray<bool>(class std::basic_string_view<char,struct std::char_traits<char> >)const
@@ -183,6 +187,7 @@ public: static void quantiloom::Log::SetLevel(enum quantiloom::Log::Level)
 public: static void quantiloom::Log::Shutdown(void)
 public: static void quantiloom::Log::Trace(class std::basic_string_view<char,struct std::char_traits<char> >)
 public: static void quantiloom::Log::Warn(class std::basic_string_view<char,struct std::char_traits<char> >)
+public: struct glm::mat<4,4,float,0> quantiloom::ExternalRenderContext::GetNodeRestTransform(unsigned int)const
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig &&)
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig const &)
 public: struct quantiloom::AtmosphereNNConfig const & quantiloom::ExternalRenderContext::GetAtmosphere(void)const
@@ -195,6 +200,7 @@ public: struct quantiloom::OfflineRenderOutput quantiloom::OfflineRenderer::Rend
 public: struct quantiloom::OfflineRenderParams const & quantiloom::OfflineRenderer::Params(void)const
 public: struct quantiloom::SensorParams const & quantiloom::ExternalRenderContext::GetGPUSensorParams(void)const
 public: struct quantiloom::ThermalSolveStatus quantiloom::ExternalRenderContext::GetThermalSolveStatus(void)const
+public: struct quantiloom::TimelineInfo quantiloom::ExternalRenderContext::GetTimelineInfo(void)const
 public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
 public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const
 public: unsigned __int64 quantiloom::Config::GetUInt64(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64)const

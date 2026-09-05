@@ -218,6 +218,11 @@ struct ThermalSolveStatus {
     f64 shortestTimeConstant_s = 0.0;
     f64 sliderStartTime_h = 0.0;
     f64 sliderEndTime_h = 24.0;
+    /// Piecewise-static geometry spans the trajectory is cut into, and which
+    /// of them the hour on screen falls in. One epoch means the geometry never
+    /// moved, or the scene asked for a single frozen reference.
+    u32 thermalEpochCount = 1;
+    u32 currentThermalEpoch = 0;
     String stepperName;
     String error;
 };

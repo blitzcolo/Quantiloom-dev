@@ -46,6 +46,7 @@
 #include "renderer/ConfigApply.hpp"
 #include "renderer/DisplayControl.hpp"
 #include "renderer/ThermalControl.hpp"
+#include "renderer/TimelineControl.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/Pick.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
@@ -892,6 +893,57 @@ public:
      *         materials, nodeCount > 32 on a GPU without fallback, etc.)
      */
     Result<void, String> SetThermalTime(f64 time_h);
+
+    // ========================================================================
+    // Timeline
+    // ========================================================================
+
+    /**
+     * @brief Move the clock to @p t_s
+     *
+     * Puts every animated node where its trajectory says, refits the
+     * acceleration structure in place, rebuilds the emitter list if one of the
+     * things that moved was a lamp, and -- when the two are mapped -- re-solves
+     * the thermal field at the hour this second corresponds to. Accumulation
+     * resets.
+     *
+     * A scene with no timeline accepts this and does nothing, so a host can
+     * drive one transport for every document it opens.
+     *
+     * Cheap enough for a drag: no exchange precompute, no epoch replan, no
+     * device idle. Those belong to a change of the trajectory itself, which is
+     * what RefitAccelerationStructure signals.
+     *
+     * Must not be called from within a host command buffer recording.
+     */
+    Result<void, String> SetTimelineTime(f64 t_s);
+
+    /**
+     * @brief The clock, where it stands, and what it drives
+     */
+    [[nodiscard]] TimelineInfo GetTimelineInfo() const;
+
+    /**
+     * @brief Tie the thermal hour to the clock
+     *
+     * @param hourAtStart_h  the simulated hour at `timeline.start_s`
+     * @param scale          seconds of thermal simulation per second of
+     *                       timeline; 8640 watches a day in ten seconds
+     *
+     * Re-solves at the current time before returning, so the picture and the
+     * numbers agree the moment this comes back.
+     */
+    Result<void, String> SetTimelineThermalMapping(f64 hourAtStart_h, f64 scale);
+
+    /**
+     * @brief Where a node would stand with every trajectory at the identity
+     *
+     * What a host writes into `[[nodes]]` for a node the clock moves. Its
+     * `transform` is where it is at the current instant, which is not a thing
+     * a document can record. For a node with no trajectory the two are the
+     * same.
+     */
+    [[nodiscard]] glm::mat4 GetNodeRestTransform(u32 nodeIndex) const;
 
     /**
      * @brief Status snapshot for the panel
