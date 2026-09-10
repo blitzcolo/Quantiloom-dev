@@ -104,7 +104,7 @@ void PrintHelp(const char* progname) {
         << "  sequence <config.toml> Render the config's [timeline] tick by tick on one\n"
         << "                         device, moving the clock between frames\n"
         << "  serve                  Answer MCP on 127.0.0.1 so an agent can render\n"
-        << "  --port N               Port for serve mode (default 8766)\n"
+        << "  --port N               Port for serve mode (default 8600)\n"
         << "  -h, --help             Show this help message and exit\n"
         << "  -v, --version          Show version number and exit\n"
         << "  -V, --build-info       Show full build information and exit\n"
@@ -223,7 +223,10 @@ int RunApp(int argc, char* argv[]) {
     // serve → answer MCP instead of rendering one scene and exiting
     // ========================================================================
     if (std::strcmp(argv[1], "serve") == 0) {
-        u16 port = 8766;  // Studio defaults to 8765; both can run at once
+        // The same 8600 Studio and mcp::ServerOptions default to, so there is
+        // one number to remember; two hosts serving at once now needs one of
+        // them to be given a --port.
+        u16 port = 8600;
         for (int i = 2; i < argc; ++i) {
             if (std::strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
                 const long parsed = std::strtol(argv[++i], nullptr, 10);

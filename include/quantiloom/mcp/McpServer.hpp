@@ -27,7 +27,7 @@
  * Usage:
  * @code
  * mcp::ServerOptions options;
- * options.port = 8765;
+ * options.port = 8600;
  * options.serverVersion = QUANTILOOM_VERSION_STRING;
  * options.onCommandQueued = [this] { requestUpdate(); };  // wake the pump
  *
@@ -188,9 +188,18 @@ struct ToolDef {
  * @brief Host-side settings, fixed at Create()
  */
 struct ServerOptions {
-    /// Loopback port. Studio and the CLI default to different ones so both can
-    /// run at once.
-    u16 port = 8765;
+    /// Loopback port.
+    ///
+    /// 8600 rather than something in the 876x range the hosts used to pick:
+    /// Windows reserves blocks of the ephemeral range for Hyper-V and WinNAT,
+    /// and on a machine whose reservations covered 8725-8824 the bind failed
+    /// with a message blaming another server. `netsh int ipv4 show
+    /// excludedportrange protocol=tcp` lists them.
+    ///
+    /// Every host now defaults here, so two of them cannot serve at once; the
+    /// second reports the bind failure and the host's own switch -- `serve
+    /// --port`, Studio's `--mcp=PORT` -- moves it.
+    u16 port = 8600;
 
     /// Reported in `serverInfo`. Distinguishes hosts to the agent.
     String serverName = "quantiloom";
