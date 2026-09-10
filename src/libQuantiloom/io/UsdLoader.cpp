@@ -52,6 +52,7 @@
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
 #include <pxr/usd/usdShade/shader.h>
+#include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/usd/sdf/path.h>
 #include <pxr/usd/sdf/assetPath.h>
@@ -1356,7 +1357,14 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
         }
 
         UsdShadeMaterial shadeMaterial(prim);
-        UsdShadeShader surfaceShader = shadeMaterial.ComputeSurfaceSource();
+
+        // A material translated from a .mtlx document connects its surface
+        // through the `mtlx` render context, not the universal one, so asking
+        // only for the default finds nothing and the material comes out empty.
+        // The universal context stays second: a material that has both is
+        // saying the universal output is the portable one.
+        UsdShadeShader surfaceShader = shadeMaterial.ComputeSurfaceSource(
+            {TfToken("mtlx"), UsdShadeTokens->universalRenderContext});
 
         usd::BindingContext context;
         context.usdDir = usdDir;

@@ -1978,3 +1978,393 @@ def Material "Mat"
     // still binds, against set 0, and the log says so.
     EXPECT_GE(material.baseColorTextureIndex, 0);
 }
+
+// ============================================================================
+// MaterialX gltf_pbr and open_pbr_surface
+// ============================================================================
+
+TEST_F(UsdLoaderTest, GltfPbrSurfaceshaderMapsOneToOne) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("gltf_pbr.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_gltf_pbr_surfaceshader"
+        color3f inputs:base_color = (0.4, 0.5, 0.6)
+        float inputs:metallic = 0.3
+        float inputs:roughness = 0.25
+        float inputs:ior = 1.7
+        float inputs:specular = 0.8
+        color3f inputs:specular_color = (0.9, 0.85, 0.8)
+        float inputs:transmission = 0.4
+        float inputs:thickness = 1.5
+        float inputs:attenuation_distance = 2.0
+        color3f inputs:attenuation_color = (0.9, 0.8, 0.7)
+        color3f inputs:sheen_color = (0.5, 0.25, 0.125)
+        float inputs:sheen_roughness = 0.4
+        float inputs:clearcoat = 0.3
+        float inputs:clearcoat_roughness = 0.15
+        color3f inputs:emissive = (1, 0.5, 0.25)
+        float inputs:emissive_strength = 2.0
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // gltf_pbr used to be routed into the UsdPreviewSurface reader, where none
+    // of these names matched and every material came out the default grey.
+    EXPECT_NEAR(material.baseColorFactor.r, 0.4f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.b, 0.6f, 1e-6f);
+    EXPECT_NEAR(material.metallicFactor, 0.3f, 1e-6f);
+    EXPECT_NEAR(material.roughnessFactor, 0.25f, 1e-6f);
+    EXPECT_NEAR(material.ior, 1.7f, 1e-6f);
+    EXPECT_NEAR(material.specularFactor, 0.8f, 1e-6f);
+    EXPECT_NEAR(material.specularColorFactor.g, 0.85f, 1e-6f);
+    EXPECT_NEAR(material.transmission, 0.4f, 1e-6f);
+    EXPECT_NEAR(material.thicknessFactor, 1.5f, 1e-6f);
+    EXPECT_NEAR(material.attenuationDistance, 2.0f, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.b, 0.7f, 1e-6f);
+    EXPECT_NEAR(material.sheenColorFactor.r, 0.5f, 1e-6f);
+    EXPECT_NEAR(material.sheenRoughnessFactor, 0.4f, 1e-6f);
+    EXPECT_NEAR(material.clearcoatFactor, 0.3f, 1e-6f);
+    EXPECT_NEAR(material.clearcoatRoughnessFactor, 0.15f, 1e-6f);
+
+    // emissive_strength folds into the factor, as it does for glTF itself.
+    EXPECT_NEAR(material.emissiveFactor.r, 2.0f, 1e-6f);
+    EXPECT_NEAR(material.emissiveFactor.g, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.emissiveFactor.b, 0.5f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, GltfPbrWithoutAnAttenuationDistanceHasNoAttenuation) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("gltf_pbr_no_attenuation.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_gltf_pbr_surfaceshader"
+        float inputs:transmission = 1.0
+        color3f inputs:attenuation_color = (0.2, 0.4, 0.6)
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // attenuation_distance has no default in the node definition, so a colour
+    // without one describes no absorption; inventing a distance would invent a
+    // coefficient.
+    EXPECT_NEAR(material.attenuationDistance, 0.0f, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.r, 1.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, GltfPbrAlphaModeIntegerSelectsMaskAndCutoff) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("gltf_pbr_alpha.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_gltf_pbr_surfaceshader"
+        float inputs:alpha = 0.6
+        int inputs:alpha_mode = 1
+        float inputs:alpha_cutoff = 0.35
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // The enum travels as an integer: 0 opaque, 1 mask, 2 blend.
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Mask);
+    EXPECT_NEAR(material.alphaCutoff, 0.35f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.a, 0.6f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, OpenPbrDispersionScaleOverAbbeNumber) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("open_pbr_dispersion.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:transmission_weight = 1.0
+        float inputs:transmission_dispersion_scale = 0.5
+        float inputs:transmission_dispersion_abbe_number = 40.0
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // OpenPBR splits dispersion into a strength and an Abbe number, so the
+    // reciprocal Material stores is scale / V.
+    EXPECT_NEAR(material.dispersion, 0.5f / 40.0f, 1e-6f);
+    EXPECT_NEAR(material.transmission, 1.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, OpenPbrDispersionScaleZeroMeansNoDispersion) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("open_pbr_no_dispersion.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:transmission_weight = 1.0
+        float inputs:transmission_dispersion_abbe_number = 40.0
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // The Abbe number defaults to 20, so reading it alone would give every
+    // OpenPBR glass a dispersion nobody asked for.
+    EXPECT_NEAR(material.dispersion, 0.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, OpenPbrFuzzAndCoatMapToSheenAndClearcoat) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("open_pbr_fuzz.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_open_pbr_surface_surfaceshader"
+        float inputs:base_weight = 0.5
+        color3f inputs:base_color = (0.4, 0.5, 0.6)
+        float inputs:base_metalness = 0.2
+        float inputs:specular_roughness = 0.35
+        float inputs:specular_ior = 1.8
+        float inputs:specular_roughness_anisotropy = 0.7
+        float inputs:fuzz_weight = 0.5
+        color3f inputs:fuzz_color = (1, 0.5, 0.25)
+        float inputs:fuzz_roughness = 0.6
+        float inputs:coat_weight = 0.4
+        float inputs:coat_roughness = 0.05
+        float inputs:geometry_opacity = 0.75
+        bool inputs:geometry_thin_walled = 1
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // base_weight is a weight on base_color, fuzz is sheen, coat is clearcoat.
+    EXPECT_NEAR(material.baseColorFactor.r, 0.2f, 1e-5f);
+    EXPECT_NEAR(material.baseColorFactor.g, 0.25f, 1e-5f);
+    EXPECT_NEAR(material.baseColorFactor.b, 0.3f, 1e-5f);
+    EXPECT_NEAR(material.metallicFactor, 0.2f, 1e-6f);
+    EXPECT_NEAR(material.roughnessFactor, 0.35f, 1e-6f);
+    EXPECT_NEAR(material.ior, 1.8f, 1e-6f);
+    EXPECT_NEAR(material.anisotropyStrength, 0.7f, 1e-6f);
+
+    EXPECT_NEAR(material.sheenColorFactor.r, 0.5f, 1e-6f);
+    EXPECT_NEAR(material.sheenColorFactor.g, 0.25f, 1e-6f);
+    EXPECT_NEAR(material.sheenColorFactor.b, 0.125f, 1e-6f);
+    EXPECT_NEAR(material.sheenRoughnessFactor, 0.6f, 1e-6f);
+
+    EXPECT_NEAR(material.clearcoatFactor, 0.4f, 1e-6f);
+    EXPECT_NEAR(material.clearcoatRoughnessFactor, 0.05f, 1e-6f);
+
+    EXPECT_NEAR(material.baseColorFactor.a, 0.75f, 1e-6f);
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Blend);
+    EXPECT_TRUE(material.doubleSided);
+}
+
+TEST_F(UsdLoaderTest, MaterialXImageColorSpaceMetadataSelectsSrgb) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("mtlx_srgb.tga", 200, 150, 100, 255);
+    WriteSolidTga("mtlx_linear.tga", 200, 150, 100, 255);
+
+    const auto path = WriteUsda("mtlx_colour_space.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_gltf_pbr_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Encoded.outputs:out>
+        color3f inputs:emissive.connect = </Mat/Linear.outputs:out>
+        token outputs:surface
+    }
+
+    def Shader "Encoded"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @./mtlx_srgb.tga@ (
+            colorSpace = "srgb_texture"
+        )
+        color3f outputs:out
+    }
+
+    def Shader "Linear"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @./mtlx_linear.tga@ (
+            colorSpace = "lin_rec709"
+        )
+        color3f outputs:out
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    // Colour space is the one thing that breaks spectral upsampling silently: an
+    // sRGB image read as linear gives the wrong reflectance and nothing errors.
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    ASSERT_GE(material.emissiveTextureIndex, 0);
+    EXPECT_TRUE(scene.textures[material.baseColorTextureIndex].isSRGB);
+    EXPECT_FALSE(scene.textures[material.emissiveTextureIndex].isSRGB)
+        << "lin_rec709 overrides the slot's guess that an emissive map is colour";
+}
+
+TEST_F(UsdLoaderTest, AMaterialXDocumentReferencedFromUsdResolvesItsStandardSurface) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // A .mtlx document is a USD layer as far as this loader is concerned: the
+    // usdMtlx plugin translates it, and what comes out the other side is an
+    // ordinary UsdShadeShader with `info:id = ND_standard_surface_surfaceshader`.
+    // Nothing here reads MaterialX, and nothing here links it.
+    WriteUsda("referenced_material.mtlx", R"(<?xml version="1.0"?>
+<materialx version="1.39">
+  <standard_surface name="SS1" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.1, 0.2, 0.3" />
+    <input name="specular_roughness" type="float" value="0.35" />
+    <input name="metalness" type="float" value="0.9" />
+  </standard_surface>
+  <surfacematerial name="Mat1" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="SS1" />
+  </surfacematerial>
+</materialx>
+)");
+
+    const auto path = WriteUsda("mtlx_reference.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + R"(
+def Mesh "Quad"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+}
+
+def "Library" (
+    references = @./referenced_material.mtlx@</MaterialX/Materials/Mat1>
+)
+{
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    const Material* referenced = nullptr;
+    for (const auto& material : scene.materials) {
+        if (std::abs(material.roughnessFactor - 0.35f) < 1e-5f) {
+            referenced = &material;
+            break;
+        }
+    }
+    ASSERT_NE(referenced, nullptr)
+        << "the .mtlx document's standard_surface did not reach the scene; "
+        << scene.materials.size() << " materials were loaded";
+
+    EXPECT_NEAR(referenced->metallicFactor, 0.9f, 1e-5f);
+    EXPECT_NEAR(referenced->baseColorFactor.r, 0.1f, 1e-5f);
+    EXPECT_NEAR(referenced->baseColorFactor.g, 0.2f, 1e-5f);
+    EXPECT_NEAR(referenced->baseColorFactor.b, 0.3f, 1e-5f);
+}

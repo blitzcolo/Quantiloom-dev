@@ -243,10 +243,12 @@ UvBinding ResolveUvSource(const UsdAttribute& producer, BindingContext& context,
     const String id = NodeId(node);
 
     if (IdStartsWith(id, "UsdPrimvarReader_")) {
-        if (auto name = GetInputValue<TfToken>(node, "varname", context)) {
-            out.primvar = name->GetString();
-        } else if (auto name = GetInputValue<std::string>(node, "varname", context)) {
-            out.primvar = *name;
+        // varname is a token in the UsdPreviewSurface schema and a string in
+        // some exporters' output; both name the same primvar.
+        if (auto varToken = GetInputValue<TfToken>(node, "varname", context)) {
+            out.primvar = varToken->GetString();
+        } else if (auto varString = GetInputValue<std::string>(node, "varname", context)) {
+            out.primvar = *varString;
         }
         return out;
     }
@@ -1309,6 +1311,129 @@ void ConvertStandardSurface(const SurfaceReading& reading, Material& material) {
     }
 }
 
+void ConvertGltfPbr(const SurfaceReading& reading, Material& material) {
+    // This node definition is the glTF material expressed in MaterialX, so most
+    // of it is a rename: the inputs are the KHR extensions by another spelling.
+    material.baseColorFactor =
+        glm::vec4(ColourFactorFor(reading[SurfaceSlot::BaseColor]), 1.0f);
+    material.metallicFactor = ScalarFactorFor(reading[SurfaceSlot::Metallic]);
+    material.roughnessFactor = ScalarFactorFor(reading[SurfaceSlot::Roughness]);
+    material.ior = reading.Scalar(SurfaceSlot::Ior);
+
+    material.specularFactor = ScalarFactorFor(reading[SurfaceSlot::Specular]);
+    material.specularColorFactor = ColourFactorFor(reading[SurfaceSlot::SpecularColor]);
+
+    material.transmission = ScalarFactorFor(reading[SurfaceSlot::Transmission]);
+    material.thicknessFactor = ScalarFactorFor(reading[SurfaceSlot::Thickness]);
+    // attenuation_distance has no default in the node definition, so it counts
+    // only when the scene wrote one; Material's own 0 already means no
+    // attenuation.
+    if (reading[SurfaceSlot::AttenuationDistance].authored) {
+        material.attenuationDistance = reading.Scalar(SurfaceSlot::AttenuationDistance);
+        material.attenuationColor = reading.Colour(SurfaceSlot::AttenuationColor);
+    }
+
+    material.sheenColorFactor = ColourFactorFor(reading[SurfaceSlot::SheenColor]);
+    material.sheenRoughnessFactor = ScalarFactorFor(reading[SurfaceSlot::SheenRoughness]);
+
+    material.clearcoatFactor = ScalarFactorFor(reading[SurfaceSlot::ClearcoatWeight]);
+    material.clearcoatRoughnessFactor =
+        ScalarFactorFor(reading[SurfaceSlot::ClearcoatRoughness]);
+
+    // emissive_strength folds into the factor, the same way
+    // KHR_materials_emissive_strength does at the glTF loader: five consumers
+    // have to agree exactly or the MIS weight is biased by light size.
+    material.emissiveFactor = ColourFactorFor(reading[SurfaceSlot::Emissive]) *
+                              reading.Scalar(SurfaceSlot::EmissiveWeight);
+
+    // alpha_mode is glTF's enum as an integer: 0 opaque, 1 mask, 2 blend.
+    const SlotValue& alpha = reading[SurfaceSlot::Opacity];
+    material.baseColorFactor.a = ScalarFactorFor(alpha);
+    material.alphaCutoff = reading.Scalar(SurfaceSlot::AlphaCutoff);
+    switch (static_cast<int>(reading.Scalar(SurfaceSlot::AlphaMode) + 0.5f)) {
+        case 1:  material.alphaMode = Material::AlphaMode::Mask;  break;
+        case 2:  material.alphaMode = Material::AlphaMode::Blend; break;
+        default: material.alphaMode = Material::AlphaMode::Opaque; break;
+    }
+}
+
+void ConvertOpenPbr(const SurfaceReading& reading, Material& material) {
+    material.baseColorFactor =
+        glm::vec4(reading.Scalar(SurfaceSlot::BaseWeight) *
+                      ColourFactorFor(reading[SurfaceSlot::BaseColor]),
+                  1.0f);
+    material.metallicFactor = ScalarFactorFor(reading[SurfaceSlot::Metallic]);
+    material.roughnessFactor = ScalarFactorFor(reading[SurfaceSlot::Roughness]);
+    material.ior = reading.Scalar(SurfaceSlot::Ior);
+
+    material.specularFactor = ScalarFactorFor(reading[SurfaceSlot::Specular]);
+    material.specularColorFactor = ColourFactorFor(reading[SurfaceSlot::SpecularColor]);
+
+    // OpenPBR states anisotropy as a roughness anisotropy with no rotation; the
+    // tangent direction stays the geometric one.
+    material.anisotropyStrength = ScalarFactorFor(reading[SurfaceSlot::AnisotropyStrength]);
+
+    material.transmission = ScalarFactorFor(reading[SurfaceSlot::Transmission]);
+    const f32 depth = reading.Scalar(SurfaceSlot::TransmissionDepth);
+    const glm::vec3 transmissionColour = reading.Colour(SurfaceSlot::TransmissionColor);
+    if (depth > 0.0f) {
+        material.attenuationColor = transmissionColour;
+        material.attenuationDistance = depth;
+    } else if (transmissionColour != glm::vec3(1.0f)) {
+        QL_LOG_WARN("    Material '{}': transmission_color with transmission_depth = 0 is "
+                    "a distance-independent tint, which has no volume-absorption "
+                    "equivalent; no attenuation is applied", reading.materialPath);
+    }
+
+    // OpenPBR splits dispersion into a strength and an Abbe number, so a scale
+    // of zero is no dispersion whatever the number says.
+    const f32 dispersionScale = reading.Scalar(SurfaceSlot::DispersionScale);
+    const f32 abbe = reading.Scalar(SurfaceSlot::Dispersion);
+    material.dispersion = (dispersionScale > 0.0f && abbe > 0.0f)
+                              ? dispersionScale / abbe
+                              : 0.0f;
+
+    // fuzz is OpenPBR's sheen.
+    material.sheenColorFactor = reading.Scalar(SurfaceSlot::SheenWeight) *
+                               ColourFactorFor(reading[SurfaceSlot::SheenColor]);
+    material.sheenRoughnessFactor = ScalarFactorFor(reading[SurfaceSlot::SheenRoughness]);
+
+    material.clearcoatFactor = ScalarFactorFor(reading[SurfaceSlot::ClearcoatWeight]);
+    material.clearcoatRoughnessFactor =
+        ScalarFactorFor(reading[SurfaceSlot::ClearcoatRoughness]);
+    if (reading.Colour(SurfaceSlot::ClearcoatColor) != glm::vec3(1.0f)) {
+        QL_LOG_WARN("    Material '{}': coat_color is not applied; the clearcoat layer "
+                    "here has no absorption", reading.materialPath);
+    }
+    if (reading.Scalar(SurfaceSlot::ClearcoatIor) != 1.6f) {
+        QL_LOG_WARN("    Material '{}': coat_ior is not applied; the clearcoat layer's "
+                    "index is fixed", reading.materialPath);
+    }
+
+    // emission_luminance is in nits. There is no radiometric calibration in RGB
+    // mode to convert it against, so it passes through as an HDR scale rather
+    // than being multiplied by a constant this loader invented; a lamp that
+    // needs to be absolute binds an emissive_curve instead.
+    const f32 luminance = reading.Scalar(SurfaceSlot::EmissiveWeight);
+    material.emissiveFactor = ColourFactorFor(reading[SurfaceSlot::Emissive]) * luminance;
+    if (luminance > 0.0f) {
+        QL_LOG_WARN("    Material '{}': emission_luminance is in nits and is applied as "
+                    "an HDR scale, not converted; bind an emissive_curve for a "
+                    "calibrated emitter", reading.materialPath);
+    }
+
+    const SlotValue& opacity = reading[SurfaceSlot::Opacity];
+    const f32 alpha = ScalarFactorFor(opacity);
+    material.baseColorFactor.a = alpha;
+    if (opacity.HasTexture() || alpha < 1.0f) {
+        material.alphaMode = Material::AlphaMode::Blend;
+    }
+
+    if (reading.Scalar(SurfaceSlot::ThinWalled) >= 0.5f) {
+        material.doubleSided = true;
+    }
+}
+
 }  // namespace
 
 void ConvertSurface(const SurfaceReading& reading, Material& material) {
@@ -1320,7 +1445,11 @@ void ConvertSurface(const SurfaceReading& reading, Material& material) {
             ConvertStandardSurface(reading, material);
             return;
         case SurfaceVocabulary::GltfPbr:
+            ConvertGltfPbr(reading, material);
+            return;
         case SurfaceVocabulary::OpenPbrSurface:
+            ConvertOpenPbr(reading, material);
+            return;
         case SurfaceVocabulary::Unknown:
             break;
     }
