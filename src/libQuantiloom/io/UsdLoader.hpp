@@ -131,6 +131,17 @@ struct UsdLoadOptions {
     bool enablePointInstancer = true;
 
     /**
+     * @brief Fold the stage's own upAxis and metersPerUnit into the node transforms
+     *
+     * A Z-up stage is rotated to Y-up and an authored metersPerUnit is applied as
+     * a uniform scale, so a scene assembled from files in different conventions
+     * lines up. On by default; `scene.world_units_to_meters` is not an
+     * alternative, as that scales lighting, camera and thermal inputs rather than
+     * geometry and is one scalar for a whole config.
+     */
+    bool applyStageMetrics = true;
+
+    /**
      * @brief Time code for attribute queries
      * Default is UsdTimeCode::Default() (no animation).
      */
@@ -365,20 +376,6 @@ private:
         const std::vector<i32>& faceVertexCounts,
         const std::vector<i32>& faceVertexIndices,
         std::vector<u32>& outTriangleToFace);
-
-    /**
-     * @brief Expand face-varying attribute to per-vertex
-     * @note Used for normals and UVs with faceVarying interpolation
-     */
-    template<typename T>
-    static void ExpandFaceVaryingAttribute(
-        const std::vector<T>& faceVaryingData,
-        const std::vector<i32>& faceVertexCounts,
-        const std::vector<i32>& faceVertexIndices,
-        const std::vector<glm::vec3>& positions,
-        std::vector<glm::vec3>& outPositions,
-        std::vector<T>& outData,
-        std::vector<u32>& outIndices);
 };
 
 } // namespace quantiloom

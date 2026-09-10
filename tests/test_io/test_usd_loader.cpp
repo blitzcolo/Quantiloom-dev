@@ -178,6 +178,30 @@ def Xform "Sphere" (
         return assetsPath / fileName;
     }
 
+    /// Write an inline `#usda` document and return its path.
+    ///
+    /// Scratch fixtures go to the temp directory, never to
+    /// assets/models/usd_test/ -- git tracks that one, and a test that leaves
+    /// generated files in the source tree turns a clean checkout dirty.
+    static std::filesystem::path WriteUsda(const std::string& fileName,
+                                           const std::string& body) {
+        const auto dir =
+            std::filesystem::temp_directory_path() / "quantiloom_usd_fixtures";
+        std::filesystem::create_directories(dir);
+        const auto path = dir / fileName;
+        std::ofstream file(path);
+        file << body;
+        file.close();
+        return path;
+    }
+
+    /// The first primitive of the first mesh, for fixtures that author one.
+    static const GeometryPrimitive& OnlyPrimitive(const Scene& scene) {
+        EXPECT_EQ(scene.meshes.size(), 1u);
+        EXPECT_EQ(scene.meshes[0].primitives.size(), 1u);
+        return scene.meshes[0].primitives[0];
+    }
+
     bool hasOpenUSD;
     bool hasTestAssets;
     std::filesystem::path assetsPath;
@@ -718,4 +742,296 @@ TEST_F(UsdLoaderTest, SceneResourceCounts) {
 
     EXPECT_GT(totalTriangles, 0) << "Scene should have triangles";
     EXPECT_GT(totalVertices, 0) << "Scene should have vertices";
+}
+
+// ============================================================================
+// Vertex attribute hygiene
+// ============================================================================
+// USD lets every attribute carry its own interpolation, so a mesh may need its
+// geometry expanded for one of them and not for the other. These pin the four
+// combinations that used to lose an attribute outright.
+
+TEST_F(UsdLoaderTest, VertexUvsSurviveFaceVaryingNormals) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("fv_normals_vertex_uvs.usda", R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+
+def Mesh "Quad"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+        interpolation = "faceVarying"
+    )
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    const GeometryPrimitive& prim = OnlyPrimitive(scene);
+    ASSERT_FALSE(prim.positions.empty());
+    EXPECT_EQ(prim.normals.size(), prim.positions.size());
+    EXPECT_EQ(prim.uvs.size(), prim.positions.size())
+        << "Expanding for face-varying normals must re-index the vertex UVs, "
+           "not discard them";
+}
+
+TEST_F(UsdLoaderTest, AuthoredVertexNormalsSurviveFaceVaryingUvs) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // A normal that no generator would produce for a flat quad in Z, so a
+    // silent rebuild by NormalGenerator is distinguishable from the authored
+    // value surviving.
+    const auto path = WriteUsda("vertex_normals_fv_uvs.usda", R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+
+def Mesh "Quad"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    normal3f[] normals = [(0, 0.6, 0.8), (0, 0.6, 0.8), (0, 0.6, 0.8), (0, 0.6, 0.8)] (
+        interpolation = "vertex"
+    )
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "faceVarying"
+    )
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    const GeometryPrimitive& prim = OnlyPrimitive(scene);
+    ASSERT_FALSE(prim.positions.empty());
+    ASSERT_EQ(prim.normals.size(), prim.positions.size());
+    EXPECT_EQ(prim.uvs.size(), prim.positions.size());
+
+    for (const auto& n : prim.normals) {
+        EXPECT_NEAR(n.x, 0.0f, 1e-5f);
+        EXPECT_NEAR(n.y, 0.6f, 1e-5f) << "Authored normals were rebuilt";
+        EXPECT_NEAR(n.z, 0.8f, 1e-5f) << "Authored normals were rebuilt";
+    }
+}
+
+TEST_F(UsdLoaderTest, ConstantNormalsSurviveFaceVaryingExpansion) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // A constant normal is one value for the whole mesh. It has to be re-read
+    // for every face vertex the expansion emits, or it stays sized to the old
+    // point list and the mesh is invalid.
+    const auto path = WriteUsda("constant_normal_fv_uvs.usda", R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+
+def Mesh "Quad"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    normal3f[] normals = [(0, 0.6, 0.8)] (
+        interpolation = "constant"
+    )
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "faceVarying"
+    )
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    const GeometryPrimitive& prim = OnlyPrimitive(scene);
+    ASSERT_FALSE(prim.positions.empty());
+    ASSERT_EQ(prim.normals.size(), prim.positions.size());
+
+    for (const auto& n : prim.normals) {
+        EXPECT_NEAR(n.y, 0.6f, 1e-5f);
+        EXPECT_NEAR(n.z, 0.8f, 1e-5f);
+    }
+}
+
+TEST_F(UsdLoaderTest, FlipsStToImageRowOrder) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // UsdUVTexture puts st's origin at the image's lower-left; stb decodes
+    // top-down and the shaders sample glTF's upper-left. st (0, 0) must
+    // therefore arrive as uv (0, 1).
+    const auto path = WriteUsda("st_origin.usda", R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+
+def Mesh "Quad"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [4]
+    int[] faceVertexIndices = [0, 1, 2, 3]
+    texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+        interpolation = "vertex"
+    )
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    const GeometryPrimitive& prim = OnlyPrimitive(scene);
+    ASSERT_EQ(prim.uvs.size(), prim.positions.size());
+
+    bool foundOrigin = false;
+    for (size_t i = 0; i < prim.positions.size(); ++i) {
+        if (glm::length(prim.positions[i] - glm::vec3(0.0f, 0.0f, 0.0f)) < 1e-5f) {
+            foundOrigin = true;
+            EXPECT_NEAR(prim.uvs[i].x, 0.0f, 1e-5f);
+            EXPECT_NEAR(prim.uvs[i].y, 1.0f, 1e-5f)
+                << "st (0, 0) is the image's bottom row, which is v = 1 here";
+        }
+    }
+    EXPECT_TRUE(foundOrigin);
+}
+
+// ============================================================================
+// Purpose, visibility and stage metrics
+// ============================================================================
+
+TEST_F(UsdLoaderTest, SkipsGuideProxyAndInvisiblePrims) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("purpose_and_visibility.usda", R"(#usda 1.0
+(
+    defaultPrim = "Render"
+)
+
+def Mesh "Render"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+
+def Mesh "Guide"
+{
+    uniform token purpose = "guide"
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+
+def Mesh "Proxy"
+{
+    uniform token purpose = "proxy"
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+
+def Mesh "Hidden"
+{
+    token visibility = "invisible"
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    EXPECT_EQ(scene.meshes.size(), 1u)
+        << "guide, proxy and invisible prims are not render geometry";
+    ASSERT_EQ(scene.nodes.size(), 1u);
+    EXPECT_EQ(scene.nodes[0].name, "Render");
+}
+
+TEST_F(UsdLoaderTest, FoldsAuthoredMetersPerUnitAndZUpIntoNodeTransforms) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("z_up_centimetres.usda", R"(#usda 1.0
+(
+    defaultPrim = "Tri"
+    upAxis = "Z"
+    metersPerUnit = 0.01
+)
+
+def Mesh "Tri"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    ASSERT_EQ(scene.nodes.size(), 1u);
+
+    // Z-up sends the stage's up vector to +Y, and one centimetre is 0.01 m.
+    const glm::vec3 up =
+        glm::vec3(scene.nodes[0].transform * glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+    EXPECT_NEAR(up.x, 0.0f, 1e-5f);
+    EXPECT_NEAR(up.y, 0.01f, 1e-5f);
+    EXPECT_NEAR(up.z, 0.0f, 1e-5f);
+}
+
+TEST_F(UsdLoaderTest, UnauthoredMetersPerUnitIsNotApplied) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // USD's default when the metadata is absent is 0.01. Applying it silently
+    // would shrink by a hundred every scene that loads correctly today, so an
+    // unauthored stage stays at 1.0 and warns instead.
+    const auto path = WriteUsda("no_stage_metrics.usda", R"(#usda 1.0
+(
+    defaultPrim = "Tri"
+)
+
+def Mesh "Tri"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    ASSERT_EQ(scene.nodes.size(), 1u);
+
+    const glm::vec3 point =
+        glm::vec3(scene.nodes[0].transform * glm::vec4(1.0f, 2.0f, 3.0f, 1.0f));
+    EXPECT_NEAR(point.x, 1.0f, 1e-5f);
+    EXPECT_NEAR(point.y, 2.0f, 1e-5f);
+    EXPECT_NEAR(point.z, 3.0f, 1e-5f);
 }

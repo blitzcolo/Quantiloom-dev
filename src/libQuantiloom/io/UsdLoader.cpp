@@ -43,6 +43,8 @@
 #include <pxr/usd/usdGeom/xformable.h>
 #include <pxr/usd/usdGeom/primvarsAPI.h>
 #include <pxr/usd/usdGeom/tokens.h>
+#include <pxr/usd/usdGeom/imageable.h>
+#include <pxr/usd/usdGeom/metrics.h>
 #include <pxr/usd/usdGeom/pointInstancer.h>
 #include <pxr/usd/usdShade/material.h>
 #include <pxr/usd/usdShade/materialBindingAPI.h>
@@ -61,6 +63,7 @@
 
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtx/matrix_decompose.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
@@ -371,6 +374,255 @@ static UsdTimeCode GetTimeCode(const UsdLoadOptions& options) {
         return UsdTimeCode::Default();
     }
     return UsdTimeCode(options.timeCode);
+}
+
+// ============================================================================
+// Stage metrics - upAxis and metersPerUnit as one root transform
+// ============================================================================
+
+/// The transform that puts a stage's own conventions into Quantiloom's: Y-up,
+/// and metres if the stage said what its units are.
+///
+/// metersPerUnit is folded only when the stage actually authored it. USD's
+/// default when the metadata is absent is 0.01, and applying that silently would
+/// shrink by a hundred every scene that has been loading correctly, so an
+/// unauthored stage is left at 1.0 and says so once.
+///
+/// This is geometry, which is why it is not `scene.world_units_to_meters`: that
+/// key scales lighting, the camera and the thermal solve (ConfigResolve.cpp:340,
+/// 507, 751) and never touches a vertex, and one config scalar cannot describe a
+/// scene assembled from models authored in different units.
+static glm::mat4 StageRootTransform(const UsdStageWeakPtr& stage,
+                                    const UsdLoadOptions& options) {
+    if (!options.applyStageMetrics || !stage) {
+        return glm::mat4(1.0f);
+    }
+
+    glm::mat4 root(1.0f);
+
+    if (UsdGeomGetStageUpAxis(stage) == UsdGeomTokens->z) {
+        root = glm::rotate(glm::mat4(1.0f), glm::radians(-90.0f),
+                           glm::vec3(1.0f, 0.0f, 0.0f));
+        QL_LOG_INFO("  Stage is Z-up; rotating the scene root -90 degrees about X");
+    }
+
+    if (stage->HasAuthoredMetadata(UsdGeomTokens->metersPerUnit)) {
+        const double mpu = UsdGeomGetStageMetersPerUnit(stage);
+        if (mpu > 0.0 && mpu != 1.0) {
+            // Uniform, so it commutes with the rotation above.
+            root = glm::scale(glm::mat4(1.0f), glm::vec3(static_cast<f32>(mpu))) * root;
+            QL_LOG_INFO("  Stage metersPerUnit = {}; folded into the scene root", mpu);
+        }
+    } else {
+        QL_LOG_WARN("  Stage authored no metersPerUnit. USD's default is 0.01, but "
+                    "applying it would shrink every scene that loads correctly today "
+                    "by a hundred, so 1.0 is used. Author the metadata to say otherwise.");
+    }
+
+    return root;
+}
+
+/// Whether a prim is something to render.
+///
+/// `guide` is annotation and `proxy` is the cheap stand-in a render prim
+/// replaces, so loading a proxy alongside its render prim puts two copies of the
+/// model in the scene; an invisible prim is one the stage asked not to see.
+static bool IsRenderablePrim(const UsdPrim& prim, const UsdTimeCode& timeCode) {
+    UsdGeomImageable imageable(prim);
+    if (!imageable) {
+        return true;
+    }
+    const TfToken purpose = imageable.ComputePurpose();
+    if (purpose == UsdGeomTokens->guide || purpose == UsdGeomTokens->proxy) {
+        return false;
+    }
+    return imageable.ComputeVisibility(timeCode) != UsdGeomTokens->invisible;
+}
+
+// ============================================================================
+// Vertex attributes and face-vertex expansion
+// ============================================================================
+
+/// USD's `st` origin is the image's lower-left corner (the UsdUVTexture spec
+/// says so), while stb decodes top-down and the shaders sample with glTF's
+/// upper-left convention. Flipping V at load is what puts a USD texture the
+/// right way up.
+///
+/// Every UV that reaches a Mesh goes through UsdStToUv, so a UV transform
+/// derived from a shader graph has to be conjugated by the same flip to stay
+/// consistent with it.
+static constexpr bool kFlipUsdV = true;
+
+static glm::vec2 UsdStToUv(f32 s, f32 t) {
+    return kFlipUsdV ? glm::vec2(s, 1.0f - t) : glm::vec2(s, t);
+}
+
+/// One authored vertex attribute together with the interpolation USD gave it.
+///
+/// Keeping the two together is the point. A mesh whose normals are face-varying
+/// and whose UVs are per-vertex has to expand the normals and re-index the UVs;
+/// reading both through one shared assumption is what used to move an empty
+/// vector over whichever of the two did not trigger the expansion.
+template <typename T>
+struct AttrSource {
+    const VtArray<T>* data = nullptr;
+    TfToken interpolation;
+
+    [[nodiscard]] bool Present() const { return data != nullptr && !data->empty(); }
+
+    /// Face-varying and uniform attributes address something the point list
+    /// cannot; everything else is already indexed by the triangulation.
+    [[nodiscard]] bool NeedsExpansion() const {
+        return Present() && (interpolation == UsdGeomTokens->faceVarying ||
+                             interpolation == UsdGeomTokens->uniform);
+    }
+
+    /// Where one face vertex reads its value, or -1 when the attribute is absent
+    /// or too short to answer.
+    [[nodiscard]] i64 IndexFor(size_t fvIndex, size_t faceIdx, size_t pointIndex) const {
+        if (!Present()) {
+            return -1;
+        }
+        size_t index;
+        if (interpolation == UsdGeomTokens->faceVarying) {
+            index = fvIndex;
+        } else if (interpolation == UsdGeomTokens->uniform) {
+            index = faceIdx;
+        } else if (interpolation == UsdGeomTokens->constant) {
+            index = 0;
+        } else {  // vertex, varying, or an interpolation nobody authored
+            index = pointIndex;
+        }
+        return index < data->size() ? static_cast<i64>(index) : -1;
+    }
+};
+
+/// A mesh with one vertex per face vertex, every attribute read through its own
+/// interpolation.
+struct ExpandedMesh {
+    std::vector<glm::vec3> positions;
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
+    std::vector<u32> indices;
+    std::vector<u32> triangleToFace;
+};
+
+static void ExpandToFaceVertices(const VtArray<int>& faceVertexCounts,
+                                 const VtArray<int>& faceVertexIndices,
+                                 const std::vector<glm::vec3>& positions,
+                                 const AttrSource<GfVec3f>& normalSource,
+                                 const AttrSource<GfVec2f>& uvSource,
+                                 ExpandedMesh& out) {
+    const size_t faceVertexTotal = faceVertexIndices.size();
+    out.positions.reserve(faceVertexTotal);
+    if (normalSource.Present()) { out.normals.reserve(faceVertexTotal); }
+    if (uvSource.Present()) { out.uvs.reserve(faceVertexTotal); }
+
+    bool normalsComplete = normalSource.Present();
+    bool uvsComplete = uvSource.Present();
+
+    size_t fvOffset = 0;
+    u32 nextVertex = 0;
+
+    for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
+        const int vertexCount = faceVertexCounts[faceIdx];
+        if (vertexCount < 3 ||
+            fvOffset + static_cast<size_t>(vertexCount) > faceVertexTotal) {
+            fvOffset += static_cast<size_t>(std::max(vertexCount, 0));
+            continue;
+        }
+
+        // Fan triangulation: corner 0 with every adjacent pair after it.
+        for (int i = 1; i < vertexCount - 1; ++i) {
+            const size_t fv[3] = {fvOffset,
+                                  fvOffset + static_cast<size_t>(i),
+                                  fvOffset + static_cast<size_t>(i) + 1};
+
+            // Validate the whole triangle before emitting any of it, or a bad
+            // corner would leave a two-vertex triangle behind and shift every
+            // index after it.
+            size_t point[3];
+            bool triangleOk = true;
+            for (int c = 0; c < 3; ++c) {
+                const int index = faceVertexIndices[fv[c]];
+                if (index < 0 || static_cast<size_t>(index) >= positions.size()) {
+                    triangleOk = false;
+                    break;
+                }
+                point[c] = static_cast<size_t>(index);
+            }
+            if (!triangleOk) {
+                continue;
+            }
+
+            for (int c = 0; c < 3; ++c) {
+                out.positions.push_back(positions[point[c]]);
+
+                if (normalSource.Present()) {
+                    const i64 n = normalSource.IndexFor(fv[c], faceIdx, point[c]);
+                    if (n < 0) {
+                        normalsComplete = false;
+                    } else {
+                        const GfVec3f& value = (*normalSource.data)[static_cast<size_t>(n)];
+                        out.normals.emplace_back(value[0], value[1], value[2]);
+                    }
+                }
+                if (uvSource.Present()) {
+                    const i64 u = uvSource.IndexFor(fv[c], faceIdx, point[c]);
+                    if (u < 0) {
+                        uvsComplete = false;
+                    } else {
+                        const GfVec2f& value = (*uvSource.data)[static_cast<size_t>(u)];
+                        out.uvs.push_back(UsdStToUv(value[0], value[1]));
+                    }
+                }
+                out.indices.push_back(nextVertex++);
+            }
+
+            out.triangleToFace.push_back(static_cast<u32>(faceIdx));
+        }
+
+        fvOffset += static_cast<size_t>(vertexCount);
+    }
+
+    // An attribute that could not answer for every face vertex is dropped rather
+    // than shipped short: Mesh::IsValid() requires it to match the vertex count,
+    // and NormalGenerator rebuilds a missing normal set.
+    if (!normalsComplete || out.normals.size() != out.positions.size()) {
+        if (!out.normals.empty()) {
+            QL_LOG_WARN("    Normals do not cover every face vertex; regenerating them");
+        }
+        out.normals.clear();
+    }
+    if (!uvsComplete || out.uvs.size() != out.positions.size()) {
+        if (!out.uvs.empty()) {
+            QL_LOG_WARN("    UVs do not cover every face vertex; dropping them");
+        }
+        out.uvs.clear();
+    }
+}
+
+/// Fill one entry per point, reading through the source's own interpolation.
+/// Constant, vertex and varying all answer per point; anything that does not is
+/// left empty rather than short.
+template <typename T, typename Out, typename Convert>
+static void FillPerPoint(const AttrSource<T>& source, size_t pointCount,
+                         std::vector<Out>& out, Convert convert) {
+    out.clear();
+    if (!source.Present()) {
+        return;
+    }
+    out.reserve(pointCount);
+    for (size_t i = 0; i < pointCount; ++i) {
+        const i64 index = source.IndexFor(i, 0, i);
+        if (index < 0) {
+            QL_LOG_WARN("    A vertex attribute covers {} of {} points; dropping it",
+                        source.data->size(), pointCount);
+            out.clear();
+            return;
+        }
+        out.push_back(convert((*source.data)[static_cast<size_t>(index)]));
+    }
 }
 
 // ============================================================================
@@ -1057,171 +1309,74 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
     }
 
     // ========================================================================
-    // Get normals
+    // Get normals and UVs
     // ========================================================================
+    // Both are read as an AttrSource -- the values plus the interpolation USD
+    // authored them with -- rather than being flattened here, because the two
+    // may disagree: face-varying normals on a mesh with per-vertex UVs need the
+    // geometry expanded for the normals and the UVs re-indexed, not discarded.
     UsdGeomPrimvarsAPI primvarsAPI(*prim);
-    std::vector<glm::vec3> normals;
 
-    UsdGeomPrimvar normalsPrimvar = primvarsAPI.GetPrimvar(TfToken("normals"));
-    if (!normalsPrimvar) {
-        normalsPrimvar = UsdGeomPrimvar(geomMesh.GetNormalsAttr());
-    }
-
-    bool hasFaceVaryingNormals = false;
-    bool hasUniformNormals = false;
-    bool hasConstantNormal = false;
+    // `primvars:normals` takes precedence over the `normals` attribute, which is
+    // what UsdGeomPointBased says. The attribute cannot be read through
+    // UsdGeomPrimvar at all: wrapping a name outside the `primvars:` namespace
+    // gives an object that is never IsDefined(), so the fallback here used to be
+    // dead code and every plain `normals` array was dropped and rebuilt by
+    // NormalGenerator -- a mesh's authored shading silently replaced by the
+    // dihedral-angle guess.
     VtArray<GfVec3f> usdNormals;
+    AttrSource<GfVec3f> normalSource;
 
-    if (normalsPrimvar && normalsPrimvar.HasValue()) {
+    if (UsdGeomPrimvar normalsPrimvar = primvarsAPI.GetPrimvar(TfToken("normals"));
+        normalsPrimvar && normalsPrimvar.HasValue()) {
         normalsPrimvar.Get(&usdNormals, timeCode);
-        TfToken interpolation = normalsPrimvar.GetInterpolation();
-
-        QL_LOG_INFO("    Mesh '{}' normals: {} values, interpolation={}",
-                    mesh.name, usdNormals.size(), interpolation.GetString());
-
-        if (interpolation == UsdGeomTokens->vertex ||
-            interpolation == UsdGeomTokens->varying) {
-            // Per-vertex normals (smooth shading)
-            normals.reserve(usdNormals.size());
-            for (const auto& n : usdNormals) {
-                normals.emplace_back(n[0], n[1], n[2]);
-            }
-        } else if (interpolation == UsdGeomTokens->faceVarying) {
-            // Per-face-vertex normals (allows hard edges)
-            hasFaceVaryingNormals = true;
-        } else if (interpolation == UsdGeomTokens->uniform) {
-            // Per-face normals (flat shading)
-            hasUniformNormals = true;
-        } else if (interpolation == UsdGeomTokens->constant) {
-            // Single normal for entire mesh
-            hasConstantNormal = true;
-            if (!usdNormals.empty()) {
-                glm::vec3 constNormal(usdNormals[0][0], usdNormals[0][1], usdNormals[0][2]);
-                normals.resize(positions.size(), constNormal);
-            }
-        }
+        normalSource = AttrSource<GfVec3f>{&usdNormals, normalsPrimvar.GetInterpolation()};
+    } else if (UsdAttribute normalsAttr = geomMesh.GetNormalsAttr();
+               normalsAttr && normalsAttr.HasValue()) {
+        normalsAttr.Get(&usdNormals, timeCode);
+        normalSource = AttrSource<GfVec3f>{&usdNormals, geomMesh.GetNormalsInterpolation()};
     }
 
-    // ========================================================================
-    // Get UVs
-    // ========================================================================
-    std::vector<glm::vec2> uvs;
-    bool hasFaceVaryingUVs = false;
-    VtArray<GfVec2f> usdUVs;
+    if (normalSource.Present()) {
+        QL_LOG_INFO("    Mesh '{}' normals: {} values, interpolation={}",
+                    mesh.name, usdNormals.size(),
+                    normalSource.interpolation.GetString());
+    }
 
     UsdGeomPrimvar uvPrimvar = primvarsAPI.GetPrimvar(TfToken("st"));
     if (!uvPrimvar) {
         uvPrimvar = primvarsAPI.GetPrimvar(TfToken("uv"));
     }
 
+    VtArray<GfVec2f> usdUVs;
+    AttrSource<GfVec2f> uvSource;
     if (uvPrimvar && uvPrimvar.HasValue()) {
         uvPrimvar.Get(&usdUVs, timeCode);
-        TfToken interpolation = uvPrimvar.GetInterpolation();
-
-        if (interpolation == UsdGeomTokens->vertex ||
-            interpolation == UsdGeomTokens->varying) {
-            uvs.reserve(usdUVs.size());
-            for (const auto& uv : usdUVs) {
-                uvs.emplace_back(uv[0], uv[1]);
-            }
-        } else if (interpolation == UsdGeomTokens->faceVarying) {
-            hasFaceVaryingUVs = true;
-        }
+        uvSource = AttrSource<GfVec2f>{&usdUVs, uvPrimvar.GetInterpolation()};
     }
 
+    std::vector<glm::vec3> normals;
+    std::vector<glm::vec2> uvs;
+
     // ========================================================================
-    // Handle face-varying/uniform attributes by expanding geometry
+    // Face-varying or uniform attributes need one vertex per face vertex
     // ========================================================================
-    if (hasFaceVaryingNormals || hasFaceVaryingUVs || hasUniformNormals) {
-        std::vector<glm::vec3> expandedPositions;
-        std::vector<glm::vec3> expandedNormals;
-        std::vector<glm::vec2> expandedUVs;
-        std::vector<u32> newIndices;
-        std::vector<u32> newTriangleToFace;
-
-        expandedPositions.reserve(indices.size());
-        expandedNormals.reserve(indices.size());
-        if (hasFaceVaryingUVs) expandedUVs.reserve(indices.size());
-
-        size_t fvIndexOffset = 0;
-        size_t newVertexIndex = 0;
-
-        for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
-            int vertexCount = faceVertexCounts[faceIdx];
-            if (vertexCount < 3) {
-                fvIndexOffset += vertexCount;
-                continue;
-            }
-
-            // Get face normal for uniform interpolation
-            glm::vec3 faceNormal(0.0f, 1.0f, 0.0f);
-            if (hasUniformNormals && faceIdx < usdNormals.size()) {
-                faceNormal = glm::vec3(usdNormals[faceIdx][0],
-                                        usdNormals[faceIdx][1],
-                                        usdNormals[faceIdx][2]);
-            }
-
-            // Fan triangulation with face-varying data
-            for (int i = 1; i < vertexCount - 1; ++i) {
-                // Vertex 0
-                int posIdx0 = faceVertexIndices[fvIndexOffset];
-                expandedPositions.push_back(positions[posIdx0]);
-                if (hasFaceVaryingNormals && fvIndexOffset < usdNormals.size()) {
-                    expandedNormals.emplace_back(
-                        usdNormals[fvIndexOffset][0],
-                        usdNormals[fvIndexOffset][1],
-                        usdNormals[fvIndexOffset][2]);
-                } else if (hasUniformNormals) {
-                    expandedNormals.push_back(faceNormal);
-                }
-                if (hasFaceVaryingUVs && fvIndexOffset < usdUVs.size()) {
-                    expandedUVs.emplace_back(usdUVs[fvIndexOffset][0], usdUVs[fvIndexOffset][1]);
-                }
-                newIndices.push_back(static_cast<u32>(newVertexIndex++));
-
-                // Vertex i
-                int posIdx1 = faceVertexIndices[fvIndexOffset + i];
-                expandedPositions.push_back(positions[posIdx1]);
-                if (hasFaceVaryingNormals && (fvIndexOffset + i) < usdNormals.size()) {
-                    expandedNormals.emplace_back(
-                        usdNormals[fvIndexOffset + i][0],
-                        usdNormals[fvIndexOffset + i][1],
-                        usdNormals[fvIndexOffset + i][2]);
-                } else if (hasUniformNormals) {
-                    expandedNormals.push_back(faceNormal);
-                }
-                if (hasFaceVaryingUVs && (fvIndexOffset + i) < usdUVs.size()) {
-                    expandedUVs.emplace_back(usdUVs[fvIndexOffset + i][0], usdUVs[fvIndexOffset + i][1]);
-                }
-                newIndices.push_back(static_cast<u32>(newVertexIndex++));
-
-                // Vertex i+1
-                int posIdx2 = faceVertexIndices[fvIndexOffset + i + 1];
-                expandedPositions.push_back(positions[posIdx2]);
-                if (hasFaceVaryingNormals && (fvIndexOffset + i + 1) < usdNormals.size()) {
-                    expandedNormals.emplace_back(
-                        usdNormals[fvIndexOffset + i + 1][0],
-                        usdNormals[fvIndexOffset + i + 1][1],
-                        usdNormals[fvIndexOffset + i + 1][2]);
-                } else if (hasUniformNormals) {
-                    expandedNormals.push_back(faceNormal);
-                }
-                if (hasFaceVaryingUVs && (fvIndexOffset + i + 1) < usdUVs.size()) {
-                    expandedUVs.emplace_back(usdUVs[fvIndexOffset + i + 1][0], usdUVs[fvIndexOffset + i + 1][1]);
-                }
-                newIndices.push_back(static_cast<u32>(newVertexIndex++));
-
-                newTriangleToFace.push_back(static_cast<u32>(faceIdx));
-            }
-
-            fvIndexOffset += vertexCount;
-        }
-
-        positions = std::move(expandedPositions);
-        normals = std::move(expandedNormals);
-        uvs = std::move(expandedUVs);
-        indices = std::move(newIndices);
-        triangleToFace = std::move(newTriangleToFace);
+    if (normalSource.NeedsExpansion() || uvSource.NeedsExpansion()) {
+        ExpandedMesh expanded;
+        ExpandToFaceVertices(faceVertexCounts, faceVertexIndices, positions,
+                             normalSource, uvSource, expanded);
+        positions      = std::move(expanded.positions);
+        normals        = std::move(expanded.normals);
+        uvs            = std::move(expanded.uvs);
+        indices        = std::move(expanded.indices);
+        triangleToFace = std::move(expanded.triangleToFace);
+    } else {
+        // Constant, vertex and varying all answer per point, which is what the
+        // triangulation above already indexes.
+        FillPerPoint(normalSource, positions.size(), normals,
+                     [](const GfVec3f& n) { return glm::vec3(n[0], n[1], n[2]); });
+        FillPerPoint(uvSource, positions.size(), uvs,
+                     [](const GfVec2f& uv) { return UsdStToUv(uv[0], uv[1]); });
     }
 
     // ========================================================================
@@ -1466,6 +1621,13 @@ void UsdLoader::ParsePointInstancer(const void* stagePtr, const void* primPtr,
     const UsdStagePtr stage = prim->GetStage();
     std::vector<u32> protoMeshIndices;
 
+    // Instance transforms are authored in the instancer's own space, so the
+    // instancer's world transform sits between them and the stage root. Without
+    // it a nested instancer placed every instance at the origin of the stage.
+    const glm::mat4 instancerRoot =
+        StageRootTransform(stage, options) *
+        GfMatrix4dToGlm(UsdGeomXformable(*prim).ComputeLocalToWorldTransform(timeCode));
+
     for (const auto& protoPath : protoPaths) {
         UsdPrim protoPrim = stage->GetPrimAtPath(protoPath);
         if (!protoPrim) {
@@ -1532,7 +1694,7 @@ void UsdLoader::ParsePointInstancer(const void* stagePtr, const void* primPtr,
         glm::mat4 T = glm::translate(glm::mat4(1.0f), pos);
         glm::mat4 R = glm::mat4_cast(rot);
         glm::mat4 S = glm::scale(glm::mat4(1.0f), scale);
-        node.transform = T * R * S;
+        node.transform = instancerRoot * T * R * S;
 
         scene.nodes.push_back(node);
     }
@@ -1792,10 +1954,18 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
     // ========================================================================
     // Pass 2: Collect all Meshes and PointInstancers
     // ========================================================================
+    const glm::mat4 stageRoot = StageRootTransform(stage, options);
+    size_t skippedPrims = 0;
+
     for (const UsdPrim& prim : stage->Traverse()) {
         if (prim.IsA<UsdGeomMesh>()) {
             // Skip meshes that are prototypes of PointInstancers
             if (prim.IsInPrototype()) {
+                continue;
+            }
+
+            if (!IsRenderablePrim(prim, GetTimeCode(options))) {
+                ++skippedPrims;
                 continue;
             }
 
@@ -1835,14 +2005,22 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
             SceneNode node;
             node.meshIndex = static_cast<u32>(scene.meshes.size());
             node.name = prim.GetName().GetString();
-            node.transform = GfMatrix4dToGlm(worldXform);
+            node.transform = stageRoot * GfMatrix4dToGlm(worldXform);
 
             scene.meshes.push_back(std::move(mesh));
             scene.nodes.push_back(node);
         }
         else if (options.enablePointInstancer && prim.IsA<UsdGeomPointInstancer>()) {
+            if (!IsRenderablePrim(prim, GetTimeCode(options))) {
+                ++skippedPrims;
+                continue;
+            }
             ParsePointInstancer(&(*stage), &prim, scene, materialPathMap, path, options);
         }
+    }
+
+    if (skippedPrims > 0) {
+        QL_LOG_INFO("  Skipped {} guide, proxy or invisible prims", skippedPrims);
     }
 
     QL_LOG_INFO("  Scene '{}' loaded: {} meshes, {} nodes, {} materials, {} textures",
