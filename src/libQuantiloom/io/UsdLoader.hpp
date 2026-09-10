@@ -1,42 +1,103 @@
 /**
  * @file UsdLoader.hpp
- * @brief OpenUSD scene loader for 3D scenes with PBR materials
+ * @brief OpenUSD scene loader: geometry, materials, textures and load options
  *
- * Provides UsdLoader class for loading OpenUSD files:
- * - Parses .usd, .usda (ASCII), .usdc (Crate binary), and .usdz (zipped) formats
- * - Converts UsdGeomMesh to Quantiloom GeometryPrimitive format
- * - Converts UsdPreviewSurface and MaterialX materials to Quantiloom Material format
- * - Loads texture assets (PNG/JPEG/EXR) via ImageIO
- * - Flattens Xform hierarchy to world-space SceneNode transforms
- * - Full USD composition support (sublayers, references, payloads, variants, inherits)
+ * Reads .usd, .usda, .usdc and .usdz through OpenUSD's own composition --
+ * sublayers, references, payloads, variants, inherits -- and converts what
+ * comes out into a Scene. Meshes are triangulated and flattened to world space;
+ * GeomSubsets become separate primitives; a PointInstancer is expanded to one
+ * node per instance.
  *
- * Supported OpenUSD features:
- * - UsdGeomMesh with triangle/polygon primitives (auto-triangulated)
- * - UsdShadeMaterial with UsdPreviewSurface (PBR metallic-roughness)
- * - MaterialX standard_surface shader (converted to PBR)
- * - Textures: diffuseColor, metallic, roughness, normal, emissive (with connections)
- * - Xform hierarchy (flattened to world-space transforms)
- * - Full USD composition (sublayers, references, payloads, variants, inherits)
- * - Variant selection via UsdLoadOptions
- * - GeomSubsets for multi-material meshes
- * - PointInstancer for efficient instancing
+ * ## Materials
  *
- * Quantiloom spectral extensions via custom attributes:
- * - quantiloom:materialType - Spectral database type
- * - quantiloom:materialRef - Material name in database
- * - quantiloom:emissivityCurve - Path to emissivity CSV
- * - quantiloom:reflectanceCurve - Path to reflectance CSV
- * - quantiloom:transmittanceCurve - Path to transmittance CSV
- * - quantiloom:temperature_K - Surface temperature (K)
+ * A material's surface shader is classified by its `info:id` and read through a
+ * table per vocabulary. Four are understood, and the table is the record of what
+ * each one supports (io/UsdSurfaceTables.cpp):
  *
- * NOT supported:
- * - Animation/skeletal deformation (UsdSkel)
- * - UsdGeomBasisCurves/Points (only meshes)
- * - UsdLux lights (use Quantiloom config instead)
- * - UsdGeomCamera (use Quantiloom config instead)
+ *  - `UsdPreviewSurface` and `ND_UsdPreviewSurface_surfaceshader`
+ *  - `ND_standard_surface_surfaceshader` (MaterialX / Arnold)
+ *  - `ND_gltf_pbr_surfaceshader` (the glTF material as a MaterialX node)
+ *  - `ND_open_pbr_surface_surfaceshader`
  *
- * Uses Pixar OpenUSD library for USD parsing (conditional compilation).
- * When OpenUSD is not available, returns an error message.
+ * An id outside that list keeps the material's defaults and warns; reading it
+ * through a vocabulary it is not written in matches no input name and produces
+ * a grey that looks like bad authoring rather than an unsupported shader. A
+ * `.mtlx` document referenced from USD needs nothing special -- usdMtlx turns it
+ * into ordinary shader prims -- except that its surface arrives through the
+ * `mtlx` render context, which is asked for first.
+ *
+ * Textures follow the shader graph: UsdUVTexture, UsdTransform2d,
+ * UsdPrimvarReader, and the MaterialX image, tiledimage, normalmap, separate,
+ * extract, convert, constant, multiply and place2d nodes. Anything else warns
+ * once per material and the input it feeds is treated as unconnected.
+ *
+ * Three consequences of `Material`'s slots being fixed, which the reader has to
+ * absorb rather than pass on:
+ *
+ *  - **Channels are repacked at load.** metallic and roughness are two USD
+ *    inputs and one Material slot whose channels the shader reads as G
+ *    roughness, B metallic, and there is no per-slot channel selector on the GPU
+ *    side to point elsewhere. Two images become one entry; the untextured half
+ *    of a pair keeps its scalar, because the fill is 255.
+ *  - **A connected input means take the texture**, so the factor it multiplies
+ *    is one -- or the node's `scale`, which folds into the factor exactly
+ *    whenever there is no bias.
+ *  - **Colour space is decided per entry**, from an explicit token first, then
+ *    from the destination slot, with .exr and .hdr always linear. One file bound
+ *    as both a colour and a data map is two entries. This is the one thing that
+ *    breaks spectral upsampling silently, so it is never guessed from the file
+ *    extension.
+ *
+ * ## Geometry
+ *
+ * Every vertex attribute is read through its own interpolation, so a mesh with
+ * face-varying normals and per-vertex UVs keeps both. `st` is flipped in V on
+ * the way in: USD puts its origin at the image's lower-left (the UsdUVTexture
+ * spec), stb decodes top-down, and the shaders sample glTF's upper-left. Any UV
+ * transform read from a shader graph is conjugated by the same flip
+ * (usd::kFlipUsdV, usd::ConjugateByVFlip).
+ *
+ * `guide` and `proxy` purposes and invisible prims are skipped. A Z-up stage and
+ * an authored `metersPerUnit` are folded into the node transforms, so files in
+ * different conventions line up; an *unauthored* metersPerUnit is left at 1.0
+ * with a warning, because USD's default of 0.01 applied silently would shrink
+ * every scene that loads correctly today by a hundred.
+ *
+ * ## Quantiloom attributes on a Material prim
+ *
+ * The same quantities the glTF extensions carry, under the same names:
+ * - `quantiloom:materialType` / `quantiloom:materialRef` -- spectral database entry
+ * - `quantiloom:emissivityCurve` / `reflectanceCurve` / `transmittanceCurve` -- IR CSVs
+ * - `quantiloom:temperature_K`, `quantiloom:temperatureTexture`,
+ *   `quantiloom:temperatureScale`, `quantiloom:temperatureOffset`
+ * - `quantiloom:fluorescenceExcitationCurve` / `fluorescenceEmissionCurve` /
+ *   `fluorescenceYield`
+ * - `quantiloom:dispersion` -- already 1/Abbe, and read after the surface, so it
+ *   overrides a vocabulary's own dispersion
+ *
+ * ## Load options
+ *
+ * UsdLoadOptions carries variant selections, a time code, a payload policy and
+ * the stage-metric switch. A config spells the variants as one string --
+ * `/Root/Car{color=red}`, comma-separated, or a bare `set=variant` for every
+ * prim owning the set -- which ParseUsdVariantSpec turns into selections.
+ * `enableMaterialX` is retained for source compatibility and has no effect: the
+ * vocabularies are not optional.
+ *
+ * ## Not supported
+ *
+ * - UsdSkel, skeletal deformation and animated topology
+ * - UsdGeomBasisCurves, UsdGeomPoints and every non-mesh gprim
+ * - UsdLux lights and UsdGeomCamera (the config owns both)
+ * - More than one UV set, the same limit GltfLoader has
+ * - Subsurface scattering, thin-film interference and iridescence: warned when
+ *   a vocabulary authored them, never approximated
+ * - Diffuse transmission, which none of the four vocabularies has an input for
+ * - HDR texture data: Texture is RGBA8, so a float image is quantised
+ * - `instanceable` prototype expansion and custom Ar resolvers
+ *
+ * Built against Pixar OpenUSD under conditional compilation. Without it every
+ * entry point returns an error saying so.
  *
  * @note Returns Result<Scene, String> for explicit error handling
  * @note Scene graph flattened to world space (no hierarchy preserved)

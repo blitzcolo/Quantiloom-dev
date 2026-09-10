@@ -316,13 +316,11 @@ public:
      * @param usdPath Path to USD file (.usd, .usda, .usdc, .usdz)
      * @return Result indicating success or error
      *
-     * Supports Quantiloom spectral extensions via custom primvars:
-     * - quantiloom:materialType - Spectral database type
-     * - quantiloom:materialRef - Material name in database
-     * - quantiloom:emissivityCurve - Path to emissivity CSV
-     * - quantiloom:reflectanceCurve - Path to reflectance CSV
-     * - quantiloom:transmittanceCurve - Path to transmittance CSV
-     * - quantiloom:temperature_K - Surface temperature (K)
+     * Reads UsdPreviewSurface, MaterialX standard_surface, gltf_pbr and
+     * open_pbr_surface materials, and the quantiloom: attributes for spectral
+     * and IR data -- the material database reference, the three IR curves, the
+     * temperature, fluorescence and dispersion. io/UsdLoader.hpp has the list
+     * and what is deliberately not supported.
      */
     Result<void, String> LoadSceneFromUsd(const String& usdPath);
 
