@@ -18,6 +18,7 @@
 #include <pxr/base/gf/vec3f.h>
 #include <pxr/base/gf/vec4f.h>
 #include <pxr/base/tf/token.h>
+#include <pxr/usd/ar/packageUtils.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/usd/usd/attribute.h>
 #include <pxr/usd/usd/timeCode.h>
@@ -60,6 +61,16 @@ String ResolveAsset(const SdfAssetPath& asset, const BindingContext& context) {
         path = std::filesystem::path(context.usdDir) / path;
     }
     return std::filesystem::weakly_canonical(path).string();
+}
+
+/// Whether an asset path names something readable.
+///
+/// A texture inside a .usdz is not a file: the resolver hands back the
+/// package-relative form `archive.usdz[dir/tex.jpg]`, which no filesystem call
+/// will find. UsdLoader reads those through Ar and hands the bank the bytes, so
+/// they are accepted here.
+bool AssetExists(const String& path) {
+    return ArIsPackageRelativePath(path) || std::filesystem::exists(path);
 }
 
 /// Read a constant off an attribute, widened to a vec4 in the slot's own terms.
@@ -381,7 +392,7 @@ InputBinding ReadUsdUVTexture(const UsdShadeShader& node, const TfToken& outputN
     }
     const String path = ResolveAsset(asset, context);
 
-    if (path.empty() || !std::filesystem::exists(path)) {
+    if (path.empty() || !AssetExists(path)) {
         // `fallback` is what UsdUVTexture says to use when the file cannot be
         // read, so a missing texture becomes a constant rather than nothing.
         if (!path.empty()) {
@@ -459,7 +470,7 @@ InputBinding ReadMaterialXImage(const UsdShadeShader& node, const TfToken& outpu
     }
     const String path = ResolveAsset(asset, context);
 
-    if (path.empty() || !std::filesystem::exists(path)) {
+    if (path.empty() || !AssetExists(path)) {
         if (!path.empty()) {
             QL_LOG_WARN("    Material '{}': texture '{}' not found; using the node's "
                         "default", context.materialPath, path);

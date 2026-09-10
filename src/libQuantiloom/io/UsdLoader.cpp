@@ -156,6 +156,10 @@ Result<UsdLoadOptions::VariantSelections, String> ParseUsdVariantSpec(StringView
 #include <pxr/usd/usdShade/tokens.h>
 #include <pxr/usd/usdShade/connectableAPI.h>
 #include <pxr/usd/sdf/path.h>
+#include <pxr/usd/ar/asset.h>
+#include <pxr/usd/ar/packageUtils.h>
+#include <pxr/usd/ar/resolvedPath.h>
+#include <pxr/usd/ar/resolver.h>
 #include <pxr/usd/sdf/assetPath.h>
 #include <pxr/base/gf/matrix4d.h>
 #include <pxr/base/gf/vec2f.h>
@@ -1650,6 +1654,30 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
         }
 
         readings.emplace(prim.GetPath(), std::move(reading));
+    }
+
+    // A texture inside a .usdz is not a file. The resolver names it
+    // `archive.usdz[dir/tex.jpg]` and the bytes are in the zip, so they are
+    // read here and handed to the bank, which decodes them in the same parallel
+    // pass as everything else.
+    for (const String& texturePath : texturePaths) {
+        if (!ArIsPackageRelativePath(texturePath)) {
+            continue;
+        }
+        std::shared_ptr<ArAsset> asset =
+            ArGetResolver().OpenAsset(ArResolvedPath(texturePath));
+        if (!asset) {
+            QL_LOG_WARN("  Could not open packaged texture '{}'", texturePath);
+            continue;
+        }
+        std::shared_ptr<const char> buffer = asset->GetBuffer();
+        if (!buffer || asset->GetSize() == 0) {
+            QL_LOG_WARN("  Packaged texture '{}' is empty", texturePath);
+            continue;
+        }
+        const auto* bytes = reinterpret_cast<const u8*>(buffer.get());
+        bank.AdoptEncoded(texturePath,
+                          std::vector<u8>(bytes, bytes + asset->GetSize()));
     }
 
     if (options.loadTextures || !texturePaths.empty()) {

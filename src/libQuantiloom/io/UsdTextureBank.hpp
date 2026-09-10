@@ -108,14 +108,31 @@ struct SlotRecipe {
 [[nodiscard]] Texture DecodeTextureFile(const String& absolutePath);
 
 /**
+ * @brief Decode an image already in memory
+ *
+ * For assets that are not files. A texture inside a .usdz is one: the resolver
+ * hands back a package-relative path and the bytes live in the zip, so there is
+ * nothing for the file path to open.
+ */
+[[nodiscard]] Texture DecodeTextureBytes(const String& name, const u8* data, usize size);
+
+/**
  * @class UsdTextureBank
  * @brief Decoded sources for one load, plus the entries built from them
  */
 class UsdTextureBank {
 public:
     /// Decode every path in parallel. Called once, before any material is read,
-    /// because decoding is the load's I/O cost and it parallelises.
+    /// because decoding is the load's I/O cost and it parallelises. Paths
+    /// already adopted -- as a decoded source or as encoded bytes -- are left
+    /// alone.
     void Preload(const std::unordered_set<String>& absolutePaths);
+
+    /// Hand the bank an image that is not a file, to be decoded by the next
+    /// Preload along with everything else.
+    void AdoptEncoded(const String& path, std::vector<u8> bytes) {
+        m_encoded.emplace(path, std::move(bytes));
+    }
 
     /// Build (or find) the entry a recipe describes and return its index in
     /// `textures`, or -1 when none of its sources decoded.
@@ -139,6 +156,7 @@ public:
 
 private:
     std::unordered_map<String, Texture> m_sources;
+    std::unordered_map<String, std::vector<u8>> m_encoded;
     std::unordered_map<String, i32> m_byKey;
 };
 

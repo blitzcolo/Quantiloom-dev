@@ -2837,3 +2837,34 @@ def Material "Mat"
     // A frame nobody samples is bytes on the GPU for nothing.
     EXPECT_TRUE(scene.meshes[0].primitives.at(0).tangents.empty());
 }
+
+TEST_F(UsdLoaderTest, TexturesInsideAUsdzArePackageRelativeAndStillLoad) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+    if (!hasTestAssets) {
+        GTEST_SKIP() << "USD test assets not found";
+    }
+    const auto modelPath = GetTestFilePath("Caterpillar_Work_Boot.usdz");
+    if (!std::filesystem::exists(modelPath)) {
+        GTEST_SKIP() << "Caterpillar_Work_Boot.usdz not found";
+    }
+
+    auto result = UsdLoader::LoadFromFile(modelPath.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    // The resolver names a packaged texture `archive.usdz[dir/tex.jpg]`, which
+    // no filesystem call finds. Testing the path for existence dropped every
+    // texture in every .usdz -- one of the four formats this loader advertises
+    // -- and the model rendered untextured with four warnings nobody reads.
+    EXPECT_GT(scene.textures.size(), 0u) << "a .usdz's textures live in the zip";
+    ASSERT_FALSE(scene.materials.empty());
+
+    const Material& material = scene.materials[0];
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    const Texture& base = scene.textures[material.baseColorTextureIndex];
+    EXPECT_GT(base.width, 0u);
+    EXPECT_GT(base.height, 0u);
+    EXPECT_TRUE(base.isSRGB) << "a base colour is colour whatever archive it came from";
+}

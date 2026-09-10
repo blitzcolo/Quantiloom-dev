@@ -8,6 +8,8 @@
 #include "core/Log.hpp"
 #include "io/ImageIO.hpp"
 
+#include <stb_image.h>
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -118,26 +120,16 @@ std::vector<String> SlotRecipe::Sources() const {
 // DecodeTextureFile
 // ============================================================================
 
-Texture DecodeTextureFile(const String& absolutePath) {
+namespace {
+
+/// The RGBA8 repack both decode paths share.
+Texture ToRgba8(const Image& img, const String& sourceUri) {
     Texture tex;
-
-    if (absolutePath.empty()) {
-        return tex;
-    }
-
-    auto imageResult = ImageIO::ReadImage(absolutePath);
-    if (!imageResult.has_value()) {
-        QL_LOG_ERROR("Failed to load texture '{}'", absolutePath);
-        return tex;
-    }
-
-    const Image& img = imageResult.value();
-
-    tex.name = std::filesystem::path(absolutePath).filename().string();
+    tex.name = std::filesystem::path(sourceUri).filename().string();
     tex.width = img.width;
     tex.height = img.height;
     tex.channels = 4;  // Always output RGBA for renderer compatibility
-    tex.sourceUri = absolutePath;
+    tex.sourceUri = sourceUri;
 
     const usize pixelCount = static_cast<usize>(img.width) * img.height;
     tex.pixels.resize(pixelCount * 4);
@@ -184,6 +176,61 @@ Texture DecodeTextureFile(const String& absolutePath) {
     return tex;
 }
 
+}  // namespace
+
+Texture DecodeTextureFile(const String& absolutePath) {
+    if (absolutePath.empty()) {
+        return {};
+    }
+    auto imageResult = ImageIO::ReadImage(absolutePath);
+    if (!imageResult.has_value()) {
+        QL_LOG_ERROR("Failed to load texture '{}'", absolutePath);
+        return {};
+    }
+    return ToRgba8(imageResult.value(), absolutePath);
+}
+
+Texture DecodeTextureBytes(const String& name, const u8* data, usize size) {
+    if (data == nullptr || size == 0) {
+        return {};
+    }
+
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    u8* decoded = stbi_load_from_memory(data, static_cast<int>(size), &width, &height,
+                                        &channels, 0);
+    if (decoded == nullptr) {
+        QL_LOG_ERROR("Failed to decode packaged texture '{}': {}", name,
+                     stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        return {};
+    }
+
+    // Through Image so the channel-name lookup and the clamping are the same
+    // code the file path uses; a packaged texture must not decode differently
+    // from the same bytes on disk.
+    Image img;
+    img.width = static_cast<u32>(width);
+    img.height = static_cast<u32>(height);
+    img.channels = static_cast<u32>(channels);
+    if (channels == 1) {
+        img.channelNames = {"Gray"};
+    } else if (channels == 2) {
+        img.channelNames = {"Gray", "Alpha"};
+    } else if (channels == 3) {
+        img.channelNames = {"R", "G", "B"};
+    } else {
+        img.channelNames = {"R", "G", "B", "A"};
+    }
+    img.data.resize(static_cast<usize>(width) * height * channels);
+    for (usize i = 0; i < img.data.size(); ++i) {
+        img.data[i] = static_cast<f32>(decoded[i]) / 255.0f;
+    }
+    stbi_image_free(decoded);
+
+    return ToRgba8(img, name);
+}
+
 // ============================================================================
 // UsdTextureBank
 // ============================================================================
@@ -211,6 +258,16 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
     std::vector<std::future<std::pair<String, Texture>>> pending;
     pending.reserve(paths.size());
     for (const String& path : paths) {
+        // Bytes that were handed over rather than read from disk -- a texture
+        // inside a .usdz -- decode here too, so they cost the same as any other.
+        if (const auto encoded = m_encoded.find(path); encoded != m_encoded.end()) {
+            const std::vector<u8>& bytes = encoded->second;
+            pending.push_back(std::async(std::launch::async, [path, &bytes]() {
+                return std::make_pair(path, DecodeTextureBytes(path, bytes.data(),
+                                                               bytes.size()));
+            }));
+            continue;
+        }
         pending.push_back(std::async(std::launch::async, [path]() {
             return std::make_pair(path, DecodeTextureFile(path));
         }));
@@ -226,6 +283,7 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
     }
 
     QL_LOG_INFO("  Decoded {} of {} texture files", decoded, paths.size());
+    m_encoded.clear();
 }
 
 i32 UsdTextureBank::Materialise(const SlotRecipe& recipe, std::vector<Texture>& textures) {
@@ -336,6 +394,7 @@ i32 UsdTextureBank::Materialise(const SlotRecipe& recipe, std::vector<Texture>& 
 
 void UsdTextureBank::ReleaseSources() {
     m_sources.clear();
+    m_encoded.clear();
 }
 
 // ============================================================================
