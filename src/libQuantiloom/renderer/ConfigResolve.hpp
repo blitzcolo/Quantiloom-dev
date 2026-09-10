@@ -138,9 +138,16 @@ struct TimelineConfig {
 struct ModelEntry {
     String file;      ///< already through ResolveConfigPath
     String name;      ///< unique within the config; prefixes the model's node names
-    String variant;   ///< KHR_materials_variants, empty for the default
+    String variant;   ///< KHR_materials_variants, or a USD variant spec; empty for the default
     glm::mat4 rest{1.0f};
     std::optional<scene::MotionSpec> motion;
+
+    // USD only. A glTF has no time code, no payloads and no stage metrics, so
+    // these three do nothing to one -- which is why they are here rather than
+    // in a second entry type: the [[models]] array is one list whatever is in it.
+    std::optional<f64> timeCode;      ///< absent means UsdTimeCode::Default()
+    bool loadPayloads = true;         ///< `payloads = "none"` opens the stage without them
+    bool applyStageMetrics = true;    ///< fold upAxis and metersPerUnit into the transforms
 };
 
 /**

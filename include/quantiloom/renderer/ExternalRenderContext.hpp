@@ -115,6 +115,50 @@ struct SolarLutSpec {
 };
 
 /**
+ * @struct UsdSceneOptions
+ * @brief What a host can ask of the USD loader beyond the path
+ *
+ * The same four things a config says with `scene.variant`, `scene.usd_time_code`,
+ * `scene.usd_payloads` and `scene.usd_stage_metrics`, so a host that builds a
+ * scene by hand and a host that opens a .toml reach the same loader in the same
+ * state.
+ *
+ * Fields only, and appended to rather than reordered: this crosses the SDK
+ * boundary and Studio reads it by offset.
+ */
+struct UsdSceneOptions {
+    /// One entry per selection: "/Root/Car{color=red}", or a bare "lod=low" for
+    /// every prim that owns the set. Joined with commas and parsed by
+    /// ParseUsdVariantSpec, so a malformed entry fails the load rather than
+    /// quietly rendering the default.
+    Vector<String> variantSelections;
+
+    /// Which sample to read from an animated stage. Ignored while
+    /// useDefaultTime is true, which is the stage's own default time -- not
+    /// time zero, which is a sample an unanimated attribute does not have.
+    f64 timeCode = 0.0;
+    bool useDefaultTime = true;
+
+    /// False opens the stage without its payloads: the hierarchy, none of the
+    /// heavy geometry hanging off it.
+    bool loadPayloads = true;
+
+    /// Fold the stage's upAxis and an authored metersPerUnit into the node
+    /// transforms, so files in different conventions line up.
+    bool applyStageMetrics = true;
+};
+
+/**
+ * @struct GltfSceneOptions
+ * @brief What a host can ask of the glTF loader beyond the path
+ */
+struct GltfSceneOptions {
+    /// KHR_materials_variants, by name. Empty is the file's own per-primitive
+    /// materials, which is what glTF calls vanilla behaviour.
+    String variant;
+};
+
+/**
  * @class ExternalRenderContext
  * @brief Renders to externally-managed Vulkan surfaces using dynamic rendering
  *
@@ -259,6 +303,15 @@ public:
     Result<void, String> LoadSceneFromGltf(const String& gltfPath);
 
     /**
+     * @brief Load scene from glTF file, selecting a materials variant
+     * @param gltfPath Path to glTF/GLB file
+     * @param options  KHR_materials_variants selection
+     * @return Result indicating success or error
+     */
+    Result<void, String> LoadSceneFromGltf(const String& gltfPath,
+                                           const GltfSceneOptions& options);
+
+    /**
      * @brief Load scene from OpenUSD file
      * @param usdPath Path to USD file (.usd, .usda, .usdc, .usdz)
      * @return Result indicating success or error
@@ -272,6 +325,21 @@ public:
      * - quantiloom:temperature_K - Surface temperature (K)
      */
     Result<void, String> LoadSceneFromUsd(const String& usdPath);
+
+    /**
+     * @brief Load scene from OpenUSD file with load-time options
+     * @param usdPath Path to USD file (.usd, .usda, .usdc, .usdz)
+     * @param options Variant selections, time code, payload policy, stage metrics
+     * @return Result indicating success, or the error -- including a variant
+     *         spec that does not parse, which fails the load rather than
+     *         rendering the default variant without saying so
+     *
+     * The single-argument overload is this one with UsdSceneOptions{}: the
+     * default variants, the stage's default time, payloads loaded, and the
+     * stage's own metrics folded in.
+     */
+    Result<void, String> LoadSceneFromUsd(const String& usdPath,
+                                          const UsdSceneOptions& options);
 
     /**
      * @brief Check if scene is loaded

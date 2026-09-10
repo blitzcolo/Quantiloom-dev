@@ -80,9 +80,14 @@ struct UsdLoadOptions {
      * Map of prim path -> (variant set name -> variant name)
      * Example: { "/Root/Model": { "LOD": "high", "material": "metal" } }
      *
+     * The empty prim path is a wildcard: that set is selected on every prim
+     * that owns it, which is how a config can say `lod=low` without knowing
+     * where in the hierarchy the sets are.
+     *
      * If empty, default variants are used.
      */
-    std::unordered_map<String, std::unordered_map<String, String>> variantSelections;
+    using VariantSelections = std::unordered_map<String, std::unordered_map<String, String>>;
+    VariantSelections variantSelections;
 
     // ========================================================================
     // Payload Control
@@ -169,6 +174,24 @@ struct UsdLoadOptions {
         return opts;
     }
 };
+
+/**
+ * @brief Parse a variant selection spec into UsdLoadOptions::variantSelections
+ *
+ * The syntax a config's `variant` key uses for a USD file:
+ *
+ *     /Root/Car{color=red}          one set on one prim
+ *     lod=low                       that set on every prim that owns it
+ *     /A{x=1},/B{y=2},lod=low       comma-separated, any mix
+ *
+ * A malformed entry is an error rather than a warning. An unknown *variant
+ * name* is a typo in the data and glTF warns about it, but the syntax is the
+ * contract between the config and the loader: if it does not parse, nobody
+ * knows what was asked for.
+ *
+ * pxr-free, so it is available and testable in a build without OpenUSD.
+ */
+Result<UsdLoadOptions::VariantSelections, String> ParseUsdVariantSpec(StringView spec);
 
 /**
  * @class UsdLoader

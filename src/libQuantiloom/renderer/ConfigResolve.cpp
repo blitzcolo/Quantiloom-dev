@@ -939,7 +939,13 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     //   [[models]]
     //   file = "assets/models/car.glb"
     //   name = "car"                # unique; prefixes this model's node names
-    //   variant = "Red"             # KHR_materials_variants
+    //   variant = "Red"             # glTF: KHR_materials_variants, by name
+    //                               # USD: "/Root/Car{color=red}", comma-separated;
+    //                               #   a bare "set=variant" applies to every prim
+    //                               #   that owns the set
+    //   time_code = 12.0            # USD: which sample to read; absent = default time
+    //   payloads = "all"            # USD: "all" | "none"
+    //   stage_metrics = true        # USD: fold upAxis and metersPerUnit into the pose
     //   translation = [0, 0, 0]     # the rest pose, in the [[nodes]] grammar
     //   rotation_euler_degrees = [0, 90, 0]
     //
@@ -1053,6 +1059,24 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
             ModelEntry model;
             model.file = ResolveConfigPath(file, options.baseDir);
             model.variant = entry.GetString("variant", "");
+
+            // USD-only keys. They are read for every entry because the array is
+            // one list; a glTF entry that carries them is odd but not wrong, and
+            // the loader it goes to has nowhere to put them.
+            if (entry.Has("time_code")) {
+                model.timeCode = entry.GetDouble("time_code", 0.0);
+            }
+            if (entry.Has("payloads")) {
+                const String payloads = entry.GetString("payloads", "all");
+                if (payloads == "none") {
+                    model.loadPayloads = false;
+                } else if (payloads != "all") {
+                    diag.Warn("models.payloads",
+                              "[[models]] `payloads` is \"" + payloads +
+                                  "\"; expected \"all\" or \"none\", so all are loaded");
+                }
+            }
+            model.applyStageMetrics = entry.GetBool("stage_metrics", true);
 
             String name = entry.GetString("name", "");
             if (name.empty()) name = std::filesystem::path(file).stem().string();

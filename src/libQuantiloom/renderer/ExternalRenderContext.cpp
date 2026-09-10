@@ -1309,9 +1309,17 @@ void ExternalRenderContext::Impl::RebuildSceneGpuResources() {
 }
 
 Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltfPath) {
+    return LoadSceneFromGltf(gltfPath, GltfSceneOptions{});
+}
+
+Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltfPath,
+                                                              const GltfSceneOptions& options) {
     QL_LOG_INFO("Loading glTF scene: {}", gltfPath);
 
-    auto result = GltfLoader::LoadFromFile(gltfPath);
+    GltfLoadOptions loadOptions;
+    loadOptions.variant = options.variant;
+
+    auto result = GltfLoader::LoadFromFile(gltfPath, loadOptions);
     if (!result.has_value()) {
         return Result<void, String>::Err("Failed to load glTF: " + result.error());
     }
@@ -1330,9 +1338,37 @@ Result<void, String> ExternalRenderContext::LoadSceneFromGltf(const String& gltf
 }
 
 Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPath) {
+    return LoadSceneFromUsd(usdPath, UsdSceneOptions{});
+}
+
+Result<void, String> ExternalRenderContext::LoadSceneFromUsd(const String& usdPath,
+                                                             const UsdSceneOptions& options) {
     QL_LOG_INFO("Loading USD scene: {}", usdPath);
 
-    auto result = UsdLoader::LoadFromFile(usdPath);
+    UsdLoadOptions loadOptions;
+    if (!options.variantSelections.empty()) {
+        // The same one-string syntax a config uses, so a host and a .toml
+        // cannot disagree about what a selection means.
+        String spec;
+        for (const String& selection : options.variantSelections) {
+            if (!spec.empty()) {
+                spec += ',';
+            }
+            spec += selection;
+        }
+        auto parsed = ParseUsdVariantSpec(spec);
+        if (!parsed.has_value()) {
+            return Result<void, String>::Err(parsed.error());
+        }
+        loadOptions.variantSelections = std::move(parsed.value());
+    }
+    loadOptions.timeCode = options.timeCode;
+    loadOptions.useDefaultTime = options.useDefaultTime;
+    loadOptions.payloadPolicy = options.loadPayloads ? UsdLoadOptions::PayloadPolicy::LoadAll
+                                                     : UsdLoadOptions::PayloadPolicy::LoadNone;
+    loadOptions.applyStageMetrics = options.applyStageMetrics;
+
+    auto result = UsdLoader::LoadFromFile(usdPath, loadOptions);
     if (!result.has_value()) {
         return Result<void, String>::Err("Failed to load USD: " + result.error());
     }

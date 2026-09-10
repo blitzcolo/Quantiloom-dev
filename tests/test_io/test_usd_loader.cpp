@@ -2497,3 +2497,198 @@ def Material "Mat"
     // QUANTILOOM_materials_dispersion has over KHR_materials_dispersion.
     EXPECT_NEAR(material.dispersion, 0.0125f, 1e-6f);
 }
+
+// ============================================================================
+// Load options
+// ============================================================================
+
+TEST_F(UsdLoaderTest, ABareVariantSelectionAppliesToEveryPrimOwningTheSet) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // Two prims share a variant set called "lod". A config that says `lod=low`
+    // should not have to know where in the hierarchy they are.
+    const auto path = WriteUsda("bare_variant.usda", R"(#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Mesh "A" (
+        variants = { string lod = "high" }
+        prepend variantSets = "lod"
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        variantSet "lod" = {
+            "high" {
+                point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+            "low" {
+                point3f[] points = [(0, 0, 0), (2, 0, 0), (0, 2, 0)]
+            }
+        }
+    }
+
+    def Mesh "B" (
+        variants = { string lod = "high" }
+        prepend variantSets = "lod"
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        variantSet "lod" = {
+            "high" {
+                point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+            "low" {
+                point3f[] points = [(0, 0, 0), (3, 0, 0), (0, 3, 0)]
+            }
+        }
+    }
+}
+)");
+
+    auto spec = ParseUsdVariantSpec("lod=low");
+    ASSERT_TRUE(spec.has_value()) << spec.error();
+    UsdLoadOptions options;
+    options.variantSelections = spec.value();
+
+    auto result = UsdLoader::LoadFromFile(path.string(), options);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    ASSERT_EQ(scene.meshes.size(), 2u);
+    f32 widest = 0.0f;
+    for (const auto& mesh : scene.meshes) {
+        for (const auto& primitive : mesh.primitives) {
+            for (const auto& point : primitive.positions) {
+                widest = std::max(widest, point.x);
+            }
+        }
+    }
+    // "high" tops out at 1 on both; "low" reaches 2 and 3.
+    EXPECT_NEAR(widest, 3.0f, 1e-5f) << "the bare selection reached both prims";
+}
+
+TEST_F(UsdLoaderTest, TimeCodeSelectsTheAnimatedSample) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("time_samples.usda", R"(#usda 1.0
+(
+    defaultPrim = "Tri"
+)
+
+def Mesh "Tri"
+{
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+    point3f[] points.timeSamples = {
+        0: [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+        10: [(0, 0, 0), (5, 0, 0), (0, 5, 0)],
+    }
+}
+)");
+
+    UsdLoadOptions options;
+    options.useDefaultTime = false;
+    options.timeCode = 10.0;
+
+    auto result = UsdLoader::LoadFromFile(path.string(), options);
+    ASSERT_TRUE(result.has_value()) << result.error();
+
+    const Scene& scene = *result;
+    f32 widest = 0.0f;
+    ASSERT_FALSE(scene.meshes.empty());
+    for (const auto& primitive : scene.meshes.at(0).primitives) {
+        for (const auto& point : primitive.positions) {
+            widest = std::max(widest, point.x);
+        }
+    }
+    EXPECT_NEAR(widest, 5.0f, 1e-5f);
+}
+
+TEST_F(UsdLoaderTest, PayloadsNoneLoadsNoGeometry) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteUsda("payload_body.usda", R"(#usda 1.0
+(
+    defaultPrim = "Body"
+)
+
+def Mesh "Body"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)");
+
+    const auto path = WriteUsda("payload_root.usda", R"(#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def Xform "Root"
+{
+    def "Heavy" (
+        payload = @./payload_body.usda@</Body>
+    )
+    {
+    }
+}
+)");
+
+    UsdLoadOptions withPayloads;
+    auto loaded = UsdLoader::LoadFromFile(path.string(), withPayloads);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    EXPECT_EQ(loaded.value().meshes.size(), 1u);
+
+    UsdLoadOptions withoutPayloads;
+    withoutPayloads.payloadPolicy = UsdLoadOptions::PayloadPolicy::LoadNone;
+    auto unloaded = UsdLoader::LoadFromFile(path.string(), withoutPayloads);
+    ASSERT_TRUE(unloaded.has_value()) << unloaded.error();
+    EXPECT_TRUE(unloaded.value().meshes.empty())
+        << "the hierarchy without the heavy geometry hanging off it";
+}
+
+TEST_F(UsdLoaderTest, StageMetricsCanBeDisabledFromOptions) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("metrics_off.usda", R"(#usda 1.0
+(
+    defaultPrim = "Tri"
+    upAxis = "Z"
+    metersPerUnit = 0.01
+)
+
+def Mesh "Tri"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)");
+
+    UsdLoadOptions options;
+    options.applyStageMetrics = false;
+
+    auto result = UsdLoader::LoadFromFile(path.string(), options);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    ASSERT_EQ(scene.nodes.size(), 1u);
+
+    const glm::vec3 up =
+        glm::vec3(scene.nodes[0].transform * glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+    EXPECT_NEAR(up.z, 1.0f, 1e-5f) << "the stage's own axes, untouched";
+    EXPECT_NEAR(up.y, 0.0f, 1e-5f);
+}

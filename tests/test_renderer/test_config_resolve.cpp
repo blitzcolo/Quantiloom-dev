@@ -1911,6 +1911,48 @@ position = [10, 0, 0]
     EXPECT_DOUBLE_EQ(resolved.value().timeline.end_s, 6.0);
 }
 
+TEST_F(ConfigResolveTest, ModelEntryPayloadsAndTimeCodeAreRead) {
+    // Three USD-only keys on a [[models]] entry. They are read for every entry
+    // because the array is one list whatever is in it; a glTF entry that carries
+    // them goes to a loader with nowhere to put them.
+    auto config = Parse({.trailing = R"(
+[[models]]
+file = "rig.usdc"
+name = "rig"
+variant = "/Root/Car{color=red}"
+time_code = 12.0
+payloads = "none"
+stage_metrics = false
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& models = resolved.value().models;
+    ASSERT_EQ(models.size(), 1u);
+    EXPECT_EQ(models[0].variant, "/Root/Car{color=red}");
+    ASSERT_TRUE(models[0].timeCode.has_value());
+    EXPECT_DOUBLE_EQ(*models[0].timeCode, 12.0);
+    EXPECT_FALSE(models[0].loadPayloads);
+    EXPECT_FALSE(models[0].applyStageMetrics);
+}
+
+TEST_F(ConfigResolveTest, ModelEntryUsdKeysDefaultToLoadingEverything) {
+    auto config = Parse({.trailing = R"(
+[[models]]
+file = "rig.usdc"
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    const auto& models = resolved.value().models;
+    ASSERT_EQ(models.size(), 1u);
+    // An absent time code is the stage's own default time, not time zero: time
+    // zero is a sample an unanimated attribute does not have.
+    EXPECT_FALSE(models[0].timeCode.has_value());
+    EXPECT_TRUE(models[0].loadPayloads);
+    EXPECT_TRUE(models[0].applyStageMetrics);
+}
+
 TEST_F(ConfigResolveTest, ModelsCarryNameFileRestAndMotion) {
     auto config = Parse({.trailing = R"(
 [timeline]

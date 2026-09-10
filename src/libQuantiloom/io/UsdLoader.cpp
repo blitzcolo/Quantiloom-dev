@@ -27,7 +27,107 @@
 #include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
+#include <cctype>
+#include <string_view>
+
 // Conditional compilation based on OpenUSD availability
+// ============================================================================
+// ParseUsdVariantSpec - the config's `variant` string, for a USD file
+// ============================================================================
+// pxr-free and outside the #if, so a build without OpenUSD still parses the key
+// and still reports a malformed one. See the header for the syntax.
+
+namespace quantiloom {
+
+namespace {
+
+StringView TrimSpace(StringView text) {
+    const auto notSpace = [](char c) { return std::isspace(static_cast<unsigned char>(c)) == 0; };
+    usize begin = 0;
+    while (begin < text.size() && !notSpace(text[begin])) {
+        ++begin;
+    }
+    usize end = text.size();
+    while (end > begin && !notSpace(text[end - 1])) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+}  // namespace
+
+Result<UsdLoadOptions::VariantSelections, String> ParseUsdVariantSpec(StringView spec) {
+    using Selections = UsdLoadOptions::VariantSelections;
+    using Res = Result<Selections, String>;
+
+    Selections selections;
+    const StringView trimmed = TrimSpace(spec);
+    if (trimmed.empty()) {
+        return Res(std::move(selections));
+    }
+
+    usize cursor = 0;
+    while (cursor <= trimmed.size()) {
+        const usize comma = trimmed.find(',', cursor);
+        const StringView entry = TrimSpace(
+            trimmed.substr(cursor, comma == StringView::npos ? StringView::npos : comma - cursor));
+        cursor = comma == StringView::npos ? trimmed.size() + 1 : comma + 1;
+
+        if (entry.empty()) {
+            return Res::Err("USD variant spec has an empty entry: '" + String(spec) + "'");
+        }
+
+        StringView primPath;
+        StringView assignment = entry;
+
+        if (entry.front() == '/') {
+            const usize open = entry.find('{');
+            if (open == StringView::npos || entry.back() != '}') {
+                return Res::Err("USD variant entry '" + String(entry) +
+                                "' names a prim but not a selection; expected "
+                                "/Prim{set=variant}");
+            }
+            primPath = TrimSpace(entry.substr(0, open));
+            assignment = TrimSpace(entry.substr(open + 1, entry.size() - open - 2));
+            if (primPath.size() < 2) {
+                return Res::Err("USD variant entry '" + String(entry) + "' has no prim path");
+            }
+        }
+
+        if (assignment.find('{') != StringView::npos ||
+            assignment.find('}') != StringView::npos) {
+            // Braces outside a prim-scoped entry: most likely a prim path that
+            // lost its leading slash, which would otherwise parse as a variant
+            // set called "{color".
+            return Res::Err("USD variant entry '" + String(entry) +
+                            "' has braces but no leading '/'; expected "
+                            "/Prim{set=variant} or set=variant");
+        }
+
+        const usize equals = assignment.find('=');
+        if (equals == StringView::npos) {
+            return Res::Err("USD variant entry '" + String(entry) +
+                            "' is not set=variant");
+        }
+        const StringView setName = TrimSpace(assignment.substr(0, equals));
+        const StringView variantName = TrimSpace(assignment.substr(equals + 1));
+        if (setName.empty() || variantName.empty()) {
+            return Res::Err("USD variant entry '" + String(entry) +
+                            "' has an empty variant set or variant name");
+        }
+        if (assignment.find('=', equals + 1) != StringView::npos) {
+            return Res::Err("USD variant entry '" + String(entry) +
+                            "' has more than one '='");
+        }
+
+        selections[String(primPath)][String(setName)] = String(variantName);
+    }
+
+    return Res(std::move(selections));
+}
+
+}  // namespace quantiloom
+
 #if QUANTILOOM_USE_OPENUSD
 
 // OpenUSD headers
@@ -1360,25 +1460,57 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
     // ========================================================================
     // Apply variant selections
     // ========================================================================
+    const auto applyVariants = [](const UsdPrim& prim, const String& primLabel,
+                                 const std::unordered_map<String, String>& variantMap,
+                                 bool quiet) {
+        UsdVariantSets variantSets = prim.GetVariantSets();
+        for (const auto& [setName, variantName] : variantMap) {
+            if (!variantSets.HasVariantSet(setName)) {
+                if (!quiet) {
+                    QL_LOG_WARN("  Variant set '{}' not found on '{}'", setName, primLabel);
+                }
+                continue;
+            }
+            UsdVariantSet variantSet = variantSets.GetVariantSet(setName);
+            if (variantSet.SetVariantSelection(variantName)) {
+                QL_LOG_INFO("  Applied variant: {}[{}={}]", primLabel, setName, variantName);
+            } else {
+                QL_LOG_WARN("  Failed to set variant {}[{}={}]", primLabel, setName, variantName);
+            }
+        }
+    };
+
     for (const auto& [primPath, variantMap] : options.variantSelections) {
-        UsdPrim prim = stage->GetPrimAtPath(SdfPath(primPath));
-        if (!prim) {
-            QL_LOG_WARN("  Variant selection: prim '{}' not found", primPath);
+        if (!primPath.empty()) {
+            UsdPrim prim = stage->GetPrimAtPath(SdfPath(primPath));
+            if (!prim) {
+                QL_LOG_WARN("  Variant selection: prim '{}' not found", primPath);
+                continue;
+            }
+            applyVariants(prim, primPath, variantMap, /*quiet=*/false);
             continue;
         }
 
-        UsdVariantSets variantSets = prim.GetVariantSets();
-        for (const auto& [setName, variantName] : variantMap) {
-            if (variantSets.HasVariantSet(setName)) {
-                UsdVariantSet vs = variantSets.GetVariantSet(setName);
-                if (vs.SetVariantSelection(variantName)) {
-                    QL_LOG_INFO("  Applied variant: {}[{}={}]", primPath, setName, variantName);
-                } else {
-                    QL_LOG_WARN("  Failed to set variant {}[{}={}]", primPath, setName, variantName);
+        // The wildcard: this set, wherever it is. Every owning prim is collected
+        // before any selection is made, because a selection changes the
+        // composition the traversal is walking -- picking a variant that adds a
+        // subtree while iterating over that subtree is undefined.
+        std::vector<UsdPrim> owners;
+        for (const UsdPrim& prim : stage->Traverse()) {
+            UsdVariantSets sets = prim.GetVariantSets();
+            for (const auto& [setName, variantName] : variantMap) {
+                (void)variantName;
+                if (sets.HasVariantSet(setName)) {
+                    owners.push_back(prim);
+                    break;
                 }
-            } else {
-                QL_LOG_WARN("  Variant set '{}' not found on '{}'", setName, primPath);
             }
+        }
+        if (owners.empty()) {
+            QL_LOG_WARN("  Variant selection: no prim owns any of the named variant sets");
+        }
+        for (const UsdPrim& prim : owners) {
+            applyVariants(prim, prim.GetPath().GetString(), variantMap, /*quiet=*/true);
         }
     }
 

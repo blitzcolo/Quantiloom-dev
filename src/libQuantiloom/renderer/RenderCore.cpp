@@ -40,6 +40,37 @@ bool LooksLikeUsd(const String& path) {
 
 }  // namespace
 
+// The USD loader's options, from the keys a config uses to describe them.
+//
+// A malformed variant spec is an error and not a warning, unlike an unknown
+// glTF variant name: a name that does not exist is a typo in the data, which is
+// worth carrying on past, but the spec's syntax is the contract between the
+// config and the loader -- if it does not parse, nobody knows what was asked
+// for, and rendering the default silently is the wrong answer confidently.
+static Result<UsdLoadOptions, String> UsdOptionsFrom(const String& variantSpec,
+                                                     std::optional<f64> timeCode,
+                                                     bool loadPayloads,
+                                                     bool applyStageMetrics) {
+    UsdLoadOptions options;
+
+    if (!variantSpec.empty()) {
+        auto selections = ParseUsdVariantSpec(variantSpec);
+        if (!selections.has_value()) {
+            return Result<UsdLoadOptions, String>::Err(selections.error());
+        }
+        options.variantSelections = std::move(selections.value());
+    }
+
+    if (timeCode.has_value()) {
+        options.timeCode = *timeCode;
+        options.useDefaultTime = false;
+    }
+    options.payloadPolicy = loadPayloads ? UsdLoadOptions::PayloadPolicy::LoadAll
+                                         : UsdLoadOptions::PayloadPolicy::LoadNone;
+    options.applyStageMetrics = applyStageMetrics;
+    return Result<UsdLoadOptions, String>(std::move(options));
+}
+
 Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& baseDir,
                                           const ResolvedRenderConfig* resolved,
                                           SceneLoadInfo* info) {
@@ -54,7 +85,25 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         const auto usdPath = ResolveConfigPath(config.Get<String>("scene.usd"), baseDir);
         QL_LOG_INFO("Loading USD scene: {}", usdPath);
 
-        auto result = UsdLoader::LoadFromFile(usdPath);
+        // Read here for the same reason `scene.variant` is: this is the one
+        // place both the CLI and Studio pass through, ResolveRenderConfig runs
+        // before the scene exists, and ResolveMaterialSpectra runs after it
+        // loaded. `scene.variant` itself is shared by both formats, and which
+        // syntax it is in follows from which loader reads it.
+        std::optional<f64> timeCode;
+        if (config.Has("scene.usd_time_code")) {
+            timeCode = config.Get<f64>("scene.usd_time_code");
+        }
+        auto options = UsdOptionsFrom(
+            config.Has("scene.variant") ? config.Get<String>("scene.variant") : String{},
+            timeCode,
+            config.GetString("scene.usd_payloads", "all") != "none",
+            config.GetBool("scene.usd_stage_metrics", true));
+        if (!options.has_value()) {
+            return Result<Scene, String>::Err(options.error());
+        }
+
+        auto result = UsdLoader::LoadFromFile(usdPath, options.value());
         if (!result.has_value()) {
             return Result<Scene, String>::Err("Failed to load USD: " + result.error());
         }
@@ -118,7 +167,13 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
 
             Scene part;
             if (LooksLikeUsd(model.file)) {
-                auto result = UsdLoader::LoadFromFile(model.file);
+                auto options = UsdOptionsFrom(model.variant, model.timeCode,
+                                              model.loadPayloads, model.applyStageMetrics);
+                if (!options.has_value()) {
+                    return Result<Scene, String>::Err("Model '" + model.name + "': " +
+                                                      options.error());
+                }
+                auto result = UsdLoader::LoadFromFile(model.file, options.value());
                 if (!result.has_value()) {
                     return Result<Scene, String>::Err("Failed to load model '" + model.name +
                                                       "' (" + model.file + "): " + result.error());

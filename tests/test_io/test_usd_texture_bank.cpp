@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include "io/UsdLoader.hpp"
 #include "io/UsdSurfaceTables.hpp"
 #include "io/UsdTextureBank.hpp"
 
@@ -252,4 +253,45 @@ TEST(UsdSurfaceTables, ClassifyShaderIdMatchesExactTokens) {
     EXPECT_EQ(ClassifyShaderId("ND_disney_principled_surfaceshader"),
               SurfaceVocabulary::Unknown);
     EXPECT_EQ(ClassifyShaderId(""), SurfaceVocabulary::Unknown);
+}
+
+// ============================================================================
+// The variant spec a config carries
+// ============================================================================
+// pxr-free, so these run whether or not this build has OpenUSD.
+
+TEST(UsdVariantSpec, ParsesPrimScopedAndBareSelections) {
+    auto parsed = ParseUsdVariantSpec("/Root/Car{color=red}, lod=low ,/Root/Trailer{lod=high}");
+    ASSERT_TRUE(parsed.has_value()) << parsed.error();
+    const auto& selections = parsed.value();
+
+    ASSERT_EQ(selections.size(), 3u);
+    EXPECT_EQ(selections.at("/Root/Car").at("color"), "red");
+    EXPECT_EQ(selections.at("/Root/Trailer").at("lod"), "high");
+
+    // The empty prim path is the wildcard: that set, on every prim that owns it.
+    EXPECT_EQ(selections.at("").at("lod"), "low");
+}
+
+TEST(UsdVariantSpec, AnEmptySpecSelectsNothing) {
+    auto parsed = ParseUsdVariantSpec("");
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_TRUE(parsed.value().empty());
+
+    auto blank = ParseUsdVariantSpec("   ");
+    ASSERT_TRUE(blank.has_value());
+    EXPECT_TRUE(blank.value().empty());
+}
+
+TEST(UsdVariantSpec, RejectsAMalformedEntry) {
+    // An unknown variant *name* is a typo in the data and warns; the syntax is
+    // the contract, so a spec that does not parse fails the load.
+    EXPECT_FALSE(ParseUsdVariantSpec("/Root/Car").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("/Root/Car{color}").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("/Root/Car{color=red").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("{color=red}").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("color=").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("=red").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("a=b=c").has_value());
+    EXPECT_FALSE(ParseUsdVariantSpec("lod=low,").has_value());
 }

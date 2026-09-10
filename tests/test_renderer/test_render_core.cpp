@@ -191,6 +191,30 @@ TEST(RenderCoreLoadSceneFromConfig, UsdTakesPrecedenceOverGltf) {
     EXPECT_NE(scene.error().find("USD"), std::string::npos) << scene.error();
 }
 
+// A variant spec that does not parse fails the load rather than rendering the
+// default variant. An unknown variant *name* is a typo in the data and warns;
+// the syntax is the contract between the config and the loader.
+TEST(RenderCoreLoadSceneFromConfig, AMalformedUsdVariantSpecFailsTheLoad) {
+    const auto cfg = ConfigFrom(
+        "[scene]\nusd = \"no_such_file.usdc\"\nvariant = \"/Root/Car{color\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_FALSE(scene.has_value());
+    EXPECT_NE(scene.error().find("variant"), std::string::npos) << scene.error();
+    // And it fails on the spec, before it ever looks for the file.
+    EXPECT_EQ(scene.error().find("Failed to load USD"), std::string::npos) << scene.error();
+}
+
+TEST(RenderCoreLoadSceneFromConfig, AMalformedModelVariantSpecNamesTheModel) {
+    const auto cfg = ConfigFrom(
+        "[[models]]\nfile = \"no_such_file.usdc\"\nname = \"rig\"\n"
+        "variant = \"lod\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    ASSERT_FALSE(scene.has_value());
+    EXPECT_NE(scene.error().find("rig"), std::string::npos) << scene.error();
+}
+
 TEST(RenderCoreLoadSceneFromConfig, ReportsAMissingSceneFile) {
     const auto cfg = ConfigFrom("[scene]\ngltf = \"no_such_file.gltf\"\n");
     auto scene = rendercore::LoadSceneFromConfig(cfg);
