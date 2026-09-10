@@ -714,7 +714,7 @@ correctness bug:
 
 ## A scene can have a clock, and several models
 
-Until 0.4.0 a config named one scene file and placed it once. It can now name
+Until 0.3.2 a config named one scene file and placed it once. It can now name
 `[[models]]`, each with a rest pose and a trajectory, against a `[timeline]`
 that says what a second is.
 
