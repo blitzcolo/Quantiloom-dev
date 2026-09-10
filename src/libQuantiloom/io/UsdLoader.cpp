@@ -610,6 +610,62 @@ static void ParseSpectralExtensions(Material& mat, const void* primPtr,
         }
     }
 
+    // ========================================================================
+    // Fluorescence
+    // ========================================================================
+    // The same three quantities QUANTILOOM_materials_fluorescence carries in
+    // glTF, spelled the same way: light absorbed at one wavelength and given
+    // back at another, rank one. The normalisation and the energy rules are
+    // ResolveFluorescence's, so both formats and the TOML keys reach one
+    // implementation; what lands here is samples.
+    //
+    // No emissiveFactor is written, deliberately. A fluorescent surface emits
+    // only what something else lit it with, and the emitter-sampling table
+    // collects triangles by luminance(emissiveFactor): a triple here would have
+    // next-event estimation aim at a surface that is dark on its own.
+    if (auto curve = loadSpectralCurve("quantiloom:fluorescenceExcitationCurve")) {
+        mat.fluorescenceExcitationCurve = std::move(*curve);
+    }
+    if (auto curve = loadSpectralCurve("quantiloom:fluorescenceEmissionCurve")) {
+        mat.fluorescenceEmissionCurve = std::move(*curve);
+    }
+    if (UsdAttribute yieldAttr = prim->GetAttribute(TfToken("quantiloom:fluorescenceYield"))) {
+        float fluorescenceYield = 0.0f;
+        if (yieldAttr.Get(&fluorescenceYield)) {
+            mat.fluorescenceYield = fluorescenceYield;
+            QL_LOG_INFO("      fluorescenceYield: {:.4g}", mat.fluorescenceYield);
+        }
+    }
+
+    // One half is not a description of anything, and a scene that carries one
+    // half is more likely to have a typo than an intention. Said here rather
+    // than left to the binder, which never sees a material that dropped a curve
+    // on a failed load.
+    if (mat.fluorescenceExcitationCurve.empty() != mat.fluorescenceEmissionCurve.empty()) {
+        QL_LOG_WARN("    Material '{}': only one of the two fluorescence curves loaded, "
+                    "so the material will not fluoresce", mat.name);
+    }
+    if (!mat.fluorescenceExcitationCurve.empty() && !mat.fluorescenceEmissionCurve.empty()) {
+        // Where the pair came from, for the energy warning ResolveFluorescence
+        // prints: "the scene file" is no help when the scene is an assembly.
+        mat.fluorescenceSource = usdFilePath + "#" + prim->GetPath().GetString();
+    }
+
+    // ========================================================================
+    // Dispersion
+    // ========================================================================
+    // Already the reciprocal Abbe number Material holds, unlike
+    // KHR_materials_dispersion's 20/V. Read after the surface shader, so it
+    // overrides a vocabulary's own dispersion the way the glTF extension
+    // overrides the ratified one.
+    if (UsdAttribute dispersionAttr = prim->GetAttribute(TfToken("quantiloom:dispersion"))) {
+        float dispersion = 0.0f;
+        if (dispersionAttr.Get(&dispersion)) {
+            mat.dispersion = dispersion;
+            QL_LOG_INFO("      dispersion: {:.6f} (1/Abbe)", mat.dispersion);
+        }
+    }
+
     // Mark as measured if IR data loaded
     if (mat.HasIRData()) {
         mat.spectralSource = Material::SpectralSource::Measured;

@@ -2368,3 +2368,132 @@ def "Library" (
     EXPECT_NEAR(referenced->baseColorFactor.g, 0.2f, 1e-5f);
     EXPECT_NEAR(referenced->baseColorFactor.b, 0.3f, 1e-5f);
 }
+
+// ============================================================================
+// Quantiloom attributes on a Material prim
+// ============================================================================
+
+TEST_F(UsdLoaderTest, ReadsFluorescenceCurvesAndYieldFromQuantiloomAttributes) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteUsda("fluor_excitation.csv", "400,0.0\n450,0.8\n500,0.0\n");
+    WriteUsda("fluor_emission.csv", "550,0.0\n600,1.0\n650,0.0\n");
+
+    const auto path = WriteUsda("fluorescence.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    string quantiloom:fluorescenceExcitationCurve = "fluor_excitation.csv"
+    string quantiloom:fluorescenceEmissionCurve = "fluor_emission.csv"
+    float quantiloom:fluorescenceYield = 0.6
+
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor = (0.6, 0.6, 0.6)
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // The keys are QUANTILOOM_materials_fluorescence's, spelled the same way, so
+    // one scene converted between the two formats says the same thing.
+    ASSERT_EQ(material.fluorescenceExcitationCurve.size(), 3u);
+    ASSERT_EQ(material.fluorescenceEmissionCurve.size(), 3u);
+    EXPECT_NEAR(material.fluorescenceExcitationCurve[1].first, 450.0f, 1e-3f);
+    EXPECT_NEAR(material.fluorescenceExcitationCurve[1].second, 0.8f, 1e-4f);
+    EXPECT_NEAR(material.fluorescenceEmissionCurve[1].first, 600.0f, 1e-3f);
+    EXPECT_NEAR(material.fluorescenceYield, 0.6f, 1e-5f);
+
+    // No emissiveFactor: a fluorescent surface is dark on its own, and a triple
+    // here would put it in the emitter-sampling table.
+    EXPECT_EQ(material.emissiveFactor, glm::vec3(0.0f));
+
+    // The pair's provenance, for the energy warning ResolveFluorescence prints.
+    EXPECT_NE(material.fluorescenceSource.find("#/Mat"), String::npos)
+        << "fluorescenceSource was '" << material.fluorescenceSource << "'";
+}
+
+TEST_F(UsdLoaderTest, OneFluorescenceCurveAloneDoesNotFluoresce) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteUsda("fluor_half.csv", "400,0.0\n450,0.8\n500,0.0\n");
+
+    const auto path = WriteUsda("fluorescence_half.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    string quantiloom:fluorescenceExcitationCurve = "fluor_half.csv"
+    float quantiloom:fluorescenceYield = 0.6
+
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // Half a transfer is not a description of anything; the loader says so and
+    // leaves the source empty so nothing downstream treats it as a pair.
+    EXPECT_TRUE(material.fluorescenceEmissionCurve.empty());
+    EXPECT_TRUE(material.fluorescenceSource.empty());
+}
+
+TEST_F(UsdLoaderTest, QuantiloomDispersionOverridesTheSurfaceValue) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("quantiloom_dispersion.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    float quantiloom:dispersion = 0.0125
+
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:transmission = 1.0
+        float inputs:transmission_dispersion = 30.0
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // The attribute is already 1/Abbe, and it is read after the surface, so it
+    // wins over the vocabulary's own value -- the same precedence
+    // QUANTILOOM_materials_dispersion has over KHR_materials_dispersion.
+    EXPECT_NEAR(material.dispersion, 0.0125f, 1e-6f);
+}
