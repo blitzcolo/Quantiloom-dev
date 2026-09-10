@@ -195,6 +195,61 @@ def Xform "Sphere" (
         return path;
     }
 
+    /// Write an uncompressed 32-bit TGA with exactly the bytes given.
+    ///
+    /// A texture test needs the pixels it asked for. ImageIO::WritePNG applies
+    /// sRGB encoding on the way out (ImageIO.cpp:197), so a known byte written
+    /// through it comes back as a different one; TGA is a 18-byte header and
+    /// raw BGRA, which stb_image reads back unchanged. The descriptor bit 0x20
+    /// puts the origin top-left, so the rows are in the order they are written.
+    static std::filesystem::path WriteRawTga(const std::string& fileName, u32 width,
+                                             u32 height,
+                                             const std::vector<u8>& rgba) {
+        const auto dir =
+            std::filesystem::temp_directory_path() / "quantiloom_usd_fixtures";
+        std::filesystem::create_directories(dir);
+        const auto path = dir / fileName;
+
+        std::vector<u8> header(18, 0);
+        header[2] = 2;  // uncompressed true-colour
+        header[12] = static_cast<u8>(width & 0xFF);
+        header[13] = static_cast<u8>((width >> 8) & 0xFF);
+        header[14] = static_cast<u8>(height & 0xFF);
+        header[15] = static_cast<u8>((height >> 8) & 0xFF);
+        header[16] = 32;    // bits per pixel
+        header[17] = 0x28;  // 8 alpha bits, top-left origin
+
+        std::ofstream file(path, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(header.data()),
+                   static_cast<std::streamsize>(header.size()));
+        for (usize i = 0; i + 3 < rgba.size(); i += 4) {
+            const u8 bgra[4] = {rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]};
+            file.write(reinterpret_cast<const char*>(bgra), 4);
+        }
+        file.close();
+        return path;
+    }
+
+    /// A solid image of one colour.
+    static std::filesystem::path WriteSolidTga(const std::string& fileName, u8 r, u8 g,
+                                               u8 b, u8 a) {
+        std::vector<u8> pixels;
+        for (int i = 0; i < 4; ++i) {
+            pixels.insert(pixels.end(), {r, g, b, a});
+        }
+        return WriteRawTga(fileName, 2, 2, pixels);
+    }
+
+    static const Material& MaterialNamed(const Scene& scene, const std::string& name) {
+        for (const auto& material : scene.materials) {
+            if (material.name == name) {
+                return material;
+            }
+        }
+        ADD_FAILURE() << "no material named '" << name << "'";
+        return scene.materials.at(0);
+    }
+
     /// The first primitive of the first mesh, for fixtures that author one.
     static const GeometryPrimitive& OnlyPrimitive(const Scene& scene) {
         EXPECT_EQ(scene.meshes.size(), 1u);
@@ -1034,4 +1089,892 @@ def Mesh "Tri"
     EXPECT_NEAR(point.x, 1.0f, 1e-5f);
     EXPECT_NEAR(point.y, 2.0f, 1e-5f);
     EXPECT_NEAR(point.z, 3.0f, 1e-5f);
+}
+
+// ============================================================================
+// The table-driven surface reader
+// ============================================================================
+
+namespace {
+
+/// The mesh every material fixture binds, so the scene has geometry to carry it.
+constexpr const char* kBoundQuad = R"(
+    def Mesh "Quad"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [4]
+        int[] faceVertexIndices = [0, 1, 2, 3]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "vertex"
+        )
+        rel material:binding = </Mat>
+    }
+)";
+
+}  // namespace
+
+TEST_F(UsdLoaderTest, ATexturedDiffuseColorGetsAUnitFactor) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("unit_factor_colour.tga", 200, 150, 100, 255);
+    WriteSolidTga("unit_factor_emissive.tga", 90, 80, 70, 255);
+
+    const auto path = WriteUsda("unit_factor.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Colour.outputs:rgb>
+        color3f inputs:emissiveColor.connect = </Mat/Emissive.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./unit_factor_colour.tga@
+        float3 outputs:rgb
+    }
+
+    def Shader "Emissive"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./unit_factor_emissive.tga@
+        float3 outputs:rgb
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // A connected input means "take the texture", so the factor it multiplies is
+    // one. It used to keep the input's default: 0.8 on base colour, and zero on
+    // emissive, which made every textured USD emitter dark.
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    EXPECT_NEAR(material.baseColorFactor.r, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.g, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.b, 1.0f, 1e-6f);
+
+    ASSERT_GE(material.emissiveTextureIndex, 0);
+    EXPECT_NEAR(material.emissiveFactor.r, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.emissiveFactor.g, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.emissiveFactor.b, 1.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, UsdUVTextureScaleBecomesTheColourFactor) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("scaled_colour.tga", 255, 255, 255, 255);
+
+    const auto path = WriteUsda("texture_scale.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Colour.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./scaled_colour.tga@
+        float4 inputs:scale = (0.5, 0.25, 0.125, 1)
+        float3 outputs:rgb
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // A scale with no bias is exactly a factor, so it folds instead of being
+    // baked into pixels the spectral unmixer would then read differently.
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    EXPECT_NEAR(material.baseColorFactor.r, 0.5f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.g, 0.25f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.b, 0.125f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, SeparateMetallicAndRoughnessImagesArePackedIntoGAndB) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("mr_metal.tga", 0x40, 0x00, 0x00, 0xFF);
+    WriteSolidTga("mr_rough.tga", 0x00, 0xC0, 0x00, 0xFF);
+
+    const auto path = WriteUsda("metal_rough_split.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:metallic.connect = </Mat/Metal.outputs:r>
+        float inputs:roughness.connect = </Mat/Rough.outputs:g>
+        token outputs:surface
+    }
+
+    def Shader "Metal"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./mr_metal.tga@
+        float outputs:r
+    }
+
+    def Shader "Rough"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./mr_rough.tga@
+        float outputs:g
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    // USD binds two files; the shader reads one texture, G for roughness and B
+    // for metallic. Whichever image arrived first used to take the single slot
+    // and the other was dropped.
+    ASSERT_GE(material.metallicRoughnessTextureIndex, 0);
+    const Texture& packed = scene.textures[material.metallicRoughnessTextureIndex];
+    if (packed.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    EXPECT_EQ(packed.pixels[1], 0xC0) << "G is roughness";
+    EXPECT_EQ(packed.pixels[2], 0x40) << "B is metallic";
+    EXPECT_FALSE(packed.isSRGB);
+    EXPECT_NEAR(material.metallicFactor, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.roughnessFactor, 1.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, AMetallicOnlyImageLeavesRoughnessAsTheScalar) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("metal_only.tga", 0x40, 0x00, 0x00, 0xFF);
+
+    const auto path = WriteUsda("metal_only.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:metallic.connect = </Mat/Metal.outputs:r>
+        float inputs:roughness = 0.25
+        token outputs:surface
+    }
+
+    def Shader "Metal"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./metal_only.tga@
+        float outputs:r
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    ASSERT_GE(material.metallicRoughnessTextureIndex, 0);
+    const Texture& packed = scene.textures[material.metallicRoughnessTextureIndex];
+    if (packed.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    // 255 is 1.0, so the scalar half of the pair survives the multiply.
+    EXPECT_EQ(packed.pixels[1], 0xFF);
+    EXPECT_EQ(packed.pixels[2], 0x40);
+    EXPECT_NEAR(material.roughnessFactor, 0.25f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, OpacityThresholdSelectsAlphaMask) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("opacity_threshold.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:opacityThreshold = 0.4
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Mask);
+    EXPECT_NEAR(material.alphaCutoff, 0.4f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, OpacityImageAlphaLandsInBaseColourAlpha) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("opacity_colour.tga", 200, 150, 100, 255);
+    WriteSolidTga("opacity_alpha.tga", 0, 0, 0, 0x80);
+
+    const auto path = WriteUsda("opacity_texture.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Colour.outputs:rgb>
+        float inputs:opacity.connect = </Mat/Alpha.outputs:a>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./opacity_colour.tga@
+        float3 outputs:rgb
+    }
+
+    def Shader "Alpha"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./opacity_alpha.tga@
+        float outputs:a
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Blend);
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    const Texture& base = scene.textures[material.baseColorTextureIndex];
+    if (base.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    EXPECT_EQ(base.pixels[0], 200);
+    EXPECT_EQ(base.pixels[3], 0x80) << "the opacity map is the base colour's alpha";
+    EXPECT_TRUE(base.retainCpuPixels)
+        << "a non-opaque base colour is read on the CPU for the thermal view factors";
+}
+
+TEST_F(UsdLoaderTest, ClearcoatInputsAreRead) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("clearcoat.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:clearcoat = 0.7
+        float inputs:clearcoatRoughness = 0.2
+        float inputs:ior = 1.7
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    EXPECT_NEAR(material.clearcoatFactor, 0.7f, 1e-6f);
+    EXPECT_NEAR(material.clearcoatRoughnessFactor, 0.2f, 1e-6f);
+    EXPECT_NEAR(material.ior, 1.7f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, NormalMapScaleBiasIdiomIsNotBakedTwice) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("normal_flat.tga", 128, 128, 255, 255);
+
+    const auto path = WriteUsda("normal_idiom.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        normal3f inputs:normal.connect = </Mat/Normal.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Normal"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./normal_flat.tga@
+        float4 inputs:scale = (2, 2, 2, 1)
+        float4 inputs:bias = (-1, -1, -1, 0)
+        token inputs:sourceColorSpace = "raw"
+        float3 outputs:rgb
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    ASSERT_GE(material.normalTextureIndex, 0);
+    const Texture& normal = scene.textures[material.normalTextureIndex];
+    if (normal.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    // The shader already maps [0,1] to [-1,1]; baking the same affine here
+    // would apply it twice and a flat normal would come out sideways.
+    EXPECT_EQ(normal.pixels[0], 128);
+    EXPECT_EQ(normal.pixels[1], 128);
+    EXPECT_EQ(normal.pixels[2], 255);
+    EXPECT_FALSE(normal.isSRGB);
+}
+
+TEST_F(UsdLoaderTest, WrapModesAndSourceColorSpaceReachTheTexture) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("wrapped.tga", 10, 20, 30, 255);
+
+    const auto path = WriteUsda("wrap_modes.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Colour.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./wrapped.tga@
+        token inputs:wrapS = "clamp"
+        token inputs:wrapT = "mirror"
+        token inputs:sourceColorSpace = "raw"
+        float3 outputs:rgb
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    const Texture& texture = scene.textures[material.baseColorTextureIndex];
+    EXPECT_EQ(texture.sampler.wrapS, TextureSampler::WrapMode::ClampToEdge);
+    EXPECT_EQ(texture.sampler.wrapT, TextureSampler::WrapMode::MirroredRepeat);
+    EXPECT_FALSE(texture.isSRGB) << "sourceColorSpace = raw overrides the slot's guess";
+}
+
+TEST_F(UsdLoaderTest, AnImageUsedAsColourAndAsDataGetsTwoEntries) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("shared.tga", 90, 120, 150, 255);
+
+    const auto path = WriteUsda("shared_image.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/AsColour.outputs:rgb>
+        float inputs:roughness.connect = </Mat/AsData.outputs:g>
+        token outputs:surface
+    }
+
+    def Shader "AsColour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./shared.tga@
+        float3 outputs:rgb
+    }
+
+    def Shader "AsData"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./shared.tga@
+        float outputs:g
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    ASSERT_GE(material.metallicRoughnessTextureIndex, 0);
+    EXPECT_NE(material.baseColorTextureIndex, material.metallicRoughnessTextureIndex)
+        << "one file in two roles is two entries; a pass over shared indices could "
+           "only give it one colour space";
+    EXPECT_TRUE(scene.textures[material.baseColorTextureIndex].isSRGB);
+    EXPECT_FALSE(scene.textures[material.metallicRoughnessTextureIndex].isSRGB);
+}
+
+TEST_F(UsdLoaderTest, UsdTransform2dBecomesThePerSlotUvTransform) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("transformed.tga", 10, 20, 30, 255);
+
+    const auto path = WriteUsda("uv_transform.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Colour.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./transformed.tga@
+        float2 inputs:st.connect = </Mat/Place.outputs:result>
+        float3 outputs:rgb
+    }
+
+    def Shader "Place"
+    {
+        uniform token info:id = "UsdTransform2d"
+        float2 inputs:in.connect = </Mat/Reader.outputs:result>
+        float2 inputs:scale = (2, 3)
+        float inputs:rotation = 0
+        float2 inputs:translation = (0.1, 0.2)
+        float2 outputs:result
+    }
+
+    def Shader "Reader"
+    {
+        uniform token info:id = "UsdPrimvarReader_float2"
+        token inputs:varname = "st"
+        float2 outputs:result
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    // The vertices were flipped in V, so the transform is conjugated by the same
+    // flip: scale unchanged, rotation negated, offset.y = 1 - t.y - s.y*cos(0).
+    EXPECT_NEAR(material.baseColorUv.scale.x, 2.0f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.scale.y, 3.0f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.rotation, 0.0f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.offset.x, 0.1f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.offset.y, 1.0f - 0.2f - 3.0f, 1e-5f);
+}
+
+TEST_F(UsdLoaderTest, AnUnknownShaderIdKeepsMaterialDefaults) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("unknown_shader.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_disney_principled_surfaceshader"
+        color3f inputs:base_color = (0.1, 0.2, 0.3)
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // Reading an unknown vocabulary through one it is not written in matches no
+    // input name and produces a material that looks badly authored. Keeping the
+    // defaults and warning says what actually happened.
+    EXPECT_NEAR(material.baseColorFactor.r, 0.8f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.g, 0.8f, 1e-6f);
+    EXPECT_NEAR(material.baseColorFactor.b, 0.8f, 1e-6f);
+    EXPECT_NEAR(material.roughnessFactor, 0.5f, 1e-6f);
+    EXPECT_NEAR(material.metallicFactor, 0.0f, 1e-6f);
+}
+
+// ============================================================================
+// MaterialX standard_surface
+// ============================================================================
+
+TEST_F(UsdLoaderTest, StandardSurfaceScalarsMapToTheGltfFields) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("standard_surface_scalars.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:base = 0.5
+        color3f inputs:base_color = (0.4, 0.5, 0.6)
+        float inputs:metalness = 0.3
+        float inputs:specular_roughness = 0.25
+        float inputs:specular_IOR = 1.7
+        float inputs:specular_anisotropy = 0.6
+        float inputs:specular_rotation = 0.25
+        float inputs:transmission = 0.4
+        color3f inputs:transmission_color = (0.9, 0.8, 0.7)
+        float inputs:transmission_depth = 2.0
+        float inputs:transmission_dispersion = 30.0
+        float inputs:sheen = 0.5
+        color3f inputs:sheen_color = (1, 0.5, 0.25)
+        float inputs:sheen_roughness = 0.4
+        float inputs:coat = 0.3
+        float inputs:coat_roughness = 0.15
+        float inputs:emission = 2.0
+        color3f inputs:emission_color = (1, 0.5, 0.25)
+        color3f inputs:opacity = (0.5, 0.5, 0.5)
+        bool inputs:thin_walled = 1
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // base is a weight on base_color, and emission a weight on emission_color;
+    // both fold into one factor, the way KHR_materials_emissive_strength does.
+    EXPECT_NEAR(material.baseColorFactor.r, 0.2f, 1e-5f);
+    EXPECT_NEAR(material.baseColorFactor.g, 0.25f, 1e-5f);
+    EXPECT_NEAR(material.baseColorFactor.b, 0.3f, 1e-5f);
+    EXPECT_NEAR(material.emissiveFactor.r, 2.0f, 1e-5f);
+    EXPECT_NEAR(material.emissiveFactor.g, 1.0f, 1e-5f);
+    EXPECT_NEAR(material.emissiveFactor.b, 0.5f, 1e-5f);
+
+    EXPECT_NEAR(material.metallicFactor, 0.3f, 1e-6f);
+    EXPECT_NEAR(material.roughnessFactor, 0.25f, 1e-6f);
+    EXPECT_NEAR(material.ior, 1.7f, 1e-6f);
+
+    // specular_rotation is in turns; anisotropyRotation is in radians.
+    EXPECT_NEAR(material.anisotropyStrength, 0.6f, 1e-6f);
+    EXPECT_NEAR(material.anisotropyRotation, 1.5707963f, 1e-5f);
+
+    // transmission_depth is a distance, so it is Beer-Lambert's and the colour
+    // becomes the attenuation.
+    EXPECT_NEAR(material.transmission, 0.4f, 1e-6f);
+    EXPECT_NEAR(material.attenuationDistance, 2.0f, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.r, 0.9f, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.b, 0.7f, 1e-6f);
+
+    // Material::dispersion is the Abbe number's reciprocal.
+    EXPECT_NEAR(material.dispersion, 1.0f / 30.0f, 1e-6f);
+
+    EXPECT_NEAR(material.sheenColorFactor.r, 0.5f, 1e-6f);
+    EXPECT_NEAR(material.sheenColorFactor.g, 0.25f, 1e-6f);
+    EXPECT_NEAR(material.sheenColorFactor.b, 0.125f, 1e-6f);
+    EXPECT_NEAR(material.sheenRoughnessFactor, 0.4f, 1e-6f);
+
+    EXPECT_NEAR(material.clearcoatFactor, 0.3f, 1e-6f);
+    EXPECT_NEAR(material.clearcoatRoughnessFactor, 0.15f, 1e-6f);
+
+    // opacity is a colour in standard_surface and a scalar here.
+    EXPECT_NEAR(material.baseColorFactor.a, 0.5f, 1e-6f);
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Blend);
+
+    // thin_walled is geometry's business in USD and the material's here.
+    EXPECT_TRUE(material.doubleSided);
+}
+
+TEST_F(UsdLoaderTest, StandardSurfaceTransmissionColourWithoutDepthIsNotBeerLambert) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("standard_surface_tint.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:transmission = 1.0
+        color3f inputs:transmission_color = (0.9, 0.5, 0.2)
+        float inputs:transmission_depth = 0.0
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // With depth zero the colour is a distance-independent tint. Turning it into
+    // a one-metre absorption would invent a coefficient nobody supplied.
+    EXPECT_NEAR(material.transmission, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.attenuationDistance, Material{}.attenuationDistance, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.r, 1.0f, 1e-6f);
+    EXPECT_NEAR(material.attenuationColor.g, 1.0f, 1e-6f);
+
+    // And the old `baseColorFactor.a = 1 - transmission` is gone: it counted
+    // transmission twice once the blend mode also applied.
+    EXPECT_NEAR(material.baseColorFactor.a, 1.0f, 1e-6f);
+    EXPECT_EQ(material.alphaMode, Material::AlphaMode::Opaque);
+}
+
+TEST_F(UsdLoaderTest, StandardSurfaceTexturesGoThroughTheImageNodes) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("mtlx_colour.tga", 210, 160, 110, 255);
+    WriteSolidTga("mtlx_metal.tga", 0x30, 0x00, 0x00, 0xFF);
+
+    const auto path = WriteUsda("standard_surface_textures.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Colour.outputs:out>
+        float inputs:metalness.connect = </Mat/Split.outputs:outr>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @./mtlx_colour.tga@ (
+            colorSpace = "srgb_texture"
+        )
+        string inputs:uaddressmode = "clamp"
+        float2 inputs:texcoord.connect = </Mat/Place.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "Place"
+    {
+        uniform token info:id = "ND_place2d_vector2"
+        float2 inputs:pivot = (0.5, 0.5)
+        float2 inputs:scale = (2, 2)
+        float inputs:rotate = 0
+        float2 inputs:offset = (0, 0)
+        int inputs:operationorder = 0
+        float2 outputs:out
+    }
+
+    def Shader "Split"
+    {
+        uniform token info:id = "ND_separate3_color3"
+        color3f inputs:in.connect = </Mat/Metal.outputs:out>
+        float outputs:outr
+    }
+
+    def Shader "Metal"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @./mtlx_metal.tga@
+        color3f outputs:out
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    EXPECT_TRUE(scene.textures[material.baseColorTextureIndex].isSRGB)
+        << "colorSpace = srgb_texture on the file input";
+    EXPECT_EQ(scene.textures[material.baseColorTextureIndex].sampler.wrapS,
+              TextureSampler::WrapMode::ClampToEdge);
+
+    // place2d divides by scale, so scale = 2 halves the coordinates; the pivot
+    // holds the centre still. Conjugated by the V flip, the rotation stays zero.
+    EXPECT_NEAR(material.baseColorUv.scale.x, 0.5f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.scale.y, 0.5f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.offset.x, 0.25f, 1e-5f);
+    EXPECT_NEAR(material.baseColorUv.offset.y, 1.0f - 0.25f - 0.5f, 1e-5f);
+
+    ASSERT_GE(material.metallicRoughnessTextureIndex, 0);
+    const Texture& packed = scene.textures[material.metallicRoughnessTextureIndex];
+    if (packed.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    EXPECT_EQ(packed.pixels[2], 0x30) << "separate3.outr routed into B";
+    EXPECT_NEAR(material.metallicFactor, 1.0f, 1e-6f);
+}
+
+TEST_F(UsdLoaderTest, ASecondUvSetFallsBackToSetZero) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("second_uv.tga", 10, 20, 30, 255);
+
+    const auto path = WriteUsda("second_uv_set.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        color3f inputs:base_color.connect = </Mat/Colour.outputs:out>
+        token outputs:surface
+    }
+
+    def Shader "Colour"
+    {
+        uniform token info:id = "ND_image_color3"
+        asset inputs:file = @./second_uv.tga@
+        float2 inputs:texcoord.connect = </Mat/Coord.outputs:out>
+        color3f outputs:out
+    }
+
+    def Shader "Coord"
+    {
+        uniform token info:id = "ND_texcoord_vector2"
+        int inputs:index = 1
+        float2 outputs:out
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Material& material = MaterialNamed(*result, "Mat");
+
+    // Only one UV set is loaded, the same limitation GltfLoader has. The texture
+    // still binds, against set 0, and the log says so.
+    EXPECT_GE(material.baseColorTextureIndex, 0);
 }

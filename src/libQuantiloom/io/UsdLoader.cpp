@@ -18,6 +18,9 @@
 
 #include "UsdLoader.hpp"
 #include "io/SpectralIO.hpp"
+#include "io/UsdShadeGraph.hpp"
+#include "io/UsdSurfaceTables.hpp"
+#include "io/UsdTextureBank.hpp"
 #include "io/ImageIO.hpp"
 #include "scene/MeshOptimizer.hpp"
 #include "scene/NormalGenerator.hpp"
@@ -82,197 +85,6 @@
 PXR_NAMESPACE_USING_DIRECTIVE
 
 namespace quantiloom {
-
-// ============================================================================
-// Texture Cache for Deduplication
-// ============================================================================
-// Thread-safe cache to avoid loading the same texture file multiple times.
-// Key: absolute file path, Value: index in scene.textures
-
-struct TextureCache {
-    std::unordered_map<String, size_t> pathToIndex;
-    std::mutex mutex;
-
-    void Clear() {
-        std::lock_guard<std::mutex> lock(mutex);
-        pathToIndex.clear();
-    }
-
-    // Returns {found, index}. If found=false, index is undefined.
-    std::pair<bool, size_t> Find(const String& path) {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (auto it = pathToIndex.find(path); it != pathToIndex.end()) {
-            return {true, it->second};
-        }
-        return {false, 0};
-    }
-
-    void Insert(const String& path, size_t index) {
-        std::lock_guard<std::mutex> lock(mutex);
-        pathToIndex[path] = index;
-    }
-};
-
-static TextureCache g_textureCache;
-
-// ============================================================================
-// CollectTexturePathsFromShader - Extract texture paths from a shader
-// ============================================================================
-// Collects texture asset paths without loading them (for parallel pre-load)
-
-static void CollectTexturePathsFromShader(
-    const UsdShadeShader& shader,
-    const String& usdFilePath,
-    std::unordered_set<String>& outPaths)
-{
-    std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
-
-    // List of input names that may have texture connections
-    const char* textureInputs[] = {
-        "diffuseColor", "metallic", "roughness", "normal", "emissiveColor",
-        "occlusion", "opacity", "base_color", "specular_roughness", "file"
-    };
-
-    for (const char* inputName : textureInputs) {
-        if (UsdShadeInput input = shader.GetInput(TfToken(inputName))) {
-            String texPath = UsdLoader::GetTextureAssetPath(&input);
-            if (!texPath.empty()) {
-                std::filesystem::path fullPath = std::filesystem::weakly_canonical(usdDir / texPath);
-                outPaths.insert(fullPath.string());
-            }
-        }
-    }
-}
-
-// ============================================================================
-// CollectTexturePathsFromMaterial - Extract all texture paths from a material
-// ============================================================================
-
-static void CollectTexturePathsFromMaterial(
-    const UsdPrim& materialPrim,
-    const String& usdFilePath,
-    std::unordered_set<String>& outPaths)
-{
-    UsdShadeMaterial shadeMat(materialPrim);
-    if (!shadeMat) return;
-
-    // Get surface shader
-    UsdShadeShader surfaceShader = shadeMat.ComputeSurfaceSource();
-    if (surfaceShader) {
-        CollectTexturePathsFromShader(surfaceShader, usdFilePath, outPaths);
-
-        // Also check connected shaders (e.g., UsdUVTexture nodes)
-        for (const UsdShadeInput& input : surfaceShader.GetInputs()) {
-            UsdShadeConnectableAPI source;
-            TfToken sourceName;
-            UsdShadeAttributeType sourceType;
-            if (input.GetConnectedSource(&source, &sourceName, &sourceType)) {
-                UsdShadeShader connectedShader(source.GetPrim());
-                if (connectedShader) {
-                    CollectTexturePathsFromShader(connectedShader, usdFilePath, outPaths);
-                }
-            }
-        }
-    }
-}
-
-// ============================================================================
-// ParallelLoadTextures - Load textures in parallel using thread pool
-// ============================================================================
-
-static void ParallelLoadTextures(
-    const std::unordered_set<String>& uniquePaths,
-    const String& usdFilePath,
-    std::vector<Texture>& outTextures)
-{
-    if (uniquePaths.empty()) return;
-
-    // Determine thread count (cap at 8 to avoid over-subscription)
-    unsigned int numThreads = std::min(8u, std::thread::hardware_concurrency());
-    if (numThreads == 0) numThreads = 4;
-
-    QL_LOG_INFO("  Parallel loading {} textures using {} threads", uniquePaths.size(), numThreads);
-
-    // Convert set to vector for indexed access
-    std::vector<String> pathsVec(uniquePaths.begin(), uniquePaths.end());
-
-    // Launch async tasks
-    std::vector<std::future<std::pair<String, Texture>>> futures;
-    futures.reserve(pathsVec.size());
-
-    for (const String& fullPath : pathsVec) {
-        futures.push_back(std::async(std::launch::async, [fullPath, &usdFilePath]() {
-            // Extract relative path from full path for ParseTexture
-            std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
-            std::filesystem::path relativePath = std::filesystem::relative(fullPath, usdDir);
-            String relStr = relativePath.string();
-
-            Texture tex = UsdLoader::ParseTexture(nullptr, relStr, usdFilePath);
-            return std::make_pair(fullPath, std::move(tex));
-        }));
-    }
-
-    // Collect results and update cache
-    for (auto& f : futures) {
-        auto [fullPath, tex] = f.get();
-        if (tex.width > 0) {
-            size_t index = outTextures.size();
-            outTextures.push_back(std::move(tex));
-            g_textureCache.Insert(fullPath, index);
-            QL_LOG_DEBUG("    Pre-loaded texture: {} -> index {}", fullPath, index);
-        }
-    }
-
-    QL_LOG_INFO("  Parallel texture loading complete: {} textures loaded", outTextures.size());
-
-    // Compression does NOT happen here. BC7CompressedData captures isSRGB at
-    // compression time (TextureCompressor.cpp:103) and the upload picks its
-    // format from that copy (TextureManager.cpp:311), so a texture compressed
-    // before its colour space is known is stuck with the wrong one. Materials
-    // are what say which textures are colour, and they are parsed after this
-    // function -- so the caller compresses, once the marking is done.
-}
-
-// ============================================================================
-// LoadTextureWithCache - Load texture with deduplication
-// ============================================================================
-// Returns texture index if successful, -1 if failed.
-// Uses g_textureCache to avoid loading the same file multiple times.
-
-static int LoadTextureWithCache(
-    const String& assetPath,
-    const String& usdFilePath,
-    std::vector<Texture>& textures)
-{
-    if (assetPath.empty()) {
-        return -1;
-    }
-
-    // Resolve to absolute path for cache key
-    std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
-    std::filesystem::path fullPath = std::filesystem::weakly_canonical(usdDir / assetPath);
-    String cacheKey = fullPath.string();
-
-    // Check cache first
-    auto [found, cachedIndex] = g_textureCache.Find(cacheKey);
-    if (found) {
-        QL_LOG_DEBUG("    Texture cache hit: {} -> index {}", assetPath, cachedIndex);
-        return static_cast<int>(cachedIndex);
-    }
-
-    // Load texture
-    Texture tex = UsdLoader::ParseTexture(nullptr, assetPath, usdFilePath);
-    if (tex.width == 0) {
-        return -1;
-    }
-
-    // Add to textures and cache
-    int index = static_cast<int>(textures.size());
-    textures.push_back(std::move(tex));
-    g_textureCache.Insert(cacheKey, static_cast<size_t>(index));
-
-    return index;
-}
 
 // ============================================================================
 // InitializeUsdPlugins - Ensure USD plugins are discoverable
@@ -443,20 +255,6 @@ static bool IsRenderablePrim(const UsdPrim& prim, const UsdTimeCode& timeCode) {
 // Vertex attributes and face-vertex expansion
 // ============================================================================
 
-/// USD's `st` origin is the image's lower-left corner (the UsdUVTexture spec
-/// says so), while stb decodes top-down and the shaders sample with glTF's
-/// upper-left convention. Flipping V at load is what puts a USD texture the
-/// right way up.
-///
-/// Every UV that reaches a Mesh goes through UsdStToUv, so a UV transform
-/// derived from a shader graph has to be conjugated by the same flip to stay
-/// consistent with it.
-static constexpr bool kFlipUsdV = true;
-
-static glm::vec2 UsdStToUv(f32 s, f32 t) {
-    return kFlipUsdV ? glm::vec2(s, 1.0f - t) : glm::vec2(s, t);
-}
-
 /// One authored vertex attribute together with the interpolation USD gave it.
 ///
 /// Keeping the two together is the point. A mesh whose normals are face-varying
@@ -573,7 +371,7 @@ static void ExpandToFaceVertices(const VtArray<int>& faceVertexCounts,
                         uvsComplete = false;
                     } else {
                         const GfVec2f& value = (*uvSource.data)[static_cast<size_t>(u)];
-                        out.uvs.push_back(UsdStToUv(value[0], value[1]));
+                        out.uvs.push_back(usd::UsdStToUv(value[0], value[1]));
                     }
                 }
                 out.indices.push_back(nextVertex++);
@@ -686,139 +484,47 @@ std::vector<u32> UsdLoader::TriangulatePolygonsWithFaceMap(
 }
 
 // ============================================================================
-// ParseTexture - Load texture from USD asset path using ImageIO
+// ParseTexture - Resolve an asset path and decode it
 // ============================================================================
 
 Texture UsdLoader::ParseTexture(const void* /* stagePtr */, const String& assetPath,
-                                  const String& usdFilePath) {
-    Texture tex;
-
+                                const String& usdFilePath) {
     if (assetPath.empty()) {
-        return tex;
+        return {};
     }
 
-    // Resolve asset path relative to USD file
-    std::filesystem::path usdDir = std::filesystem::path(usdFilePath).parent_path();
-    std::filesystem::path fullPath = usdDir / assetPath;
-
-    // Normalize path (resolve .. and .)
+    std::filesystem::path fullPath(assetPath);
+    if (!fullPath.is_absolute()) {
+        fullPath = std::filesystem::path(usdFilePath).parent_path() / fullPath;
+    }
     fullPath = std::filesystem::weakly_canonical(fullPath);
 
     if (!std::filesystem::exists(fullPath)) {
         QL_LOG_ERROR("Texture file not found: {}", fullPath.string());
-        return tex;
+        return {};
     }
-
-    // Load texture using ImageIO::ReadImage (supports EXR, PNG, JPEG, BMP, TGA, HDR)
-    auto imageResult = ImageIO::ReadImage(fullPath.string());
-    if (!imageResult.has_value()) {
-        QL_LOG_ERROR("Failed to load texture '{}'", assetPath);
-        return tex;
-    }
-
-    const Image& img = imageResult.value();
-
-    tex.name = fullPath.filename().string();
-    tex.width = img.width;
-    tex.height = img.height;
-    tex.channels = 4;  // Always output RGBA for renderer compatibility
-    tex.sourceUri = assetPath;
-
-    // Convert to RGBA8 (renderer requires 4 channels)
-    size_t pixelCount = static_cast<size_t>(img.width) * img.height;
-    tex.pixels.resize(pixelCount * 4);
-
-    // Positional indices are right for a PNG or JPEG, where stb_image really
-    // does hand back R,G,B in that order, and wrong for an .exr, which comes
-    // back in OpenEXR's name-sorted channel order. Asking by name is correct
-    // for both, since ImageIO names the stb channels too. See
-    // Image::ChannelIndex.
-    const u32 cr = img.ChannelIndex("R", 0);
-    const u32 cg = img.ChannelIndex("G", 1);
-    const u32 cb = img.ChannelIndex("B", 2);
-    const u32 ca = img.ChannelIndex("A", 3);
-    const u32 grey = img.LuminanceChannelIndex();
-
-    for (size_t i = 0; i < pixelCount; ++i) {
-        float r = 0.0f, g = 0.0f, b = 0.0f, a = 1.0f;
-
-        if (img.channels == 1) {
-            // Grayscale -> RGB (same value for all channels)
-            r = g = b = std::clamp(img.data[i], 0.0f, 1.0f);
-        } else if (img.channels == 2) {
-            // Gray + Alpha
-            r = g = b = std::clamp(img.data[i * 2 + grey], 0.0f, 1.0f);
-            a = std::clamp(img.data[i * 2 + (grey == 0 ? 1 : 0)], 0.0f, 1.0f);
-        } else if (img.channels == 3) {
-            // RGB
-            r = std::clamp(img.data[i * 3 + cr], 0.0f, 1.0f);
-            g = std::clamp(img.data[i * 3 + cg], 0.0f, 1.0f);
-            b = std::clamp(img.data[i * 3 + cb], 0.0f, 1.0f);
-        } else if (img.channels >= 4) {
-            // RGBA
-            r = std::clamp(img.data[i * img.channels + cr], 0.0f, 1.0f);
-            g = std::clamp(img.data[i * img.channels + cg], 0.0f, 1.0f);
-            b = std::clamp(img.data[i * img.channels + cb], 0.0f, 1.0f);
-            a = std::clamp(img.data[i * img.channels + ca], 0.0f, 1.0f);
-        }
-
-        tex.pixels[i * 4 + 0] = static_cast<u8>(r * 255.0f + 0.5f);
-        tex.pixels[i * 4 + 1] = static_cast<u8>(g * 255.0f + 0.5f);
-        tex.pixels[i * 4 + 2] = static_cast<u8>(b * 255.0f + 0.5f);
-        tex.pixels[i * 4 + 3] = static_cast<u8>(a * 255.0f + 0.5f);
-    }
-
-    QL_LOG_INFO("    Loaded texture '{}' ({}x{}, {} -> 4 channels)",
-                tex.name, tex.width, tex.height, img.channels);
-
-    return tex;
+    return usd::DecodeTextureFile(fullPath.string());
 }
 
-// ============================================================================
-// GetTextureAssetPath - Follow shader connection to find texture file
-// ============================================================================
-
-String UsdLoader::GetTextureAssetPath(const void* shaderInputPtr) {
-    if (!shaderInputPtr) {
-        return "";
+/// A `quantiloom:` asset attribute's absolute path. The resolver's answer wins,
+/// so a `.usdz`'s internal layout works.
+static String ResolveQuantiloomAsset(const SdfAssetPath& asset, const String& usdFilePath) {
+    if (!asset.GetResolvedPath().empty()) {
+        return asset.GetResolvedPath();
     }
-
-    const auto* input = static_cast<const UsdShadeInput*>(shaderInputPtr);
-
-    // Check if input is connected
-    UsdShadeConnectableAPI source;
-    TfToken sourceName;
-    UsdShadeAttributeType sourceType;
-
-    if (input->GetConnectedSource(&source, &sourceName, &sourceType)) {
-        // Get the source shader
-        UsdShadeShader sourceShader(source.GetPrim());
-        if (sourceShader) {
-            TfToken shaderId;
-            sourceShader.GetIdAttr().Get(&shaderId);
-
-            // Check if it's a UsdUVTexture
-            if (shaderId == TfToken("UsdUVTexture")) {
-                // Get the file input
-                if (UsdShadeInput fileInput = sourceShader.GetInput(TfToken("file"))) {
-                    SdfAssetPath assetPath;
-                    if (fileInput.Get(&assetPath)) {
-                        return assetPath.GetAssetPath();
-                    }
-                }
-            }
-        }
+    std::filesystem::path path(asset.GetAssetPath());
+    if (!path.is_absolute()) {
+        path = std::filesystem::path(usdFilePath).parent_path() / path;
     }
-
-    return "";
+    return std::filesystem::weakly_canonical(path).string();
 }
 
 // ============================================================================
 // ParseSpectralExtensions - Parse Quantiloom custom attributes
 // ============================================================================
 
-void UsdLoader::ParseSpectralExtensions(Material& mat, const void* primPtr,
-                                         const String& usdFilePath) {
+static void ParseSpectralExtensions(Material& mat, const void* primPtr,
+                                    const String& usdFilePath) {
     if (!primPtr) {
         return;
     }
@@ -913,329 +619,81 @@ void UsdLoader::ParseSpectralExtensions(Material& mat, const void* primPtr,
 }
 
 // ============================================================================
-// ParseUsdPreviewSurface - Parse UsdPreviewSurface shader
+// ClassifySurface - Which vocabulary a material's surface shader is written in
 // ============================================================================
 
-void UsdLoader::ParseUsdPreviewSurface(Material& mat, const void* shaderPtr,
-                                        std::vector<Texture>& textures,
-                                        const String& usdFilePath,
-                                        const UsdLoadOptions& options) {
-    if (!shaderPtr) {
-        return;
+static usd::SurfaceVocabulary ClassifySurface(const UsdShadeShader& surfaceShader,
+                                              const String& materialPath) {
+    if (!surfaceShader) {
+        return usd::SurfaceVocabulary::Unknown;
     }
 
-    const auto* shader = static_cast<const UsdShadeShader*>(shaderPtr);
+    TfToken shaderId;
+    surfaceShader.GetIdAttr().Get(&shaderId);
+    const usd::SurfaceVocabulary vocabulary = usd::ClassifyShaderId(shaderId.GetString());
 
-    // Helper to get scalar or textured value
-    auto getColorOrTexture = [&](const char* inputName, glm::vec3& outColor, int& outTexIndex) {
-        outTexIndex = -1;
-        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
-            // First check for texture connection
-            if (options.loadTextures) {
-                String texPath = GetTextureAssetPath(&input);
-                if (!texPath.empty()) {
-                    // Use cached texture loading
-                    int texIndex = LoadTextureWithCache(texPath, usdFilePath, textures);
-                    if (texIndex >= 0) {
-                        outTexIndex = texIndex;
-                        return;
-                    }
-                }
-            }
-
-            // Fall back to scalar value
-            GfVec3f color;
-            if (input.Get(&color)) {
-                outColor = glm::vec3(color[0], color[1], color[2]);
-            }
-        }
-    };
-
-    auto getFloatOrTexture = [&](const char* inputName, float& outValue, int& outTexIndex) {
-        outTexIndex = -1;
-        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
-            // First check for texture connection
-            if (options.loadTextures) {
-                String texPath = GetTextureAssetPath(&input);
-                if (!texPath.empty()) {
-                    // Use cached texture loading
-                    int texIndex = LoadTextureWithCache(texPath, usdFilePath, textures);
-                    if (texIndex >= 0) {
-                        outTexIndex = texIndex;
-                        return;
-                    }
-                }
-            }
-
-            // Fall back to scalar value
-            float value;
-            if (input.Get(&value)) {
-                outValue = value;
-            }
-        }
-    };
-
-    // Parse diffuseColor
-    glm::vec3 baseColor(0.8f);
-    int baseColorTexIndex = -1;
-    getColorOrTexture("diffuseColor", baseColor, baseColorTexIndex);
-    mat.baseColorFactor = glm::vec4(baseColor, 1.0f);
-    mat.baseColorTextureIndex = baseColorTexIndex;
-
-    // Parse metallic
-    float metallic = 0.0f;
-    int metallicTexIndex = -1;
-    getFloatOrTexture("metallic", metallic, metallicTexIndex);
-    mat.metallicFactor = metallic;
-    mat.metallicRoughnessTextureIndex = metallicTexIndex;
-
-    // Parse roughness
-    float roughness = 0.5f;
-    int roughnessTexIndex = -1;
-    getFloatOrTexture("roughness", roughness, roughnessTexIndex);
-    mat.roughnessFactor = roughness;
-    if (roughnessTexIndex >= 0 && mat.metallicRoughnessTextureIndex < 0) {
-        mat.metallicRoughnessTextureIndex = roughnessTexIndex;
+    if (vocabulary == usd::SurfaceVocabulary::Unknown) {
+        // Reading it through a vocabulary it is not written in matches no input
+        // name and produces the default grey, which looks like a material that
+        // was authored badly rather than one nobody here can read.
+        QL_LOG_WARN("    Material '{}': surface shader id '{}' is not a vocabulary this "
+                    "loader knows; the material keeps its defaults",
+                    materialPath, shaderId.GetString());
+    } else {
+        QL_LOG_INFO("    Material '{}' is {}", materialPath,
+                    usd::VocabularyName(vocabulary));
     }
-
-    // Parse emissiveColor
-    glm::vec3 emissive(0.0f);
-    int emissiveTexIndex = -1;
-    getColorOrTexture("emissiveColor", emissive, emissiveTexIndex);
-    mat.emissiveFactor = emissive;
-    mat.emissiveTextureIndex = emissiveTexIndex;
-
-    // Parse normal map
-    if (options.loadTextures) {
-        if (UsdShadeInput normalInput = shader->GetInput(TfToken("normal"))) {
-            String texPath = GetTextureAssetPath(&normalInput);
-            if (!texPath.empty()) {
-                // Use cached texture loading
-                int texIndex = LoadTextureWithCache(texPath, usdFilePath, textures);
-                if (texIndex >= 0) {
-                    mat.normalTextureIndex = texIndex;
-                }
-            }
-        }
-    }
-
-    // Parse opacity
-    if (UsdShadeInput opacityInput = shader->GetInput(TfToken("opacity"))) {
-        float opacity = 1.0f;
-        if (opacityInput.Get(&opacity)) {
-            if (opacity < 1.0f) {
-                mat.alphaMode = Material::AlphaMode::Blend;
-                mat.baseColorFactor.a = opacity;
-            }
-        }
-    }
-
-    // Parse IOR (index of refraction) for transmission materials
-    // UsdPreviewSurface IOR default is 1.5 (glass)
-    if (UsdShadeInput iorInput = shader->GetInput(TfToken("ior"))) {
-        float ior = 1.5f;
-        if (iorInput.Get(&ior)) {
-            mat.ior = ior;
-            QL_LOG_DEBUG("    Parsed ior: {:.4f}", ior);
-        }
-    }
-}
-
-// ============================================================================
-// ParseMaterialXSurface - Parse MaterialX standard_surface shader
-// ============================================================================
-
-void UsdLoader::ParseMaterialXSurface(Material& mat, const void* shaderPtr,
-                                       std::vector<Texture>& textures,
-                                       const String& usdFilePath,
-                                       const UsdLoadOptions& options) {
-    if (!shaderPtr) {
-        return;
-    }
-
-    const auto* shader = static_cast<const UsdShadeShader*>(shaderPtr);
-
-    // MaterialX standard_surface input names
-    // base, base_color, metalness, specular_roughness, emission, emission_color, normal
-
-    // Helper to get value
-    auto getFloat = [&](const char* inputName, float defaultValue) -> float {
-        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
-            float value;
-            if (input.Get(&value)) {
-                return value;
-            }
-        }
-        return defaultValue;
-    };
-
-    auto getColor3 = [&](const char* inputName, glm::vec3 defaultValue) -> glm::vec3 {
-        if (UsdShadeInput input = shader->GetInput(TfToken(inputName))) {
-            GfVec3f color;
-            if (input.Get(&color)) {
-                return glm::vec3(color[0], color[1], color[2]);
-            }
-        }
-        return defaultValue;
-    };
-
-    // Parse base (weight for base color)
-    float base = getFloat("base", 1.0f);
-
-    // Parse base_color
-    glm::vec3 baseColor = getColor3("base_color", glm::vec3(0.8f));
-    mat.baseColorFactor = glm::vec4(baseColor * base, 1.0f);
-
-    // Parse metalness
-    mat.metallicFactor = getFloat("metalness", 0.0f);
-
-    // Parse specular_roughness
-    mat.roughnessFactor = getFloat("specular_roughness", 0.5f);
-
-    // Parse emission and emission_color
-    float emission = getFloat("emission", 0.0f);
-    glm::vec3 emissionColor = getColor3("emission_color", glm::vec3(1.0f));
-    mat.emissiveFactor = emissionColor * emission;
-
-    // Note: specular_IOR is mapped to Material::ior
-    float specularIOR = getFloat("specular_IOR", 1.5f);
-    mat.ior = specularIOR;
-    if (specularIOR != 1.5f) {
-        QL_LOG_DEBUG("    Parsed specular_IOR: {:.4f}", specularIOR);
-    }
-
-    // Parse transmission (for glass-like materials)
-    float transmission = getFloat("transmission", 0.0f);
-    if (transmission > 0.0f) {
-        mat.transmission = transmission;
-        // Also set alpha mode to blend for backward compatibility
-        mat.alphaMode = Material::AlphaMode::Blend;
-        mat.baseColorFactor.a = 1.0f - transmission;
-        QL_LOG_DEBUG("    Parsed transmission: {:.4f}", transmission);
-
-        // Parse transmission_color for volume attenuation
-        glm::vec3 transmissionColor = getColor3("transmission_color", glm::vec3(1.0f));
-        if (transmissionColor != glm::vec3(1.0f)) {
-            mat.attenuationColor = transmissionColor;
-            mat.attenuationDistance = 1.0f;  // Default 1 meter
-            QL_LOG_DEBUG("    Parsed transmission_color: [{:.3f}, {:.3f}, {:.3f}]",
-                        transmissionColor.r, transmissionColor.g, transmissionColor.b);
-        }
-
-        // Parse transmission_depth for attenuation distance
-        float transmissionDepth = getFloat("transmission_depth", 0.0f);
-        if (transmissionDepth > 0.0f) {
-            mat.attenuationDistance = transmissionDepth;
-            QL_LOG_DEBUG("    Parsed transmission_depth: {:.4f} m", transmissionDepth);
-        }
-    }
-
-    // Texture loading for MaterialX (if enabled)
-    if (options.loadTextures) {
-        // Check base_color for texture
-        if (UsdShadeInput input = shader->GetInput(TfToken("base_color"))) {
-            String texPath = GetTextureAssetPath(&input);
-            if (!texPath.empty()) {
-                // Use cached texture loading
-                int texIndex = LoadTextureWithCache(texPath, usdFilePath, textures);
-                if (texIndex >= 0) {
-                    mat.baseColorTextureIndex = texIndex;
-                }
-            }
-        }
-
-        // Check normal for texture
-        if (UsdShadeInput input = shader->GetInput(TfToken("normal"))) {
-            String texPath = GetTextureAssetPath(&input);
-            if (!texPath.empty()) {
-                // Use cached texture loading
-                int texIndex = LoadTextureWithCache(texPath, usdFilePath, textures);
-                if (texIndex >= 0) {
-                    mat.normalTextureIndex = texIndex;
-                }
-            }
-        }
-    }
+    return vocabulary;
 }
 
 // ============================================================================
 // ParseMaterial - Convert UsdShadeMaterial to Quantiloom Material
 // ============================================================================
+// The surface itself was already read in Pass 0, because the texture files have
+// to be known before any of them is decoded. This turns that reading into a
+// Material: scalars first, then textures, because whether the base colour entry
+// keeps its CPU pixels depends on the alpha mode the scalars decide.
 
-Material UsdLoader::ParseMaterial(const void* stagePtr, const void* primPtr,
-                                    std::vector<Texture>& textures,
-                                    const String& usdFilePath,
-                                    const UsdLoadOptions& options) {
+static Material ParseMaterial(const UsdPrim& prim, const usd::SurfaceReading& reading,
+                              usd::UsdTextureBank& bank, std::vector<Texture>& textures,
+                              const String& usdFilePath) {
     Material mat;
 
-    // Default material values
+    // Quantiloom's own defaults, for a material whose shader said nothing.
     mat.baseColorFactor = glm::vec4(0.8f, 0.8f, 0.8f, 1.0f);
     mat.metallicFactor = 0.0f;
     mat.roughnessFactor = 0.5f;
     mat.emissiveFactor = glm::vec3(0.0f);
     mat.alphaMode = Material::AlphaMode::Opaque;
     mat.alphaCutoff = 0.5f;
+    mat.name = prim.GetName().GetString();
 
-    if (!primPtr) {
-        mat.spectralSource = Material::SpectralSource::RGBUpsampled;
-        mat.ComputeSpectralAlbedo();
-        return mat;
-    }
-
-    const auto* prim = static_cast<const UsdPrim*>(primPtr);
-    UsdShadeMaterial shadeMat(*prim);
-    mat.name = prim->GetName().GetString();
-
-    // Get surface shader output
-    UsdShadeShader surfaceShader = shadeMat.ComputeSurfaceSource();
-    if (surfaceShader) {
-        TfToken shaderId;
-        surfaceShader.GetIdAttr().Get(&shaderId);
-        std::string shaderIdStr = shaderId.GetString();
-
-        QL_LOG_INFO("    Material '{}' uses shader: {}", mat.name, shaderIdStr);
-
-        if (shaderId == TfToken("UsdPreviewSurface")) {
-            ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
-        }
-        else if (options.enableMaterialX) {
-            // MaterialX shaders have IDs like:
-            // - ND_standard_surface_surfaceshader
-            // - ND_UsdPreviewSurface_surfaceshader
-            // - ND_gltf_pbr_surfaceshader
-            if (shaderIdStr.find("standard_surface") != std::string::npos) {
-                ParseMaterialXSurface(mat, &surfaceShader, textures, usdFilePath, options);
-            }
-            else if (shaderIdStr.find("gltf_pbr") != std::string::npos) {
-                // glTF PBR is similar to UsdPreviewSurface
-                ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
-            }
-            else {
-                QL_LOG_WARN("    Unknown shader type '{}', using default parsing", shaderIdStr);
-                ParseUsdPreviewSurface(mat, &surfaceShader, textures, usdFilePath, options);
-            }
-        }
-    }
+    usd::ConvertSurface(reading, mat);
+    usd::ApplySlotTextures(reading, mat, bank, textures);
 
     mat.ComputeSpectralAlbedo();
     mat.spectralSource = Material::SpectralSource::RGBUpsampled;
 
-    // Parse Quantiloom spectral extensions
-    ParseSpectralExtensions(mat, primPtr, usdFilePath);
+    // After the assignment above, never before it: ParseSpectralExtensions is
+    // what promotes a material to Measured, and the band gate in
+    // ConfigResolve reads that.
+    ParseSpectralExtensions(mat, &prim, usdFilePath);
 
-    // Load temperature texture if specified (after ParseSpectralExtensions set the path)
-    // Temperature texture uses linear space (not sRGB) - R channel contains normalized temperature
-    if (UsdAttribute tempTexAttr = prim->GetAttribute(TfToken("quantiloom:temperatureTexture"))) {
+    // The temperature texture is data, so it is linear whatever the file is.
+    if (UsdAttribute tempTexAttr = prim.GetAttribute(TfToken("quantiloom:temperatureTexture"))) {
         SdfAssetPath texPath;
         if (tempTexAttr.Get(&texPath) && !texPath.GetAssetPath().empty()) {
-            int texIndex = LoadTextureWithCache(texPath.GetAssetPath(), usdFilePath, textures);
-            if (texIndex >= 0) {
-                mat.temperatureTextureIndex = texIndex;
-                // Mark as linear space (not sRGB) since it's data, not color
-                if (static_cast<size_t>(texIndex) < textures.size()) {
-                    textures[texIndex].isSRGB = false;
-                }
-                QL_LOG_INFO("    Loaded temperature texture: index {}", texIndex);
+            usd::SlotRecipe recipe;
+            usd::SlotRecipe::Src source;
+            source.path = ResolveQuantiloomAsset(texPath, usdFilePath);
+            source.channel = usd::ChannelSel::R;
+            recipe.dst[0] = source;
+            recipe.srgb = false;
+            recipe.debugName = "temperature";
+            mat.temperatureTextureIndex = bank.Materialise(recipe, textures);
+            if (mat.temperatureTextureIndex >= 0) {
+                QL_LOG_INFO("    Loaded temperature texture: index {}",
+                            mat.temperatureTextureIndex);
             }
         }
     }
@@ -1376,7 +834,7 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         FillPerPoint(normalSource, positions.size(), normals,
                      [](const GfVec3f& n) { return glm::vec3(n[0], n[1], n[2]); });
         FillPerPoint(uvSource, positions.size(), uvs,
-                     [](const GfVec2f& uv) { return UsdStToUv(uv[0], uv[1]); });
+                     [](const GfVec2f& uv) { return usd::UsdStToUv(uv[0], uv[1]); });
     }
 
     // ========================================================================
@@ -1804,9 +1262,6 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
     // Ensure USD plugins are initialized
     InitializeUsdPlugins();
 
-    // Clear texture cache for this load operation
-    g_textureCache.Clear();
-
     QL_LOG_INFO("Loading USD scene from: {}", path);
 
     if (!std::filesystem::exists(path)) {
@@ -1883,70 +1338,98 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
     scene.name = filePath.stem().string();
 
     // ========================================================================
-    // Pass 0: Pre-scan texture paths and parallel load (I/O optimization)
+    // Pass 0: Read every surface, then decode the files they name
     // ========================================================================
-    // First pass collects all unique texture paths from materials without loading.
-    // Then loads all textures in parallel using std::async.
-    // This reduces load time from 47s to ~15s on multi-core systems.
+    // Reading and decoding are separated because a shader graph has to be
+    // walked to find out which files a material uses, and decoding is the
+    // load's I/O cost: knowing every path first is what lets them all decode at
+    // once. The readings are kept, so Pass 1 does not walk the graphs again.
 
-    if (options.loadTextures) {
-        std::unordered_set<String> uniqueTexturePaths;
+    usd::UsdTextureBank bank;
+    std::unordered_map<SdfPath, usd::SurfaceReading, SdfPath::Hash> readings;
+    std::unordered_set<String> texturePaths;
+    const String usdDir = filePath.parent_path().string();
 
-        // Scan all materials to collect texture paths
-        for (const UsdPrim& prim : stage->Traverse()) {
-            if (prim.IsA<UsdShadeMaterial>()) {
-                CollectTexturePathsFromMaterial(prim, path, uniqueTexturePaths);
+    for (const UsdPrim& prim : stage->Traverse()) {
+        if (!prim.IsA<UsdShadeMaterial>()) {
+            continue;
+        }
+
+        UsdShadeMaterial shadeMaterial(prim);
+        UsdShadeShader surfaceShader = shadeMaterial.ComputeSurfaceSource();
+
+        usd::BindingContext context;
+        context.usdDir = usdDir;
+        context.timeCode = options.timeCode;
+        context.useDefaultTime = options.useDefaultTime;
+        context.loadTextures = options.loadTextures;
+        context.materialPath = prim.GetPath().GetString();
+
+        const usd::SurfaceVocabulary vocabulary =
+            ClassifySurface(surfaceShader, context.materialPath);
+        usd::SurfaceReading reading = usd::ReadSurface(
+            surfaceShader ? &surfaceShader : nullptr, vocabulary, context);
+        usd::CollectTextureSources(reading, texturePaths);
+
+        if (UsdAttribute tempTexAttr =
+                prim.GetAttribute(TfToken("quantiloom:temperatureTexture"))) {
+            SdfAssetPath texPath;
+            if (tempTexAttr.Get(&texPath) && !texPath.GetAssetPath().empty()) {
+                texturePaths.insert(ResolveQuantiloomAsset(texPath, path));
             }
         }
 
-        QL_LOG_INFO("  Found {} unique texture paths to load", uniqueTexturePaths.size());
+        readings.emplace(prim.GetPath(), std::move(reading));
+    }
 
-        // Parallel load all textures
-        ParallelLoadTextures(uniqueTexturePaths, path, scene.textures);
+    if (options.loadTextures || !texturePaths.empty()) {
+        bank.Preload(texturePaths);
     }
 
     // ========================================================================
     // Pass 1: Collect all Materials
     // ========================================================================
-    // Note: Textures are already loaded and cached by Pass 0.
-    // ParseMaterial will use cache hits for texture indices.
     std::unordered_map<String, int> materialPathMap;
 
     for (const UsdPrim& prim : stage->Traverse()) {
-        if (prim.IsA<UsdShadeMaterial>()) {
-            Material mat = ParseMaterial(&(*stage), &prim, scene.textures, path, options);
-            String matPath = prim.GetPath().GetString();
-            materialPathMap[matPath] = static_cast<int>(scene.materials.size());
-            scene.materials.push_back(std::move(mat));
-
-            QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
-                        scene.materials.back().name,
-                        scene.materials.back().metallicFactor,
-                        scene.materials.back().roughnessFactor);
+        if (!prim.IsA<UsdShadeMaterial>()) {
+            continue;
         }
+        const auto reading = readings.find(prim.GetPath());
+        if (reading == readings.end()) {
+            continue;
+        }
+
+        Material mat = ParseMaterial(prim, reading->second, bank, scene.textures, path);
+        materialPathMap[prim.GetPath().GetString()] = static_cast<int>(scene.materials.size());
+        scene.materials.push_back(std::move(mat));
+
+        QL_LOG_INFO("  Loaded material '{}' (metallic={:.2f}, roughness={:.2f})",
+                    scene.materials.back().name,
+                    scene.materials.back().metallicFactor,
+                    scene.materials.back().roughnessFactor);
     }
+
+    // The decoded sources have done their job; only the entries in
+    // scene.textures are uploaded, and a 4K source is 64 MB.
+    bank.ReleaseSources();
+    readings.clear();
 
     // Ensure at least one default material exists
     if (scene.materials.empty()) {
         scene.materials.push_back(Material::CreateLambertian(glm::vec3(0.8f), "DefaultMaterial"));
     }
 
-    // Mark textures as sRGB based on usage, as GltfLoader does. UsdPreviewSurface
-    // authors diffuseColor and emissiveColor in sRGB like glTF does; the data
-    // channels (metallic/roughness, normal, occlusion, temperature) are linear.
-    // Without this every USD base colour was uploaded as R8G8B8A8_UNORM and the
-    // shader read gamma-encoded values as if they were linear.
-    for (const auto& mat : scene.materials) {
-        if (mat.baseColorTextureIndex >= 0 && mat.baseColorTextureIndex < static_cast<int>(scene.textures.size())) {
-            scene.textures[mat.baseColorTextureIndex].isSRGB = true;
-        }
-        if (mat.emissiveTextureIndex >= 0 && mat.emissiveTextureIndex < static_cast<int>(scene.textures.size())) {
-            scene.textures[mat.emissiveTextureIndex].isSRGB = true;
-        }
-    }
-
-    // Parallel BC7 compression. After the marking, never before -- see the note
-    // at the end of ParallelLoadTextures.
+    // Colour space is decided per entry as it is built, from what the shader
+    // graph said or, failing that, from the slot it fills -- not swept over the
+    // materials afterwards. One file bound as both a colour and a data map is
+    // two entries with two answers, which a pass over shared indices could not
+    // express.
+    //
+    // BC7 compression comes after, always: BC7CompressedData captures isSRGB at
+    // compression time (TextureCompressor.cpp:103) and the upload picks its
+    // format from that copy (TextureManager.cpp:311), so a texture compressed
+    // before its colour space is known is stuck with the wrong one.
     if (TextureCompressor::IsAvailable() && !scene.textures.empty()) {
         TextureCompressor::ParallelCompressTextures(scene.textures, false /* fast mode */);
     }
@@ -2085,32 +1568,6 @@ Texture UsdLoader::ParseTexture(const void* /* stage */, const String& /* assetP
     return Texture{};
 }
 
-String UsdLoader::GetTextureAssetPath(const void* /* shaderInput */) {
-    return "";
-}
-
-void UsdLoader::ParseSpectralExtensions(Material& /* mat */, const void* /* prim */,
-                                         const String& /* usdFilePath */) {
-}
-
-void UsdLoader::ParseUsdPreviewSurface(Material& /* mat */, const void* /* shader */,
-                                        std::vector<Texture>& /* textures */,
-                                        const String& /* usdFilePath */,
-                                        const UsdLoadOptions& /* options */) {
-}
-
-void UsdLoader::ParseMaterialXSurface(Material& /* mat */, const void* /* shader */,
-                                       std::vector<Texture>& /* textures */,
-                                       const String& /* usdFilePath */,
-                                       const UsdLoadOptions& /* options */) {
-}
-
-Material UsdLoader::ParseMaterial(const void* /* stage */, const void* /* prim */,
-                                    std::vector<Texture>& /* textures */,
-                                    const String& /* usdFilePath */,
-                                    const UsdLoadOptions& /* options */) {
-    return Material{};
-}
 
 Mesh UsdLoader::ParseMesh(const void* /* stage */, const void* /* prim */,
                           const std::unordered_map<String, int>& /* materialPathMap */,

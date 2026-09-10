@@ -75,6 +75,12 @@ add_library(quantiloom_core OBJECT
     io/GltfLoader.hpp
     io/UsdLoader.cpp
     io/UsdLoader.hpp
+    io/UsdSurfaceTables.cpp
+    io/UsdSurfaceTables.hpp
+    io/UsdTextureBank.cpp
+    io/UsdTextureBank.hpp
+    io/UsdShadeGraph.cpp
+    io/UsdShadeGraph.hpp
     io/SpectralCubeIO.cpp
     io/SpectralCubeIO.hpp
 

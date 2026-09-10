@@ -267,23 +267,16 @@ public:
     static Result<std::vector<String>, String> ListPrimsWithVariants(const String& path);
 
     // ========================================================================
-    // Texture Utility Functions (public for parallel loading support)
+    // Texture Utility Functions
     // ========================================================================
 
     /**
-     * @brief Parse texture from USD shader node
-     * @note Loads image via ImageIO (PNG/JPEG/EXR)
-     * @note Made public for parallel texture loading optimization
+     * @brief Resolve an asset path against the USD file and decode it to RGBA8
+     * @note The decode itself is usd::DecodeTextureFile, which UsdTextureBank
+     *       also uses; this adds the path resolution a loose asset path needs.
      */
     static Texture ParseTexture(const void* stage, const String& assetPath,
                                  const String& usdFilePath);
-
-    /**
-     * @brief Get texture asset path from shader input connection
-     * @return Asset path if connected to UsdUVTexture, empty string otherwise
-     * @note Made public for texture path collection in parallel loading
-     */
-    static String GetTextureAssetPath(const void* shaderInput);
 
 private:
     // ========================================================================
@@ -302,32 +295,6 @@ private:
                           const UsdLoadOptions& options);
 
     /**
-     * @brief Parse UsdShadeMaterial to Quantiloom Material
-     * @note Supports both UsdPreviewSurface and MaterialX standard_surface
-     * @note Follows texture connections to load texture assets
-     */
-    static Material ParseMaterial(const void* stage, const void* shadeMaterial,
-                                   std::vector<Texture>& textures,
-                                   const String& usdFilePath,
-                                   const UsdLoadOptions& options);
-
-    /**
-     * @brief Parse UsdPreviewSurface shader
-     */
-    static void ParseUsdPreviewSurface(Material& mat, const void* shader,
-                                        std::vector<Texture>& textures,
-                                        const String& usdFilePath,
-                                        const UsdLoadOptions& options);
-
-    /**
-     * @brief Parse MaterialX standard_surface shader
-     */
-    static void ParseMaterialXSurface(Material& mat, const void* shader,
-                                       std::vector<Texture>& textures,
-                                       const String& usdFilePath,
-                                       const UsdLoadOptions& options);
-
-    /**
      * @brief Flatten USD Xform hierarchy to world-space nodes
      * @note Resolves References to external USD files
      * @note Computes accumulated transforms for each node
@@ -344,12 +311,6 @@ private:
                                      const String& usdFilePath,
                                      const UsdLoadOptions& options);
 
-    /**
-     * @brief Parse Quantiloom spectral extensions from USD custom primvars
-     * @note Mirrors glTF QUANTILOOM_material_ir extension behavior
-     */
-    static void ParseSpectralExtensions(Material& mat, const void* prim,
-                                         const String& usdFilePath);
 
     // ========================================================================
     // Geometry Utilities
