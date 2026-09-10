@@ -37,6 +37,7 @@ add_library(quantiloom_core OBJECT
     # Core module
     core/Log.cpp
     ${QL_PUBLIC_INC}/core/Log.hpp
+    core/LogTap.hpp
     core/Config.cpp
     ${QL_PUBLIC_INC}/core/Config.hpp
     core/SpectralColour.cpp

@@ -12,6 +12,10 @@
 QL_DISABLE_WARNINGS_PUSH
 #include <spdlog/spdlog.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
+
+#include "core/LogTap.hpp"
+
+#include <mutex>
 #include <spdlog/sinks/basic_file_sink.h>
 QL_DISABLE_WARNINGS_POP
 
@@ -25,6 +29,16 @@ Log::Level Log::s_CurrentLevel = Log::Level::Info;
 
 // File-local spdlog logger (hidden from public API)
 static std::shared_ptr<spdlog::logger> s_Logger;
+
+// The tap is read on every message and written almost never, but texture
+// decoding logs from worker threads, so the read is under the same lock.
+static std::mutex s_TapMutex;
+static logtap::Fn s_Tap;
+
+void logtap::Set(Fn fn) {
+    std::lock_guard<std::mutex> lock(s_TapMutex);
+    s_Tap = std::move(fn);
+}
 
 void Log::Init(const char* logFilePath, const Level level) {
     // Create multi-sink logger (console + file)
@@ -95,6 +109,12 @@ void Log::Flush() {
 }
 
 void Log::LogMessage(Level level, std::string_view message) {
+    {
+        std::lock_guard<std::mutex> lock(s_TapMutex);
+        if (s_Tap) {
+            s_Tap(level, message);
+        }
+    }
     if (!s_Logger) return;
 
     // Convert string_view to string for spdlog

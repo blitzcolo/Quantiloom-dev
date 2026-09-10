@@ -94,10 +94,17 @@ Result<Scene, String> LoadSceneFromConfig(const Config& config, const String& ba
         if (config.Has("scene.usd_time_code")) {
             timeCode = config.Get<f64>("scene.usd_time_code");
         }
+        const String payloads = config.GetString("scene.usd_payloads", "all");
+        if (payloads != "all" && payloads != "none") {
+            // The same answer [[models]].payloads gives: a value that is
+            // neither is a typo, and loading everything is the safe reading.
+            QL_LOG_WARN("scene.usd_payloads is \"{}\"; expected \"all\" or \"none\", "
+                        "loading all", payloads);
+        }
         auto options = UsdOptionsFrom(
             config.Has("scene.variant") ? config.Get<String>("scene.variant") : String{},
             timeCode,
-            config.GetString("scene.usd_payloads", "all") != "none",
+            payloads != "none",
             config.GetBool("scene.usd_stage_metrics", true));
         if (!options.has_value()) {
             return Result<Scene, String>::Err(options.error());

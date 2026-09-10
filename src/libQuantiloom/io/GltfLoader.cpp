@@ -1493,11 +1493,23 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
         // the tangent.
         if (primitive.tangents.empty() && !primitive.uvs.empty() &&
             inRange(static_cast<int>(primitive.materialId))) {
+            // The same three readers of a tangent the USD side tests for:
+            // Material::HasAnisotropy() (a strength above zero, the extension's
+            // default being 0), a normal map, and a clearcoat normal map. A
+            // clearcoat with no normal map of its own reads none.
             const tinygltf::Material& source = model.materials[primitive.materialId];
+            bool anisotropic = false;
+            if (const auto ext = source.extensions.find("KHR_materials_anisotropy");
+                ext != source.extensions.end() && ext->second.Has("anisotropyStrength")) {
+                anisotropic = ext->second.Get("anisotropyStrength").GetNumberAsDouble() > 0.0;
+            }
+            bool clearcoatNormal = false;
+            if (const auto ext = source.extensions.find("KHR_materials_clearcoat");
+                ext != source.extensions.end()) {
+                clearcoatNormal = ext->second.Has("clearcoatNormalTexture");
+            }
             const bool wantsTangents =
-                source.extensions.count("KHR_materials_anisotropy") > 0 ||
-                source.normalTexture.index >= 0 ||
-                source.extensions.count("KHR_materials_clearcoat") > 0;
+                anisotropic || source.normalTexture.index >= 0 || clearcoatNormal;
             if (wantsTangents && TangentGenerator::FromUv(primitive)) {
                 QL_LOG_DEBUG("      Derived tangents for primitive {} from its UVs", primIdx);
             }

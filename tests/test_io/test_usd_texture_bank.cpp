@@ -12,6 +12,7 @@
 #include "io/UsdLoader.hpp"
 #include "io/UsdSurfaceTables.hpp"
 #include "io/UsdTextureBank.hpp"
+#include "support/LogCapture.hpp"
 
 #include <cmath>
 
@@ -294,4 +295,65 @@ TEST(UsdVariantSpec, RejectsAMalformedEntry) {
     EXPECT_FALSE(ParseUsdVariantSpec("=red").has_value());
     EXPECT_FALSE(ParseUsdVariantSpec("a=b=c").has_value());
     EXPECT_FALSE(ParseUsdVariantSpec("lod=low,").has_value());
+}
+
+// The repack always produces RGBA8, so a file with no alpha decodes with a 255
+// in that channel and a recipe that reads it reads a constant. The bank knows
+// what the file had and says so, once per file however many slots ask.
+TEST(UsdTextureBank, AlphaAskedOfAnImageWithoutOneWarnsOncePerFile) {
+    UsdTextureBank bank;
+    bank.AdoptSource("rgb.png", SolidSource("rgb.png", 10, 20, 30, 0xFF), /*sourceChannels=*/3);
+    bank.AdoptSource("rgba.png", SolidSource("rgba.png", 10, 20, 30, 0x80), /*sourceChannels=*/4);
+
+    support::ScopedLogCapture log;
+    std::vector<Texture> textures;
+
+    SlotRecipe opacity;
+    opacity.dst[3] = SourceFrom("rgb.png", ChannelSel::A);
+    opacity.debugName = "baseColor";
+    EXPECT_GE(bank.Materialise(opacity, textures), 0);
+
+    SlotRecipe again;
+    again.dst[0] = SourceFrom("rgb.png", ChannelSel::A);
+    again.debugName = "roughness";
+    EXPECT_GE(bank.Materialise(again, textures), 0);
+
+    SlotRecipe fine;
+    fine.dst[3] = SourceFrom("rgba.png", ChannelSel::A);
+    fine.debugName = "baseColor2";
+    EXPECT_GE(bank.Materialise(fine, textures), 0);
+
+    EXPECT_EQ(log.Count(Log::Level::Warn, "'rgb.png' has 3 channels and no alpha"), 1)
+        << log.Dump();
+    EXPECT_FALSE(log.HasWarning("'rgba.png'")) << log.Dump();
+    EXPECT_EQ(textures[0].pixels[3], 255) << "the fill, which is what the warning is about";
+}
+
+// A scale folds into the factor and never touches a pixel. A bias cannot, so it
+// is baked -- and because the bytes a spectral unmixer reads are then the
+// biased ones, the bake is logged rather than silent.
+TEST(UsdTextureBank, ABakedBiasIsLogged) {
+    UsdTextureBank bank;
+    bank.AdoptSource("rough.png", SolidSource("rough.png", 0x80, 0x80, 0x80, 0xFF));
+
+    support::ScopedLogCapture log;
+    std::vector<Texture> textures;
+
+    SlotRecipe folded;
+    folded.dst[1] = SourceFrom("rough.png", ChannelSel::R);
+    folded.debugName = "metallicRoughness";
+    EXPECT_GE(bank.Materialise(folded, textures), 0);
+    EXPECT_FALSE(log.HasInfo("baked into the pixels")) << log.Dump();
+
+    SlotRecipe baked;
+    baked.dst[1] = SourceFrom("rough.png", ChannelSel::R);
+    baked.dst[1]->scale = 0.5f;
+    baked.dst[1]->bias = 0.25f;
+    baked.debugName = "metallicRoughness";
+    const i32 index = bank.Materialise(baked, textures);
+    ASSERT_GE(index, 0);
+    EXPECT_TRUE(log.HasInfo("Texture entry 'metallicRoughness': scale 0.5 and bias 0.25"))
+        << log.Dump();
+    // 0x80 / 255 * 0.5 + 0.25 = 0.5008 -> 128
+    EXPECT_EQ(textures[index].pixels[1], 128);
 }

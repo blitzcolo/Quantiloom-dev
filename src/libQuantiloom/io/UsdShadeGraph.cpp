@@ -721,6 +721,19 @@ SurfaceReading ReadSurface(const void* shaderPtr, SurfaceVocabulary vocabulary,
             slot.authored = true;
         }
         if (binding.texture) {
+            // `outputs:rgb` wired to a float input. The scalar semantics read
+            // one byte, and red is the byte a grey map broadcast to RGB makes
+            // correct; a genuinely coloured map here is an authoring error
+            // whose result -- one channel of it -- should not pass silently.
+            // A vector input (a normal map) reads three and is not this case.
+            if (spec.kind == ValueKind::Float &&
+                (binding.texture->channels == ChannelSel::RGB ||
+                 binding.texture->channels == ChannelSel::RGBA)) {
+                QL_LOG_WARN("    Material '{}': a colour output feeds the scalar input "
+                            "'{}'; its red channel is used",
+                            context.materialPath, spec.input);
+                binding.texture->channels = ChannelSel::R;
+            }
             slot.texture = std::move(binding.texture);
             slot.authored = true;
         }
@@ -762,7 +775,8 @@ constexpr ChannelSel kChannelByIndex[4] = {ChannelSel::R, ChannelSel::G, Channel
                                            ChannelSel::A};
 
 /// Which byte of the source an input reads. A colour selector feeding a scalar
-/// slot reads red, which is what a grey map broadcast to RGB makes correct.
+/// slot reads red, which is what a grey map broadcast to RGB makes correct;
+/// ReadSurface has already warned about that case and narrowed it to R.
 u32 SourceChannel(ChannelSel channel) {
     switch (channel) {
         case ChannelSel::G: return 1;

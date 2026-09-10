@@ -34,7 +34,8 @@ const char* ChannelName(ChannelSel channel) {
 
 /// Which byte of an RGBA8 texel a single-channel selector reads. `rgb` and
 /// `rgba` collapse to red here: a colour output feeding a scalar input is a
-/// separate case the walker warns about before it gets this far.
+/// separate case ReadSurface warns about and narrows to R before it gets this
+/// far.
 u32 ChannelByte(ChannelSel channel) {
     switch (channel) {
         case ChannelSel::G: return 1;
@@ -178,7 +179,7 @@ Texture ToRgba8(const Image& img, const String& sourceUri) {
 
 }  // namespace
 
-Texture DecodeTextureFile(const String& absolutePath) {
+Texture DecodeTextureFile(const String& absolutePath, u32* outSourceChannels) {
     if (absolutePath.empty()) {
         return {};
     }
@@ -187,10 +188,14 @@ Texture DecodeTextureFile(const String& absolutePath) {
         QL_LOG_ERROR("Failed to load texture '{}'", absolutePath);
         return {};
     }
+    if (outSourceChannels != nullptr) {
+        *outSourceChannels = imageResult.value().channels;
+    }
     return ToRgba8(imageResult.value(), absolutePath);
 }
 
-Texture DecodeTextureBytes(const String& name, const u8* data, usize size) {
+Texture DecodeTextureBytes(const String& name, const u8* data, usize size,
+                           u32* outSourceChannels) {
     if (data == nullptr || size == 0) {
         return {};
     }
@@ -228,6 +233,9 @@ Texture DecodeTextureBytes(const String& name, const u8* data, usize size) {
     }
     stbi_image_free(decoded);
 
+    if (outSourceChannels != nullptr) {
+        *outSourceChannels = img.channels;
+    }
     return ToRgba8(img, name);
 }
 
@@ -255,7 +263,12 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
         }
     }
 
-    std::vector<std::future<std::pair<String, Texture>>> pending;
+    struct Decoded {
+        String path;
+        Texture texture;
+        u32 sourceChannels = 4;
+    };
+    std::vector<std::future<Decoded>> pending;
     pending.reserve(paths.size());
     for (const String& path : paths) {
         // Bytes that were handed over rather than read from disk -- a texture
@@ -263,23 +276,30 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
         if (const auto encoded = m_encoded.find(path); encoded != m_encoded.end()) {
             const std::vector<u8>& bytes = encoded->second;
             pending.push_back(std::async(std::launch::async, [path, &bytes]() {
-                return std::make_pair(path, DecodeTextureBytes(path, bytes.data(),
-                                                               bytes.size()));
+                Decoded out;
+                out.path = path;
+                out.texture = DecodeTextureBytes(path, bytes.data(), bytes.size(),
+                                                 &out.sourceChannels);
+                return out;
             }));
             continue;
         }
         pending.push_back(std::async(std::launch::async, [path]() {
-            return std::make_pair(path, DecodeTextureFile(path));
+            Decoded out;
+            out.path = path;
+            out.texture = DecodeTextureFile(path, &out.sourceChannels);
+            return out;
         }));
     }
 
     usize decoded = 0;
     for (auto& future : pending) {
-        auto [path, texture] = future.get();
-        if (texture.width > 0) {
+        Decoded out = future.get();
+        if (out.texture.width > 0) {
             ++decoded;
         }
-        m_sources.emplace(std::move(path), std::move(texture));
+        m_sourceChannels[out.path] = out.sourceChannels;
+        m_sources.emplace(std::move(out.path), std::move(out.texture));
     }
 
     QL_LOG_INFO("  Decoded {} of {} texture files", decoded, paths.size());
@@ -311,6 +331,20 @@ i32 UsdTextureBank::Materialise(const SlotRecipe& recipe, std::vector<Texture>& 
         if (first == nullptr) {
             first = &it->second;
         }
+
+        // Alpha asked of a file that had none. The repack filled it with 255,
+        // so an opacity bound this way is fully opaque everywhere, which is
+        // probably not what binding an opacity map meant. Once per file.
+        if (src->channel == ChannelSel::A) {
+            const auto channels = m_sourceChannels.find(src->path);
+            const bool hasAlpha = channels == m_sourceChannels.end() ||
+                                  channels->second == 2 || channels->second >= 4;
+            if (!hasAlpha && m_warnedNoAlpha.insert(src->path).second) {
+                QL_LOG_WARN("    Texture '{}' has {} channels and no alpha; the 'a' "
+                            "output reads as 1 everywhere",
+                            src->path, channels->second);
+            }
+        }
     }
     if (first == nullptr) {
         return -1;
@@ -329,6 +363,20 @@ i32 UsdTextureBank::Materialise(const SlotRecipe& recipe, std::vector<Texture>& 
         entry.height = height;
         entry.channels = 4;
         entry.pixels.assign(static_cast<usize>(width) * height * 4, 0);
+
+        // A scale folds into the material's factor and leaves the pixels alone;
+        // a bias cannot, so it is baked, and the bytes a spectral unmixer reads
+        // off this entry are then the biased ones. Worth a line in the log.
+        for (usize channel = 0; channel < 4; ++channel) {
+            const auto& src = resolved.dst[channel];
+            if (src && src->bias != 0.0f) {
+                QL_LOG_INFO("    Texture entry '{}': scale {} and bias {} on '{}' are baked "
+                            "into the pixels",
+                            resolved.debugName.empty() ? key : resolved.debugName,
+                            src->scale, src->bias, src->path);
+                break;
+            }
+        }
 
         for (usize channel = 0; channel < 4; ++channel) {
             const auto& src = resolved.dst[channel];

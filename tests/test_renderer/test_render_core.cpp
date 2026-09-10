@@ -15,6 +15,10 @@
 
 #include "renderer/RenderCore.hpp"
 
+#include "io/UsdLoader.hpp"
+#include "support/LogCapture.hpp"
+
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -213,6 +217,152 @@ TEST(RenderCoreLoadSceneFromConfig, AMalformedModelVariantSpecNamesTheModel) {
 
     ASSERT_FALSE(scene.has_value());
     EXPECT_NE(scene.error().find("rig"), std::string::npos) << scene.error();
+}
+
+// The positive half of the contract: what [scene] says about a USD file --
+// the variant, the time code, the stage metrics, the payload policy -- arrives
+// at the loader as the options it means. The loader's own tests pin what each
+// option does; this one pins that the config reaches it, which nothing between
+// the CLI and Studio can check any other way.
+TEST(RenderCoreLoadSceneFromConfig, UsdVariantAndTimeCodeReachTheLoader) {
+    if (!UsdLoader::IsAvailable()) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto dir = std::filesystem::temp_directory_path() / "quantiloom_rendercore_usd";
+    std::filesystem::create_directories(dir);
+
+    // A Z-up, centimetre stage whose "low" variant is the only one animated.
+    // The default variant is "high" and its triangle never reaches x = 5, so a
+    // vertex at 5 proves both the variant and the time code were applied.
+    const auto stagePath = dir / "options.usda";
+    std::ofstream(stagePath) << R"(#usda 1.0
+(
+    defaultPrim = "World"
+    upAxis = "Z"
+    metersPerUnit = 0.01
+)
+
+def Xform "World"
+{
+    def Mesh "Tri" (
+        variants = { string lod = "high" }
+        prepend variantSets = "lod"
+    )
+    {
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        variantSet "lod" = {
+            "high" {
+                point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+            }
+            "low" {
+                point3f[] points.timeSamples = {
+                    0: [(0, 0, 0), (1, 0, 0), (0, 1, 0)],
+                    10: [(0, 0, 0), (5, 0, 0), (0, 5, 0)],
+                }
+            }
+        }
+    }
+}
+)";
+
+    const std::string usdKey = "[scene]\nusd = \"" + stagePath.generic_string() + "\"\n";
+
+    {
+        const auto cfg = ConfigFrom(usdKey + "variant = \"lod=low\"\nusd_time_code = 10.0\n"
+                                             "usd_stage_metrics = false\n");
+        auto scene = rendercore::LoadSceneFromConfig(cfg);
+        ASSERT_TRUE(scene.has_value()) << scene.error();
+        const Scene& loaded = *scene;
+        ASSERT_EQ(loaded.meshes.size(), 1u);
+        ASSERT_EQ(loaded.meshes[0].primitives.size(), 1u);
+
+        f32 maxX = 0.0f;
+        for (const auto& position : loaded.meshes[0].primitives[0].positions) {
+            maxX = std::max(maxX, position.x);
+        }
+        EXPECT_NEAR(maxX, 5.0f, 1e-5f) << "the low variant, at time code 10";
+
+        ASSERT_EQ(loaded.nodes.size(), 1u);
+        const glm::vec3 up =
+            glm::vec3(loaded.nodes[0].transform * glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+        EXPECT_NEAR(up.z, 1.0f, 1e-5f) << "usd_stage_metrics = false leaves the stage's axes";
+    }
+
+    {
+        // Nothing said: the default variant, the default time, and the stage's
+        // Z-up centimetres folded in, so the stage's Z lands on +Y at 0.01.
+        const auto cfg = ConfigFrom(usdKey);
+        auto scene = rendercore::LoadSceneFromConfig(cfg);
+        ASSERT_TRUE(scene.has_value()) << scene.error();
+        const Scene& loaded = *scene;
+        ASSERT_EQ(loaded.meshes.size(), 1u);
+
+        f32 maxX = 0.0f;
+        for (const auto& position : loaded.meshes[0].primitives[0].positions) {
+            maxX = std::max(maxX, position.x);
+        }
+        EXPECT_NEAR(maxX, 1.0f, 1e-5f) << "the high variant";
+
+        ASSERT_EQ(loaded.nodes.size(), 1u);
+        const glm::vec3 up =
+            glm::vec3(loaded.nodes[0].transform * glm::vec4(0.0f, 0.0f, 1.0f, 1.0f));
+        EXPECT_NEAR(up.y, 0.01f, 1e-6f) << "Z-up and metersPerUnit folded in by default";
+        EXPECT_NEAR(up.z, 0.0f, 1e-6f);
+    }
+
+    // Payloads: a root whose only geometry hangs off a payload.
+    std::ofstream(dir / "body.usda") << R"(#usda 1.0
+(
+    defaultPrim = "Body"
+)
+
+def Mesh "Body"
+{
+    point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+    int[] faceVertexCounts = [3]
+    int[] faceVertexIndices = [0, 1, 2]
+}
+)";
+    const auto rootPath = dir / "root.usda";
+    std::ofstream(rootPath) << R"(#usda 1.0
+(
+    defaultPrim = "Root"
+)
+
+def Xform "Root"
+{
+    def "Heavy" (
+        payload = @./body.usda@</Body>
+    )
+    {
+    }
+}
+)";
+    const std::string rootKey = "[scene]\nusd = \"" + rootPath.generic_string() + "\"\n";
+    {
+        auto scene = rendercore::LoadSceneFromConfig(ConfigFrom(rootKey + "usd_payloads = \"none\"\n"));
+        ASSERT_TRUE(scene.has_value()) << scene.error();
+        EXPECT_TRUE(scene.value().meshes.empty()) << "usd_payloads = \"none\" reached the loader";
+    }
+    {
+        auto scene = rendercore::LoadSceneFromConfig(ConfigFrom(rootKey));
+        ASSERT_TRUE(scene.has_value()) << scene.error();
+        EXPECT_EQ(scene.value().meshes.size(), 1u) << "payloads load by default";
+    }
+}
+
+// A value that is neither "all" nor "none" is a typo, and [[models]].payloads
+// already says so; [scene] says the same and loads everything.
+TEST(RenderCoreLoadSceneFromConfig, AnUnknownUsdPayloadsValueWarnsAndLoadsAll) {
+    support::ScopedLogCapture log;
+    const auto cfg = ConfigFrom(
+        "[scene]\nusd = \"no_such_file.usdc\"\nusd_payloads = \"some\"\n");
+    auto scene = rendercore::LoadSceneFromConfig(cfg);
+
+    EXPECT_FALSE(scene.has_value());
+    EXPECT_TRUE(log.HasWarning("scene.usd_payloads is \"some\"")) << log.Dump();
 }
 
 TEST(RenderCoreLoadSceneFromConfig, ReportsAMissingSceneFile) {

@@ -105,16 +105,22 @@ struct SlotRecipe {
  * The single decode path: `UsdLoader::ParseTexture` resolves a path and calls
  * this, and the bank calls it directly for the paths it preloads.
  */
-[[nodiscard]] Texture DecodeTextureFile(const String& absolutePath);
+[[nodiscard]] Texture DecodeTextureFile(const String& absolutePath,
+                                        u32* outSourceChannels = nullptr);
 
 /**
  * @brief Decode an image already in memory
+ *
+ * Both decoders report the file's own channel count through `outSourceChannels`
+ * when asked: the result is always RGBA8, and a recipe that reads alpha from a
+ * file that had none should say so rather than read the 255 that was filled in.
  *
  * For assets that are not files. A texture inside a .usdz is one: the resolver
  * hands back a package-relative path and the bytes live in the zip, so there is
  * nothing for the file path to open.
  */
-[[nodiscard]] Texture DecodeTextureBytes(const String& name, const u8* data, usize size);
+[[nodiscard]] Texture DecodeTextureBytes(const String& name, const u8* data, usize size,
+                                         u32* outSourceChannels = nullptr);
 
 /**
  * @class UsdTextureBank
@@ -150,12 +156,17 @@ public:
     }
 
     /// For tests: seed a source without touching the filesystem.
-    void AdoptSource(const String& path, Texture texture) {
+    /// `sourceChannels` is what the file would have had.
+    void AdoptSource(const String& path, Texture texture, u32 sourceChannels = 4) {
+        m_sourceChannels[path] = sourceChannels;
         m_sources.emplace(path, std::move(texture));
     }
 
 private:
     std::unordered_map<String, Texture> m_sources;
+    /// The channel count each source had on disk, before the RGBA8 repack.
+    std::unordered_map<String, u32> m_sourceChannels;
+    std::unordered_set<String> m_warnedNoAlpha;
     std::unordered_map<String, std::vector<u8>> m_encoded;
     std::unordered_map<String, i32> m_byKey;
 };

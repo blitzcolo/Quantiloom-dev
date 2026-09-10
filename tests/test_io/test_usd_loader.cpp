@@ -15,6 +15,7 @@
 #include "scene/Scene.hpp"
 #include "scene/Mesh.hpp"
 #include "scene/Material.hpp"
+#include "support/LogCapture.hpp"
 #include <filesystem>
 #include <fstream>
 
@@ -204,7 +205,8 @@ def Xform "Sphere" (
     /// puts the origin top-left, so the rows are in the order they are written.
     static std::filesystem::path WriteRawTga(const std::string& fileName, u32 width,
                                              u32 height,
-                                             const std::vector<u8>& rgba) {
+                                             const std::vector<u8>& rgba,
+                                             bool withAlpha = true) {
         const auto dir =
             std::filesystem::temp_directory_path() / "quantiloom_usd_fixtures";
         std::filesystem::create_directories(dir);
@@ -216,15 +218,15 @@ def Xform "Sphere" (
         header[13] = static_cast<u8>((width >> 8) & 0xFF);
         header[14] = static_cast<u8>(height & 0xFF);
         header[15] = static_cast<u8>((height >> 8) & 0xFF);
-        header[16] = 32;    // bits per pixel
-        header[17] = 0x28;  // 8 alpha bits, top-left origin
+        header[16] = withAlpha ? 32 : 24;     // bits per pixel
+        header[17] = withAlpha ? 0x28 : 0x20;  // (8 alpha bits,) top-left origin
 
         std::ofstream file(path, std::ios::binary);
         file.write(reinterpret_cast<const char*>(header.data()),
                    static_cast<std::streamsize>(header.size()));
         for (usize i = 0; i + 3 < rgba.size(); i += 4) {
             const u8 bgra[4] = {rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]};
-            file.write(reinterpret_cast<const char*>(bgra), 4);
+            file.write(reinterpret_cast<const char*>(bgra), withAlpha ? 4 : 3);
         }
         file.close();
         return path;
@@ -1970,6 +1972,7 @@ def Material "Mat"
 }
 )");
 
+    support::ScopedLogCapture log;
     auto result = UsdLoader::LoadFromFile(path.string());
     ASSERT_TRUE(result.has_value()) << result.error();
     const Material& material = MaterialNamed(*result, "Mat");
@@ -1977,6 +1980,114 @@ def Material "Mat"
     // Only one UV set is loaded, the same limitation GltfLoader has. The texture
     // still binds, against set 0, and the log says so.
     EXPECT_GE(material.baseColorTextureIndex, 0);
+    EXPECT_TRUE(log.HasWarning("UV set 1 requested, but only one UV set is loaded"))
+        << log.Dump();
+}
+
+TEST_F(UsdLoaderTest, AColourOutputOnAScalarInputWarnsAndReadsRed) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    WriteSolidTga("rgb_on_metallic.tga", 0x40, 0x80, 0xC0, 0xFF);
+
+    const auto path = WriteUsda("rgb_on_metallic.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:metallic.connect = </Mat/Metal.outputs:rgb>
+        token outputs:surface
+    }
+
+    def Shader "Metal"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./rgb_on_metallic.tga@
+        float3 outputs:rgb
+    }
+}
+)");
+
+    support::ScopedLogCapture log;
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    // A scalar input reads one byte. The red one is what a grey map broadcast
+    // to RGB makes right, and a coloured map wired this way is said out loud.
+    EXPECT_TRUE(log.HasWarning("a colour output feeds the scalar input 'metallic'"))
+        << log.Dump();
+    ASSERT_GE(material.metallicRoughnessTextureIndex, 0);
+    const Texture& packed = scene.textures[material.metallicRoughnessTextureIndex];
+    if (packed.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    EXPECT_EQ(packed.pixels[2], 0x40) << "B is metallic, from the source's red";
+}
+
+TEST_F(UsdLoaderTest, OpacityFromAnImageWithoutAlphaWarns) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    std::vector<u8> pixels;
+    for (int i = 0; i < 4; ++i) {
+        pixels.insert(pixels.end(), {200, 150, 100, 255});
+    }
+    WriteRawTga("no_alpha.tga", 2, 2, pixels, /*withAlpha=*/false);
+
+    const auto path = WriteUsda("no_alpha.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        color3f inputs:diffuseColor.connect = </Mat/Tex.outputs:rgb>
+        float inputs:opacity.connect = </Mat/Tex.outputs:a>
+        token outputs:surface
+    }
+
+    def Shader "Tex"
+    {
+        uniform token info:id = "UsdUVTexture"
+        asset inputs:file = @./no_alpha.tga@
+        float3 outputs:rgb
+        float outputs:a
+    }
+}
+)");
+
+    support::ScopedLogCapture log;
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    const Material& material = MaterialNamed(scene, "Mat");
+
+    // The file has three channels. The repack fills alpha with 255, so the
+    // opacity bound to it is 1 everywhere -- which the log has to say, because
+    // an opaque object is not a visibly wrong one.
+    EXPECT_TRUE(log.HasWarning("has 3 channels and no alpha")) << log.Dump();
+    ASSERT_GE(material.baseColorTextureIndex, 0);
+    const Texture& packed = scene.textures[material.baseColorTextureIndex];
+    if (packed.pixels.empty()) {
+        GTEST_SKIP() << "texture pixels were released by block compression";
+    }
+    EXPECT_EQ(packed.pixels[3], 255);
 }
 
 // ============================================================================
