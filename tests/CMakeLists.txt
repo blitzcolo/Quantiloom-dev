@@ -236,6 +236,7 @@ set(TEST_CORE_SOURCES
 # Scene tests
 set(TEST_SCENE_SOURCES
     test_scene/test_material.cpp
+    test_scene/test_tangent_generator.cpp
     test_scene/test_camera.cpp
     test_scene/test_mesh.cpp
     test_scene/test_mesh_optimizer.cpp

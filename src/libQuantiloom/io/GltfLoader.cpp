@@ -2,6 +2,7 @@
 #include "io/SpectralIO.hpp"
 #include "scene/MeshOptimizer.hpp"
 #include "scene/NormalGenerator.hpp"
+#include "scene/TangentGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
@@ -1448,14 +1449,19 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
         // TANGENT attribute the renderer synthesises one per vertex; it is
         // continuous, which is enough for a normal map, but its rotation within
         // the surface is arbitrary, so the highlight points somewhere the
-        // author did not choose. Nothing downstream can detect that, which is
-        // why it is said here.
-        if (primitive.tangents.empty() && inRange(static_cast<int>(primitive.materialId)) &&
+        // author did not choose.
+        //
+        // With UVs there is a better answer than a warning, and it is applied
+        // below once the indices and normals are in place: the direction of
+        // increasing u is the direction the map was painted along. Without
+        // them there is nothing to derive a frame from, and the warning stands.
+        if (primitive.tangents.empty() && primitive.uvs.empty() &&
+            inRange(static_cast<int>(primitive.materialId)) &&
             model.materials[primitive.materialId].extensions.count(
                 "KHR_materials_anisotropy") > 0) {
-            QL_LOG_WARN("    Primitive {} of mesh '{}' uses an anisotropic material but has no "
-                        "TANGENT attribute; the highlight direction will be arbitrary",
-                        primIdx, mesh.name);
+            QL_LOG_WARN("    Primitive {} of mesh '{}' uses an anisotropic material but has "
+                        "neither a TANGENT attribute nor UVs to derive one from; the "
+                        "highlight direction will be arbitrary", primIdx, mesh.name);
         }
 
         // Indices (required for indexed geometry)
@@ -1479,6 +1485,22 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
         if (primitive.normals.empty()) {
             QL_LOG_DEBUG("    Generating normals with dihedral angle threshold");
             NormalGenerator::GenerateWithDihedralAngle(primitive);
+        }
+
+        // Tangents, for the materials that read one. After the normals, because
+        // the frame is orthogonalised against them and NormalGenerator
+        // duplicates vertices at hard edges; before deduplication, which keys on
+        // the tangent.
+        if (primitive.tangents.empty() && !primitive.uvs.empty() &&
+            inRange(static_cast<int>(primitive.materialId))) {
+            const tinygltf::Material& source = model.materials[primitive.materialId];
+            const bool wantsTangents =
+                source.extensions.count("KHR_materials_anisotropy") > 0 ||
+                source.normalTexture.index >= 0 ||
+                source.extensions.count("KHR_materials_clearcoat") > 0;
+            if (wantsTangents && TangentGenerator::FromUv(primitive)) {
+                QL_LOG_DEBUG("      Derived tangents for primitive {} from its UVs", primIdx);
+            }
         }
 
         // Deduplicate vertices AFTER normal generation

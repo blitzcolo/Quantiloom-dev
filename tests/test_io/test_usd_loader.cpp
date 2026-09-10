@@ -2692,3 +2692,148 @@ def Mesh "Tri"
     EXPECT_NEAR(up.z, 1.0f, 1e-5f) << "the stage's own axes, untouched";
     EXPECT_NEAR(up.y, 0.0f, 1e-5f);
 }
+
+// ============================================================================
+// Tangents
+// ============================================================================
+
+TEST_F(UsdLoaderTest, ReadsPrimvarsTangentsFloat3AndFloat4) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    // USD states no handedness convention for primvars:tangents, so a float3 is
+    // taken as right-handed and a float4 carries its own sign -- glTF's TANGENT
+    // rule, which is the only one anything downstream knows.
+    const auto path = WriteUsda("authored_tangents.usda", R"(#usda 1.0
+(
+    defaultPrim = "World"
+)
+
+def Xform "World"
+{
+    def Mesh "Three"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        float3[] primvars:tangents = [(1, 0, 0), (1, 0, 0), (1, 0, 0)] (
+            interpolation = "vertex"
+        )
+    }
+
+    def Mesh "Four"
+    {
+        point3f[] points = [(0, 0, 0), (1, 0, 0), (0, 1, 0)]
+        int[] faceVertexCounts = [3]
+        int[] faceVertexIndices = [0, 1, 2]
+        normal3f[] normals = [(0, 0, 1), (0, 0, 1), (0, 0, 1)] (
+            interpolation = "vertex"
+        )
+        float4[] primvars:tangents = [(0, 1, 0, -1), (0, 1, 0, -1), (0, 1, 0, -1)] (
+            interpolation = "vertex"
+        )
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    ASSERT_EQ(scene.meshes.size(), 2u);
+
+    const auto tangentOf = [&](const std::string& name) {
+        for (const auto& mesh : scene.meshes) {
+            if (mesh.name == name) {
+                EXPECT_FALSE(mesh.primitives.empty());
+                EXPECT_FALSE(mesh.primitives.at(0).tangents.empty());
+                return mesh.primitives.at(0).tangents.at(0);
+            }
+        }
+        ADD_FAILURE() << "no mesh named " << name;
+        return glm::vec4(0.0f);
+    };
+
+    const glm::vec4 three = tangentOf("Three");
+    EXPECT_NEAR(three.x, 1.0f, 1e-5f);
+    EXPECT_NEAR(three.w, 1.0f, 1e-5f) << "a float3 tangent is right-handed";
+
+    const glm::vec4 four = tangentOf("Four");
+    EXPECT_NEAR(four.y, 1.0f, 1e-5f);
+    EXPECT_NEAR(four.w, -1.0f, 1e-5f) << "a float4 tangent carries its own sign";
+}
+
+TEST_F(UsdLoaderTest, AnAnisotropicUsdMaterialWithoutTangentsGetsDerivedOnes) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("derived_tangents.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "ND_standard_surface_surfaceshader"
+        float inputs:specular_anisotropy = 0.8
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    ASSERT_FALSE(scene.meshes.empty());
+    const GeometryPrimitive& primitive = scene.meshes[0].primitives.at(0);
+    ASSERT_EQ(primitive.tangents.size(), primitive.positions.size())
+        << "an anisotropic highlight points along the tangent, so an arbitrary "
+           "frame puts the streak somewhere the author did not choose";
+
+    // The quad's u runs with +X, and `st` was flipped in V, which leaves u alone.
+    for (const glm::vec4& tangent : primitive.tangents) {
+        EXPECT_NEAR(tangent.x, 1.0f, 1e-4f);
+        EXPECT_NEAR(tangent.y, 0.0f, 1e-4f);
+    }
+}
+
+TEST_F(UsdLoaderTest, AMaterialThatReadsNoTangentGetsNone) {
+    if (!hasOpenUSD) {
+        GTEST_SKIP() << "OpenUSD support not available";
+    }
+
+    const auto path = WriteUsda("no_tangents_needed.usda", std::string(R"(#usda 1.0
+(
+    defaultPrim = "Quad"
+)
+)") + kBoundQuad + R"(
+def Material "Mat"
+{
+    token outputs:surface.connect = </Mat/Surface.outputs:surface>
+
+    def Shader "Surface"
+    {
+        uniform token info:id = "UsdPreviewSurface"
+        float inputs:roughness = 0.4
+        token outputs:surface
+    }
+}
+)");
+
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+
+    ASSERT_FALSE(scene.meshes.empty());
+    // A frame nobody samples is bytes on the GPU for nothing.
+    EXPECT_TRUE(scene.meshes[0].primitives.at(0).tangents.empty());
+}

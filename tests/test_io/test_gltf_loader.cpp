@@ -1125,3 +1125,138 @@ TEST_F(GltfLoaderTest, VariantOnlyRemapsPrimitivesThatDeclareAMapping) {
     EXPECT_FALSE(resolvesToAMaterialNamed(navy, "palepink"))
         << "only one fabric may be active at a time";
 }
+
+// ============================================================================
+// Tangents
+// ============================================================================
+
+// An anisotropic material's highlight points ALONG the tangent, so the
+// synthesised frame the renderer falls back on -- continuous, but arbitrary in
+// its rotation within the surface -- puts the streak somewhere the author did
+// not choose, and nothing downstream can detect it. With UVs there is a better
+// answer than the warning that used to stand here.
+TEST_F(GltfLoaderTest, AnAnisotropicPrimitiveWithoutTangentsGetsDerivedOnes) {
+    const char* gltfJson = R"JSON({
+  "asset": { "version": "2.0" },
+  "extensionsUsed": [ "KHR_materials_anisotropy" ],
+  "materials": [
+    {
+      "name": "Brushed",
+      "extensions": {
+        "KHR_materials_anisotropy": { "anisotropyStrength": 0.8 }
+      }
+    }
+  ],
+  "meshes": [
+    {
+      "primitives": [
+        { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+          "indices": 3, "material": 0 }
+      ]
+    }
+  ],
+  "nodes": [ { "mesh": 0 } ],
+  "scenes": [ { "nodes": [ 0 ] } ],
+  "scene": 0,
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [ 0.0, 0.0, 0.0 ], "max": [ 1.0, 1.0, 0.0 ] },
+    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+    { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 72, "byteLength": 24 },
+    { "buffer": 0, "byteOffset": 96, "byteLength": 6 }
+  ],
+  "buffers": [
+    {
+      "byteLength": 102,
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIA"
+    }
+  ]
+})JSON";
+
+    const std::filesystem::path tempPath =
+        std::filesystem::temp_directory_path() / "quantiloom_derived_tangents.gltf";
+    {
+        std::ofstream file(tempPath);
+        ASSERT_TRUE(file.is_open());
+        file << gltfJson;
+    }
+
+    auto result = GltfLoader::LoadFromFile(tempPath.string());
+    std::filesystem::remove(tempPath);
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    Scene& scene = *result;
+    ASSERT_FALSE(scene.meshes.empty());
+    ASSERT_FALSE(scene.meshes[0].primitives.empty());
+
+    const GeometryPrimitive& primitive = scene.meshes[0].primitives[0];
+    ASSERT_EQ(primitive.tangents.size(), primitive.positions.size());
+
+    // The UVs run u with +X on this triangle.
+    for (const glm::vec4& tangent : primitive.tangents) {
+        EXPECT_NEAR(tangent.x, 1.0f, 1e-4f);
+        EXPECT_NEAR(tangent.y, 0.0f, 1e-4f);
+        EXPECT_NEAR(tangent.w, 1.0f, 1e-4f);
+    }
+}
+
+// And a material that samples no tangent gets none: a frame nobody reads is
+// bytes on the GPU for nothing.
+TEST_F(GltfLoaderTest, APlainMaterialGetsNoDerivedTangents) {
+    const char* gltfJson = R"JSON({
+  "asset": { "version": "2.0" },
+  "materials": [ { "name": "Plain", "pbrMetallicRoughness": { "roughnessFactor": 0.4 } } ],
+  "meshes": [
+    {
+      "primitives": [
+        { "attributes": { "POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2 },
+          "indices": 3, "material": 0 }
+      ]
+    }
+  ],
+  "nodes": [ { "mesh": 0 } ],
+  "scenes": [ { "nodes": [ 0 ] } ],
+  "scene": 0,
+  "accessors": [
+    { "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+      "min": [ 0.0, 0.0, 0.0 ], "max": [ 1.0, 1.0, 0.0 ] },
+    { "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3" },
+    { "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2" },
+    { "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }
+  ],
+  "bufferViews": [
+    { "buffer": 0, "byteOffset": 0,  "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 36, "byteLength": 36 },
+    { "buffer": 0, "byteOffset": 72, "byteLength": 24 },
+    { "buffer": 0, "byteOffset": 96, "byteLength": 6 }
+  ],
+  "buffers": [
+    {
+      "byteLength": 102,
+      "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAABAAIA"
+    }
+  ]
+})JSON";
+
+    const std::filesystem::path tempPath =
+        std::filesystem::temp_directory_path() / "quantiloom_no_derived_tangents.gltf";
+    {
+        std::ofstream file(tempPath);
+        ASSERT_TRUE(file.is_open());
+        file << gltfJson;
+    }
+
+    auto result = GltfLoader::LoadFromFile(tempPath.string());
+    std::filesystem::remove(tempPath);
+
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const Scene& scene = *result;
+    ASSERT_FALSE(scene.meshes.empty());
+    EXPECT_TRUE(scene.meshes[0].primitives[0].tangents.empty());
+}

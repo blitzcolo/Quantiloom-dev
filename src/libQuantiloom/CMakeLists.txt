@@ -165,6 +165,8 @@ add_library(quantiloom_core OBJECT
     scene/MeshOptimizer.hpp
     scene/NormalGenerator.cpp
     scene/NormalGenerator.hpp
+    scene/TangentGenerator.cpp
+    scene/TangentGenerator.hpp
     ${QL_PUBLIC_INC}/scene/BRDFModels.hpp
     scene/Material.cpp
     ${QL_PUBLIC_INC}/scene/Material.hpp

@@ -375,6 +375,7 @@ private:
      */
     static Mesh ParseMesh(const void* stage, const void* geomMesh,
                           const std::unordered_map<String, int>& materialPathMap,
+                          const std::vector<Material>& materials,
                           const String& usdFilePath,
                           const UsdLoadOptions& options);
 

@@ -24,6 +24,7 @@
 #include "io/ImageIO.hpp"
 #include "scene/MeshOptimizer.hpp"
 #include "scene/NormalGenerator.hpp"
+#include "scene/TangentGenerator.hpp"
 #include "renderer/TextureCompressor.hpp"
 #include "core/Log.hpp"
 
@@ -402,6 +403,7 @@ struct ExpandedMesh {
     std::vector<glm::vec3> positions;
     std::vector<glm::vec3> normals;
     std::vector<glm::vec2> uvs;
+    std::vector<glm::vec4> tangents;
     std::vector<u32> indices;
     std::vector<u32> triangleToFace;
 };
@@ -411,14 +413,17 @@ static void ExpandToFaceVertices(const VtArray<int>& faceVertexCounts,
                                  const std::vector<glm::vec3>& positions,
                                  const AttrSource<GfVec3f>& normalSource,
                                  const AttrSource<GfVec2f>& uvSource,
+                                 const AttrSource<GfVec4f>& tangentSource,
                                  ExpandedMesh& out) {
     const size_t faceVertexTotal = faceVertexIndices.size();
     out.positions.reserve(faceVertexTotal);
     if (normalSource.Present()) { out.normals.reserve(faceVertexTotal); }
     if (uvSource.Present()) { out.uvs.reserve(faceVertexTotal); }
+    if (tangentSource.Present()) { out.tangents.reserve(faceVertexTotal); }
 
     bool normalsComplete = normalSource.Present();
     bool uvsComplete = uvSource.Present();
+    bool tangentsComplete = tangentSource.Present();
 
     size_t fvOffset = 0;
     u32 nextVertex = 0;
@@ -475,6 +480,15 @@ static void ExpandToFaceVertices(const VtArray<int>& faceVertexCounts,
                         out.uvs.push_back(usd::UsdStToUv(value[0], value[1]));
                     }
                 }
+                if (tangentSource.Present()) {
+                    const i64 t = tangentSource.IndexFor(fv[c], faceIdx, point[c]);
+                    if (t < 0) {
+                        tangentsComplete = false;
+                    } else {
+                        const GfVec4f& value = (*tangentSource.data)[static_cast<size_t>(t)];
+                        out.tangents.emplace_back(value[0], value[1], value[2], value[3]);
+                    }
+                }
                 out.indices.push_back(nextVertex++);
             }
 
@@ -498,6 +512,13 @@ static void ExpandToFaceVertices(const VtArray<int>& faceVertexCounts,
             QL_LOG_WARN("    UVs do not cover every face vertex; dropping them");
         }
         out.uvs.clear();
+    }
+    if (!tangentsComplete || out.tangents.size() != out.positions.size()) {
+        if (!out.tangents.empty()) {
+            QL_LOG_WARN("    Tangents do not cover every face vertex; deriving them "
+                        "from the UVs instead");
+        }
+        out.tangents.clear();
     }
 }
 
@@ -864,6 +885,7 @@ static Material ParseMaterial(const UsdPrim& prim, const usd::SurfaceReading& re
 
 Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
                           const std::unordered_map<String, int>& materialPathMap,
+                          const std::vector<Material>& materials,
                           const String& usdFilePath,
                           const UsdLoadOptions& options) {
     Mesh mesh;
@@ -970,19 +992,41 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         uvSource = AttrSource<GfVec2f>{&usdUVs, uvPrimvar.GetInterpolation()};
     }
 
+    // `primvars:tangents` is the authored tangent frame. USD has no convention
+    // for its handedness, so a float3 is taken as right-handed (+1) and a float4
+    // carries its own sign, which is what glTF's TANGENT does.
+    VtArray<GfVec4f> usdTangents;
+    AttrSource<GfVec4f> tangentSource;
+    if (UsdGeomPrimvar tangentPrimvar = primvarsAPI.GetPrimvar(TfToken("tangents"));
+        tangentPrimvar && tangentPrimvar.HasValue()) {
+        if (!tangentPrimvar.Get(&usdTangents, timeCode)) {
+            VtArray<GfVec3f> threeComponent;
+            if (tangentPrimvar.Get(&threeComponent, timeCode)) {
+                usdTangents.reserve(threeComponent.size());
+                for (const GfVec3f& tangent : threeComponent) {
+                    usdTangents.push_back(GfVec4f(tangent[0], tangent[1], tangent[2], 1.0f));
+                }
+            }
+        }
+        tangentSource = AttrSource<GfVec4f>{&usdTangents, tangentPrimvar.GetInterpolation()};
+    }
+
     std::vector<glm::vec3> normals;
     std::vector<glm::vec2> uvs;
+    std::vector<glm::vec4> tangents;
 
     // ========================================================================
     // Face-varying or uniform attributes need one vertex per face vertex
     // ========================================================================
-    if (normalSource.NeedsExpansion() || uvSource.NeedsExpansion()) {
+    if (normalSource.NeedsExpansion() || uvSource.NeedsExpansion() ||
+        tangentSource.NeedsExpansion()) {
         ExpandedMesh expanded;
         ExpandToFaceVertices(faceVertexCounts, faceVertexIndices, positions,
-                             normalSource, uvSource, expanded);
+                             normalSource, uvSource, tangentSource, expanded);
         positions      = std::move(expanded.positions);
         normals        = std::move(expanded.normals);
         uvs            = std::move(expanded.uvs);
+        tangents       = std::move(expanded.tangents);
         indices        = std::move(expanded.indices);
         triangleToFace = std::move(expanded.triangleToFace);
     } else {
@@ -992,6 +1036,8 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
                      [](const GfVec3f& n) { return glm::vec3(n[0], n[1], n[2]); });
         FillPerPoint(uvSource, positions.size(), uvs,
                      [](const GfVec2f& uv) { return usd::UsdStToUv(uv[0], uv[1]); });
+        FillPerPoint(tangentSource, positions.size(), tangents,
+                     [](const GfVec4f& t) { return glm::vec4(t[0], t[1], t[2], t[3]); });
     }
 
     // ========================================================================
@@ -1072,6 +1118,7 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
                 primitive.positions = positions;
                 primitive.normals = normals;
                 primitive.uvs = uvs;
+                primitive.tangents = tangents;
                 mesh.primitives.push_back(std::move(primitive));
             }
         }
@@ -1094,6 +1141,7 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
             remainingPrimitive.positions = positions;
             remainingPrimitive.normals = normals;
             remainingPrimitive.uvs = uvs;
+            remainingPrimitive.tangents = tangents;
             mesh.primitives.push_back(std::move(remainingPrimitive));
         }
     } else {
@@ -1102,6 +1150,7 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         primitive.positions = std::move(positions);
         primitive.normals = std::move(normals);
         primitive.uvs = std::move(uvs);
+        primitive.tangents = std::move(tangents);
         primitive.indices = std::move(indices);
         primitive.materialId = defaultMaterialId;
         mesh.primitives.push_back(std::move(primitive));
@@ -1117,6 +1166,30 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
         if (primitive.normals.empty()) {
             QL_LOG_DEBUG("    Generating normals for USD primitive with dihedral angle threshold");
             NormalGenerator::GenerateWithDihedralAngle(primitive);
+        }
+    }
+
+    // ========================================================================
+    // Tangents, for the materials that read one
+    // ========================================================================
+    // After the normals, because the frame is orthogonalised against them and
+    // NormalGenerator duplicates vertices at hard edges; before deduplication,
+    // which keys on the tangent. Only where a material actually reads one: a
+    // frame nobody samples is bytes on the GPU for nothing.
+    for (auto& primitive : mesh.primitives) {
+        if (!primitive.tangents.empty() || primitive.uvs.empty()) {
+            continue;
+        }
+        if (primitive.materialId < 0 ||
+            static_cast<usize>(primitive.materialId) >= materials.size()) {
+            continue;
+        }
+        const Material& material = materials[static_cast<usize>(primitive.materialId)];
+        const bool wantsTangents = material.HasAnisotropy() ||
+                                   material.normalTextureIndex >= 0 ||
+                                   material.clearcoatNormalTextureIndex >= 0;
+        if (wantsTangents && TangentGenerator::FromUv(primitive)) {
+            QL_LOG_DEBUG("    Derived tangents for '{}' from its UVs", mesh.name);
         }
     }
 
@@ -1251,7 +1324,8 @@ void UsdLoader::ParsePointInstancer(const void* stagePtr, const void* primPtr,
 
         // Find or create mesh for this prototype
         if (protoPrim.IsA<UsdGeomMesh>()) {
-            Mesh protoMesh = ParseMesh(&(*stage), &protoPrim, materialPathMap, usdFilePath, options);
+            Mesh protoMesh = ParseMesh(&(*stage), &protoPrim, materialPathMap,
+                                       scene.materials, usdFilePath, options);
             protoMeshIndices.push_back(static_cast<u32>(scene.meshes.size()));
             scene.meshes.push_back(std::move(protoMesh));
         }
@@ -1648,7 +1722,8 @@ Result<Scene, String> UsdLoader::LoadFromFile(const String& path, const UsdLoadO
                 continue;
             }
 
-            Mesh mesh = ParseMesh(&(*stage), &prim, materialPathMap, path, options);
+            Mesh mesh = ParseMesh(&(*stage), &prim, materialPathMap, scene.materials,
+                                  path, options);
 
             // ================================================================
             // Read doubleSided attribute from geometry and propagate to material
@@ -1767,6 +1842,7 @@ Texture UsdLoader::ParseTexture(const void* /* stage */, const String& /* assetP
 
 Mesh UsdLoader::ParseMesh(const void* /* stage */, const void* /* prim */,
                           const std::unordered_map<String, int>& /* materialPathMap */,
+                          const std::vector<Material>& /* materials */,
                           const String& /* usdFilePath */,
                           const UsdLoadOptions& /* options */) {
     return Mesh{};
