@@ -106,8 +106,10 @@ struct ThermographyParams {
 /// that gap is easy to reach and worth checking against the raw DN before
 /// quoting a figure.
 ///
-/// The responsivity here must stay the one GenericSensor::RadianceToElectrons
-/// applies; a test asserts the two agree rather than trusting the comment.
+/// Compatibility approximation for an uncharacterized fixed band: one QE and
+/// one photon-energy wavelength stand in for a measured device response.
+/// The versioned camera pipeline instead inverts and differentiates its full
+/// response curve; use that path for device-specific NETD or temperatures.
 [[nodiscard]] QL_API f64 NoiseEquivalentTemperatureDifferenceK(const SensorParams& sensor,
                                                                f64 lambdaMinNm,
                                                                f64 lambdaMaxNm,

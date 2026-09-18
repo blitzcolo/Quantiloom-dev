@@ -870,6 +870,16 @@ ir_temperature_k = 350.0
     ASSERT_EQ(scene.materials[0].irEmissivityCurve.size(), 2u);
     EXPECT_FLOAT_EQ(scene.materials[0].irEmissivityCurve[0].second, 0.9f);
     EXPECT_FLOAT_EQ(scene.materials[0].irTemperature_K, 350.0f);
+    const auto epsilonSlot =
+        spectra.value().materialNameToIrEmissivityCurve.find("Panel");
+    const auto tauSlot =
+        spectra.value().materialNameToIrTransmittanceCurve.find("Panel");
+    ASSERT_NE(epsilonSlot, spectra.value().materialNameToIrEmissivityCurve.end());
+    ASSERT_NE(tauSlot, spectra.value().materialNameToIrTransmittanceCurve.end());
+    EXPECT_NEAR(spectra.value().curves[epsilonSlot->second].Evaluate(10000.0f),
+                0.9f, 1e-5f);
+    EXPECT_NEAR(spectra.value().curves[tauSlot->second].Evaluate(10000.0f),
+                0.0f, 1e-6f);
 
     // Reflectance from energy conservation: 1 - 0.9 - 0.0
     ASSERT_EQ(scene.materials[0].irReflectanceCurve.size(), 2u);
@@ -877,6 +887,103 @@ ir_temperature_k = 350.0
 
     // The override names one material and leaves the rest alone.
     EXPECT_TRUE(scene.materials[1].irEmissivityCurve.empty());
+}
+
+TEST_F(ConfigResolveTest, CameraRejectsIrMaterialCurveThatMissesItsResponseTail) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([sensor]
+version = 1
+enabled = true
+detector = "photon"
+[sensor.optics]
+sensor_width_px = 64
+sensor_height_px = 64
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+wavelength_nm = [8000.0, 14000.0]
+value = [0.5, 0.5]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel"});
+    scene.materials[0].irEmissivityCurve =
+        {{8000.0f, 0.9f}, {12000.0f, 0.9f}};
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_FALSE(spectra.has_value());
+    EXPECT_NE(spectra.error().find("camera channel"), String::npos);
+}
+
+TEST_F(ConfigResolveTest, CameraRejectsIrFractionSumsAboveOneAtSourceKnots) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([sensor]
+version = 1
+enabled = true
+detector = "photon"
+[sensor.optics]
+sensor_width_px = 64
+sensor_height_px = 64
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+wavelength_nm = [8000.0, 12000.0]
+value = [0.5, 0.5]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    for (const auto& reflectance : {
+             Vector<std::pair<f32, f32>>{{8000.0f, 0.8f}, {12000.0f, 0.8f}},
+             Vector<std::pair<f32, f32>>{{8000.0f, 0.4f},
+                                         {9999.0f, 0.4f},
+                                         {10000.0f, 0.8f},
+                                         {10001.0f, 0.4f},
+                                         {12000.0f, 0.4f}}}) {
+        Scene scene = MakeSceneWithMaterials({"Panel"});
+        scene.materials[0].irReflectanceCurve = reflectance;
+        scene.materials[0].irTransmittanceCurve =
+            {{8000.0f, reflectance.size() == 2 ? 0.4f : 0.3f},
+             {12000.0f, reflectance.size() == 2 ? 0.4f : 0.3f}};
+        ConfigApplyOptions options;
+        ConfigApplyReport localReport;
+        auto spectra =
+            ResolveMaterialSpectra(config, scene, resolved.value(), options, localReport);
+        ASSERT_FALSE(spectra.has_value());
+        EXPECT_NE(spectra.error().find("energy conservation"), String::npos);
+    }
+    Scene emissive = MakeSceneWithMaterials({"Panel"});
+    emissive.materials[0].irEmissivityCurve =
+        {{8000.0f, 0.8f}, {12000.0f, 0.8f}};
+    emissive.materials[0].irTransmittanceCurve =
+        {{8000.0f, 0.4f}, {12000.0f, 0.4f}};
+    ConfigApplyOptions options;
+    ConfigApplyReport localReport;
+    auto invalid =
+        ResolveMaterialSpectra(config, emissive, resolved.value(), options, localReport);
+    ASSERT_FALSE(invalid.has_value());
+    EXPECT_NE(invalid.error().find("energy conservation"), String::npos);
+}
+
+TEST_F(ConfigResolveTest, SpectralBufferRejectsMoreThanShaderRecordLimit) {
+    auto config = Parse({});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    Scene scene;
+    scene.materials.reserve(4097);
+    for (int i = 0; i < 4097; ++i) {
+        Material material;
+        material.name = "M" + std::to_string(i);
+        material.irEmissivityCurve = {{8000.0f, 0.9f}, {12000.0f, 0.9f}};
+        scene.materials.push_back(std::move(material));
+    }
+    ConfigApplyOptions options;
+    ConfigApplyReport localReport;
+    auto spectra =
+        ResolveMaterialSpectra(config, scene, resolved.value(), options, localReport);
+    ASSERT_FALSE(spectra.has_value());
+    EXPECT_NE(spectra.error().find("4096-record limit"), String::npos);
 }
 
 TEST_F(ConfigResolveTest, ClearSkyModelDerivesAZenithEmissivity) {
@@ -1623,6 +1730,75 @@ TEST_F(ConfigResolveTest, EmissionCurveIsResampledOntoTheBandBeingRendered) {
     const auto& gpu = spectra.value().curves[static_cast<usize>(idx)];
     EXPECT_NEAR(gpu.startWavelength_nm, 1400.0f, 1.0f);
     EXPECT_NEAR(gpu.GetWavelength(gpu.numSamples - 1), 2400.0f, 1.0f);
+    ASSERT_GT(gpu._padding, 0u);
+    u32 next = gpu._padding;
+    f32 lastSourceNm = 0.0f;
+    size_t visited = 0;
+    while (next != 0) {
+        ASSERT_LE(next, spectra.value().curves.size());
+        const auto& exact = spectra.value().curves[next - 1];
+        EXPECT_FLOAT_EQ(exact.stepSize_nm, 0.0f);
+        ASSERT_GE(exact.numSamples, 2u);
+        ASSERT_LE(exact.numSamples, 32u);
+        lastSourceNm = exact.values[2 * (exact.numSamples - 1)];
+        next = exact._padding;
+        ASSERT_LT(++visited, spectra.value().curves.size());
+    }
+    EXPECT_GT(lastSourceNm, 2400.0f)
+        << "SINGLE/camera must retain measured lamp wavelengths outside preview band";
+}
+
+TEST_F(ConfigResolveTest, ExactEmissionSegmentsKeepNonuniformSourceKnots) {
+    const auto source = testDir / "lamp_knots.csv";
+    {
+        std::ofstream file(source);
+        file << "400,0\n450,1\n455,0.5\n600,0\n";
+    }
+    EmissionBindingRequest request;
+    request.source = source.string();
+    request.scale = "absolute";
+    request.bandMinNm = 400.0f;
+    request.bandMaxNm = 780.0f;
+    auto resolved = ResolveEmissionSpectrum(request, testDir.string());
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    ASSERT_EQ(resolved.value().exactSegments.size(), 1u);
+    const auto& exact = resolved.value().exactSegments.front();
+    EXPECT_FLOAT_EQ(exact.stepSize_nm, 0.0f);
+    ASSERT_EQ(exact.numSamples, 4u);
+    EXPECT_FLOAT_EQ(exact.values[0], 400.0f);
+    EXPECT_FLOAT_EQ(exact.values[1], 0.0f);
+    EXPECT_FLOAT_EQ(exact.values[2], 450.0f);
+    EXPECT_FLOAT_EQ(exact.values[3], 1.0f);
+    EXPECT_FLOAT_EQ(exact.values[4], 455.0f);
+    EXPECT_FLOAT_EQ(exact.values[5], 0.5f);
+    EXPECT_FLOAT_EQ(exact.values[6], 600.0f);
+    EXPECT_FLOAT_EQ(exact.values[7], 0.0f);
+}
+
+TEST_F(ConfigResolveTest, ExactEmissionSegmentsShareBoundaryAtThirtyThreeKnots) {
+    const auto source = testDir / "lamp_33.csv";
+    {
+        std::ofstream file(source);
+        for (int i = 0; i < 33; ++i)
+            file << 400 + i << ',' << i / 32.0 << '\n';
+    }
+    EmissionBindingRequest request;
+    request.source = source.string();
+    request.scale = "absolute";
+    request.bandMinNm = 400.0f;
+    request.bandMaxNm = 780.0f;
+    auto resolved = ResolveEmissionSpectrum(request, testDir.string());
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    ASSERT_EQ(resolved.value().exactSegments.size(), 2u);
+    const auto& first = resolved.value().exactSegments[0];
+    const auto& second = resolved.value().exactSegments[1];
+    EXPECT_EQ(first.numSamples, 32u);
+    EXPECT_EQ(second.numSamples, 2u);
+    EXPECT_FLOAT_EQ(first.values[2 * (first.numSamples - 1)], 431.0f);
+    EXPECT_FLOAT_EQ(second.values[0], 431.0f);
+    EXPECT_FLOAT_EQ(first.values[2 * (first.numSamples - 1) + 1],
+                    second.values[1]);
+    EXPECT_FLOAT_EQ(second.values[2], 432.0f);
 }
 
 TEST_F(ConfigResolveTest, AnUnknownEmissiveCurveOrScaleIsFatalRatherThanIgnored) {
@@ -1737,6 +1913,39 @@ TEST(ConfigResolveFluorescence, AYieldAboveOneIsRejected) {
     EXPECT_TRUE(ResolveFluorescence(MakeFluorescenceRequest(0.0f)).has_value());
 }
 
+TEST(ConfigResolveFluorescence, NarrowOutputKeepsBlueExcitationAndFullEmissionScale) {
+    auto wide = MakeFluorescenceRequest();
+    auto narrow = wide;
+    narrow.bandMinNm = 540.0f;
+    narrow.bandMaxNm = 560.0f;
+
+    const auto full = ResolveFluorescence(wide);
+    const auto filtered = ResolveFluorescence(narrow);
+    ASSERT_TRUE(full.has_value()) << full.error();
+    ASSERT_TRUE(filtered.has_value()) << filtered.error();
+    EXPECT_GT(filtered.value().excitation.Evaluate(450.0f), 0.0f);
+    EXPECT_NEAR(filtered.value().excitation.Evaluate(450.0f),
+                full.value().excitation.Evaluate(450.0f), 1e-6f);
+    EXPECT_NEAR(filtered.value().emission.Evaluate(550.0f),
+                full.value().emission.Evaluate(550.0f), 1e-6f);
+    EXPECT_NEAR(filtered.value().emissionAreaInBand,
+                full.value().emissionAreaInBand, 1e-3f);
+}
+
+TEST(ConfigResolveFluorescence, VisibleExcitationCanFeedInfraredEmission) {
+    FluorescenceBindingRequest request;
+    request.excitationSamples = {{400.0f, 0.0f}, {450.0f, 0.8f}, {500.0f, 0.0f}};
+    request.emissionSamples = {{1400.0f, 0.0f}, {1450.0f, 1.0f}, {1500.0f, 0.0f}};
+    request.yield = 0.5f;
+    request.bandMinNm = 1400.0f;
+    request.bandMaxNm = 1500.0f;
+
+    const auto resolved = ResolveFluorescence(request);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_GT(resolved.value().excitation.Evaluate(450.0f), 0.0f);
+    EXPECT_GT(resolved.value().emission.Evaluate(1450.0f), 0.0f);
+}
+
 // The excitation is a fraction too, and the common way to get it wrong is a
 // table published in percent.
 TEST(ConfigResolveFluorescence, AnExcitationAboveOneIsRejected) {
@@ -1756,6 +1965,43 @@ TEST(ConfigResolveFluorescence, AnEmissionOutsideTheBandIsRejected) {
     request.bandMinNm = 3000.0f;
     request.bandMaxNm = 5000.0f;
     EXPECT_FALSE(ResolveFluorescence(request).has_value());
+}
+
+TEST_F(ConfigResolveTest, FluorescenceEmissionOutsidePreviewCanReachDeviceBand) {
+    auto config = Parse({.spectralKeys = "mode = \"vis_fused\"\n",
+                         .trailing = R"([sensor]
+version = 1
+enabled = true
+detector = "photon"
+[sensor.optics]
+sensor_width_px = 64
+sensor_height_px = 64
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+wavelength_nm = [850.0, 900.0]
+value = [0.6, 0.6]
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    Scene scene = MakeSceneWithMaterials({"Dye"});
+    auto& dye = scene.materials[0];
+    dye.fluorescenceExcitationCurve =
+        {{400.0f, 0.0f}, {450.0f, 0.8f}, {500.0f, 0.0f}};
+    dye.fluorescenceEmissionCurve =
+        {{850.0f, 0.0f}, {875.0f, 1.0f}, {900.0f, 0.0f}};
+    dye.fluorescenceYield = 0.5f;
+    ConfigApplyOptions options;
+    ConfigApplyReport localReport;
+    auto spectra =
+        ResolveMaterialSpectra(config, scene, resolved.value(), options, localReport);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+    EXPECT_GE(scene.materials[0].fluorescenceExcitationCurveIndex, 0);
+    EXPECT_GE(scene.materials[0].fluorescenceEmissionCurveIndex, 0);
+    const auto& gpu = spectra.value().curves[
+        static_cast<size_t>(scene.materials[0].fluorescenceEmissionCurveIndex)];
+    EXPECT_GE(gpu.GetWavelengthRange().first, 850.0f);
+    EXPECT_LE(gpu.GetWavelengthRange().second, 900.0f);
 }
 
 // Fluorescence emits at longer wavelengths than it absorbs. A pair the other

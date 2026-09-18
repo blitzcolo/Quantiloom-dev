@@ -350,7 +350,7 @@ struct SpectralCurveGPU {
     float startWavelength_nm;            // Starting wavelength (nm)
     float stepSize_nm;                   // Wavelength step size (nm)
     uint  numSamples;                    // Actual number of valid samples (0 to MAX_SPECTRAL_SAMPLES)
-    uint  _padding;                      // Padding for 16-byte alignment
+    uint  _padding;                      // Emission only: next exact segment index+1, 0 ends chain; step=0 packs <=32 (nm,value) pairs
 };
 
 

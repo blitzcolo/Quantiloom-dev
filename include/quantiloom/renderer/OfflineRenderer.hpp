@@ -36,6 +36,7 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "renderer/TimelineControl.hpp"
+#include "postprocess/CameraPipeline.hpp"
 
 #include <functional>
 #include <memory>
@@ -240,6 +241,16 @@ public:
      *         is no partial result worth returning.
      */
     OfflineRenderOutput Render();
+
+    /// Resolved versioned camera model shared with CLI and the interactive host.
+    [[nodiscard]] const camera::CameraConfig& GetCameraConfig() const;
+
+    /// Capture one physical device frame at the first row's exposure midpoint.
+    /// The sensor chain samples the rendered scene at its own time/wavelength
+    /// coordinates; it never reconstructs a device response from a VIS RGB or
+    /// fixed-band image. State advances only after a successful acquisition.
+    [[nodiscard]] Result<camera::CameraOutput, String>
+    CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds);
 
     /**
      * @brief Move the clock to @p t_s

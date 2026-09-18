@@ -139,10 +139,10 @@ inline auto ApertureSolidAngleSr(f32 fNumber) -> f64 {
     return std::numbers::pi / (1.0 + 4.0 * n * n);
 }
 
-/// Sensor output containing both raw DN and enhanced preview
+/// Compatibility output from the versioned camera pipeline.
 struct SensorOutput {
     Image rawDN;            // Raw sensor DN values [0, 2^bitDepth-1]
-    Image enhancedPreview;  // Noisy radiance with PSF blur (same scale as input)
+    Image enhancedPreview;  // Quantized-RAW-derived encoded sRGB preview.
 };
 
 /// Abstract sensor model interface

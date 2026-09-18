@@ -5,8 +5,8 @@
 // - CPU sensor chain execution order verification
 // - Deterministic behavior with noise disabled
 // - PSF blur effect on high-frequency content
-// - FPN structured noise verification
-// - FPN map generation statistical properties
+// - fixed per-pixel PRNU and dark nonuniformity
+// - fixed-pattern persistence across captures
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -94,75 +94,42 @@ auto CentreVariance(const Image& img) -> f32 {
 } // namespace
 
 TEST_F(SensorChainOrderTest, PSFReducesHighFrequency) {
-    // Create checkerboard pattern (high frequency)
     Image hdr(128, 128, 1);
-    for (u32 y = 0; y < 128; ++y) {
-        for (u32 x = 0; x < 128; ++x) {
-            hdr(x, y, 0) = ((x + y) % 2 == 0) ? 0.5f : 0.1f;
-        }
-    }
-
-    // Apply sensor chain (PSF will blur the checkerboard)
-    params.fNumber = 8.0f;  // Larger f# -> more blur
-    GenericSensor sensor;
-    auto result = sensor.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    // Compare against the enhanced preview, which is radiance on the same scale
-    // as the input -- so this is a statement about blur, not about the DN scale.
-    // The previous version compared radiance variance against DN variance and
-    // absorbed the unit mismatch into a 1e6 factor, which meant it passed for
-    // any PSF width whatsoever, including none.
-    const f32 inputVar = CentreVariance(hdr);
-    const f32 outVar = CentreVariance(result.value().enhancedPreview);
-
-    ASSERT_GT(inputVar, 0.0f);
-    EXPECT_LT(outVar, inputVar) << "PSF blur must reduce checkerboard contrast";
+    for (u32 y = 0; y < 128; ++y)
+        for (u32 x = 0; x < 128; ++x)
+            hdr(x, y, 0) = ((x + y) % 2 == 0) ? 0.005f : 0.001f;
+    params.fNumber = 8.0f;
+    params.psfSigma_px = 0.0f;
+    GenericSensor sharpSensor;
+    auto sharp = sharpSensor.Apply(hdr, params);
+    ASSERT_TRUE(sharp.has_value());
+    params.psfSigma_px = -1.0f;
+    GenericSensor blurredSensor;
+    auto blurred = blurredSensor.Apply(hdr, params);
+    ASSERT_TRUE(blurred.has_value());
+    // Compare two previews in the same encoded display space; input radiance
+    // and a display image have different units and cannot be compared directly.
+    EXPECT_LT(CentreVariance(blurred.value().enhancedPreview),
+              CentreVariance(sharp.value().enhancedPreview));
 }
 
-TEST_F(SensorChainOrderTest, FPNCreatesStructuredNoise) {
-    // FPN should create spatially correlated noise (stripes),
-    // not random per-pixel noise
-    Image hdr(128, 128, 1);
-    for (auto& v : hdr.data) v = 0.01f;
-
+TEST_F(SensorChainOrderTest, FPNCreatesStableSpatialNoise) {
+    Image hdr(64, 64, 1);
+    for (auto& value : hdr.data) value = 0.01f;
     params.enableFPN = true;
     params.prnuSigma = 0.05f;
-    params.dsnuSigma_e = 30.0f;
-    params.fNumber = 1.4f;
-    params.gain = 1.0f;
-
-    GenericSensor sensor;
-    auto result = sensor.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    const Image& dn = result.value().rawDN;
-
-    // Adjacent pixels in same column should be correlated (PRNU)
-    f32 sameColCorr = 0.0f;
-    u32 count = 0;
-    for (u32 x = 20; x < 108; ++x) {
-        for (u32 y = 20; y < 107; ++y) {
-            sameColCorr += dn(x, y, 0) * dn(x, y + 1, 0);
-            ++count;
-        }
-    }
-    sameColCorr /= count;
-
-    // Adjacent pixels in different columns should be less correlated
-    f32 diffColCorr = 0.0f;
-    count = 0;
-    for (u32 x = 20; x < 107; ++x) {
-        for (u32 y = 20; y < 108; ++y) {
-            diffColCorr += dn(x, y, 0) * dn(x + 1, y, 0);
-            ++count;
-        }
-    }
-    diffColCorr /= count;
-
-    // Both should be positive (signal present)
-    EXPECT_GT(sameColCorr, 0.0f);
-    EXPECT_GT(diffColCorr, 0.0f);
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    auto first = GenericSensor().Apply(hdr, params);
+    auto second = GenericSensor().Apply(hdr, params);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first.value().rawDN.data, second.value().rawDN.data);
+    const f32 baseline = first.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : first.value().rawDN.data) if (value != baseline) ++different;
+    EXPECT_GT(different, first.value().rawDN.data.size() / 4);
 }
 
 TEST_F(SensorChainOrderTest, FullChainEndToEnd) {
@@ -210,118 +177,57 @@ TEST_F(SensorChainOrderTest, FullChainEndToEnd) {
 }
 
 // ============================================================================
-// FPN Map Generation Statistical Verification
+// Fixed-Pattern Statistical Verification
 // ============================================================================
 
-TEST_F(SensorChainOrderTest, PRNUColumnCorrelation) {
-    // PRNU creates vertical stripes: pixels in same column are correlated
-    Image hdr(200, 200, 1);
-    for (auto& v : hdr.data) v = 0.01f;
-
+TEST_F(SensorChainOrderTest, PRNUOnlyModulatesIlluminatedCharge) {
+    Image dark(64, 64, 1);
+    Image lit(64, 64, 1);
+    for (auto& value : lit.data) value = 0.01f;
     params.enableFPN = true;
     params.prnuSigma = 0.08f;
-    params.dsnuSigma_e = 0.0f;  // Isolate PRNU
-    params.fNumber = 1.4f;
-    params.gain = 1.0f;
-
+    params.dsnuSigma_e = 0.0f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
     GenericSensor sensor;
-    auto result = sensor.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-    const Image& dn = result.value().rawDN;
-
-    // Column means
-    std::vector<f32> colMeans(dn.width, 0.0f);
-    for (u32 x = 0; x < dn.width; ++x) {
-        for (u32 y = 0; y < dn.height; ++y) {
-            colMeans[x] += dn(x, y, 0);
-        }
-        colMeans[x] /= dn.height;
-    }
-
-    f32 overallMean = 0.0f;
-    for (auto m : colMeans) overallMean += m;
-    overallMean /= colMeans.size();
-
-    // Between-column variance (should be large for vertical stripes)
-    f32 betweenColVar = 0.0f;
-    for (auto m : colMeans) {
-        f32 d = m - overallMean;
-        betweenColVar += d * d;
-    }
-    betweenColVar /= colMeans.size();
-
-    // Within-column variance (should be small)
-    f32 withinColVar = 0.0f;
-    u32 cnt = 0;
-    for (u32 x = 50; x < 150; ++x) {
-        for (u32 y = 50; y < 150; ++y) {
-            f32 d = dn(x, y, 0) - colMeans[x];
-            withinColVar += d * d;
-            ++cnt;
-        }
-    }
-    withinColVar /= cnt;
-
-    EXPECT_GT(betweenColVar, withinColVar)
-        << "PRNU vertical stripes: between-column > within-column variance";
+    auto darkFrame = sensor.Apply(dark, params);
+    auto litFrame = sensor.Apply(lit, params);
+    ASSERT_TRUE(darkFrame.has_value());
+    ASSERT_TRUE(litFrame.has_value());
+    for (f32 value : darkFrame.value().rawDN.data) EXPECT_FLOAT_EQ(value, 0.0f);
+    const f32 first = litFrame.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : litFrame.value().rawDN.data) if (value != first) ++different;
+    EXPECT_GT(different, litFrame.value().rawDN.data.size() / 4);
 }
 
-TEST_F(SensorChainOrderTest, DSNURowCorrelation) {
-    // DSNU creates horizontal stripes: pixels in same row are correlated
-    Image hdr(200, 200, 1);
-    for (auto& v : hdr.data) v = 0.01f;
-
+TEST_F(SensorChainOrderTest, DSNUIsDarkChargeNonuniformity) {
+    Image dark(64, 64, 1);
     params.enableFPN = true;
-    params.prnuSigma = 0.0f;  // Isolate DSNU
-    params.dsnuSigma_e = 50.0f;
-    params.fNumber = 1.4f;
-    params.gain = 1.0f;
-
-    GenericSensor sensor;
-    auto result = sensor.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-    const Image& dn = result.value().rawDN;
-
-    // Row means
-    std::vector<f32> rowMeans(dn.height, 0.0f);
-    for (u32 y = 0; y < dn.height; ++y) {
-        for (u32 x = 0; x < dn.width; ++x) {
-            rowMeans[y] += dn(x, y, 0);
-        }
-        rowMeans[y] /= dn.width;
-    }
-
-    f32 overallMean = 0.0f;
-    for (auto m : rowMeans) overallMean += m;
-    overallMean /= rowMeans.size();
-
-    // Between-row variance (should be large for horizontal stripes)
-    f32 betweenRowVar = 0.0f;
-    for (auto m : rowMeans) {
-        f32 d = m - overallMean;
-        betweenRowVar += d * d;
-    }
-    betweenRowVar /= rowMeans.size();
-
-    // Within-row variance (should be small)
-    f32 withinRowVar = 0.0f;
-    u32 cnt = 0;
-    for (u32 y = 50; y < 150; ++y) {
-        for (u32 x = 50; x < 150; ++x) {
-            f32 d = dn(x, y, 0) - rowMeans[y];
-            withinRowVar += d * d;
-            ++cnt;
-        }
-    }
-    withinRowVar /= cnt;
-
-    EXPECT_GT(betweenRowVar, withinRowVar)
-        << "DSNU horizontal stripes: between-row > within-row variance";
+    params.prnuSigma = 0.0f;
+    params.dsnuSigma_e = 20.0f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
+    GenericSensor noDarkCurrent;
+    auto absent = noDarkCurrent.Apply(dark, params);
+    ASSERT_TRUE(absent.has_value());
+    for (f32 value : absent.value().rawDN.data) EXPECT_FLOAT_EQ(value, 0.0f);
+    params.enableDarkCurrent = true;
+    params.darkCurrent_e_s = 5000.0f;
+    GenericSensor darkCurrent;
+    auto present = darkCurrent.Apply(dark, params);
+    ASSERT_TRUE(present.has_value());
+    const f32 first = present.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : present.value().rawDN.data) if (value != first) ++different;
+    EXPECT_GT(different, present.value().rawDN.data.size() / 4);
 }
 
 TEST_F(SensorChainOrderTest, FPNMapsDeterministic) {
-    // Same sensor instance should produce same FPN pattern
-    // (FPN maps generated once and reused)
+    // Fixed-pattern keys exclude the acquisition index, so a second
+    // capture with temporal noise disabled must be identical.
     Image hdr(100, 100, 1);
     for (auto& v : hdr.data) v = 0.01f;
 

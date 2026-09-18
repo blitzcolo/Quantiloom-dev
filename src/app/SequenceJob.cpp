@@ -182,6 +182,7 @@ int RunSequence(const SequenceOptions& options) {
 
     i64 index = 0;
     u32 failures = 0;
+    camera::CaptureState cameraState;
     const auto sequenceStarted = std::chrono::steady_clock::now();
 
     for (i64 tick = from; tick <= to; tick += every) {
@@ -218,7 +219,8 @@ int RunSequence(const SequenceOptions& options) {
             continue;
         }
         if (!rendered.wroteItsOwnOutput) {
-            WriteFrameOutputs(config, rendered, renderer.Params().mode, outcome);
+            WriteFrameOutputs(config, renderer, cameraState, rendered,
+                              renderer.Params().mode, outcome);
         }
         if (!outcome.error.empty()) ++failures;
 

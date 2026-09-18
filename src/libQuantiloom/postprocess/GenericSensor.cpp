@@ -1,688 +1,148 @@
 #include "postprocess/GenericSensor.hpp"
-#include "core/Log.hpp"
+
+#include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CpuCameraPipeline.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <numbers>
 #include <random>
 
 namespace quantiloom {
 
-// ============================================================================
-// Constants
-// ============================================================================
-
-// Planck constant (J·s)
-constexpr f64 kPlanckConstant = 6.62607015e-34;
-
-// Speed of light (m/s)
-constexpr f64 kSpeedOfLight = 299792458.0;
-
-// Chain steps that carry no state. They were private statics of GenericSensor,
-// which exported them from the DLL for no reason -- nothing outside this file
-// can call them. Declared static here so the definitions below, which appear in
-// call order rather than declaration order, keep internal linkage.
-static auto ApplyPSF(const Image& img, f32 sigma_pixels) -> Image;
-static auto RadianceToElectrons(const Image& radiance, const SensorParams& p) -> Image;
-static auto QuantizeToDN(const Image& electrons, const SensorParams& p) -> Image;
-static auto ElectronsToRadiance(const Image& electrons, const SensorParams& p) -> Image;
-static auto MakeGaussianKernel(f32 sigma) -> Vector<f32>;
-static auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image;
-static auto ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image;
-
-// ============================================================================
-// State
-// ============================================================================
-
 struct GenericSensor::Impl {
-    // RNG for noise. Seeded from SensorParams::noiseSeed on first use rather
-    // than at construction, so the seed travels with the parameters (and thus
-    // with the scene TOML) instead of being fixed before they are known.
-    // Re-seeded if a later Apply asks for a different seed.
-    std::mt19937 m_Rng;
-    bool m_Seeded = false;
-    u32 m_SeededWith = 0;
-
-    // FPN maps (generated once, reused for all frames)
-    Image m_PRNUMap;  // Photo Response Non-Uniformity (multiplicative gain map)
-    Image m_DSNUMap;  // Dark Signal Non-Uniformity (additive dark current map)
-    bool m_FPNMapsGenerated = false;
-
-    // Seed the RNG from SensorParams on first use, or when the requested seed
-    // changes. Invalidates the FPN maps, which belong to the previous stream.
-    auto EnsureSeeded(u32 requestedSeed) -> void;
-
-    // Add noise sources
-    auto AddNoise(Image& electrons, const SensorParams& p) -> void;
-
-    // FPN: Generate fixed pattern noise maps (PRNU + DSNU)
-    auto GenerateFPNMaps(u32 width, u32 height, const SensorParams& p) -> void;
-
-    // FPN: Apply fixed pattern noise to electron signal
-    auto ApplyFPN(Image& electrons, const SensorParams& p) -> void;
+    camera::CaptureState capture;
+    u32 requestedSeed = 0;
+    u32 effectiveSeed = 0;
+    bool seeded = false;
 };
 
-// ============================================================================
-// Constructor
-// ============================================================================
-
-// The RNG is seeded in Apply from SensorParams, not here -- see EnsureSeeded.
 GenericSensor::GenericSensor() : m_impl(std::make_unique<Impl>()) {}
 GenericSensor::~GenericSensor() = default;
 
-auto GenericSensor::Impl::EnsureSeeded(const u32 requestedSeed) -> void {
-    // Seed 0 means "give me nondeterministic noise". Anything else is honoured
-    // exactly, so the same seed and parameters reproduce the same raw DN.
-    // Re-seeding only when the request changes keeps successive frames from one
-    // sensor advancing the stream, which is what makes per-frame noise differ
-    // while the FPN maps stay fixed.
-    if (m_Seeded && m_SeededWith == requestedSeed) {
-        return;
-    }
-
-    const u32 effective = (requestedSeed != 0U) ? requestedSeed
-                                                : std::random_device{}();
-    m_Rng.seed(effective);
-    m_Seeded = true;
-    m_SeededWith = requestedSeed;
-
-    // Maps were drawn from the previous stream; they must not outlive it.
-    m_FPNMapsGenerated = false;
-
-    if (requestedSeed == 0U) {
-        Log::Debug("Sensor noise: nondeterministic seed {}", effective);
-    }
-}
-
-// ============================================================================
-// Main Interface
-// ============================================================================
-
 auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
-    -> Result<SensorOutput> {
-
-    if (!hdr.IsValid()) {
-        return Result<SensorOutput>(Result<SensorOutput>::Err("Invalid input image"));
+    -> Result<SensorOutput, String> {
+    if (!hdr.IsValid() || (hdr.channels != 1 && hdr.channels != 3 &&
+                           hdr.channels != 4))
+        return Result<SensorOutput, String>::Err(
+            "GenericSensor needs a valid mono or linear RGB image");
+    if (!m_impl->seeded || m_impl->requestedSeed != params.noiseSeed) {
+        m_impl->requestedSeed = params.noiseSeed;
+        m_impl->effectiveSeed = params.noiseSeed != 0 ?
+            params.noiseSeed : std::random_device{}();
+        m_impl->capture = {};
+        m_impl->seeded = true;
     }
-
-    Log::Debug("Sensor chain: Input {}x{} ({} channels)",
-               hdr.width, hdr.height, hdr.channels);
-
-    m_impl->EnsureSeeded(params.noiseSeed);
-
-    // Generate FPN maps if needed (lazy initialization)
-    if (params.enableFPN && !m_impl->m_FPNMapsGenerated) {
-        m_impl->GenerateFPNMaps(hdr.width, hdr.height, params);
-        m_impl->m_FPNMapsGenerated = true;
+    camera::CameraConfig config;
+    config.enabled = true;
+    config.device.id = "legacy_generic_photon";
+    config.device.displayName = "Legacy generic photon sensor";
+    config.device.detector = camera::DetectorKind::Photon;
+    config.device.calibration = camera::CalibrationStatus::GenericAssumption;
+    config.device.cfa = hdr.channels == 1 ? camera::CfaPattern::Mono :
+                                          camera::CfaPattern::MultiChannel;
+    config.optics.sensorWidthPx = hdr.width;
+    config.optics.sensorHeightPx = hdr.height;
+    config.optics.focalLengthMm = params.focalLength_mm;
+    config.optics.fNumber = params.fNumber;
+    config.optics.pixelPitchUm = params.pixelPitch_um;
+    config.optics.psfSigmaPixelsOverride = params.psfSigma_px;
+    config.optics.cosFourthVignetting =
+        params.enableVignetting && !params.isTelecentric;
+    if (config.optics.cosFourthVignetting && params.fov_deg > 0.0f) {
+        const auto focal = camera::EffectiveFocalLengthMm(
+            static_cast<f64>(params.fov_deg) * std::numbers::pi_v<f64> / 180.0,
+            params.pixelPitch_um, hdr.width);
+        if (!focal) return Result<SensorOutput, String>::Err(focal.error());
+        config.optics.focalLengthMm = focal.value();
     }
-
-    // Step 1: Apply PSF blur (diffraction-limited optics, or an explicit width)
-    const f32 sigma_pixels = PSFSigmaPixels(params);
-
-    if (params.psfSigma_px >= 0.0f) {
-        Log::Debug("PSF: σ = {:.3f} pixels (explicit override)", sigma_pixels);
-    } else {
-        Log::Debug("PSF: σ = {:.3f} pixels (diffraction-limited, {:.3f}·λ·f#)",
-                   sigma_pixels, kAiryGaussianSigmaFactor);
+    config.readout.exposureSeconds = params.integrationTime_s;
+    config.readout.electronsPerDn = params.gain; // Old gain was e-/DN.
+    config.readout.analogGain = 1.0;
+    config.readout.adcBits = params.bitDepth;
+    config.readout.outputBits = params.bitDepth;
+    config.photon.fullWellElectrons = params.wellCapacity_e;
+    config.photon.darkCurrentElectronsPerSecond = params.darkCurrent_e_s;
+    config.photon.readNoiseElectronsRms = params.readNoise_e_rms;
+    config.photon.prnuSigma = params.prnuSigma;
+    config.photon.dsnuElectronsRms = params.dsnuSigma_e;
+    config.photon.dsnuReferenceExposureSeconds = params.integrationTime_s;
+    config.photon.enableShotNoise = params.enablePoissonNoise;
+    config.photon.enableDarkShotNoise = params.enablePoissonNoise;
+    config.photon.enableReadNoise = params.enableReadNoise;
+    config.photon.enableDarkCurrent = params.enableDarkCurrent;
+    config.photon.enableFpn = params.enableFPN;
+    config.photon.applyNuc = params.enableNUC;
+    config.photon.nucResidualFraction =
+        std::clamp(1.0 - static_cast<f64>(params.nucEfficiency), 0.0, 1.0);
+    config.randomSeed = m_impl->effectiveSeed;
+    config.fastRgbRadianceScale = 1.0; // Explicit generic 1 nm flat surrogate.
+    config.calibratedFastRgbInput = false;
+    config.quality.wavelengthSamples = 2;
+    config.quality.timeSamples = 1;
+    config.quality.pixelSamples = 1;
+    config.products.rawDn = true;
+    config.products.display = true;
+    config.products.bandMeasurement = false;
+    config.products.correctedDeviceSignal = false;
+    const f64 centerNm = params.wavelength_nm;
+    for (u32 channel = 0; channel < (hdr.channels == 1 ? 1u : 3u); ++channel) {
+        camera::ResponseCurve qe;
+        qe.kind = camera::ResponseKind::AbsoluteQE;
+        qe.wavelengthNm = {centerNm - 0.5, centerNm + 0.5};
+        qe.value = {params.quantumEfficiency, params.quantumEfficiency};
+        qe.source.parameterPath = "legacy.sensor.quantum_efficiency";
+        qe.source.provenance = camera::ValueProvenance::Assumed;
+        camera::ResponseStack response;
+        response.quantumEfficiency = std::move(qe);
+        config.device.channels.push_back({
+            hdr.channels == 1 ? "Mono" : (channel == 0 ? "R" :
+                                             channel == 1 ? "G" : "B"),
+            std::move(response)});
     }
-
-    Image blurred = ApplyPSF(hdr, sigma_pixels);
-
-    // Step 2: Radiance → Photo-electrons
-    Image electrons = RadianceToElectrons(blurred, params);
-
-    // Step 3: Add noise
-    m_impl->AddNoise(electrons, params);
-
-    // Step 4a: Quantize to DN (raw sensor output)
-    Image rawDN = QuantizeToDN(electrons, params);
-
-    // Step 4b: Convert noisy electrons back to radiance (enhanced preview)
-    Image enhancedPreview = ElectronsToRadiance(electrons, params);
-
-    // Add metadata
-    rawDN.metadata["sensor_model"] = "GenericSensor";
-    rawDN.metadata["integration_time_s"] = std::to_string(params.integrationTime_s);
-    rawDN.metadata["gain"] = std::to_string(params.gain);
-    rawDN.metadata["bit_depth"] = std::to_string(params.bitDepth);
-
-    enhancedPreview.metadata["sensor_model"] = "GenericSensor";
-    enhancedPreview.metadata["enhanced_preview"] = "true";
-
-    Log::Info("Sensor chain complete: DN range [0, {}]", (1u << params.bitDepth) - 1);
-
-    SensorOutput output;
-    output.rawDN = std::move(rawDN);
-    output.enhancedPreview = std::move(enhancedPreview);
-
-    return Result<SensorOutput, String>(std::move(output));  // Implicit conversion to Result
-}
-
-// ============================================================================
-// Step 1: Optical PSF (Gaussian Approximation)
-// ============================================================================
-
-auto ApplyPSF(const Image& img, const f32 sigma_pixels) -> Image {
-    if (sigma_pixels < kMinPSFSigmaPixels) {
-        // Narrower than a pixel can express -- the GPU path skips here too.
-        return img;
-    }
-
-    // Separable Gaussian convolution: O(N·K) instead of O(N·K²)
-    const auto kernel = MakeGaussianKernel(sigma_pixels);
-    Image temp = ConvolveX(img, kernel);
-    return ConvolveY(temp, kernel);
-}
-
-auto MakeGaussianKernel(const f32 sigma) -> Vector<f32> {
-    // Kernel radius: 3σ (covers 99.7% of Gaussian)
-    const i32 radius = static_cast<i32>(std::ceil(3.0f * sigma));
-    const i32 size = 2 * radius + 1;
-
-    Vector<f32> kernel(size);
-    f32 sum = 0.0f;
-
-    for (i32 i = 0; i < size; ++i) {
-        const f32 x = static_cast<f32>(i - radius);
-        kernel[i] = std::exp(-0.5f * (x * x) / (sigma * sigma));
-        sum += kernel[i];
-    }
-
-    // Normalize
-    for (auto& k : kernel) {
-        k /= sum;
-    }
-
-    return kernel;
-}
-
-auto ConvolveX(const Image& img, const Vector<f32>& kernel) -> Image {
-    Image result(img.width, img.height, img.channels);
-    const i32 radius = static_cast<i32>(kernel.size()) / 2;
-
-    for (u32 y = 0; y < img.height; ++y) {
-        for (u32 x = 0; x < img.width; ++x) {
-            for (u32 c = 0; c < img.channels; ++c) {
-                f32 sum = 0.0f;
-                for (i32 k = -radius; k <= radius; ++k) {
-                    const i32 xk = std::clamp(static_cast<i32>(x) + k, 0,
-                                              static_cast<i32>(img.width) - 1);
-                    sum += img(xk, y, c) * kernel[k + radius];
-                }
-                result(x, y, c) = sum;
-            }
+    if (params.enableNUC && params.enableFPN) {
+        const size_t count = static_cast<size_t>(hdr.width) * hdr.height *
+                             (hdr.channels == 1 ? 1u : 3u);
+        config.photon.nucGainMap.resize(count);
+        config.photon.nucOffsetElectronsMap.resize(count);
+        for (size_t i = 0; i < count; ++i) {
+            const f64 prnu = params.prnuSigma * camera::CounterGaussian(
+                config.randomSeed, static_cast<u32>(i), 0,
+                camera::NoiseClass::FixedPrnu);
+            const f64 dsnu = params.dsnuSigma_e * camera::CounterGaussian(
+                config.randomSeed, static_cast<u32>(i), 0,
+                camera::NoiseClass::FixedDsnu);
+            config.photon.nucGainMap[i] = 1.0 / std::max(0.01, 1.0 + prnu);
+            config.photon.nucOffsetElectronsMap[i] = -dsnu;
         }
     }
-
-    return result;
-}
-
-auto ConvolveY(const Image& img, const Vector<f32>& kernel) -> Image {
-    Image result(img.width, img.height, img.channels);
-    const i32 radius = static_cast<i32>(kernel.size()) / 2;
-
-    for (u32 y = 0; y < img.height; ++y) {
-        for (u32 x = 0; x < img.width; ++x) {
-            for (u32 c = 0; c < img.channels; ++c) {
-                f32 sum = 0.0f;
-                for (i32 k = -radius; k <= radius; ++k) {
-                    const i32 yk = std::clamp(static_cast<i32>(y) + k, 0,
-                                              static_cast<i32>(img.height) - 1);
-                    sum += img(x, yk, c) * kernel[k + radius];
-                }
-                result(x, y, c) = sum;
-            }
-        }
+    Image rgb(hdr.width, hdr.height, 3);
+    for (u32 y = 0; y < hdr.height; ++y)
+        for (u32 x = 0; x < hdr.width; ++x)
+            for (u32 channel = 0; channel < 3; ++channel)
+                rgb(x, y, channel) = hdr(x, y, hdr.channels == 1 ? 0u : channel);
+    camera::CpuCameraPipeline pipeline(std::move(config));
+    auto output = pipeline.CaptureFastRgb(
+        m_impl->capture, static_cast<f64>(m_impl->capture.acquisitionIndex) *
+                             params.integrationTime_s, rgb);
+    if (!output) return Result<SensorOutput, String>::Err(output.error());
+    if (!output.value().rawDn || !output.value().display)
+        return Result<SensorOutput, String>::Err(
+            "legacy camera adapter did not return RAW and preview");
+    SensorOutput legacy;
+    legacy.rawDN = std::move(output.value().rawDn->image);
+    legacy.enhancedPreview = std::move(output.value().display->image);
+    if (hdr.channels == 1) {
+        Image gray(hdr.width, hdr.height, 1);
+        for (u32 y = 0; y < hdr.height; ++y)
+            for (u32 x = 0; x < hdr.width; ++x)
+                gray(x, y, 0) = legacy.enhancedPreview(x, y, 0);
+        gray.metadata = legacy.enhancedPreview.metadata;
+        legacy.enhancedPreview = std::move(gray);
     }
-
-    return result;
-}
-
-// ============================================================================
-// Step 2: Radiance → Photo-electrons
-// ============================================================================
-// Implements:
-// - Solid angle calculation for lens aperture
-// - Optional cos^4 natural vignetting (P5 fix)
-// - Photon counting with quantum efficiency
-// ============================================================================
-
-auto RadianceToElectrons(const Image& radiance,
-                                         const SensorParams& p) -> Image {
-    Image electrons(radiance.width, radiance.height, radiance.channels);
-
-    // Pixel area (m²)
-    const f64 pixelArea_m2 = (p.pixelPitch_um * 1e-6) * (p.pixelPitch_um * 1e-6);
-
-    // Photon energy: E = h·c / λ
-    const f64 wavelength_m = p.wavelength_nm * 1e-9;
-    const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
-
-    // Solid angle subtended by lens aperture: Ω = π·sin²θ = π / (1 + 4·f#²)
-    const f64 solidAngle_sr = ApertureSolidAngleSr(p.fNumber);
-
-    Log::Debug("Optics: f# = {:.1f}, Ω = {:.6e} sr, pixel area = {:.3e} m²",
-               p.fNumber, solidAngle_sr, pixelArea_m2);
-
-    // ========================================================================
-    // Vignetting setup (P5 fix: cos^4 natural vignetting)
-    // ========================================================================
-    // Compute image center and focal length for vignetting calculation
-    const f32 cx = static_cast<f32>(radiance.width) / 2.0f;
-    const f32 cy = static_cast<f32>(radiance.height) / 2.0f;
-
-    // Focal length from FOV:
-    // tan(FOV/2) = (sensor_width/2) / focal_length
-    // focal_length = (width * pitch) / (2 * tan(FOV/2))
-    f32 focal_length_m = 0.0f;
-    if (p.enableVignetting && !p.isTelecentric && p.fov_deg > 0.0f) {
-        const f32 fov_half_rad = p.fov_deg * 0.5f * (std::numbers::pi_v<f32> / 180.0f);
-        const f32 sensor_half_width = cx * p.pixelPitch_um * 1e-6f;
-        focal_length_m = sensor_half_width / std::tan(fov_half_rad);
-        Log::Debug("Vignetting enabled: FOV={:.1f}°, focal_length={:.1f}mm",
-                   p.fov_deg, focal_length_m * 1000.0f);
-    }
-
-    // Statistics for debugging
-    f64 minElectrons = 1e10, maxElectrons = 0.0, sumElectrons = 0.0;
-    f32 minVignette = 1.0f, maxVignette = 1.0f;
-
-    for (u32 y = 0; y < radiance.height; ++y) {
-        for (u32 x = 0; x < radiance.width; ++x) {
-            // ================================================================
-            // Compute vignetting factor for this pixel
-            // ================================================================
-            f32 vignette = 1.0f;
-            if (p.enableVignetting && !p.isTelecentric && focal_length_m > 0.0f) {
-                // Distance from optical axis (in meters)
-                const f32 dx = (static_cast<f32>(x) - cx) * p.pixelPitch_um * 1e-6f;
-                const f32 dy = (static_cast<f32>(y) - cy) * p.pixelPitch_um * 1e-6f;
-                const f32 r = std::sqrt(dx * dx + dy * dy);
-
-                // Angle from optical axis: θ = atan(r / f)
-                const f32 theta = std::atan2(r, focal_length_m);
-
-                // Cos^4 vignetting law:
-                // E(θ) = E(0) × cos⁴(θ)
-                // Components:
-                //   - cos θ: oblique incidence on sensor (Lambert)
-                //   - cos θ: reduced solid angle of exit pupil
-                //   - cos² θ: increased image distance (inverse-square)
-                const f32 cos_theta = std::cos(theta);
-                vignette = cos_theta * cos_theta * cos_theta * cos_theta;
-
-                // Update statistics
-                minVignette = std::min(minVignette, vignette);
-                maxVignette = std::max(maxVignette, vignette);
-            }
-
-            // Effective solid angle with vignetting applied
-            const f64 effective_solidAngle_sr = solidAngle_sr * static_cast<f64>(vignette);
-
-            // Process all channels for this pixel
-            for (u32 c = 0; c < radiance.channels; ++c) {
-                const u32 idx = (y * radiance.width + x) * radiance.channels + c;
-
-                // Input: radiance L (W/m²/sr)
-                // Irradiance: E = L · Ω (W/m²)
-                const f64 irradiance_W_m2 = radiance.data[idx] * effective_solidAngle_sr;
-
-                // Energy collected: E_total = E · A · t (Joules)
-                const f64 energy_J = irradiance_W_m2 * pixelArea_m2 * p.integrationTime_s;
-
-                // Number of photons: N_photons = E_total / E_photon
-                const f64 numPhotons = energy_J / photonEnergy_J;
-
-                // Number of photo-electrons: N_e = N_photons · QE
-                f64 numElectrons = numPhotons * p.quantumEfficiency;
-
-                // Add dark current
-                if (p.enableDarkCurrent) {
-                    numElectrons += p.darkCurrent_e_s * p.integrationTime_s;
-                }
-
-                // Clamp to well capacity
-                numElectrons = std::min(numElectrons, static_cast<f64>(p.wellCapacity_e));
-
-                electrons.data[idx] = static_cast<f32>(numElectrons);
-
-                // Update statistics
-                minElectrons = std::min(minElectrons, numElectrons);
-                maxElectrons = std::max(maxElectrons, numElectrons);
-                sumElectrons += numElectrons;
-            }
-        }
-    }
-
-    const f64 avgElectrons = sumElectrons / radiance.TotalElements();
-    Log::Debug("Electrons: min={:.1f}, max={:.1f}, avg={:.1f} e-",
-               minElectrons, maxElectrons, avgElectrons);
-
-    if (p.enableVignetting && !p.isTelecentric) {
-        Log::Debug("Vignetting: center={:.2f}, edge={:.2f} ({:.1f}% falloff)",
-                   maxVignette, minVignette, (1.0f - minVignette) * 100.0f);
-    }
-
-    return electrons;
-}
-
-// ============================================================================
-// Step 4: ADC Quantization
-// ============================================================================
-
-auto QuantizeToDN(const Image& electrons,
-                                  const SensorParams& p) -> Image {
-    Image dn(electrons.width, electrons.height, electrons.channels);
-
-    const f32 maxDN = static_cast<f32>((1u << p.bitDepth) - 1);
-
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        // Convert electrons to DN: DN = electrons / gain
-        f32 dnValue = electrons.data[i] / p.gain;
-
-        // Quantize to ADC range
-        dnValue = std::clamp(dnValue, 0.0f, maxDN);
-
-        // Floor to integer DN (ADC quantization)
-        dnValue = std::floor(dnValue);
-
-        dn.data[i] = dnValue;
-    }
-
-    return dn;
-}
-
-// ============================================================================
-// Step 5: Photo-electrons → Radiance (Reverse Conversion for Preview)
-// ============================================================================
-
-auto ElectronsToRadiance(const Image& electrons,
-                                         const SensorParams& p) -> Image {
-    Image radiance(electrons.width, electrons.height, electrons.channels);
-
-    // Pixel area (m²)
-    const f64 pixelArea_m2 = (p.pixelPitch_um * 1e-6) * (p.pixelPitch_um * 1e-6);
-
-    // Photon energy: E = h·c / λ
-    const f64 wavelength_m = p.wavelength_nm * 1e-9;
-    const f64 photonEnergy_J = (kPlanckConstant * kSpeedOfLight) / wavelength_m;
-
-    // Solid angle subtended by lens aperture: Ω = π·sin²θ = π / (1 + 4·f#²).
-    // Must stay the same call as RadianceToElectrons -- the enhanced-preview
-    // round trip is only lossless while the two are exact inverses.
-    const f64 solidAngle_sr = ApertureSolidAngleSr(p.fNumber);
-
-    // Reverse conversion: electrons → radiance
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        f64 numElectrons = electrons.data[i];
-
-        // Remove dark current contribution
-        if (p.enableDarkCurrent) {
-            numElectrons -= p.darkCurrent_e_s * p.integrationTime_s;
-            numElectrons = std::max(numElectrons, 0.0);
-        }
-
-        // Electrons → Photons: N_photons = N_e / QE
-        const f64 numPhotons = numElectrons / p.quantumEfficiency;
-
-        // Photons → Energy: E_total = N_photons × E_photon
-        const f64 energy_J = numPhotons * photonEnergy_J;
-
-        // Energy → Irradiance: E = E_total / (A × t)
-        const f64 irradiance_W_m2 = energy_J / (pixelArea_m2 * p.integrationTime_s);
-
-        // Irradiance → Radiance: L = E / Ω
-        const f64 radiance_W_m2_sr = irradiance_W_m2 / solidAngle_sr;
-
-        radiance.data[i] = static_cast<f32>(radiance_W_m2_sr);
-    }
-
-    return radiance;
-}
-
-// ============================================================================
-// FPN: Generate Fixed Pattern Noise Maps (PRNU + DSNU)
-// ============================================================================
-
-auto GenericSensor::Impl::GenerateFPNMaps(const u32 width, const u32 height,
-                                     const SensorParams& p) -> void {
-    Log::Info("Generating FPN maps: {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
-              width, height, p.prnuSigma * 100.0f, p.dsnuSigma_e);
-
-    // Initialize maps
-    m_PRNUMap.Resize(width, height, 1);  // Single channel (grayscale)
-    m_DSNUMap.Resize(width, height, 1);
-
-    // Generate PRNU map (if sigma > 0)
-    // PRNU simulates column-wise gain non-uniformity from readout electronics
-    // Using anisotropic filtering: smooth along Y (columns), preserve X independence
-    // This creates VERTICAL STRIPES (column FPN)
-    if (p.prnuSigma > 1e-6f) {
-        std::normal_distribution<f32> prnuDist(0.0f, p.prnuSigma);
-
-        // Step 1: Generate per-column random values (1D noise expanded to 2D)
-        // Each column shares the same base value with slight per-pixel variation
-        Vector<f32> columnNoise(width);
-        for (u32 x = 0; x < width; ++x) {
-            columnNoise[x] = prnuDist(m_Rng);
-        }
-
-        // Step 2: Apply 1D smoothing to column noise for wider stripes
-        f32 smoothingSigma = 8.0f;  // Stripe width in pixels
-        auto kernel = MakeGaussianKernel(smoothingSigma);
-        const i32 radius = static_cast<i32>(kernel.size()) / 2;
-
-        Vector<f32> smoothedColumnNoise(width);
-        for (u32 x = 0; x < width; ++x) {
-            f32 sum = 0.0f;
-            for (i32 k = -radius; k <= radius; ++k) {
-                const i32 xk = std::clamp(static_cast<i32>(x) + k, 0, static_cast<i32>(width) - 1);
-                sum += columnNoise[xk] * kernel[k + radius];
-            }
-            smoothedColumnNoise[x] = sum;
-        }
-
-        // Step 3: Expand to 2D map (same value for entire column + small per-pixel variation)
-        std::normal_distribution<f32> pixelNoise(0.0f, p.prnuSigma * 0.1f);  // 10% pixel-level noise
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                m_PRNUMap(x, y, 0) = smoothedColumnNoise[x] + pixelNoise(m_Rng);
-            }
-        }
-
-        // Step 4: Renormalize to target sigma
-        f32 currentMean = 0.0f;
-        for (const auto& val : m_PRNUMap.data) {
-            currentMean += val;
-        }
-        currentMean /= static_cast<f32>(m_PRNUMap.TotalElements());
-
-        f32 currentVariance = 0.0f;
-        for (const auto& val : m_PRNUMap.data) {
-            f32 diff = val - currentMean;
-            currentVariance += diff * diff;
-        }
-        currentVariance /= static_cast<f32>(m_PRNUMap.TotalElements());
-        f32 currentSigma = std::sqrt(currentVariance);
-
-        if (currentSigma > 1e-6f) {
-            f32 scale = p.prnuSigma / currentSigma;
-            for (auto& val : m_PRNUMap.data) {
-                val = (val - currentMean) * scale;
-            }
-        }
-    } else {
-        std::ranges::fill(m_PRNUMap.data, 0.0f);
-    }
-
-    // Generate DSNU map (if sigma > 0)
-    // DSNU simulates row-wise dark current non-uniformity from row addressing
-    // Using anisotropic filtering: smooth along X (rows), preserve Y independence
-    // This creates HORIZONTAL STRIPES (row FPN)
-    if (p.dsnuSigma_e > 1e-6f) {
-        std::normal_distribution<f32> dsnuDist(0.0f, p.dsnuSigma_e);
-
-        // Step 1: Generate per-row random values
-        Vector<f32> rowNoise(height);
-        for (u32 y = 0; y < height; ++y) {
-            rowNoise[y] = dsnuDist(m_Rng);
-        }
-
-        // Step 2: Apply 1D smoothing to row noise for wider stripes
-        f32 smoothingSigma = 5.0f;  // Stripe width in pixels (narrower than PRNU)
-        auto kernel = MakeGaussianKernel(smoothingSigma);
-        const i32 radius = static_cast<i32>(kernel.size()) / 2;
-
-        Vector<f32> smoothedRowNoise(height);
-        for (u32 y = 0; y < height; ++y) {
-            f32 sum = 0.0f;
-            for (i32 k = -radius; k <= radius; ++k) {
-                const i32 yk = std::clamp(static_cast<i32>(y) + k, 0, static_cast<i32>(height) - 1);
-                sum += rowNoise[yk] * kernel[k + radius];
-            }
-            smoothedRowNoise[y] = sum;
-        }
-
-        // Step 3: Expand to 2D map (same value for entire row + small per-pixel variation)
-        std::normal_distribution<f32> pixelNoise(0.0f, p.dsnuSigma_e * 0.1f);  // 10% pixel-level noise
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                m_DSNUMap(x, y, 0) = smoothedRowNoise[y] + pixelNoise(m_Rng);
-            }
-        }
-
-        // Step 4: Renormalize to target sigma
-        f32 currentMean = 0.0f;
-        for (const auto& val : m_DSNUMap.data) {
-            currentMean += val;
-        }
-        currentMean /= static_cast<f32>(m_DSNUMap.TotalElements());
-
-        f32 currentVariance = 0.0f;
-        for (const auto& val : m_DSNUMap.data) {
-            f32 diff = val - currentMean;
-            currentVariance += diff * diff;
-        }
-        currentVariance /= static_cast<f32>(m_DSNUMap.TotalElements());
-        f32 currentSigma = std::sqrt(currentVariance);
-
-        if (currentSigma > 1e-6f) {
-            f32 scale = p.dsnuSigma_e / currentSigma;
-            for (auto& val : m_DSNUMap.data) {
-                val = (val - currentMean) * scale;
-            }
-        }
-    } else {
-        std::ranges::fill(m_DSNUMap.data, 0.0f);
-    }
-
-    Log::Debug("FPN maps generated: PRNU range [{:.4f}, {:.4f}], DSNU range [{:.2f}, {:.2f}] e-",
-               *std::ranges::min_element(m_PRNUMap.data),
-               *std::ranges::max_element(m_PRNUMap.data),
-               *std::ranges::min_element(m_DSNUMap.data),
-               *std::ranges::max_element(m_DSNUMap.data));
-}
-
-// ============================================================================
-// FPN: Apply Fixed Pattern Noise (PRNU + DSNU) with Optional NUC
-// ============================================================================
-
-auto GenericSensor::Impl::ApplyFPN(Image& electrons, const SensorParams& p) -> void {
-    if (!p.enableFPN || !m_FPNMapsGenerated) {
-        return;  // FPN disabled or maps not generated
-    }
-
-    // Verify map dimensions match image dimensions
-    if (m_PRNUMap.width != electrons.width || m_PRNUMap.height != electrons.height) {
-        Log::Warn("FPN map size mismatch: {}x{} vs {}x{}, skipping FPN",
-                  m_PRNUMap.width, m_PRNUMap.height, electrons.width, electrons.height);
-        return;
-    }
-
-    // Apply FPN with optional NUC correction
-    for (u32 y = 0; y < electrons.height; ++y) {
-        for (u32 x = 0; x < electrons.width; ++x) {
-            const u32 idx = y * electrons.width + x;
-
-            // Get FPN values for this pixel
-            f32 prnu = m_PRNUMap.data[idx];  // Multiplicative gain error
-            f32 dsnu = m_DSNUMap.data[idx];  // Additive dark signal error
-
-            // Apply NUC correction (if enabled)
-            // NUC reduces FPN but leaves a residual due to imperfect calibration
-            if (p.enableNUC) {
-                prnu *= (1.0f - p.nucEfficiency);  // Residual PRNU after NUC
-                dsnu *= (1.0f - p.nucEfficiency);  // Residual DSNU after NUC
-            }
-
-            // Apply FPN to all channels
-            for (u32 c = 0; c < electrons.channels; ++c) {
-                f32& signal = electrons(x, y, c);
-
-                // PRNU: multiplicative gain non-uniformity
-                // signal' = signal × (1 + prnu)
-                signal *= (1.0f + prnu);
-
-                // DSNU: additive dark signal non-uniformity
-                // signal'' = signal' + dsnu
-                signal += dsnu;
-            }
-        }
-    }
-
-    // Log statistics for verification
-    f32 totalVariance = 0.0f;
-    f32 mean = 0.0f;
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        mean += electrons.data[i];
-    }
-    mean /= static_cast<f32>(electrons.TotalElements());
-
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        f32 diff = electrons.data[i] - mean;
-        totalVariance += diff * diff;
-    }
-    totalVariance /= static_cast<f32>(electrons.TotalElements());
-    f32 stdDev = std::sqrt(totalVariance);
-
-    const char* nucStatus = p.enableNUC ? " (with NUC residual)" : " (without NUC)";
-    Log::Info("FPN applied{}: mean={:.1f} e-, stddev={:.1f} e- ({:.2f}%)",
-              nucStatus, mean, stdDev, (stdDev / mean) * 100.0f);
-}
-
-// ============================================================================
-// Step 3: Add Noise (Updated to include FPN)
-// ============================================================================
-
-auto GenericSensor::Impl::AddNoise(Image& electrons, const SensorParams& p) -> void {
-    std::normal_distribution<f32> gaussianDist(0.0f, 1.0f);
-
-    // Apply temporal noise sources (Poisson, Read Noise)
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        f32 signal = electrons.data[i];
-
-        // Poisson noise (shot noise): σ = sqrt(N)
-        if (p.enablePoissonNoise && signal > 0.0f) {
-            const f32 shotNoise_rms = std::sqrt(signal);
-            signal += gaussianDist(m_Rng) * shotNoise_rms;
-        }
-
-        // Read noise (Gaussian)
-        if (p.enableReadNoise) {
-            signal += gaussianDist(m_Rng) * p.readNoise_e_rms;
-        }
-
-        electrons.data[i] = signal;
-    }
-
-    // Apply Fixed Pattern Noise (PRNU + DSNU) after temporal noise
-    // FPN is applied last because it affects the signal AFTER photon/electron conversion
-    ApplyFPN(electrons, p);
-
-    // Final clamp to [0, well_capacity]
-    for (u32 i = 0; i < electrons.TotalElements(); ++i) {
-        electrons.data[i] = std::clamp(electrons.data[i], 0.0f, p.wellCapacity_e);
-    }
+    legacy.rawDN.metadata["camera_input_semantics"] = "fast_rgb_approximation";
+    legacy.enhancedPreview.metadata["camera_input_semantics"] =
+        "fast_rgb_approximation";
+    return legacy;
 }
 
 } // namespace quantiloom

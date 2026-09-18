@@ -7,16 +7,14 @@
 // campaign has to live with and a simulation has to reproduce before it can be
 // compared with one.
 //
-// The NETD case is the one worth keeping honest: its responsivity is a second
-// copy of the chain GenericSensor applies, so it is asserted against that
-// chain rather than against itself.
+// This legacy helper describes an explicitly generic fixed-band estimate.
+// A configured device uses its own full response and temperature derivative
+// in CpuCameraPipeline; those tests live in test_camera_cpu.cpp.
 // ============================================================================
 
 #include <gtest/gtest.h>
 
 #include "postprocess/Thermography.hpp"
-
-#include "postprocess/GenericSensor.hpp"
 
 #include <cmath>
 
@@ -165,52 +163,29 @@ TEST(ThermographyTest, NetdImprovesWithIntegrationTime) {
     EXPECT_NEAR(longT, shortT / 4.0, shortT * 1e-6);  // read-noise-limited: 1/t
 }
 
-TEST(ThermographyTest, NetdResponsivityIsTheSensorChainsOwn) {
-    // The one number in this file that is a second copy of something: the
-    // radiance-to-electrons factor. Recovered here by running the actual
-    // sensor with every noise source off, so a divergence between the two
-    // fails rather than quietly changing every NETD ever reported.
+TEST(ThermographyTest, GenericFixedBandNetdMatchesReadNoiseClosedForm) {
+    // The compatibility estimate uses one documented representative
+    // wavelength for the entire band. It must not be compared to a true
+    // response integral or to GenericSensor's 1 nm fast-RGB proxy.
     SensorParams p = QuietSensor();
     p.quantumEfficiency = 0.6f;
     p.fNumber = 2.0f;
     p.pixelPitch_um = 15.0f;
     p.integrationTime_s = 0.02f;
-    p.psfSigma_px = 0.0f;  // no blur, so a flat field stays flat
-    p.wellCapacity_e = 1e9f;
-    p.gain = 1.0f;
-    p.bitDepth = 24;
-
-    // A flat band-integrated radiance, which is what the chain is fed. Small
-    // enough that the electrons it produces stay inside the ADC: at unit
-    // radiance this sensor makes 2.5e7 of them, and a 24-bit converter clips
-    // at 1.7e7, which reads as a responsivity mismatch rather than as
-    // saturation.
-    constexpr f32 kRadiance = 0.1f;
-    Image flat(4, 4, 3);
-    for (auto& v : flat.data) {
-        v = kRadiance;
-    }
-
-    GenericSensor sensor;
-    auto result = sensor.Apply(flat, p);
-    ASSERT_TRUE(result.has_value()) << result.error();
-
-    // DN back to electrons through the gain, which is what the chain divided
-    // by. Noise is off, so this is the signal exactly.
-    const f64 electrons = static_cast<f64>(result.value().rawDN(2, 2, 0)) * p.gain;
-
-    // NETD's model, run forward: sigma_e of 1 electron would be worth
-    // 1/responsivity of radiance, so responsivity = electrons / radiance.
-    SensorParams noiseOnly = p;
-    noiseOnly.enableReadNoise = true;
-    noiseOnly.readNoise_e_rms = 1.0f;
-    const f64 netd =
-        NoiseEquivalentTemperatureDifferenceK(noiseOnly, kLwirMin, kLwirMax, 300.0);
-    const f64 dLdT = BandRadianceDerivativePerK(kLwirMin, kLwirMax, 300.0) *
-                     (kLwirMax - kLwirMin);
-    const f64 impliedResponsivity = 1.0 / (netd * dLdT);
-
-    EXPECT_NEAR(impliedResponsivity, electrons / kRadiance, electrons * 1e-3);
+    p.enableReadNoise = true;
+    p.readNoise_e_rms = 1.0f;
+    const f64 omega = 3.14159265358979323846 / (1.0 + 4.0 * 2.0 * 2.0);
+    const f64 area = std::pow(15e-6, 2.0);
+    const f64 photonEnergy = 6.62607015e-34 * 299792458.0 / 10e-6;
+    const f64 electronsPerBandRadiance =
+        omega * area * 0.02 * 0.6 / photonEnergy;
+    const f64 dBandRadiancePerK =
+        BandRadianceDerivativePerK(kLwirMin, kLwirMax, 300.0) *
+        (kLwirMax - kLwirMin);
+    const f64 expected = 1.0 / (electronsPerBandRadiance * dBandRadiancePerK);
+    const f64 measured =
+        NoiseEquivalentTemperatureDifferenceK(p, kLwirMin, kLwirMax, 300.0);
+    EXPECT_NEAR(measured, expected, expected * 1e-6);
 }
 
 TEST(ThermographyTest, NetdIsWorseWhereTheBandHasLessSensitivity) {

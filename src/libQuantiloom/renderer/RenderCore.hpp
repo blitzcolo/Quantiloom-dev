@@ -513,6 +513,12 @@ struct MaterialGpuIndices {
     // the Material itself rather than here, being a scalar and not an index.
     i32 fluorescenceExcitationCurve = -1;
     i32 fluorescenceEmissionCurve = -1;
+
+    // These measured IR curves remain on the GPU for every wavelength draw;
+    // reducing them to the wavelength used during scene upload biases a device
+    // response integral and a fused band with a sloped epsilon or tau.
+    i32 irEmissivityCurve = -1;
+    i32 irTransmittanceCurve = -1;
 };
 
 /**
@@ -543,12 +549,10 @@ struct MaterialGpuIndices {
  *
  * @param wavelengthNm Wavelength the IR curves are evaluated at
  *
- * @note The IR emissivity and transmittance are interpolated at `wavelengthNm`.
- *       ExternalRenderContext used to average each curve over its whole range
- *       instead, because the conversion was a file-static function with no way to
- *       reach the current wavelength -- which made the GUI's thermal response
- *       wavelength-independent, in a renderer whose reason to exist is that it is
- *       not. The two agree only for a flat curve.
+ * @note `wavelengthNm` populates the scalar compatibility fields. When
+ *       MaterialGpuIndices supplies IR curve indices, the shader samples those
+ *       curves at every ray wavelength; a band or camera capture must not use
+ *       the scalar evaluated during upload for a later wavelength.
  * @note Both are clamped to [0, 1]. Emissivity above 1 is unphysical, and the clamp
  *       was already on the context's side.
  */

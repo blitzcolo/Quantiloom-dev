@@ -1,39 +1,15 @@
 /**
  * @file GenericSensor.hpp
- * @brief Generic sensor model implementation for VIS/SWIR/MWIR/LWIR imaging simulation
+ * @brief Compatibility adapter from SensorParams and linear RGB input to the
+ * versioned CPU CameraPipeline.
  *
- * Provides GenericSensor class implementing complete sensor simulation chain:
- * 1. Optics: PSF (Point Spread Function) blur via Gaussian convolution
- * 2. Detector: Quantum efficiency, well capacity, photoelectron conversion
- * 3. Noise: Poisson (shot), read noise, dark current, FPN (PRNU/DSNU)
- * 4. ADC: Quantization to digital numbers (DN) with configurable bit depth
+ * RGB input carries no unique spectrum. This path uses a documented generic
+ * one-nanometre flat surrogate at SensorParams::wavelength_nm, marks the
+ * result as a fast-RGB approximation, and shares the physical detector,
+ * Poisson/readout and ADC code with spectral camera captures.
  *
- * Sensor chain:
- * @code
- * HDR Radiance (W·sr⁻¹·m⁻²)
- *   ↓ [Optics: PSF blur]
- * Blurred Radiance
- *   ↓ [Detector: QE × integration time × pixel area]
- * Photoelectrons (e⁻)
- *   ↓ [Noise: Poisson + Read + Dark + FPN]
- * Noisy Photoelectrons
- *   ↓ [ADC: quantize to [0, 2^bitDepth-1]]
- * Digital Numbers (DN)
- * @endcode
- *
- * Noise models:
- * - Poisson: sqrt(N) shot noise from photon statistics
- * - Read noise: Gaussian additive noise from readout circuitry
- * - Dark current: Temperature-dependent thermal electron generation
- * - FPN (Fixed Pattern Noise): PRNU (gain) + DSNU (dark) per-pixel maps
- *
- * Output products:
- * - rawDN: Quantized sensor output [0, 2^bitDepth-1] (realistic sensor data)
- * - enhancedPreview: Noisy radiance with PSF (for visualization)
- *
- * @note Implements SensorModel abstract interface
- * @note All noise sources can be toggled via SensorParams flags
- * @note FPN maps generated once and cached (deterministic per-run)
+ * rawDN contains integer ADC codes. enhancedPreview is encoded sRGB derived
+ * from those codes, not a radiance measurement.
  *
  * @see SensorModel for abstract base class
  * @see SensorParams for configuration parameters
@@ -50,8 +26,7 @@
 
 namespace quantiloom {
 
-/// Generic sensor implementation - covers VIS/SWIR/MWIR/LWIR
-/// Full chain: Optics (PSF) → Detector (QE, noise) → ADC (quantization)
+/// Legacy API preserving SensorParams while using the one camera pipeline.
 ///
 /// The chain's state -- RNG, FPN maps, seeding -- lives behind a pimpl. It used
 /// to sit in this header, which put sizeof(GenericSensor) into the ABI: a

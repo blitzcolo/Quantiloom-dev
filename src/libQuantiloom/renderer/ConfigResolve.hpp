@@ -58,6 +58,7 @@
 #include "core/SpectralData.hpp"
 #include "core/Types.hpp"
 #include "postprocess/SensorModel.hpp"
+#include "postprocess/CameraPipeline.hpp"
 #include "renderer/ConfigApply.hpp"
 #include "renderer/LightingParams.hpp"
 #include "scene/Camera.hpp"
@@ -218,6 +219,7 @@ struct ResolvedRenderConfig {
     // [sensor]
     bool sensorEnabled = false;
     SensorParams sensor{};
+    camera::CameraConfig cameraConfig{};
 
     /// [thermal] -- the surface energy balance, when a scene asks for one. Its
     /// per-material properties come from the same [[materials]] entries the IR
@@ -275,6 +277,16 @@ struct EndmemberSlots {
 struct ResolvedMaterialSpectra {
     Vector<SpectralCurveGPU> curves;
     std::unordered_map<String, i32> materialNameToCurve;
+
+    /// Original thermal material curves on their own wavelength grids. A
+    /// precise camera may read beyond a fused render mode's generic band.
+    std::unordered_map<String, i32> materialNameToIrEmissivityCurve;
+    std::unordered_map<String, i32> materialNameToIrTransmittanceCurve;
+    /// Largest absolute source-vs-64-point GPU interpolation difference seen
+    /// at authored knots in a camera response domain. Reported as an
+    /// approximation measure, not a guarantee of arbitrary narrow-line
+    /// accuracy.
+    f32 maxSourceToGpuCurveError = 0.0f;
 
     /// Endmember mixtures, keyed like materialNameToCurve. A material appears
     /// in both: the first map is endmember 0, this one is the whole mixture.
@@ -423,6 +435,10 @@ struct EmissionBindingRequest {
 /// path must use so that the two cannot describe different lights.
 struct ResolvedEmission {
     SpectralCurveGPU curve;
+    /// Exact piecewise-linear source knots, packed as (lambda,value) pairs
+    /// across linked segments for SINGLE/camera sampling. The preview keeps
+    /// curve's band-averaged grid.
+    Vector<SpectralCurveGPU> exactSegments;
     /// The linear sRGB the curve renders as. Only meaningful, and only set,
     /// when rewriteRgb is true.
     glm::vec3 renderedRgb{0.0f};
@@ -463,25 +479,26 @@ struct FluorescenceBindingRequest {
     Vector<std::pair<f32, f32>> emissionSamples;
     /// Quantum yield, in [0, 1].
     f32 yield = 0.0f;
-    /// The band being rendered. Both curves are resampled onto it, and the
-    /// emission is normalised to unit area over it.
+    /// The output window being rendered. It decides which emitted wavelengths
+    /// can be observed; excitation and emission keep their own support.
     f32 bandMinNm = 400.0f;
     f32 bandMaxNm = 780.0f;
     /// For the messages, so a warning names the material it is about.
     String materialName;
 };
 
-/// One bound fluorescent pair, on the band grid the shader reads.
+/// One bound fluorescent pair, each curve on its own support grid.
 struct ResolvedFluorescence {
-    /// ex(lambda), dimensionless, clamped to the band.
+    /// ex(lambda), dimensionless, zero outside its measured support.
     SpectralCurveGPU excitation;
-    /// em(lambda), a density per nm: it integrates to 1 over the band, so
-    /// `yield` alone carries the strength and the two cannot double-count it.
+    Vector<SpectralCurveGPU> excitationExactSegments;
+    /// em(lambda), a density per nm with unit area over the entire emission
+    /// support. Changing the output device must not renormalise the emitter.
     SpectralCurveGPU emission;
+    Vector<SpectralCurveGPU> emissionExactSegments;
     f32 yield = 0.0f;
-    /// What the emission samples summed to before normalisation, over the band.
-    /// Reported rather than used: a curve whose support is mostly outside the
-    /// band loses most of itself to the clamp, and the number says how much.
+    /// Historical field name retained for existing callers: now the full
+    /// source emission area before normalisation, independent of output band.
     f32 emissionAreaInBand = 0.0f;
     /// Not errors. The render proceeds and these are the things that make it
     /// mean less than it looks like it does.

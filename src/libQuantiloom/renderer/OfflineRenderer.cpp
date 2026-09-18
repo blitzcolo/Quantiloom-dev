@@ -64,6 +64,9 @@
 #include "scene/Material.hpp"
 #include "hs_core/HyperspectralRenderer.hpp"
 #include "hs_core/HyperspectralConfig.hpp"
+#include "hs_core/BatchRenderer.hpp"
+#include "postprocess/CpuCameraPipeline.hpp"
+#include "postprocess/CameraPhysics.hpp"
 
 #include <glm/glm.hpp>
 
@@ -156,6 +159,9 @@ struct OfflineRenderer::Impl {
     VkPipelineCache pipelineCache = VK_NULL_HANDLE;
     std::unique_ptr<RayTracingPipeline> pipeline;
     std::unique_ptr<PerformanceLogger> perfLogger;
+    std::unique_ptr<BatchRenderer> cameraBatchRenderer;
+    std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
+    std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
 
     // ------------------------------------------------------------------
     // Borrowed from a shared RenderDevice, or all null. Not GPU state this
@@ -250,6 +256,12 @@ struct OfflineRenderer::Impl {
 
     OfflineRenderOutput RenderHyperspectral();
     OfflineRenderOutput RenderSingleFrame();
+    Result<Image, String> RenderCameraWavelength(f64 wavelengthNm,
+                                                 u64 acquisitionIndex,
+                                                 u32 seed);
+    Result<CameraData, String> CameraDataAt(f64 timeSeconds, SpectralMode mode,
+                                           f64 wavelengthNm,
+                                           bool physicalSensorProjection) const;
 };
 
 // ============================================================================
@@ -883,6 +895,12 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
             QL_LOG_INFO("  Material '{}': using diffuse transmission curve index {}",
                         mat.name, it->second);
         }
+        if (auto it = spectra.materialNameToIrEmissivityCurve.find(mat.name);
+            it != spectra.materialNameToIrEmissivityCurve.end())
+            slots.irEmissivityCurve = it->second;
+        if (auto it = spectra.materialNameToIrTransmittanceCurve.find(mat.name);
+            it != spectra.materialNameToIrTransmittanceCurve.end())
+            slots.irTransmittanceCurve = it->second;
         if (auto it = spectra.materialNameToFluorescence.find(mat.name);
             it != spectra.materialNameToFluorescence.end()) {
             slots.fluorescenceExcitationCurve = it->second.excitationCurve;
@@ -1179,6 +1197,351 @@ OfflineRenderOutput OfflineRenderer::Render() {
         return m_impl->RenderHyperspectral();
     }
     return m_impl->RenderSingleFrame();
+}
+
+const camera::CameraConfig& OfflineRenderer::GetCameraConfig() const {
+    return m_impl->resolved.cameraConfig;
+}
+
+Result<CameraData, String> OfflineRenderer::Impl::CameraDataAt(
+    f64 timeSeconds, SpectralMode mode, f64 wavelengthNm,
+    bool physicalSensorProjection) const {
+    Camera poseCamera = loadedScene.camera;
+    const auto& motion = resolved.cameraConfig.motion;
+    if (!motion.keys.empty()) {
+        const auto pose = camera::CameraPoseAt(motion, timeSeconds);
+        if (!pose) return Result<CameraData, String>::Err(pose.error());
+        const auto position = glm::vec3(
+            static_cast<f32>(pose.value().position[0]),
+            static_cast<f32>(pose.value().position[1]),
+            static_cast<f32>(pose.value().position[2]));
+        const auto lookAt = glm::vec3(
+            static_cast<f32>(pose.value().lookAt[0]),
+            static_cast<f32>(pose.value().lookAt[1]),
+            static_cast<f32>(pose.value().lookAt[2]));
+        poseCamera = Camera(position, lookAt, loadedScene.camera.GetUpReference(),
+                            loadedScene.camera.GetFovY(),
+                            loadedScene.camera.GetAspectRatio());
+        poseCamera.SetProjection(loadedScene.camera.GetProjection());
+        poseCamera.SetOrthoHeight(loadedScene.camera.GetOrthoHeight());
+    }
+    CameraData data = poseCamera.GetCameraData();
+    data.wavelength_nm = static_cast<f32>(wavelengthNm);
+    data.spectral_mode = static_cast<u32>(mode);
+    data.debug_mode = physicalSensorProjection ? 0u :
+                      static_cast<u32>(resolved.debugMode);
+    data.debugParam = 0u;
+    if (physicalSensorProjection) {
+        const auto& optics = resolved.cameraConfig.optics;
+        const auto fovX = camera::HorizontalFovRadians(
+            optics.focalLengthMm, optics.pixelPitchUm, optics.sensorWidthPx);
+        if (!fovX) return Result<CameraData, String>::Err(fovX.error());
+        const f64 aspect = static_cast<f64>(optics.sensorWidthPx) /
+                           optics.sensorHeightPx;
+        data.aspectRatio = static_cast<f32>(aspect);
+        data.fovScale = static_cast<f32>(std::tan(fovX.value() / 2.0) / aspect);
+    }
+    return data;
+}
+
+Result<camera::CameraOutput, String>
+OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds) {
+    Impl& impl = *m_impl;
+    const f64 enteredTime = impl.timeline.Current_s();
+    struct RestoreSceneTime {
+        OfflineRenderer& renderer;
+        Impl& impl;
+        f64 timeSeconds;
+        ~RestoreSceneTime() {
+            (void)renderer.SetTimelineTime(timeSeconds);
+            const auto cameraData = impl.CameraDataAt(
+                timeSeconds, impl.params.mode, impl.params.wavelengthNm, false);
+            if (cameraData && impl.pipeline) impl.pipeline->SetCameraData(cameraData.value());
+        }
+    } restoreTime{*this, impl, enteredTime};
+    camera::CameraConfig config = impl.resolved.cameraConfig;
+    if (!config.enabled)
+        return Result<camera::CameraOutput, String>::Err("camera capture is disabled");
+    if (auto checked = camera::ValidateCameraConfig(config); !checked)
+        return Result<camera::CameraOutput, String>::Err(checked.error());
+    // The shader's solar/sky LUT clamps outside its supplied span. That is a
+    // useful old-scene preview fallback, but cannot support an exact device
+    // measurement of a response whose tail was never supplied.
+    if (impl.params.mode != SpectralMode::RGB && impl.resolved.solarSunSky) {
+        const auto& [sun, sky] = *impl.resolved.solarSunSky;
+        for (const auto& channel : config.device.channels) {
+            const auto& response = channel.response;
+            const auto& base = response.systemResponse ? *response.systemResponse :
+                (config.device.detector == camera::DetectorKind::Photon ?
+                 *response.quantumEfficiency : *response.thermalAbsorptance);
+            if (sun.samples.empty() || sky.samples.empty() ||
+                sun.samples.front().first > base.MinNm() ||
+                sun.samples.back().first < base.MaxNm() ||
+                sky.samples.front().first > base.MinNm() ||
+                sky.samples.back().first < base.MaxNm())
+                return Result<camera::CameraOutput, String>::Err(
+                    "camera response exceeds solar/sky LUT coverage");
+        }
+    }
+    // Observer products are rendered by the facade, not fabricated by the
+    // sensor from its measurement. The CPU chain owns only detector products.
+    const bool wantsObserver = config.products.cieLinearSrgb;
+    const bool wantsTraced = config.products.tracedRadiance;
+    if (wantsObserver && !IsVisMode(impl.params.mode))
+        return Result<camera::CameraOutput, String>::Err(
+            "CIE observer product requires a visible spectral render mode");
+    if (wantsTraced && impl.params.mode != SpectralMode::Single)
+        return Result<camera::CameraOutput, String>::Err(
+            "spectral radiance cube request requires single-wavelength mode");
+    config.products.cieLinearSrgb = false;
+    config.products.tracedRadiance = false;
+    camera::CpuCameraPipeline camera(std::move(config));
+    camera::CaptureState nextState = state;
+    const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm)
+        -> Result<Image, String> {
+        auto moved = SetTimelineTime(timeSeconds);
+        if (!moved) return Result<Image, String>::Err(moved.error());
+        return impl.RenderCameraWavelength(wavelengthNm, state.acquisitionIndex,
+                                           impl.resolved.cameraConfig.randomSeed);
+    };
+    Result<camera::CameraOutput, String> captured =
+        Result<camera::CameraOutput, String>::Err("camera capture did not run");
+    if (impl.params.mode == SpectralMode::RGB) {
+        auto moved = SetTimelineTime(frameTimeSeconds);
+        if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
+        const auto pose = impl.CameraDataAt(frameTimeSeconds, SpectralMode::RGB,
+                                            impl.params.wavelengthNm, false);
+        if (!pose) return Result<camera::CameraOutput, String>::Err(pose.error());
+        impl.pipeline->SetCameraData(pose.value());
+        OfflineRenderOutput fast = impl.RenderSingleFrame();
+        if (!fast.error.empty())
+            return Result<camera::CameraOutput, String>::Err(fast.error);
+        const u32 sensorWidth = impl.resolved.cameraConfig.optics.sensorWidthPx;
+        const u32 sensorHeight = impl.resolved.cameraConfig.optics.sensorHeightPx;
+        Image rgb(sensorWidth, sensorHeight, 3);
+        rgb.channelNames = {"R", "G", "B"};
+        // The fast entrance is explicitly approximate. Resize its preview
+        // radiance onto the physical pixel grid, leaving pixel collection area
+        // tied solely to pitch and fill factor in the detector calculation.
+        for (u32 y = 0; y < sensorHeight; ++y)
+            for (u32 x = 0; x < sensorWidth; ++x) {
+                const f64 sourceX = (x + 0.5) * fast.radiance.width / sensorWidth - 0.5;
+                const f64 sourceY = (y + 0.5) * fast.radiance.height / sensorHeight - 0.5;
+                const i32 x0 = std::clamp(static_cast<i32>(std::floor(sourceX)), 0,
+                                          static_cast<i32>(fast.radiance.width) - 1);
+                const i32 y0 = std::clamp(static_cast<i32>(std::floor(sourceY)), 0,
+                                          static_cast<i32>(fast.radiance.height) - 1);
+                const i32 x1 = std::min(x0 + 1, static_cast<i32>(fast.radiance.width) - 1);
+                const i32 y1 = std::min(y0 + 1, static_cast<i32>(fast.radiance.height) - 1);
+                const f64 fx = std::clamp(sourceX - x0, 0.0, 1.0);
+                const f64 fy = std::clamp(sourceY - y0, 0.0, 1.0);
+                for (u32 c = 0; c < 3; ++c) {
+                    const f64 top = (1.0 - fx) * fast.radiance(x0, y0, c) +
+                                    fx * fast.radiance(x1, y0, c);
+                    const f64 bottom = (1.0 - fx) * fast.radiance(x0, y1, c) +
+                                       fx * fast.radiance(x1, y1, c);
+                    rgb(x, y, c) = static_cast<f32>((1.0 - fy) * top + fy * bottom);
+                }
+            }
+        captured = camera.CaptureFastRgb(nextState, frameTimeSeconds, rgb);
+    } else {
+        captured = camera.Capture(nextState, frameTimeSeconds, sampler);
+    }
+    if (!captured) return captured;
+    if (wantsObserver || wantsTraced) {
+        auto moved = SetTimelineTime(frameTimeSeconds);
+        if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
+        OfflineRenderOutput observer = impl.RenderSingleFrame();
+        if (!observer.error.empty())
+            return Result<camera::CameraOutput, String>::Err(observer.error);
+        if (wantsObserver) {
+            camera::SignalDescriptor signal;
+            signal.kind = camera::SignalKind::CieLinearSrgb;
+            signal.unit = "linear_sRGB";
+            signal.calibration = impl.resolved.cameraConfig.device.calibration;
+            signal.acquisitionIndex = state.acquisitionIndex;
+            signal.exposureStartSeconds = frameTimeSeconds;
+            signal.exposureEndSeconds = frameTimeSeconds;
+            Image image(observer.radiance.width, observer.radiance.height, 3);
+            image.channelNames = {"R", "G", "B"};
+            for (u32 y = 0; y < image.height; ++y)
+                for (u32 x = 0; x < image.width; ++x)
+                    for (u32 c = 0; c < 3; ++c)
+                        image(x, y, c) = observer.radiance(x, y, c);
+            camera::CameraProduct product{std::move(image), std::move(signal)};
+            auto annotated = camera::AnnotateProductMetadata(product);
+            if (!annotated)
+                return Result<camera::CameraOutput, String>::Err(annotated.error());
+            captured.value().cieLinearSrgb = std::move(product);
+        }
+        if (wantsTraced) {
+            camera::SignalDescriptor signal;
+            signal.kind = camera::SignalKind::SpectralRadiance;
+            signal.unit = "W/m^2/sr/nm";
+            signal.channelWavelengthNm = {impl.params.wavelengthNm};
+            signal.calibration = impl.resolved.cameraConfig.device.calibration;
+            signal.acquisitionIndex = state.acquisitionIndex;
+            signal.exposureStartSeconds = frameTimeSeconds;
+            signal.exposureEndSeconds = frameTimeSeconds;
+            Image image(observer.radiance.width, observer.radiance.height, 1);
+            image.channelNames = {"L_" + std::to_string(impl.params.wavelengthNm)};
+            for (u32 y = 0; y < image.height; ++y)
+                for (u32 x = 0; x < image.width; ++x)
+                    image(x, y, 0) = observer.radiance(x, y, 0);
+            camera::CameraProduct product{std::move(image), std::move(signal)};
+            auto annotated = camera::AnnotateProductMetadata(product);
+            if (!annotated)
+                return Result<camera::CameraOutput, String>::Err(annotated.error());
+            captured.value().tracedRadiance = std::move(product);
+        }
+    }
+    const bool volumeRgbAssumption = std::any_of(
+        impl.loadedScene.materials.begin(), impl.loadedScene.materials.end(),
+        [](const Material& material) {
+            return material.volumeDensity > 0.0f && material.scatteringCoeff > 0.0f;
+        });
+    if (!impl.resolved.solarSunSky || impl.spectra.rgbUpsampledMaterials > 0 ||
+        volumeRgbAssumption ||
+        (impl.timeline.Present() &&
+         frameTimeSeconds - impl.resolved.cameraConfig.readout.exposureSeconds / 2.0 <
+             impl.timeline.Info().start_s)) {
+        String assumptions;
+        if (!impl.resolved.solarSunSky)
+            assumptions = "no_measured_solar_sky_lut";
+        if (impl.spectra.rgbUpsampledMaterials > 0) {
+            if (!assumptions.empty()) assumptions += ",";
+            assumptions += "rgb_upsampled_materials:" +
+                std::to_string(impl.spectra.rgbUpsampledMaterials);
+        }
+        if (volumeRgbAssumption) {
+            if (!assumptions.empty()) assumptions += ",";
+            assumptions += "volume_extinction_rgb_mean";
+        }
+        const bool preTimeline = impl.timeline.Present() &&
+            frameTimeSeconds - impl.resolved.cameraConfig.readout.exposureSeconds / 2.0 <
+                impl.timeline.Info().start_s;
+        if (preTimeline) {
+            if (!assumptions.empty()) assumptions += ",";
+            assumptions += "pre_timeline_initial_hold";
+        }
+        const auto annotate = [&assumptions](std::optional<camera::CameraProduct>& product) {
+            if (product) product->image.metadata["camera_scene_assumptions"] = assumptions;
+        };
+        annotate(captured.value().tracedRadiance);
+        annotate(captured.value().cieLinearSrgb);
+        annotate(captured.value().bandMeasurement);
+        annotate(captured.value().rawDn);
+        annotate(captured.value().correctedDeviceSignal);
+        annotate(captured.value().apparentTemperature);
+        annotate(captured.value().display);
+        if (preTimeline) {
+            const auto mark = [](std::optional<camera::CameraProduct>& product) {
+                if (product) product->image.metadata["camera_pre_timeline_policy"] =
+                    "initial_scene_hold";
+            };
+            mark(captured.value().tracedRadiance);
+            mark(captured.value().cieLinearSrgb);
+            mark(captured.value().bandMeasurement);
+            mark(captured.value().rawDn);
+            mark(captured.value().correctedDeviceSignal);
+            mark(captured.value().apparentTemperature);
+            mark(captured.value().display);
+        }
+    }
+    // The scene ray tracer still stores reflectance and n,k as a 64-point GPU
+    // grid. This is separate from the CPU camera's convergent wavelength
+    // integration and from the exact source-knot chains for lamps/fluorescence.
+    const auto markSceneGrid = [](std::optional<camera::CameraProduct>& product) {
+        if (!product) return;
+        product->image.metadata["camera_scene_reflectance_nk_grid_samples"] = "64";
+        product->image.metadata["camera_scene_reflectance_nk_resampling"] =
+            "uniform_gpu_grid";
+    };
+    markSceneGrid(captured.value().tracedRadiance);
+    markSceneGrid(captured.value().cieLinearSrgb);
+    markSceneGrid(captured.value().bandMeasurement);
+    markSceneGrid(captured.value().rawDn);
+    markSceneGrid(captured.value().correctedDeviceSignal);
+    markSceneGrid(captured.value().apparentTemperature);
+    markSceneGrid(captured.value().display);
+    state = std::move(nextState);
+    return captured;
+}
+
+Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
+    f64 wavelengthNm, u64 acquisitionIndex, u32 seed) {
+    if (!std::isfinite(wavelengthNm) || wavelengthNm <= 0.0 ||
+        wavelengthNm > std::numeric_limits<f32>::max())
+        return Result<Image, String>::Err("invalid camera spectral sample wavelength");
+    const auto originalPose = CameraDataAt(
+        timeline.Current_s(), params.mode, params.wavelengthNm, false);
+    if (!originalPose) return Result<Image, String>::Err(originalPose.error());
+    CameraData original = originalPose.value();
+    struct RestoreBindings {
+        Impl& host;
+        CameraData original;
+        ~RestoreBindings() {
+            host.pipeline->BindOutputImage(*host.outputImage);
+            host.pipeline->SetCameraData(original);
+            host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
+                                            original.debug_mode != 0);
+            host.pipeline->BindAtmosphereNN(host.atmosHeaderBuffer.get(),
+                                            host.atmosDataBuffer.get());
+        }
+    } restore{*this, original};
+    if (resolved.atmosphere.enabled) {
+        const auto grid = RenderBandLambdaGrid(SpectralMode::Single, wavelengthNm);
+        if (!grid.error.empty() || grid.band.empty())
+            return Result<Image, String>::Err("camera wavelength lacks atmosphere coverage: " +
+                (grid.error.empty() ? std::to_string(wavelengthNm) : grid.error));
+        try {
+            AtmosModelPack pack(resolved.atmosphere.modelPackDir);
+            AtmosphereBaker baker(pack);
+            auto baked = baker.Bake(resolved.atmosphere, grid.band, grid.lambdasNm,
+                                    grid.windowHalfWidthNm);
+            const glm::vec3& sunDir = resolved.lighting.sunDirection;
+            baked.header.sunDirWorld[0] = sunDir.x;
+            baked.header.sunDirWorld[1] = sunDir.y;
+            baked.header.sunDirWorld[2] = sunDir.z;
+            baked.header.worldUnitsToMeters = resolved.worldUnitsToMeters;
+            cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
+                contextRef->GetAllocator(), sizeof(AtmosNNHeaderGPU),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            cameraAtmosHeaderBuffer->Upload(&baked.header, sizeof(AtmosNNHeaderGPU));
+            cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
+                contextRef->GetAllocator(), baked.data.size() * sizeof(f32),
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            cameraAtmosDataBuffer->Upload(baked.data.data(),
+                                           baked.data.size() * sizeof(f32));
+            pipeline->BindAtmosphereNN(cameraAtmosHeaderBuffer.get(),
+                                        cameraAtmosDataBuffer.get());
+        } catch (const std::exception& e) {
+            return Result<Image, String>::Err(
+                String("camera atmosphere bake failed: ") + e.what());
+        }
+    }
+    if (!cameraBatchRenderer)
+        cameraBatchRenderer =
+            std::make_unique<BatchRenderer>(*contextRef, *pipeline, loadedScene);
+    BatchRenderParams sample;
+    sample.spp = params.spp;
+    sample.frameIndex = static_cast<u32>(acquisitionIndex);
+    sample.frameIndexHigh = static_cast<u32>(acquisitionIndex >> 32);
+    sample.renderSeed = seed;
+    sample.outputWidth = resolved.cameraConfig.optics.sensorWidthPx;
+    sample.outputHeight = resolved.cameraConfig.optics.sensorHeightPx;
+    const auto cameraPose = CameraDataAt(
+        timeline.Current_s(), SpectralMode::Single, wavelengthNm, true);
+    if (!cameraPose) return Result<Image, String>::Err(cameraPose.error());
+    CameraData cameraData = cameraPose.value();
+    Image image;
+    if (!cameraBatchRenderer->RenderSingleBand(
+            static_cast<f32>(wavelengthNm), sample, cameraData, image))
+        return Result<Image, String>::Err("single-wavelength camera render failed");
+    image.channelNames = {"L_" + std::to_string(wavelengthNm)};
+    image.metadata["wavelength_nm"] = std::to_string(wavelengthNm);
+    image.metadata["units"] = "W/m^2/sr/nm";
+    return image;
 }
 
 Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {

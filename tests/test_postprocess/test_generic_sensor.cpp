@@ -82,25 +82,20 @@ TEST_F(GenericSensorTest, ValidInputProducesOutput) {
 }
 
 TEST_F(GenericSensorTest, OutputMetadata) {
-    Image hdr(50, 50, 3);
-    for (auto& val : hdr.data) {
-        val = 0.5f;
-    }
-
+    Image hdr(8, 8, 1);
+    for (auto& value : hdr.data) value = 0.005f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
     auto result = sensor.Apply(hdr, params);
     ASSERT_TRUE(result.has_value());
-
-    const SensorOutput& output = result.value();
-
-    // Check raw DN metadata
-    EXPECT_EQ(output.rawDN.metadata.at("sensor_model"), "GenericSensor");
-    EXPECT_EQ(output.rawDN.metadata.at("integration_time_s"), "0.010000");
-    EXPECT_EQ(output.rawDN.metadata.at("gain"), "3.000000");
-    EXPECT_EQ(output.rawDN.metadata.at("bit_depth"), "14");
-
-    // Check preview metadata
-    EXPECT_EQ(output.enhancedPreview.metadata.at("sensor_model"), "GenericSensor");
-    EXPECT_EQ(output.enhancedPreview.metadata.at("enhanced_preview"), "true");
+    const auto& raw = result.value().rawDN;
+    const auto& preview = result.value().enhancedPreview;
+    EXPECT_EQ(raw.metadata.at("camera_signal_kind"), "raw_dn");
+    EXPECT_EQ(raw.metadata.at("camera_unit"), "DN");
+    EXPECT_EQ(raw.metadata.at("camera_input_semantics"), "fast_rgb_approximation");
+    EXPECT_EQ(preview.metadata.at("camera_signal_kind"), "device_preview_srgb");
+    EXPECT_EQ(preview.metadata.at("camera_input_semantics"), "fast_rgb_approximation");
 }
 
 // ============================================================================
@@ -159,60 +154,39 @@ TEST_F(GenericSensorTest, ZeroRadianceProducesLowDN) {
 // Enhanced Preview Tests
 // ============================================================================
 
-TEST_F(GenericSensorTest, EnhancedPreviewMaintainsRadianceScale) {
-    Image hdr(100, 100, 3);
-    const f32 inputRadiance = 1.0f;
-    for (auto& val : hdr.data) {
-        val = inputRadiance;
-    }
-
-    // Disable noise for deterministic test
+TEST_F(GenericSensorTest, EnhancedPreviewComesFromQuantizedRaw) {
+    Image hdr(8, 8, 1);
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
     params.enableDarkCurrent = false;
-
-    auto result = sensor.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    const Image& preview = result.value().enhancedPreview;
-
-    // Enhanced preview should have similar magnitude to input
-    // (allowing for PSF blur and round-trip conversion errors)
-    f32 avgPreview = 0.0f;
-    for (const auto& val : preview.data) {
-        avgPreview += val;
-    }
-    avgPreview /= preview.data.size();
-
-    // Should be within 30% of input radiance (PSF blur spreads energy slightly)
-    EXPECT_NEAR(avgPreview, inputRadiance, inputRadiance * 0.3f);
+    params.gain = 100.0f; // legacy gain is e-/DN.
+    for (auto& value : hdr.data) value = 0.0005f;
+    auto below = sensor.Apply(hdr, params);
+    ASSERT_TRUE(below.has_value());
+    for (auto& value : hdr.data) value = 0.001f;
+    auto above = sensor.Apply(hdr, params);
+    ASSERT_TRUE(above.has_value());
+    EXPECT_FLOAT_EQ(below.value().rawDN.data[0], 0.0f);
+    EXPECT_FLOAT_EQ(above.value().rawDN.data[0], 1.0f);
+    EXPECT_FLOAT_EQ(below.value().enhancedPreview.data[0], 0.0f);
+    EXPECT_GT(above.value().enhancedPreview.data[0], 0.0f);
 }
 
-TEST_F(GenericSensorTest, RawDNMuchLargerThanPreview) {
-    Image hdr(100, 100, 3);
-    for (auto& val : hdr.data) {
-        val = 1.0f;
-    }
-
+TEST_F(GenericSensorTest, RawAndPreviewHaveDistinctUnits) {
+    Image hdr(16, 16, 3);
+    for (auto& value : hdr.data) value = 0.01f;
+    params.enablePoissonNoise = false;
+    params.enableReadNoise = false;
+    params.enableDarkCurrent = false;
     auto result = sensor.Apply(hdr, params);
     ASSERT_TRUE(result.has_value());
-
-    const Image& rawDN = result.value().rawDN;
-    const Image& preview = result.value().enhancedPreview;
-
-    // Calculate average values
-    f32 avgDN = 0.0f;
-    f32 avgPreview = 0.0f;
-
-    for (size_t i = 0; i < rawDN.data.size(); ++i) {
-        avgDN += rawDN.data[i];
-        avgPreview += preview.data[i];
-    }
-    avgDN /= rawDN.data.size();
-    avgPreview /= preview.data.size();
-
-    // DN values should be MUCH larger than preview (hundreds to thousands vs ~1.0)
-    EXPECT_GT(avgDN, avgPreview * 10.0f);
+    const auto& raw = result.value().rawDN;
+    const auto& preview = result.value().enhancedPreview;
+    EXPECT_GT(raw.data[0], 1.0f);
+    EXPECT_EQ(raw.data[0], std::floor(raw.data[0]));
+    EXPECT_GT(preview.data[0], 0.0f);
+    EXPECT_LE(preview.data[0], 1.0f);
+    EXPECT_EQ(preview.metadata.at("camera_unit"), "sRGB-preview");
 }
 
 // ============================================================================
@@ -222,7 +196,7 @@ TEST_F(GenericSensorTest, RawDNMuchLargerThanPreview) {
 TEST_F(GenericSensorTest, NoiseIncreasesVariance) {
     Image hdr(200, 200, 1);  // Larger image to avoid boundary effects
     for (auto& val : hdr.data) {
-        val = 1.0f;  // Uniform radiance
+        val = 0.005f;  // Uniform radiance
     }
 
     // Use small PSF blur to minimize boundary variance
@@ -309,7 +283,7 @@ TEST_F(GenericSensorTest, PSFBlurReducesSharpness) {
     Image hdr(100, 100, 1);
     for (u32 y = 0; y < 100; ++y) {
         for (u32 x = 0; x < 100; ++x) {
-            hdr(x, y, 0) = (x < 50) ? 0.0f : 1.0f;  // Sharp vertical edge at x=50
+            hdr(x, y, 0) = (x < 50) ? 0.0f : 0.005f;  // Sharp vertical edge at x=50
         }
     }
 
@@ -330,8 +304,8 @@ TEST_F(GenericSensorTest, PSFBlurReducesSharpness) {
     f32 leftEdge = preview(49, 50, 0);
     f32 rightEdge = preview(50, 50, 0);
 
-    EXPECT_GT(leftEdge, 0.01f);   // Not pure black (blurred from bright side)
-    EXPECT_LT(rightEdge, 0.99f);  // Not pure white (blurred from dark side)
+    EXPECT_GT(leftEdge, 0.0f);   // Not pure black (blurred from bright side)
+    EXPECT_LT(rightEdge, preview(60, 50, 0));  // Not pure white (blurred from dark side)
 }
 
 // ----------------------------------------------------------------------------
@@ -348,7 +322,7 @@ auto MakeEdgeImage() -> Image {
     Image hdr(100, 100, 1);
     for (u32 y = 0; y < 100; ++y) {
         for (u32 x = 0; x < 100; ++x) {
-            hdr(x, y, 0) = (x < 50) ? 0.0f : 1.0f;
+            hdr(x, y, 0) = (x < 50) ? 0.0f : 0.005f;
         }
     }
     return hdr;
@@ -436,8 +410,8 @@ TEST_F(GenericSensorTest, FullChainPreservesImageStructure) {
     for (u32 y = 0; y < 64; ++y) {
         for (u32 x = 0; x < 64; ++x) {
             // Gradient pattern
-            hdr(x, y, 0) = static_cast<f32>(x) / 63.0f;
-            hdr(x, y, 1) = static_cast<f32>(y) / 63.0f;
+            hdr(x, y, 0) = static_cast<f32>(x) * 0.01f / 63.0f;
+            hdr(x, y, 1) = static_cast<f32>(y) * 0.01f / 63.0f;
             hdr(x, y, 2) = 0.5f;
         }
     }
@@ -475,10 +449,10 @@ TEST_F(GenericSensorTest, FPNDisabledByDefault) {
     EXPECT_EQ(result.value().rawDN.width, 100);
 }
 
-TEST_F(GenericSensorTest, FPNMapsGeneratedOnce) {
+TEST_F(GenericSensorTest, FixedPatternStableAcrossCaptures) {
     Image hdr(100, 100, 1);
     for (auto& val : hdr.data) {
-        val = 1.0f;
+        val = 0.005f;
     }
 
     // Enable FPN
@@ -493,7 +467,7 @@ TEST_F(GenericSensorTest, FPNMapsGeneratedOnce) {
     ASSERT_TRUE(result1.has_value());
     const Image& dn1 = result1.value().rawDN;
 
-    // Second apply (should reuse FPN maps)
+    // The counter key keeps fixed pattern terms unchanged on the next capture.
     auto result2 = sensor.Apply(hdr, params);
     ASSERT_TRUE(result2.has_value());
     const Image& dn2 = result2.value().rawDN;
@@ -508,7 +482,7 @@ TEST_F(GenericSensorTest, FPNMapsGeneratedOnce) {
 TEST_F(GenericSensorTest, FPNIncreasesVariance) {
     Image hdr(200, 200, 1);
     for (auto& val : hdr.data) {
-        val = 1.0f;  // Uniform input
+        val = 0.005f;  // Uniform input
     }
 
     // Disable temporal noise
@@ -549,7 +523,7 @@ TEST_F(GenericSensorTest, FPNIncreasesVariance) {
     params.prnuSigma = 0.02f;  // 2% PRNU (noticeable effect)
     params.dsnuSigma_e = 10.0f;
 
-    // Need new sensor instance to regenerate FPN maps
+    // A second instance with the same seed uses the same fixed pattern.
     GenericSensor sensorWithFPN;
     auto resultWithFPN = sensorWithFPN.Apply(hdr, params);
     ASSERT_TRUE(resultWithFPN.has_value());
@@ -583,8 +557,8 @@ TEST_F(GenericSensorTest, PRNUAffectsSignalMultiplicatively) {
     Image hdr(100, 100, 1);
 
     // Test at two different signal levels
-    const f32 lowSignal = 0.1f;
-    const f32 highSignal = 1.0f;
+    const f32 lowSignal = 0.001f;
+    const f32 highSignal = 0.01f;
 
     params.enableFPN = true;
     params.prnuSigma = 0.05f;  // 5% PRNU (strong effect)
@@ -602,7 +576,7 @@ TEST_F(GenericSensorTest, PRNUAffectsSignalMultiplicatively) {
     ASSERT_TRUE(result1.has_value());
     const Image& dnLow = result1.value().rawDN;
 
-    // High signal test (reuse same sensor to get identical FPN maps)
+    // High signal test with the same fixed per-pixel response.
     for (auto& val : hdr.data) {
         val = highSignal;
     }
@@ -627,7 +601,8 @@ TEST_F(GenericSensorTest, DSNUIsAdditiveAndSignalIndependent) {
     params.dsnuSigma_e = 20.0f;  // Strong DSNU
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
-    params.enableDarkCurrent = false;
+    params.enableDarkCurrent = true;
+    params.darkCurrent_e_s = 5000.0f;
 
     // Test at zero signal (only DSNU present)
     for (auto& val : hdr.data) {
@@ -640,7 +615,7 @@ TEST_F(GenericSensorTest, DSNUIsAdditiveAndSignalIndependent) {
 
     // Test at non-zero signal (DSNU + signal)
     for (auto& val : hdr.data) {
-        val = 0.5f;
+        val = 0.005f;
     }
     auto result2 = sensorDSNU.Apply(hdr, params);
     ASSERT_TRUE(result2.has_value());
@@ -659,376 +634,131 @@ TEST_F(GenericSensorTest, DSNUIsAdditiveAndSignalIndependent) {
 // NUC (Non-Uniformity Correction) Tests
 // ============================================================================
 
-TEST_F(GenericSensorTest, NUCReducesFPNButLeavesResidual) {
-    Image hdr(200, 200, 1);
-    for (auto& val : hdr.data) {
-        val = 1.0f;
-    }
-
+TEST_F(GenericSensorTest, NUCCorrectsOutputWithoutChangingRawFPN) {
+    Image hdr(64, 64, 1);
+    for (auto& value : hdr.data) value = 0.01f;
     params.enableFPN = true;
-    params.prnuSigma = 0.02f;  // 2% PRNU
-    params.dsnuSigma_e = 10.0f;
+    params.prnuSigma = 0.05f;
+    params.dsnuSigma_e = 5.0f;
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
     params.enableDarkCurrent = false;
-    params.fNumber = 1.4f;
-
-    // Test without NUC (full FPN)
+    params.noiseSeed = 1234u;
     params.enableNUC = false;
-    GenericSensor sensorNoNUC;
-    auto resultNoNUC = sensorNoNUC.Apply(hdr, params);
-    ASSERT_TRUE(resultNoNUC.has_value());
-
-    const Image& dnNoNUC = resultNoNUC.value().rawDN;
-    const u32 margin = 20;
-    f32 meanNoNUC = 0.0f;
-    u32 count = 0;
-
-    for (u32 y = margin; y < dnNoNUC.height - margin; ++y) {
-        for (u32 x = margin; x < dnNoNUC.width - margin; ++x) {
-            meanNoNUC += dnNoNUC(x, y, 0);
-            ++count;
-        }
-    }
-    meanNoNUC /= count;
-
-    f32 varianceNoNUC = 0.0f;
-    for (u32 y = margin; y < dnNoNUC.height - margin; ++y) {
-        for (u32 x = margin; x < dnNoNUC.width - margin; ++x) {
-            f32 diff = dnNoNUC(x, y, 0) - meanNoNUC;
-            varianceNoNUC += diff * diff;
-        }
-    }
-    varianceNoNUC /= count;
-
-    // Test with NUC (98% efficiency, 2% residual)
+    GenericSensor uncorrectedSensor;
+    auto uncorrected = uncorrectedSensor.Apply(hdr, params);
+    ASSERT_TRUE(uncorrected.has_value());
     params.enableNUC = true;
-    params.nucEfficiency = 0.98f;
-    GenericSensor sensorWithNUC;
-    auto resultWithNUC = sensorWithNUC.Apply(hdr, params);
-    ASSERT_TRUE(resultWithNUC.has_value());
-
-    const Image& dnWithNUC = resultWithNUC.value().rawDN;
-    f32 meanWithNUC = 0.0f;
-    count = 0;
-
-    for (u32 y = margin; y < dnWithNUC.height - margin; ++y) {
-        for (u32 x = margin; x < dnWithNUC.width - margin; ++x) {
-            meanWithNUC += dnWithNUC(x, y, 0);
-            ++count;
-        }
-    }
-    meanWithNUC /= count;
-
-    f32 varianceWithNUC = 0.0f;
-    for (u32 y = margin; y < dnWithNUC.height - margin; ++y) {
-        for (u32 x = margin; x < dnWithNUC.width - margin; ++x) {
-            f32 diff = dnWithNUC(x, y, 0) - meanWithNUC;
-            varianceWithNUC += diff * diff;
-        }
-    }
-    varianceWithNUC /= count;
-
-    // NUC should significantly reduce variance
-    EXPECT_LT(varianceWithNUC, varianceNoNUC * 0.5f);
-
-    // But should NOT eliminate it completely (residual remains)
-    EXPECT_GT(varianceWithNUC, 0.0f);
+    params.nucEfficiency = 1.0f;
+    GenericSensor correctedSensor;
+    auto corrected = correctedSensor.Apply(hdr, params);
+    ASSERT_TRUE(corrected.has_value());
+    EXPECT_EQ(uncorrected.value().rawDN.data, corrected.value().rawDN.data);
+    auto variance = [](const Image& image) {
+        f64 mean = 0.0;
+        for (f32 value : image.data) mean += value;
+        mean /= image.data.size();
+        f64 sum = 0.0;
+        for (f32 value : image.data) sum += (value - mean) * (value - mean);
+        return sum / image.data.size();
+    };
+    EXPECT_LT(variance(corrected.value().enhancedPreview),
+              variance(uncorrected.value().enhancedPreview) * 0.5);
 }
 
-TEST_F(GenericSensorTest, NUCEfficiencyControlsResidual) {
-    Image hdr(150, 150, 1);
-    for (auto& val : hdr.data) {
-        val = 1.0f;
-    }
-
+TEST_F(GenericSensorTest, CalibrationResidualChangesPreviewOnly) {
+    Image hdr(64, 64, 1);
+    for (auto& value : hdr.data) value = 0.01f;
     params.enableFPN = true;
-    params.prnuSigma = 0.03f;  // 3% PRNU (strong effect)
-    params.dsnuSigma_e = 15.0f;  // Strong DSNU
+    params.prnuSigma = 0.05f;
+    params.dsnuSigma_e = 0.0f;
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
     params.enableDarkCurrent = false;
-
-    // First: measure variance with 90% NUC efficiency
     params.enableNUC = true;
-    params.nucEfficiency = 0.90f;
-    GenericSensor sensor90;
-    auto result90 = sensor90.Apply(hdr, params);
-    ASSERT_TRUE(result90.has_value());
-
-    const Image& dn90 = result90.value().rawDN;
-    f32 mean90 = 0.0f;
-    for (const auto& val : dn90.data) {
-        mean90 += val;
-    }
-    mean90 /= dn90.data.size();
-
-    f32 variance90 = 0.0f;
-    for (const auto& val : dn90.data) {
-        f32 diff = val - mean90;
-        variance90 += diff * diff;
-    }
-    variance90 /= dn90.data.size();
-
-    // Second: measure variance with 50% NUC efficiency (much worse, 50% residual)
+    params.noiseSeed = 4567u;
+    params.nucEfficiency = 0.95f;
+    GenericSensor nearlyCalibrated;
+    auto nearly = nearlyCalibrated.Apply(hdr, params);
+    ASSERT_TRUE(nearly.has_value());
     params.nucEfficiency = 0.50f;
-    GenericSensor sensor50;
-    auto result50 = sensor50.Apply(hdr, params);
-    ASSERT_TRUE(result50.has_value());
-
-    const Image& dn50 = result50.value().rawDN;
-    f32 mean50 = 0.0f;
-    for (const auto& val : dn50.data) {
-        mean50 += val;
-    }
-    mean50 /= dn50.data.size();
-
-    f32 variance50 = 0.0f;
-    for (const auto& val : dn50.data) {
-        f32 diff = val - mean50;
-        variance50 += diff * diff;
-    }
-    variance50 /= dn50.data.size();
-
-    // With 50% NUC efficiency, residual FPN is much larger (50% vs 10%)
-    // So variance50 should be significantly larger than variance90
-    // Allow for statistical variation: expect at least 30% difference
-    EXPECT_GT(variance50, variance90 * 1.3f);
-
-    // Sanity check: both variances should be positive (FPN is present)
-    EXPECT_GT(variance90, 0.0f);
-    EXPECT_GT(variance50, 0.0f);
+    GenericSensor weaklyCalibrated;
+    auto weak = weaklyCalibrated.Apply(hdr, params);
+    ASSERT_TRUE(weak.has_value());
+    EXPECT_EQ(nearly.value().rawDN.data, weak.value().rawDN.data);
+    f64 difference = 0.0;
+    for (size_t i = 0; i < nearly.value().enhancedPreview.data.size(); ++i)
+        difference += std::abs(nearly.value().enhancedPreview.data[i] -
+                               weak.value().enhancedPreview.data[i]);
+    EXPECT_GT(difference, 0.0);
 }
 
 // ============================================================================
-// FPN Anisotropic Stripe Pattern Tests
+// FPN Per-Pixel Persistence Tests
 // ============================================================================
 
-TEST_F(GenericSensorTest, PRNUCreatesVerticalStripes) {
-    // PRNU should create vertical stripes (column FPN from readout electronics)
-    // Pixels in the same column should have similar PRNU values
-    Image hdr(200, 200, 1);
-    for (auto& val : hdr.data) {
-        val = 0.01f;  // Low radiance to avoid saturation
-    }
-
+TEST_F(GenericSensorTest, PRNUIsFixedPerPixelAcrossCaptures) {
+    Image hdr(64, 64, 1);
+    for (auto& value : hdr.data) value = 0.01f;
     params.enableFPN = true;
-    params.prnuSigma = 0.08f;  // 8% PRNU (strong effect)
-    params.dsnuSigma_e = 0.0f;  // Disable DSNU to isolate PRNU
+    params.prnuSigma = 0.08f;
+    params.dsnuSigma_e = 0.0f;
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
     params.enableDarkCurrent = false;
-    params.fNumber = 1.4f;  // Minimal PSF blur
-    params.gain = 1.0f;  // Lower gain to preserve signal range
-
-    GenericSensor sensorPRNU;
-    auto result = sensorPRNU.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    const Image& dn = result.value().rawDN;
-
-    // Verify we're not saturated (check that not all values are at max DN)
-    const f32 maxDN = static_cast<f32>((1u << params.bitDepth) - 1);
-    f32 dnSum = 0.0f;
-    for (const auto& val : dn.data) {
-        dnSum += val;
-    }
-    f32 avgDN = dnSum / dn.data.size();
-    ASSERT_LT(avgDN, maxDN * 0.9f) << "Signal is saturated, reduce input radiance";
-
-    // Calculate column-wise variance vs row-wise variance
-    // For vertical stripes: between-column variance >> within-column variance
-
-    // Column means
-    std::vector<f32> colMeans(dn.width, 0.0f);
-    for (u32 x = 0; x < dn.width; ++x) {
-        for (u32 y = 0; y < dn.height; ++y) {
-            colMeans[x] += dn(x, y, 0);
-        }
-        colMeans[x] /= dn.height;
-    }
-
-    f32 overallMean = 0.0f;
-    for (const auto& m : colMeans) {
-        overallMean += m;
-    }
-    overallMean /= colMeans.size();
-
-    f32 betweenColumnVariance = 0.0f;
-    for (const auto& m : colMeans) {
-        f32 diff = m - overallMean;
-        betweenColumnVariance += diff * diff;
-    }
-    betweenColumnVariance /= colMeans.size();
-
-    // Within-column variance: how much do pixels within a column vary?
-    f32 withinColumnVariance = 0.0f;
-    u32 count = 0;
-    for (u32 x = 50; x < 150; ++x) {  // Sample middle columns
-        f32 colMean = colMeans[x];
-        for (u32 y = 50; y < 150; ++y) {  // Sample middle rows
-            f32 diff = dn(x, y, 0) - colMean;
-            withinColumnVariance += diff * diff;
-            ++count;
-        }
-    }
-    withinColumnVariance /= count;
-
-    // For vertical stripes: between-column variance should be larger
-    // than within-column variance (columns are uniform internally but differ from each other)
-    EXPECT_GT(betweenColumnVariance, withinColumnVariance);
+    auto first = sensor.Apply(hdr, params);
+    auto second = sensor.Apply(hdr, params);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first.value().rawDN.data, second.value().rawDN.data);
+    const f32 initial = first.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : first.value().rawDN.data) if (value != initial) ++different;
+    EXPECT_GT(different, first.value().rawDN.data.size() / 4);
 }
 
-TEST_F(GenericSensorTest, DSNUCreatesHorizontalStripes) {
-    // DSNU should create horizontal stripes (row FPN from row addressing)
-    // Pixels in the same row should have similar DSNU values
-    Image hdr(200, 200, 1);
-    for (auto& val : hdr.data) {
-        val = 0.01f;  // Low radiance to avoid saturation
-    }
-
+TEST_F(GenericSensorTest, DSNUIsFixedPerPixelAcrossDarkCaptures) {
+    Image hdr(64, 64, 1);
     params.enableFPN = true;
-    params.prnuSigma = 0.0f;  // Disable PRNU to isolate DSNU
-    params.dsnuSigma_e = 50.0f;  // Strong DSNU (in electrons)
+    params.prnuSigma = 0.0f;
+    params.dsnuSigma_e = 20.0f;
+    params.darkCurrent_e_s = 5000.0f;
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
-    params.enableDarkCurrent = false;
-    params.fNumber = 1.4f;  // Minimal PSF blur
-    params.gain = 1.0f;  // Lower gain to preserve signal range
-
-    GenericSensor sensorDSNU;
-    auto result = sensorDSNU.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    const Image& dn = result.value().rawDN;
-
-    // Verify we have non-zero signal
-    f32 dnSum = 0.0f;
-    for (const auto& val : dn.data) {
-        dnSum += val;
-    }
-    f32 avgDN = dnSum / dn.data.size();
-    ASSERT_GT(avgDN, 10.0f) << "Signal is too weak";
-
-    // Calculate row-wise variance vs column-wise variance
-    // For horizontal stripes: between-row variance >> within-row variance
-
-    // Row means
-    std::vector<f32> rowMeans(dn.height, 0.0f);
-    for (u32 y = 0; y < dn.height; ++y) {
-        for (u32 x = 0; x < dn.width; ++x) {
-            rowMeans[y] += dn(x, y, 0);
-        }
-        rowMeans[y] /= dn.width;
-    }
-
-    f32 overallMean = 0.0f;
-    for (const auto& m : rowMeans) {
-        overallMean += m;
-    }
-    overallMean /= rowMeans.size();
-
-    f32 betweenRowVariance = 0.0f;
-    for (const auto& m : rowMeans) {
-        f32 diff = m - overallMean;
-        betweenRowVariance += diff * diff;
-    }
-    betweenRowVariance /= rowMeans.size();
-
-    // Within-row variance: how much do pixels within a row vary?
-    f32 withinRowVariance = 0.0f;
-    u32 count = 0;
-    for (u32 y = 50; y < 150; ++y) {  // Sample middle rows
-        f32 rowMean = rowMeans[y];
-        for (u32 x = 50; x < 150; ++x) {  // Sample middle columns
-            f32 diff = dn(x, y, 0) - rowMean;
-            withinRowVariance += diff * diff;
-            ++count;
-        }
-    }
-    withinRowVariance /= count;
-
-    // For horizontal stripes: between-row variance should be larger
-    // than within-row variance (rows are uniform internally but differ from each other)
-    EXPECT_GT(betweenRowVariance, withinRowVariance);
+    params.enableDarkCurrent = true;
+    auto first = sensor.Apply(hdr, params);
+    auto second = sensor.Apply(hdr, params);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(first.value().rawDN.data, second.value().rawDN.data);
+    const f32 initial = first.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : first.value().rawDN.data) if (value != initial) ++different;
+    EXPECT_GT(different, first.value().rawDN.data.size() / 4);
 }
 
-TEST_F(GenericSensorTest, CombinedFPNCreatesGridPattern) {
-    // When both PRNU (vertical) and DSNU (horizontal) are enabled,
-    // the combined effect should create a grid-like pattern
-    Image hdr(200, 200, 1);
-    for (auto& val : hdr.data) {
-        val = 0.01f;  // Low radiance to avoid saturation
-    }
-
-    params.enableFPN = true;
-    params.prnuSigma = 0.06f;  // 6% PRNU
-    params.dsnuSigma_e = 40.0f;  // DSNU
+TEST_F(GenericSensorTest, CombinedFPNCreatesSpatialVariationWithoutStripeAssumption) {
+    Image hdr(64, 64, 1);
+    for (auto& value : hdr.data) value = 0.01f;
     params.enablePoissonNoise = false;
     params.enableReadNoise = false;
-    params.enableDarkCurrent = false;
-    params.fNumber = 1.4f;
-    params.gain = 1.0f;  // Lower gain to preserve signal range
-
-    GenericSensor sensorGrid;
-    auto result = sensorGrid.Apply(hdr, params);
-    ASSERT_TRUE(result.has_value());
-
-    const Image& dn = result.value().rawDN;
-
-    // Verify we have reasonable signal
-    f32 dnSum = 0.0f;
-    for (const auto& val : dn.data) {
-        dnSum += val;
-    }
-    f32 avgDN = dnSum / dn.data.size();
-    ASSERT_GT(avgDN, 10.0f) << "Signal is too weak";
-
-    // Calculate both column and row variance contributions
-    // For a grid pattern, both should be significant
-
-    // Column means
-    std::vector<f32> colMeans(dn.width, 0.0f);
-    for (u32 x = 0; x < dn.width; ++x) {
-        for (u32 y = 0; y < dn.height; ++y) {
-            colMeans[x] += dn(x, y, 0);
-        }
-        colMeans[x] /= dn.height;
-    }
-
-    f32 overallMean = 0.0f;
-    for (const auto& m : colMeans) {
-        overallMean += m;
-    }
-    overallMean /= colMeans.size();
-
-    f32 columnVariance = 0.0f;
-    for (const auto& m : colMeans) {
-        f32 diff = m - overallMean;
-        columnVariance += diff * diff;
-    }
-    columnVariance /= colMeans.size();
-
-    // Row means
-    std::vector<f32> rowMeans(dn.height, 0.0f);
-    for (u32 y = 0; y < dn.height; ++y) {
-        for (u32 x = 0; x < dn.width; ++x) {
-            rowMeans[y] += dn(x, y, 0);
-        }
-        rowMeans[y] /= dn.width;
-    }
-
-    f32 rowVariance = 0.0f;
-    for (const auto& m : rowMeans) {
-        f32 diff = m - overallMean;
-        rowVariance += diff * diff;
-    }
-    rowVariance /= rowMeans.size();
-
-    // Both column and row variance should be significant (grid pattern)
-    // They don't need to be equal, but both should be non-trivial
-    EXPECT_GT(columnVariance, 1.0f);  // PRNU contribution
-    EXPECT_GT(rowVariance, 1.0f);     // DSNU contribution
+    params.enableDarkCurrent = true;
+    params.darkCurrent_e_s = 5000.0f;
+    params.prnuSigma = 0.06f;
+    params.dsnuSigma_e = 20.0f;
+    params.enableFPN = false;
+    GenericSensor uniformSensor;
+    auto uniform = uniformSensor.Apply(hdr, params);
+    ASSERT_TRUE(uniform.has_value());
+    params.enableFPN = true;
+    GenericSensor patternedSensor;
+    auto patterned = patternedSensor.Apply(hdr, params);
+    ASSERT_TRUE(patterned.has_value());
+    const auto first = patterned.value().rawDN.data[0];
+    size_t different = 0;
+    for (f32 value : patterned.value().rawDN.data) if (value != first) ++different;
+    EXPECT_GT(different, patterned.value().rawDN.data.size() / 4);
+    EXPECT_NE(patterned.value().rawDN.data, uniform.value().rawDN.data);
 }
 
 // ============================================================================

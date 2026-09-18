@@ -88,6 +88,8 @@ BlackbodyThermalDerivativeWPerK(f64 temperatureK, const ResponseStack& response,
 [[nodiscard]] f64 CounterUniform01(u32 deviceSeed, u32 pixelIndex,
                                    u64 acquisitionIndex, NoiseClass noiseClass,
                                    u32 counter);
+[[nodiscard]] f64 CounterGaussian(u32 deviceSeed, u32 pixelIndex,
+                                  u64 acquisitionIndex, NoiseClass noiseClass);
 
 // Checks that spectral products carry a wavelength per image channel and
 // measurement products carry the detector profile/units, then stamps the

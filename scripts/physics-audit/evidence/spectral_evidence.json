@@ -253,6 +253,15 @@
       "description": "NIR_ReflectedVsThermal_Comparison test verifies solar NIR (5800K) dominates thermal NIR (300K) by >1e19. True ratio is ~6.15e19, well above threshold.",
       "evidence": "sun_nir(1um, 5800K) = 10878 W/sr/m^2/nm vs thermal_nir(1um, 300K) = 1.77e-16 W/sr/m^2/nm, ratio = 6.15e19",
       "recommendation": "No change needed."
+    },
+    {
+      "id": "SPEC-29",
+      "severity": "Info",
+      "file": "src/libQuantiloom/renderer/ConfigResolve.cpp",
+      "line": 1424,
+      "description": "Fluorescence excitation uses its own source-wavelength domain and emission is normalized over its complete nonzero support, independent of the output device window. A detector window cannot change quantum yield.",
+      "evidence": "Independent piecewise-linear triangle with emission support 500-600 nm and peak 12 at 550 nm has full area 600; a 540-560 nm output window receives area 216, or 36% of total. Renormalizing to the output window would incorrectly amplify its detected radiance by 1/0.36.",
+      "recommendation": "Keep excitation and emission source domains separate from device response. Test a blue excitation curve with a narrow green output window and verify emission density does not change when the output window changes."
     }
   ]
 }

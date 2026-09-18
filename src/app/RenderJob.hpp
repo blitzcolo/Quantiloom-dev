@@ -45,6 +45,10 @@ struct RenderOutcome {
     /// The temperature a thermal camera would report, in kelvin. Empty unless
     /// [thermography] enabled it and the mode carries a band to invert.
     String tappPath;
+    String measurementPath;
+    String rawDnPath;
+    String correctedPath;
+    String displayPath;
     /// The hyperspectral cube streams itself to disk; there is no frame.
     bool wroteItsOwnOutput = false;
 
@@ -80,8 +84,10 @@ struct RenderOutcome {
  * @param outcome  `exrPath`, `width` and `height` are read; `pngPath`,
  *                 `tappPath`, `preview` and `error` are written.
  */
-void WriteFrameOutputs(const Config& config, OfflineRenderOutput& rendered,
-                       SpectralMode spectralMode, RenderOutcome& outcome);
+void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
+                       camera::CaptureState& cameraState,
+                       OfflineRenderOutput& rendered, SpectralMode spectralMode,
+                       RenderOutcome& outcome);
 
 RenderOutcome RenderConfigToFiles(const Config& config,
                                   const OfflineRenderer::InitParams& init);

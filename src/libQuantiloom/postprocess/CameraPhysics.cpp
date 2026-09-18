@@ -217,6 +217,9 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
         !FinitePositive(config.optics.pixelPitchUm) ||
         !FinitePositive(config.optics.fillFactor) ||
         config.optics.fillFactor > 1.0 ||
+        !std::isfinite(config.optics.psfSigmaPixelsOverride) ||
+        (config.optics.psfSigmaPixelsOverride < 0.0 &&
+         config.optics.psfSigmaPixelsOverride != -1.0) ||
         config.optics.sensorWidthPx == 0 || config.optics.sensorHeightPx == 0)
         return Result<void, String>::Err("invalid physical camera geometry");
     if (!FinitePositive(config.readout.exposureSeconds) ||
@@ -234,7 +237,12 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
         return Result<void, String>::Err("camera needs at least one device channel");
     if (config.device.cfa == CfaPattern::Mono && config.device.channels.size() != 1)
         return Result<void, String>::Err("monochrome detector needs one response channel");
-    if (config.device.cfa != CfaPattern::Mono && config.device.channels.size() != 3)
+    if (config.device.cfa == CfaPattern::MultiChannel &&
+        config.device.channels.size() < 2)
+        return Result<void, String>::Err("multi-channel detector needs multiple responses");
+    if (config.device.cfa != CfaPattern::Mono &&
+        config.device.cfa != CfaPattern::MultiChannel &&
+        config.device.channels.size() != 3)
         return Result<void, String>::Err("Bayer detector needs R, G and B response channels");
     for (const auto& channel : config.device.channels) {
         const auto valid = ValidateResponseStack(channel.response, config.device.detector);
@@ -256,15 +264,30 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
     if (config.quality.wavelengthSamples == 0 || config.quality.timeSamples == 0 ||
         config.quality.pixelSamples == 0 || config.quality.gpuTimePositions == 0)
         return Result<void, String>::Err("camera sample counts must be positive");
+    const size_t calibratedSamples = static_cast<size_t>(config.optics.sensorWidthPx) *
+        config.optics.sensorHeightPx *
+        (config.device.cfa == CfaPattern::MultiChannel ?
+         config.device.channels.size() : 1u);
+    const auto validCalibration = [calibratedSamples](
+        const std::vector<f64>& values, bool mustBePositive) {
+        if (!values.empty() && values.size() != calibratedSamples) return false;
+        return std::all_of(values.begin(), values.end(), [mustBePositive](f64 value) {
+            return std::isfinite(value) && (mustBePositive ? value > 0.0 : true);
+        });
+    };
     if (config.device.detector == DetectorKind::Photon) {
         if (!FinitePositive(config.photon.fullWellElectrons) ||
             !FiniteNonnegative(config.photon.darkCurrentElectronsPerSecond) ||
             !FiniteNonnegative(config.photon.readNoiseElectronsRms) ||
             !FiniteNonnegative(config.photon.prnuSigma) ||
             !FiniteNonnegative(config.photon.dsnuElectronsRms) ||
+            !FinitePositive(config.photon.dsnuReferenceExposureSeconds) ||
             !FiniteNonnegative(config.photon.biasDnRms) ||
             !FiniteNonnegative(config.photon.nucResidualFraction))
             return Result<void, String>::Err("invalid photon detector parameters");
+        if (!validCalibration(config.photon.nucGainMap, true) ||
+            !validCalibration(config.photon.nucOffsetElectronsMap, false))
+            return Result<void, String>::Err("photon NUC maps must match device pixels");
     } else {
         if (!FiniteNonnegative(config.thermal.timeConstantSeconds) ||
             !FinitePositive(config.thermal.responsivityDnPerWatt) ||
@@ -278,6 +301,12 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
              !FinitePositive(config.thermal.netdNoiseBandwidthHz) ||
              config.thermal.netdOpticalCondition.empty()))
             return Result<void, String>::Err("NETD requires reference temperature, optical condition and bandwidth");
+        if (config.thermal.netdKelvin > 0.0 &&
+            config.thermal.readNoiseDnRms > 0.0)
+            return Result<void, String>::Err("NETD and independent read noise would double-count one output noise");
+        if (!validCalibration(config.thermal.nucGainMap, true) ||
+            !validCalibration(config.thermal.nucOffsetDnMap, false))
+            return Result<void, String>::Err("thermal NUC maps must match device pixels");
     }
     if (!FiniteNonnegative(config.fastRgbRadianceScale) ||
         (config.calibratedFastRgbInput && !FinitePositive(config.fastRgbRadianceScale)))
@@ -590,6 +619,16 @@ f64 CounterUniform01(u32 deviceSeed, u32 pixelIndex, u64 acquisitionIndex,
                                                noiseClass, counter)) + 0.5) / 4294967296.0;
 }
 
+f64 CounterGaussian(u32 deviceSeed, u32 pixelIndex, u64 acquisitionIndex,
+                    NoiseClass noiseClass) {
+    const f64 u1 = CounterUniform01(deviceSeed, pixelIndex, acquisitionIndex,
+                                    noiseClass, 0);
+    const f64 u2 = CounterUniform01(deviceSeed, pixelIndex, acquisitionIndex,
+                                    noiseClass, 1);
+    return std::sqrt(-2.0 * std::log(u1)) *
+           std::cos(2.0 * std::numbers::pi_v<f64> * u2);
+}
+
 Result<void, String> AnnotateProductMetadata(CameraProduct& product) {
     if (!product.image.IsValid())
         return Result<void, String>::Err("camera product image is invalid");
@@ -647,6 +686,7 @@ Result<void, String> AnnotateProductMetadata(CameraProduct& product) {
     case SignalKind::RawDN: kind = "raw_dn"; break;
     case SignalKind::ApparentTemperature: kind = "apparent_temperature"; break;
     case SignalKind::FastRgbApproximation: kind = "fast_rgb_approximation"; break;
+    case SignalKind::DevicePreviewSrgb: kind = "device_preview_srgb"; break;
     }
     auto& metadata = product.image.metadata;
     metadata["camera_signal_kind"] = kind;

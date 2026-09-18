@@ -1178,13 +1178,13 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
     cpuMat.temperatureTextureIndex = material.temperatureTextureIndex;
     cpuMat.temperatureScale = material.temperatureScale;
     cpuMat.temperatureOffset = material.temperatureOffset;
-    cpuMat.irEmissivityCurveIndex = -1;    // no per-wavelength curve buffer yet
+    cpuMat.irEmissivityCurveIndex = indices.irEmissivityCurve;
 
     // Transmission properties (KHR_materials_transmission + KHR_materials_volume)
     cpuMat.ior = material.ior;
     cpuMat.transmission = material.transmission;
     cpuMat.transmissionTextureIndex = material.transmissionTextureIndex;
-    cpuMat.irTransmittanceCurveIndex = -1; // no per-wavelength curve buffer yet
+    cpuMat.irTransmittanceCurveIndex = indices.irTransmittanceCurve;
     cpuMat.attenuationColor = material.attenuationColor;
     cpuMat.attenuationDistance = material.attenuationDistance;
     cpuMat.thicknessFactor = material.thicknessFactor;

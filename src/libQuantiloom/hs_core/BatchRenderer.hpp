@@ -37,6 +37,7 @@ namespace quantiloom {
 class RayTracingPipeline;
 class Scene;
 class VulkanContext;
+struct CameraData;
 
 // ============================================================================
 // Batch Rendering Status
@@ -113,6 +114,11 @@ struct BatchRenderParams {
     u32 maxBounces = 4;           ///< Maximum ray bounces
     bool enableAccumulation = true; ///< Accumulate samples across frames
     bool verbose = false;         ///< Enable verbose logging
+    u32 frameIndex = 0;           ///< Acquisition frame, independent of render spp
+    u32 frameIndexHigh = 0;       ///< Upper 32 bits of acquisition index
+    u32 renderSeed = 0x5EED1234u; ///< Stable seed shared across wavelengths
+    u32 outputWidth = 0;         ///< 0 uses the scene render width
+    u32 outputHeight = 0;        ///< 0 uses the scene render height
 };
 
 // ============================================================================
@@ -226,6 +232,15 @@ public:
     bool RenderSingleBand(
         f32 wavelength_nm,
         const BatchRenderParams& params,
+        Image& outImage
+    );
+
+    /// Use the resolved camera pose, including motion, supplied by the host.
+    /// The caller restores the previous pipeline image, camera and specialization.
+    bool RenderSingleBand(
+        f32 wavelength_nm,
+        const BatchRenderParams& params,
+        const CameraData& cameraData,
         Image& outImage
     );
 

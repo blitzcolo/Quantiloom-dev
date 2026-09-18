@@ -7,6 +7,8 @@
 #include <cmath>
 #include <filesystem>
 #include <limits>
+#include <string>
+#include <system_error>
 
 using namespace quantiloom;
 using namespace quantiloom::camera;

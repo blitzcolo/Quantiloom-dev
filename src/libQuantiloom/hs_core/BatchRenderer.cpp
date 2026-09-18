@@ -21,6 +21,16 @@
 
 namespace quantiloom {
 
+namespace {
+u32 StableMix(u32 value) {
+    value = (value ^ 61u) ^ (value >> 16u);
+    value *= 9u;
+    value ^= value >> 4u;
+    value *= 0x27d4eb2du;
+    return value ^ (value >> 15u);
+}
+} // namespace
+
 // ============================================================================
 // Status String Conversion
 // ============================================================================
@@ -106,15 +116,17 @@ struct BatchRenderer::Impl {
      * @brief Render single wavelength and read back to CPU
      */
     bool RenderWavelength(f32 wavelength_nm, const BatchRenderParams& params,
-                          Image& outImage) {
+                          const CameraData* cameraOverride, Image& outImage) {
         if (!outputImage) {
             LOG_ERROR("BatchRenderer: Output image not initialized");
             return false;
         }
 
-        // Get camera from scene
-        const Camera& camera = scene.camera;
-        CameraData cameraData = camera.GetCameraData();
+        // The scene camera is the historical batch default. Camera capture
+        // supplies its resolved pose explicitly, so a timeline preview cannot
+        // accidentally snap back to the static asset camera.
+        CameraData cameraData = cameraOverride != nullptr
+            ? *cameraOverride : scene.camera.GetCameraData();
 
         // Set wavelength and spectral mode (single wavelength)
         cameraData.wavelength_nm = wavelength_nm;
@@ -124,10 +136,12 @@ struct BatchRenderer::Impl {
         pipeline.BindOutputImage(*outputImage);
 
         // Render with accumulation (multiple samples)
-        u32 randomSeed = static_cast<u32>(
-            std::chrono::high_resolution_clock::now()
-                .time_since_epoch().count()
-        );
+        // Common random numbers across wavelengths reduce the variance of a
+        // response integral. Neither wall time nor wavelength belongs in the
+        // ray seed; the acquisition/frame and sample identify this draw.
+        const u32 sequenceSeed = StableMix(params.renderSeed ^
+                                           StableMix(params.frameIndex) ^
+                                           StableMix(params.frameIndexHigh ^ 0x9e3779b9u));
 
         pipeline.SetCameraData(cameraData);
 
@@ -173,10 +187,12 @@ struct BatchRenderer::Impl {
             vkBeginCommandBuffer(cmd, &beginInfo);
 
             for (u32 sample = batchStart; sample < batchEnd; ++sample) {
-                // randomSeed advances per sample; the sequence seed does not --
+                // The per-sample seed changes; the sequence seed does not --
                 // it fixes the Owen scrambles for the whole accumulation, which
                 // is what makes the samples stratified against each other.
-                pipeline.SetSamplingParams(0, sample, params.spp, randomSeed + sample, randomSeed);
+                const u32 sampleSeed = StableMix(sequenceSeed ^ StableMix(sample));
+                pipeline.SetSamplingParams(params.frameIndex, sample, params.spp,
+                                           sampleSeed, sequenceSeed);
                 pipeline.TraceRays(cmd, imageWidth, imageHeight, sample == params.spp - 1);
             }
 
@@ -312,8 +328,8 @@ std::pair<BatchRenderStatus, SpectralCube> BatchRenderer::RenderBatch(
     }
 
     // Get image dimensions
-    u32 width = m_impl->scene.width;
-    u32 height = m_impl->scene.height;
+    u32 width = params.outputWidth != 0 ? params.outputWidth : m_impl->scene.width;
+    u32 height = params.outputHeight != 0 ? params.outputHeight : m_impl->scene.height;
 
     if (width == 0 || height == 0) {
         LOG_ERROR("BatchRenderer: Invalid image dimensions {}x{}", width, height);
@@ -373,7 +389,7 @@ std::pair<BatchRenderStatus, SpectralCube> BatchRenderer::RenderBatch(
         }
 
         // Render this wavelength
-        if (!m_impl->RenderWavelength(wavelength_nm, params, bandImage)) {
+        if (!m_impl->RenderWavelength(wavelength_nm, params, nullptr, bandImage)) {
             LOG_ERROR("BatchRenderer: Failed to render wavelength {} nm",
                       wavelength_nm);
             m_impl->lastBandCount = bandIdx;
@@ -424,14 +440,28 @@ bool BatchRenderer::RenderSingleBand(
     Image& outImage
 ) {
     // Ensure GPU resources
-    u32 width = m_impl->scene.width;
-    u32 height = m_impl->scene.height;
+    u32 width = params.outputWidth != 0 ? params.outputWidth : m_impl->scene.width;
+    u32 height = params.outputHeight != 0 ? params.outputHeight : m_impl->scene.height;
 
     if (!m_impl->EnsureOutputImage(width, height)) {
         return false;
     }
 
-    return m_impl->RenderWavelength(wavelength_nm, params, outImage);
+    return m_impl->RenderWavelength(wavelength_nm, params, nullptr, outImage);
+}
+
+bool BatchRenderer::RenderSingleBand(
+    f32 wavelength_nm,
+    const BatchRenderParams& params,
+    const CameraData& cameraData,
+    Image& outImage
+) {
+    const u32 width = params.outputWidth != 0 ? params.outputWidth : m_impl->scene.width;
+    const u32 height = params.outputHeight != 0 ? params.outputHeight : m_impl->scene.height;
+    if (!m_impl->EnsureOutputImage(width, height)) {
+        return false;
+    }
+    return m_impl->RenderWavelength(wavelength_nm, params, &cameraData, outImage);
 }
 
 void BatchRenderer::Cancel() {

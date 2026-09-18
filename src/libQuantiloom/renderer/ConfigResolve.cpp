@@ -16,21 +16,98 @@
 #include "io/SpectralBasisLoader.hpp"
 #include "io/SpectralIO.hpp"
 #include "postprocess/PostprocessConfig.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 #include "scene/Material.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
 
 #include <algorithm>
+#include <array>
 #include <utility>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <iterator>
 
 namespace quantiloom::rendercore {
 
 namespace {
 
 using Severity = ConfigApplyMessage::Severity;
+
+struct DeviceWavelengthDomain {
+    String channel;
+    f64 minNm = 0.0;
+    f64 maxNm = 0.0;
+};
+
+Vector<DeviceWavelengthDomain> DeviceDomains(const camera::CameraConfig& camera) {
+    Vector<DeviceWavelengthDomain> domains;
+    for (const auto& channel : camera.device.channels) {
+        const auto& stack = channel.response;
+        const camera::ResponseCurve* base = stack.systemResponse
+            ? &*stack.systemResponse
+            : camera.device.detector == camera::DetectorKind::Photon
+                  ? &*stack.quantumEfficiency : &*stack.thermalAbsorptance;
+        domains.push_back({channel.name, base->MinNm(), base->MaxNm()});
+    }
+    return domains;
+}
+
+bool Covers(const f64 sourceMinNm, const f64 sourceMaxNm,
+            const DeviceWavelengthDomain& domain) {
+    return sourceMinNm <= domain.minNm && sourceMaxNm >= domain.maxNm;
+}
+
+bool AtmosphereCovers(const f64 minNm, const f64 maxNm) {
+    struct Range { f64 minNm, maxNm; };
+    static constexpr Range kTrained[] = {
+        {400.0, 800.0}, {930.0, 1200.0}, {1400.0, 2400.0},
+        {3000.0, 5000.0}, {8000.0, 12000.0}
+    };
+    return std::any_of(std::begin(kTrained), std::end(kTrained),
+                       [=](const Range& range) {
+                           return minNm >= range.minNm && maxNm <= range.maxNm;
+                       });
+}
+
+Result<Vector<SpectralCurveGPU>, String> ExactCurveSegments(
+    const Vector<std::pair<f32, f32>>& samples) {
+    using Segments = Result<Vector<SpectralCurveGPU>, String>;
+    if (samples.size() < 2)
+        return Segments::Err("exact spectral curve needs at least two knots");
+    for (size_t i = 0; i < samples.size(); ++i) {
+        if (!std::isfinite(samples[i].first) || samples[i].first <= 0.0f ||
+            !std::isfinite(samples[i].second) ||
+            (i && samples[i].first <= samples[i - 1].first))
+            return Segments::Err(
+                "exact spectral knots need positive increasing wavelengths and finite values");
+    }
+    Vector<SpectralCurveGPU> segments;
+    size_t first = 0;
+    constexpr size_t kPairsPerSegment = MAX_SPECTRAL_SAMPLES / 2;
+    while (first + 1 < samples.size()) {
+        const size_t last =
+            std::min(first + kPairsPerSegment - 1, samples.size() - 1);
+        SpectralCurveGPU segment;
+        segment.startWavelength_nm = samples[first].first;
+        // Zero step marks a packed exact-source segment, interpreted only by
+        // EvaluateEmissionCurve. Each value pair is (lambda_nm, radiance),
+        // allowing arbitrary original knots with no resampling error.
+        segment.stepSize_nm = 0.0f;
+        segment.numSamples = static_cast<u32>(last - first + 1);
+        for (u32 i = 0; i < segment.numSamples; ++i) {
+            segment.values[2 * i] = samples[first + i].first;
+            segment.values[2 * i + 1] = samples[first + i].second;
+        }
+        segments.push_back(segment);
+        if (segments.size() >= 4096)
+            return Segments::Err(
+                "exact spectral curve exceeds 4095 segments on binding 13");
+        first = last; // adjacent segments share their boundary knot
+    }
+    return segments;
+}
 
 /// Collects diagnostics and remembers whether a fatal one was seen, so the
 /// resolver can keep reading -- a half-finished config is more useful with all
@@ -158,10 +235,28 @@ void BindFluorescence(const String& name, Material& mat,
         diag.Warn("fluorescence", "    '" + name + "': " + warning);
     }
 
-    const auto excitationIndex = static_cast<i32>(out.curves.size());
-    out.curves.push_back(resolved.excitation);
-    const auto emissionIndex = static_cast<i32>(out.curves.size());
-    out.curves.push_back(resolved.emission);
+    if (out.curves.size() + 2 + resolved.excitationExactSegments.size() +
+            resolved.emissionExactSegments.size() > 4096) {
+        diag.Fatal("fluorescence",
+                   "binding 13 has at most 4096 spectral curve records; "
+                   "exact fluorescence segments for '" + name + "' exceed it");
+        return;
+    }
+    const auto appendExact = [&](const SpectralCurveGPU& preview,
+                                 const Vector<SpectralCurveGPU>& segments) {
+        const i32 first = static_cast<i32>(out.curves.size());
+        out.curves.push_back(preview);
+        for (const auto& segment : segments) {
+            const i32 nextIndex = static_cast<i32>(out.curves.size());
+            out.curves.back()._padding = static_cast<u32>(nextIndex + 1);
+            out.curves.push_back(segment);
+        }
+        return first;
+    };
+    const i32 excitationIndex =
+        appendExact(resolved.excitation, resolved.excitationExactSegments);
+    const i32 emissionIndex =
+        appendExact(resolved.emission, resolved.emissionExactSegments);
 
     out.materialNameToFluorescence[name] = {excitationIndex, emissionIndex};
     mat.fluorescenceExcitationCurveIndex = excitationIndex;
@@ -203,8 +298,8 @@ void BindFluorescence(const String& name, Material& mat,
     }
 
     QL_LOG_INFO("  Material '{}': fluorescence from '{}', yield {:.4g}, "
-                "excitation → curve index {}, emission → curve index {} "
-                "(area {:.4g} in band before normalising)",
+                "excitation -> curve index {}, emission -> curve index {} "
+                "(full emission area {:.4g} before normalising)",
                 name, source, resolved.yield, excitationIndex, emissionIndex,
                 resolved.emissionAreaInBand);
 }
@@ -789,6 +884,67 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // Parsed whether or not it is enabled, so a host can turn it on later
     // without rereading the file.
     out.sensor = PostprocessConfig::ParseSensorParams(config);
+    auto cameraConfig = ParseCameraConfig(config, out.mode, options.baseDir);
+    if (!cameraConfig) {
+        diag.Fatal("sensor", cameraConfig.error());
+    } else {
+        out.cameraConfig = std::move(*cameraConfig);
+        out.sensorEnabled = out.cameraConfig.enabled;
+        const bool strictCamera = out.cameraConfig.enabled &&
+                                  config.Has("sensor.version");
+        const auto deviceDomains = DeviceDomains(out.cameraConfig);
+        // The photon/thermal integrator uses the device response's own
+        // wavelength span. A sun or sky LUT that covers only the render mode
+        // would otherwise be clamped to its endpoint across the missing part
+        // and present an invented measurement.
+        if (out.cameraConfig.enabled && out.solarSunSky) {
+            const auto& [sun, sky] = *out.solarSunSky;
+            for (const auto& domain : deviceDomains) {
+                const std::array<std::pair<const char*, const SpectralCurve*>, 2> sources{{
+                    {"sun", &sun}, {"sky", &sky}
+                }};
+                for (const auto& source : sources) {
+                    const auto& samples = source.second->samples;
+                    const bool explicitlyDark = !samples.empty() && std::all_of(
+                        samples.begin(), samples.end(),
+                        [](const auto& sample) { return sample.second == 0.0f; });
+                    if (explicitlyDark) continue;
+                    if (samples.empty() ||
+                        !Covers(samples.front().first, samples.back().first, domain)) {
+                        const String message =
+                            String(source.first) + " LUT does not cover device channel '" +
+                            domain.channel + "' response [" +
+                            std::to_string(domain.minNm) + ", " +
+                            std::to_string(domain.maxNm) +
+                            "] nm; provide a covering LUT or explicitly omit that source";
+                        if (strictCamera) diag.Fatal("lighting.solar_lut", message);
+                        else diag.Warn("lighting.solar_lut",
+                                       message + " (legacy approximation)");
+                    }
+                }
+            }
+        } else if (out.cameraConfig.enabled && spectralIlluminantNeeded &&
+                   !out.solarSunSky) {
+            const String message =
+                "camera measurement has nonzero spectral sun/sky but no covering "
+                "solar_lut; provide one or set both sources to zero";
+            if (strictCamera) diag.Fatal("lighting.solar_lut", message);
+            else diag.Warn("lighting.solar_lut", message + " (legacy approximation)");
+        }
+        if (out.cameraConfig.enabled && out.atmosphere.enabled) {
+            for (const auto& domain : deviceDomains) {
+                if (AtmosphereCovers(domain.minNm, domain.maxNm)) continue;
+                const String message =
+                    "NN atmosphere training data does not cover camera channel '" +
+                    domain.channel + "' [" + std::to_string(domain.minNm) +
+                    ", " + std::to_string(domain.maxNm) +
+                    "] nm; use a covering atmosphere spectrum or explicitly "
+                    "disable [atmosphere]";
+                if (strictCamera) diag.Fatal("atmosphere", message);
+                else diag.Warn("atmosphere", message + " (legacy approximation)");
+            }
+        }
+    }
 
     // ------------------------------------------------------------------
     // [thermal]
@@ -1139,6 +1295,11 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                       "timeline ends before it starts; end_s is clamped to start_s");
             timeline.end_s = timeline.start_s;
         }
+        if (!out.cameraConfig.motion.keys.empty() && !timeline.present) {
+            diag.Fatal("camera.motion",
+                       "camera motion needs a [timeline] so capture and scene animation "
+                       "share one clock");
+        }
         if (timeline.present) {
             timeline.time_s = std::clamp(timeline.time_s, timeline.start_s, timeline.end_s);
             if (out.models.empty() || std::none_of(out.models.begin(), out.models.end(),
@@ -1189,6 +1350,19 @@ Result<ResolvedFluorescence, String> ResolveFluorescence(
     // Excitation: a fraction, so it has to be one. A curve given in percent, or
     // an absorption coefficient mistaken for a fraction, lands here rather than
     // in a render that quietly makes light.
+    const auto ordered = [](const Vector<std::pair<f32, f32>>& samples) {
+        if (samples.size() < 2) return false;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (!std::isfinite(samples[i].first) || samples[i].first <= 0.0f ||
+                !std::isfinite(samples[i].second) ||
+                (i && samples[i].first <= samples[i - 1].first)) return false;
+        }
+        return true;
+    };
+    if (!ordered(request.excitationSamples) || !ordered(request.emissionSamples))
+        return FluoResult::Err(
+            "fluorescence curves need at least two finite samples with increasing wavelengths");
+
     for (const auto& [lambda, value] : request.excitationSamples) {
         if (value < 0.0f || value > 1.0f) {
             return FluoResult::Err(
@@ -1207,14 +1381,10 @@ Result<ResolvedFluorescence, String> ResolveFluorescence(
         }
     }
 
-    // Overlap with the band, asked before resampling rather than inferred from
-    // the result. SpectralCurveGPU::FromCPUBand falls back to the curve's own
-    // grid when there is no overlap, which is right for a reflectance -- the
-    // curve is still the best information there is about the material -- and
-    // wrong here: a pair that lands entirely outside the band being rendered
-    // describes light arriving and leaving at wavelengths this render does not
-    // have, and normalising the emission over an empty intersection would put
-    // the whole curve back at full strength somewhere it does not belong.
+    // Only the emitted light has to intersect the output window. Excitation
+    // may be in a different band altogether (the defining property of this
+    // transport term), so its support belongs to the source spectrum rather
+    // than to the device looking at the emitted wavelengths.
     const auto overlaps = [&](const Vector<std::pair<f32, f32>>& samples) {
         return samples.back().first > request.bandMinNm &&
                samples.front().first < request.bandMaxNm;
@@ -1233,29 +1403,46 @@ Result<ResolvedFluorescence, String> ResolveFluorescence(
             "come back at. A curve measured in the visible says nothing about an "
             "infrared band.");
     }
-    if (!overlaps(request.excitationSamples)) {
+    // Trim only zero-valued padding. Keep one zero knot on either side of the
+    // nonzero part, so linear interpolation still reaches zero at the true
+    // edge. This spends the fixed 64-point GPU grid on the measured shape even
+    // when a table extends across several spectral bands with zero tails.
+    const auto support = [](const Vector<std::pair<f32, f32>>& samples)
+        -> std::optional<std::pair<f32, f32>> {
+        size_t first = samples.size(), last = 0;
+        for (size_t i = 0; i < samples.size(); ++i) {
+            if (samples[i].second > 0.0f) {
+                first = std::min(first, i);
+                last = i;
+            }
+        }
+        if (first == samples.size()) return std::nullopt;
+        const size_t lo = first > 0 ? first - 1 : first;
+        const size_t hi = last + 1 < samples.size() ? last + 1 : last;
+        return std::pair<f32, f32>{samples[lo].first, samples[hi].first};
+    };
+    const auto exSupport = support(request.excitationSamples);
+    const auto emSupport = support(request.emissionSamples);
+    if (!exSupport) return FluoResult::Err("the excitation curve is zero throughout");
+    if (!emSupport) return FluoResult::Err("the emission curve is zero throughout");
+    if (emSupport->second <= request.bandMinNm ||
+        emSupport->first >= request.bandMaxNm)
         return FluoResult::Err(
-            "the excitation curve covers [" +
-            std::to_string(static_cast<i32>(request.excitationSamples.front().first)) + ", " +
-            std::to_string(static_cast<i32>(request.excitationSamples.back().first)) +
-            "] nm, entirely outside the " + bandText() +
-            " being rendered, so nothing in this render would ever excite it. "
-            "Excitation below 400 nm is not expressible: the visible band starts "
-            "there, and a path carries no wavelength outside the band it renders.");
-    }
+            "the emission curve has no nonzero overlap with the " + bandText() +
+            " output window");
 
     SpectralCurve exCpu;
     exCpu.samples = request.excitationSamples;
-    out.excitation =
-        SpectralCurveGPU::FromCPUBand(exCpu, request.bandMinNm, request.bandMaxNm);
+    out.excitation = SpectralCurveGPU::FromCPUBand(
+        exCpu, exSupport->first, exSupport->second);
 
     SpectralCurve emCpu;
     emCpu.samples = request.emissionSamples;
-    out.emission =
-        SpectralCurveGPU::FromCPUBand(emCpu, request.bandMinNm, request.bandMaxNm);
+    out.emission = SpectralCurveGPU::FromCPUBand(
+        emCpu, emSupport->first, emSupport->second);
 
-    // The emission shape becomes a density per nm, integrating to 1 over the
-    // band. Two reasons it is done here rather than left to the shader: the
+    // The emission shape becomes a density per nm, integrating to 1 over its
+    // entire nonzero support. Two reasons it is done here rather than left to the shader: the
     // published curves carry no absolute level at all (a spectrofluorimeter
     // reports counts), so a level read off one would be an artefact of the
     // instrument; and with the area fixed at 1, `yield` is the only number that
@@ -1268,45 +1455,46 @@ Result<ResolvedFluorescence, String> ResolveFluorescence(
     // on every fluorescent surface as 1.6% too little light. A flat curve over
     // the visible band has to come back as exactly the band's width.
     f64 area = 0.0;
-    for (u32 i = 0; i < out.emission.numSamples; ++i) {
-        const f64 v = static_cast<f64>(out.emission.values[i]);
-        area += (i == 0 || i + 1 == out.emission.numSamples) ? 0.5 * v : v;
+    for (size_t i = 1; i < request.emissionSamples.size(); ++i) {
+        const auto& before = request.emissionSamples[i - 1];
+        const auto& after = request.emissionSamples[i];
+        area += 0.5 * (static_cast<f64>(before.second) +
+                       static_cast<f64>(after.second)) *
+                static_cast<f64>(after.first - before.first);
     }
-    area *= static_cast<f64>(out.emission.stepSize_nm);
     out.emissionAreaInBand = static_cast<f32>(area);
 
-    if (!(area > 0.0)) {
+    if (!(area > 0.0))
         return FluoResult::Err(
-            "the emission curve overlaps the band being rendered but is zero "
-            "throughout it, so there is nothing to normalise and no wavelength "
-            "for the absorbed light to come back at");
-    }
+            "the emission curve has no positive area after resampling");
     const f32 inverseArea = static_cast<f32>(1.0 / area);
     for (u32 i = 0; i < out.emission.numSamples; ++i) {
         out.emission.values[i] *= inverseArea;
     }
+    auto excitationSegments = ExactCurveSegments(request.excitationSamples);
+    if (!excitationSegments)
+        return FluoResult::Err(excitationSegments.error());
+    Vector<std::pair<f32, f32>> normalisedEmission = request.emissionSamples;
+    for (auto& sample : normalisedEmission) sample.second *= inverseArea;
+    auto emissionSegments = ExactCurveSegments(normalisedEmission);
+    if (!emissionSegments)
+        return FluoResult::Err(emissionSegments.error());
+    out.excitationExactSegments = std::move(*excitationSegments);
+    out.emissionExactSegments = std::move(*emissionSegments);
 
-    // How much of each curve the band actually holds. Both are clamped at the
-    // band edges, and a pair whose overlap is small is a pair mostly outside
-    // the render: worth saying, not worth refusing, because a band edge cutting
-    // a tail is normal and a band edge cutting the peak is not.
+    // Device band limits output, not molecular excitation or yield. Warn when
+    // it sees only part of the emission; do not renormalise that part.
     const auto span = [](const Vector<std::pair<f32, f32>>& samples) {
         return std::pair<f32, f32>{samples.front().first, samples.back().first};
     };
-    const auto [exLo, exHi] = span(request.excitationSamples);
     const auto [emLo, emHi] = span(request.emissionSamples);
-    if (exLo > request.bandMinNm + 1.0f || exHi < request.bandMaxNm - 1.0f) {
+    if (emSupport->first < request.bandMinNm ||
+        emSupport->second > request.bandMaxNm) {
         out.warnings.push_back(
-            "the excitation curve covers [" + std::to_string(static_cast<i32>(exLo)) +
-            ", " + std::to_string(static_cast<i32>(exHi)) +
-            "] nm and is held at its endpoints outside that");
-    }
-    if (emLo > request.bandMinNm || emHi < request.bandMaxNm) {
-        out.warnings.push_back(
-            "the emission curve covers [" + std::to_string(static_cast<i32>(emLo)) +
-            ", " + std::to_string(static_cast<i32>(emHi)) +
-            "] nm; the part outside the band is normalised away with the rest, so "
-            "the yield describes what comes back INSIDE the band");
+            "the output window sees only part of emission support [" +
+            std::to_string(static_cast<i32>(emLo)) + ", " +
+            std::to_string(static_cast<i32>(emHi)) +
+            "] nm; yield remains normalised over the full emission support");
     }
 
     // Stokes shift: fluorescence emits at longer wavelengths than it absorbs,
@@ -1500,6 +1688,9 @@ Result<ResolvedEmission, String> ResolveEmissionSpectrum(
     }
 
     out.curve = gpu;
+    auto exact = ExactCurveSegments(curve.samples);
+    if (!exact) return EmissionResult::Err(exact.error());
+    out.exactSegments = std::move(*exact);
     return EmissionResult(std::move(out));
 }
 
@@ -1603,6 +1794,13 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
     ResolvedMaterialSpectra out;
     Diagnostics diag(options, report);
+    const bool strictCamera =
+        resolved.cameraConfig.enabled && config.Has("sensor.version");
+    const auto deviceDomains = DeviceDomains(resolved.cameraConfig);
+    // Keep the source knot positions for energy checks. A narrow measured
+    // peak can disappear on the 64-point GPU grid, so a validation based only
+    // on uploaded samples could declare invalid input safe.
+    std::unordered_map<i32, SpectralCurve> sourceCurveByIndex;
 
     // The band every curve-binding path below resamples onto. A measured curve
     // for a cross-band asset spans the near ultraviolet to the LWIR, and 64
@@ -1623,6 +1821,59 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         bandMinNm = config.Get<f32>("hyperspectral.wavelength_min_nm", bandMinNm);
         bandMaxNm = config.Get<f32>("hyperspectral.wavelength_max_nm", bandMaxNm);
     }
+    // The output wavelength window is the union of the preview estimator and
+    // every detector response. It is only an overlap gate for fluorescence:
+    // neither excitation nor emission is clipped or normalised to it.
+    f32 fluorescenceOutputMinNm = bandMinNm;
+    f32 fluorescenceOutputMaxNm = bandMaxNm;
+    if (resolved.cameraConfig.enabled) {
+        for (const auto& domain : deviceDomains) {
+            fluorescenceOutputMinNm =
+                std::min(fluorescenceOutputMinNm, static_cast<f32>(domain.minNm));
+            fluorescenceOutputMaxNm =
+                std::max(fluorescenceOutputMaxNm, static_cast<f32>(domain.maxNm));
+        }
+    }
+    const auto requireExcitationCoverage =
+        [&](const String& name, const ResolvedFluorescence& fluorescence) {
+            const auto [exMin, exMax] = fluorescence.excitation.GetWavelengthRange();
+            if (resolved.atmosphere.enabled &&
+                !AtmosphereCovers(exMin, exMax)) {
+                diag.Fatal("atmosphere",
+                           "NN atmosphere does not cover material '" + name +
+                           "' fluorescence excitation [" +
+                           std::to_string(exMin) + ", " +
+                           std::to_string(exMax) +
+                           "] nm; provide covering atmosphere data or explicitly "
+                           "disable [atmosphere]");
+            }
+            if (!resolved.solarSunSky) return;
+            const auto& [sun, sky] = *resolved.solarSunSky;
+            const std::array<std::pair<const char*, const SpectralCurve*>, 2> sources{{
+                {"sun", &sun}, {"sky", &sky}
+            }};
+            for (const auto& [label, curve] : sources) {
+                if (curve->samples.empty()) {
+                    diag.Fatal("lighting.solar_lut",
+                               String(label) + " LUT is empty while material '" + name +
+                               "' has fluorescence excitation");
+                    continue;
+                }
+                const bool explicitlyDark = std::all_of(
+                    curve->samples.begin(), curve->samples.end(),
+                    [](const auto& sample) { return sample.second == 0.0f; });
+                if (explicitlyDark) continue;
+                if (curve->samples.front().first > exMin ||
+                    curve->samples.back().first < exMax) {
+                    diag.Fatal("lighting.solar_lut",
+                               String(label) + " LUT does not cover material '" + name +
+                               "' fluorescence excitation [" + std::to_string(exMin) +
+                               ", " + std::to_string(exMax) +
+                               "] nm; supply a covering spectrum or explicitly "
+                               "disable that source");
+                }
+            }
+        };
 
     // ------------------------------------------------------------------
     // Default IR surface temperature
@@ -1754,9 +2005,37 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 for (const auto& warning : resolved.warnings) {
                     diag.Warn("emissive_curve", "    '" + name + "': " + warning);
                 }
+                if (!resolved.exactSegments.empty()) {
+                    const f64 sourceLo = resolved.exactSegments.front().values[0];
+                    const auto& lastSegment = resolved.exactSegments.back();
+                    const f64 sourceHi =
+                        lastSegment.values[2 * (lastSegment.numSamples - 1)];
+                    for (const auto& domain : deviceDomains) {
+                        if (Covers(sourceLo, sourceHi, domain)) continue;
+                        diag.Warn("emissive_curve",
+                                  "material '" + name + "' emission spans [" +
+                                  std::to_string(sourceLo) + ", " +
+                                  std::to_string(sourceHi) +
+                                  "] nm while camera channel '" + domain.channel +
+                                  "' reads [" + std::to_string(domain.minNm) +
+                                  ", " + std::to_string(domain.maxNm) +
+                                  "] nm; emission is zero outside authored support");
+                    }
+                }
 
+                if (out.curves.size() + 1 + resolved.exactSegments.size() > 4096) {
+                    diag.Fatal("emissive_curve",
+                               "binding 13 has at most 4096 spectral curve records; "
+                               "exact segments for material '" + name + "' exceed it");
+                    continue;
+                }
                 const auto index = static_cast<i32>(out.curves.size());
                 out.curves.push_back(resolved.curve);
+                for (const auto& segment : resolved.exactSegments) {
+                    const i32 nextIndex = static_cast<i32>(out.curves.size());
+                    out.curves.back()._padding = static_cast<u32>(nextIndex + 1);
+                    out.curves.push_back(segment);
+                }
                 out.materialNameToEmissiveCurve[name] = index;
                 it->emissiveRadianceCurveIndex = index;
                 it->emissiveCurveSource = request.source;
@@ -1826,14 +2105,15 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                     request.excitationSamples = exLoaded.value().samples;
                     request.emissionSamples = emLoaded.value().samples;
                     request.yield = yield;
-                    request.bandMinNm = bandMinNm;
-                    request.bandMaxNm = bandMaxNm;
+                    request.bandMinNm = fluorescenceOutputMinNm;
+                    request.bandMaxNm = fluorescenceOutputMaxNm;
                     request.materialName = name;
 
                     auto bound = ResolveFluorescence(request);
                     if (!bound) {
                         diag.Fatal("fluorescence", "  '" + name + "': " + bound.error());
                     } else {
+                        requireExcitationCoverage(name, *bound);
                         BindFluorescence(name, *it, bound.value(),
                                          exSource + " / " + emSource, out, diag);
                     }
@@ -2033,8 +2313,21 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                            "spectral_weight_texture to name one");
         }
 
-        constexpr f32 kMwirNm = 4000.0f;
-        constexpr f32 kLwirNm = 10000.0f;
+        // Legacy scalar IR fractions state a constant assumption, not a
+        // measured curve whose last wavelength is 10 um. Preserve that
+        // meaning when a new device responds outside the old two-point
+        // placeholder: extend only these scalars, never an authored curve.
+        f32 kMwirNm = 4000.0f;
+        f32 kLwirNm = 10000.0f;
+        if (resolved.cameraConfig.enabled &&
+            resolved.cameraConfig.device.effectiveMaxNm > 780.0) {
+            kMwirNm = std::min(
+                kMwirNm,
+                static_cast<f32>(resolved.cameraConfig.device.effectiveMinNm));
+            kLwirNm = std::max(
+                kLwirNm,
+                static_cast<f32>(resolved.cameraConfig.device.effectiveMaxNm));
+        }
         const f32 emissivity = matTable.GetFloat("ir_emissivity", 0.0f);
         const f32 transmittance = matTable.GetFloat("ir_transmittance", 0.0f);
 
@@ -2043,6 +2336,14 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         }
         if (transmittance > 0.0f) {
             it->irTransmittanceCurve = {{kMwirNm, transmittance}, {kLwirNm, transmittance}};
+        }
+        if ((emissivity > 0.0f || transmittance > 0.0f) &&
+            (kMwirNm < 4000.0f || kLwirNm > 10000.0f)) {
+            diag.Info("materials",
+                      "material '" + name + "' legacy scalar IR fractions are "
+                      "constant assumptions extended across camera response [" +
+                      std::to_string(kMwirNm) + ", " +
+                      std::to_string(kLwirNm) + "] nm");
         }
         // Derived only when the config actually said something to derive it
         // from. Both keys above default to zero when absent, so this used to
@@ -2370,12 +2671,15 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
             SpectralCurve curve;
             curve.samples = result.value();
+            const f32 uploadMin = strictCamera ? curve.samples.front().first : bandMinNm;
+            const f32 uploadMax = strictCamera ? curve.samples.back().first : bandMaxNm;
             SpectralCurveGPU gpuCurve =
-                SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
+                SpectralCurveGPU::FromCPUBand(curve, uploadMin, uploadMax);
 
             const i32 curveIndex = static_cast<i32>(out.curves.size());
             out.materialNameToCurve[materialName] = curveIndex;
             out.curves.push_back(gpuCurve);
+            sourceCurveByIndex.emplace(curveIndex, std::move(curve));
 
             logBound(materialName, gpuCurve, curveIndex, "the config");
         }
@@ -2409,13 +2713,16 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
         SpectralCurve curve;
         curve.samples = mat.irReflectanceCurve;
+        const f32 uploadMin = strictCamera ? curve.samples.front().first : bandMinNm;
+        const f32 uploadMax = strictCamera ? curve.samples.back().first : bandMaxNm;
         const SpectralCurveGPU gpuCurve =
-            SpectralCurveGPU::FromCPUBand(curve, bandMinNm, bandMaxNm);
+            SpectralCurveGPU::FromCPUBand(curve, uploadMin, uploadMax);
         if (gpuCurve.numSamples == 0) continue;
 
         const i32 curveIndex = static_cast<i32>(out.curves.size());
         out.materialNameToCurve[mat.name] = curveIndex;
         out.curves.push_back(gpuCurve);
+        sourceCurveByIndex.emplace(curveIndex, std::move(curve));
         ++boundFromScene;
 
         logBound(mat.name, gpuCurve, curveIndex, "the scene file",
@@ -2445,8 +2752,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         request.excitationSamples = mat.fluorescenceExcitationCurve;
         request.emissionSamples = mat.fluorescenceEmissionCurve;
         request.yield = mat.fluorescenceYield;
-        request.bandMinNm = bandMinNm;
-        request.bandMaxNm = bandMaxNm;
+        request.bandMinNm = fluorescenceOutputMinNm;
+        request.bandMaxNm = fluorescenceOutputMaxNm;
         request.materialName = mat.name;
 
         auto bound = ResolveFluorescence(request);
@@ -2455,6 +2762,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                        "  '" + mat.name + "' (from the scene file): " + bound.error());
             continue;
         }
+        requireExcitationCoverage(mat.name, *bound);
         BindFluorescence(mat.name, mat, bound.value(),
                          mat.fluorescenceSource.empty() ? String("the scene file")
                                                         : mat.fluorescenceSource,
@@ -2538,6 +2846,10 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 ResolvedRef entry;
                 entry.curveIndex = static_cast<i32>(out.curves.size());
                 out.curves.push_back(gpuCurve);
+                SpectralCurve sourceCurve =
+                    basisLoader.ReconstructCurve(spectralData->name, activeBand);
+                if (!sourceCurve.samples.empty())
+                    sourceCurveByIndex.emplace(entry.curveIndex, std::move(sourceCurve));
 
                 // The VIS reconstruction, separately from the render band: the
                 // colour is only ever compared against a base-colour texel, and
@@ -2791,6 +3103,201 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                     "spectral data");
     }
 
+    // Keep authored thermal emissivity and transmittance over their complete
+    // wavelength support. The fixed fused-band grid is not the camera's
+    // response grid, and resampling these only to that band would discard the
+    // material data a narrow or wider detector needs.
+    const auto bindIrCurve =
+        [&](const Material& material, const Vector<std::pair<f32, f32>>& samples,
+            const char* property, std::unordered_map<String, i32>& indices) {
+            if (samples.empty()) return;
+            bool valid = samples.size() >= 2;
+            for (size_t i = 0; i < samples.size(); ++i) {
+                const auto [wavelength, value] = samples[i];
+                valid = valid && std::isfinite(wavelength) && wavelength > 0.0f &&
+                        std::isfinite(value) && value >= 0.0f && value <= 1.0f &&
+                        (i == 0 || wavelength > samples[i - 1].first);
+            }
+            if (!valid) {
+                diag.Fatal("material", "material '" + material.name + "' " +
+                           property + " needs increasing positive wavelengths and "
+                           "finite fractions in [0,1]");
+                return;
+            }
+            const f64 curveLo = samples.front().first;
+            const f64 curveHi = samples.back().first;
+            const bool emissivityOverridden =
+                StringView(property) == "ir_emissivity" &&
+                (!material.irReflectanceCurve.empty() ||
+                 out.materialNameToCurve.count(material.name) > 0);
+            if (resolved.cameraConfig.enabled && !emissivityOverridden) {
+                for (const auto& domain : deviceDomains) {
+                    if (domain.maxNm <= 780.0) continue;
+                    if (!Covers(curveLo, curveHi, domain)) {
+                        const String message =
+                            "material '" + material.name + "' " + property +
+                            " spans [" + std::to_string(curveLo) + ", " +
+                            std::to_string(curveHi) + "] nm but camera channel '" +
+                            domain.channel + "' measures [" +
+                            std::to_string(domain.minNm) + ", " +
+                            std::to_string(domain.maxNm) +
+                            "] nm; provide a covering material curve";
+                        if (strictCamera) diag.Fatal("material", message);
+                        else diag.Warn("material", message + " (legacy approximation)");
+                    }
+                }
+            }
+            SpectralCurve cpu;
+            cpu.samples = samples;
+            const i32 index = static_cast<i32>(out.curves.size());
+            out.curves.push_back(SpectralCurveGPU::FromCPUBand(
+                cpu, static_cast<f32>(curveLo), static_cast<f32>(curveHi)));
+            sourceCurveByIndex.emplace(index, std::move(cpu));
+            indices[material.name] = index;
+        };
+    for (const auto& material : scene.materials) {
+        bindIrCurve(material, material.irEmissivityCurve, "ir_emissivity",
+                    out.materialNameToIrEmissivityCurve);
+        bindIrCurve(material, material.irTransmittanceCurve, "ir_transmittance",
+                    out.materialNameToIrTransmittanceCurve);
+    }
+    if (resolved.cameraConfig.enabled) {
+        for (const auto& [index, source] : sourceCurveByIndex) {
+            if (index < 0 || static_cast<size_t>(index) >= out.curves.size() ||
+                source.samples.size() < 2) continue;
+            const auto& gpu = out.curves[static_cast<size_t>(index)];
+            for (const auto& domain : deviceDomains) {
+                if (!Covers(source.samples.front().first,
+                            source.samples.back().first, domain)) continue;
+                auto compare = [&](f32 wavelength) {
+                    out.maxSourceToGpuCurveError =
+                        std::max(out.maxSourceToGpuCurveError,
+                                 std::abs(source.Evaluate(wavelength) -
+                                          gpu.Evaluate(wavelength)));
+                };
+                compare(static_cast<f32>(domain.minNm));
+                compare(static_cast<f32>(domain.maxNm));
+                for (const auto& [wavelength, value] : source.samples) {
+                    (void)value;
+                    if (wavelength >= domain.minNm && wavelength <= domain.maxNm)
+                        compare(wavelength);
+                }
+            }
+        }
+        if (out.maxSourceToGpuCurveError > 1e-3f) {
+            diag.Warn("camera.spectral_sampling",
+                      "material source-to-64-point-GPU interpolation reaches absolute "
+                      "fraction error " +
+                      std::to_string(out.maxSourceToGpuCurveError) +
+                      " at authored knots inside camera response; retain this "
+                      "approximation in quantitative output metadata");
+        }
+    }
+    const auto reportEnergy = [&](const Material& material, const String& message) {
+        const String text = "material '" + material.name + "': " + message;
+        if (strictCamera) diag.Fatal("material.energy", text);
+        else diag.Warn("material.energy", text);
+    };
+    const auto sourceAt = [&](i32 index) -> const SpectralCurve* {
+        if (const auto it = sourceCurveByIndex.find(index);
+            it != sourceCurveByIndex.end()) return &it->second;
+        return nullptr;
+    };
+    const auto validateEnergy =
+        [&](const Material& material, const Vector<const SpectralCurve*>& terms,
+            const String& label, bool requireUnitSum) {
+            if (terms.size() < 2) return;
+            f32 lo = 0.0f, hi = std::numeric_limits<f32>::infinity();
+            for (const SpectralCurve* curve : terms) {
+                if (!curve || curve->samples.size() < 2) return;
+                lo = std::max(lo, curve->samples.front().first);
+                hi = std::min(hi, curve->samples.back().first);
+            }
+            if (!(hi > lo)) {
+                reportEnergy(material, label + " have no common measured wavelength span");
+                return;
+            }
+            Vector<f32> nodes{lo, hi};
+            for (const SpectralCurve* curve : terms)
+                for (const auto& sample : curve->samples)
+                    if (sample.first > lo && sample.first < hi)
+                        nodes.push_back(sample.first);
+            std::sort(nodes.begin(), nodes.end());
+            nodes.erase(std::unique(nodes.begin(), nodes.end()), nodes.end());
+            // The sum of piecewise linear source curves reaches every local
+            // extremum at one of their original knots. A 64-point GPU check
+            // can miss a narrow peak between two uploaded samples.
+            for (const f32 wavelength : nodes) {
+                f64 total = 0.0;
+                for (const SpectralCurve* curve : terms)
+                    total += curve->Evaluate(wavelength);
+                constexpr f64 kEnergyTolerance = 1e-5;
+                const bool invalid = requireUnitSum
+                    ? std::abs(total - 1.0) > 0.05
+                    : total > 1.0 + kEnergyTolerance;
+                if (!invalid) continue;
+                reportEnergy(material, label + " at " +
+                             std::to_string(wavelength) + " nm sum to " +
+                             std::to_string(total) +
+                             (requireUnitSum
+                                  ? " rather than one; measured reflectance "
+                                    "takes precedence and authored emissivity is ignored"
+                                  : " > 1, which violates energy conservation"));
+                return;
+            }
+        };
+    for (const auto& material : scene.materials) {
+        const SpectralCurve* epsilon = nullptr;
+        const SpectralCurve* tau = nullptr;
+        if (const auto it = out.materialNameToIrEmissivityCurve.find(material.name);
+            it != out.materialNameToIrEmissivityCurve.end())
+            epsilon = sourceAt(it->second);
+        if (const auto it = out.materialNameToIrTransmittanceCurve.find(material.name);
+            it != out.materialNameToIrTransmittanceCurve.end())
+            tau = sourceAt(it->second);
+        Vector<const SpectralCurve*> reflectances;
+        if (const auto it = out.materialNameToEndmembers.find(material.name);
+            it != out.materialNameToEndmembers.end()) {
+            for (i32 i = 0; i < it->second.count; ++i)
+                if (const auto* curve = sourceAt(it->second.curves[i]))
+                    reflectances.push_back(curve);
+        } else if (const auto it = out.materialNameToCurve.find(material.name);
+                   it != out.materialNameToCurve.end()) {
+            if (const auto* curve = sourceAt(it->second))
+                reflectances.push_back(curve);
+        }
+        if (epsilon && tau)
+            validateEnergy(material, {epsilon, tau},
+                           "emissivity plus transmittance", false);
+        for (const SpectralCurve* rho : reflectances) {
+            if (resolved.cameraConfig.enabled) {
+                for (const auto& domain : deviceDomains) {
+                    if (!Covers(rho->samples.front().first,
+                                rho->samples.back().first, domain)) {
+                        const String message =
+                            "material '" + material.name +
+                            "' measured reflectance does not cover camera channel '" +
+                            domain.channel + "' response";
+                        if (strictCamera) diag.Fatal("material.reflectance", message);
+                        else diag.Warn("material.reflectance",
+                                       message + " (legacy approximation)");
+                    }
+                }
+            }
+            if (tau)
+                validateEnergy(material, {rho, tau},
+                               "reflectance plus transmittance", false);
+            if (epsilon) {
+                if (tau)
+                    validateEnergy(material, {rho, epsilon, tau},
+                                   "reflectance, emissivity and transmittance", true);
+                else
+                    validateEnergy(material, {rho, epsilon},
+                                   "reflectance and emissivity", true);
+            }
+        }
+    }
+
     QL_LOG_INFO("  Total spectral curves (CSV + SpectralBaker): {}", out.curves.size());
     report.spectralCurvesLoaded = static_cast<u32>(out.curves.size());
 
@@ -2957,6 +3464,11 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         else if (activeBandCRI == "NIR")  activeBandRange = {930.0f, 1200.0f};
 
         const bool allowPartialNK = config.Get<bool>("refractive_index.allow_partial_nk", false);
+        const bool approximateNkAllowed = allowPartialNK &&
+            resolved.cameraConfig.device.calibration ==
+                camera::CalibrationStatus::GenericAssumption &&
+            resolved.cameraConfig.quality.backend ==
+                camera::ProcessingBackend::GpuPreview;
 
         for (const auto& [materialName, yamlPath] : config.GetSection("refractive_index")) {
             if (materialName == "allow_partial_nk") continue;
@@ -2972,8 +3484,32 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             ComplexRefractiveIndex cri = result.value();
             const auto [lambda_min, lambda_max] = cri.GetWavelengthRange();
 
-            // Coverage validation: source must span the active render band
-            if (lambda_min > activeBandRange.minNm || lambda_max < activeBandRange.maxNm) {
+            // A physical device asks for its response domain, which may differ
+            // from the RGB preview or the mode's generic fused band. The old
+            // allow_partial_nk switch remains a preview escape hatch only.
+            bool deviceCoverageFailed = false;
+            if (strictCamera) {
+                for (const auto& domain : deviceDomains) {
+                    if (Covers(lambda_min, lambda_max, domain)) continue;
+                    const String message =
+                        "n,k '" + materialName + "' covers [" +
+                        std::to_string(lambda_min) + ", " +
+                        std::to_string(lambda_max) +
+                        "] nm but camera channel '" + domain.channel +
+                        "' requires [" + std::to_string(domain.minNm) +
+                        ", " + std::to_string(domain.maxNm) + "] nm";
+                    if (approximateNkAllowed) {
+                        diag.Warn("refractive_index",
+                                  message + " -- allowed only as generic GPU preview");
+                    } else {
+                        diag.Fatal("refractive_index",
+                                   message + "; provide covering data for measurement");
+                        deviceCoverageFailed = true;
+                    }
+                }
+                if (deviceCoverageFailed) continue;
+            } else if (lambda_min > activeBandRange.minNm ||
+                       lambda_max < activeBandRange.maxNm) {
                 String msg = "    n,k '" + materialName + "' covers [" +
                     std::to_string(static_cast<int>(lambda_min)) + ", " +
                     std::to_string(static_cast<int>(lambda_max)) + "] nm but the active band " +
@@ -2988,9 +3524,20 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 }
             }
 
-            // Resample to the active band's range for maximum resolution
+            f32 uploadMin = activeBandRange.minNm;
+            f32 uploadMax = activeBandRange.maxNm;
+            if (strictCamera && !deviceDomains.empty()) {
+                uploadMin = static_cast<f32>(deviceDomains.front().minNm);
+                uploadMax = static_cast<f32>(deviceDomains.front().maxNm);
+                for (const auto& domain : deviceDomains) {
+                    uploadMin = std::min(uploadMin, static_cast<f32>(domain.minNm));
+                    uploadMax = std::max(uploadMax, static_cast<f32>(domain.maxNm));
+                }
+            }
+            // Resample to the wavelengths actually measured, not just the
+            // preview mode, while the source coverage check above stays exact.
             ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPUBand(
-                cri, activeBandRange.minNm, activeBandRange.maxNm);
+                cri, uploadMin, uploadMax);
             if (gpuCRI.numSamples == 0) {
                 gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
             }
@@ -3011,6 +3558,23 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 out.refractiveIndices.size());
     report.refractiveIndicesLoaded = static_cast<u32>(out.refractiveIndices.size());
 
+    // Shader spectral_query.hlsli guards binding 13 at 4096 entries. Earlier
+    // exact-chain appends check their own size, but later reflectance,
+    // endmember and IR registrations also share this buffer.
+    if (out.curves.size() > 4096) {
+        diag.Fatal("spectral_curves",
+                   "binding 13 has " + std::to_string(out.curves.size()) +
+                   " records, exceeding the shader's 4096-record limit");
+    }
+    for (size_t i = 0; i < out.curves.size(); ++i) {
+        const u32 nextPlusOne = out.curves[i]._padding;
+        if (nextPlusOne != 0 && nextPlusOne > out.curves.size()) {
+            diag.Fatal("spectral_curves",
+                       "exact source segment at index " + std::to_string(i) +
+                       " links outside binding 13");
+            break;
+        }
+    }
     if (diag.failed()) {
         return SpectraResult::Err(diag.firstError());
     }

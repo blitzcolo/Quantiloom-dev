@@ -133,9 +133,73 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
         return 0.0;
     }
 
+    // The first slot is the existing band-averaged preview curve. Its padding
+    // word may link to exact source-knot segments (next index + 1, zero ends
+    // the chain). The SINGLE reference chooses those segments; VIS/FUSED keep
+    // the original band average so line-spectrum preview gates retain their
+    // energy-conserving 64-bin estimator. CameraMeasurement uses this same
+    // branch when its specialization is added.
+    bool exactPacked = false;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+        spectralCurves[curveIndex]._padding != 0u) {
+        uint curveCount, curveStride;
+        spectralCurves.GetDimensions(curveCount, curveStride);
+        uint next = spectralCurves[curveIndex]._padding;
+        bool found = false;
+        [loop]
+        for (uint visited = 0u;
+             visited < curveCount && visited < uint(MAX_SPECTRAL_CURVES);
+             ++visited) {
+            const uint segment = next - 1u;
+            if (segment >= curveCount || segment >= uint(MAX_SPECTRAL_CURVES)) return 0.0;
+            const uint n = spectralCurves[segment].numSamples;
+            const float step = spectralCurves[segment].stepSize_nm;
+            const bool packed = step == 0.0;
+            if (n < 2u || (packed && n > 32u) || (!packed && step < 0.0))
+                return 0.0;
+            const float lo = packed ? spectralCurves[segment].values[0]
+                                    : spectralCurves[segment].startWavelength_nm;
+            const float hi = packed ? spectralCurves[segment].values[2u * (n - 1u)]
+                                    : lo + float(n - 1u) * step;
+            const float eps = packed ? 0.0 : step * 1e-4;
+            // Exact segments are sorted by source wavelength. Once the query
+            // is below this segment, no later one can contain it.
+            if (lambda_nm < lo - eps) return 0.0;
+            if (lambda_nm >= lo - eps && lambda_nm <= hi + eps) {
+                curveIndex = int(segment);
+                exactPacked = packed;
+                found = true;
+                break;
+            }
+            next = spectralCurves[segment]._padding;
+            if (next == 0u) return 0.0;
+        }
+        if (!found) return 0.0; // corrupt/cyclic link never reads out of bounds
+    }
+
     uint numSamples = spectralCurves[curveIndex].numSamples;
     if (numSamples == 0) {
         return 0.0;
+    }
+
+    if (exactPacked) {
+        // This record holds the original nonuniform source knots, not a
+        // resampled grid. At most 32 pairs need five binary-search steps.
+        uint low = 0u;
+        uint high = numSamples - 1u;
+        [loop]
+        while (high - low > 1u) {
+            const uint mid = (low + high) / 2u;
+            if (lambda_nm < spectralCurves[curveIndex].values[2u * mid])
+                high = mid;
+            else
+                low = mid;
+        }
+        const float x0 = spectralCurves[curveIndex].values[2u * low];
+        const float x1 = spectralCurves[curveIndex].values[2u * high];
+        const float y0 = spectralCurves[curveIndex].values[2u * low + 1u];
+        const float y1 = spectralCurves[curveIndex].values[2u * high + 1u];
+        return lerp(y0, y1, saturate((lambda_nm - x0) / max(x1 - x0, 1e-12)));
     }
 
     float startWavelength = spectralCurves[curveIndex].startWavelength_nm;

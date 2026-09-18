@@ -110,6 +110,9 @@ struct ExternalRenderContext::Impl {
     // Scene data
     std::unique_ptr<Scene> scene;
     Camera camera;
+    // Side table for curve slots not stored on the public Material type. Kept
+    // in scene-material order and replaced atomically on every scene adoption.
+    Vector<rendercore::MaterialGpuIndices> materialGpuIndices;
 
     // Acceleration structures
 
@@ -604,7 +607,8 @@ struct ExternalRenderContext::Impl {
     // structures, geometry buffers, materials, pipeline. Waits for the device
     // first -- see the comment on the definition. Both scene loaders go through
     // this rather than repeating the sequence.
-    void AdoptScene(Scene&& loaded);
+    void AdoptScene(Scene&& loaded,
+                    Vector<rendercore::MaterialGpuIndices> indices = {});
 
     void RebuildSceneGpuResources();
 
@@ -1040,7 +1044,33 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // 5. One GPU rebuild: textures, acceleration structures, material buffer,
     //    pipeline. CreatePipeline binds whatever buffers are current, which is
     //    why the two above are already in place.
-    m_impl->AdoptScene(std::move(loadedScene));
+    Vector<rendercore::MaterialGpuIndices> materialIndices;
+    materialIndices.reserve(loadedScene.materials.size());
+    for (const auto& mat : loadedScene.materials) {
+        auto slots = rendercore::IndicesFromMaterial(mat);
+        if (auto it = spectra.materialNameToIrEmissivityCurve.find(mat.name);
+            it != spectra.materialNameToIrEmissivityCurve.end()) {
+            if (it->second < 0 || static_cast<usize>(it->second) >= spectra.curves.size()) {
+                report.messages.push_back({ConfigApplyMessage::Severity::Error,
+                                           "materials", "IR emissivity curve index is invalid for '" +
+                                               mat.name + "'"});
+                return report;
+            }
+            slots.irEmissivityCurve = it->second;
+        }
+        if (auto it = spectra.materialNameToIrTransmittanceCurve.find(mat.name);
+            it != spectra.materialNameToIrTransmittanceCurve.end()) {
+            if (it->second < 0 || static_cast<usize>(it->second) >= spectra.curves.size()) {
+                report.messages.push_back({ConfigApplyMessage::Severity::Error,
+                                           "materials", "IR transmittance curve index is invalid for '" +
+                                               mat.name + "'"});
+                return report;
+            }
+            slots.irTransmittanceCurve = it->second;
+        }
+        materialIndices.push_back(slots);
+    }
+    m_impl->AdoptScene(std::move(loadedScene), std::move(materialIndices));
     report.sceneLoaded = true;
 
     // 5b. The clock, built against the adopted scene because the rest poses it
@@ -1282,8 +1312,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
 // instrument -- there is no per-frame cost to protect here.
 // Take ownership of a freshly loaded scene and rebuild everything derived from it.
 // Shared by the three loaders, which had identical tails.
-void ExternalRenderContext::Impl::AdoptScene(Scene&& loaded) {
+void ExternalRenderContext::Impl::AdoptScene(
+    Scene&& loaded, Vector<rendercore::MaterialGpuIndices> indices) {
     scene = std::make_unique<Scene>(std::move(loaded));
+    materialGpuIndices = std::move(indices);
+    if (materialGpuIndices.size() != scene->materials.size()) {
+        materialGpuIndices.clear();
+    }
 
     // Setup camera from scene
     camera = scene->camera;
@@ -2472,12 +2507,32 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     const bool wasOpaque =
         rendercore::IsOpaqueForRayTracing(*m_impl->scene, materialIndex);
 
-    // 1. Update CPU-side scene data
+    // 1. Update CPU-side scene data. A newly supplied IR curve must not keep
+    // reading the old resolved curve index; full config application is what
+    // uploads new curve data, so this immediate edit uses scalar fallback.
+    const Material& previous = m_impl->scene->materials[materialIndex];
+    auto indices = rendercore::IndicesFromMaterial(material);
+    if (m_impl->materialGpuIndices.size() == m_impl->scene->materials.size()) {
+        const auto& oldSlots = m_impl->materialGpuIndices[materialIndex];
+        indices.irEmissivityCurve =
+            material.irEmissivityCurve == previous.irEmissivityCurve
+                ? oldSlots.irEmissivityCurve : -1;
+        indices.irTransmittanceCurve =
+            material.irTransmittanceCurve == previous.irTransmittanceCurve
+                ? oldSlots.irTransmittanceCurve : -1;
+        const auto validIndex = [&](i32 curve) {
+            return curve < 0 ||
+                static_cast<usize>(curve) < m_impl->spectralCurveEntries.size();
+        };
+        if (!validIndex(indices.irEmissivityCurve)) indices.irEmissivityCurve = -1;
+        if (!validIndex(indices.irTransmittanceCurve)) indices.irTransmittanceCurve = -1;
+        m_impl->materialGpuIndices[materialIndex] = indices;
+    }
     m_impl->scene->materials[materialIndex] = material;
 
     // 2. Convert to GPU format
     MaterialDataCPU cpuMat = rendercore::ConvertMaterial(
-        material, m_impl->wavelength_nm, rendercore::IndicesFromMaterial(material));
+        material, m_impl->wavelength_nm, indices);
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
@@ -3740,7 +3795,8 @@ void ExternalRenderContext::Impl::UpdateGpuResources() {
     if (!scene) return;
 
     QL_LOG_INFO("Updating GPU resources...");
-    materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm);
+    materialBuffer = rendercore::BuildMaterialBuffer(
+        *contextAdapter, *scene, wavelength_nm, materialGpuIndices);
     RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
 }

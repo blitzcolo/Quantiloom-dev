@@ -527,6 +527,38 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
                                          SampleEndmemberWeights(material, uv), lambda);
 }
 
+// One priority order for a measured infrared surface in every estimator.
+// A reflectance curve is a hemispherical measurement; an explicit emissivity
+// curve supplies epsilon where reflectance is absent. Measured n,k supplies
+// normal-incidence R0 next, then the generic emissivity heuristic. Tau has its
+// own measured curve. x=rho, y=epsilon, z=tau.
+float3 InfraredSurfaceFractions(MaterialData material, float3 endmemberW,
+                                float metallic, float roughness, float lambda) {
+    const float tau = material.irTransmittanceCurveIndex >= 0
+        ? saturate(EvaluateSpectralCurve(spectralCurves,
+                 material.irTransmittanceCurveIndex, lambda))
+        : saturate(material.irTransmittance);
+    float rho;
+    if (material.spectralReflectanceCurveIndex >= 0) {
+        rho = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
+    } else if (material.irEmissivityCurveIndex >= 0) {
+        const float epsilon = saturate(EvaluateSpectralCurve(
+            spectralCurves, material.irEmissivityCurveIndex, lambda));
+        rho = 1.0 - epsilon - tau;
+    } else if (material.complexRefractiveIndexIndex >= 0) {
+        const float2 nk = SampleComplexRefractiveIndex(
+            complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
+        rho = FresnelF0(nk.x, nk.y);
+    } else {
+        const float epsilon = GetEffectiveIREmissivity(material, metallic, roughness);
+        rho = 1.0 - epsilon - tau;
+    }
+    // The host rejects conflicting measured curves for quantitative capture.
+    // This remains a finite-energy guard for older scenes and direct GPU edits.
+    rho = clamp(rho, 0.0, 1.0 - tau);
+    return float3(rho, saturate(1.0 - rho - tau), tau);
+}
+
 // Sheen reflectance at one wavelength, by the same priority base colour uses:
 // a bound curve is the quantitative answer, and the RGB factor is the fallback.
 //
@@ -948,6 +980,80 @@ bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
              0xFF, 0, 0, 1, shadowRay, shadowPayload);
 
     return shadowPayload.isShadowed == 0;
+}
+
+// Excitation is independent of the outgoing wavelength. Draw over the bound
+// excitation curve's own support, not over the camera's band: a detector at
+// 600 nm must still see a dye pumped at 450 nm. The density is uniform on that
+// finite support, so multiplying by its span is exactly 1/pdf.
+float FluorescenceExcitationWithLight(MaterialData material, float NdotL,
+                                      float shadowFactor, LightSample light,
+                                      float lightIrradianceScale,
+                                      inout Payload payload) {
+    if (material.fluorescenceExcitationCurveIndex < 0 ||
+        material.fluorescenceEmissionCurveIndex < 0 ||
+        material.fluorescenceYield <= 0.0) {
+        return 0.0;
+    }
+    const int curveIndex = material.fluorescenceExcitationCurveIndex;
+    const uint nEx = spectralCurves[curveIndex].numSamples;
+    const float exStep = spectralCurves[curveIndex].stepSize_nm;
+    if (nEx < 2 || exStep <= 0.0) return 0.0;
+    const float lo = spectralCurves[curveIndex].startWavelength_nm;
+    const float hi = lo + float(nEx - 1u) * exStep;
+    const float lambda = lo + (hi - lo) *
+        PathSample1D(payload, SAMPLE_SLOT_FLUOR_LAMBDA);
+    const float excitation = EvaluateEmissionCurve(spectralCurves, curveIndex, lambda);
+    if (excitation <= 0.0) return 0.0;
+
+    float irradiance = 0.0;
+    const uint nSun = solarSpectralLUT[0].sunIrradiance.numSamples;
+    const uint nSky = solarSpectralLUT[0].skyIrradiance.numSamples;
+    const float sunLo = solarSpectralLUT[0].sunIrradiance.startWavelength_nm;
+    const float skyLo = solarSpectralLUT[0].skyIrradiance.startWavelength_nm;
+    const float sunHi = sunLo + float(nSun > 0u ? nSun - 1u : 0u) *
+        solarSpectralLUT[0].sunIrradiance.stepSize_nm;
+    const float skyHi = skyLo + float(nSky > 0u ? nSky - 1u : 0u) *
+        solarSpectralLUT[0].skyIrradiance.stepSize_nm;
+    if (nSun > 0u && lambda >= sunLo && lambda <= sunHi) {
+        irradiance += SampleSunIrradiance(solarSpectralLUT, lambda) *
+                      NdotL * shadowFactor;
+    }
+    if (nSky > 0u && lambda >= skyLo && lambda <= skyHi) {
+        irradiance += SampleSkyIrradiance(solarSpectralLUT, lambda);
+    }
+
+    // The emitted triangle is an independent spectral source. Its curve is
+    // already zero outside measured support; RGB fallback has D65 support only.
+    if (lightIrradianceScale > 0.0) {
+        const float lightRadiance = light.curveIndex >= 0
+            ? EvaluateEmissionCurve(spectralCurves, light.curveIndex, lambda)
+            : ConvertLinearRGBToIlluminantSpectrum(
+                  rgbToSpectrumTable, cieCMF_LUT, light.emissive, lambda);
+        irradiance += lightRadiance * lightIrradianceScale;
+    }
+    return excitation * irradiance * (hi - lo);
+}
+
+// Bands without a direct-light sample still need one for the excitation
+// integral. The visible estimator passes its existing sample to the function
+// above, so fluorescence there does not trace a second shadow ray.
+float SampleFluorescenceExcitation(MaterialData material, float3 hitPos,
+                                   float3 normal, float NdotL, float shadowFactor,
+                                   inout Payload payload) {
+    if (material.fluorescenceExcitationCurveIndex < 0 ||
+        material.fluorescenceEmissionCurveIndex < 0 ||
+        material.fluorescenceYield <= 0.0) return 0.0;
+    const LightSample light = SampleEmissiveGeometry(hitPos, payload);
+    float lightScale = 0.0;
+    if (light.valid) {
+        const float NdotWl = dot(normal, light.wi);
+        if (NdotWl > 0.0 && LightSampleVisible(hitPos, normal, light)) {
+            lightScale = NdotWl / light.pdfSolid;
+        }
+    }
+    return FluorescenceExcitationWithLight(material, NdotL, shadowFactor,
+                                          light, lightScale, payload);
 }
 
 // Power heuristic, beta = 2, guarded so that a zero opposing density gives the
@@ -2431,12 +2537,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     visNeeScale = NdotWl *
                                   PowerHeuristic(visLight.pdfSolid, pdfBsdfAtLight) /
                                   visLight.pdfSolid;
-                    // The same emitter without the MIS weight. Fluorescence
-                    // absorbs at a wavelength no other technique draws -- the
-                    // bounce carries the OUTGOING wavelengths -- so the
-                    // excitation integral has one strategy estimating it and a
-                    // power heuristic against a competitor that does not exist
-                    // would throw away the share it assigns to nobody.
+                    // Excitation has no opposing BSDF strategy at its sampled
+                    // incoming wavelength, so it keeps the full 1/pdf share.
                     visNeeScaleFluor = NdotWl / visLight.pdfSolid;
                     visKD     = kD4;
                     visF      = F4;
@@ -2581,35 +2683,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // density at each outgoing wavelength. Being inside the shared loop is
         // what makes the deterministic sweep, the quartet and a collapsed hero
         // ray agree without three implementations.
-        float fluorM = 0.0;
-        const bool hasFluorescence = material.fluorescenceExcitationCurveIndex >= 0 &&
-                                     material.fluorescenceEmissionCurveIndex >= 0 &&
-                                     material.fluorescenceYield > 0.0;
-        if (hasFluorescence) {
-            const float lambda_f =
-                SampleVisibleWavelength(PathSample1D(payload, SAMPLE_SLOT_FLUOR_LAMBDA));
-            const float ex_f = EvaluateEmissionCurve(
-                spectralCurves, material.fluorescenceExcitationCurveIndex, lambda_f);
-            if (ex_f > 0.0) {
-                float E_f = 0.0;
-                if (hasSpectralSolarLUT) {
-                    // Irradiance, not radiance: the sun's normal irradiance
-                    // projected onto the surface and shadowed, plus the dome's
-                    // hemispherical irradiance as it is. The sky term above
-                    // divides by pi to become a radiance; a surface absorbs the
-                    // irradiance, so this one does not.
-                    E_f = SampleSunIrradiance(solarSpectralLUT, lambda_f) * NdotL * shadowFactor +
-                          SampleSkyIrradiance(solarSpectralLUT, lambda_f);
-                }
-                if (visNeeScaleFluor > 0.0) {
-                    const float L_light_f = hasNeeCurve
-                        ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda_f)
-                        : RgbIlluminantAt(iNee, SampleCIE_LUT(cieCMF_LUT, lambda_f).w, lambda_f);
-                    E_f += L_light_f * visNeeScaleFluor;
-                }
-                fluorM = ex_f * E_f / VisibleWavelengthPDF(lambda_f);
-            }
-        }
+        const float fluorM = FluorescenceExcitationWithLight(
+            material, NdotL, shadowFactor, visLight, visNeeScaleFluor, payload);
+        const float T_surface_vis = GetSurfaceTemperatureK(
+            material, geoInfo, PrimitiveIndex(), uv,
+            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
 
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
@@ -2825,7 +2903,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                           fluorM * (1.0 / PI);
             }
 
-            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl + L_nee + L_fluor;
+            // Visible transport uses the glTF transmission channel; the
+            // separate irTransmittance curve is measured only in the IR and
+            // must not be clamped from its 3 um endpoint into this band.
+            const float epsilon_vis = saturate(1.0 - rho_lambda - material.transmission);
+            const float L_thermal = T_surface_vis > 0.0
+                ? epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda) : 0.0;
+            float L_lambda = L_direct + L_ambient + L_emissive + L_ibl +
+                             L_nee + L_fluor + L_thermal;
 
             // The quartet's indirect correction at this wavelength, added
             // before the atmosphere composes the surface rather than after:
@@ -2967,7 +3052,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // identically zero.
         output_radiance = clamp(output_radiance, -1000.0, 1000.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+               pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) {
         // ====================================================================
         // Single Wavelength Mode: True Spectral Rendering (Quantitative)
         // ====================================================================
@@ -3250,12 +3336,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // the same analytic sky it subtracts -- a different one would turn the
         // residual into a bias.
         //
-        // Guarded on the wavelength rather than run always: below about 3 um a
-        // 300 K Planck radiance is many orders below the reflected solar term
-        // and adding it would only cost a Planck evaluation per hit in the
-        // bands where it says nothing. The threshold is the MWIR band edge,
-        // which is where the fused modes start carrying it too.
-        if (lambda >= SPECTRAL_MWIR_LAMBDA_MIN) {
+        // Evaluate at every wavelength. A 300 K surface contributes almost
+        // nothing in the visible, but a hot filament has a measurable VIS/SWIR
+        // Planck tail; an arbitrary 3 um cutoff loses it entirely.
+        {
             const float T_single = GetSurfaceTemperatureK(
                 material, geoInfo, PrimitiveIndex(), uv,
                 WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
@@ -3263,14 +3347,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Kirchhoff, and spectral wherever a curve says so: the same
             // reflectance that varies across the surface varies what it
             // radiates, which is what a thermal image is of.
-            float emissivity_s = GetEffectiveIREmissivity(material, metallic, roughness);
-            if (material.spectralReflectanceCurveIndex >= 0) {
-                const float rho_s = EvaluateEndmemberReflectanceW(
-                    spectralCurves, material, endmemberW, lambda);
-                emissivity_s = saturate(1.0 - rho_s - material.irTransmittance);
-            }
+            const float emissivity_s = saturate(
+                1.0 - spectralAlbedo - material.transmission);
             const float reflectance_s =
-                saturate(1.0 - emissivity_s - material.irTransmittance);
+                saturate(1.0 - emissivity_s - material.transmission);
 
             if (T_single > 0.0) {
                 radiance_spectral += emissivity_s * IRPlanckRadiance(T_single, lambda);
@@ -3279,6 +3359,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 IRDownwellingRadiance(atmos, 0, lambda, lut.atmosphereTemperature_K,
                                       lut.skyEmissivityClear);
         }
+
+        const float fluorM = SampleFluorescenceExcitation(
+            material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+            normal, NdotL, shadowFactor, payload);
+        radiance_spectral += material.fluorescenceYield *
+            EvaluateEmissionCurve(spectralCurves,
+                                  material.fluorescenceEmissionCurveIndex, lambda) *
+            fluorM * (1.0 / PI);
 
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
         if (atmosEnabled) {
@@ -3297,7 +3385,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                pushConsts.camera.wavelength_nm > SPECTRAL_VIS_LAMBDA_MAX &&
+                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ====================================================================
         // SWIR Fused Mode: Short-Wave IR Band Integration (1000-2500nm)
         // ====================================================================
@@ -3316,9 +3407,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float SWIR_LAMBDA_MIN = SPECTRAL_SWIR_LAMBDA_MIN;
         const float SWIR_LAMBDA_MAX = SPECTRAL_SWIR_LAMBDA_MAX;
         const uint  NUM_SWIR_SAMPLES = 16;
-        // At 500K, Planck tail at 2.4µm ≈ 3.5e-3 W/sr/m²/nm — comparable to
-        // reflected solar; below this, SWIR thermal emission is negligible.
-        const float SWIR_EMISSION_MIN_TEMP_K = 500.0;
         const float lambda_step = (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN) / float(NUM_SWIR_SAMPLES - 1);
 
         float radiance_accum = 0.0;
@@ -3349,18 +3437,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Directional emissivity is real, but it belongs in a specular lobe
         // driven by Fresnel(n, k) -- FresnelConductor in pbr.hlsli, already
         // harness-verified -- not as a scale on a Lambertian albedo.
-        float baseEmissivity_swir = GetEffectiveIREmissivity(material, metallic, roughness);
-        float emissivity = baseEmissivity_swir;
-        float reflectance = saturate(1.0 - baseEmissivity_swir - material.irTransmittance);
-
         // Sample surface temperature from texture or use scalar value
         float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                       WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
                                                       payload);
+        const float fluorM_swir = SampleFluorescenceExcitation(
+            material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+            normal, NdotL, shadowFactor, payload);
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
-        const bool heroRay = (payload.heroLambda > 0.0);
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
+        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
         float heroRadiance = 0.0;
 
@@ -3374,20 +3463,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // near rho = 0.3, so interreflection carries several times the weight
         // it does in the visible, and the band had no bounce at all.
         const float lambda_b = heroRay
-            ? payload.heroLambda
+            ? carriedLambda
             : SWIR_LAMBDA_MIN + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN);
-        const uint atmosIdx_b = (uint)clamp(round((lambda_b - SWIR_LAMBDA_MIN) / lambda_step),
-                                            0.0, float(NUM_SWIR_SAMPLES - 1));
+        const uint atmosIdx_b = singleRay ? 0u
+            : (uint)clamp(round((lambda_b - SWIR_LAMBDA_MIN) / lambda_step),
+                          0.0, float(NUM_SWIR_SAMPLES - 1));
 
-        float rho_b = reflectance;
-        if (material.spectralReflectanceCurveIndex >= 0) {
-            rho_b = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
-        } else if (material.complexRefractiveIndexIndex >= 0) {
-            float2 nk = SampleComplexRefractiveIndex(
-                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
-            rho_b = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                  / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-        }
+        const float rho_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b).x;
 
         // The base is the loop's own sky radiance, at lambda_b. Continuous in
         // wavelength, so unlike the thermal bands there is no grid to snap to.
@@ -3432,7 +3515,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // NOTE: Removed [unroll] to reduce shader compilation time
         for (uint i = 0; i < sampleCount; ++i) {
-            float lambda = heroRay ? payload.heroLambda
+            float lambda = heroRay ? carriedLambda
                                    : SWIR_LAMBDA_MIN + float(i) * lambda_step;
             uint  atmosIdx = heroRay ? atmosIdx_b : i;
 
@@ -3461,17 +3544,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // 2. Get spectral reflectance at this wavelength
-            float rho_lambda;
-            if (material.spectralReflectanceCurveIndex >= 0) {
-                rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
-            } else if (material.complexRefractiveIndexIndex >= 0) {
-                float2 nk = SampleComplexRefractiveIndex(
-                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
-                rho_lambda = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                           / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-            } else {
-                rho_lambda = reflectance;
-            }
+            const float3 fractions = InfraredSurfaceFractions(
+                material, endmemberW, metallic, roughness, lambda);
+            const float rho_lambda = fractions.x;
 
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
             //
@@ -3532,13 +3607,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
-            if (T_surface_swir > SWIR_EMISSION_MIN_TEMP_K) {
+            if (T_surface_swir > 0.0) {
                 float L_blackbody = IRPlanckRadiance(T_surface_swir, lambda);
                 // Under the coat, which transmits 1 - clearcoat*F_c of it. A
                 // non-absorbing dielectric does not emit, so attenuating what
                 // passes through it is the whole of the coat's thermal effect
                 // in this band.
-                L_emission = emissivity * L_blackbody * ccBase;
+                L_emission = fractions.y * L_blackbody * ccBase;
             }
 
             // 4b. Self-emission from a bound spectrum. Separate from the Planck
@@ -3554,7 +3629,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
                           ccBase;
 
             // 5. Total spectral radiance
-            float L_lambda = L_reflected + L_emission;
+            float L_lambda = L_reflected + L_emission +
+                material.fluorescenceYield *
+                EvaluateEmissionCurve(spectralCurves,
+                                      material.fluorescenceEmissionCurveIndex, lambda) *
+                fluorM_swir * (1.0 / PI);
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
@@ -3668,10 +3747,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 1200, numbers that were an artefact of a division rather than a
         // statement about the surface. ir_emissivity is at least a property the
         // material declares, in the band it declares it for.
-        const float baseEmissivity_nir = GetEffectiveIREmissivity(material, metallic, roughness);
-        // Hemispherical, as measured -- see the note in the SWIR branch above.
-        const float reflectance_nir =
-            saturate(1.0 - baseEmissivity_nir - material.irTransmittance);
+        const float T_surface_nir = GetSurfaceTemperatureK(
+            material, geoInfo, PrimitiveIndex(), uv,
+            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+        const float fluorM_nir = SampleFluorescenceExcitation(
+            material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+            normal, NdotL, shadowFactor, payload);
 
         const float lambda_b = heroRay
             ? payload.heroLambda
@@ -3679,17 +3760,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint atmosIdx_b = (uint)clamp(round((lambda_b - NIR_LAMBDA_MIN) / lambda_step),
                                             0.0, float(NUM_NIR_SAMPLES - 1));
 
-        float rho_b;
-        if (material.spectralReflectanceCurveIndex >= 0) {
-            rho_b = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
-        } else if (material.complexRefractiveIndexIndex >= 0) {
-            float2 nk = SampleComplexRefractiveIndex(
-                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
-            rho_b = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                  / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-        } else {
-            rho_b = reflectance_nir;
-        }
+        const float rho_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b).x;
 
         const float L_base_b = hasSpectralSolarLUT
             ? SampleSkyIrradiance(solarSpectralLUT, lambda_b) / PI
@@ -3754,17 +3826,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             }
 
             // 2. Get spectral reflectance at this wavelength
-            float rho_lambda;
-            if (material.spectralReflectanceCurveIndex >= 0) {
-                rho_lambda = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
-            } else if (material.complexRefractiveIndexIndex >= 0) {
-                float2 nk = SampleComplexRefractiveIndex(
-                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
-                rho_lambda = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                           / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-            } else {
-                rho_lambda = reflectance_nir;
-            }
+            const float3 fractions = InfraredSurfaceFractions(
+                material, endmemberW, metallic, roughness, lambda);
+            const float rho_lambda = fractions.x;
 
             // 3. Reflected solar radiance: ρ(λ) × (L_sun(λ) × NdotL × V + L_sky(λ))
             //
@@ -3813,18 +3877,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
                               ccWeight * ccE * sky_radiance_lambda;
             }
 
-            // Note: Thermal emission is negligible in NIR for T < 600K
-            // A 600K object peaks at ~4800nm (Wien's law), far from NIR band
-            // Skip thermal calculation for performance
-            //
-            // A bound emission spectrum is a different matter and is not
-            // skipped: a tungsten filament at 3000 K peaks at 966 nm, which is
-            // inside this band, so a lamp someone measured is one of the
-            // brightest things a NIR render can contain. Zero unless a curve is
-            // bound, so every existing NIR scene is bit-identical.
+            // Planck is tiny near room temperature, but a hot surface can emit
+            // strongly here. The measured rho sets epsilon by Kirchhoff.
+            if (T_surface_nir > 0.0) {
+                L_reflected += fractions.y * IRPlanckRadiance(T_surface_nir, lambda) * ccBase;
+            }
+            // Bound emission is an independent authored source.
             L_reflected += BoundEmissionRadiance(spectralCurves, material, emissive,
                                                  1.0, lambda) *
                            ccBase;
+            L_reflected += material.fluorescenceYield *
+                EvaluateEmissionCurve(spectralCurves,
+                                      material.fluorescenceEmissionCurveIndex, lambda) *
+                fluorM_nir * (1.0 / PI);
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             if (atmosEnabled) {
@@ -3874,7 +3939,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
+    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
+               SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
         // ====================================================================
@@ -3904,9 +3972,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float lambda_min, lambda_max;
         bool includeSolarReflection = false;  // Only for MWIR during daytime
 
-        if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
-            lambda_min = SPECTRAL_MWIR_LAMBDA_MIN;
-            lambda_max = SPECTRAL_MWIR_LAMBDA_MAX;
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
+        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool mwirLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) ||
+                              (singleRay && carriedLambda < SPECTRAL_LWIR_LAMBDA_MIN);
+        if (mwirLike) {
+            lambda_min = singleRay ? carriedLambda : SPECTRAL_MWIR_LAMBDA_MIN;
+            lambda_max = singleRay ? carriedLambda + 1.0 : SPECTRAL_MWIR_LAMBDA_MAX;
             // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
             // Only include if surface faces the sun AND the sun is visible.
             // shadowFactor was traced for every mode and read by three of
@@ -3916,10 +3988,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // shadowFactor would need.
             includeSolarReflection = (NdotL > 0.0 && shadowFactor > 0.0);
         } else {  // LWIR
-            lambda_min = SPECTRAL_LWIR_LAMBDA_MIN;
-            lambda_max = SPECTRAL_LWIR_LAMBDA_MAX;
+            lambda_min = singleRay ? carriedLambda : SPECTRAL_LWIR_LAMBDA_MIN;
+            lambda_max = singleRay ? carriedLambda + 1.0 : SPECTRAL_LWIR_LAMBDA_MAX;
             // LWIR: solar contribution < 0.1%, skip for performance
-            includeSolarReflection = false;
+            includeSolarReflection = singleRay && NdotL > 0.0 && shadowFactor > 0.0;
         }
 
         // Integration parameters
@@ -3931,7 +4003,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // weighs what comes back by it, so integrating the whole band along
         // this path would answer a question nobody asked. It reports scalar
         // spectral radiance, by the contract on Payload::heroLambda.
-        const bool heroRay = (payload.heroLambda > 0.0);
+        const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_IR_SAMPLES;
         float heroRadiance = 0.0;
 
@@ -3941,15 +4013,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Compute view angle for angle-dependent emissivity
         float NdotV = max(dot(normal, V), 0.0);
 
-        // Hemispherical, as measured -- see the note in the SWIR branch above.
-        float baseEmissivity = GetEffectiveIREmissivity(material, metallic, roughness);
-        float emissivity = baseEmissivity;
-        float reflectance = saturate(1.0 - baseEmissivity - material.irTransmittance);
-
         // Sample surface temperature from texture or use scalar value
         float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                  WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
                                                  payload);
+        const float fluorM_ir = SampleFluorescenceExcitation(
+            material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+            normal, NdotL, shadowFactor, payload);
 
         // Atmospheric downwelling radiation temperature
         float T_atmosphere = lut.atmosphereTemperature_K;
@@ -3969,28 +4039,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // LUT index too: a ray that already carries a hero wavelength answers
         // at that wavelength throughout, base and correction alike.
         const float lambda_b = heroRay
-            ? payload.heroLambda
+            ? carriedLambda
             : lambda_min + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (lambda_max - lambda_min);
 
         // The atmosphere LUT is baked on the loop's own sample points, so a
         // sampled wavelength has no index of its own -- take the nearest, as
         // VIS_FUSED does for a hero ray.
-        const uint atmosIdx_b = (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
-                                            0.0, float(NUM_IR_SAMPLES - 1));
+        const uint atmosIdx_b = singleRay ? 0u
+            : (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
+                          0.0, float(NUM_IR_SAMPLES - 1));
 
-        float rho_b = reflectance;
-        if (material.spectralReflectanceCurveIndex >= 0) {
-            float rho_curve = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_b);
-            rho_b = rho_curve;
-        } else if (material.complexRefractiveIndexIndex >= 0) {
-            float2 nk = SampleComplexRefractiveIndex(
-                complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda_b);
-            float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                     / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-            // Normal-incidence Fresnel, used hemispherically. Exact directional
-            // Fresnel needs a specular lobe, not a scale on a diffuse one.
-            rho_b = saturate(R0);
-        }
+        const float rho_b = InfraredSurfaceFractions(
+            material, endmemberW, metallic, roughness, lambda_b).x;
 
         const float L_base_b = IRDownwellingRadiance(atmos, atmosIdx_b, lambda_b,
                                                     T_atmosphere, lut.skyEmissivityClear);
@@ -4006,7 +4066,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // scalar; see Payload::heroLambda.
         [loop]
         for (uint i = 0; i < sampleCount; ++i) {
-            float lambda = heroRay ? payload.heroLambda
+            float lambda = heroRay ? carriedLambda
                                    : lambda_min + float(i) * lambda_step;
             uint  atmosIdx = heroRay ? atmosIdx_b : i;
 
@@ -4022,20 +4082,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Without a curve these stay the scalars computed outside the
             // loop, so materials that never had one render bit for bit as
             // before.
-            float emissivity_l = emissivity;
-            float reflectance_l = reflectance;
-            if (material.spectralReflectanceCurveIndex >= 0) {
-                float rho_l = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
-                emissivity_l = saturate(1.0 - rho_l - material.irTransmittance);
-                reflectance_l = rho_l;
-            } else if (material.complexRefractiveIndexIndex >= 0) {
-                float2 nk = SampleComplexRefractiveIndex(
-                    complexRefractiveIndices, material.complexRefractiveIndexIndex, lambda);
-                float R0 = ((nk.x - 1.0) * (nk.x - 1.0) + nk.y * nk.y)
-                         / ((nk.x + 1.0) * (nk.x + 1.0) + nk.y * nk.y);
-                emissivity_l = saturate(1.0 - R0 - material.irTransmittance);
-                reflectance_l = saturate(R0);
-            }
+            const float3 fractions = InfraredSurfaceFractions(
+                material, endmemberW, metallic, roughness, lambda);
+            const float reflectance_l = fractions.x;
+            const float emissivity_l = fractions.y;
 
             // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)
             float L_emission = 0.0;
@@ -4165,7 +4215,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // This enables rendering of IR optics and windows.
             // ================================================================
             float L_transmitted = 0.0;
-            float transmittance = material.irTransmittance;
+            float transmittance = fractions.z;
 
             if (transmittance > 0.001 && payload.depth < MAX_PATH_DEPTH) {
                 // Trace transmission ray to get background radiance
@@ -4196,7 +4246,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 5. Total spectral radiance at this wavelength (with transmittance)
             float L_lambda = L_emission + L_bound + L_reflected_atm + L_reflected_sun +
-                             L_transmitted;
+                             L_transmitted +
+                             material.fluorescenceYield *
+                             EvaluateEmissionCurve(spectralCurves,
+                                                   material.fluorescenceEmissionCurveIndex,
+                                                   lambda) * fluorM_ir * (1.0 / PI);
 
             // NN atmosphere composition: L = tau_view(λ)·L_surface(λ) + L_path(λ)
             // (MWIR L_path already merges PTH_THRML + night-gated SOL_SCAT at bake time)
@@ -4896,8 +4950,39 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // is the same sun the spectral branches sample, just colour-matched.
             sunRadiance = lut.sunRadiance_rgb;
         } else if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
-            const float sun_irr =
-                SampleSunIrradiance(solarSpectralLUT, pushConsts.camera.wavelength_nm);
+            float sun_irr = 0.0;
+            if (payload.heroLambda != 0.0 || SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+                const float lambda = payload.heroLambda != 0.0
+                    ? abs(payload.heroLambda) : pushConsts.camera.wavelength_nm;
+                sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
+            } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED ||
+                       SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
+                       SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
+                       SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
+                // A primary fused ray represents a band average, so the
+                // participating-medium source must average that same band.
+                float lo = SPECTRAL_NIR_LAMBDA_MIN;
+                float hi = SPECTRAL_NIR_LAMBDA_MAX;
+                if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
+                    lo = SPECTRAL_SWIR_LAMBDA_MIN; hi = SPECTRAL_SWIR_LAMBDA_MAX;
+                } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
+                    lo = SPECTRAL_MWIR_LAMBDA_MIN; hi = SPECTRAL_MWIR_LAMBDA_MAX;
+                } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
+                    lo = SPECTRAL_LWIR_LAMBDA_MIN; hi = SPECTRAL_LWIR_LAMBDA_MAX;
+                }
+                const float step = (hi - lo) / 15.0;
+                [loop]
+                for (uint i = 0u; i < 16u; ++i) {
+                    const float weight = (i == 0u || i == 15u) ? 0.5 : 1.0;
+                    sun_irr += weight * SampleSunIrradiance(
+                        solarSpectralLUT, lo + float(i) * step);
+                }
+                sun_irr *= step / (hi - lo);
+            } else {
+                // VIS_HERO quartet is corrected per wavelength below.
+                sun_irr = SampleSunIrradiance(
+                    solarSpectralLUT, pushConsts.camera.wavelength_nm);
+            }
             sunRadiance = float3(sun_irr, sun_irr, sun_irr);
         } else {
             // No curve, no sun -- the same refusal as every surface path. An

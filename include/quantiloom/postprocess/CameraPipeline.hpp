@@ -16,7 +16,8 @@ inline constexpr u32 kCameraConfigVersion = 1;
 // Storage shape never defines physical meaning.
 enum class SignalKind : u32 {
     SpectralRadiance, BandMeasurement, DeviceLinear, CieLinearSrgb,
-    DisplaySrgb, RawDN, ApparentTemperature, FastRgbApproximation
+    DisplaySrgb, RawDN, ApparentTemperature, FastRgbApproximation,
+    DevicePreviewSrgb
 };
 enum class DetectorKind : u32 { Photon, Thermal };
 enum class CalibrationStatus : u32 { GenericAssumption, HardwareReference, Calibrated };
@@ -28,7 +29,7 @@ enum class ResponseKind : u32 {
 enum class RelativeNormalization : u32 { None, PeakOne, AreaOne };
 enum class ShutterKind : u32 { Global, Rolling };
 enum class ProcessingBackend : u32 { CpuReference, GpuPreview };
-enum class CfaPattern : u32 { Mono, RGGB, GRBG, GBRG, BGGR };
+enum class CfaPattern : u32 { Mono, RGGB, GRBG, GBRG, BGGR, MultiChannel };
 enum class OutputColorSpace : u32 { DeviceNative, CieLinearSrgb, DisplaySrgb };
 
 struct ParameterSource {
@@ -48,6 +49,8 @@ struct ResponseCurve {
     // A relative curve requires both amplitude and amplitudeSource.
     f64 amplitude = 1.0;
     String amplitudeSource;
+    String dataPath; // Empty for inline data; preserved for TOML round-trip.
+    u32 dataColumn = 2; // One-based: first column is wavelength, second is value.
     // If measured QE/absorptance already includes active pixel area, the
     // OpticsConfig fillFactor must stay at one.
     bool includesPixelFillFactor = false;
@@ -83,6 +86,8 @@ struct OpticsConfig {
     f64 focusDistanceM = std::numeric_limits<f64>::infinity();
     bool cosFourthVignetting = false;
     String knownPsfPath;
+    String knownPsfSourcePath; // Authored path for config round-trip.
+    f64 psfSigmaPixelsOverride = -1.0; // Legacy or measured Gaussian width; -1 uses Airy.
 };
 
 struct ReadoutConfig {
@@ -104,10 +109,21 @@ struct PhotonDetectorConfig {
     f64 darkCurrentElectronsPerSecond = 0.0;
     f64 readNoiseElectronsRms = 0.0;
     f64 prnuSigma = 0.0;
-    f64 dsnuElectronsRms = 0.0;
+    f64 dsnuElectronsRms = 0.0; // Dark charge nonuniformity at reference exposure.
+    f64 dsnuReferenceExposureSeconds = 0.01;
     f64 biasDnRms = 0.0;
     bool applyNuc = false;
     f64 nucResidualFraction = 0.0;
+    bool enableShotNoise = true;
+    bool enableDarkShotNoise = true;
+    bool enableReadNoise = true;
+    bool enableDarkCurrent = true;
+    bool enableFpn = false;
+    // Independent calibration coefficients; temporal noise is never scaled.
+    std::vector<f64> nucGainMap;
+    std::vector<f64> nucOffsetElectronsMap;
+    String nucGainMapPath;
+    String nucOffsetElectronsMapPath;
 };
 
 struct ThermalDetectorConfig {
@@ -120,6 +136,10 @@ struct ThermalDetectorConfig {
     f64 netdReferenceTemperatureK = 0.0;
     f64 netdNoiseBandwidthHz = 0.0;
     String netdOpticalCondition;
+    std::vector<f64> nucGainMap;
+    std::vector<f64> nucOffsetDnMap;
+    String nucGainMapPath;
+    String nucOffsetDnMapPath;
 };
 
 struct DeviceProfile {
@@ -167,6 +187,7 @@ struct IspConfig {
 
 struct ProcessingQuality {
     ProcessingBackend backend = ProcessingBackend::CpuReference;
+    bool noiseFree = false; // Deterministic operator checks still run full ADC.
     u32 wavelengthSamples = 32;
     u32 timeSamples = 1;
     u32 pixelSamples = 1;
@@ -200,6 +221,7 @@ struct ProductRequest {
 
 struct CameraConfig {
     u32 version = kCameraConfigVersion;
+    bool enabled = false;
     DeviceProfile device;
     OpticsConfig optics;
     ReadoutConfig readout;

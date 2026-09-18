@@ -1,0 +1,47 @@
+# Portable open-plane camera-physics fixture. The checker derives its other
+# wavelength/material/light cases from this scene without editing the source.
+# Geometry: scripts/utils/generate_shadow_scene.py (committed output).
+
+[renderer]
+resolution = [64, 64]
+spp = 64
+seed = 1763
+output = "camera_physics_open.exr"
+
+[spectral]
+mode = "single"
+wavelength_nm = 2000.0
+band = "SWIR"
+
+[scene]
+gltf = "assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 1200.0
+
+[camera]
+position = [0.0, 20.0, 0.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false
+
+[material_overrides."shadow_scene_open"]
+ir_temperature_k = 1200.0
+ir_emissivity = 1.0
+ir_transmittance = 0.0
+specular = 0.0

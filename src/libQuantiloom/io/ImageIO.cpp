@@ -183,6 +183,12 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
     }
 
     try {
+        // Camera display products are already encoded sRGB. Ordinary render
+        // images still take the legacy linear-to-sRGB path.
+        const auto cameraKind = image.metadata.find("camera_signal_kind");
+        const bool alreadySrgb = cameraKind != image.metadata.end() &&
+            (cameraKind->second == "display_srgb" ||
+             cameraKind->second == "device_preview_srgb");
         // Convert float [0,1] to uint8 [0,255] with clamping and sRGB gamma
         std::vector<uint8_t> pixels(image.width * image.height * image.channels);
 
@@ -196,7 +202,7 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
 
                     // Apply sRGB gamma encoding (shader outputs linear RGB)
                     // Alpha channel (c == 3) should NOT be gamma encoded
-                    if (c < 3) {
+                    if (c < 3 && !alreadySrgb) {
                         value = LinearToSRGB(value);
                     }
 

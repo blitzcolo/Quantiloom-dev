@@ -2,7 +2,6 @@
 
 #include "core/Log.hpp"
 #include "io/ImageIO.hpp"
-#include "postprocess/GenericSensor.hpp"
 #include "postprocess/PostprocessConfig.hpp"
 #include "postprocess/Thermography.hpp"
 #include "renderer/OfflineRenderer.hpp"
@@ -11,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <limits>
+#include <utility>
 #include <vector>
 
 namespace quantiloom::app {
@@ -19,83 +19,49 @@ namespace {
 /**
  * @brief Run the sensor imaging chain over the traced frame
  *
- * Modifies `img` in place to the enhanced preview, and writes the raw DN image
- * beside the EXR.
+ * Captures a device frame through the renderer facade, which traces the scene
+ * at the camera's own wavelength/time samples. The original radiance frame
+ * remains untouched for its EXR; all camera products receive separate files.
  */
-void ApplySensorChain(const Config& config, const OfflineRenderOutput& rendered, Image& img,
-                      const String& outputPath, const u32 width, const u32 height) {
+Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
+                                       camera::CaptureState& state,
+                                       RenderOutcome& outcome) {
     QL_LOG_INFO("Applying sensor simulation...");
-
-    SensorParams sensorParams = PostprocessConfig::ParseSensorParams(config);
-
-    // ========================================================================
-    // IR fused modes: unit fixup for the sensor photon budget
-    // ========================================================================
-    // The renderer stores per-nm AVERAGE spectral radiance (band integral /
-    // band width, see closesthit.rchit) while the sensor chain expects
-    // band-INTEGRATED radiance (W/sr/m^2). Multiply by the band width here, and
-    // use the band center for photon energy instead of the 550 nm visible-light
-    // default.
-    //
-    // Both numbers come back with the frame rather than being derived here: the
-    // renderer is the only party that knows which band it just integrated.
-    const f32 bandScale = rendered.sensorRadianceScale;
-    if (rendered.sensorWavelengthNm > 0.0f) {
-        sensorParams.wavelength_nm = rendered.sensorWavelengthNm;
+    const std::filesystem::path exrPath(outcome.exrPath);
+    const auto captured = renderer.CaptureCamera(state, renderer.GetTimelineInfo().current_s);
+    if (!captured) return Result<Image, String>::Err(captured.error());
+    const auto write = [&](const std::optional<camera::CameraProduct>& product,
+                           const char* suffix) -> Result<void, String> {
+        if (!product) return Result<void, String>::Ok();
+        const auto path = exrPath.parent_path() /
+            (exrPath.stem().string() + suffix + ".exr");
+        if (!ImageIO::WriteEXR(path.string(), product->image))
+            return Result<void, String>::Err("failed to write camera product " + path.string());
+        return Result<void, String>::Ok();
+    };
+    const auto& output = captured.value();
+    for (const auto& [product, suffix] : {
+             std::pair{&output.bandMeasurement, "_measurement"},
+             std::pair{&output.rawDn, "_rawdn"},
+             std::pair{&output.correctedDeviceSignal, "_corrected"},
+             std::pair{&output.apparentTemperature, "_tapp"},
+             std::pair{&output.display, "_display"},
+             std::pair{&output.cieLinearSrgb, "_cie"},
+             std::pair{&output.tracedRadiance, "_spectral"}}) {
+        const auto wrote = write(*product, suffix);
+        if (!wrote) return Result<Image, String>::Err(wrote.error());
     }
-    if (bandScale != 1.0f) {
-        QL_LOG_INFO("  IR sensor units: radiance x{:.0f} nm bandwidth, photon wavelength {:.0f} nm",
-                    bandScale, sensorParams.wavelength_nm);
-    }
-
-    GenericSensor sensor;
-
-    // Extract RGB/grayscale channels (drop alpha for sensor simulation)
-    Image hdrInput(width, height, 3);
-    for (u32 y = 0; y < height; ++y) {
-        for (u32 x = 0; x < width; ++x) {
-            hdrInput(x, y, 0) = img(x, y, 0) * bandScale;  // R
-            hdrInput(x, y, 1) = img(x, y, 1) * bandScale;  // G
-            hdrInput(x, y, 2) = img(x, y, 2) * bandScale;  // B
-        }
-    }
-
-    auto sensorResult = sensor.Apply(hdrInput, sensorParams);
-    if (!sensorResult.has_value()) {
-        QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", sensorResult.error());
-        return;
-    }
-    QL_LOG_INFO("  [OK] Sensor simulation complete");
-
-    const SensorOutput& sensorOutput = sensorResult.value();
-
-    // Replace image with enhanced preview (noisy radiance, for PNG/visualization).
-    // Divide the band scale back out so the EXR keeps the same per-nm average
-    // radiance units as the sensor-off path.
-    const Image& enhancedPreview = sensorOutput.enhancedPreview;
-    const f32 invBandScale = 1.0f / bandScale;
-    for (u32 y = 0; y < height; ++y) {
-        for (u32 x = 0; x < width; ++x) {
-            img(x, y, 0) = enhancedPreview(x, y, 0) * invBandScale;  // R
-            img(x, y, 1) = enhancedPreview(x, y, 1) * invBandScale;  // G
-            img(x, y, 2) = enhancedPreview(x, y, 2) * invBandScale;  // B
-            // Alpha unchanged
-        }
-    }
-
-    img.metadata["postprocess"] = "sensor_simulation_preview";
-
-    // Save raw DN image to separate file
-    const std::filesystem::path exrPath(outputPath);
-    const std::string rawDnPath =
-        (exrPath.parent_path() / (exrPath.stem().string() + "_rawdn.exr")).string();
-
-    QL_LOG_INFO("Saving raw DN image to {}...", rawDnPath);
-    if (ImageIO::WriteEXR(rawDnPath, sensorOutput.rawDN)) {
-        QL_LOG_INFO("  [OK] Saved raw DN image");
-    } else {
-        QL_LOG_WARN("  [WARN] Failed to save raw DN image");
-    }
+    const auto productPath = [&](const char* suffix) -> String {
+        return (exrPath.parent_path() /
+                (exrPath.stem().string() + suffix + ".exr")).string();
+    };
+    if (output.bandMeasurement) outcome.measurementPath = productPath("_measurement");
+    if (output.rawDn) outcome.rawDnPath = productPath("_rawdn");
+    if (output.correctedDeviceSignal) outcome.correctedPath = productPath("_corrected");
+    if (output.apparentTemperature) outcome.tappPath = productPath("_tapp");
+    if (output.display) outcome.displayPath = productPath("_display");
+    if (output.display) return output.display->image;
+    return Image{};
 }
 
 /**
@@ -263,19 +229,28 @@ Image BuildPreview(const Image& img, const SpectralMode mode, const u32 width, c
 
 }  // namespace
 
-void WriteFrameOutputs(const Config& config, OfflineRenderOutput& rendered,
+void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
+                       camera::CaptureState& cameraState,
+                       OfflineRenderOutput& rendered,
                        const SpectralMode spectralMode, RenderOutcome& outcome) {
     Image& img = rendered.radiance;
 
-    // Before the sensor chain, which overwrites img with its own noisy
-    // preview: the temperature map is of the scene, not of the detector.
-    if (PostprocessConfig::IsThermographyEnabled(config)) {
+    // The compatibility thermography map is for scenes without the versioned
+    // camera. A camera capture writes its own response-weighted _tapp product.
+    if (!renderer.GetCameraConfig().enabled &&
+        PostprocessConfig::IsThermographyEnabled(config)) {
         WriteApparentTemperature(config, rendered, img, spectralMode, outcome.exrPath,
                                  outcome);
     }
 
-    if (PostprocessConfig::IsSensorEnabled(config)) {
-        ApplySensorChain(config, rendered, img, outcome.exrPath, outcome.width, outcome.height);
+    Image cameraPreview;
+    if (renderer.GetCameraConfig().enabled) {
+        auto captured = ApplySensorChain(renderer, cameraState, outcome);
+        if (!captured) {
+            outcome.error = captured.error();
+            return;
+        }
+        cameraPreview = std::move(captured.value());
     } else {
         QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
     }
@@ -293,14 +268,16 @@ void WriteFrameOutputs(const Config& config, OfflineRenderOutput& rendered,
     const bool isFusedMode =
         (spectralMode == SpectralMode::RGB || IsVisMode(spectralMode) ||
          spectralMode == SpectralMode::MWIR_Fused || spectralMode == SpectralMode::LWIR_Fused ||
-         spectralMode == SpectralMode::SWIR_Fused);
+         spectralMode == SpectralMode::SWIR_Fused || cameraPreview.IsValid());
 
     if (isFusedMode) {
         const std::filesystem::path exrPath(outcome.exrPath);
         const std::filesystem::path pngPath =
             exrPath.parent_path() / (exrPath.stem().string() + ".png");
 
-        outcome.preview = BuildPreview(img, spectralMode, outcome.width, outcome.height);
+        outcome.preview = cameraPreview.IsValid() ?
+            std::move(cameraPreview) :
+            BuildPreview(img, spectralMode, outcome.width, outcome.height);
 
         if (ImageIO::WritePNG(pngPath.string(), outcome.preview)) {
             QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
@@ -350,7 +327,8 @@ RenderOutcome RenderConfigToFiles(const Config& config,
     // The hyperspectral cube streams itself to disk band by band; there is no
     // frame to save. Everything below is the single-frame output stage.
     if (!rendered.wroteItsOwnOutput) {
-        WriteFrameOutputs(config, rendered, spectralMode, outcome);
+        camera::CaptureState cameraState;
+        WriteFrameOutputs(config, renderer, cameraState, rendered, spectralMode, outcome);
     }
 
     outcome.seconds = std::chrono::duration<f64>(std::chrono::steady_clock::now() - started).count();

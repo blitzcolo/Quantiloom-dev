@@ -180,7 +180,10 @@ struct SpectralCurveGPU {
     f32 startWavelength_nm = 0.0f;       // First wavelength in grid (nm)
     f32 stepSize_nm = 0.0f;              // Wavelength step size (nm)
     u32 numSamples = 0;                  // Number of valid samples (0 to MAX_SPECTRAL_SAMPLES)
-    u32 _padding = 0;                    // Padding for 16-byte alignment (std430)
+    // For emission curves only: 0 or next exact segment index + 1. An exact
+    // segment has stepSize_nm = 0 and values packed as up to 32 (nm, value)
+    // pairs. Reflection curves leave this at 0. Layout stays 272 bytes.
+    u32 _padding = 0;
 
     // Default constructor: empty curve
     SpectralCurveGPU() = default;
