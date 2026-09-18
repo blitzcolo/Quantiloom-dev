@@ -295,6 +295,7 @@ set(TEST_SUPPORT_SOURCES
 
 # Postprocess tests (sensor simulation, multiband fusion)
 set(TEST_POSTPROCESS_SOURCES
+    test_postprocess/test_camera_pipeline.cpp
     test_postprocess/test_generic_sensor.cpp
     test_postprocess/test_multiband_fusion.cpp
     test_postprocess/test_gpu_sensor_math.cpp
@@ -517,7 +518,7 @@ add_custom_target(test_renderer
 
 # Run only postprocess tests (sensor simulation, fusion)
 add_custom_target(test_postprocess
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=CameraPhysicsTest.*:GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

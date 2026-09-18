@@ -203,6 +203,9 @@ add_library(quantiloom_core OBJECT
     thermal/ThermalSolveCache.hpp
 
     # Postprocess module
+    ${QL_PUBLIC_INC}/postprocess/CameraPipeline.hpp
+    postprocess/CameraPhysics.cpp
+    postprocess/CameraPhysics.hpp
     ${QL_PUBLIC_INC}/postprocess/SensorModel.hpp
     postprocess/GenericSensor.cpp
     ${QL_PUBLIC_INC}/postprocess/GenericSensor.hpp
