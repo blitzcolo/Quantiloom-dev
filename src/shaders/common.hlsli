@@ -30,6 +30,7 @@
 #define SPECTRAL_MODE_NIR_FUSED    6  // Near IR fusion - reflected solar
 #define SPECTRAL_MODE_RGB          7  // Fast RGB-only (no spectral integration, default)
 #define SPECTRAL_MODE_VIS_HERO     8  // Visible band by hero-wavelength sampling
+#define SPECTRAL_MODE_CAMERA_MEASUREMENT 9 // one response-sampled device wavelength
 
 // The two visible estimators over one band. Everything that is about the band
 // -- which lighting inputs are RGB, which materials get upsampled, which

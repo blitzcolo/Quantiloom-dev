@@ -196,6 +196,7 @@ TEST(TypesTest, SpectralModeEnumValues) {
     EXPECT_EQ(static_cast<u32>(SpectralMode::NIR_Fused), 6u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::RGB), 7u);
     EXPECT_EQ(static_cast<u32>(SpectralMode::VIS_Hero), 8u);
+    EXPECT_EQ(static_cast<u32>(SpectralMode::CameraMeasurement), 9u);
 }
 
 // The comment above is a promise; this reads the shader and checks it. The
@@ -228,6 +229,7 @@ TEST(TypesTest, ShaderSpectralModeDefinesMatchTheEnum) {
         {"SPECTRAL_MODE_NIR_FUSED",     SpectralMode::NIR_Fused},
         {"SPECTRAL_MODE_RGB",           SpectralMode::RGB},
         {"SPECTRAL_MODE_VIS_HERO",      SpectralMode::VIS_Hero},
+        {"SPECTRAL_MODE_CAMERA_MEASUREMENT", SpectralMode::CameraMeasurement},
     };
     EXPECT_EQ(defines.size(), std::size(modes))
         << "common.hlsli defines a mode the enum does not list, or the reverse";

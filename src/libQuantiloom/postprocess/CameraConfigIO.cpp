@@ -1,4 +1,5 @@
 #include "postprocess/CameraConfigIO.hpp"
+#include "postprocess/CameraConfigIOInternal.hpp"
 
 #include "postprocess/CameraPhysics.hpp"
 #include "postprocess/PostprocessConfig.hpp"
@@ -412,6 +413,8 @@ CameraConfig MigrateLegacy(const Config& document, SpectralMode mode) {
     camera.device.documentVersion = "migration-v1";
     camera.device.calibration = CalibrationStatus::GenericAssumption;
     camera.device.detector = DetectorKind::Photon; // Even a legacy LWIR scene.
+    if (mode == SpectralMode::RGB)
+        camera.inputKind = CameraInputKind::FastRgbApproximation;
     const bool legacyColor = mode == SpectralMode::RGB ||
                              mode == SpectralMode::VIS_Fused ||
                              mode == SpectralMode::VIS_Hero;
@@ -421,6 +424,7 @@ CameraConfig MigrateLegacy(const Config& document, SpectralMode mode) {
     camera.optics.focalLengthMm = legacy.focalLength_mm;
     camera.optics.fNumber = legacy.fNumber;
     camera.optics.pixelPitchUm = legacy.pixelPitch_um;
+    camera.optics.psfSigmaPixelsOverride = legacy.psfSigma_px;
     SetExtent(document, camera.optics);
     // The old pinhole render was framed by camera.fov_y. Its independent
     // focal_length_mm did not affect the view. Keep that composition on load.
@@ -724,6 +728,15 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
         camera.device.detector = *detector;
         camera.device.calibration = *calibration;
         camera.device.cfa = *cfa;
+        const String inputKind = Lower(
+            document.GetString("sensor.input_kind", "spectral"));
+        if (inputKind == "spectral")
+            camera.inputKind = CameraInputKind::SpectralMeasurement;
+        else if (inputKind == "fast_rgb")
+            camera.inputKind = CameraInputKind::FastRgbApproximation;
+        else
+            return Error<CameraConfig>(
+                "sensor.input_kind must be spectral or fast_rgb");
         auto sources = ReadSources(document, camera.device.parameterSources);
         if (!sources) return Error<CameraConfig>(sources.error());
 
@@ -736,6 +749,9 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetDouble("sensor.optics.f_number", camera.optics.fNumber);
         camera.optics.pixelPitchUm =
             document.GetDouble("sensor.optics.pixel_pitch_um", camera.optics.pixelPitchUm);
+        camera.optics.psfSigmaPixelsOverride =
+            document.GetDouble("sensor.optics.psf_sigma_px",
+                               camera.optics.psfSigmaPixelsOverride);
         camera.optics.fillFactor =
             document.GetDouble("sensor.optics.fill_factor", camera.optics.fillFactor);
         camera.optics.sensorWidthPx =
@@ -1001,6 +1017,9 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "device_id = " << Quoted(camera.device.id) << '\n';
     out << "display_name = " << Quoted(camera.device.displayName) << '\n';
     out << "detector = " << Quoted(Token(camera.device.detector)) << '\n';
+    out << "input_kind = " <<
+        Quoted(camera.inputKind == CameraInputKind::FastRgbApproximation
+                   ? "fast_rgb" : "spectral") << '\n';
     out << "cfa = " << Quoted(Token(camera.device.cfa)) << '\n';
     out << "calibration_status = " << Quoted(Token(camera.device.calibration)) << '\n';
     out << "effective_min_nm = " << camera.device.effectiveMinNm << '\n';
@@ -1020,6 +1039,7 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "focal_length_mm = " << optics.focalLengthMm << '\n';
     out << "f_number = " << optics.fNumber << '\n';
     out << "pixel_pitch_um = " << optics.pixelPitchUm << '\n';
+    out << "psf_sigma_px = " << optics.psfSigmaPixelsOverride << '\n';
     out << "fill_factor = " << optics.fillFactor << '\n';
     out << "sensor_width_px = " << optics.sensorWidthPx << '\n';
     out << "sensor_height_px = " << optics.sensorHeightPx << '\n';
@@ -1201,6 +1221,59 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
         }
     }
     return out.str();
+}
+
+Result<camera::CameraConfig, String> CameraConfigFromSensorParams(
+    const SensorParams& sensor, SpectralMode mode, u32 physicalWidth,
+    u32 physicalHeight, f64 verticalFovDegrees, f64 wavelengthNm) {
+    if (physicalWidth == 0 || physicalHeight == 0 ||
+        !std::isfinite(verticalFovDegrees) ||
+        verticalFovDegrees <= 0.0 || verticalFovDegrees >= 180.0)
+        return Error<camera::CameraConfig>(
+            "legacy sensor conversion needs physical width, height and vertical FOV");
+    // The old API carries a SensorParams value, while ParseCameraConfig owns
+    // every legacy-to-versioned rule. Feed those exact legacy keys through
+    // that one parser rather than implementing a second host-side mapping.
+    std::ostringstream toml;
+    toml << std::setprecision(std::numeric_limits<f32>::max_digits10);
+    toml << "[renderer]\nresolution = [" << physicalWidth << ", "
+         << physicalHeight << "]\n";
+    toml << "[camera]\nfov_y = " << verticalFovDegrees << "\n";
+    toml << "[spectral]\nwavelength_nm = " << wavelengthNm << "\n";
+    toml << "[sensor]\nenabled = true\n";
+    toml << "focal_length_mm = " << sensor.focalLength_mm << '\n';
+    toml << "f_number = " << sensor.fNumber << '\n';
+    toml << "pixel_pitch_um = " << sensor.pixelPitch_um << '\n';
+    toml << "psf_sigma_px = " << sensor.psfSigma_px << '\n';
+    toml << "quantum_efficiency = " << sensor.quantumEfficiency << '\n';
+    toml << "well_capacity_e = " << sensor.wellCapacity_e << '\n';
+    toml << "read_noise_e_rms = " << sensor.readNoise_e_rms << '\n';
+    toml << "dark_current_e_s = " << sensor.darkCurrent_e_s << '\n';
+    toml << "integration_time_s = " << sensor.integrationTime_s << '\n';
+    toml << "bit_depth = " << sensor.bitDepth << '\n';
+    toml << "gain = " << sensor.gain << '\n';
+    toml << "enable_poisson_noise = "
+         << (sensor.enablePoissonNoise ? "true" : "false") << '\n';
+    toml << "enable_read_noise = "
+         << (sensor.enableReadNoise ? "true" : "false") << '\n';
+    toml << "enable_dark_current = "
+         << (sensor.enableDarkCurrent ? "true" : "false") << '\n';
+    toml << "enable_fpn = " << (sensor.enableFPN ? "true" : "false") << '\n';
+    toml << "noise_seed = " << sensor.noiseSeed << '\n';
+    toml << "detector_temperature_k = " << sensor.detectorTemperature_K << '\n';
+    toml << "[sensor.fpn]\n";
+    toml << "prnu_sigma = " << sensor.prnuSigma << '\n';
+    toml << "dsnu_sigma_e = " << sensor.dsnuSigma_e << '\n';
+    toml << "enable_nuc = " << (sensor.enableNUC ? "true" : "false") << '\n';
+    toml << "nuc_efficiency = " << sensor.nucEfficiency << '\n';
+    auto document = Config::Parse(toml.str());
+    if (!document) return Error<camera::CameraConfig>(document.error());
+    auto migrated = ParseCameraConfig(*document, mode);
+    if (!migrated) return migrated;
+    migrated.value().optics.psfSigmaPixelsOverride = sensor.psfSigma_px;
+    migrated.value().optics.cosFourthVignetting =
+        sensor.enableVignetting && !sensor.isTelecentric;
+    return migrated;
 }
 
 } // namespace quantiloom

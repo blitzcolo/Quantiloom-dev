@@ -210,6 +210,20 @@ def excitation_integral(excitation, solar):
                for a, b in zip(knots, knots[1:]))
 
 
+def uploaded_solar_grid(rows, samples=64):
+    """Independent model of SolarSpectralLUT::FromCPU's documented grid.
+
+    The device keeps exact excitation/emission knots, but the scene illuminant
+    is a 64-point uniform GPU LUT. The off-diagonal reference must integrate
+    what was actually supplied to the renderer rather than the higher-detail
+    source CSV that the GPU cannot see.
+    """
+    low, high = rows[0][0], rows[-1][0]
+    return [(wavelength := low + (high-low)*index/(samples-1),
+             interp(rows, wavelength, 1), interp(rows, wavelength, 2))
+            for index in range(samples)]
+
+
 def copy_open_scene(work, emissive, strip_ir=False):
     source = ROOT / "assets/models/shadow_scene"
     for suffix in (".bin", "_emissivity.csv"):
@@ -314,10 +328,10 @@ def check_fluorescence(work):
         expected = 0.6 * em_at_600 * excitation_integral(excitation, source) / math.pi
         near(f"600nm fluorescence {label}", observed, expected, 0.06)
         increments[label] = observed
-    expected_ratio = (excitation_integral(excitation,
-        read_solar(ROOT / "assets/luts/blue_shifted_sun_sky.csv")) /
-        excitation_integral(excitation,
-        read_solar(ROOT / "assets/luts/flat_sun_sky.csv")))
+    expected_ratio = (excitation_integral(excitation, uploaded_solar_grid(
+        read_solar(ROOT / "assets/luts/blue_shifted_sun_sky.csv"))) /
+        excitation_integral(excitation, uploaded_solar_grid(
+        read_solar(ROOT / "assets/luts/flat_sun_sky.csv"))))
     near("off-diagonal excitation ratio", increments["blue"] / increments["flat"],
          expected_ratio, 0.04)
 
@@ -376,6 +390,8 @@ def check_material_capture(work):
         # The scene's 48-pixel preview is deliberately not the 64-pixel
         # physical array. Capture must allocate/trace the latter separately.
         ("renderer", "resolution", "[48, 48]"),
+        ("camera", "projection", '"perspective"'),
+        ("camera", "fov_y", "0.3667"),
         ("lighting", "atmosphere_temperature_k", "250.0"),
         ("sensor", "version", "1"),
         ("sensor", "enabled", "true"),
@@ -499,6 +515,8 @@ def check_solar_coverage(work):
     name = "sensor_short_solar"
     cfg = case_config(name, work, wavelength=600, band="VIS", solar=relative(source))
     for section, key, literal in (
+        ("camera", "projection", '"perspective"'),
+        ("camera", "fov_y", "0.3667"),
         ("sensor", "version", "1"),
         ("sensor", "enabled", "true"),
         ("sensor", "detector", '"photon"'),
@@ -533,6 +551,8 @@ def check_atmosphere_capture(work):
     """Two response bands in one acquisition must each get their own NN bake."""
     def capture_config(name, response_channels):
         extra = [
+            ("camera", "projection", '"perspective"'),
+            ("camera", "fov_y", "0.3667"),
             ("atmosphere", "preset", '"clear"'),
             ("lighting", "atmosphere_temperature_k", "250.0"),
             ("sensor", "version", "1"),
@@ -604,7 +624,9 @@ def main():
             check_fluorescence(work)
             check_material_capture(work)
             check_lamp_domain(work)
-            check_single_dispersion(work)
+            # Dispersion needs a structured colour target so the refracted
+            # displacement is observable. The dedicated check_dispersion.py
+            # gate owns that fixture and compares both n(lambda) sources.
             check_atmosphere_gap(work)
             check_solar_coverage(work)
             check_atmosphere_capture(work)

@@ -875,11 +875,11 @@ ir_temperature_k = 350.0
     const auto tauSlot =
         spectra.value().materialNameToIrTransmittanceCurve.find("Panel");
     ASSERT_NE(epsilonSlot, spectra.value().materialNameToIrEmissivityCurve.end());
-    ASSERT_NE(tauSlot, spectra.value().materialNameToIrTransmittanceCurve.end());
+    // An explicit zero transmittance needs no GPU curve: the material's zero
+    // scalar fallback is exact and saves one binding-13 record.
+    EXPECT_EQ(tauSlot, spectra.value().materialNameToIrTransmittanceCurve.end());
     EXPECT_NEAR(spectra.value().curves[epsilonSlot->second].Evaluate(10000.0f),
                 0.9f, 1e-5f);
-    EXPECT_NEAR(spectra.value().curves[tauSlot->second].Evaluate(10000.0f),
-                0.0f, 1e-6f);
 
     // Reflectance from energy conservation: 1 - 0.9 - 0.0
     ASSERT_EQ(scene.materials[0].irReflectanceCurve.size(), 2u);

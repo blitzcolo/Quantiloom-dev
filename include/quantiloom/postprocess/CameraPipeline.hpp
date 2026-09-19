@@ -29,6 +29,7 @@ enum class ResponseKind : u32 {
 enum class RelativeNormalization : u32 { None, PeakOne, AreaOne };
 enum class ShutterKind : u32 { Global, Rolling };
 enum class ProcessingBackend : u32 { CpuReference, GpuPreview };
+enum class CameraInputKind : u32 { SpectralMeasurement, FastRgbApproximation };
 enum class CfaPattern : u32 { Mono, RGGB, GRBG, GBRG, BGGR, MultiChannel };
 enum class OutputColorSpace : u32 { DeviceNative, CieLinearSrgb, DisplaySrgb };
 
@@ -222,6 +223,7 @@ struct ProductRequest {
 struct CameraConfig {
     u32 version = kCameraConfigVersion;
     bool enabled = false;
+    CameraInputKind inputKind = CameraInputKind::SpectralMeasurement;
     DeviceProfile device;
     OpticsConfig optics;
     ReadoutConfig readout;

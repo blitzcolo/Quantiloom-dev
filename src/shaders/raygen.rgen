@@ -9,12 +9,15 @@
 // ============================================================================
 
 #include "common.hlsli"
+#include "camera_response.hlsli"
 
 // ============================================================================
 // Bindings
 // ============================================================================
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
+[[vk::binding(28, 0)]] RWTexture2D<float4> cameraMeasurementImage;
+[[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
 [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;  // Fallback lighting (unused here)
 
@@ -140,6 +143,33 @@ void main() {
     // A primary ray carries the whole visible band. Only a dispersive
     // refraction narrows it to one wavelength -- see Payload::heroLambda.
     payload.heroLambda = 0.0;
+    uint cameraChannel = 0u;
+    uint proposalChannel = 0u;
+    float cameraLambdaPdf = 0.0;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+        if (!CameraResponseValid(cameraResponseTable)) {
+            return;
+        }
+        uint measurementWidth, measurementHeight;
+        cameraMeasurementImage.GetDimensions(measurementWidth, measurementHeight);
+        if (launchID.x >= measurementWidth || launchID.y >= measurementHeight) return;
+        const uint channelCount = CameraHeaderWord(cameraResponseTable, 4u);
+        const uint2 physicalPixel = CameraPhysicalPixel(
+            cameraResponseTable, launchID, launchSize);
+        cameraChannel = min(CameraCfaChannel(cameraResponseTable, physicalPixel),
+                            channelCount - 1u);
+        if (channelCount > 1u) {
+            const float channelU = StratifiedSample1D(
+                pushConsts.sampleIndex, launchID, SAMPLE_SLOT_CAMERA_CHANNEL,
+                pushConsts.sequenceSeed);
+            proposalChannel = min(uint(channelU * float(channelCount)), channelCount - 1u);
+        }
+        const float wavelengthU = StratifiedSample1D(
+            pushConsts.sampleIndex, launchID, SAMPLE_SLOT_CAMERA_LAMBDA,
+            pushConsts.sequenceSeed);
+        payload.heroLambda = CameraSampleWavelength(
+            cameraResponseTable, proposalChannel, wavelengthU, cameraLambdaPdf);
+    }
 
     // Initialize recursion depth (0 = primary ray)
     payload.depth = 0;
@@ -170,7 +200,56 @@ void main() {
     // payload. Written unconditionally: unlike radiance this is not averaged,
     // the last sample simply wins (jitter makes it flicker sub-pixel at
     // silhouettes, which the grid overlay's epsilon absorbs).
-    depthImage[launchID] = payload.primaryHitT;
+    uint depthWidth, depthHeight;
+    depthImage.GetDimensions(depthWidth, depthHeight);
+    if (launchID.x < depthWidth && launchID.y < depthHeight)
+        depthImage[launchID] = payload.primaryHitT;
+
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+        const uint channelCount = CameraHeaderWord(cameraResponseTable, 4u);
+        const bool multiChannel = CameraHeaderWord(cameraResponseTable, 3u) == CAMERA_CFA_MULTI;
+        const bool latentColor = channelCount > 1u;
+        float pdf = cameraLambdaPdf;
+        if (latentColor) {
+            pdf = 0.0;
+            [loop]
+            for (uint c = 0u; c < channelCount; ++c)
+                pdf += CameraProposalPdf(cameraResponseTable, c, payload.heroLambda);
+            pdf /= float(channelCount);
+        }
+        const float Lnm = isfinite(payload.radiance.r) ? payload.radiance.r : 0.0;
+        const float cosine = max(dot(direction, normalize(pushConsts.camera.forward)), 0.0);
+        const float cosine2 = cosine * cosine;
+        const float cosFourth = CameraHeaderWord(cameraResponseTable, 6u) != 0u && !orthographic
+            ? cosine2 * cosine2 : 1.0;
+        const float collection = CameraHeaderFloat(cameraResponseTable, 8u) *
+                                 CameraHeaderFloat(cameraResponseTable, 9u) * cosFourth;
+        const float photonFactor = CameraHeaderWord(cameraResponseTable, 2u) == CAMERA_DETECTOR_PHOTON
+            ? payload.heroLambda * 1e-9 / 1.98644586e-25 : 1.0;
+        float3 rate = float3(0.0, 0.0, 0.0);
+        if (pdf > 0.0 && isfinite(collection)) {
+            const float weighted = Lnm * collection * photonFactor / pdf;
+            if (latentColor) {
+                [loop]
+                for (uint c = 0u; c < channelCount; ++c)
+                    rate[c] = weighted * CameraResponseAt(cameraResponseTable, c,
+                                                           payload.heroLambda);
+            } else {
+                rate.r = weighted * CameraResponseAt(cameraResponseTable, cameraChannel,
+                                                     payload.heroLambda);
+            }
+        }
+        if (pushConsts.sampleIndex == 0u) {
+            cameraMeasurementImage[launchID] = float4(rate,
+                                                      multiChannel ? 0.0 : float(cameraChannel));
+        } else {
+            const float3 previous = cameraMeasurementImage[launchID].rgb;
+            cameraMeasurementImage[launchID] = float4(
+                previous + (rate - previous) / float(pushConsts.sampleIndex + 1u),
+                multiChannel ? 0.0 : float(cameraChannel));
+        }
+        return;
+    }
 
     // ========================================================================
     // Output: Accumulative Sampling with Progressive Refinement

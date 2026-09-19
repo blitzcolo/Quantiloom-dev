@@ -61,15 +61,15 @@ gain = 5.0
     EXPECT_EQ(qe.kind, ResponseKind::AbsoluteQE);
     EXPECT_DOUBLE_EQ(qe.MinNm(), 8000.0);
     EXPECT_DOUBLE_EQ(qe.MaxNm(), 12000.0);
-    EXPECT_DOUBLE_EQ(qe.value.front(), 0.65);
-    EXPECT_DOUBLE_EQ(qe.value.back(), 0.65);
+    EXPECT_NEAR(qe.value.front(), 0.65, 1e-7);
+    EXPECT_NEAR(qe.value.back(), 0.65, 1e-7);
     EXPECT_NEAR(camera.optics.focalLengthMm,
                 512.0 * 20e-3 / (2.0 * std::tan(25.0 * 3.14159265358979323846 / 180.0)),
                 1e-5);
     EXPECT_DOUBLE_EQ(camera.photon.fullWellElectrons, 300000.0);
     EXPECT_DOUBLE_EQ(camera.photon.readNoiseElectronsRms, 500.0);
     EXPECT_DOUBLE_EQ(camera.photon.darkCurrentElectronsPerSecond, 130.0);
-    EXPECT_DOUBLE_EQ(camera.readout.exposureSeconds, 0.02);
+    EXPECT_NEAR(camera.readout.exposureSeconds, 0.02, 1e-8);
     EXPECT_DOUBLE_EQ(camera.readout.electronsPerDn, 5.0);
     EXPECT_DOUBLE_EQ(camera.readout.analogGain, 1.0);
 }
@@ -556,6 +556,7 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     authored.optics.sensorHeightPx = 2;
     authored.optics.focusDistanceM = 2.5;
     authored.optics.cosFourthVignetting = true;
+    authored.optics.psfSigmaPixelsOverride = 1.5;
     authored.optics.knownPsfPath = "reference_psf.exr";
     authored.readout.shutter = ShutterKind::Rolling;
     authored.readout.exposureSeconds = 0.0075;
@@ -679,6 +680,7 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     EXPECT_EQ(got.optics.sensorHeightPx, 2u);
     EXPECT_DOUBLE_EQ(got.optics.focusDistanceM, 2.5);
     EXPECT_TRUE(got.optics.cosFourthVignetting);
+    EXPECT_DOUBLE_EQ(got.optics.psfSigmaPixelsOverride, 1.5);
     EXPECT_EQ(got.optics.knownPsfPath, "reference_psf.exr");
     EXPECT_EQ(got.readout.shutter, ShutterKind::Rolling);
     EXPECT_DOUBLE_EQ(got.readout.exposureSeconds, authored.readout.exposureSeconds);

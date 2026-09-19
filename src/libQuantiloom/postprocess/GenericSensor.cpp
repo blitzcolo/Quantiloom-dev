@@ -104,12 +104,13 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
                              (hdr.channels == 1 ? 1u : 3u);
         config.photon.nucGainMap.resize(count);
         config.photon.nucOffsetElectronsMap.resize(count);
+        const u32 calibrationSeed = camera::DeviceRandomSeed(config);
         for (size_t i = 0; i < count; ++i) {
             const f64 prnu = params.prnuSigma * camera::CounterGaussian(
-                config.randomSeed, static_cast<u32>(i), 0,
+                calibrationSeed, static_cast<u32>(i), 0,
                 camera::NoiseClass::FixedPrnu);
             const f64 dsnu = params.dsnuSigma_e * camera::CounterGaussian(
-                config.randomSeed, static_cast<u32>(i), 0,
+                calibrationSeed, static_cast<u32>(i), 0,
                 camera::NoiseClass::FixedDsnu);
             config.photon.nucGainMap[i] = 1.0 / std::max(0.01, 1.0 + prnu);
             config.photon.nucOffsetElectronsMap[i] = -dsnu;

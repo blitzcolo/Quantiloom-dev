@@ -1,3 +1,5 @@
+class quantiloom::Result<struct quantiloom::camera::CameraConfig,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ParseCameraConfig(class quantiloom::Config const &,enum quantiloom::SpectralMode,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::CameraConfigToToml(struct quantiloom::camera::CameraConfig const &)
 class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::mcp::EncodeImageContent(struct quantiloom::Image const &,unsigned int)
 const quantiloom::GenericSensor::`vftable'
 double quantiloom::BandRadianceDerivativePerK(double,double,double)
@@ -70,10 +72,13 @@ public: class quantiloom::Result<struct quantiloom::Image,class std::basic_strin
 public: class quantiloom::Result<struct quantiloom::Image,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureScreenshot(void)
 public: class quantiloom::Result<struct quantiloom::PickResult,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Pick(unsigned int,unsigned int)
 public: class quantiloom::Result<struct quantiloom::ThermalElementTrajectory,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::GetElementTrajectory(unsigned int,double,double,unsigned int)
+public: class quantiloom::Result<struct quantiloom::camera::CameraOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureCameraProducts(void)
+public: class quantiloom::Result<struct quantiloom::camera::CameraOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::CaptureCamera(struct quantiloom::camera::CaptureState &,double)
 public: class quantiloom::Result<unsigned __int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::DuplicateNode(unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::ThermalElementAt(struct quantiloom::PickResult const &)const
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CompleteQueuedCameraAcquisition(void)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadEnvironmentMap(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadScene(class quantiloom::Config const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromConfig(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
@@ -81,6 +86,10 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromGltf(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::GltfSceneOptions const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::LoadSceneFromUsd(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UsdSceneOptions const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::QueueCameraAcquisition(unsigned __int64,double)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::RecordCameraBaseline(struct VkCommandBuffer_T *)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::RecordQueuedCameraAcquisition(struct VkCommandBuffer_T *)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetCameraConfig(struct quantiloom::camera::CameraConfig const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetSolarSpectralLUTFromSpec(struct quantiloom::SolarLutSpec const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalTime(double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetThermalWhatIf(enum quantiloom::ThermalSensitivityParameter,double)
@@ -194,6 +203,7 @@ public: struct glm::mat<4,4,float,0> quantiloom::ExternalRenderContext::GetNodeR
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig &&)
 public: struct quantiloom::AtmosphereNNConfig & quantiloom::AtmosphereNNConfig::operator=(struct quantiloom::AtmosphereNNConfig const &)
 public: struct quantiloom::AtmosphereNNConfig const & quantiloom::ExternalRenderContext::GetAtmosphere(void)const
+public: struct quantiloom::CameraGpuTimings quantiloom::ExternalRenderContext::GetLastCameraGpuTimings(void)const
 public: struct quantiloom::ConfigApplyReport quantiloom::ExternalRenderContext::ApplyConfig(class quantiloom::Config const &,struct quantiloom::ConfigApplyOptions const &)
 public: struct quantiloom::DisplayEnhancementParams const & quantiloom::ExternalRenderContext::GetDisplayEnhancementParams(void)const
 public: struct quantiloom::LightingParams const & quantiloom::ExternalRenderContext::GetLightingParams(void)const
@@ -205,6 +215,8 @@ public: struct quantiloom::SensorParams const & quantiloom::ExternalRenderContex
 public: struct quantiloom::ThermalSolveStatus quantiloom::ExternalRenderContext::GetThermalSolveStatus(void)const
 public: struct quantiloom::TimelineInfo quantiloom::ExternalRenderContext::GetTimelineInfo(void)const
 public: struct quantiloom::TimelineInfo quantiloom::OfflineRenderer::GetTimelineInfo(void)const
+public: struct quantiloom::camera::CameraConfig const & quantiloom::ExternalRenderContext::GetCameraConfig(void)const
+public: struct quantiloom::camera::CameraConfig const & quantiloom::OfflineRenderer::GetCameraConfig(void)const
 public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
 public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const
 public: unsigned __int64 quantiloom::Config::GetUInt64(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64)const

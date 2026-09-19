@@ -613,6 +613,15 @@ u32 CounterRandomU32(u32 deviceSeed, u32 pixelIndex, u64 acquisitionIndex,
     return Mix32(state ^ Mix32(counter + 0xd3a2646cU));
 }
 
+u32 DeviceRandomSeed(const CameraConfig& config) {
+    u32 idHash = 2166136261u;
+    for (unsigned char byte : config.device.id) {
+        idHash ^= byte;
+        idHash *= 16777619u;
+    }
+    return Mix32(config.randomSeed ^ idHash);
+}
+
 f64 CounterUniform01(u32 deviceSeed, u32 pixelIndex, u64 acquisitionIndex,
                      NoiseClass noiseClass, u32 counter) {
     return (static_cast<f64>(CounterRandomU32(deviceSeed, pixelIndex, acquisitionIndex,

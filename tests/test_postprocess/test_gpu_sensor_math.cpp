@@ -1,14 +1,15 @@
 // ============================================================================
 // Quantiloom - Unit Tests for GPU Sensor Math Formulas
 // ============================================================================
-// Tests verify the mathematical formulas used by both CPU (GenericSensor)
-// and GPU (compute shader) sensor chains. No Vulkan hardware required.
+// These are hardware-free closed-form checks for the legacy RGB adapter
+// and GPU effective-PSF approximation. Real compute dispatch/readback tests
+// live in test_renderer/test_camera_gpu.cpp.
 //
 // Covers:
 // - PSF sigma calculation (Airy disk → Gaussian sigma)
 // - Radiance → Photo-electrons conversion
 // - ADC quantization (electrons → DN)
-// - FPN math (PRNU multiplicative, DSNU additive, NUC residual)
+// - FPN math and independent gain/offset calibration
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -17,11 +18,12 @@
 #include "core/Image.hpp"
 #include <algorithm>  // std::clamp -- used to arrive via GenericSensor.hpp
 #include <cmath>
+#include <initializer_list>
 #include <numbers>
 
 using namespace quantiloom;
 
-// Physical constants (must match GenericSensor.cpp)
+// Exact CODATA constants for independent reference values
 static constexpr f64 kPlanckConstant = 6.62607015e-34;
 static constexpr f64 kSpeedOfLight = 299792458.0;
 
@@ -56,10 +58,10 @@ protected:
 // ============================================================================
 // PSF Sigma Calculation Tests
 // ============================================================================
-// Both chains call PSFSigmaPixels() / PSFKernelRadiusPixels() from
-// postprocess/SensorModel.hpp, so these tests exercise the production formula
-// rather than a third copy of it -- an earlier version of this file restated
-// the arithmetic inline, which meant a wrong constant in the renderer could be
+// The GPU preview keeps this effective Gaussian approximation. The CPU
+// reference uses the band-dependent Airy PSF tested separately. These cases
+// exercise the legacy/GPU helper in SensorModel.hpp; a wrong preview constant
+// would otherwise pass an inline restatement of the same arithmetic and could be
 // matched by the same wrong constant here and the suite would stay green.
 //
 // The expectations below are pinned to closed forms, not to decimal literals.
@@ -289,13 +291,13 @@ TEST_F(GPUSensorMathTest, WellCapacityClamp) {
 // ============================================================================
 
 TEST_F(GPUSensorMathTest, QuantizationFormula) {
-    // DN = floor(electrons / gain), clamped to [0, 2^bitDepth - 1]
+    // DN = floor(electrons / gain + 0.5), clamped to the ADC range.
     const f32 gain = 3.0f;
 
-    EXPECT_FLOAT_EQ(std::floor(100.0f / gain), 33.0f);
-    EXPECT_FLOAT_EQ(std::floor(99.0f / gain), 33.0f);
-    EXPECT_FLOAT_EQ(std::floor(9.0f / gain), 3.0f);
-    EXPECT_FLOAT_EQ(std::floor(2.0f / gain), 0.0f);
+    EXPECT_FLOAT_EQ(std::floor(100.0f / gain + 0.5f), 33.0f);
+    EXPECT_FLOAT_EQ(std::floor(99.0f / gain + 0.5f), 33.0f);
+    EXPECT_FLOAT_EQ(std::floor(9.0f / gain + 0.5f), 3.0f);
+    EXPECT_FLOAT_EQ(std::floor(2.0f / gain + 0.5f), 1.0f);
 }
 
 TEST_F(GPUSensorMathTest, ADCClipping) {
@@ -361,41 +363,35 @@ TEST_F(GPUSensorMathTest, DSNUAdditive) {
     EXPECT_FLOAT_EQ((high + dsnu) - high, dsnu);
 }
 
-TEST_F(GPUSensorMathTest, NUCResidual) {
-    // NUC reduces FPN by nucEfficiency factor:
-    // residual_prnu = prnu × (1 - nucEfficiency)
-    // residual_dsnu = dsnu × (1 - nucEfficiency)
+TEST_F(GPUSensorMathTest, IndependentGainAndOffsetCalibration) {
+    // Closed-form reference for the GPU operator test: a measured fixed
+    // multiplicative response and additive dark offset need two independent
+    // calibration coefficients. The raw signal remains uncorrected.
     const f32 prnu = 0.02f;
     const f32 dsnu = 15.0f;
-    const f32 efficiency = 0.98f;
-
-    const f32 residual_prnu = prnu * (1.0f - efficiency);
-    const f32 residual_dsnu = dsnu * (1.0f - efficiency);
-
-    EXPECT_NEAR(residual_prnu, 0.0004f, 1e-6f);  // 2% of original
-    EXPECT_NEAR(residual_dsnu, 0.3f, 1e-6f);
-
-    // Apply NUC-corrected FPN to signal
-    const f32 signal = 10000.0f;
-    const f32 corrected = signal * (1.0f + residual_prnu) + residual_dsnu;
-    // Much closer to original than without NUC
-    EXPECT_NEAR(corrected, signal, 10.0f);
+    const f32 gain = 1.0f / (1.0f + prnu);
+    const f32 offset = -dsnu * gain;
+    for (const f32 expected : {100.0f, 10000.0f}) {
+        const f32 raw = expected * (1.0f + prnu) + dsnu;
+        const f32 corrected = raw * gain + offset;
+        EXPECT_NEAR(corrected, expected, expected * 1e-6f);
+        EXPECT_NE(raw, expected);
+    }
 }
 
-TEST_F(GPUSensorMathTest, NUCFullEfficiency) {
-    // 100% NUC efficiency should completely eliminate FPN
-    const f32 prnu = 0.05f;
-    const f32 dsnu = 30.0f;
-    const f32 efficiency = 1.0f;
-
-    const f32 residual_prnu = prnu * (1.0f - efficiency);
-    const f32 residual_dsnu = dsnu * (1.0f - efficiency);
-
-    EXPECT_FLOAT_EQ(residual_prnu, 0.0f);
-    EXPECT_FLOAT_EQ(residual_dsnu, 0.0f);
-
-    // Signal should be completely unchanged
+TEST_F(GPUSensorMathTest, CalibrationDoesNotEraseTemporalReadNoise) {
+    // A static calibration corrects fixed terms. Two independent readouts
+    // retain their temporal difference after the same gain/offset is applied.
+    const f32 fixedGain = 1.05f;
+    const f32 fixedOffset = 30.0f;
+    const f32 calibrationGain = 1.0f / fixedGain;
+    const f32 calibrationOffset = -fixedOffset / fixedGain;
     const f32 signal = 10000.0f;
-    const f32 corrected = signal * (1.0f + residual_prnu) + residual_dsnu;
-    EXPECT_FLOAT_EQ(corrected, signal);
+    const f32 firstRaw = signal * fixedGain + fixedOffset + 5.0f;
+    const f32 secondRaw = signal * fixedGain + fixedOffset - 5.0f;
+    const f32 first = firstRaw * calibrationGain + calibrationOffset;
+    const f32 second = secondRaw * calibrationGain + calibrationOffset;
+    EXPECT_NEAR((first + second) * 0.5f, signal, 0.002f);
+    EXPECT_NEAR(first - second, 10.0f / fixedGain, 0.002f);
+    EXPECT_GT(first - second, 0.0f);
 }

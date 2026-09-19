@@ -1232,6 +1232,9 @@ Result<CameraData, String> OfflineRenderer::Impl::CameraDataAt(
                       static_cast<u32>(resolved.debugMode);
     data.debugParam = 0u;
     if (physicalSensorProjection) {
+        if (poseCamera.GetProjection() != Camera::Projection::Perspective)
+            return Result<CameraData, String>::Err(
+                "physical camera capture requires a perspective projection");
         const auto& optics = resolved.cameraConfig.optics;
         const auto fovX = camera::HorizontalFovRadians(
             optics.focalLengthMm, optics.pixelPitchUm, optics.sensorWidthPx);
@@ -1267,7 +1270,8 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
     // The shader's solar/sky LUT clamps outside its supplied span. That is a
     // useful old-scene preview fallback, but cannot support an exact device
     // measurement of a response whose tail was never supplied.
-    if (impl.params.mode != SpectralMode::RGB && impl.resolved.solarSunSky) {
+    if (config.inputKind == camera::CameraInputKind::SpectralMeasurement &&
+        impl.resolved.solarSunSky) {
         const auto& [sun, sky] = *impl.resolved.solarSunSky;
         for (const auto& channel : config.device.channels) {
             const auto& response = channel.response;
@@ -1306,7 +1310,8 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
     };
     Result<camera::CameraOutput, String> captured =
         Result<camera::CameraOutput, String>::Err("camera capture did not run");
-    if (impl.params.mode == SpectralMode::RGB) {
+    if (impl.resolved.cameraConfig.inputKind ==
+        camera::CameraInputKind::FastRgbApproximation) {
         auto moved = SetTimelineTime(frameTimeSeconds);
         if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
         const auto pose = impl.CameraDataAt(frameTimeSeconds, SpectralMode::RGB,

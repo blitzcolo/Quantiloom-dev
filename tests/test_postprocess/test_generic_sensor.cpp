@@ -56,7 +56,7 @@ TEST_F(GenericSensorTest, InvalidInputImage) {
     auto result = sensor.Apply(invalidImg, params);
 
     EXPECT_FALSE(result.has_value());
-    EXPECT_NE(result.error().find("Invalid"), std::string::npos);
+    EXPECT_NE(result.error().find("valid mono or linear RGB"), std::string::npos);
 }
 
 TEST_F(GenericSensorTest, ValidInputProducesOutput) {
@@ -374,10 +374,11 @@ TEST_F(GenericSensorTest, PSFSigmaOverrideZeroLeavesEdgeSharp) {
 
     // Zero means no blur, rather than falling back to the derived width.
     EXPECT_LT(EdgeLeakage(noBlur.value().enhancedPreview), 1e-3f);
-    EXPECT_GT(EdgeLeakage(blurred.value().enhancedPreview), 1e-3f);
+    EXPECT_GT(EdgeLeakage(blurred.value().enhancedPreview),
+              EdgeLeakage(noBlur.value().enhancedPreview) + 5e-4f);
 }
 
-TEST_F(GenericSensorTest, PSFSigmaNegativeIsBitIdenticalToDefault) {
+TEST_F(GenericSensorTest, PSFSigmaNegativeNonSentinelIsRejected) {
     const Image hdr = MakeEdgeImage();
     params.fNumber = 11.0f;
     params.enablePoissonNoise = false;
@@ -385,19 +386,9 @@ TEST_F(GenericSensorTest, PSFSigmaNegativeIsBitIdenticalToDefault) {
     params.enableDarkCurrent = false;
 
     ASSERT_LT(params.psfSigma_px, 0.0f) << "fixture leaves the field defaulted";
-    auto byDefault = sensor.Apply(hdr, params);
-    ASSERT_TRUE(byDefault.has_value());
-
-    params.psfSigma_px = -0.5f;  // any negative value is the same sentinel
+    params.psfSigma_px = -0.5f;  // only exactly -1 requests the derived PSF
     auto explicitlyNegative = sensor.Apply(hdr, params);
-    ASSERT_TRUE(explicitlyNegative.has_value());
-
-    const Image& a = byDefault.value().enhancedPreview;
-    const Image& b = explicitlyNegative.value().enhancedPreview;
-    ASSERT_EQ(a.TotalElements(), b.TotalElements());
-    for (u32 i = 0; i < a.TotalElements(); ++i) {
-        ASSERT_FLOAT_EQ(a.data[i], b.data[i]) << "at element " << i;
-    }
+    EXPECT_FALSE(explicitlyNegative.has_value());
 }
 
 // ============================================================================

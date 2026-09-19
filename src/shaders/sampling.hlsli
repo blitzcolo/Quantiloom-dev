@@ -147,6 +147,8 @@
 #define SAMPLE_SLOT_LOBE        4u  // diffuse or specular        (1D)
 #define SAMPLE_SLOT_DIRECTION   5u  // bounce direction           (2D)
 #define SAMPLE_SLOT_FLUOR_LAMBDA 6u // excitation wavelength      (1D)
+#define SAMPLE_SLOT_CAMERA_LAMBDA 7u // device response proposal    (1D, raygen)
+#define SAMPLE_SLOT_CAMERA_CHANNEL 8u // MultiChannel proposal mix   (1D, raygen)
 
 // ============================================================================
 // Sobol' generator matrix, dimension 1

@@ -54,7 +54,7 @@ message(STATUS "Fusion tool configured successfully")
 # Both link quantiloom_core rather than the DLL, for the same reason
 # fusion_tool does: what they drive is internal and is not going to be
 # exported to give a measurement script a way in.
-foreach(tool thermal_column_tool sensor_lab colour_lab)
+foreach(tool thermal_column_tool sensor_lab colour_lab camera_gpu_bench)
     add_executable(${tool} ${tool}.cpp)
     target_link_libraries(${tool} PRIVATE quantiloom_core)
     set_target_properties(${tool} PROPERTIES
@@ -67,6 +67,28 @@ foreach(tool thermal_column_tool sensor_lab colour_lab)
         target_compile_options(${tool} PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endforeach()
+
+add_custom_command(
+    TARGET camera_gpu_bench POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_preview.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
+        "$<TARGET_FILE_DIR:camera_gpu_bench>"
+    COMMENT "Copying camera shaders next to camera_gpu_bench"
+)
+add_dependencies(camera_gpu_bench CompileShaders)
 
 # quantiloom_core carries the USD loader, so anything linking it needs the USD
 # runtime beside the binary or it will not start -- the same POST_BUILD copy the
@@ -83,6 +105,7 @@ if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
     copy_usd_dlls(fusion_tool)
     add_dependencies(thermal_column_tool fusion_tool)
     add_dependencies(sensor_lab fusion_tool)
+    add_dependencies(camera_gpu_bench fusion_tool)
 endif()
 
 message(STATUS "Measurement tools configured successfully")

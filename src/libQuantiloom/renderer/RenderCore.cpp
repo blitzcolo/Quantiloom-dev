@@ -1438,6 +1438,12 @@ std::unique_ptr<RayTracingPipeline> CreateRayTracingPipeline(
     if (bindings.rgbToSpectrum) {
         pipeline->BindRgbToSpectrumTable(*bindings.rgbToSpectrum);   // 25
     }
+    if (bindings.cameraMeasurementImage) {
+        pipeline->BindCameraMeasurementImage(*bindings.cameraMeasurementImage); // 28
+    }
+    if (bindings.cameraResponse) {
+        pipeline->BindCameraResponseBuffer(*bindings.cameraResponse); // 29
+    }
 
     QL_LOG_INFO("  Ray tracing pipeline created and bound");
     return pipeline;

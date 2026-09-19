@@ -286,6 +286,8 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_tlas_refit.cpp
     test_renderer/test_timeline_context.cpp
     test_renderer/test_interactive_bench.cpp
+    test_renderer/test_camera_gpu.cpp
+    test_renderer/test_camera_response_gpu.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
@@ -398,6 +400,11 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_preview.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
             "$<TARGET_FILE_DIR:libquantiloom_tests>"
         COMMENT "Copying shaders next to the test binary"
     )
@@ -520,7 +527,7 @@ add_custom_target(test_renderer
 
 # Run only postprocess tests (sensor simulation, fusion)
 add_custom_target(test_postprocess
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=CameraPhysicsTest.*:CpuCameraPipelineTest.*:CameraConfigIOTest.*:GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=CameraPhysicsTest.*:CpuCameraPipelineTest.*:CameraConfigIOTest.*:CameraGpuTest.*:CameraResponseGpuTest.*:GenericSensorTest.*:MultibandFusionTest.*:GPUSensorMathTest.*:SensorParamsTest.*:SensorConfigTest.*:SensorChainOrderTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

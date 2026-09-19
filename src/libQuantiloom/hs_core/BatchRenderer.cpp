@@ -181,6 +181,18 @@ struct BatchRenderer::Impl {
         for (u32 batchStart = 0; batchStart < params.spp; batchStart += BATCH_SIZE) {
             u32 batchEnd = std::min(batchStart + BATCH_SIZE, params.spp);
 
+            // A primary command buffer must return to INITIAL before it is
+            // begun again. The pool permits individual resets; omitting this
+            // was invalid Vulkan and made repeated camera wavelength renders
+            // fail nondeterministically after the first two-sample batch.
+            if (batchStart != 0 &&
+                vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) {
+                LOG_ERROR("BatchRenderer: Failed to reset command buffer");
+                vkDestroyFence(context.GetDevice(), fence, nullptr);
+                vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
+                return false;
+            }
+
             VkCommandBufferBeginInfo beginInfo{};
             beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
             beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -211,6 +223,7 @@ struct BatchRenderer::Impl {
                 return false;
             }
         }
+
 
         vkDestroyFence(context.GetDevice(), fence, nullptr);
         vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);

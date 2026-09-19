@@ -19,6 +19,7 @@
 // ============================================================================
 
 #include "common.hlsli"
+#include "camera_response.hlsli"
 #include "pbr.hlsli"
 #include "SpectralConversion.hlsli"
 #include "blackbody.hlsli"
@@ -52,6 +53,7 @@
 // ============================================================================
 
 [[vk::binding(13, 0)]] StructuredBuffer<SpectralCurveGPU> spectralCurves;
+[[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
 
 // NOTE: Complex refractive index buffer (binding 14) is declared in pbr.hlsli
 // because the BRDF functions there read it directly.
@@ -532,7 +534,7 @@ float EvaluateEndmemberReflectance(StructuredBuffer<SpectralCurveGPU> curves,
 // curve supplies epsilon where reflectance is absent. Measured n,k supplies
 // normal-incidence R0 next, then the generic emissivity heuristic. Tau has its
 // own measured curve. x=rho, y=epsilon, z=tau.
-float3 InfraredSurfaceFractions(MaterialData material, float3 endmemberW,
+float3 InfraredSurfaceFractions(MaterialData material, float4 endmemberW,
                                 float metallic, float roughness, float lambda) {
     const float tau = material.irTransmittanceCurveIndex >= 0
         ? saturate(EvaluateSpectralCurve(spectralCurves,
@@ -1834,7 +1836,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // double.
     float emissiveMisWeight = 1.0;
     if (IsVisMode(SPEC_SPECTRAL_MODE) ||
-        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
         emissiveMisWeight = EmissiveMisWeight(material.emissiveFactor,
                                               material.emissiveTextureIndex,
                                               worldGeometricNormal,
@@ -2056,7 +2059,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Compute F0 (reflectance at normal incidence) for Fresnel calculations
     // Uses physical n,k data when available for wavelength-accurate metal reflections
-    float3 F0 = ComputePhysicalF0(material, albedo, metallic, pushConsts.camera.wavelength_nm, dielectricF0);
+    const float pathLambda = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+        ? payload.heroLambda : pushConsts.camera.wavelength_nm;
+    float3 F0 = ComputePhysicalF0(material, albedo, metallic, pathLambda, dielectricF0);
 
     // ------------------------------------------------------------------------
     // RGB reflectances, upsampled once
@@ -2085,7 +2090,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float4 sDielF0 = float4(0.0, 0.0, 0.0, -1.0);
     float4 sF0     = float4(0.0, 0.0, 0.0, -1.0);
     if (IsVisMode(SPEC_SPECTRAL_MODE) ||
-        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) {
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
         if (material.spectralReflectanceCurveIndex < 0) {
             sBase = FetchRgbSpectrum(rgbToSpectrumTable, baseColor.rgb);
         }
@@ -2198,7 +2204,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // residual and traces one ray per hit for the difference; see
     // TraceEnvBounceResidual. They still read envBRDF and prefilteredColor from
     // here, which is why the block runs for them too.
-    const bool hasEnvMap = (lut.enableEnvironmentMap != 0);
+    const bool hasEnvMap = (lut.enableEnvironmentMap != 0) &&
+                           SPEC_SPECTRAL_MODE != SPECTRAL_MODE_CAMERA_MEASUREMENT;
     if (metallic > 0.01 || roughness < 0.99) {
         // 1. Sample BRDF integration LUT
         //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
@@ -3052,8 +3059,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // identically zero.
         output_radiance = clamp(output_radiance, -1000.0, 1000.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-               pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) {
+    } else if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda <= SPECTRAL_VIS_LAMBDA_MAX)) {
         // ====================================================================
         // Single Wavelength Mode: True Spectral Rendering (Quantitative)
         // ====================================================================
@@ -3068,7 +3077,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 2. LightingParams.sunRadiance_spectral → Scalar fallback
         // ====================================================================
 
-        float lambda = pushConsts.camera.wavelength_nm;
+        float lambda = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+            ? payload.heroLambda : pushConsts.camera.wavelength_nm;
 
         // ================================================================
         // Query Sun/Sky Spectral Radiance at Wavelength λ
@@ -3308,14 +3318,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                     ccWeight * ccE,
                 F_scalar.r * sheenScale_s * ccBase, rrSurvive_s,
-                skyRadiance_lambda, 0.0, aniso, payload).x;
+                skyRadiance_lambda, lambda, aniso, payload).x;
 
             // The transmitted half against the back hemisphere, as VIS_FUSED.
             if (wDt_s > 0.0) {
                 radiance_spectral += TraceEnvBounceResidual(
                     singleHitPos, -normal, V, NdotV_s, roughness, 0.0,
                     wDt_s * ccBase, 0.0, wDt_s * ccBase,
-                    skyRadiance_lambda, 0.0, IsotropicFrame(), payload).x;
+                    skyRadiance_lambda, lambda, IsotropicFrame(), payload).x;
             }
         }
 
@@ -3370,8 +3380,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // NN atmosphere composition (single wavelength: LUT baked with one sample)
         if (atmosEnabled) {
-            float tau_l = SampleAtmosTau(atmos, atmosNNData, 0, atmosA);
-            float lpath_l = SampleAtmosLpath(atmos, atmosNNData, 0, atmosA, atmosAz);
+            const uint atmosIdx = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+                ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda) : 0u;
+            float tau_l = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA);
+            float lpath_l = SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             radiance_spectral = tau_l * radiance_spectral + lpath_l;
         }
 
@@ -3388,7 +3400,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
                (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
                 pushConsts.camera.wavelength_nm > SPECTRAL_VIS_LAMBDA_MAX &&
-                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN)) {
+                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda > SPECTRAL_VIS_LAMBDA_MAX &&
+                payload.heroLambda < SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ====================================================================
         // SWIR Fused Mode: Short-Wave IR Band Integration (1000-2500nm)
         // ====================================================================
@@ -3447,8 +3462,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
-        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
+        const float carriedLambda = cameraRay ? payload.heroLambda :
+            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
         const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
         float heroRadiance = 0.0;
@@ -3465,7 +3482,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float lambda_b = heroRay
             ? carriedLambda
             : SWIR_LAMBDA_MIN + PathSample1D(payload, SAMPLE_SLOT_LAMBDA) * (SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN);
-        const uint atmosIdx_b = singleRay ? 0u
+        const uint atmosIdx_b = cameraRay ? CameraAtmosLambdaIndex(cameraResponseTable, lambda_b, atmos.numLambda)
+            : singleRay ? 0u
             : (uint)clamp(round((lambda_b - SWIR_LAMBDA_MIN) / lambda_step),
                           0.0, float(NUM_SWIR_SAMPLES - 1));
 
@@ -3942,7 +3960,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
                (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN)) {
+                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda >= SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
         // ====================================================================
@@ -3972,8 +3992,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float lambda_min, lambda_max;
         bool includeSolarReflection = false;  // Only for MWIR during daytime
 
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
-        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
+        const float carriedLambda = cameraRay ? payload.heroLambda :
+            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
         const bool mwirLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) ||
                               (singleRay && carriedLambda < SPECTRAL_LWIR_LAMBDA_MIN);
         if (mwirLike) {
@@ -4045,7 +4067,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // The atmosphere LUT is baked on the loop's own sample points, so a
         // sampled wavelength has no index of its own -- take the nearest, as
         // VIS_FUSED does for a hero ray.
-        const uint atmosIdx_b = singleRay ? 0u
+        const uint atmosIdx_b = cameraRay ? CameraAtmosLambdaIndex(cameraResponseTable, lambda_b, atmos.numLambda)
+            : singleRay ? 0u
             : (uint)clamp(round((lambda_b - lambda_min) / lambda_step),
                           0.0, float(NUM_IR_SAMPLES - 1));
 
@@ -5426,13 +5449,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
                             attenuation4[q] = BeerLambertAt(sAtten, quartet[q], travel,
                                                             material.attenuationDistance);
                         }
-                    } else if (heroSigned != 0.0 && IsVisMode(SPEC_SPECTRAL_MODE)) {
+                    } else if ((heroSigned != 0.0 && IsVisMode(SPEC_SPECTRAL_MODE)) ||
+                               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                                pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
+                               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                                abs(heroSigned) <= SPECTRAL_VIS_LAMBDA_MAX)) {
                         // One wavelength, so one transmittance, at that
                         // wavelength -- the same reading the dispersive branch
                         // above makes.
                         const float a = BeerLambertAt(
                             FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
-                            abs(heroSigned), travel, material.attenuationDistance);
+                            heroSigned != 0.0 ? abs(heroSigned) : pushConsts.camera.wavelength_nm,
+                            travel, material.attenuationDistance);
                         attenuation4 = float4(a, a, a, 0.0);
                     } else if (!IsVisMode(SPEC_SPECTRAL_MODE) &&
                                SPEC_SPECTRAL_MODE != SPECTRAL_MODE_RGB) {

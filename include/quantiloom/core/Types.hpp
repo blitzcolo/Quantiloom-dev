@@ -97,7 +97,11 @@ enum class SpectralMode : u32 {
     // reference and a sampled estimator have to be comparable inside one
     // binary for either to be checkable against the other. Appended, never
     // renumbered: the value is a specialization constant the shaders read.
-    VIS_Hero     = 8
+    VIS_Hero     = 8,
+    // Internal ray-tracing specialization for device measurements. A primary
+    // path carries one response-sampled wavelength and returns scalar L_nm;
+    // the result is weighted into electron rate or absorbed power before CIE.
+    CameraMeasurement = 9
 };
 
 // ============================================================================

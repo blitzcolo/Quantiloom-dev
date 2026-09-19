@@ -144,6 +144,9 @@ add_library(quantiloom_core OBJECT
     renderer/ThermalExchangePrecompute.hpp
     renderer/GpuThermalStepper.cpp
     renderer/GpuThermalStepper.hpp
+    renderer/GpuCameraPipeline.cpp
+    renderer/GpuCameraPipeline.hpp
+    renderer/CameraResponseGpu.hpp
     renderer/ThermalPreview.cpp
     renderer/ThermalPreview.hpp
     renderer/ThermalSunResponse.cpp
@@ -209,6 +212,7 @@ add_library(quantiloom_core OBJECT
     postprocess/CpuCameraPipeline.cpp
     postprocess/CpuCameraPipeline.hpp
     postprocess/CameraConfigIO.cpp
+    postprocess/CameraConfigIOInternal.hpp
     ${QL_PUBLIC_INC}/postprocess/CameraConfigIO.hpp
     ${QL_PUBLIC_INC}/postprocess/SensorModel.hpp
     postprocess/GenericSensor.cpp

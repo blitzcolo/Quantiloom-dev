@@ -1,4 +1,5 @@
 #include "RayTracingPipeline.hpp"
+#include "CommandHelper.hpp"
 #include "core/Log.hpp"
 #include <algorithm>
 #include <fstream>
@@ -43,6 +44,37 @@ static constexpr u32 kMaxPipelineRayRecursionDepth = 10;
 
 static u32 GetMaxTexturesForDevice(const VulkanContext& ctx) {
     return ctx.GetCapabilities().hasDescriptorIndexing ? 1024 : 32;
+}
+
+static void WriteStorageImage(VkDevice device, VkDescriptorSet set, u32 binding,
+                              const GpuImage& image) {
+    VkDescriptorImageInfo info{};
+    info.imageView = image.GetView();
+    info.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = binding;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.descriptorCount = 1;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+}
+
+static void WriteStorageBuffer(VkDevice device, VkDescriptorSet set, u32 binding,
+                               const GpuBuffer& buffer) {
+    VkDescriptorBufferInfo info{};
+    info.buffer = buffer.GetHandle();
+    info.offset = 0;
+    info.range = VK_WHOLE_SIZE;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = set;
+    write.dstBinding = binding;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.descriptorCount = 1;
+    write.pBufferInfo = &info;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 // ============================================================================
@@ -223,6 +255,63 @@ RayTracingPipeline::RayTracingPipeline(
         LoadShaders();
         SetSpecConstants(7, false);  // default: RGB, debug off
 
+        // Bindings 28/29 have descriptorCount 1 without PARTIALLY_BOUND. Even
+        // an old RGB scene therefore needs real descriptors until camera mode
+        // supplies its full-resolution image and encoded response table.
+        m_cameraFallbackImage = std::make_unique<GpuImage>(
+            m_context.GetAllocator(), m_context.GetDevice(), 1u, 1u,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        CommandHelper::TransitionImageLayoutImmediate(
+            m_context, m_cameraFallbackImage->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m_cameraFallbackDepth = std::make_unique<GpuImage>(
+            m_context.GetAllocator(), m_context.GetDevice(), 1u, 1u,
+            VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        CommandHelper::TransitionImageLayoutImmediate(
+            m_context, m_cameraFallbackDepth->GetImage(), VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+        m_cameraFallbackResponse = std::make_unique<GpuBuffer>(
+            m_context.GetAllocator(), 64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        const u32 disabledHeader[16] = {};
+        m_cameraFallbackResponse->Upload(disabledHeader, sizeof(disabledHeader));
+        m_cameraFallbackAtmosHeader = std::make_unique<GpuBuffer>(
+            m_context.GetAllocator(), 80u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        const u32 disabledAtmosHeader[20] = {};
+        m_cameraFallbackAtmosHeader->Upload(disabledAtmosHeader,
+                                             sizeof(disabledAtmosHeader));
+        m_cameraFallbackAtmosData = std::make_unique<GpuBuffer>(
+            m_context.GetAllocator(), 2048u * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        const std::vector<f32> disabledAtmosData(2048u, 0.0f);
+        m_cameraFallbackAtmosData->Upload(disabledAtmosData.data(),
+                                           disabledAtmosData.size() * sizeof(f32));
+        for (VkDescriptorSet set : {m_descriptorSet, m_cameraDescriptorSet,
+                                    m_observerDescriptorSet}) {
+            WriteStorageImage(m_context.GetDevice(), set, 28u,
+                              *m_cameraFallbackImage);
+            WriteStorageBuffer(m_context.GetDevice(), set, 29u,
+                               *m_cameraFallbackResponse);
+            WriteStorageBuffer(m_context.GetDevice(), set, 17u,
+                               *m_cameraFallbackAtmosHeader);
+            WriteStorageBuffer(m_context.GetDevice(), set, 20u,
+                               *m_cameraFallbackAtmosData);
+        }
+        for (VkDescriptorSet set : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
+            WriteStorageImage(m_context.GetDevice(), set, 0u,
+                              *m_cameraFallbackImage);
+            WriteStorageImage(m_context.GetDevice(), set, 22u,
+                              *m_cameraFallbackDepth);
+        }
+        WriteStorageImage(m_context.GetDevice(), m_descriptorSet, 22u,
+                          *m_cameraFallbackDepth);
+
         QL_LOG_INFO("Ray Tracing pipeline created successfully");
     }
     catch (const std::exception& e) {
@@ -288,7 +377,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(28);  // ..23 emissive triangles, 24 thermal temperatures, 25 RGB->spectrum coefficients, 26 thermal sun response, 27 thermal parameter tangent
+    std::vector<VkDescriptorSetLayoutBinding> bindings(30);  // 28 camera measurement image, 29 response table
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -605,9 +694,23 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[27].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[27].pImmutableSamplers = nullptr;
 
+    bindings[28].binding = 28;
+    bindings[28].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[28].descriptorCount = 1;
+    bindings[28].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[28].pImmutableSamplers = nullptr;
+
+    bindings[29].binding = 29;
+    bindings[29].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[29].descriptorCount = 1;
+    bindings[29].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+                              VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+                              VK_SHADER_STAGE_MISS_BIT_KHR;
+    bindings[29].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(28, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(30, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
 
@@ -630,23 +733,23 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Create descriptor pool
     std::vector<VkDescriptorPoolSize> poolSizes(5);
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 2;  // output image + depth AOV
+    poolSizes[0].descriptorCount = 9;  // three sets x (output + depth + measurement)
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    poolSizes[1].descriptorCount = 1;
+    poolSizes[1].descriptorCount = 3;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     // Bindings 2,3,4,5,8,9,13,14,15,16,17,18,19,20,23,24,25,26. Counted from the
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 19;  // lighting params + vertex + index + material + UV + tangent + spectral curves + CRI + solar LUT + normal + atmosphere header + instance geometry info + CIE CMF LUT + atmosphere data + emissive triangles + thermal temperatures + RGB->spectrum table + thermal sun response + thermal parameter tangent
+    poolSizes[2].descriptorCount = 60;  // three sets x (existing 19 + camera response)
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-    poolSizes[3].descriptorCount = m_maxTextures + 2;  // Texture array + prefiltered env + BRDF LUT
+    poolSizes[3].descriptorCount = 3 * (m_maxTextures + 2);
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
-    poolSizes[4].descriptorCount = m_maxTextures + 2;  // Sampler array + IBL sampler + environment sampler
+    poolSizes[4].descriptorCount = 3 * (m_maxTextures + 2);
 
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = 3;
     poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
     poolInfo.pPoolSizes = poolSizes.data();
 
@@ -659,13 +762,19 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocInfo.descriptorPool = m_descriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &m_descriptorSetLayout;
+    VkDescriptorSetLayout layouts[3] = {m_descriptorSetLayout, m_descriptorSetLayout,
+                                       m_descriptorSetLayout};
+    VkDescriptorSet sets[3] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    allocInfo.descriptorSetCount = 3;
+    allocInfo.pSetLayouts = layouts;
 
-    result = vkAllocateDescriptorSets(device, &allocInfo, &m_descriptorSet);
+    result = vkAllocateDescriptorSets(device, &allocInfo, sets);
     if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to allocate descriptor set");
     }
+    m_descriptorSet = sets[0];
+    m_cameraDescriptorSet = sets[1];
+    m_observerDescriptorSet = sets[2];
 
     QL_LOG_INFO("  Descriptor set layout created");
 }
@@ -794,7 +903,8 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
         modules[i] = CreateShaderModule(m_spirvData[i]);
     }
 
-    // Specialization data: applied to closesthit (stage 1) and miss (stage 2)
+    // The raygen now selects CameraMeasurement before the CIE colour path, so
+    // all three tracing stages must see the same spectral-mode specialization.
     VkSpecializationMapEntry specEntries[2] = {};
     specEntries[0].constantID = 0;
     specEntries[0].offset = offsetof(SpecConstants, spectralMode);
@@ -814,6 +924,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     stages[0].stage = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
     stages[0].module = modules[0];
     stages[0].pName = "main";
+    stages[0].pSpecializationInfo = &specInfo;
 
     stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stages[1].stage = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
@@ -976,6 +1087,7 @@ void RayTracingPipeline::SetSpecConstants(u32 spectralMode, bool debugEnabled) {
     }
 
     m_activeVariant = &it->second;
+    m_activeSpectralMode = spectralMode;
 
     // Keep legacy fields in sync for GetPipeline() backward compat
     m_pipeline = m_activeVariant->pipeline;
@@ -992,6 +1104,21 @@ u32 RayTracingPipeline::AlignedSize(const u32 size, const u32 alignment) {
 // ============================================================================
 // Descriptor Binding
 // ============================================================================
+
+void RayTracingPipeline::UpdateSharedDescriptorSets(
+    VkDevice device, u32 writeCount, const VkWriteDescriptorSet* writes,
+    u32 copyCount, const VkCopyDescriptorSet* copies) const {
+    if (copyCount != 0u) {
+        throw std::logic_error("shared camera descriptors do not support descriptor copies");
+    }
+    vkUpdateDescriptorSets(device, writeCount, writes, 0, nullptr);
+    std::vector<VkWriteDescriptorSet> mirror(writes, writes + writeCount);
+    for (VkDescriptorSet target : {m_cameraDescriptorSet, m_observerDescriptorSet}) {
+        for (auto& write : mirror) write.dstSet = target;
+        vkUpdateDescriptorSets(device, writeCount, mirror.data(), 0, nullptr);
+    }
+    (void)copies;
+}
 
 void RayTracingPipeline::BindOutputImage(const GpuImage& image) const {
     VkDevice device = m_context.GetDevice();
@@ -1031,6 +1158,26 @@ void RayTracingPipeline::BindDepthImage(const GpuImage& image) const {
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
+void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const {
+    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 28u, image);
+}
+
+void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
+    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 29u, buffer);
+}
+
+void RayTracingPipeline::BindCameraDepthImage(const GpuImage& image) const {
+    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 22u, image);
+}
+
+void RayTracingPipeline::BindCameraObserverOutputImage(const GpuImage& image) const {
+    WriteStorageImage(m_context.GetDevice(), m_observerDescriptorSet, 0u, image);
+}
+
+void RayTracingPipeline::BindCameraObserverDepthImage(const GpuImage& image) const {
+    WriteStorageImage(m_context.GetDevice(), m_observerDescriptorSet, 22u, image);
+}
+
 void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tlas) const {
     VkDevice device = m_context.GetDevice();
 
@@ -1048,7 +1195,7 @@ void RayTracingPipeline::BindAccelerationStructure(VkAccelerationStructureKHR tl
     write.descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     write.descriptorCount = 1;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) const {
@@ -1068,7 +1215,7 @@ void RayTracingPipeline::BindLUTBuffer(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, const GpuBuffer &indexBuffer,
@@ -1133,7 +1280,7 @@ void RayTracingPipeline::BindGeometryBuffers(const GpuBuffer &vertexBuffer, cons
         QL_LOG_DEBUG("  [DEBUG] No UV buffer provided, skipping binding 8");
     }
 
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) const {
@@ -1153,7 +1300,7 @@ void RayTracingPipeline::BindMaterialBuffer(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) const {
@@ -1173,7 +1320,7 @@ void RayTracingPipeline::BindTangentBuffer(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
     QL_LOG_DEBUG("  [DEBUG] Bound tangent buffer to binding 9");
 }
 
@@ -1194,7 +1341,7 @@ void RayTracingPipeline::BindNormalBuffer(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
     QL_LOG_DEBUG("  [DEBUG] Bound normal buffer to binding 16");
 }
 
@@ -1261,7 +1408,7 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     writes[1].descriptorCount = textureCount;
     writes[1].pImageInfo = samplerInfos.data();
 
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView, VkSampler sampler) const {
@@ -1300,7 +1447,7 @@ void RayTracingPipeline::BindPrefilteredEnvMap(VkImageView imageView, VkSampler 
     writes[1].descriptorCount = 1;
     writes[1].pImageInfo = &samplerInfo;
 
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) const {
@@ -1341,7 +1488,7 @@ void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) c
     writes[1].descriptorCount = 1;
     writes[1].pImageInfo = &samplerInfo;
 
-    vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
+    UpdateSharedDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
 }
 
 // ============================================================================
@@ -1375,7 +1522,7 @@ void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 // ============================================================================
@@ -1409,7 +1556,7 @@ void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffe
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 // ============================================================================
@@ -1442,7 +1589,7 @@ void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 // ============================================================================
@@ -1451,39 +1598,28 @@ void RayTracingPipeline::BindSolarSpectralLUT(const GpuBuffer* buffer) const {
 
 void RayTracingPipeline::BindAtmosphereNN(const GpuBuffer* header,
                                           const GpuBuffer* data) const {
-    VkDevice device = m_context.GetDevice();
+    // The viewport LUT may change while camera and observer traces already
+    // recorded in a command buffer still use their own fixed descriptors.
+    WriteStorageBuffer(m_context.GetDevice(), m_descriptorSet, 17u,
+                       header ? *header : *m_cameraFallbackAtmosHeader);
+    WriteStorageBuffer(m_context.GetDevice(), m_descriptorSet, 20u,
+                       data ? *data : *m_cameraFallbackAtmosData);
+}
 
-    if (header == nullptr || data == nullptr) {
-        QL_LOG_INFO("NN atmosphere buffers are null - atmosphere disabled");
-        return;
-    }
+void RayTracingPipeline::BindCameraAtmosphereNN(const GpuBuffer* header,
+                                                const GpuBuffer* data) const {
+    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 17u,
+                       header ? *header : *m_cameraFallbackAtmosHeader);
+    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 20u,
+                       data ? *data : *m_cameraFallbackAtmosData);
+}
 
-    QL_LOG_INFO("Binding NN atmosphere buffers (binding 17 header {} B, "
-                "binding 20 data {} B)", header->GetSize(), data->GetSize());
-
-    VkDescriptorBufferInfo headerInfo{};
-    headerInfo.buffer = header->GetHandle();
-    headerInfo.offset = 0;
-    headerInfo.range = VK_WHOLE_SIZE;
-
-    VkDescriptorBufferInfo dataInfo{};
-    dataInfo.buffer = data->GetHandle();
-    dataInfo.offset = 0;
-    dataInfo.range = VK_WHOLE_SIZE;
-
-    VkWriteDescriptorSet writes[2]{};
-    writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = m_descriptorSet;
-    writes[0].dstBinding = 17;
-    writes[0].dstArrayElement = 0;
-    writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    writes[0].descriptorCount = 1;
-    writes[0].pBufferInfo = &headerInfo;
-    writes[1] = writes[0];
-    writes[1].dstBinding = 20;
-    writes[1].pBufferInfo = &dataInfo;
-
-    vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
+void RayTracingPipeline::BindCameraObserverAtmosphereNN(const GpuBuffer* header,
+                                                        const GpuBuffer* data) const {
+    WriteStorageBuffer(m_context.GetDevice(), m_observerDescriptorSet, 17u,
+                       header ? *header : *m_cameraFallbackAtmosHeader);
+    WriteStorageBuffer(m_context.GetDevice(), m_observerDescriptorSet, 20u,
+                       data ? *data : *m_cameraFallbackAtmosData);
 }
 
 void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) const {
@@ -1505,7 +1641,7 @@ void RayTracingPipeline::BindInstanceGeometryBuffer(const GpuBuffer& buffer) con
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) const {
@@ -1527,7 +1663,7 @@ void RayTracingPipeline::BindEmissiveTriangleBuffer(const GpuBuffer& buffer) con
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) const {
@@ -1549,7 +1685,7 @@ void RayTracingPipeline::BindThermalSunResponseBuffer(const GpuBuffer& buffer) c
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindThermalTangentBuffer(const GpuBuffer& buffer) const {
@@ -1571,7 +1707,7 @@ void RayTracingPipeline::BindThermalTangentBuffer(const GpuBuffer& buffer) const
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindThermalTemperatureBuffer(const GpuBuffer& buffer) const {
@@ -1593,7 +1729,7 @@ void RayTracingPipeline::BindThermalTemperatureBuffer(const GpuBuffer& buffer) c
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
@@ -1615,7 +1751,7 @@ void RayTracingPipeline::BindCIE_CMF_LUT(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::BindRgbToSpectrumTable(const GpuBuffer& buffer) const {
@@ -1637,7 +1773,7 @@ void RayTracingPipeline::BindRgbToSpectrumTable(const GpuBuffer& buffer) const {
     write.descriptorCount = 1;
     write.pBufferInfo = &bufferInfo;
 
-    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    UpdateSharedDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void RayTracingPipeline::UpdateDescriptorSets() {
@@ -1661,13 +1797,17 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
     // Bind pipeline and descriptor set
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_pipeline);
 
+    const VkDescriptorSet activeSet = m_activeSpectralMode ==
+        static_cast<u32>(SpectralMode::CameraMeasurement)
+        ? m_cameraDescriptorSet
+        : (m_useObserverDescriptorSet ? m_observerDescriptorSet : m_descriptorSet);
     vkCmdBindDescriptorSets(
         cmd,
         VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR,
         m_pipelineLayout,
         0,
         1,
-        &m_descriptorSet,
+        &activeSet,
         0,
         nullptr
     );

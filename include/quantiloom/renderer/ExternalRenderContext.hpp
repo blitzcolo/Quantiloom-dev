@@ -53,6 +53,7 @@
 #include "core/Image.hpp"
 #include "core/SpectralData.hpp"
 #include "postprocess/SensorModel.hpp"
+#include "postprocess/CameraPipeline.hpp"
 
 #include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
@@ -156,6 +157,16 @@ struct GltfSceneOptions {
     /// KHR_materials_variants, by name. Empty is the file's own per-primitive
     /// materials, which is what glTF calls vanilla behaviour.
     String variant;
+};
+
+/// Vulkan timestamps for one completed device capture. The full span includes
+/// its response-weighted ray trace and every sensor compute pass, excluding
+/// swapchain blit; postMs is fullMs - traceMs.
+struct CameraGpuTimings {
+    f32 traceMs = 0.0f;
+    f32 fullMs = 0.0f;
+    f32 postMs = 0.0f;
+    bool valid = false;
 };
 
 /**
@@ -891,6 +902,38 @@ public:
      * @return Current sensor parameters
      */
     [[nodiscard]] const SensorParams& GetGPUSensorParams() const;
+
+    /// Configure the versioned physical camera. Its true sensor extent is
+    /// independent of viewport extent and render scale. Response/optics
+    /// changes invalidate the next device measurement.
+    [[nodiscard]] Result<void, String> SetCameraConfig(
+        const camera::CameraConfig& config);
+    [[nodiscard]] const camera::CameraConfig& GetCameraConfig() const;
+
+    /// Request one device acquisition. Redrawing or re-presenting the previous
+    /// frame does not advance thermal state or draw new detector noise.
+    [[nodiscard]] Result<void, String> QueueCameraAcquisition(
+        u64 acquisitionIndex, f64 firstRowMidpointSeconds);
+
+    /// Headless recording of the same queued camera trace and detector chain
+    /// that RenderFrame uses, without a swapchain blit or PRESENT layout.
+    [[nodiscard]] Result<void, String> RecordQueuedCameraAcquisition(
+        VkCommandBuffer cmd);
+
+    /// Confirm that the recorded acquisition was submitted and completed.
+    /// Products remain unavailable and a new tick cannot be queued before it.
+    [[nodiscard]] Result<void, String> CompleteQueuedCameraAcquisition();
+
+    /// Matched physical-extent ordinary single-wavelength scene trace for
+    /// measuring camera cost above ray tracing. Does not acquire the detector.
+    [[nodiscard]] Result<void, String> RecordCameraBaseline(
+        VkCommandBuffer cmd);
+
+    /// Read the most recent physical device products after the host has
+    /// completed the submitted frame. RAW/measurement/corrected/display retain
+    /// explicit units and calibration metadata.
+    [[nodiscard]] Result<camera::CameraOutput, String> CaptureCameraProducts();
+    [[nodiscard]] CameraGpuTimings GetLastCameraGpuTimings() const;
 
     // ========================================================================
     // Thermal Solve (interactive surface energy balance)

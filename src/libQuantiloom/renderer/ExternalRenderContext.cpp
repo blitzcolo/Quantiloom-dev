@@ -26,6 +26,10 @@
 #include "renderer/LightingParams.hpp"
 #include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
+#include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CameraConfigIOInternal.hpp"
+#include "renderer/CameraResponseGpu.hpp"
+#include "renderer/GpuCameraPipeline.hpp"
 
 #include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalPreview.hpp"
@@ -46,6 +50,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <optional>
 #include <random>
 
 // Not for the cache directory -- that moved to core/CacheDirectory.hpp -- but
@@ -124,6 +130,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
     std::unique_ptr<GpuBuffer> criBuffer;
     std::unique_ptr<GpuBuffer> solarLutBuffer;
+    std::optional<std::pair<SpectralCurve, SpectralCurve>> cameraSolarSources;
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
@@ -207,6 +214,9 @@ struct ExternalRenderContext::Impl {
     // GPU timestamps around the trace dispatch. Resolved non-blocking at the
     // top of each RenderFrame, since the host submits after we return.
     std::unique_ptr<PerformanceLogger> perfLogger;
+    std::unique_ptr<PerformanceLogger> cameraTracePerf;
+    std::unique_ptr<PerformanceLogger> cameraFullPerf;
+    CameraGpuTimings lastCameraGpuTimings{};
 
     // Command pool for internal operations
     VkCommandPool commandPool = VK_NULL_HANDLE;
@@ -336,6 +346,25 @@ struct ExternalRenderContext::Impl {
     bool gpuSensorEnabled = false;
     SensorParams gpuSensorParams;
     bool gpuSensorWavelengthFromHost = false;
+    camera::CameraConfig cameraConfig;
+    bool cameraResourcesDirty = true;
+    bool cameraCapturePending = false;
+    bool cameraCaptureRecorded = false;
+    bool cameraCaptureCompleted = false;
+    u64 cameraAcquisitionIndex = 0;
+    f64 cameraAcquisitionTimeSeconds = 0.0;
+    std::unique_ptr<GpuImage> cameraMeasurementImage; // Binding 28, physical pixels.
+    std::unique_ptr<GpuImage> cameraBaselineImage;
+    std::unique_ptr<GpuImage> cameraDepthImage;
+    std::unique_ptr<GpuBuffer> cameraResponseBuffer; // Binding 29, knot/CDF table.
+    std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
+    std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
+    std::unique_ptr<GpuBuffer> cameraBaselineAtmosHeaderBuffer;
+    std::unique_ptr<GpuBuffer> cameraBaselineAtmosDataBuffer;
+    std::unique_ptr<rendercore::GpuCameraPipeline> cameraGpuPipeline;
+    f32 cameraAtmosMinNm = 0.0f;
+    f32 cameraAtmosStepNm = 0.0f;
+    u32 cameraAtmosCount = 0;
     std::unique_ptr<GpuImage> sensorImage;              // Sensor-processed output (noisy radiance)
     std::unique_ptr<GpuImage> sensorTempImage;          // Temporary image for multi-pass processing
     VkDescriptorSetLayout sensorDescriptorSetLayout = VK_NULL_HANDLE;
@@ -378,7 +407,18 @@ struct ExternalRenderContext::Impl {
 
         // Destroy resources in reverse order
         perfLogger.reset();  // query pool needs the (external) device alive
+        cameraTracePerf.reset();
+        cameraFullPerf.reset();
         pipeline.reset();
+        cameraGpuPipeline.reset();
+        cameraMeasurementImage.reset();
+        cameraBaselineImage.reset();
+        cameraDepthImage.reset();
+        cameraResponseBuffer.reset();
+        cameraAtmosHeaderBuffer.reset();
+        cameraAtmosDataBuffer.reset();
+        cameraBaselineAtmosHeaderBuffer.reset();
+        cameraBaselineAtmosDataBuffer.reset();
 
         // Save and destroy pipeline cache
         if (pipelineCache != VK_NULL_HANDLE && contextAdapter) {
@@ -644,6 +684,12 @@ struct ExternalRenderContext::Impl {
     void CreateGPUSensorPipeline();
     void GenerateAndUploadFPNMaps();
     void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
+    Result<void, String> EnsureCameraResources();
+    Result<void, String> UpdateCameraAtmosphere();
+    Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd);
+    Result<void, String> RecordCameraBaseline(VkCommandBuffer cmd);
+    Result<CameraData, String> CameraDataForCapture(
+        SpectralMode mode, f64 wavelengthNm) const;
 
     /// Which image the swapchain blit should read: the sensor chain's output
     /// if enabled, then CLAHE's, otherwise the raw accumulation. One function
@@ -835,6 +881,8 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     }
 
     perfLogger = std::make_unique<PerformanceLogger>(*contextAdapter);
+    cameraTracePerf = std::make_unique<PerformanceLogger>(*contextAdapter);
+    cameraFullPerf = std::make_unique<PerformanceLogger>(*contextAdapter);
 
     // Create command pool
     VkCommandPoolCreateInfo poolInfo{};
@@ -1143,8 +1191,13 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         }
     }
 
-    SetGPUSensorParams(resolved.sensor);
-    SetGPUSensorEnabled(resolved.sensorEnabled);
+    m_impl->gpuSensorParams = resolved.sensor; // Legacy getter remains readable.
+    if (auto cameraApplied = SetCameraConfig(resolved.cameraConfig);
+        !cameraApplied.has_value()) {
+        report.messages.push_back({ConfigApplyMessage::Severity::Error,
+                                   "sensor", cameraApplied.error()});
+        return report;
+    }
 
     // Thermal solve. A failing solve is a report message, not a failed apply.
     if (resolved.thermal.enabled && m_impl->thermalPreview) {
@@ -2291,6 +2344,10 @@ void ExternalRenderContext::SetWavelength(f32 wavelength_nm) {
     // binding valid -- the material count has not changed -- and follows what
     // UpdateMaterial already does for a single entry.
     if (m_impl->scene && m_impl->materialBuffer) {
+        // UpdateGpuResources replaces descriptor-backed buffers. A viewport
+        // frame recorded before this setter may still read the old allocation.
+        if (m_impl->device != VK_NULL_HANDLE)
+            vkDeviceWaitIdle(m_impl->device);
         m_impl->UpdateGpuResources();
         if (m_impl->pipeline && m_impl->materialBuffer) {
             m_impl->pipeline->BindMaterialBuffer(*m_impl->materialBuffer);
@@ -2363,6 +2420,8 @@ void ExternalRenderContext::SetLightingParams(const LightingParams& params) {
     if (m_impl->thermalPreview) {
         m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
     }
+    m_impl->cameraResourcesDirty = true; // NN camera LUT tracks sun geometry.
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2372,6 +2431,8 @@ void ExternalRenderContext::SetSunDirection(const glm::vec3& direction) {
     if (m_impl->thermalPreview) {
         m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
     }
+    m_impl->cameraResourcesDirty = true;
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2379,6 +2440,7 @@ void ExternalRenderContext::SetSunRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.sunRadiance_rgb = radiance;
     m_impl->lightingParams.sunRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
     m_impl->UploadLightingParams();
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2386,6 +2448,7 @@ void ExternalRenderContext::SetSkyRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.skyRadiance_rgb = radiance;
     m_impl->lightingParams.skyRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
     m_impl->UploadLightingParams();
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2793,6 +2856,11 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
     }
 
     const SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunIrradiance, skyIrradiance);
+    m_impl->cameraSolarSources = std::make_pair(sunIrradiance, skyIrradiance);
+    // Replacing a descriptor-backed buffer while an earlier QVulkanWindow
+    // frame may still read it is invalid; solar edits are infrequent.
+    if (m_impl->solarLutBuffer && m_impl->device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(m_impl->device);
 
     m_impl->solarLutBuffer = std::make_unique<GpuBuffer>(
         m_impl->contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
@@ -2802,6 +2870,8 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
     if (m_impl->pipeline) {
         m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
     }
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    ResetAccumulation();
 
     QL_LOG_INFO("SetSolarSpectralLUT: sun {} samples, sky {} samples",
                 lut.sunIrradiance.numSamples, lut.skyIrradiance.numSamples);
@@ -3317,6 +3387,8 @@ u32 ExternalRenderContext::GetAccumulatedSamples() const {
 }
 
 f32 ExternalRenderContext::GetLastFrameTimeMs() const {
+    if (m_impl->perfLogger && m_impl->perfLogger->TryResolvePending())
+        m_impl->lastSampleGpuMs = m_impl->perfLogger->GetLastFrameGpuMs();
     return m_impl->lastSampleGpuMs;
 }
 
@@ -3666,16 +3738,257 @@ const DisplayEnhancementParams& ExternalRenderContext::GetDisplayEnhancementPara
 // GPU Sensor Simulation API
 // ============================================================================
 
-void ExternalRenderContext::SetGPUSensorEnabled(bool enabled) {
-    bool wasEnabled = m_impl->gpuSensorEnabled;
-    m_impl->gpuSensorEnabled = enabled;
-
-    // Initialize GPU sensor resources if enabling for the first time
-    if (enabled && !wasEnabled && !m_impl->sensorInitialized) {
-        m_impl->CreateGPUSensorPipeline();
+Result<void, String> ExternalRenderContext::SetCameraConfig(
+    const camera::CameraConfig& config) {
+    camera::CameraConfig normalized = config;
+    if (config.enabled) {
+        const auto valid = camera::ValidateCameraConfig(config);
+        if (!valid) return Result<void, String>::Err(valid.error());
+        if (config.device.channels.size() > camera::kCameraResponseMaxChannels)
+            return Result<void, String>::Err(
+                "GPU camera supports at most three response channels");
+        if (m_impl->cameraSolarSources) {
+            const auto& [sun, sky] = *m_impl->cameraSolarSources;
+            for (const auto& channel : config.device.channels) {
+                const auto& stack = channel.response;
+                const auto& base = stack.systemResponse ? *stack.systemResponse :
+                    config.device.detector == camera::DetectorKind::Photon ?
+                    *stack.quantumEfficiency : *stack.thermalAbsorptance;
+                if (sun.samples.empty() || sky.samples.empty() ||
+                    sun.samples.front().first > base.MinNm() ||
+                    sun.samples.back().first < base.MaxNm() ||
+                    sky.samples.front().first > base.MinNm() ||
+                    sky.samples.back().first < base.MaxNm())
+                    return Result<void, String>::Err(
+                        "GPU camera response exceeds solar/sky LUT coverage");
+            }
+        }
+        if (normalized.device.effectiveMinNm == 0.0 &&
+            normalized.device.effectiveMaxNm == 0.0) {
+            normalized.device.effectiveMinNm = std::numeric_limits<f64>::infinity();
+            for (const auto& channel : normalized.device.channels) {
+                const auto& stack = channel.response;
+                const auto& base = stack.systemResponse ? *stack.systemResponse :
+                    normalized.device.detector == camera::DetectorKind::Photon ?
+                    *stack.quantumEfficiency : *stack.thermalAbsorptance;
+                normalized.device.effectiveMinNm =
+                    std::min(normalized.device.effectiveMinNm, base.MinNm());
+                normalized.device.effectiveMaxNm =
+                    std::max(normalized.device.effectiveMaxNm, base.MaxNm());
+            }
+        }
     }
+    m_impl->cameraConfig = std::move(normalized);
+    m_impl->gpuSensorEnabled = config.enabled;
+    m_impl->cameraResourcesDirty = true;
+    m_impl->cameraCaptureCompleted = false;
+    m_impl->cameraCaptureRecorded = false;
+    m_impl->cameraCapturePending = config.enabled;
+    m_impl->cameraAcquisitionIndex = 0;
+    m_impl->cameraAcquisitionTimeSeconds = m_impl->timeline.Current_s();
+    return Result<void, String>::Ok();
+}
 
-    QL_LOG_DEBUG("GPU Sensor: enabled={}", enabled);
+const camera::CameraConfig& ExternalRenderContext::GetCameraConfig() const {
+    return m_impl->cameraConfig;
+}
+
+Result<void, String> ExternalRenderContext::QueueCameraAcquisition(
+    u64 acquisitionIndex, f64 firstRowMidpointSeconds) {
+    if (!m_impl->cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (!std::isfinite(firstRowMidpointSeconds))
+        return Result<void, String>::Err("camera acquisition time must be finite");
+    if (m_impl->cameraCaptureRecorded)
+        return Result<void, String>::Err(
+            "complete or re-record the queued camera acquisition before "
+            "queuing another one");
+    if (m_impl->cameraCaptureCompleted &&
+        acquisitionIndex < m_impl->cameraAcquisitionIndex)
+        return Result<void, String>::Err(
+            "camera acquisition cannot move backwards without resetting state");
+    m_impl->cameraAcquisitionIndex = acquisitionIndex;
+    m_impl->cameraAcquisitionTimeSeconds = firstRowMidpointSeconds;
+    m_impl->cameraCapturePending = true;
+    m_impl->cameraCaptureCompleted = false;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(
+    VkCommandBuffer cmd) {
+    if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
+        return Result<void, String>::Err(
+            "camera acquisition needs a ready context and command buffer");
+    if (!m_impl->cameraCapturePending)
+        return Result<void, String>::Err("no camera acquisition is queued");
+    if (auto moved = SetTimelineTime(m_impl->cameraAcquisitionTimeSeconds); !moved)
+        return moved;
+    return m_impl->RecordCameraMeasurement(cmd);
+}
+
+Result<void, String> ExternalRenderContext::CompleteQueuedCameraAcquisition() {
+    if (!m_impl->cameraCaptureRecorded)
+        return Result<void, String>::Err(
+            "no recorded camera acquisition is awaiting completion");
+    m_impl->cameraCaptureRecorded = false;
+    m_impl->cameraCapturePending = false;
+    m_impl->cameraCaptureCompleted = true;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::RecordCameraBaseline(
+    VkCommandBuffer cmd) {
+    if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
+        return Result<void, String>::Err(
+            "camera baseline needs a ready context and command buffer");
+    if (auto moved = SetTimelineTime(m_impl->cameraAcquisitionTimeSeconds); !moved)
+        return moved;
+    return m_impl->RecordCameraBaseline(cmd);
+}
+
+CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
+    const bool traceReady = m_impl->cameraTracePerf &&
+                            m_impl->cameraTracePerf->TryResolvePending();
+    const bool fullReady = m_impl->cameraFullPerf &&
+                           m_impl->cameraFullPerf->TryResolvePending();
+    if (traceReady && fullReady) {
+        auto& timing = m_impl->lastCameraGpuTimings;
+        timing.traceMs = m_impl->cameraTracePerf->GetLastFrameGpuMs();
+        timing.fullMs = m_impl->cameraFullPerf->GetLastFrameGpuMs();
+        timing.postMs = std::max(0.0f, timing.fullMs - timing.traceMs);
+        timing.valid = timing.traceMs > 0.0f && timing.fullMs >= timing.traceMs;
+    }
+    return m_impl->lastCameraGpuTimings;
+}
+
+Result<camera::CameraOutput, String>
+ExternalRenderContext::CaptureCameraProducts() {
+    if (!m_impl->cameraCaptureCompleted || !m_impl->cameraGpuPipeline)
+        return Result<camera::CameraOutput, String>::Err(
+            "camera products require a completed submitted acquisition");
+    const auto& config = m_impl->cameraConfig;
+    if (config.products.tracedRadiance || config.products.cieLinearSrgb ||
+        config.products.apparentTemperature)
+        return Result<camera::CameraOutput, String>::Err(
+            "the requested observer/temperature product is not available from "
+            "the M3 GPU preview backend");
+    const u32 width = config.optics.sensorWidthPx;
+    const u32 height = config.optics.sensorHeightPx;
+    const u32 channels = config.device.cfa == camera::CfaPattern::MultiChannel
+        ? static_cast<u32>(config.device.channels.size()) : 1u;
+    const auto outputs = m_impl->cameraGpuPipeline->GetOutputs();
+
+    const auto readProductImage = [&](const GpuImage* source)
+        -> Result<Image, String> {
+        if (!source) return Result<Image, String>::Err(
+            "GPU camera product image is unavailable");
+        const auto rgba = CommandHelper::ReadbackImage(
+            *m_impl->contextAdapter, source->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
+        if (rgba.size() != static_cast<size_t>(width) * height * 4u)
+            return Result<Image, String>::Err(
+                "GPU camera product readback has the wrong size");
+        Image image(width, height, channels);
+        image.channelNames = channels == 1u
+            ? std::vector<String>{"Y"}
+            : std::vector<String>{"R", "G", "B"};
+        for (size_t pixel = 0; pixel < static_cast<size_t>(width) * height; ++pixel)
+            for (u32 channel = 0; channel < channels; ++channel)
+                image.data[pixel * channels + channel] = rgba[pixel * 4u + channel];
+        return image;
+    };
+    const auto descriptor = [&](camera::SignalKind kind, String unit) {
+        camera::SignalDescriptor signal;
+        signal.kind = kind;
+        signal.unit = std::move(unit);
+        signal.responseProfileId = config.device.id.empty()
+            ? "generic" : config.device.id;
+        signal.calibration = config.device.calibration;
+        signal.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+        signal.exposureStartSeconds = m_impl->cameraAcquisitionTimeSeconds -
+            config.readout.exposureSeconds * 0.5;
+        signal.exposureEndSeconds = m_impl->cameraAcquisitionTimeSeconds +
+            config.readout.exposureSeconds * 0.5 +
+            (config.readout.shutter == camera::ShutterKind::Rolling
+                ? (height - 1u) * config.readout.rowDelaySeconds : 0.0);
+        signal.cfa = config.device.cfa;
+        signal.channelsPerPixel = channels;
+        signal.responseMinNm = std::numeric_limits<f64>::infinity();
+        signal.responseMaxNm = 0.0;
+        for (const auto& channel : config.device.channels) {
+            const auto& stack = channel.response;
+            const auto& response = stack.systemResponse ? *stack.systemResponse :
+                config.device.detector == camera::DetectorKind::Photon
+                    ? *stack.quantumEfficiency : *stack.thermalAbsorptance;
+            signal.responseMinNm = std::min(signal.responseMinNm, response.MinNm());
+            signal.responseMaxNm = std::max(signal.responseMaxNm, response.MaxNm());
+            if (config.device.cfa == camera::CfaPattern::MultiChannel) {
+                signal.channelResponseIds.push_back(channel.name);
+                signal.channelResponseSpanNm.push_back(
+                    {response.MinNm(), response.MaxNm()});
+            }
+        }
+        return signal;
+    };
+    const auto makeProduct = [&](const GpuImage* source,
+                                 camera::SignalDescriptor signal)
+        -> Result<camera::CameraProduct, String> {
+        auto image = readProductImage(source);
+        if (!image) return Result<camera::CameraProduct, String>::Err(image.error());
+        camera::CameraProduct product{std::move(image.value()), std::move(signal)};
+        if (auto annotated = camera::AnnotateProductMetadata(product); !annotated)
+            return Result<camera::CameraProduct, String>::Err(annotated.error());
+        product.image.metadata["camera_input_kind"] =
+            config.inputKind == camera::CameraInputKind::FastRgbApproximation
+                ? "fast_rgb_approximation" : "spectral_measurement";
+        product.image.metadata["camera_random_seed"] =
+            std::to_string(config.randomSeed);
+        product.image.metadata["camera_effective_random_seed"] =
+            std::to_string(camera::DeviceRandomSeed(config));
+        return product;
+    };
+
+    camera::CameraOutput result;
+    if (config.products.bandMeasurement) {
+        auto measured = makeProduct(
+            outputs.expectedElectrons,
+            descriptor(camera::SignalKind::BandMeasurement,
+                config.device.detector == camera::DetectorKind::Photon ? "e-/s" : "W"));
+        if (!measured) return Result<camera::CameraOutput, String>::Err(measured.error());
+        if (config.device.detector == camera::DetectorKind::Photon) {
+            const f32 exposure = static_cast<f32>(config.readout.exposureSeconds);
+            for (auto& value : measured.value().image.data) value /= exposure;
+        }
+        result.bandMeasurement = std::move(measured.value());
+    }
+    if (config.products.rawDn) {
+        auto raw = makeProduct(outputs.rawDn,
+            descriptor(camera::SignalKind::RawDN, "DN"));
+        if (!raw) return Result<camera::CameraOutput, String>::Err(raw.error());
+        result.rawDn = std::move(raw.value());
+    }
+    if (config.products.correctedDeviceSignal) {
+        auto corrected = makeProduct(outputs.corrected,
+            descriptor(camera::SignalKind::DeviceLinear,
+                config.device.detector == camera::DetectorKind::Photon ? "e-" : "W"));
+        if (!corrected)
+            return Result<camera::CameraOutput, String>::Err(corrected.error());
+        result.correctedDeviceSignal = std::move(corrected.value());
+    }
+    if (config.products.display) {
+        auto display = makeProduct(outputs.display,
+            descriptor(camera::SignalKind::DevicePreviewSrgb, "encoded sRGB"));
+        if (!display) return Result<camera::CameraOutput, String>::Err(display.error());
+        result.display = std::move(display.value());
+    }
+    return result;
+}
+
+void ExternalRenderContext::SetGPUSensorEnabled(bool enabled) {
+    camera::CameraConfig config = m_impl->cameraConfig;
+    config.enabled = enabled;
+    if (auto updated = SetCameraConfig(config); !updated)
+        QL_LOG_ERROR("GPU camera enable failed: {}", updated.error());
 }
 
 void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
@@ -3688,13 +4001,17 @@ void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
     m_impl->gpuSensorWavelengthFromHost =
         params.wavelength_nm != SensorParams{}.wavelength_nm;
 
-    // Initialize GPU sensor resources if not already done
-    if (m_impl->gpuSensorEnabled && !m_impl->sensorInitialized) {
-        m_impl->CreateGPUSensorPipeline();
+    // Translate the compatibility facade through the same migration as old
+    // TOML, then run the one GPU camera implementation.
+    const auto converted = CameraConfigFromSensorParams(
+        params, m_impl->spectralMode, m_impl->width, m_impl->height,
+        m_impl->camera.GetFovY(), m_impl->wavelength_nm);
+    if (!converted) {
+        QL_LOG_ERROR("GPU sensor parameter migration failed: {}", converted.error());
+        return;
     }
-
-    QL_LOG_DEBUG("GPU Sensor params updated: QE={}, f#={}, gain={}, bitDepth={}",
-                 params.quantumEfficiency, params.fNumber, params.gain, params.bitDepth);
+    if (auto updated = SetCameraConfig(converted.value()); !updated)
+        QL_LOG_ERROR("GPU sensor parameter update failed: {}", updated.error());
 }
 
 bool ExternalRenderContext::IsGPUSensorEnabled() const {
@@ -3956,6 +4273,321 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);
+}
+
+Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
+    cameraAtmosMinNm = 0.0f;
+    cameraAtmosStepNm = 0.0f;
+    cameraAtmosCount = 0;
+    if (!atmosphereConfig.enabled) {
+        cameraAtmosHeaderBuffer.reset();
+        cameraAtmosDataBuffer.reset();
+        cameraBaselineAtmosHeaderBuffer.reset();
+        cameraBaselineAtmosDataBuffer.reset();
+        return Result<void, String>::Ok();
+    }
+    if (!atmosModelPack)
+        return Result<void, String>::Err(
+            "camera atmosphere is enabled but its model pack is unavailable");
+    f64 lo = std::numeric_limits<f64>::infinity(), hi = 0.0;
+    for (const auto& channel : cameraConfig.device.channels) {
+        const auto& stack = channel.response;
+        const auto& curve = stack.systemResponse ? *stack.systemResponse :
+            cameraConfig.device.detector == camera::DetectorKind::Photon ?
+            *stack.quantumEfficiency : *stack.thermalAbsorptance;
+        lo = std::min(lo, curve.MinNm());
+        hi = std::max(hi, curve.MaxNm());
+    }
+    const auto firstBand = RenderBandLambdaGrid(SpectralMode::Single, lo);
+    const auto lastBand = RenderBandLambdaGrid(SpectralMode::Single, hi);
+    if (firstBand.band.empty() || firstBand.band != lastBand.band)
+        return Result<void, String>::Err(
+            "GPU camera response crosses unsupported NN atmosphere bands");
+    constexpr u32 kCameraAtmosSamples = 128;
+    std::vector<f64> wavelengths(kCameraAtmosSamples);
+    for (u32 i = 0; i < kCameraAtmosSamples; ++i)
+        wavelengths[i] = lo + (hi - lo) * i / (kCameraAtmosSamples - 1);
+    // A single NN band must cover the entire uniform grid. The shader reads
+    // the nearest baked bin mean, never interpolates those means.
+    for (f64 nm : wavelengths)
+        if (RenderBandLambdaGrid(SpectralMode::Single, nm).band != firstBand.band)
+            return Result<void, String>::Err(
+                "GPU camera atmosphere has a wavelength coverage gap");
+    AtmosphereNNConfig effective = atmosphereConfig;
+    const glm::vec3 sunDir = lightingParams.sunDirection;
+    if (effective.sunFromLighting && glm::length(sunDir) > 1e-6f) {
+        const glm::vec3 sun = glm::normalize(sunDir);
+        effective.sunZenithDeg = glm::degrees(std::acos(std::clamp(sun.y, -1.0f, 1.0f)));
+        effective.sunAzimuthDeg = glm::degrees(std::atan2(sun.x, sun.z));
+    }
+    if (effective.h1FromCamera) {
+        const f32 metersPerUnit = lightingParams.worldUnitsToMeters > 0.0f ?
+                                  lightingParams.worldUnitsToMeters : 1.0f;
+        f64 cameraHeightWorld = camera.GetPosition().y;
+        if (!cameraConfig.motion.keys.empty()) {
+            const auto pose = camera::CameraPoseAt(
+                cameraConfig.motion, cameraAcquisitionTimeSeconds);
+            if (!pose) return Result<void, String>::Err(pose.error());
+            cameraHeightWorld = pose.value().position[1];
+        }
+        effective.h1Km = std::max(
+            cameraHeightWorld * metersPerUnit / 1000.0, 0.0);
+    }
+    try {
+        AtmosphereBaker baker(*atmosModelPack);
+        auto baked = baker.Bake(effective, firstBand.band, wavelengths, 0.0);
+        const glm::vec3 normalizedSun = glm::length(sunDir) > 1e-6f ?
+                                        glm::normalize(sunDir) : glm::vec3(0, 1, 0);
+        baked.header.sunDirWorld[0] = normalizedSun.x;
+        baked.header.sunDirWorld[1] = normalizedSun.y;
+        baked.header.sunDirWorld[2] = normalizedSun.z;
+        baked.header.worldUnitsToMeters =
+            lightingParams.worldUnitsToMeters > 0.0f ?
+            lightingParams.worldUnitsToMeters : 1.0f;
+        cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraAtmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
+        cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), baked.data.size() * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraAtmosDataBuffer->Upload(
+            baked.data.data(), baked.data.size() * sizeof(f32));
+        cameraAtmosMinNm = static_cast<f32>(lo);
+        cameraAtmosStepNm = static_cast<f32>(
+            (hi - lo) / (kCameraAtmosSamples - 1));
+        cameraAtmosCount = kCameraAtmosSamples;
+        const f64 middleNm = 0.5 * (lo + hi);
+        const auto middleGrid = RenderBandLambdaGrid(
+            SpectralMode::Single, middleNm);
+        auto baseline = baker.Bake(
+            effective, middleGrid.band, middleGrid.lambdasNm,
+            middleGrid.windowHalfWidthNm);
+        baseline.header.sunDirWorld[0] = normalizedSun.x;
+        baseline.header.sunDirWorld[1] = normalizedSun.y;
+        baseline.header.sunDirWorld[2] = normalizedSun.z;
+        baseline.header.worldUnitsToMeters = baked.header.worldUnitsToMeters;
+        cameraBaselineAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraBaselineAtmosHeaderBuffer->Upload(
+            &baseline.header, sizeof(baseline.header));
+        cameraBaselineAtmosDataBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), baseline.data.size() * sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        cameraBaselineAtmosDataBuffer->Upload(
+            baseline.data.data(), baseline.data.size() * sizeof(f32));
+        return Result<void, String>::Ok();
+    } catch (const std::exception& e) {
+        return Result<void, String>::Err(
+            String("camera atmosphere bake failed: ") + e.what());
+    }
+}
+
+Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
+    if (!cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (!contextAdapter || !pipeline)
+        return Result<void, String>::Err("camera rendering pipeline is not ready");
+    if (!cameraResourcesDirty && cameraMeasurementImage && cameraGpuPipeline)
+        return Result<void, String>::Ok();
+    const auto valid = camera::ValidateCameraConfig(cameraConfig);
+    if (!valid) return Result<void, String>::Err(valid.error());
+    // Configuration changes happen between frames; wait before replacing
+    // descriptor-backed images/buffers that a submitted frame may still use.
+    vkDeviceWaitIdle(device);
+    const u32 physicalW = cameraConfig.optics.sensorWidthPx;
+    const u32 physicalH = cameraConfig.optics.sensorHeightPx;
+    const auto allocator = contextAdapter->GetAllocator();
+    const auto makeImage = [&](VkFormat format) {
+        auto image = std::make_unique<GpuImage>(
+            allocator, device, physicalW, physicalH, format,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY);
+        TransitionImageLayoutImmediate(
+            image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL);
+        return image;
+    };
+    try {
+        cameraMeasurementImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
+        cameraBaselineImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
+        cameraDepthImage = makeImage(VK_FORMAT_R32_SFLOAT);
+    } catch (const std::exception& e) {
+        return Result<void, String>::Err(
+            String("camera image allocation failed: ") + e.what());
+    }
+    if (auto baked = UpdateCameraAtmosphere(); !baked)
+        return baked;
+    const auto encoded = camera::EncodeCameraResponseGpu(
+        cameraConfig, cameraAtmosMinNm, cameraAtmosStepNm, cameraAtmosCount);
+    if (!encoded) return Result<void, String>::Err(encoded.error());
+    const VkDeviceSize bytes = encoded.value().size() * sizeof(u32);
+    cameraResponseBuffer = std::make_unique<GpuBuffer>(
+        allocator, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VMA_MEMORY_USAGE_CPU_TO_GPU);
+    cameraResponseBuffer->Upload(encoded.value().data(), bytes);
+    pipeline->BindCameraMeasurementImage(*cameraMeasurementImage);
+    pipeline->BindCameraResponseBuffer(*cameraResponseBuffer);
+    pipeline->BindCameraDepthImage(*cameraDepthImage);
+    pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
+    pipeline->BindCameraObserverDepthImage(*cameraDepthImage);
+    pipeline->BindCameraAtmosphereNN(
+        cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get() :
+                                  atmosHeaderBuffer.get(),
+        cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get() :
+                                atmosDataBuffer.get());
+    pipeline->BindCameraObserverAtmosphereNN(
+        cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get() :
+                                          atmosHeaderBuffer.get(),
+        cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get() :
+                                        atmosDataBuffer.get());
+    auto gpu = rendercore::GpuCameraPipeline::Create(
+        *contextAdapter, physicalW, physicalH);
+    if (!gpu) return Result<void, String>::Err(gpu.error());
+    if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
+        return configured;
+    cameraGpuPipeline = std::move(gpu.value());
+    cameraResourcesDirty = false;
+    cameraCaptureCompleted = false;
+    return Result<void, String>::Ok();
+}
+
+Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
+    SpectralMode mode, f64 wavelengthNm) const {
+    Camera poseCamera = camera;
+    if (!cameraConfig.motion.keys.empty()) {
+        const auto pose = camera::CameraPoseAt(
+            cameraConfig.motion, cameraAcquisitionTimeSeconds);
+        if (!pose) return Result<CameraData, String>::Err(pose.error());
+        poseCamera = Camera(
+            glm::vec3(static_cast<f32>(pose.value().position[0]),
+                      static_cast<f32>(pose.value().position[1]),
+                      static_cast<f32>(pose.value().position[2])),
+            glm::vec3(static_cast<f32>(pose.value().lookAt[0]),
+                      static_cast<f32>(pose.value().lookAt[1]),
+                      static_cast<f32>(pose.value().lookAt[2])),
+            camera.GetUpReference(), camera.GetFovY(), camera.GetAspectRatio());
+        poseCamera.SetProjection(camera.GetProjection());
+        poseCamera.SetOrthoHeight(camera.GetOrthoHeight());
+    }
+    if (poseCamera.GetProjection() != Camera::Projection::Perspective)
+        return Result<CameraData, String>::Err(
+            "physical camera capture requires a perspective projection");
+    const auto& optics = cameraConfig.optics;
+    const auto fovX = camera::HorizontalFovRadians(
+        optics.focalLengthMm, optics.pixelPitchUm, optics.sensorWidthPx);
+    if (!fovX) return Result<CameraData, String>::Err(fovX.error());
+    CameraData data = poseCamera.GetCameraData();
+    const f64 aspect = static_cast<f64>(optics.sensorWidthPx) /
+                       optics.sensorHeightPx;
+    data.aspectRatio = static_cast<f32>(aspect);
+    data.fovScale = static_cast<f32>(std::tan(fovX.value() / 2.0) / aspect);
+    data.spectral_mode = static_cast<u32>(mode);
+    data.wavelength_nm = static_cast<f32>(wavelengthNm);
+    data.debug_mode = 0;
+    data.debugParam = 0;
+    return data;
+}
+
+Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
+    VkCommandBuffer cmd) {
+    if (!cameraCapturePending)
+        return Result<void, String>::Err("no camera acquisition is queued");
+    if (auto ready = EnsureCameraResources(); !ready) return ready;
+    const bool fastRgb = cameraConfig.inputKind ==
+        camera::CameraInputKind::FastRgbApproximation;
+    const SpectralMode captureMode = fastRgb
+        ? SpectralMode::RGB : SpectralMode::CameraMeasurement;
+    const auto pose = CameraDataForCapture(
+        captureMode,
+        0.5 * (cameraConfig.device.effectiveMinNm +
+               cameraConfig.device.effectiveMaxNm));
+    if (!pose) return Result<void, String>::Err(pose.error());
+    pipeline->SetCameraData(pose.value());
+    pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
+    const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);
+    const u32 randomSeed = camera::CounterRandomU32(
+        effectiveSeed, 0u, cameraAcquisitionIndex,
+        camera::NoiseClass::EmpiricalEffect, 0u);
+    if (cameraFullPerf) cameraFullPerf->BeginFrame(cmd);
+    if (cameraTracePerf) cameraTracePerf->BeginFrame(cmd);
+    const u32 physicalW = cameraConfig.optics.sensorWidthPx;
+    const u32 physicalH = cameraConfig.optics.sensorHeightPx;
+    // Raygen progressively averages the device rate in binding 28. These
+    // wavelength/path samples belong to one acquisition: the detector sees
+    // their mean and draws noise exactly once after the loop.
+    // CPU wavelengthSamples controls deterministic quadrature refinement.
+    // GPU preview draws one response-distributed wavelength per path, so its
+    // convergence knob is the viewport SPP. Reusing the CPU default (32) here
+    // would launch 32 full 1080p traces for one preview acquisition.
+    const u32 spectralSamples = fastRgb ? 1u : std::max(spp, 1u);
+    if (fastRgb) pipeline->SetUseCameraObserverSet(true);
+    for (u32 sample = 0; sample < spectralSamples; ++sample) {
+        pipeline->SetSamplingParams(
+            static_cast<u32>(cameraAcquisitionIndex), sample, spectralSamples,
+            randomSeed ^ (sample * 0x9e3779b9u), effectiveSeed);
+        pipeline->TraceRays(cmd, physicalW, physicalH);
+        if (sample + 1u < spectralSamples) {
+            VkMemoryBarrier accumulation{};
+            accumulation.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            accumulation.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+            accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                         VK_ACCESS_SHADER_WRITE_BIT;
+            vkCmdPipelineBarrier(
+                cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
+                1, &accumulation, 0, nullptr, 0, nullptr);
+        }
+    }
+    if (fastRgb) pipeline->SetUseCameraObserverSet(false);
+    if (cameraTracePerf) cameraTracePerf->EndFrame(cmd);
+    VkMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(
+        cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+        1, &barrier, 0, nullptr, 0, nullptr);
+    const auto readout = fastRgb
+        ? cameraGpuPipeline->RecordFastRgbMeasurement(
+              cmd, *cameraBaselineImage, cameraAcquisitionIndex,
+              cameraAcquisitionTimeSeconds)
+        : cameraGpuPipeline->RecordMeasurement(
+              cmd, *cameraMeasurementImage, cameraAcquisitionIndex,
+              cameraAcquisitionTimeSeconds);
+    if (cameraFullPerf) cameraFullPerf->EndFrame(cmd);
+    if (!readout) return readout;
+    cameraCaptureRecorded = true;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
+    VkCommandBuffer cmd) {
+    if (auto ready = EnsureCameraResources(); !ready) return ready;
+    const f64 centerNm = 0.5 * (cameraConfig.device.effectiveMinNm +
+                                 cameraConfig.device.effectiveMaxNm);
+    const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);
+    if (!pose) return Result<void, String>::Err(pose.error());
+    pipeline->SetUseCameraObserverSet(true);
+    pipeline->SetCameraData(pose.value());
+    pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
+    const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);
+    const u32 randomSeed = camera::CounterRandomU32(
+        effectiveSeed, 0u, cameraAcquisitionIndex,
+        camera::NoiseClass::EmpiricalEffect, 0u);
+    pipeline->SetSamplingParams(
+        static_cast<u32>(cameraAcquisitionIndex), 0u, 1u,
+        randomSeed, effectiveSeed);
+    if (perfLogger) perfLogger->BeginFrame(cmd);
+    pipeline->TraceRays(cmd,
+        cameraConfig.optics.sensorWidthPx,
+        cameraConfig.optics.sensorHeightPx);
+    if (perfLogger) perfLogger->EndFrame(cmd);
+    pipeline->SetUseCameraObserverSet(false);
+    return Result<void, String>::Ok();
 }
 
 // ============================================================================
@@ -5869,6 +6501,8 @@ void ExternalRenderContext::SetAtmosphere(const AtmosphereNNConfig& config) {
     m_impl->atmosphereConfig = config;
     m_impl->atmosModelPack.reset();
     m_impl->atmosBakeKey = 0;  // Force rebake (or disable-upload) next frame
+    m_impl->cameraResourcesDirty = true;
+    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
 
     if (config.enabled && !config.modelPackDir.empty()) {
         // Throws if the directory does not exist -- hard error, no fallback

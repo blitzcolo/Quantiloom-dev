@@ -627,6 +627,8 @@ struct PipelineBindings {
     /// w = 0 turns off.
     const GpuBuffer* thermalSunResponse = nullptr;
     const GpuBuffer* thermalParameterTangent = nullptr;
+    const GpuImage* cameraMeasurementImage = nullptr; // binding 28
+    const GpuBuffer* cameraResponse = nullptr;        // binding 29
 };
 
 /**

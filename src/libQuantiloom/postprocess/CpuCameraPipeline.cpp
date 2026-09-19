@@ -248,7 +248,10 @@ SignalDescriptor Descriptor(const CameraConfig& config, SignalKind kind,
         (config.readout.shutter == ShutterKind::Rolling ?
          (config.optics.sensorHeightPx - 1) * config.readout.rowDelaySeconds : 0.0);
     signal.cfa = config.device.cfa;
-    signal.channelsPerPixel = OutputChannels(config);
+    const bool displayProduct = kind == SignalKind::DisplaySrgb ||
+        kind == SignalKind::DevicePreviewSrgb ||
+        kind == SignalKind::CieLinearSrgb;
+    signal.channelsPerPixel = displayProduct ? 3u : OutputChannels(config);
     signal.responseMinNm = std::numeric_limits<f64>::max();
     signal.responseMaxNm = 0.0;
     for (const auto& channel : config.device.channels) {
@@ -256,7 +259,7 @@ SignalDescriptor Descriptor(const CameraConfig& config, SignalKind kind,
         signal.responseMinNm = std::min(signal.responseMinNm, response.MinNm());
         signal.responseMaxNm = std::max(signal.responseMaxNm, response.MaxNm());
     }
-    if (config.device.cfa == CfaPattern::MultiChannel)
+    if (!displayProduct && config.device.cfa == CfaPattern::MultiChannel)
         for (const auto& channel : config.device.channels) {
             const auto& response = DetectorCurve(channel.response, config.device.detector);
             signal.channelResponseIds.push_back(channel.name);
@@ -503,6 +506,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     const u32 height = m_config.optics.sensorHeightPx;
     const u32 channels = OutputChannels(m_config);
     const size_t elementCount = static_cast<size_t>(width) * height * channels;
+    const u32 effectiveSeed = DeviceRandomSeed(m_config);
     if (expected.size() != elementCount)
         return Fail<CameraOutput>("measured-input element count is invalid");
     size_t negativeMcElements = 0;
@@ -573,29 +577,29 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             const f64 exposure = m_config.readout.exposureSeconds;
             const f64 prnu = (!m_config.quality.noiseFree && detector.enableFpn) ?
                 detector.prnuSigma * FixedGaussian(
-                    m_config.randomSeed, noisePixel, NoiseClass::FixedPrnu) : 0.0;
+                    effectiveSeed, noisePixel, NoiseClass::FixedPrnu) : 0.0;
             const f64 expectedLight = std::max(0.0, rateOrPower * exposure * (1.0 + prnu));
             const f64 darkNonuniform = (!m_config.quality.noiseFree && detector.enableFpn) ?
                 detector.dsnuElectronsRms *
                 (exposure / detector.dsnuReferenceExposureSeconds) *
-                FixedGaussian(m_config.randomSeed, noisePixel, NoiseClass::FixedDsnu) : 0.0;
+                FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedDsnu) : 0.0;
             const f64 expectedDark = detector.enableDarkCurrent ?
                 std::max(0.0, detector.darkCurrentElectronsPerSecond * exposure +
                               darkNonuniform) : 0.0;
             const f64 light = (!m_config.quality.noiseFree && detector.enableShotNoise) ?
-                Poisson(expectedLight, m_config.randomSeed, noisePixel, state.acquisitionIndex,
+                Poisson(expectedLight, effectiveSeed, noisePixel, state.acquisitionIndex,
                         NoiseClass::PhotonShot) : expectedLight;
             const f64 dark = (!m_config.quality.noiseFree && detector.enableDarkShotNoise) ?
-                Poisson(expectedDark, m_config.randomSeed, noisePixel, state.acquisitionIndex,
+                Poisson(expectedDark, effectiveSeed, noisePixel, state.acquisitionIndex,
                         NoiseClass::DarkShot) : expectedDark;
             f64 electrons = std::min(detector.fullWellElectrons, light + dark);
             if (!m_config.quality.noiseFree && detector.enableReadNoise)
                 electrons += detector.readNoiseElectronsRms *
-                    TemporalGaussian(m_config.randomSeed, noisePixel, state.acquisitionIndex,
+                    TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                      NoiseClass::Read);
             const f64 fixedBias = (!m_config.quality.noiseFree && detector.enableFpn) ?
                 detector.biasDnRms * FixedGaussian(
-                    m_config.randomSeed, noisePixel, NoiseClass::Bias) : 0.0;
+                    effectiveSeed, noisePixel, NoiseClass::Bias) : 0.0;
             analogDn = m_config.readout.analogGain * electrons /
                        m_config.readout.electronsPerDn +
                        m_config.readout.blackLevelDn + fixedBias;
@@ -632,7 +636,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                                           static_cast<u32>(index % channels) :
                                           ChannelAt(m_config.device.cfa, x, y);
                 analogDn += thermalReadNoiseDn[deviceChannel] *
-                    TemporalGaussian(m_config.randomSeed, noisePixel, state.acquisitionIndex,
+                    TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                      NoiseClass::ThermalRead);
             }
             const f64 dn = Quantize(analogDn, m_config.readout.adcBits);
@@ -770,6 +774,21 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         annotateApproximation(output.apparentTemperature);
         annotateApproximation(output.display);
     }
+    const auto annotateSeed = [this, effectiveSeed](
+        std::optional<CameraProduct>& product) {
+        if (!product) return;
+        product->image.metadata["camera_random_seed"] =
+            std::to_string(m_config.randomSeed);
+        product->image.metadata["camera_effective_device_seed"] =
+            std::to_string(effectiveSeed);
+        product->image.metadata["camera_random_algorithm"] =
+            "fnv1a_device_id_mix32_counter_v1";
+    };
+    annotateSeed(output.bandMeasurement);
+    annotateSeed(output.rawDn);
+    annotateSeed(output.correctedDeviceSignal);
+    annotateSeed(output.apparentTemperature);
+    annotateSeed(output.display);
     if (negativeMcElements > 0) {
         const auto annotate = [negativeMcElements, negativeMcSum,
                                negativeMcMinimum](

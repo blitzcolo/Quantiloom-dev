@@ -144,6 +144,13 @@ if(DXC_EXECUTABLE)
     quantiloom_compile_hlsl(sensor_quantize_to_radiance  sensor_quantize_to_radiance.comp.hlsl)
     quantiloom_compile_hlsl(sensor_fpn                   sensor_fpn.comp.hlsl)
 
+    # Unified camera device preview (rate PSF, detector/RAW, ISP, RNG audit).
+    quantiloom_compile_hlsl(camera_psf.comp         camera_psf.comp.hlsl)
+    quantiloom_compile_hlsl(camera_readout.comp     camera_readout.comp.hlsl)
+    quantiloom_compile_hlsl(camera_preview.comp     camera_preview.comp.hlsl)
+    quantiloom_compile_hlsl(camera_rng_vectors.comp camera_rng_vectors.comp.hlsl)
+    quantiloom_compile_hlsl(camera_fast_rgb.comp    camera_fast_rgb.comp.hlsl)
+
     # Viewport pick (inline ray query, cs_6_5)
     quantiloom_compile_hlsl(pick pick.rayq.hlsl)
     quantiloom_compile_hlsl(thermal_exchange thermal_exchange.rayq.hlsl)

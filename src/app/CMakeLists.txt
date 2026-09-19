@@ -119,6 +119,11 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_preview.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
         "$<TARGET_FILE_DIR:Quantiloom>"
     COMMENT "Copying shaders to executable directory"
 )

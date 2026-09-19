@@ -1,0 +1,124 @@
+# Fixed 1080p GPU camera-chain acceptance scene. The benchmark runner records
+# Vulkan timestamps; this config only fixes the workload and physical array.
+# A single open plane keeps trace cost separable from the response/PSF/readout/
+# ISP/HSV stages. The flat source covers all three device QE curves.
+
+[renderer]
+resolution = [1920, 1080]
+spp = 1
+seed = 1763
+output = "renders/camera_perf_1080p.exr"
+
+[spectral]
+mode = "vis_hero"
+band = "VIS"
+
+[scene]
+gltf = "assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position = [0.0, 20.0, 0.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 0.0, 1.0]
+projection = "perspective"
+fov_y = 4.27
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.5, 0.5, 0.5]
+solar_lut = "assets/luts/flat_sun_sky.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+cfa = "rggb"
+
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 3.45
+fill_factor = 1.0
+sensor_width_px = 1920
+sensor_height_px = 1080
+focus_distance_m = 20.0
+
+[sensor.exposure]
+time_s = 0.01
+
+[sensor.readout]
+shutter = "rolling"
+row_delay_s = 0.00001
+frame_period_s = 0.033333333
+adc_bits = 12
+output_bits = 12
+analog_gain = 1.0
+electrons_per_dn = 3.0
+black_level_dn = 64.0
+
+[sensor.photon]
+full_well_e = 10400.0
+dark_current_e_s = 50.0
+read_noise_e_rms = 2.1
+prnu_sigma = 0.01
+dsnu_e_rms = 5.0
+enable_fpn = true
+
+[sensor.quality]
+backend = "gpu_preview"
+gpu_time_positions = 8
+
+[sensor.products]
+band_measurement = true
+raw_dn = true
+corrected_device_signal = true
+display = true
+
+[[sensor.channels]]
+name = "R"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [400, 450, 550, 650, 780]
+value = [0.0, 0.0, 0.15, 0.8, 0.0]
+
+[[sensor.channels]]
+name = "G"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [400, 450, 550, 650, 780]
+value = [0.0, 0.2, 0.8, 0.2, 0.0]
+
+[[sensor.channels]]
+name = "B"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [400, 450, 550, 650, 780]
+value = [0.0, 0.8, 0.2, 0.0, 0.0]
+
+[isp]
+denoise = true
+denoise_strength = 0.2
+sharpen = true
+sharpen_strength = 0.2
+tone_gamma = 1.0
+
+[isp.hsv]
+hue_offset_deg = 15.0
+saturation_scale = 1.1
+value_gamma = 0.9
+
+[effects.hsv]
+empirical_noise = true
+temporal_drift = true

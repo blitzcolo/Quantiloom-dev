@@ -85,6 +85,9 @@ BlackbodyThermalDerivativeWPerK(f64 temperatureK, const ResponseStack& response,
 [[nodiscard]] u32 CounterRandomU32(u32 deviceSeed, u32 pixelIndex,
                                    u64 acquisitionIndex, NoiseClass noiseClass,
                                    u32 counter);
+// Stable UTF-8 FNV-1a device ID folded with the user's seed. Never std::hash:
+// CPU and GPU must receive the same 32-bit stream key on every platform.
+[[nodiscard]] u32 DeviceRandomSeed(const CameraConfig& config);
 [[nodiscard]] f64 CounterUniform01(u32 deviceSeed, u32 pixelIndex,
                                    u64 acquisitionIndex, NoiseClass noiseClass,
                                    u32 counter);

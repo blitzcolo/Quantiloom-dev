@@ -7,6 +7,7 @@
 // ============================================================================
 
 #include "common.hlsli"
+#include "camera_response.hlsli"
 #include "pbr.hlsli"
 #include "atmosphere_nn.hlsli"
 #include "SpectralConversion.hlsli"
@@ -27,6 +28,7 @@
 // ============================================================================
 
 [[vk::binding(15, 0)]] StructuredBuffer<SolarSpectralLUT> solarSpectralLUT;
+[[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
 
 // ============================================================================
 // NN Atmosphere LUT (Bindings 17 + 20)
@@ -211,16 +213,22 @@ void main(inout Payload payload) {
         }
         payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
 
-    } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-               pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) {
+    } else if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+                pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda <= SPECTRAL_VIS_LAMBDA_MAX)) {
         // Single wavelength mode: Query spectral sky at current wavelength
         float radiance_spectral;
 
+        const float lambda = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+            ? payload.heroLambda : pushConsts.camera.wavelength_nm;
         if (atmos.enabled != 0 && atmos.thermalBand != 0 && atmos.hasLdown != 0) {
             // Thermal single wavelength: NN downwelling spectrum (one sample)
-            radiance_spectral = SampleAtmosLdown(atmos, atmosNNData, 0);
+            const uint idx = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+                ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda) : 0u;
+            radiance_spectral = SampleAtmosLdown(atmos, atmosNNData, idx);
         } else if (hasSpectralSolarLUT) {
-            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, pushConsts.camera.wavelength_nm);
+            float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
             radiance_spectral = sky_irr / PI;
         } else {
             // The legacy scalar is an RGB average in arbitrary units. A
@@ -232,7 +240,10 @@ void main(inout Payload payload) {
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
                (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
                 pushConsts.camera.wavelength_nm > SPECTRAL_VIS_LAMBDA_MAX &&
-                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN)) {
+                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda > SPECTRAL_VIS_LAMBDA_MAX &&
+                payload.heroLambda < SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ================================================================
         // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
         // ================================================================
@@ -258,8 +269,10 @@ void main(inout Payload payload) {
         // An environment bounce carries one wavelength and must get that
         // wavelength's sky back; the band average would be weighed by a single
         // reflectance sample and lose the correlation the bounce exists for.
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
-        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
+        const float carriedLambda = cameraRay ? payload.heroLambda :
+            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
         const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
         float heroRadiance = 0.0;
@@ -373,7 +386,9 @@ void main(inout Payload payload) {
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
                (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN)) {
+                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN) ||
+               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
+                payload.heroLambda >= SPECTRAL_MWIR_LAMBDA_MIN)) {
         // ================================================================
         // MWIR/LWIR_FUSED mode: Atmospheric thermal background
         // ================================================================
@@ -383,8 +398,10 @@ void main(inout Payload payload) {
         // ================================================================
 
         float lambda_min, lambda_max;
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE);
-        const float carriedLambda = singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda;
+        const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
+        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
+        const float carriedLambda = cameraRay ? payload.heroLambda :
+            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
         if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
             (singleRay && carriedLambda < SPECTRAL_LWIR_LAMBDA_MIN)) {
             lambda_min = singleRay ? carriedLambda : SPECTRAL_MWIR_LAMBDA_MIN;
@@ -425,7 +442,8 @@ void main(inout Payload payload) {
             // The LUT is baked on the loop's sample points, so a sampled
             // wavelength takes the nearest index -- matching what the
             // closest-hit shader does for the same ray.
-            uint atmosIdx = singleRay ? 0u : heroRay
+            uint atmosIdx = cameraRay ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda)
+                : singleRay ? 0u : heroRay
                 ? (uint)clamp(round((lambda - lambda_min) / lambda_step),
                               0.0, float(NUM_IR_SAMPLES - 1))
                 : i;

@@ -120,7 +120,8 @@ void CommandHelper::TransitionImageLayout(
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-        dstStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+        dstStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     else if (oldLayout == VK_IMAGE_LAYOUT_UNDEFINED && newLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
         // Prepare for texture upload (buffer -> image)
@@ -140,7 +141,8 @@ void CommandHelper::TransitionImageLayout(
         // Prepare for readback (e.g., copying to staging buffer)
         barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+        srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     }
     else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL && newLayout == VK_IMAGE_LAYOUT_GENERAL) {
@@ -148,7 +150,8 @@ void CommandHelper::TransitionImageLayout(
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        dstStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
+        dstStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
     }
     else {
         // Fallback for unsupported transitions

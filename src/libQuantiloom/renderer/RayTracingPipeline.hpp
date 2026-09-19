@@ -72,6 +72,7 @@
 #include <vulkan/vulkan.h>
 #include <vector>
 #include <string>
+#include <memory>
 #include <unordered_map>
 
 // ============================================================================
@@ -347,6 +348,18 @@ public:
     /// the solver ran on. Always bound; one zeroed record when there is none.
     void BindThermalSunResponseBuffer(const GpuBuffer& buffer) const;
     void BindThermalTangentBuffer(const GpuBuffer& buffer) const;
+    // CameraMeasurement resources. A one-pixel zero image and zero response
+    // header are bound by the pipeline itself until a host supplies these.
+    void BindCameraMeasurementImage(const GpuImage& image) const;  // binding 28
+    void BindCameraResponseBuffer(const GpuBuffer& buffer) const;   // binding 29
+    void BindCameraDepthImage(const GpuImage& image) const;         // camera binding 22
+    void BindCameraObserverOutputImage(const GpuImage& image) const; // observer binding 0
+    void BindCameraObserverDepthImage(const GpuImage& image) const; // observer binding 22
+    void BindCameraAtmosphereNN(const GpuBuffer* header,
+                                const GpuBuffer* data) const;      // bindings 17,20 camera set
+    void BindCameraObserverAtmosphereNN(const GpuBuffer* header,
+                                        const GpuBuffer* data) const; // observer 17,20
+    void SetUseCameraObserverSet(bool enabled) { m_useObserverDescriptorSet = enabled; }
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();
@@ -388,6 +401,10 @@ private:
     // ========================================================================
 
     void CreateDescriptorSetLayout();
+    void UpdateSharedDescriptorSets(VkDevice device, u32 writeCount,
+                                  const VkWriteDescriptorSet* writes,
+                                  u32 copyCount,
+                                  const VkCopyDescriptorSet* copies) const;
     void CreatePipelineLayout();
     void LoadShaders();
 
@@ -426,6 +443,13 @@ private:
     // Descriptor pool and sets
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet m_descriptorSet = VK_NULL_HANDLE;
+    VkDescriptorSet m_cameraDescriptorSet = VK_NULL_HANDLE;
+    VkDescriptorSet m_observerDescriptorSet = VK_NULL_HANDLE;
+    std::unique_ptr<GpuImage> m_cameraFallbackImage;
+    std::unique_ptr<GpuImage> m_cameraFallbackDepth;
+    std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;
+    std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosHeader;
+    std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosData;
 
     // Shader Binding Table (SBT)
     std::unique_ptr<GpuBuffer> m_sbtBuffer;
@@ -452,6 +476,8 @@ private:
 
     std::unordered_map<u64, PipelineVariant> m_variantCache;
     PipelineVariant* m_activeVariant = nullptr;
+    u32 m_activeSpectralMode = 7;
+    bool m_useObserverDescriptorSet = false;
 
     PipelineVariant CreatePipelineVariant(const SpecConstants& spec);
     static u64 PackSpecKey(u32 spectralMode, u32 debugEnabled) {

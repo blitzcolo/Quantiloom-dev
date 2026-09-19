@@ -140,7 +140,8 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     // energy-conserving 64-bin estimator. CameraMeasurement uses this same
     // branch when its specialization is added.
     bool exactPacked = false;
-    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
+    if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) &&
         spectralCurves[curveIndex]._padding != 0u) {
         uint curveCount, curveStride;
         spectralCurves.GetDimensions(curveCount, curveStride);
