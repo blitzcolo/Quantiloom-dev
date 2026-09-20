@@ -16,8 +16,20 @@
 // ============================================================================
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
-[[vk::binding(28, 0)]] RWTexture2D<float4> cameraMeasurementImage;
+// Measurement rate map, one layer per time stratum (M4-1). Layer 0 is the
+// anchor: it alone feeds the primary-hit depth AOV and the interactive
+// depth blit. The runtime layer count arrives in the push constants; the
+// image is allocated with kCameraTimeStrataMax layers regardless.
+[[vk::binding(28, 0)]] RWTexture2DArray<float4> cameraMeasurementImage;
 [[vk::binding(29, 0)]] ByteAddressBuffer cameraResponseTable;
+// Per-stratum primary-hit depth (RayTCurrent, -1 on miss), same layering as
+// binding 28. Consumed by camera_dynamic.comp for reprojection consistency.
+[[vk::binding(31, 0)]] RWTexture2DArray<float> cameraMeasurementDepthImage;
+// 4 x u32 atomic counters accumulated by raygen in camera-measurement mode:
+// slot 0 transparent primary hits, slot 1 specular primary hits (per
+// pixel-sample; the host normalizes by pixels x samples). Zeroed by the host
+// before each acquisition's trace loop.
+[[vk::binding(30, 0)]] RWByteAddressBuffer cameraDynamicCounters;
 [[vk::binding(1, 0)]] RaytracingAccelerationStructure scene;
 [[vk::binding(2, 0)]] StructuredBuffer<LightingParams> lightingParams;  // Fallback lighting (unused here)
 
@@ -150,8 +162,9 @@ void main() {
         if (!CameraResponseValid(cameraResponseTable)) {
             return;
         }
-        uint measurementWidth, measurementHeight;
-        cameraMeasurementImage.GetDimensions(measurementWidth, measurementHeight);
+        uint measurementWidth, measurementHeight, measurementLayers;
+        cameraMeasurementImage.GetDimensions(
+            measurementWidth, measurementHeight, measurementLayers);
         if (launchID.x >= measurementWidth || launchID.y >= measurementHeight) return;
         const uint channelCount = CameraHeaderWord(cameraResponseTable, 4u);
         const uint2 physicalPixel = CameraPhysicalPixel(
@@ -180,6 +193,10 @@ void main() {
     // Miss sentinel for the depth AOV; the closest-hit shader overwrites it
     payload.primaryHitT = -1.0;
 
+    // Diffuse by default; the closest-hit shader classifies the primary
+    // surface so the dynamic-exposure counters can weight it.
+    payload.primaryMaterialFlags = 0u;
+
     // A primary ray is not a BSDF sample, so an emitter it lands on shows its
     // full emission -- what the camera sees looking straight at a light.
     payload.bsdfPdf = 0.0;
@@ -199,13 +216,23 @@ void main() {
     // Snapshot the primary hit distance before anything else can touch the
     // payload. Written unconditionally: unlike radiance this is not averaged,
     // the last sample simply wins (jitter makes it flicker sub-pixel at
-    // silhouettes, which the grid overlay's epsilon absorbs).
+    // silhouettes, which the grid overlay's epsilon absorbs). Stratified
+    // exposures write it only from the anchor stratum (layer 0): the other
+    // strata carry their own depth in binding 31, and the interactive depth
+    // blit must keep showing the anchor view.
     uint depthWidth, depthHeight;
     depthImage.GetDimensions(depthWidth, depthHeight);
-    if (launchID.x < depthWidth && launchID.y < depthHeight)
+    if (launchID.x < depthWidth && launchID.y < depthHeight &&
+        pushConsts.timeStratum == 0u)
         depthImage[launchID] = payload.primaryHitT;
 
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+        // Same stratum routing as in the setup block above; the two blocks
+        // are separate scopes because everything wavelength-related happens
+        // between them.
+        const uint strata = max(pushConsts.timeStratumCount, 1u);
+        const uint stratum = min(pushConsts.timeStratum, strata - 1u);
+        const uint3 stratumCoord = uint3(launchID, stratum);
         const uint channelCount = CameraHeaderWord(cameraResponseTable, 4u);
         const bool multiChannel = CameraHeaderWord(cameraResponseTable, 3u) == CAMERA_CFA_MULTI;
         const bool latentColor = channelCount > 1u;
@@ -240,13 +267,25 @@ void main() {
             }
         }
         if (pushConsts.sampleIndex == 0u) {
-            cameraMeasurementImage[launchID] = float4(rate,
-                                                      multiChannel ? 0.0 : float(cameraChannel));
+            cameraMeasurementImage[stratumCoord] = float4(rate,
+                                                          multiChannel ? 0.0 : float(cameraChannel));
         } else {
-            const float3 previous = cameraMeasurementImage[launchID].rgb;
-            cameraMeasurementImage[launchID] = float4(
+            const float3 previous = cameraMeasurementImage[stratumCoord].rgb;
+            cameraMeasurementImage[stratumCoord] = float4(
                 previous + (rate - previous) / float(pushConsts.sampleIndex + 1u),
                 multiChannel ? 0.0 : float(cameraChannel));
+        }
+        // Per-stratum primary depth for the dynamic compositor's consistency
+        // check. Every stratum writes its own layer (the 2D depth AOV above
+        // stays anchor-only for the interactive depth blit).
+        cameraMeasurementDepthImage[stratumCoord] = payload.primaryHitT;
+        // Dynamic-exposure class counters, per pixel-sample. The host
+        // normalizes by pixels x samples and combines them with the
+        // compositor's disocclusion count into DynamicExposureReport.
+        if (payload.primaryHitT >= 0.0) {
+            const uint flags = payload.primaryMaterialFlags;
+            if ((flags & 2u) != 0u) cameraDynamicCounters.InterlockedAdd(0, 1u);
+            if ((flags & 1u) != 0u) cameraDynamicCounters.InterlockedAdd(4, 1u);
         }
         return;
     }

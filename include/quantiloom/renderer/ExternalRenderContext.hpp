@@ -161,12 +161,61 @@ struct GltfSceneOptions {
 
 /// Vulkan timestamps for one completed device capture. The full span includes
 /// its response-weighted ray trace and every sensor compute pass, excluding
-/// swapchain blit; postMs is fullMs - traceMs.
+/// swapchain blit; postMs is fullMs - traceMs. The per-pass breakdown
+/// (dynamic = time-stratum compositor, psf, detector = readout/ADC) is filled
+/// from the camera pipeline's seven query stamps; isp brackets statistics
+/// through the display pass and hsv the HSV pass (~0 when HSV is off).
 struct CameraGpuTimings {
     f32 traceMs = 0.0f;
     f32 fullMs = 0.0f;
     f32 postMs = 0.0f;
+    f32 dynamicMs = 0.0f;
+    f32 psfMs = 0.0f;
+    f32 detectorMs = 0.0f;
+    f32 ispMs = 0.0f;
+    f32 hsvMs = 0.0f;
     bool valid = false;
+};
+
+/// Error decomposition of the M4-1 GPU dynamic-exposure approximation, per
+/// committed acquisition. The GPU preview integrates a moving exposure by
+/// tracing T time strata and reprojecting them through the anchor depth;
+/// these numbers say how much of the frame that approximation had to guess
+/// at. Fractions are 0..1. `timeSampleCoverage` is how many of the requested
+/// gpu_time_positions were realized (spp-limited); `objectMotionApproximation`
+/// is the mean adjacent-stratum displacement of the scene's animated nodes,
+/// in world units per stratum pair (0 for a static scene or camera-only
+/// motion -- the report is about object motion the reprojection cannot know).
+struct DynamicExposureReport {
+    f64 disoccludedFraction = 0.0;
+    f64 transparentFraction = 0.0;
+    f64 viewDependentFraction = 0.0;
+    f64 timeSampleCoverage = 0.0;
+    f64 objectMotionApproximation = 0.0;
+    u32 strataCount = 0;
+    bool valid = false;
+};
+
+/// Snapshot of the interactive camera scheduler's state, returned by
+/// GetCameraHistoryStatus. The epoch increments every time the detector's
+/// temporal history is discarded (a timeline scrub back before a committed
+/// acquisition, or a ResetCameraHistory call); two products are comparable
+/// only within one epoch. The next* fields carry the AE/AWB feedback the
+/// next committed acquisition will consume; a nextExposureSeconds of zero
+/// means fresh state (no capture since the last reset), where the loop
+/// starts from the authored manual values.
+struct CameraHistoryStatus {
+    u64 epoch = 0;
+    u64 acquisitionIndex = 0;
+    f64 frameTimeSeconds = 0.0;
+    /// A history reset has been requested (scrub-back) and is applied on the
+    /// next RenderFrame, which records no acquisition.
+    bool historyReset = false;
+    /// Why the current epoch began; empty before the first reset.
+    String lastResetReason;
+    f64 nextExposureSeconds = 0.0;
+    f64 nextAnalogGain = 1.0;
+    std::array<f64, 3> nextWhiteBalance{1.0, 1.0, 1.0};
 };
 
 /**
@@ -924,6 +973,50 @@ public:
     /// Products remain unavailable and a new tick cannot be queued before it.
     [[nodiscard]] Result<void, String> CompleteQueuedCameraAcquisition();
 
+    /// Discard the detector's temporal history (thermal detector state and
+    /// acquisition-keyed noise counters) and restart the interactive
+    /// scheduler at acquisition 0 of a new epoch. The viewport then resumes
+    /// acquiring from the current timeline time. Between frames only.
+    [[nodiscard]] Result<void, String> ResetCameraHistory();
+
+    /// Snapshot of the interactive camera scheduler: the history epoch, the
+    /// last committed acquisition, and whether a history reset (e.g. a
+    /// timeline scrub back before a committed acquisition) is pending.
+    [[nodiscard]] CameraHistoryStatus GetCameraHistoryStatus() const;
+
+    /// Record an acquisition-history checkpoint: the detector's thermal
+    /// state, the previous-frame AGC window and the host AE/AWB feedback
+    /// state are snapshotted so a later RestoreCameraHistoryCheckpoint can
+    /// rewind to this exact tick. Depth one -- the newest checkpoint wins.
+    /// Between frames only, after the last committed acquisition completed.
+    [[nodiscard]] Result<void, String> CheckpointCameraHistory();
+
+    /// Rewind the camera to the last CheckpointCameraHistory: the GPU
+    /// detector state and the feedback state are restored, the history epoch
+    /// increments (so pre-restore products compare unequal across epochs),
+    /// and the explicit acquisition path resumes at the checkpoint's tick --
+    /// replaying the same tick sequence is bit-identical because the noise
+    /// streams are keyed on the acquisition index. Unlike a timeline scrub,
+    /// the restore is fully applied when the call returns: no reset is left
+    /// pending for the next RenderFrame.
+    [[nodiscard]] Result<void, String> RestoreCameraHistoryCheckpoint();
+
+    /// Advance the device through round(seconds/frame_period) synthetic
+    /// acquisitions on the same frame grid as the offline CPU reference
+    /// (anchored so the last warmup step sits one period below the current
+    /// acquisition time), without reading any product back. Products stay
+    /// unavailable; the first real acquisition afterwards sees a full
+    /// period of elapsed history. Errors if an acquisition is still awaiting
+    /// completion.
+    [[nodiscard]] Result<void, String> WarmUpCamera(f64 seconds);
+
+    /// Commit one explicit acquisition at `timeSeconds` (Queue/Record/
+    /// Complete without a product readback), advancing the acquisition index
+    /// by one from the last completed tick. Products stay available from the
+    /// last completed acquisition. For hosts that drive the clock themselves
+    /// instead of letting RenderFrame schedule acquisitions.
+    [[nodiscard]] Result<void, String> AdvanceCameraTo(f64 timeSeconds);
+
     /// Matched physical-extent ordinary single-wavelength scene trace for
     /// measuring camera cost above ray tracing. Does not acquire the detector.
     [[nodiscard]] Result<void, String> RecordCameraBaseline(
@@ -934,6 +1027,24 @@ public:
     /// explicit units and calibration metadata.
     [[nodiscard]] Result<camera::CameraOutput, String> CaptureCameraProducts();
     [[nodiscard]] CameraGpuTimings GetLastCameraGpuTimings() const;
+
+    /// Re-run the display half of the camera ISP (demosaic -> color ->
+    /// display -> HSV) over the last completed acquisition, for display
+    /// parameter changes (white balance, tone, palette, HSV grading). No ray
+    /// is retraced, no statistics pass runs (the Linear-AGC window keeps its
+    /// cached values), the AE/AWB loop does not advance and no thermal-state
+    /// noise is drawn -- the noise streams key on the acquisition index, so
+    /// with unchanged parameters the display is bit-identical. Between
+    /// frames only, with no acquisition queued or recorded. Also runs inside
+    /// ReprocessAccumulated when the camera owns the frame.
+    [[nodiscard]] Result<void, String> ReprocessCameraDisplay();
+
+    /// Error decomposition of the last committed acquisition's GPU
+    /// dynamic-exposure approximation. Performs a synchronized readback of
+    /// the device counters, so it must be called between submitted frames,
+    /// not between record and submit. Returns an invalid (zeroed) report
+    /// when no stratified spectral acquisition has completed.
+    [[nodiscard]] DynamicExposureReport GetLastDynamicExposureReport() const;
 
     // ========================================================================
     // Thermal Solve (interactive surface energy balance)

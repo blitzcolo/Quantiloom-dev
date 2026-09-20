@@ -1249,6 +1249,13 @@ Result<CameraData, String> OfflineRenderer::Impl::CameraDataAt(
 
 Result<camera::CameraOutput, String>
 OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds) {
+    return CaptureCameraInternal(state, frameTimeSeconds, /*suppressProducts=*/false);
+}
+
+Result<camera::CameraOutput, String>
+OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
+                                       f64 frameTimeSeconds,
+                                       bool suppressProducts) {
     Impl& impl = *m_impl;
     const f64 enteredTime = impl.timeline.Current_s();
     struct RestoreSceneTime {
@@ -1299,6 +1306,16 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
             "spectral radiance cube request requires single-wavelength mode");
     config.products.cieLinearSrgb = false;
     config.products.tracedRadiance = false;
+    if (suppressProducts) {
+        // A skipped-tick advance: the acquisition itself must run, because
+        // the detector state feeds back from it, but nothing is written and
+        // the observer/trace renders below are skipped entirely.
+        config.products.bandMeasurement = false;
+        config.products.rawDn = false;
+        config.products.correctedDeviceSignal = false;
+        config.products.apparentTemperature = false;
+        config.products.display = false;
+    }
     camera::CpuCameraPipeline camera(std::move(config));
     camera::CaptureState nextState = state;
     const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm)
@@ -1353,7 +1370,7 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
         captured = camera.Capture(nextState, frameTimeSeconds, sampler);
     }
     if (!captured) return captured;
-    if (wantsObserver || wantsTraced) {
+    if (!suppressProducts && (wantsObserver || wantsTraced)) {
         auto moved = SetTimelineTime(frameTimeSeconds);
         if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
         OfflineRenderOutput observer = impl.RenderSingleFrame();
@@ -1471,6 +1488,42 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
     markSceneGrid(captured.value().display);
     state = std::move(nextState);
     return captured;
+}
+
+Result<camera::CaptureCheckpoint, String>
+OfflineRenderer::CheckpointCamera(const camera::CaptureState& state) {
+    return camera::CheckpointCamera(state);
+}
+
+Result<void, String>
+OfflineRenderer::RestoreCamera(camera::CaptureState& state,
+                               const camera::CaptureCheckpoint& checkpoint) {
+    return camera::RestoreCamera(state, checkpoint);
+}
+
+Result<void, String>
+OfflineRenderer::AdvanceCameraState(camera::CaptureState& state, f64 timeSeconds) {
+    const auto advance = [this](camera::CaptureState& working,
+                                f64 t) -> Result<void, String> {
+        auto captured = CaptureCameraInternal(working, t, /*suppressProducts=*/true);
+        if (!captured)
+            return Result<void, String>::Err(captured.error());
+        return Result<void, String>::Ok();
+    };
+    return camera::AdvanceCameraState(state, timeSeconds, advance);
+}
+
+Result<void, String>
+OfflineRenderer::WarmUpCamera(camera::CaptureState& state, f64 seconds,
+                              f64 framePeriodSeconds) {
+    const auto advance = [this](camera::CaptureState& working,
+                                f64 t) -> Result<void, String> {
+        auto captured = CaptureCameraInternal(working, t, /*suppressProducts=*/true);
+        if (!captured)
+            return Result<void, String>::Err(captured.error());
+        return Result<void, String>::Ok();
+    };
+    return camera::WarmUpCamera(state, seconds, framePeriodSeconds, advance);
 }
 
 Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(

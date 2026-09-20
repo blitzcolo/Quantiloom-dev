@@ -1355,6 +1355,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
     uint materialID = geoInfo.materialId;
     MaterialData material = materials[materialID];
 
+    // Classify the primary surface for the dynamic-exposure counters
+    // (raygen, binding 30). Specular energy moves with the viewpoint and
+    // transmission has no single surface depth, so a reprojection between
+    // time strata cannot be trusted on either; everything else reads as
+    // diffuse (0). Recursive payloads inherit the parent's value, which
+    // raygen never reads.
+    if (payload.depth == 0u) {
+        const bool specularClass = material.metallicFactor >= 0.5 ||
+                                   material.roughnessFactor <= 0.2;
+        const bool transparentClass = material.alphaMode == 2u ||  // Blend
+                                      material.transmission > 0.0;
+        payload.primaryMaterialFlags =
+            (specularClass ? 1u : 0u) | (transparentClass ? 2u : 0u);
+    }
+
     // ========================================================================
     // Compute geometric normal from triangle vertices
     // ========================================================================

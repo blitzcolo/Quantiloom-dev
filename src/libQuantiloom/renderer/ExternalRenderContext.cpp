@@ -28,6 +28,7 @@
 #include "atmos/AtmosphereBaker.hpp"
 #include "postprocess/CameraPhysics.hpp"
 #include "postprocess/CameraConfigIOInternal.hpp"
+#include "postprocess/CameraAutoControl.hpp"
 #include "renderer/CameraResponseGpu.hpp"
 #include "renderer/GpuCameraPipeline.hpp"
 
@@ -85,6 +86,12 @@ using core::GetDefaultCacheDirectory;
 struct ExternalRenderContext::Impl {
     // Context adapter (provides VulkanContext interface for external handles)
     std::unique_ptr<VulkanContextAdapter> contextAdapter;
+
+    // The facade that owns this Impl. Used by internal steps that need a
+    // public facade call (the camera scheduler poses the timeline through
+    // SetTimelineTime). Re-pointed by the facade's move operations; never
+    // null while the Impl is alive.
+    ExternalRenderContext* owner = nullptr;
 
     // External Vulkan handles (cached for reference)
     VkInstance instance = VK_NULL_HANDLE;
@@ -353,10 +360,12 @@ struct ExternalRenderContext::Impl {
     bool cameraCaptureCompleted = false;
     u64 cameraAcquisitionIndex = 0;
     f64 cameraAcquisitionTimeSeconds = 0.0;
-    std::unique_ptr<GpuImage> cameraMeasurementImage; // Binding 28, physical pixels.
+    std::unique_ptr<GpuImage> cameraMeasurementImage; // Binding 28, physical pixels, one layer per time stratum.
+    std::unique_ptr<GpuImage> cameraMeasurementDepthImage; // Binding 31, per-stratum primary depth.
     std::unique_ptr<GpuImage> cameraBaselineImage;
     std::unique_ptr<GpuImage> cameraDepthImage;
     std::unique_ptr<GpuBuffer> cameraResponseBuffer; // Binding 29, knot/CDF table.
+    std::unique_ptr<GpuBuffer> cameraDynamicCounterBuffer; // Binding 30, 4 x u32 raygen counters.
     std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
     std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
     std::unique_ptr<GpuBuffer> cameraBaselineAtmosHeaderBuffer;
@@ -365,31 +374,76 @@ struct ExternalRenderContext::Impl {
     f32 cameraAtmosMinNm = 0.0f;
     f32 cameraAtmosStepNm = 0.0f;
     u32 cameraAtmosCount = 0;
-    std::unique_ptr<GpuImage> sensorImage;              // Sensor-processed output (noisy radiance)
-    std::unique_ptr<GpuImage> sensorTempImage;          // Temporary image for multi-pass processing
-    VkDescriptorSetLayout sensorDescriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout sensorPipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorPool sensorDescriptorPool = VK_NULL_HANDLE;
-    VkDescriptorSet sensorDescriptorSet = VK_NULL_HANDLE;
-    VkPipeline sensorRadianceToElectronsPipeline = VK_NULL_HANDLE;
-    VkPipeline sensorPoissonNoisePipeline = VK_NULL_HANDLE;
-    VkPipeline sensorPsfBlurHorizontalPipeline = VK_NULL_HANDLE;
-    VkPipeline sensorPsfBlurVerticalPipeline = VK_NULL_HANDLE;
-    VkPipeline sensorQuantizeToRadiancePipeline = VK_NULL_HANDLE;
-    VkShaderModule sensorRadianceToElectronsShader = VK_NULL_HANDLE;
-    VkShaderModule sensorPoissonNoiseShader = VK_NULL_HANDLE;
-    VkShaderModule sensorPsfBlurHorizontalShader = VK_NULL_HANDLE;
-    VkShaderModule sensorPsfBlurVerticalShader = VK_NULL_HANDLE;
-    VkShaderModule sensorQuantizeToRadianceShader = VK_NULL_HANDLE;
-    VkPipeline sensorFpnPipeline = VK_NULL_HANDLE;
-    VkShaderModule sensorFpnShader = VK_NULL_HANDLE;
-    std::unique_ptr<GpuImage> fpnPrnuMap;              // PRNU map (width x height, R32_SFLOAT)
-    std::unique_ptr<GpuImage> fpnDsnuMap;              // DSNU map (width x height, R32_SFLOAT)
-    VkDescriptorSetLayout sensorFpnDescriptorSetLayout = VK_NULL_HANDLE;
-    VkPipelineLayout sensorFpnPipelineLayout = VK_NULL_HANDLE;
-    VkDescriptorSet sensorFpnDescriptorSet = VK_NULL_HANDLE;
-    bool fpnMapsGenerated = false;
-    bool sensorInitialized = false;
+    // Interactive camera acquisition scheduling. When the camera is enabled,
+    // RenderFrame drives acquisitions from the timeline clock instead of
+    // tracing the visibility image; QueueCameraAcquisition remains the
+    // explicit path for headless hosts. One state-advancing tick is one
+    // committed acquisition -- redraws, presents and reprocesses never
+    // advance it.
+    struct CameraScheduler {
+        // Set on the first RenderFrame with the camera enabled; before that
+        // the explicit Queue/Record/Complete facade owns the acquisition.
+        bool drivesAcquisition = false;
+        u64 nextAcquisitionIndex = 0;
+        f64 nextAcquisitionTimeSeconds = 0.0;
+        f64 framePeriodSeconds = 1.0 / 30.0;
+        // Scrubbing back before a committed acquisition (or a host reset
+        // request) invalidates the detector's temporal history. Applied on
+        // the next RenderFrame, which records no acquisition; the reason is
+        // kept for GetCameraHistoryStatus.
+        bool historyResetPending = false;
+        String historyResetReason;
+        u64 historyEpoch = 0;
+        bool hasCommittedAcquisition = false;
+        f64 lastCommittedAcquisitionTime = 0.0;
+    };
+    CameraScheduler cameraScheduler;
+
+    // M4-2 acquisition history. One checkpoint deep is all the interactive
+    // hosts need (rewind to the marked tick). The GPU half of a record holds
+    // the device state; the host half carries the CaptureState feedback
+    // fields that the M4-4 closed loop fills in.
+    struct CameraHistoryRecord {
+        rendercore::GpuCameraPipeline::GpuCheckpoint gpu;
+        camera::CaptureState host;
+    };
+    std::vector<CameraHistoryRecord> cameraHistoryStack;
+    camera::CaptureState cameraHostState;
+
+    // M4-4 AE/AWB closed loop. The feedback (cameraHostState.next*) is
+    // computed lazily once per committed tick from the statistics the last
+    // submitted frame left on the device: RunCameraAutoControl runs at the
+    // top of RecordCameraMeasurement (before the new tick is recorded, so
+    // the readback is queue-ordered after the previous frame) and never
+    // between record and submit. `cameraAutoControlDue` marks that the
+    // device statistics buffer holds a committed tick's data (Queue clears
+    // cameraCaptureCompleted, so that flag cannot serve); `cameraAutoLastAcquisition`
+    // marks the index the feedback was last computed for, so a same-tick
+    // re-record, a redraw or a display reprocess never moves the loop;
+    // `cameraAutoAppliedAcquisition` marks the index the effective config was
+    // last pushed to the device for.
+    bool cameraAutoControlDue = false;
+    u64 cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
+    u64 cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
+    bool cameraAutoThermalNoted = false;
+
+    // M4-1 temporal stratification state. `cameraStratumSampleCounts` carries
+    // each layer's running sample count across same-tick re-records so a
+    // redraw continues the progressive average instead of restarting it;
+    // it resets whenever the acquisition index moves. The remaining fields
+    // describe the last committed acquisition for DynamicExposureReport.
+    std::array<u32, 8> cameraStratumSampleCounts{};
+    u64 cameraStratumRecordedAcquisition =
+        std::numeric_limits<u64>::max();
+    u32 cameraLastAcquisitionSamples = 0;
+    u32 cameraLastStrataCount = 1;
+    f64 cameraLastObjectMotion = 0.0;
+    DynamicExposureReport lastDynamicReport;
+    // Seven-stamp query pool bracketing the camera compute passes
+    // (start/dynamic/psf/detector/display/isp/hsv-end). Resolved lazily by
+    // GetLastCameraGpuTimings once the GPU has finished the frame.
+    VkQueryPool cameraTimingPool = VK_NULL_HANDLE;
+    f64 cameraTimestampPeriodNs = 1.0;
 
     // Ready flag
     bool isReady = false;
@@ -411,10 +465,16 @@ struct ExternalRenderContext::Impl {
         cameraFullPerf.reset();
         pipeline.reset();
         cameraGpuPipeline.reset();
+        if (cameraTimingPool != VK_NULL_HANDLE) {
+            vkDestroyQueryPool(device, cameraTimingPool, nullptr);
+            cameraTimingPool = VK_NULL_HANDLE;
+        }
         cameraMeasurementImage.reset();
+        cameraMeasurementDepthImage.reset();
         cameraBaselineImage.reset();
         cameraDepthImage.reset();
         cameraResponseBuffer.reset();
+        cameraDynamicCounterBuffer.reset();
         cameraAtmosHeaderBuffer.reset();
         cameraAtmosDataBuffer.reset();
         cameraBaselineAtmosHeaderBuffer.reset();
@@ -528,88 +588,8 @@ struct ExternalRenderContext::Impl {
         }
         pickInitAttempted = false;
 
-        // Destroy GPU sensor resources
-        sensorImage.reset();
-        sensorTempImage.reset();
-        if (device != VK_NULL_HANDLE) {
-            if (sensorRadianceToElectronsPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorRadianceToElectronsPipeline, nullptr);
-                sensorRadianceToElectronsPipeline = VK_NULL_HANDLE;
-            }
-            if (sensorPoissonNoisePipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorPoissonNoisePipeline, nullptr);
-                sensorPoissonNoisePipeline = VK_NULL_HANDLE;
-            }
-            if (sensorPsfBlurHorizontalPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorPsfBlurHorizontalPipeline, nullptr);
-                sensorPsfBlurHorizontalPipeline = VK_NULL_HANDLE;
-            }
-            if (sensorPsfBlurVerticalPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorPsfBlurVerticalPipeline, nullptr);
-                sensorPsfBlurVerticalPipeline = VK_NULL_HANDLE;
-            }
-            if (sensorQuantizeToRadiancePipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorQuantizeToRadiancePipeline, nullptr);
-                sensorQuantizeToRadiancePipeline = VK_NULL_HANDLE;
-            }
-            if (sensorRadianceToElectronsShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorRadianceToElectronsShader, nullptr);
-                sensorRadianceToElectronsShader = VK_NULL_HANDLE;
-            }
-            if (sensorPoissonNoiseShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorPoissonNoiseShader, nullptr);
-                sensorPoissonNoiseShader = VK_NULL_HANDLE;
-            }
-            if (sensorPsfBlurHorizontalShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorPsfBlurHorizontalShader, nullptr);
-                sensorPsfBlurHorizontalShader = VK_NULL_HANDLE;
-            }
-            if (sensorPsfBlurVerticalShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorPsfBlurVerticalShader, nullptr);
-                sensorPsfBlurVerticalShader = VK_NULL_HANDLE;
-            }
-            if (sensorQuantizeToRadianceShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorQuantizeToRadianceShader, nullptr);
-                sensorQuantizeToRadianceShader = VK_NULL_HANDLE;
-            }
-            if (sensorDescriptorPool != VK_NULL_HANDLE) {
-                vkDestroyDescriptorPool(device, sensorDescriptorPool, nullptr);
-                sensorDescriptorPool = VK_NULL_HANDLE;
-            }
-            if (sensorPipelineLayout != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(device, sensorPipelineLayout, nullptr);
-                sensorPipelineLayout = VK_NULL_HANDLE;
-            }
-            if (sensorDescriptorSetLayout != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device, sensorDescriptorSetLayout, nullptr);
-                sensorDescriptorSetLayout = VK_NULL_HANDLE;
-            }
-            // Destroy FPN resources
-            if (sensorFpnPipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(device, sensorFpnPipeline, nullptr);
-                sensorFpnPipeline = VK_NULL_HANDLE;
-            }
-            if (sensorFpnShader != VK_NULL_HANDLE) {
-                vkDestroyShaderModule(device, sensorFpnShader, nullptr);
-                sensorFpnShader = VK_NULL_HANDLE;
-            }
-            if (sensorFpnPipelineLayout != VK_NULL_HANDLE) {
-                vkDestroyPipelineLayout(device, sensorFpnPipelineLayout, nullptr);
-                sensorFpnPipelineLayout = VK_NULL_HANDLE;
-            }
-            if (sensorFpnDescriptorSetLayout != VK_NULL_HANDLE) {
-                vkDestroyDescriptorSetLayout(device, sensorFpnDescriptorSetLayout, nullptr);
-                sensorFpnDescriptorSetLayout = VK_NULL_HANDLE;
-            }
-        }
-        fpnPrnuMap.reset();
-        fpnDsnuMap.reset();
-        fpnMapsGenerated = false;
-        sensorInitialized = false;
-
         // Reset merged global geometry buffers
         geometry = {};
-
 
         if (commandPool != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
             vkDestroyCommandPool(device, commandPool, nullptr);
@@ -681,21 +661,116 @@ struct ExternalRenderContext::Impl {
     void ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height);
     void ComputeImageMinMax(f32& outMin, f32& outMax);
 
-    void CreateGPUSensorPipeline();
-    void GenerateAndUploadFPNMaps();
-    void ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height);
     Result<void, String> EnsureCameraResources();
     Result<void, String> UpdateCameraAtmosphere();
+    /// Run the interactive camera scheduler for one RenderFrame: commit a new
+    /// acquisition when the timeline clock reached the next scheduled slot,
+    /// re-record the current tick for convergence on redraws, and apply a
+    /// pending history reset (which records nothing). Returns true when a new
+    /// acquisition was committed.
+    Result<bool, String> StepCameraAcquisition(VkCommandBuffer cmd);
     Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd);
     Result<void, String> RecordCameraBaseline(VkCommandBuffer cmd);
     Result<CameraData, String> CameraDataForCapture(
-        SpectralMode mode, f64 wavelengthNm) const;
+        SpectralMode mode, f64 wavelengthNm,
+        f64 timeSeconds = std::numeric_limits<f64>::quiet_NaN()) const;
 
-    /// Which image the swapchain blit should read: the sensor chain's output
-    /// if enabled, then CLAHE's, otherwise the raw accumulation. One function
-    /// because RenderFrame and PresentAccumulated must never disagree about
-    /// what "the current image" is.
-    [[nodiscard]] VkImage CurrentDisplaySource() const;
+    // M4-4 AE/AWB closed loop. EffectiveCameraConfig mirrors
+    // CpuCameraPipeline::EffectiveConfig: a committed acquisition consumes
+    // the feedback the previous tick wrote into cameraHostState.next*; a
+    // fresh state (nextExposure <= 0, i.e. nothing committed since the last
+    // reset) starts from the authored manual values. MaybeRun executes the
+    // controller for the last committed tick exactly once; RunCameraAutoControl
+    // is the StepAutoControl wrapper (thermal detectors are skipped with the
+    // same warning the CPU chain logs).
+    [[nodiscard]] camera::CameraConfig EffectiveCameraConfig() const;
+    void MaybeRunCameraAutoControl();
+    void RunCameraAutoControl();
+    /// Record the display-half reprocess (demosaic -> color -> display ->
+    /// HSV) over the last acquisition on `cmd`. No trace, no statistics, no
+    /// state advance; see ReprocessCameraDisplay.
+    [[nodiscard]] Result<void, String> RecordCameraDisplayReprocess(
+        VkCommandBuffer cmd);
+
+    /// Which image the swapchain blit should read, and the extent to blit
+    /// from: CLAHE's output if the viewport override is on, then the camera
+    /// display product, then the raw accumulation. One function because
+    /// RenderFrame, PresentAccumulated and ReprocessAccumulated must never
+    /// disagree about what "the current image" is.
+    struct DisplaySource {
+        VkImage image;
+        u32 width;
+        u32 height;
+    };
+    struct ImageExtent {
+        u32 width;
+        u32 height;
+    };
+    [[nodiscard]] DisplaySource CurrentDisplaySource() const;
+
+    /// The camera display product once an acquisition has completed, else
+    /// null (the image exists before the first acquisition but holds no
+    /// measurement).
+    [[nodiscard]] const GpuImage* CameraDisplayImage() const {
+        if (!cameraConfig.enabled || !cameraGpuPipeline || !cameraCaptureCompleted)
+            return nullptr;
+        return cameraGpuPipeline->GetOutputs().display;
+    }
+
+    /// Whether CLAHE has a valid input this frame. It reads the camera's
+    /// agcSource (infrared) or corrected product (visible) when the camera is
+    /// enabled, which exists only after the first acquisition; until then
+    /// there is nothing to enhance and the display falls through to the
+    /// camera display (or the raw accumulation).
+    [[nodiscard]] bool ClaheInputReady() const {
+        if (!cameraConfig.enabled) return true;
+        if (!cameraGpuPipeline || !cameraCaptureCompleted) return false;
+        const auto outputs = cameraGpuPipeline->GetOutputs();
+        return cameraConfig.device.detector == camera::DetectorKind::Thermal
+                   ? outputs.agcSource != nullptr
+                   : outputs.corrected != nullptr;
+    }
+
+    /// The image CLAHE reads: the camera's agcSource (infrared camera -- the
+    /// pre-AGC scalar the camera chain would have tone-mapped), the corrected
+    /// product for a visible camera, else the raw accumulation.
+    [[nodiscard]] const GpuImage* ClaheInputImage() const {
+        if (cameraConfig.enabled && cameraGpuPipeline) {
+            const auto outputs = cameraGpuPipeline->GetOutputs();
+            if (cameraConfig.device.detector == camera::DetectorKind::Thermal &&
+                outputs.agcSource)
+                return outputs.agcSource;
+            if (outputs.corrected) return outputs.corrected;
+        }
+        return outputImage.get();
+    }
+
+    /// The camera config asked for CLAHE as the persistent infrared tone: the
+    /// camera display pass writes the pre-AGC scalar to both outputs and the
+    /// host's CLAHE pipeline runs over the agcSource, its result becoming the
+    /// final display. The viewport CLAHE parameters (tile grid, clip limit,
+    /// palette) drive the run, exactly as they drive the viewport override.
+    [[nodiscard]] bool CameraClahePersistent() const {
+        return cameraConfig.enabled &&
+               cameraConfig.device.detector == camera::DetectorKind::Thermal &&
+               cameraConfig.isp.infraredTone == DisplayToneMode::Clahe;
+    }
+
+    /// The extent CLAHE runs at, and the extent its displayImage is kept at:
+    /// the physical sensor array when the camera is enabled, else the render
+    /// extent.
+    [[nodiscard]] ImageExtent ClaheInputExtent() const {
+        if (cameraConfig.enabled) {
+            return {cameraConfig.optics.sensorWidthPx,
+                    cameraConfig.optics.sensorHeightPx};
+        }
+        return {width, height};
+    }
+
+    /// (Re)create the CLAHE display image at the current ClaheTarget extent
+    /// and rebind it. Called when CLAHE initializes, the render extent
+    /// changes, or the camera configuration changes the input size.
+    void RecreateClaheDisplayImage();
 
     /// Copy @p source onto the swapchain image and leave it in PRESENT_SRC.
     /// The transitions and the format-converting blit, with no tracing --
@@ -760,12 +835,22 @@ struct ExternalRenderContext::Impl {
 
 ExternalRenderContext::ExternalRenderContext()
     : m_impl(std::make_unique<Impl>()) {
+    m_impl->owner = this;
 }
 
 ExternalRenderContext::~ExternalRenderContext() = default;
 
-ExternalRenderContext::ExternalRenderContext(ExternalRenderContext&&) noexcept = default;
-ExternalRenderContext& ExternalRenderContext::operator=(ExternalRenderContext&&) noexcept = default;
+// The Impl back-points at its facade; a move has to re-point it.
+ExternalRenderContext::ExternalRenderContext(ExternalRenderContext&& other) noexcept
+    : m_impl(std::move(other.m_impl)) {
+    if (m_impl) m_impl->owner = this;
+}
+ExternalRenderContext& ExternalRenderContext::operator=(
+    ExternalRenderContext&& other) noexcept {
+    m_impl = std::move(other.m_impl);
+    if (m_impl) m_impl->owner = this;
+    return *this;
+}
 
 // ============================================================================
 // Factory Method
@@ -1653,6 +1738,7 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
     }
 }
 
+
 void ExternalRenderContext::RenderFrame(
     VkCommandBuffer cmd,
     VkImage targetImage,
@@ -1678,7 +1764,8 @@ void ExternalRenderContext::RenderFrame(
     // Only update every N frames to reduce readback overhead, but always update
     // on frame 1 (after first render) and whenever cache is invalid
     constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
-    if (m_impl->displayParams.enabled && m_impl->claheInitialized &&
+    if (m_impl->claheInitialized &&
+        (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
         m_impl->accumulatedSamples > 0 &&
         (!m_impl->hasCachedMinMax ||
          m_impl->accumulatedSamples == 1 ||  // Always update after first frame
@@ -1744,48 +1831,67 @@ void ExternalRenderContext::RenderFrame(
         m_impl->sequenceSeed
     );
 
-    // Execute ray tracing (writes to internal outputImage in GENERAL layout).
-    // Timestamps bracket the trace alone -- not the sensor chain, CLAHE or the
-    // blit -- so what gets measured is the cost of one sample of *this scene*.
-    if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
-    m_impl->pipeline->TraceRays(cmd, renderW, renderH);
-    if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
+    if (m_impl->cameraConfig.enabled) {
+        // The camera chain owns the frame: it traces at the physical sensor
+        // extent and produces the display product. The visibility
+        // accumulation in outputImage is not traced in this mode; hosts that
+        // read CaptureScreenshot with the camera enabled get the last
+        // non-camera frame, if any.
+        if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
+            QL_LOG_WARN("Camera scheduler: {}", stepped.error());
+        }
+    } else {
+        // Execute ray tracing (writes to internal outputImage in GENERAL
+        // layout). Timestamps bracket the trace alone -- not CLAHE or the
+        // blit -- so what gets measured is the cost of one sample of *this
+        // scene*. The camera trace is bracketed by the camera perf queries
+        // inside RecordCameraMeasurement.
+        if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
+        m_impl->pipeline->TraceRays(cmd, renderW, renderH);
+        if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
+    }
 
     // Post-processing, then the blit. Both halves are shared with
-    // PresentAccumulated, which does them without the trace above. They run at
-    // the render extent, before the magnifying blit, so a reduced scale makes
-    // them cheaper too -- and CLAHE never sees an upsampled image.
-    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        m_impl->ExecuteGPUSensorChain(cmd, renderW, renderH);
-    }
-    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        // Note: ExecuteCLAHE reads from outputImage by default (TODO: make it
-        // read from the sensor output when that is enabled).
-        m_impl->ExecuteCLAHE(cmd, renderW, renderH);
+    // PresentAccumulated, which does them without the trace above. They run
+    // at the render extent, before the magnifying blit, so a reduced scale
+    // makes them cheaper too -- and CLAHE never sees an upsampled image.
+    if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+        m_impl->claheInitialized && m_impl->displayImage &&
+        m_impl->ClaheInputReady()) {
+        const auto claheExtent = m_impl->ClaheInputExtent();
+        m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
     }
 
-    const VkImage blitSourceImage = m_impl->CurrentDisplaySource();
+    const auto blitSource = m_impl->CurrentDisplaySource();
     // Whichever pass wrote it last is what the barrier has to wait on.
-    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR;
-    if (blitSourceImage != m_impl->outputImage->GetImage()) {
-        srcStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    }
-    m_impl->BlitToTarget(cmd, blitSourceImage, targetImage, targetLayout,
-                         renderW, renderH, width, height, srcStage);
+    const VkPipelineStageFlags srcStage =
+        (blitSource.image == m_impl->outputImage->GetImage())
+            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout,
+                         blitSource.width, blitSource.height, width, height,
+                         srcStage);
 
     m_impl->accumulatedSamples++;
     m_impl->frameIndex++;
 }
 
-VkImage ExternalRenderContext::Impl::CurrentDisplaySource() const {
-    // Priority: GPU sensor -> CLAHE -> raw accumulation.
-    if (displayParams.enabled && claheInitialized && displayImage) {
-        return displayImage->GetImage();
+ExternalRenderContext::Impl::DisplaySource
+ExternalRenderContext::Impl::CurrentDisplaySource() const {
+    // Priority: CLAHE (viewport override or the camera's persistent Clahe
+    // tone) -> camera display -> raw accumulation. The camera product sits at
+    // the physical sensor extent, which BlitToTarget magnifies to the target
+    // like any other source.
+    if (displayImage && claheInitialized && ClaheInputReady() &&
+        (displayParams.enabled || CameraClahePersistent())) {
+        const auto extent = ClaheInputExtent();
+        return {displayImage->GetImage(), extent.width, extent.height};
     }
-    if (gpuSensorEnabled && sensorInitialized && sensorImage) {
-        return sensorImage->GetImage();
+    if (const GpuImage* cameraDisplay = CameraDisplayImage()) {
+        return {cameraDisplay->GetImage(), cameraConfig.optics.sensorWidthPx,
+                cameraConfig.optics.sensorHeightPx};
     }
-    return outputImage->GetImage();
+    return {outputImage->GetImage(), width, height};
 }
 
 void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
@@ -1910,16 +2016,16 @@ bool ExternalRenderContext::PresentAccumulated(
         return false;
     }
 
-    const VkImage source = m_impl->CurrentDisplaySource();
+    const auto source = m_impl->CurrentDisplaySource();
     // The post-processed images still hold the last frame's result -- nothing
     // has changed the accumulation since -- so the chains are not re-run.
     const VkPipelineStageFlags sourceStage =
-        (source == m_impl->outputImage->GetImage())
+        (source.image == m_impl->outputImage->GetImage())
             ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-    m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
-                         m_impl->width, m_impl->height, width, height,
+    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout,
+                         source.width, source.height, width, height,
                          sourceStage);
     // Deliberately no accumulatedSamples++: that is the whole point.
     return true;
@@ -1951,36 +2057,64 @@ bool ExternalRenderContext::ReprocessAccumulated(
         return false;
     }
 
-    // The min/max cache reads the raw accumulation, which this path never
+    // The min/max cache reads the CLAHE input image, which this path never
     // changes -- so a filled cache is still right, whatever display setting
     // prompted the reprocess. Only a cache that has never been filled needs
     // computing: CLAHE enabled for the first time after the trace stopped.
-    if (m_impl->displayParams.enabled && m_impl->claheInitialized &&
-        !m_impl->hasCachedMinMax) {
+    if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+        m_impl->claheInitialized && !m_impl->hasCachedMinMax &&
+        m_impl->ClaheInputReady()) {
         m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
     }
 
     // The post-processing half of RenderFrame, over the accumulation as it
-    // stands -- at the render extent, like RenderFrame runs it.
-    if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        m_impl->ExecuteGPUSensorChain(cmd, m_impl->width, m_impl->height);
-    }
-    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        m_impl->ExecuteCLAHE(cmd, m_impl->width, m_impl->height);
+    // stands. When the camera owns the frame, a display-setting change only
+    // re-runs the display half of the camera chain (demosaic through HSV):
+    // no trace, no statistics, no AE/AWB, no thermal-state noise; the AGC
+    // window keeps riding in the statistics buffer.
+    if (m_impl->cameraConfig.enabled && m_impl->cameraCaptureCompleted &&
+        !m_impl->cameraCapturePending && !m_impl->cameraCaptureRecorded) {
+        if (auto reprocessed = m_impl->RecordCameraDisplayReprocess(cmd);
+            !reprocessed)
+            QL_LOG_WARN("Camera display reprocess: {}", reprocessed.error());
     }
 
-    const VkImage source = m_impl->CurrentDisplaySource();
+    if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+        m_impl->claheInitialized && m_impl->displayImage &&
+        m_impl->ClaheInputReady()) {
+        const auto claheExtent = m_impl->ClaheInputExtent();
+        m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
+    }
+
+    const auto source = m_impl->CurrentDisplaySource();
     const VkPipelineStageFlags sourceStage =
-        (source == m_impl->outputImage->GetImage())
+        (source.image == m_impl->outputImage->GetImage())
             ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-    m_impl->BlitToTarget(cmd, source, targetImage, targetLayout,
-                         m_impl->width, m_impl->height, width, height,
+    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout,
+                         source.width, source.height, width, height,
                          sourceStage);
     // Like PresentAccumulated: no accumulatedSamples++.
     return true;
+}
+
+Result<void, String> ExternalRenderContext::ReprocessCameraDisplay() {
+    if (!m_impl->cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (!m_impl->cameraGpuPipeline || !m_impl->cameraCaptureCompleted)
+        return Result<void, String>::Err(
+            "camera display reprocess needs a completed camera acquisition");
+    if (m_impl->cameraCapturePending || m_impl->cameraCaptureRecorded)
+        return Result<void, String>::Err(
+            "complete the queued camera acquisition before reprocessing");
+    Result<void, String> status = Result<void, String>::Ok();
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                    [&](VkCommandBuffer cmd) {
+        status = m_impl->RecordCameraDisplayReprocess(cmd);
+    });
+    return status;
 }
 
 void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage,
@@ -2131,120 +2265,11 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
         pipeline->BindDepthImage(*depthAovImage);
     }
 
-    // Recreate CLAHE display image if initialized
+    // Recreate CLAHE display image if initialized. Waits on the device, which
+    // ApplyInternalExtent already did above; the extent follows the CLAHE
+    // input (physical sensor array when the camera is enabled).
     if (claheInitialized && displayImage) {
-        displayImage = std::make_unique<GpuImage>(
-            contextAdapter->GetAllocator(),
-            contextAdapter->GetDevice(),
-            width, height,
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-
-        TransitionImageLayoutImmediate(
-            displayImage->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
-
-        // Update CLAHE descriptor set with new images
-        VkDescriptorImageInfo inputImageInfo{};
-        inputImageInfo.imageView = outputImage->GetView();
-        inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputImageInfo{};
-        outputImageInfo.imageView = displayImage->GetView();
-        outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        std::vector<VkWriteDescriptorSet> writes(2);
-
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = claheDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputImageInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = claheDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputImageInfo;
-
-        vkUpdateDescriptorSets(device, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-    }
-
-    // Recreate sensor images if initialized
-    if (sensorInitialized && sensorImage) {
-        auto sensorAllocator = contextAdapter->GetAllocator();
-        auto sensorDevice = contextAdapter->GetDevice();
-
-        sensorImage = std::make_unique<GpuImage>(
-            sensorAllocator, sensorDevice,
-            width, height,
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-
-        sensorTempImage = std::make_unique<GpuImage>(
-            sensorAllocator, sensorDevice,
-            width, height,
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-
-        TransitionImageLayoutImmediate(
-            sensorImage->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
-
-        TransitionImageLayoutImmediate(
-            sensorTempImage->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
-
-        // Recreate FPN map images for new dimensions
-        if (fpnPrnuMap) {
-            fpnPrnuMap = std::make_unique<GpuImage>(
-                sensorAllocator, sensorDevice,
-                width, height,
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_GPU_ONLY
-            );
-            fpnDsnuMap = std::make_unique<GpuImage>(
-                sensorAllocator, sensorDevice,
-                width, height,
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_GPU_ONLY
-            );
-
-            TransitionImageLayoutImmediate(
-                fpnPrnuMap->GetImage(),
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_GENERAL
-            );
-            TransitionImageLayoutImmediate(
-                fpnDsnuMap->GetImage(),
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_GENERAL
-            );
-        }
-
-        // Invalidate FPN maps so they get regenerated for new dimensions
-        fpnMapsGenerated = false;
+        RecreateClaheDisplayImage();
     }
 
     // Aspect comes from the target extent, not the render extent. Rounding
@@ -3244,6 +3269,20 @@ Result<void, String> ExternalRenderContext::SetTimelineTime(const f64 t_s) {
     if (!m_impl->scene) {
         return Result<void, String>::Err("no scene loaded");
     }
+    // Scrubbing back before a committed camera acquisition invalidates the
+    // detector's temporal history (thermal detector state, acquisition-keyed
+    // noise). The scheduler applies a reset on the next RenderFrame, which
+    // then records no acquisition; forward moves never reset.
+    if (m_impl->cameraConfig.enabled &&
+        m_impl->cameraScheduler.hasCommittedAcquisition &&
+        t_s < m_impl->cameraScheduler.lastCommittedAcquisitionTime - 1e-9) {
+        auto& s = m_impl->cameraScheduler;
+        s.historyResetPending = true;
+        s.historyResetReason =
+            String("timeline scrubbed back before the committed camera ") +
+            "acquisition at t=" +
+            std::to_string(m_impl->cameraScheduler.lastCommittedAcquisitionTime);
+    }
     if (!m_impl->timeline.Present()) {
         // Legal and quiet: a static scene has a clock that does nothing, and a
         // host driving one transport for every document should not have to ask
@@ -3786,6 +3825,23 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(
     m_impl->cameraCapturePending = config.enabled;
     m_impl->cameraAcquisitionIndex = 0;
     m_impl->cameraAcquisitionTimeSeconds = m_impl->timeline.Current_s();
+    // The interactive scheduler restarts from the new configuration: the
+    // first RenderFrame with the camera enabled takes scheduling ownership
+    // again and the first acquisition lands at the current clock time.
+    m_impl->cameraScheduler.drivesAcquisition = false;
+    m_impl->cameraScheduler.nextAcquisitionIndex = 0;
+    m_impl->cameraScheduler.nextAcquisitionTimeSeconds =
+        m_impl->timeline.Current_s();
+    // The CLAHE input extent may have changed (camera on/off, sensor size);
+    // its display image follows it.
+    m_impl->hasCachedMinMax = false;
+    m_impl->RecreateClaheDisplayImage();
+    // A new configuration restarts the AE/AWB loop from its authored manual
+    // values; the first acquisition under it is fresh state.
+    m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
+    m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
+    m_impl->cameraHostState = camera::CaptureState{};
     return Result<void, String>::Ok();
 }
 
@@ -3833,6 +3889,231 @@ Result<void, String> ExternalRenderContext::CompleteQueuedCameraAcquisition() {
     m_impl->cameraCaptureRecorded = false;
     m_impl->cameraCapturePending = false;
     m_impl->cameraCaptureCompleted = true;
+    // The committed tick's statistics are on the device (the host submitted
+    // before completing): the AE/AWB loop consumes them when the next tick
+    // is recorded.
+    m_impl->cameraAutoControlDue = true;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::ResetCameraHistory() {
+    // Discard the detector's temporal history and restart the interactive
+    // scheduler at acquisition 0 of a new epoch. Safe to call between frames;
+    // the explicit Queue/Record/Complete path is unaffected apart from the
+    // GpuCameraPipeline counter restart.
+    if (m_impl->cameraGpuPipeline) m_impl->cameraGpuPipeline->ResetState();
+    m_impl->cameraStratumSampleCounts.fill(0);
+    m_impl->cameraStratumRecordedAcquisition =
+        std::numeric_limits<u64>::max();
+    auto& s = m_impl->cameraScheduler;
+    s.historyResetPending = false;
+    s.historyResetReason = "camera history reset requested by host";
+    s.historyEpoch += 1;
+    s.hasCommittedAcquisition = false;
+    s.lastCommittedAcquisitionTime = 0.0;
+    s.nextAcquisitionIndex = 0;
+    s.nextAcquisitionTimeSeconds = m_impl->timeline.Current_s();
+    m_impl->cameraAcquisitionIndex = 0;
+    m_impl->cameraAcquisitionTimeSeconds = m_impl->timeline.Current_s();
+    m_impl->cameraCapturePending = m_impl->cameraConfig.enabled;
+    m_impl->cameraCaptureRecorded = false;
+    m_impl->cameraCaptureCompleted = false;
+    // The AE/AWB loop restarts from the authored manual values; the zeroed
+    // statistics buffer is a valid (empty) measurement, so the loop may run.
+    m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
+    m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
+    m_impl->cameraHostState = camera::CaptureState{};
+    return Result<void, String>::Ok();
+}
+
+CameraHistoryStatus ExternalRenderContext::GetCameraHistoryStatus() const {
+    CameraHistoryStatus status;
+    const auto& s = m_impl->cameraScheduler;
+    status.epoch = s.historyEpoch;
+    status.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+    status.frameTimeSeconds = m_impl->cameraAcquisitionTimeSeconds;
+    status.historyReset = s.historyResetPending;
+    status.lastResetReason = s.historyResetReason;
+    // The AE/AWB feedback the next committed acquisition will consume
+    // (cameraHostState.next*); zero exposure means fresh state, i.e. the
+    // next acquisition starts from the authored manual values.
+    status.nextExposureSeconds = m_impl->cameraHostState.nextExposureSeconds;
+    status.nextAnalogGain = m_impl->cameraHostState.nextAnalogGain;
+    status.nextWhiteBalance = m_impl->cameraHostState.nextWhiteBalance;
+    return status;
+}
+
+Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
+    if (!m_impl->cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (auto ready = m_impl->EnsureCameraResources(); !ready) return ready;
+
+    Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String> recorded =
+        Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String>::Err(
+            "camera history checkpoint was not recorded");
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                    [&](VkCommandBuffer cmd) {
+        recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(cmd);
+    });
+    if (!recorded) return Result<void, String>::Err(recorded.error());
+
+    auto& s = m_impl->cameraScheduler;
+    // The host half of the record is the feedback carrier: the AE/AWB next*
+    // fields stay exactly as the committed ticks left them, so a restore
+    // rewinds the closed loop and a replayed tick sequence reproduces the
+    // original feedback bit for bit.
+    m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+    m_impl->cameraHostState.frameTimeSeconds =
+        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.historyEpoch = s.historyEpoch;
+
+    ExternalRenderContext::Impl::CameraHistoryRecord record;
+    record.gpu = *recorded;
+    record.gpu.historyEpoch = s.historyEpoch;
+    record.host = m_impl->cameraHostState;
+    // Depth one: the newest checkpoint wins.
+    m_impl->cameraHistoryStack.clear();
+    m_impl->cameraHistoryStack.push_back(std::move(record));
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
+    if (m_impl->cameraHistoryStack.empty())
+        return Result<void, String>::Err(
+            "no camera history checkpoint has been recorded");
+    ExternalRenderContext::Impl::CameraHistoryRecord record =
+        std::move(m_impl->cameraHistoryStack.back());
+    m_impl->cameraHistoryStack.pop_back();
+    if (!m_impl->cameraGpuPipeline)
+        return Result<void, String>::Err(
+            "camera history checkpoint cannot restore without the GPU camera "
+            "pipeline");
+
+    Result<void, String> restored = Result<void, String>::Ok();
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                    [&](VkCommandBuffer cmd) {
+        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(
+            record.gpu, cmd);
+    });
+    if (!restored) return restored;
+    m_impl->cameraHostState = record.host;
+    // The replayed ticks re-run the controller from the restored feedback,
+    // consuming the restored statistics buffer, and the effective config is
+    // pushed to the device again on the next record.
+    m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
+    m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
+
+    auto& s = m_impl->cameraScheduler;
+    // A restore rewinds history, so the epoch moves on and the reason is
+    // recorded for GetCameraHistoryStatus. The restore is applied
+    // synchronously, though: unlike a timeline scrub there is nothing left
+    // pending, and a pending reset on the next RenderFrame would discard
+    // the state this call just restored.
+    s.historyEpoch += 1;
+    s.historyResetPending = false;
+    s.historyResetReason = "checkpoint restore";
+    s.hasCommittedAcquisition = false;
+    s.lastCommittedAcquisitionTime = 0.0;
+    if (s.drivesAcquisition) {
+        // The scheduler resumes at the checkpoint's tick: replaying it is a
+        // same-index re-record, and the slots after it advance normally.
+        s.nextAcquisitionIndex = record.host.acquisitionIndex;
+        s.nextAcquisitionTimeSeconds = record.host.frameTimeSeconds;
+    }
+    // The explicit path resumes at the checkpoint's exit as well: the next
+    // queued acquisition may re-record the checkpoint's tick or advance from
+    // it, both of which the restored GPU state accepts.
+    m_impl->cameraAcquisitionIndex = record.host.acquisitionIndex;
+    m_impl->cameraAcquisitionTimeSeconds = record.host.frameTimeSeconds;
+    m_impl->cameraCapturePending = false;
+    m_impl->cameraCaptureRecorded = false;
+    m_impl->cameraCaptureCompleted = true;
+    m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+    m_impl->cameraHostState.frameTimeSeconds =
+        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.historyEpoch = s.historyEpoch;
+    // Per-tick progressive accumulation starts over on replay: sampleIndex
+    // 0 overwrites the measurement image, so a replayed tick converges to
+    // the identical average rather than continuing the discarded run's.
+    m_impl->cameraStratumSampleCounts.fill(0);
+    m_impl->cameraStratumRecordedAcquisition =
+        std::numeric_limits<u64>::max();
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::WarmUpCamera(f64 seconds) {
+    if (!m_impl->cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    const f64 period = m_impl->cameraConfig.readout.framePeriodSeconds;
+    if (!std::isfinite(seconds) || seconds < 0.0)
+        return Result<void, String>::Err(
+            "camera warmup seconds must be finite and nonnegative");
+    if (!std::isfinite(period) || period <= 0.0)
+        return Result<void, String>::Err(
+            "camera warmup frame period must be finite and positive");
+    const f64 now = m_impl->cameraAcquisitionTimeSeconds;
+    if (!std::isfinite(now))
+        return Result<void, String>::Err(
+            "camera warmup needs a finite current frame time");
+    // Same grid as the offline CPU reference (camera::WarmUpCamera): the
+    // synthetic acquisitions sit on the frame grid that ends one period
+    // below `now`, so the first real acquisition afterwards measures a full
+    // period of elapsed history. A clamped step lands on the same instant as
+    // its predecessor: it moves the index and the noise streams, not the
+    // thermal state.
+    const u64 steps = static_cast<u64>(std::llround(seconds / period));
+    if (steps == 0) return Result<void, String>::Ok();
+    const f64 start = std::max(now - static_cast<f64>(steps) * period, 0.0);
+    for (u64 i = 0; i < steps; ++i) {
+        const f64 nominal = now - static_cast<f64>(steps) * period +
+                            static_cast<f64>(i) * period;
+        const f64 time = std::max(nominal, start);
+        const bool havePrior = m_impl->cameraCaptureCompleted ||
+                               m_impl->cameraCaptureRecorded;
+        const u64 index = havePrior ? m_impl->cameraAcquisitionIndex + 1
+                                    : m_impl->cameraAcquisitionIndex;
+        auto queued = QueueCameraAcquisition(index, time);
+        if (!queued) return queued;
+        Result<void, String> recorded = Result<void, String>::Ok();
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                        [&](VkCommandBuffer cmd) {
+            recorded = RecordQueuedCameraAcquisition(cmd);
+        });
+        if (!recorded) return recorded;
+        auto completed = CompleteQueuedCameraAcquisition();
+        if (!completed) return completed;
+    }
+    m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+    m_impl->cameraHostState.frameTimeSeconds =
+        m_impl->cameraAcquisitionTimeSeconds;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> ExternalRenderContext::AdvanceCameraTo(f64 timeSeconds) {
+    if (!m_impl->cameraConfig.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (!std::isfinite(timeSeconds))
+        return Result<void, String>::Err(
+            "camera advance needs a finite frame time");
+    const bool havePrior = m_impl->cameraCaptureCompleted ||
+                           m_impl->cameraCaptureRecorded;
+    const u64 index = havePrior ? m_impl->cameraAcquisitionIndex + 1
+                                : m_impl->cameraAcquisitionIndex;
+    auto queued = QueueCameraAcquisition(index, timeSeconds);
+    if (!queued) return queued;
+    Result<void, String> recorded = Result<void, String>::Ok();
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                    [&](VkCommandBuffer cmd) {
+        recorded = RecordQueuedCameraAcquisition(cmd);
+    });
+    if (!recorded) return recorded;
+    auto completed = CompleteQueuedCameraAcquisition();
+    if (!completed) return completed;
+    m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+    m_impl->cameraHostState.frameTimeSeconds =
+        m_impl->cameraAcquisitionTimeSeconds;
     return Result<void, String>::Ok();
 }
 
@@ -3858,7 +4139,114 @@ CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
         timing.postMs = std::max(0.0f, timing.fullMs - timing.traceMs);
         timing.valid = timing.traceMs > 0.0f && timing.fullMs >= timing.traceMs;
     }
+    // Per-pass breakdown from the camera pipeline's seven stamps. Never
+    // blocks: a frame still in flight leaves the previous values standing.
+    if (m_impl->cameraTimingPool != VK_NULL_HANDLE) {
+        std::array<u64, 14> results{};
+        const VkResult resolved = vkGetQueryPoolResults(
+            m_impl->device, m_impl->cameraTimingPool, 0,
+            rendercore::GpuCameraPipeline::kTimingQueryCount,
+            results.size() * sizeof(u64), results.data(), 2 * sizeof(u64),
+            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        bool available = resolved == VK_SUCCESS;
+        for (u32 i = 0; available && i < 7; ++i)
+            available = results[2 * i + 1] != 0;
+        if (available) {
+            const f64 period = m_impl->cameraTimestampPeriodNs;
+            auto& timing = m_impl->lastCameraGpuTimings;
+            const auto span = [&](u32 from, u32 to) {
+                return static_cast<f32>(
+                    (results[2 * to] - results[2 * from]) * period / 1e6);
+            };
+            timing.dynamicMs = std::max(0.0f, span(0, 1));
+            timing.psfMs = std::max(0.0f, span(1, 2));
+            timing.detectorMs = std::max(0.0f, span(2, 3));
+            // Stamps 3..4 bracket the full M4-3 ISP (statistics, CDF,
+            // demosaic, color, display); stamps 4..5 bracket the M4-4 HSV
+            // pass (back to back when HSV is off, so hsvMs reads ~0).
+            timing.ispMs = std::max(0.0f, span(3, 4));
+            timing.hsvMs = std::max(0.0f, span(4, 5));
+        }
+    }
     return m_impl->lastCameraGpuTimings;
+}
+
+DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() const {
+    m_impl->lastDynamicReport = DynamicExposureReport{};
+    auto& report = m_impl->lastDynamicReport;
+    if (!m_impl->cameraCaptureCompleted || !m_impl->cameraGpuPipeline ||
+        m_impl->cameraLastAcquisitionSamples == 0u)
+        return report;
+
+    // Both counter sets are read back synchronously; the call must happen
+    // between submitted frames, never between record and submit.
+    std::array<u32, 4> raygenCounts{};
+    bool haveRaygen = false;
+    if (m_impl->cameraDynamicCounterBuffer &&
+        m_impl->cameraDynamicCounterBuffer->IsValid()) {
+        GpuBuffer staging(m_impl->contextAdapter->GetAllocator(),
+                          sizeof(raygenCounts), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                          VMA_MEMORY_USAGE_GPU_TO_CPU);
+        if (staging.IsValid()) {
+            CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                            [&](VkCommandBuffer cmd) {
+                VkBufferMemoryBarrier ready{};
+                ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+                ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                ready.buffer = m_impl->cameraDynamicCounterBuffer->GetHandle();
+                ready.offset = 0;
+                ready.size = VK_WHOLE_SIZE;
+                vkCmdPipelineBarrier(cmd,
+                                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                     0, nullptr, 1, &ready, 0, nullptr);
+                VkBufferCopy copy{};
+                copy.size = sizeof(raygenCounts);
+                vkCmdCopyBuffer(cmd,
+                                m_impl->cameraDynamicCounterBuffer->GetHandle(),
+                                staging.GetHandle(), 1, &copy);
+            });
+            if (const void* data = staging.Map()) {
+                std::memcpy(raygenCounts.data(), data, sizeof(raygenCounts));
+                staging.Unmap();
+                haveRaygen = true;
+            }
+        }
+    }
+    const auto dynamicCounts = m_impl->cameraGpuPipeline->ReadDynamicCounters();
+    const bool haveDynamic = dynamicCounts.has_value();
+
+    const f64 pixels = static_cast<f64>(m_impl->cameraConfig.optics.sensorWidthPx) *
+                       m_impl->cameraConfig.optics.sensorHeightPx;
+    const f64 samples = static_cast<f64>(
+        std::max(1u, m_impl->cameraLastAcquisitionSamples));
+    const f64 perPixelSample = pixels * samples;
+    if (haveRaygen) {
+        report.transparentFraction =
+            std::min(1.0, static_cast<f64>(raygenCounts[0]) / perPixelSample);
+        const f64 specular =
+            std::min(1.0, static_cast<f64>(raygenCounts[1]) / perPixelSample);
+        // View-dependent pixels are the ones a depth reprojection between
+        // strata cannot vouch for: disoccluded, specular, or transparent.
+        const f64 disoccluded = haveDynamic
+            ? static_cast<f64>((*dynamicCounts)[0]) / pixels : 0.0;
+        report.viewDependentFraction = std::min(
+            1.0, disoccluded + specular + report.transparentFraction);
+    }
+    if (haveDynamic)
+        report.disoccludedFraction =
+            std::min(1.0, static_cast<f64>((*dynamicCounts)[0]) / pixels);
+    report.timeSampleCoverage =
+        static_cast<f64>(m_impl->cameraLastStrataCount) /
+        std::clamp<u32>(m_impl->cameraConfig.quality.gpuTimePositions, 1u,
+                        rendercore::kCameraTimeStrataMax);
+    report.objectMotionApproximation = m_impl->cameraLastObjectMotion;
+    report.strataCount = m_impl->cameraLastStrataCount;
+    report.valid = true;
+    return report;
 }
 
 Result<camera::CameraOutput, String>
@@ -3945,6 +4333,14 @@ ExternalRenderContext::CaptureCameraProducts() {
             std::to_string(config.randomSeed);
         product.image.metadata["camera_effective_random_seed"] =
             std::to_string(camera::DeviceRandomSeed(config));
+        if (m_impl->cameraLastStrataCount > 1) {
+            // The band product integrates a moving exposure from T time
+            // strata reprojected through the anchor depth: a preview
+            // approximation, not the CPU reference's continuous integral.
+            product.image.metadata["camera_dynamic_approximation"] =
+                "time_strata=" +
+                std::to_string(m_impl->cameraLastStrataCount);
+        }
         return product;
     };
 
@@ -3976,8 +4372,15 @@ ExternalRenderContext::CaptureCameraProducts() {
         result.correctedDeviceSignal = std::move(corrected.value());
     }
     if (config.products.display) {
-        auto display = makeProduct(outputs.display,
-            descriptor(camera::SignalKind::DevicePreviewSrgb, "encoded sRGB"));
+        // In the persistent-Clahe mode the on-screen display is the CLAHE
+        // pipeline's output, not the camera chain's grey scalar; export what
+        // the viewer sees.
+        const GpuImage* displaySource =
+            (m_impl->CameraClahePersistent() && m_impl->displayImage)
+                ? m_impl->displayImage.get()
+                : outputs.display;
+        auto display = makeProduct(displaySource,
+            descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
         if (!display) return Result<camera::CameraOutput, String>::Err(display.error());
         result.display = std::move(display.value());
     }
@@ -4031,18 +4434,30 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
         return Result<Image, String>::Err("Render context not ready");
     }
 
-    // Determine source image: priority displayImage → sensorImage → outputImage
-    VkImage sourceImage = m_impl->outputImage->GetImage();
+    // Determine source image: priority displayImage (CLAHE) -> camera display
+    // -> outputImage. Each source carries its own extent: the CLAHE image
+    // sits at the CLAHE input extent and the camera product at the physical
+    // sensor array extent, which need not match the render extent.
+    const GpuImage* sourceImage = m_impl->outputImage.get();
+    u32 sourceWidth = m_impl->width;
+    u32 sourceHeight = m_impl->height;
 
     // Priority 1: CLAHE output (includes all effects)
-    if (m_impl->displayParams.enabled && m_impl->claheInitialized && m_impl->displayImage) {
-        sourceImage = m_impl->displayImage->GetImage();
+    if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+        m_impl->claheInitialized && m_impl->displayImage &&
+        m_impl->ClaheInputReady()) {
+        sourceImage = m_impl->displayImage.get();
+        const auto extent = m_impl->ClaheInputExtent();
+        sourceWidth = extent.width;
+        sourceHeight = extent.height;
         QL_LOG_DEBUG("CaptureDisplayImage: Using displayImage (CLAHE enabled)");
     }
-    // Priority 2: Sensor output (includes sensor effects)
-    else if (m_impl->gpuSensorEnabled && m_impl->sensorInitialized && m_impl->sensorImage) {
-        sourceImage = m_impl->sensorImage->GetImage();
-        QL_LOG_DEBUG("CaptureDisplayImage: Using sensorImage (GPU sensor enabled)");
+    // Priority 2: Camera display product (physical sensor extent)
+    else if (const GpuImage* camera = m_impl->CameraDisplayImage()) {
+        sourceImage = camera;
+        sourceWidth = m_impl->cameraConfig.optics.sensorWidthPx;
+        sourceHeight = m_impl->cameraConfig.optics.sensorHeightPx;
+        QL_LOG_DEBUG("CaptureDisplayImage: Using camera display (camera enabled)");
     }
     // Priority 3: Raw output
     else {
@@ -4052,14 +4467,14 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // Read back the appropriate image using CommandHelper
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *m_impl->contextAdapter,
-        sourceImage,
+        sourceImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
-        m_impl->width,
-        m_impl->height
+        sourceWidth,
+        sourceHeight
     );
 
     // Create Image from pixel data
-    Image displayImage(m_impl->width, m_impl->height, 4);  // RGBA
+    Image displayImage(sourceWidth, sourceHeight, 4);  // RGBA
     displayImage.data = std::move(pixels);
     displayImage.channelNames = {"R", "G", "B", "A"};
 
@@ -4411,13 +4826,35 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
         return image;
     };
     try {
-        cameraMeasurementImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
+        cameraMeasurementImage = std::make_unique<GpuImage>(
+            allocator, device, physicalW, physicalH,
+            VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax,
+            0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+        cameraMeasurementDepthImage = std::make_unique<GpuImage>(
+            allocator, device, physicalW, physicalH, VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax,
+            0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+        CommandHelper::TransitionImageLayoutImmediate(
+            *contextAdapter, cameraMeasurementImage->GetImage(),
+            VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL, 1u, rendercore::kCameraTimeStrataMax);
+        CommandHelper::TransitionImageLayoutImmediate(
+            *contextAdapter, cameraMeasurementDepthImage->GetImage(),
+            VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_GENERAL, 1u, rendercore::kCameraTimeStrataMax);
         cameraBaselineImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
         cameraDepthImage = makeImage(VK_FORMAT_R32_SFLOAT);
     } catch (const std::exception& e) {
         return Result<void, String>::Err(
             String("camera image allocation failed: ") + e.what());
     }
+    if (!cameraMeasurementImage->IsValid() ||
+        !cameraMeasurementDepthImage->IsValid())
+        return Result<void, String>::Err("camera image allocation failed");
     if (auto baked = UpdateCameraAtmosphere(); !baked)
         return baked;
     const auto encoded = camera::EncodeCameraResponseGpu(
@@ -4430,6 +4867,19 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     cameraResponseBuffer->Upload(encoded.value().data(), bytes);
     pipeline->BindCameraMeasurementImage(*cameraMeasurementImage);
     pipeline->BindCameraResponseBuffer(*cameraResponseBuffer);
+    pipeline->BindCameraMeasurementDepthImage(*cameraMeasurementDepthImage);
+    cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(
+        allocator, 4u * sizeof(u32),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
+    if (!cameraDynamicCounterBuffer->IsValid())
+        return Result<void, String>::Err(
+            "camera dynamic counter allocation failed");
+    CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0,
+                        VK_WHOLE_SIZE, 0);
+    });
+    pipeline->BindCameraDynamicCounterBuffer(*cameraDynamicCounterBuffer);
     pipeline->BindCameraDepthImage(*cameraDepthImage);
     pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
     pipeline->BindCameraObserverDepthImage(*cameraDepthImage);
@@ -4449,17 +4899,39 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
         return configured;
     cameraGpuPipeline = std::move(gpu.value());
+    if (cameraTimingPool != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(device, cameraTimingPool, nullptr);
+        cameraTimingPool = VK_NULL_HANDLE;
+    }
+    VkQueryPoolCreateInfo timingInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    timingInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    timingInfo.queryCount = rendercore::GpuCameraPipeline::kTimingQueryCount;
+    if (vkCreateQueryPool(device, &timingInfo, nullptr,
+                          &cameraTimingPool) != VK_SUCCESS)
+        return Result<void, String>::Err("cannot create camera timing pool");
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(contextAdapter->GetPhysicalDevice(),
+                                  &properties);
+    cameraTimestampPeriodNs = static_cast<f64>(properties.limits.timestampPeriod);
+    cameraStratumSampleCounts.fill(0);
+    cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
     cameraResourcesDirty = false;
     cameraCaptureCompleted = false;
     return Result<void, String>::Ok();
 }
 
 Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
-    SpectralMode mode, f64 wavelengthNm) const {
+    SpectralMode mode, f64 wavelengthNm, f64 timeSeconds) const {
     Camera poseCamera = camera;
+    // NaN means "the committed acquisition time"; explicit times serve the
+    // time-stratified trace, where each layer poses the camera at its own
+    // instant inside the exposure window.
+    const f64 poseTime = std::isnan(timeSeconds)
+                             ? cameraAcquisitionTimeSeconds
+                             : timeSeconds;
     if (!cameraConfig.motion.keys.empty()) {
         const auto pose = camera::CameraPoseAt(
-            cameraConfig.motion, cameraAcquisitionTimeSeconds);
+            cameraConfig.motion, poseTime);
         if (!pose) return Result<CameraData, String>::Err(pose.error());
         poseCamera = Camera(
             glm::vec3(static_cast<f32>(pose.value().position[0]),
@@ -4491,22 +4963,202 @@ Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
     return data;
 }
 
+Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
+    VkCommandBuffer cmd) {
+    auto& s = cameraScheduler;
+    if (!s.drivesAcquisition) {
+        s.drivesAcquisition = true;
+        // Continue the index from the explicit path if a host queued
+        // acquisitions before the viewport took over; GpuCameraPipeline
+        // requires monotonic ticks.
+        s.nextAcquisitionIndex = cameraAcquisitionIndex;
+        s.nextAcquisitionTimeSeconds = timeline.Current_s();
+    }
+
+    if (s.historyResetPending) {
+        // Applied here, between frames: the reset discards GPU detector
+        // history, which is only safe once submitted work has drained. The
+        // reset frame records no acquisition.
+        if (cameraGpuPipeline) cameraGpuPipeline->ResetState();
+        s.historyResetPending = false;
+        s.historyEpoch += 1;
+        s.hasCommittedAcquisition = false;
+        s.lastCommittedAcquisitionTime = 0.0;
+        cameraAcquisitionIndex = 0;
+        cameraCapturePending = false;
+        cameraCaptureRecorded = false;
+        cameraCaptureCompleted = false;
+        s.nextAcquisitionIndex = 0;
+        s.nextAcquisitionTimeSeconds = timeline.Current_s();
+        // The detector history is gone, so the AE/AWB feedback is too: the
+        // next epoch starts from the authored manual values. The zeroed
+        // statistics buffer is a valid (empty) measurement.
+        cameraAutoControlDue = true;
+        cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
+        cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
+        cameraHostState = camera::CaptureState{};
+        return Result<bool, String>(false);
+    }
+
+    const f64 now = timeline.Current_s();
+    if (now + 1e-12 >= s.nextAcquisitionTimeSeconds) {
+        // The clock reached the next scheduled slot: pose the scene at the
+        // slot and commit one acquisition there.
+        const f64 slot = s.nextAcquisitionTimeSeconds;
+        if (auto moved = owner->SetTimelineTime(slot); !moved) {
+            return Result<bool, String>(
+                typename Result<bool, String>::Err(moved.error()));
+        }
+        cameraAcquisitionIndex = s.nextAcquisitionIndex;
+        cameraAcquisitionTimeSeconds = slot;
+        cameraCapturePending = true;
+        cameraCaptureRecorded = false;
+        if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
+            cameraCapturePending = false;
+            return Result<bool, String>(
+                typename Result<bool, String>::Err(recorded.error()));
+        }
+        cameraCapturePending = false;
+        cameraCaptureRecorded = false;
+        cameraCaptureCompleted = true;
+        // The committed tick's statistics wait on the device for the loop.
+        cameraAutoControlDue = true;
+        s.nextAcquisitionIndex += 1;
+        s.nextAcquisitionTimeSeconds = slot + s.framePeriodSeconds;
+        s.hasCommittedAcquisition = true;
+        s.lastCommittedAcquisitionTime = slot;
+        return Result<bool, String>(true);
+    }
+
+    if (s.hasCommittedAcquisition) {
+        // Same tick, more samples: convergence without state advancement.
+        // The acquisition keeps the committed index and time; the scene pose
+        // is wherever the host left the clock.
+        cameraCapturePending = true;
+        cameraCaptureRecorded = false;
+        if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
+            cameraCapturePending = false;
+            return Result<bool, String>(
+                typename Result<bool, String>::Err(recorded.error()));
+        }
+        cameraCapturePending = false;
+        cameraCaptureRecorded = false;
+        cameraCaptureCompleted = true;
+    }
+    return Result<bool, String>(false);
+}
+
+camera::CameraConfig ExternalRenderContext::Impl::EffectiveCameraConfig() const {
+    camera::CameraConfig effective = cameraConfig;
+    const camera::IspConfig& isp = cameraConfig.isp;
+    const bool fresh = cameraHostState.nextExposureSeconds <= 0.0;
+    if (isp.autoExposure && !fresh) {
+        effective.readout.exposureSeconds = cameraHostState.nextExposureSeconds;
+        if (cameraHostState.nextAnalogGain > 0.0)
+            effective.readout.analogGain = cameraHostState.nextAnalogGain;
+    }
+    if (isp.autoWhiteBalance && !fresh)
+        effective.isp.whiteBalance = cameraHostState.nextWhiteBalance;
+    return effective;
+}
+
+void ExternalRenderContext::Impl::MaybeRunCameraAutoControl() {
+    if (!cameraConfig.isp.autoExposure && !cameraConfig.isp.autoWhiteBalance)
+        return;
+    if (!cameraAutoControlDue || !cameraGpuPipeline) return;
+    if (cameraAcquisitionIndex == cameraAutoLastAcquisition) return;
+    cameraAutoControlDue = false;
+    cameraAutoLastAcquisition = cameraAcquisitionIndex;
+    RunCameraAutoControl();
+}
+
+void ExternalRenderContext::Impl::RunCameraAutoControl() {
+    const camera::IspConfig& isp = cameraConfig.isp;
+    const bool photon =
+        cameraConfig.device.detector == camera::DetectorKind::Photon;
+    if (!photon) {
+        // A thermal detector responds to absorbed power, not scene luminance:
+        // AE has no physical meaning there, exactly as on the CPU chain.
+        if (!cameraAutoThermalNoted) {
+            cameraAutoThermalNoted = true;
+            QL_LOG_WARN(
+                "camera auto_exposure/auto_white_balance ignored: the thermal "
+                "detector responds to absorbed power, not scene luminance");
+        }
+        return;
+    }
+    const auto stats = cameraGpuPipeline->ReadIspStats();
+    if (!stats) {
+        QL_LOG_WARN("camera auto control cannot read statistics: {}",
+                    stats.error());
+        return;
+    }
+    const auto& measured = stats.value();
+    camera::AutoControlState previous;
+    const bool fresh = cameraHostState.nextExposureSeconds <= 0.0;
+    previous.exposure = fresh ? cameraConfig.readout.exposureSeconds
+                              : cameraHostState.nextExposureSeconds;
+    previous.analogGain = fresh ? cameraConfig.readout.analogGain
+                                : cameraHostState.nextAnalogGain;
+    previous.whiteBalance = fresh ? cameraConfig.isp.whiteBalance
+                                  : cameraHostState.nextWhiteBalance;
+    camera::AutoControlInput input;
+    input.lumaMean = measured.meanValue;
+    const f64 total = static_cast<f64>(measured.saturatedCount) +
+                      static_cast<f64>(measured.unsaturatedCount);
+    input.saturatedFraction = total > 0.0
+        ? static_cast<f64>(measured.saturatedCount) / total : 0.0;
+    for (u32 c = 0; c < 3u; ++c)
+        input.channelMeans[c] = measured.channelCounts[c] > 0u
+            ? static_cast<f64>(measured.channelSums[c]) /
+                  static_cast<f64>(measured.channelCounts[c])
+            : 0.0;
+    const camera::AutoControlState next = camera::StepAutoControl(
+        isp, previous, input, isp.autoExposure, isp.autoWhiteBalance);
+    cameraHostState.nextExposureSeconds = next.exposure;
+    cameraHostState.nextAnalogGain = next.analogGain;
+    cameraHostState.nextWhiteBalance = next.whiteBalance;
+}
+
+Result<void, String> ExternalRenderContext::Impl::RecordCameraDisplayReprocess(
+    VkCommandBuffer cmd) {
+    if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
+        return Result<void, String>::Err(
+            "camera display reprocess needs the GPU camera pipeline");
+    return cameraGpuPipeline->RecordDisplayReprocess(
+        cmd, EffectiveCameraConfig());
+}
+
 Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     VkCommandBuffer cmd) {
     if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
     if (auto ready = EnsureCameraResources(); !ready) return ready;
-    const bool fastRgb = cameraConfig.inputKind ==
+    // M4-4: settle the previous committed tick's AE/AWB feedback first. The
+    // statistics readback is queue-ordered after the last submitted frame,
+    // so the feedback the new tick consumes always describes the tick that
+    // came before it. A same-tick re-record finds the index already marked
+    // and leaves the loop alone.
+    MaybeRunCameraAutoControl();
+    const camera::CameraConfig captureConfig = EffectiveCameraConfig();
+    if (cameraAcquisitionIndex != cameraAutoAppliedAcquisition) {
+        if (auto applied = cameraGpuPipeline->ApplyEffectiveConfig(captureConfig);
+            !applied)
+            return applied;
+        cameraAutoAppliedAcquisition = cameraAcquisitionIndex;
+    }
+    // The committed acquisition's operating point becomes the previous value
+    // of the next controller step, exactly as CpuCameraPipeline's write-back.
+    // From the first capture on, the state is no longer fresh.
+    cameraHostState.nextExposureSeconds = captureConfig.readout.exposureSeconds;
+    cameraHostState.nextAnalogGain = captureConfig.readout.analogGain;
+    cameraHostState.nextWhiteBalance = captureConfig.isp.whiteBalance;
+    const bool fastRgb = captureConfig.inputKind ==
         camera::CameraInputKind::FastRgbApproximation;
     const SpectralMode captureMode = fastRgb
         ? SpectralMode::RGB : SpectralMode::CameraMeasurement;
-    const auto pose = CameraDataForCapture(
-        captureMode,
-        0.5 * (cameraConfig.device.effectiveMinNm +
-               cameraConfig.device.effectiveMaxNm));
-    if (!pose) return Result<void, String>::Err(pose.error());
-    pipeline->SetCameraData(pose.value());
-    pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
+    const f64 centerNm = 0.5 * (cameraConfig.device.effectiveMinNm +
+                                cameraConfig.device.effectiveMaxNm);
     const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);
     const u32 randomSeed = camera::CounterRandomU32(
         effectiveSeed, 0u, cameraAcquisitionIndex,
@@ -4523,23 +5175,113 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     // convergence knob is the viewport SPP. Reusing the CPU default (32) here
     // would launch 32 full 1080p traces for one preview acquisition.
     const u32 spectralSamples = fastRgb ? 1u : std::max(spp, 1u);
-    if (fastRgb) pipeline->SetUseCameraObserverSet(true);
-    for (u32 sample = 0; sample < spectralSamples; ++sample) {
-        pipeline->SetSamplingParams(
-            static_cast<u32>(cameraAcquisitionIndex), sample, spectralSamples,
-            randomSeed ^ (sample * 0x9e3779b9u), effectiveSeed);
-        pipeline->TraceRays(cmd, physicalW, physicalH);
-        if (sample + 1u < spectralSamples) {
-            VkMemoryBarrier accumulation{};
-            accumulation.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            accumulation.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-            accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                         VK_ACCESS_SHADER_WRITE_BIT;
-            vkCmdPipelineBarrier(
-                cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
-                1, &accumulation, 0, nullptr, 0, nullptr);
+
+    // M4-1 temporal stratification: cut the exposure window into T strata and
+    // trace each batch of samples at its own instant, the scene posed by the
+    // timeline and the camera by the motion track at that instant. The
+    // viewport pose is restored when the loop ends, on every exit path.
+    u32 strataCount = 1;
+    std::vector<f64> stratumTimes;
+    if (!fastRgb) {
+        const u32 requested = std::clamp<u32>(
+            cameraConfig.quality.gpuTimePositions, 1u,
+            rendercore::kCameraTimeStrataMax);
+        const bool anythingMoves = !cameraConfig.motion.keys.empty() ||
+                                   timeline.HasMotion();
+        strataCount = anythingMoves
+                          ? std::min<u32>(requested, spectralSamples)
+                          : 1u;
+        if (cameraStratumRecordedAcquisition != cameraAcquisitionIndex) {
+            cameraStratumSampleCounts.fill(0);
+            cameraStratumRecordedAcquisition = cameraAcquisitionIndex;
         }
+        // Zero the transparent/specular counters for this acquisition.
+        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0,
+                        VK_WHOLE_SIZE, 0);
+        VkBufferMemoryBarrier zeroed{};
+        zeroed.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        zeroed.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        zeroed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                               VK_ACCESS_SHADER_WRITE_BIT;
+        zeroed.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        zeroed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        zeroed.buffer = cameraDynamicCounterBuffer->GetHandle();
+        zeroed.offset = 0;
+        zeroed.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
+                             0, nullptr, 1, &zeroed, 0, nullptr);
+    }
+    stratumTimes = camera::ExposureStratumTimes(
+        cameraAcquisitionTimeSeconds, captureConfig.readout.exposureSeconds,
+        strataCount);
+    const f64 restoreTime = timeline.Current_s();
+    struct TimelineRestore {
+        Impl* self;
+        f64 time;
+        ~TimelineRestore() { self->ApplyTimelinePose(time); }
+    } restoreGuard{this, restoreTime};
+
+    if (fastRgb) pipeline->SetUseCameraObserverSet(true);
+    pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
+    std::array<rendercore::DynamicLayerCamera,
+               rendercore::kCameraTimeStrataMax> layerCameras{};
+    u32 totalTraced = 0;
+    for (u32 stratum = 0; stratum < strataCount; ++stratum) {
+        const f64 stratumTime = stratumTimes[stratum];
+        // Pose the scene directly rather than through SetTimelineTime: the
+        // strata around an acquisition reach back before the committed tick,
+        // which the public scrub path would read as a history-invalidating
+        // rewind (and it would remap the thermal hour, which the trace must
+        // not touch).
+        ApplyTimelinePose(stratumTime);
+        const auto pose = CameraDataForCapture(captureMode, centerNm,
+                                               stratumTime);
+        if (!pose) return Result<void, String>::Err(pose.error());
+        pipeline->SetCameraData(pose.value());
+        pipeline->SetTimeStratum(stratum, strataCount);
+        const auto& cameraData = pose.value();
+        auto& frame = layerCameras[stratum];
+        frame.origin = {cameraData.origin.x, cameraData.origin.y,
+                        cameraData.origin.z, 0.0f};
+        frame.forward = {cameraData.forward.x, cameraData.forward.y,
+                         cameraData.forward.z, 0.0f};
+        frame.right = {cameraData.right.x, cameraData.right.y,
+                       cameraData.right.z, 0.0f};
+        frame.up = {cameraData.up.x, cameraData.up.y, cameraData.up.z, 0.0f};
+        frame.params = {cameraData.fovScale, cameraData.aspectRatio,
+                        static_cast<f32>(stratumTime), 0.0f};
+
+        // Round-robin with the remainder to the earlier strata: each stratum
+        // gets spectralSamples/T paths, one layer of the measurement array
+        // per stratum, averaged progressively there. The running per-layer
+        // count keeps a same-tick re-record converging where the previous
+        // record left off instead of restarting the average.
+        const u32 base = spectralSamples / strataCount;
+        const u32 extra = spectralSamples % strataCount;
+        const u32 stratumSamples = base + (stratum < extra ? 1u : 0u);
+        const u32 running = cameraStratumSampleCounts[stratum];
+        for (u32 sample = 0; sample < stratumSamples; ++sample) {
+            const u32 sampleIndex = running + sample;
+            pipeline->SetSamplingParams(
+                static_cast<u32>(cameraAcquisitionIndex), sampleIndex,
+                stratumSamples,
+                randomSeed ^ (sampleIndex * 0x9e3779b9u), effectiveSeed);
+            pipeline->TraceRays(cmd, physicalW, physicalH);
+            if (sample + 1u < stratumSamples || stratum + 1u < strataCount) {
+                VkMemoryBarrier accumulation{};
+                accumulation.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                accumulation.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                             VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(
+                    cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
+                    1, &accumulation, 0, nullptr, 0, nullptr);
+            }
+        }
+        cameraStratumSampleCounts[stratum] = running + stratumSamples;
+        totalTraced += stratumSamples;
     }
     if (fastRgb) pipeline->SetUseCameraObserverSet(false);
     if (cameraTracePerf) cameraTracePerf->EndFrame(cmd);
@@ -4551,15 +5293,52 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
         1, &barrier, 0, nullptr, 0, nullptr);
+
+    // Object-motion approximation for the report: the mean adjacent-stratum
+    // displacement of the scene's animated nodes, measured on the trajectory
+    // the strata actually traced. Camera-only motion reads 0 here; the
+    // reprojection knows the camera moved because the host tells it.
+    cameraLastObjectMotion = 0.0;
+    if (strataCount > 1 && timeline.HasMotion()) {
+        f64 accumulated = 0.0;
+        u64 pairs = 0;
+        for (const auto& animated : timeline.Animated()) {
+            for (u32 k = 0; k + 1 < strataCount; ++k) {
+                const glm::vec3 a = glm::vec3(
+                    timeline.PoseAt(animated, stratumTimes[k])[3]);
+                const glm::vec3 b = glm::vec3(
+                    timeline.PoseAt(animated, stratumTimes[k + 1])[3]);
+                accumulated += static_cast<f64>(glm::length(b - a));
+                ++pairs;
+            }
+        }
+        if (pairs > 0) cameraLastObjectMotion = accumulated / pairs;
+    }
+
+    rendercore::DynamicExposureInput dynamic;
+    const auto& readoutConfig = captureConfig.readout;
+    const bool rolling = readoutConfig.shutter ==
+                         camera::ShutterKind::Rolling;
+    dynamic.strataRate = cameraMeasurementImage.get();
+    dynamic.strataDepth = cameraMeasurementDepthImage.get();
+    dynamic.layerCameras = layerCameras.data();
+    dynamic.strataCount = strataCount;
+    dynamic.firstRowMidSeconds = cameraAcquisitionTimeSeconds;
+    dynamic.exposureSeconds = readoutConfig.exposureSeconds;
+    dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
+    const rendercore::GpuCameraPipeline::TimingQueries timing{
+        cameraTimingPool, 0u};
     const auto readout = fastRgb
         ? cameraGpuPipeline->RecordFastRgbMeasurement(
               cmd, *cameraBaselineImage, cameraAcquisitionIndex,
               cameraAcquisitionTimeSeconds)
         : cameraGpuPipeline->RecordMeasurement(
               cmd, *cameraMeasurementImage, cameraAcquisitionIndex,
-              cameraAcquisitionTimeSeconds);
+              cameraAcquisitionTimeSeconds, timing, dynamic);
     if (cameraFullPerf) cameraFullPerf->EndFrame(cmd);
     if (!readout) return readout;
+    cameraLastAcquisitionSamples = totalTraced;
+    cameraLastStrataCount = strataCount;
     cameraCaptureRecorded = true;
     return Result<void, String>::Ok();
 }
@@ -4968,11 +5747,14 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
         return;
     }
 
-    // Create display image (same format as outputImage)
+    // Create display image (same format as outputImage) at the CLAHE input
+    // extent: the physical sensor array when the camera is enabled, else the
+    // render extent.
+    const auto claheExtent = ClaheInputExtent();
     displayImage = std::make_unique<GpuImage>(
         allocator,
         device,
-        width, height,
+        claheExtent.width, claheExtent.height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
@@ -5091,1038 +5873,56 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
     QL_LOG_INFO("CLAHE: Compute pipeline created successfully");
 }
 
-// ============================================================================
-// GPU Sensor Pipeline Creation
-// ============================================================================
-
-void ExternalRenderContext::Impl::CreateGPUSensorPipeline() {
-    if (sensorInitialized) return;
-
-    QL_LOG_INFO("Creating GPU sensor compute pipeline...");
-
-    auto device = this->device;
-    auto allocator = contextAdapter->GetAllocator();
-
-    // Helper function to load shader file
-    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) {
-            return {};
-        }
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        if (fileSize == 0 || fileSize % 4 != 0) {
-            return {};
-        }
-        std::vector<u32> code(fileSize / 4);
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), fileSize);
-        return code;
-    };
-
-    // Try multiple paths for shader location
-    auto exeDir = GetExecutableDirectory();
-    std::vector<std::filesystem::path> shaderPaths = {
-        "sensor_radiance_to_electrons.spv",
-        exeDir / "sensor_radiance_to_electrons.spv",
-        "shaders/sensor_radiance_to_electrons.spv",
-        exeDir / "shaders" / "sensor_radiance_to_electrons.spv",
-        "../shaders/sensor_radiance_to_electrons.spv",
-        "src/shaders/sensor_radiance_to_electrons.spv"
-    };
-
-    std::vector<u32> radianceToElectronsCode, poissonNoiseCode, psfBlurHorizontalCode, psfBlurVerticalCode, quantizeToRadianceCode, fpnCode;
-
-    for (const auto& basePath : shaderPaths) {
-        String radiancePath = basePath.string();
-        String poissonPath = radiancePath;
-        String blurHPath = radiancePath;
-        String blurVPath = radiancePath;
-        String quantizePath = radiancePath;
-        String fpnPath = radiancePath;
-
-        size_t pos = radiancePath.find("radiance_to_electrons");
-        if (pos != String::npos) {
-            poissonPath.replace(pos, 21, "poisson_noise");
-            blurHPath.replace(pos, 21, "psf_blur_horizontal");
-            blurVPath.replace(pos, 21, "psf_blur_vertical");
-            quantizePath.replace(pos, 21, "quantize_to_radiance");
-            fpnPath.replace(fpnPath.find("radiance_to_electrons"), 21, "fpn");
-        }
-
-        radianceToElectronsCode = loadShaderFile(radiancePath);
-        if (!radianceToElectronsCode.empty()) {
-            poissonNoiseCode = loadShaderFile(poissonPath);
-            psfBlurHorizontalCode = loadShaderFile(blurHPath);
-            psfBlurVerticalCode = loadShaderFile(blurVPath);
-            quantizeToRadianceCode = loadShaderFile(quantizePath);
-            fpnCode = loadShaderFile(fpnPath);
-
-            if (!poissonNoiseCode.empty() && !psfBlurHorizontalCode.empty() &&
-                !psfBlurVerticalCode.empty() && !quantizeToRadianceCode.empty()) {
-                QL_LOG_DEBUG("GPU Sensor: Loaded shaders from {}", radiancePath);
-                if (fpnCode.empty()) {
-                    QL_LOG_WARN("GPU Sensor: FPN shader not found at {}, FPN will be disabled", fpnPath);
-                }
-                break;
-            }
-        }
-    }
-
-    if (radianceToElectronsCode.empty() || poissonNoiseCode.empty() ||
-        psfBlurHorizontalCode.empty() || psfBlurVerticalCode.empty() ||
-        quantizeToRadianceCode.empty()) {
-        QL_LOG_WARN("GPU Sensor: Could not load shader files, GPU sensor disabled");
+void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
+    if (!claheInitialized || claheDescriptorSet == VK_NULL_HANDLE ||
+        !contextAdapter) {
         return;
     }
-
-    // Create shader modules
-    auto createShaderModule = [device](const std::vector<u32>& code) -> VkShaderModule {
-        VkShaderModuleCreateInfo createInfo{};
-        createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        createInfo.codeSize = code.size() * sizeof(u32);
-        createInfo.pCode = code.data();
-        VkShaderModule module;
-        if (vkCreateShaderModule(device, &createInfo, nullptr, &module) != VK_SUCCESS) {
-            return VK_NULL_HANDLE;
-        }
-        return module;
-    };
-
-    sensorRadianceToElectronsShader = createShaderModule(radianceToElectronsCode);
-    sensorPoissonNoiseShader = createShaderModule(poissonNoiseCode);
-    sensorPsfBlurHorizontalShader = createShaderModule(psfBlurHorizontalCode);
-    sensorPsfBlurVerticalShader = createShaderModule(psfBlurVerticalCode);
-    sensorQuantizeToRadianceShader = createShaderModule(quantizeToRadianceCode);
-    if (!fpnCode.empty()) {
-        sensorFpnShader = createShaderModule(fpnCode);
-    }
-
-    if (sensorRadianceToElectronsShader == VK_NULL_HANDLE ||
-        sensorPoissonNoiseShader == VK_NULL_HANDLE ||
-        sensorPsfBlurHorizontalShader == VK_NULL_HANDLE ||
-        sensorPsfBlurVerticalShader == VK_NULL_HANDLE ||
-        sensorQuantizeToRadianceShader == VK_NULL_HANDLE) {
-        QL_LOG_WARN("GPU Sensor: Failed to create shader modules");
-        return;
-    }
-
-    // Create descriptor set layout
-    // binding 0: inputImage (sampled image or storage image)
-    // binding 1: outputImage (storage image)
-    std::vector<VkDescriptorSetLayoutBinding> bindings(2);
-
-    bindings[0].binding = 0;
-    bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[0].descriptorCount = 1;
-    bindings[0].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    bindings[1].binding = 1;
-    bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    bindings[1].descriptorCount = 1;
-    bindings[1].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-
-    VkDescriptorSetLayoutCreateInfo layoutInfo{};
-    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    layoutInfo.bindingCount = static_cast<u32>(bindings.size());
-    layoutInfo.pBindings = bindings.data();
-
-    if (vkCreateDescriptorSetLayout(device, &layoutInfo, nullptr, &sensorDescriptorSetLayout) != VK_SUCCESS) {
-        QL_LOG_WARN("GPU Sensor: Failed to create descriptor set layout");
-        return;
-    }
-
-    // Create pipeline layout with push constants (max size for all passes)
-    VkPushConstantRange pushConstantRange{};
-    pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    pushConstantRange.offset = 0;
-    pushConstantRange.size = 128;  // Large enough for all pass structures
-
-    VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-    pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    pipelineLayoutInfo.setLayoutCount = 1;
-    pipelineLayoutInfo.pSetLayouts = &sensorDescriptorSetLayout;
-    pipelineLayoutInfo.pushConstantRangeCount = 1;
-    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-
-    if (vkCreatePipelineLayout(device, &pipelineLayoutInfo, nullptr, &sensorPipelineLayout) != VK_SUCCESS) {
-        QL_LOG_WARN("GPU Sensor: Failed to create pipeline layout");
-        return;
-    }
-
-    // Create compute pipelines for each pass
-    auto createComputePipeline = [device, this](VkShaderModule shader) -> VkPipeline {
-        VkPipelineShaderStageCreateInfo stageInfo{};
-        stageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        stageInfo.module = shader;
-        stageInfo.pName = "main";
-
-        VkComputePipelineCreateInfo pipelineInfo{};
-        pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        pipelineInfo.stage = stageInfo;
-        pipelineInfo.layout = sensorPipelineLayout;
-
-        VkPipeline pipeline;
-        if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &pipeline) != VK_SUCCESS) {
-            return VK_NULL_HANDLE;
-        }
-        return pipeline;
-    };
-
-    sensorRadianceToElectronsPipeline = createComputePipeline(sensorRadianceToElectronsShader);
-    sensorPoissonNoisePipeline = createComputePipeline(sensorPoissonNoiseShader);
-    sensorPsfBlurHorizontalPipeline = createComputePipeline(sensorPsfBlurHorizontalShader);
-    sensorPsfBlurVerticalPipeline = createComputePipeline(sensorPsfBlurVerticalShader);
-    sensorQuantizeToRadiancePipeline = createComputePipeline(sensorQuantizeToRadianceShader);
-
-    if (sensorRadianceToElectronsPipeline == VK_NULL_HANDLE ||
-        sensorPoissonNoisePipeline == VK_NULL_HANDLE ||
-        sensorPsfBlurHorizontalPipeline == VK_NULL_HANDLE ||
-        sensorPsfBlurVerticalPipeline == VK_NULL_HANDLE ||
-        sensorQuantizeToRadiancePipeline == VK_NULL_HANDLE) {
-        QL_LOG_WARN("GPU Sensor: Failed to create compute pipelines");
-        return;
-    }
-
-    // Create descriptor pool
-    // 5 passes × 2 bindings = 10, plus FPN pass with 4 bindings = 14 total
-    std::vector<VkDescriptorPoolSize> poolSizes = {
-        {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 14}
-    };
-
-    VkDescriptorPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.poolSizeCount = static_cast<u32>(poolSizes.size());
-    poolInfo.pPoolSizes = poolSizes.data();
-    poolInfo.maxSets = 6;  // 5 existing + 1 FPN
-
-    if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &sensorDescriptorPool) != VK_SUCCESS) {
-        QL_LOG_WARN("GPU Sensor: Failed to create descriptor pool");
-        return;
-    }
-
-    // Create sensor images (same format as outputImage)
-    sensorImage = std::make_unique<GpuImage>(
-        allocator,
+    // Replacing a descriptor-backed image a submitted frame may still read;
+    // configuration changes happen between frames, but a resize or a camera
+    // config change is not guaranteed to.
+    vkDeviceWaitIdle(device);
+    const auto extent = ClaheInputExtent();
+    displayImage = std::make_unique<GpuImage>(
+        contextAdapter->GetAllocator(),
         device,
-        width, height,
+        extent.width, extent.height,
         VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY
     );
-
-    sensorTempImage = std::make_unique<GpuImage>(
-        allocator,
-        device,
-        width, height,
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Transition sensor images to GENERAL layout
     TransitionImageLayoutImmediate(
-        sensorImage->GetImage(),
+        displayImage->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         VK_IMAGE_LAYOUT_UNDEFINED,
         VK_IMAGE_LAYOUT_GENERAL
     );
 
-    TransitionImageLayoutImmediate(
-        sensorTempImage->GetImage(),
-        VK_FORMAT_R32G32B32A32_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,
-        VK_IMAGE_LAYOUT_GENERAL
-    );
-
-    // Allocate descriptor set
-    VkDescriptorSetAllocateInfo allocInfo{};
-    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.descriptorPool = sensorDescriptorPool;
-    allocInfo.descriptorSetCount = 1;
-    allocInfo.pSetLayouts = &sensorDescriptorSetLayout;
-
-    if (vkAllocateDescriptorSets(device, &allocInfo, &sensorDescriptorSet) != VK_SUCCESS) {
-        QL_LOG_WARN("GPU Sensor: Failed to allocate descriptor set");
-        return;
-    }
-
-    // ========================================================================
-    // FPN: Create descriptor set layout (4 bindings), pipeline, and FPN maps
-    // ========================================================================
-    if (sensorFpnShader != VK_NULL_HANDLE) {
-        // FPN descriptor set layout: 4 storage images
-        // binding 0: inputImage (electron image, in)
-        // binding 1: outputImage (electron image, out)
-        // binding 2: prnuMap (PRNU texture)
-        // binding 3: dsnuMap (DSNU texture)
-        std::vector<VkDescriptorSetLayoutBinding> fpnBindings(4);
-        for (u32 i = 0; i < 4; ++i) {
-            fpnBindings[i].binding = i;
-            fpnBindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            fpnBindings[i].descriptorCount = 1;
-            fpnBindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            fpnBindings[i].pImmutableSamplers = nullptr;
-        }
-
-        VkDescriptorSetLayoutCreateInfo fpnLayoutInfo{};
-        fpnLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        fpnLayoutInfo.bindingCount = static_cast<u32>(fpnBindings.size());
-        fpnLayoutInfo.pBindings = fpnBindings.data();
-
-        if (vkCreateDescriptorSetLayout(device, &fpnLayoutInfo, nullptr, &sensorFpnDescriptorSetLayout) != VK_SUCCESS) {
-            QL_LOG_WARN("GPU Sensor: Failed to create FPN descriptor set layout");
-        } else {
-            // FPN pipeline layout
-            VkPushConstantRange fpnPushRange{};
-            fpnPushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-            fpnPushRange.offset = 0;
-            fpnPushRange.size = 128;
-
-            VkPipelineLayoutCreateInfo fpnPipeLayoutInfo{};
-            fpnPipeLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-            fpnPipeLayoutInfo.setLayoutCount = 1;
-            fpnPipeLayoutInfo.pSetLayouts = &sensorFpnDescriptorSetLayout;
-            fpnPipeLayoutInfo.pushConstantRangeCount = 1;
-            fpnPipeLayoutInfo.pPushConstantRanges = &fpnPushRange;
-
-            if (vkCreatePipelineLayout(device, &fpnPipeLayoutInfo, nullptr, &sensorFpnPipelineLayout) != VK_SUCCESS) {
-                QL_LOG_WARN("GPU Sensor: Failed to create FPN pipeline layout");
-            } else {
-                // FPN compute pipeline
-                VkPipelineShaderStageCreateInfo fpnStageInfo{};
-                fpnStageInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-                fpnStageInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-                fpnStageInfo.module = sensorFpnShader;
-                fpnStageInfo.pName = "main";
-
-                VkComputePipelineCreateInfo fpnPipeInfo{};
-                fpnPipeInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-                fpnPipeInfo.stage = fpnStageInfo;
-                fpnPipeInfo.layout = sensorFpnPipelineLayout;
-
-                if (vkCreateComputePipelines(device, VK_NULL_HANDLE, 1, &fpnPipeInfo, nullptr, &sensorFpnPipeline) != VK_SUCCESS) {
-                    QL_LOG_WARN("GPU Sensor: Failed to create FPN compute pipeline");
-                }
-            }
-        }
-
-        // Create FPN map images and allocate FPN descriptor set
-        if (sensorFpnPipeline != VK_NULL_HANDLE) {
-            // PRNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
-            fpnPrnuMap = std::make_unique<GpuImage>(
-                allocator, device,
-                width, height,
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_GPU_ONLY
-            );
-
-            // DSNU map: width x height, R32G32B32A32_SFLOAT (shader reads .r channel)
-            fpnDsnuMap = std::make_unique<GpuImage>(
-                allocator, device,
-                width, height,
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                VMA_MEMORY_USAGE_GPU_ONLY
-            );
-
-            // Transition FPN maps to GENERAL layout
-            TransitionImageLayoutImmediate(
-                fpnPrnuMap->GetImage(),
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_GENERAL
-            );
-            TransitionImageLayoutImmediate(
-                fpnDsnuMap->GetImage(),
-                VK_FORMAT_R32G32B32A32_SFLOAT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_GENERAL
-            );
-
-            // Allocate FPN descriptor set
-            VkDescriptorSetAllocateInfo fpnAllocInfo{};
-            fpnAllocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            fpnAllocInfo.descriptorPool = sensorDescriptorPool;
-            fpnAllocInfo.descriptorSetCount = 1;
-            fpnAllocInfo.pSetLayouts = &sensorFpnDescriptorSetLayout;
-
-            if (vkAllocateDescriptorSets(device, &fpnAllocInfo, &sensorFpnDescriptorSet) != VK_SUCCESS) {
-                QL_LOG_WARN("GPU Sensor: Failed to allocate FPN descriptor set");
-                sensorFpnPipeline = VK_NULL_HANDLE;  // Disable FPN
-            } else {
-                QL_LOG_INFO("GPU Sensor: FPN pipeline and maps created successfully");
-            }
-        }
-    }
-
-    sensorInitialized = true;
-    QL_LOG_INFO("GPU Sensor: Compute pipeline created successfully");
-}
-
-// ============================================================================
-// GPU Sensor: Generate and Upload FPN Maps
-// ============================================================================
-
-void ExternalRenderContext::Impl::GenerateAndUploadFPNMaps() {
-    if (!sensorInitialized || sensorFpnPipeline == VK_NULL_HANDLE) return;
-    if (fpnMapsGenerated) return;
-
-    const auto& params = gpuSensorParams;
-    const u32 width = this->width;
-    const u32 height = this->height;
-    auto allocator = contextAdapter->GetAllocator();
-
-    QL_LOG_INFO("GPU Sensor: Generating FPN maps {}x{} (PRNU sigma={:.2f}%, DSNU sigma={:.1f} e-)",
-                width, height, params.prnuSigma * 100.0f, params.dsnuSigma_e);
-
-    std::mt19937 rng(42);  // Fixed seed for reproducible FPN pattern
-
-    // Helper: 1D Gaussian kernel
-    auto makeGaussianKernel = [](f32 sigma) -> std::vector<f32> {
-        i32 radius = static_cast<i32>(std::ceil(3.0f * sigma));
-        std::vector<f32> kernel(2 * radius + 1);
-        f32 sum = 0.0f;
-        for (i32 i = -radius; i <= radius; ++i) {
-            kernel[i + radius] = std::exp(-0.5f * (i * i) / (sigma * sigma));
-            sum += kernel[i + radius];
-        }
-        for (auto& v : kernel) v /= sum;
-        return kernel;
-    };
-
-    // ---- Generate PRNU map (vertical stripes = per-column) ----
-    // RGBA float data for the full image
-    std::vector<f32> prnuData(width * height * 4, 0.0f);
-
-    if (params.prnuSigma > 1e-6f) {
-        std::normal_distribution<f32> prnuDist(0.0f, params.prnuSigma);
-
-        // Per-column random values
-        std::vector<f32> columnNoise(width);
-        for (u32 x = 0; x < width; ++x) {
-            columnNoise[x] = prnuDist(rng);
-        }
-
-        // Smooth with sigma=8 for wider stripes
-        auto kernel = makeGaussianKernel(8.0f);
-        i32 radius = static_cast<i32>(kernel.size()) / 2;
-        std::vector<f32> smoothed(width);
-        for (u32 x = 0; x < width; ++x) {
-            f32 sum = 0.0f;
-            for (i32 k = -radius; k <= radius; ++k) {
-                i32 xk = std::clamp(static_cast<i32>(x) + k, 0, static_cast<i32>(width) - 1);
-                sum += columnNoise[xk] * kernel[k + radius];
-            }
-            smoothed[x] = sum;
-        }
-
-        // Expand to 2D with 10% pixel-level variation
-        std::normal_distribution<f32> pixelNoise(0.0f, params.prnuSigma * 0.1f);
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                prnuData[(y * width + x) * 4 + 0] = smoothed[x] + pixelNoise(rng);
-            }
-        }
-
-        // Renormalize to target sigma
-        f32 mean = 0.0f;
-        for (u32 i = 0; i < width * height; ++i) mean += prnuData[i * 4];
-        mean /= static_cast<f32>(width * height);
-
-        f32 variance = 0.0f;
-        for (u32 i = 0; i < width * height; ++i) {
-            f32 diff = prnuData[i * 4] - mean;
-            variance += diff * diff;
-        }
-        variance /= static_cast<f32>(width * height);
-        f32 currentSigma = std::sqrt(variance);
-
-        if (currentSigma > 1e-6f) {
-            f32 scale = params.prnuSigma / currentSigma;
-            for (u32 i = 0; i < width * height; ++i) {
-                prnuData[i * 4] = (prnuData[i * 4] - mean) * scale;
-            }
-        }
-    }
-
-    // ---- Generate DSNU map (horizontal stripes = per-row) ----
-    std::vector<f32> dsnuData(width * height * 4, 0.0f);
-
-    if (params.dsnuSigma_e > 1e-6f) {
-        std::normal_distribution<f32> dsnuDist(0.0f, params.dsnuSigma_e);
-
-        // Per-row random values
-        std::vector<f32> rowNoise(height);
-        for (u32 y = 0; y < height; ++y) {
-            rowNoise[y] = dsnuDist(rng);
-        }
-
-        // Smooth with sigma=5 for wider stripes
-        auto kernel = makeGaussianKernel(5.0f);
-        i32 radius = static_cast<i32>(kernel.size()) / 2;
-        std::vector<f32> smoothed(height);
-        for (u32 y = 0; y < height; ++y) {
-            f32 sum = 0.0f;
-            for (i32 k = -radius; k <= radius; ++k) {
-                i32 yk = std::clamp(static_cast<i32>(y) + k, 0, static_cast<i32>(height) - 1);
-                sum += rowNoise[yk] * kernel[k + radius];
-            }
-            smoothed[y] = sum;
-        }
-
-        // Expand to 2D with 10% pixel-level variation
-        std::normal_distribution<f32> pixelNoise(0.0f, params.dsnuSigma_e * 0.1f);
-        for (u32 y = 0; y < height; ++y) {
-            for (u32 x = 0; x < width; ++x) {
-                dsnuData[(y * width + x) * 4 + 0] = smoothed[y] + pixelNoise(rng);
-            }
-        }
-
-        // Renormalize to target sigma
-        f32 mean = 0.0f;
-        for (u32 i = 0; i < width * height; ++i) mean += dsnuData[i * 4];
-        mean /= static_cast<f32>(width * height);
-
-        f32 variance = 0.0f;
-        for (u32 i = 0; i < width * height; ++i) {
-            f32 diff = dsnuData[i * 4] - mean;
-            variance += diff * diff;
-        }
-        variance /= static_cast<f32>(width * height);
-        f32 currentSigma = std::sqrt(variance);
-
-        if (currentSigma > 1e-6f) {
-            f32 scale = params.dsnuSigma_e / currentSigma;
-            for (u32 i = 0; i < width * height; ++i) {
-                dsnuData[i * 4] = (dsnuData[i * 4] - mean) * scale;
-            }
-        }
-    }
-
-    // ---- Upload PRNU and DSNU maps to GPU ----
-    const VkDeviceSize mapSize = width * height * 4 * sizeof(f32);
-
-    // Upload PRNU map
-    {
-        GpuBuffer stagingBuffer(allocator, mapSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        stagingBuffer.Upload(prnuData.data(), mapSize);
-
-        TransitionImageLayoutImmediate(
-            fpnPrnuMap->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-        );
-
-        CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = 0;
-            region.bufferRowLength = 0;
-            region.bufferImageHeight = 0;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = 0;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = {0, 0, 0};
-            region.imageExtent = {width, height, 1};
-
-            vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
-                fpnPrnuMap->GetImage(),
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        });
-
-        TransitionImageLayoutImmediate(
-            fpnPrnuMap->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
-    }
-
-    // Upload DSNU map
-    {
-        GpuBuffer stagingBuffer(allocator, mapSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        stagingBuffer.Upload(dsnuData.data(), mapSize);
-
-        TransitionImageLayoutImmediate(
-            fpnDsnuMap->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_GENERAL,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
-        );
-
-        CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-            VkBufferImageCopy region{};
-            region.bufferOffset = 0;
-            region.bufferRowLength = 0;
-            region.bufferImageHeight = 0;
-            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            region.imageSubresource.mipLevel = 0;
-            region.imageSubresource.baseArrayLayer = 0;
-            region.imageSubresource.layerCount = 1;
-            region.imageOffset = {0, 0, 0};
-            region.imageExtent = {width, height, 1};
-
-            vkCmdCopyBufferToImage(cmd, stagingBuffer.GetHandle(),
-                fpnDsnuMap->GetImage(),
-                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        });
-
-        TransitionImageLayoutImmediate(
-            fpnDsnuMap->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_GENERAL
-        );
-    }
-
-    // Update FPN descriptor set with map images
-    VkDescriptorImageInfo fpnPrnuInfo{};
-    fpnPrnuInfo.imageView = fpnPrnuMap->GetView();
-    fpnPrnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkDescriptorImageInfo fpnDsnuInfo{};
-    fpnDsnuInfo.imageView = fpnDsnuMap->GetView();
-    fpnDsnuInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-    VkWriteDescriptorSet fpnWrites[2] = {};
-    fpnWrites[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    fpnWrites[0].dstSet = sensorFpnDescriptorSet;
-    fpnWrites[0].dstBinding = 2;
-    fpnWrites[0].descriptorCount = 1;
-    fpnWrites[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    fpnWrites[0].pImageInfo = &fpnPrnuInfo;
-
-    fpnWrites[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    fpnWrites[1].dstSet = sensorFpnDescriptorSet;
-    fpnWrites[1].dstBinding = 3;
-    fpnWrites[1].descriptorCount = 1;
-    fpnWrites[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    fpnWrites[1].pImageInfo = &fpnDsnuInfo;
-
-    vkUpdateDescriptorSets(device, 2, fpnWrites, 0, nullptr);
-
-    fpnMapsGenerated = true;
-    QL_LOG_INFO("GPU Sensor: FPN maps generated and uploaded ({}x{})", width, height);
-}
-
-// ============================================================================
-// GPU Sensor Chain Execution
-// ============================================================================
-
-void ExternalRenderContext::Impl::ExecuteGPUSensorChain(VkCommandBuffer cmd, u32 width, u32 height) {
-    if (!sensorInitialized) return;
-
-    // Generate FPN maps on first use (lazy initialization)
-    if (!fpnMapsGenerated && sensorFpnPipeline != VK_NULL_HANDLE) {
-        GenerateAndUploadFPNMaps();
-    }
-
-    // A fused IR band renders per-nm average radiance and carries its own photon
-    // energy; recover both before the chain runs. Shared with the CLI, which applies
-    // the same adjustment to its CPU chain.
-    const rendercore::SensorBandAdjustment band =
-        rendercore::SensorAdjustmentForMode(spectralMode, gpuSensorWavelengthFromHost);
-
-    SensorParams params = gpuSensorParams;
-    if (band.wavelengthNm > 0.0f) {
-        params.wavelength_nm = band.wavelengthNm;
-    }
-
-    // Helper: Insert pipeline barrier between compute passes
-    auto insertBarrier = [cmd]() {
-        VkMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            0, 1, &barrier, 0, nullptr, 0, nullptr);
-    };
-
-    // Initial barrier: wait for ray tracing to finish
-    VkMemoryBarrier initialBarrier{};
-    initialBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    initialBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    initialBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        0, 1, &initialBarrier, 0, nullptr, 0, nullptr);
-
-    // PSF sigma in pixels: the explicit override, or the diffraction-limited
-    // width. Same call the CPU chain makes, so the two cannot drift.
-    f32 psfSigma = PSFSigmaPixels(params);
-
-    // Below the floor the blur is a no-op, and the CPU chain returns the image
-    // untouched. The passes still have to run, because pass 3 reads sensorImage
-    // and only the vertical pass writes it -- but a zero radius makes each pass
-    // a single unit-weight tap, i.e. an exact copy. sigma must stay non-zero
-    // even then: the shader's weight is exp(-x^2/sigma^2), which is 0/0 at the
-    // centre tap of a zero-width Gaussian.
-    const u32 kernelRadius = PSFKernelRadiusPixels(psfSigma);
-    if (kernelRadius == 0) {
-        psfSigma = 1.0f;  // unused at radius 0, but must not be 0
-    } else {
-        psfSigma = std::min(psfSigma, kMaxPSFSigmaPixels);
-    }
-
-    // ========================================================================
-    // Pass 1: PSF Blur Horizontal (on radiance, matching CPU order)
-    // ========================================================================
-    {
-        struct PushConstants {
-            f32 sigma;
-            u32 kernelRadius;
-            u32 imageWidth;
-            u32 imageHeight;
-            u32 passIndex;
-            u32 padding[3];
-        } pushConstants;
-
-        pushConstants.sigma = psfSigma;
-        pushConstants.kernelRadius = kernelRadius;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-        pushConstants.passIndex = 0;  // Horizontal
-
-        // Update descriptor set: outputImage → sensorTempImage
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = outputImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = sensorTempImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = sensorDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPsfBlurHorizontalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 2: PSF Blur Vertical (on radiance, matching CPU order)
-    // ========================================================================
-    {
-        struct PushConstants {
-            f32 sigma;
-            u32 kernelRadius;
-            u32 imageWidth;
-            u32 imageHeight;
-            u32 passIndex;
-            u32 padding[3];
-        } pushConstants;
-
-        pushConstants.sigma = psfSigma;
-        pushConstants.kernelRadius = kernelRadius;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-        pushConstants.passIndex = 1;  // Vertical
-
-        // Update descriptor set: sensorTempImage → sensorImage
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = sensorTempImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = sensorImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = sensorDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPsfBlurVerticalPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 3: Radiance → Photo-electrons (after PSF blur on clean radiance)
-    // ========================================================================
-    {
-        struct PushConstants {
-            f32 quantumEfficiency;
-            f32 pixelPitch_um;
-            f32 focalLength_mm;
-            f32 fNumber;
-            f32 integrationTime_s;
-            f32 wellCapacity_e;
-            f32 wavelength_nm;
-            f32 darkCurrent_e_s;
-            u32 enableDarkCurrent;
-            u32 enableVignetting;
-            f32 fov_deg;
-            u32 isTelecentric;
-            u32 imageWidth;
-            u32 imageHeight;
-            f32 radianceScale;
-            u32 padding;
-        } pushConstants;
-
-        pushConstants.quantumEfficiency = params.quantumEfficiency;
-        pushConstants.pixelPitch_um = params.pixelPitch_um;
-        pushConstants.focalLength_mm = params.focalLength_mm;
-        pushConstants.fNumber = params.fNumber;
-        pushConstants.integrationTime_s = params.integrationTime_s;
-        pushConstants.wellCapacity_e = params.wellCapacity_e;
-        pushConstants.wavelength_nm = params.wavelength_nm;
-        pushConstants.radianceScale = band.radianceScale;
-        pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
-        pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
-        pushConstants.enableVignetting = params.enableVignetting ? 1u : 0u;
-        pushConstants.fov_deg = params.fov_deg;
-        pushConstants.isTelecentric = params.isTelecentric ? 1u : 0u;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-
-        // Update descriptor set: sensorImage → sensorTempImage
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = sensorImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = sensorTempImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = sensorDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorRadianceToElectronsPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 4: Poisson + Read Noise
-    // ========================================================================
-    {
-        struct PushConstants {
-            u32 frameIndex;
-            u32 enablePoissonNoise;
-            f32 readNoise_e_rms;
-            u32 enableReadNoise;
-            f32 wellCapacity_e;
-            u32 imageWidth;
-            u32 imageHeight;
-            u32 padding;
-        } pushConstants;
-
-        pushConstants.frameIndex = frameIndex;
-        pushConstants.enablePoissonNoise = params.enablePoissonNoise ? 1u : 0u;
-        pushConstants.readNoise_e_rms = params.readNoise_e_rms;
-        pushConstants.enableReadNoise = params.enableReadNoise ? 1u : 0u;
-        pushConstants.wellCapacity_e = params.wellCapacity_e;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-
-        // Update descriptor set: sensorTempImage (in/out)
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView = sensorTempImage->GetView();
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &imageInfo;
-
-        writes[1] = writes[0];
-        writes[1].dstBinding = 1;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPoissonNoisePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 5: FPN (PRNU + DSNU) - in electron domain
-    // ========================================================================
-    if (sensorFpnPipeline != VK_NULL_HANDLE && fpnMapsGenerated &&
-        params.enableFPN) {
-        struct PushConstants {
-            u32 enableFPN;
-            u32 enableNUC;
-            f32 nucEfficiency;
-            u32 imageWidth;
-            u32 imageHeight;
-            u32 padding[3];
-        } pushConstants;
-
-        pushConstants.enableFPN = 1u;
-        pushConstants.enableNUC = params.enableNUC ? 1u : 0u;
-        pushConstants.nucEfficiency = params.nucEfficiency;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-
-        // Update FPN descriptor set: bindings 0,1 = sensorTempImage (in/out)
-        VkDescriptorImageInfo imageInfo{};
-        imageInfo.imageView = sensorTempImage->GetView();
-        imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorFpnDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &imageInfo;
-
-        writes[1] = writes[0];
-        writes[1].dstBinding = 1;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorFpnPipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
-            sensorFpnPipelineLayout, 0, 1,
-            &sensorFpnDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorFpnPipelineLayout,
-            VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    // ========================================================================
-    // Pass 6: Quantize → Radiance
-    // ========================================================================
-    {
-        struct PushConstants {
-            f32 gain;
-            u32 bitDepth;
-            f32 quantumEfficiency;
-            f32 pixelPitch_um;
-            f32 focalLength_mm;
-            f32 fNumber;
-            f32 integrationTime_s;
-            f32 wavelength_nm;
-            f32 darkCurrent_e_s;
-            u32 enableDarkCurrent;
-            u32 imageWidth;
-            u32 imageHeight;
-        } pushConstants;
-
-        pushConstants.gain = params.gain;
-        pushConstants.bitDepth = params.bitDepth;
-        pushConstants.quantumEfficiency = params.quantumEfficiency;
-        pushConstants.pixelPitch_um = params.pixelPitch_um;
-        pushConstants.focalLength_mm = params.focalLength_mm;
-        pushConstants.fNumber = params.fNumber;
-        pushConstants.integrationTime_s = params.integrationTime_s;
-        pushConstants.wavelength_nm = params.wavelength_nm;
-        // No radianceScale here: this pass inverts the electron conversion, and the
-        // CPU chain leaves its preview in band-integrated units too. Scaling at
-        // both ends would square it.
-        pushConstants.darkCurrent_e_s = params.darkCurrent_e_s;
-        pushConstants.enableDarkCurrent = params.enableDarkCurrent ? 1u : 0u;
-        pushConstants.imageWidth = width;
-        pushConstants.imageHeight = height;
-
-        // Update descriptor set: sensorTempImage → sensorImage (final output)
-        VkDescriptorImageInfo inputInfo{};
-        inputInfo.imageView = sensorTempImage->GetView();
-        inputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkDescriptorImageInfo outputInfo{};
-        outputInfo.imageView = sensorImage->GetView();
-        outputInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-
-        VkWriteDescriptorSet writes[2] = {};
-        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[0].dstSet = sensorDescriptorSet;
-        writes[0].dstBinding = 0;
-        writes[0].descriptorCount = 1;
-        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[0].pImageInfo = &inputInfo;
-
-        writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        writes[1].dstSet = sensorDescriptorSet;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        writes[1].pImageInfo = &outputInfo;
-
-        vkUpdateDescriptorSets(device, 2, writes, 0, nullptr);
-
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorQuantizeToRadiancePipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, sensorPipelineLayout, 0, 1, &sensorDescriptorSet, 0, nullptr);
-        vkCmdPushConstants(cmd, sensorPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
-        vkCmdDispatch(cmd, (width + 15) / 16, (height + 15) / 16, 1);
-        insertBarrier();
-    }
-
-    //QL_LOG_DEBUG("GPU Sensor: Executed 5-pass sensor chain (PSF sigma={:.2f} pixels)", psfSigma);
+    VkDescriptorImageInfo outputImageInfo{};
+    outputImageInfo.imageView = displayImage->GetView();
+    outputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = claheDescriptorSet;
+    write.dstBinding = 1;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = &outputImageInfo;
+    vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
 }
 
 void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
-    // Read back image pixels
+    // Read back the CLAHE input image -- the camera's corrected product when
+    // the camera is enabled, else the raw accumulation.
+    const GpuImage* input = ClaheInputImage();
+    const auto extent = ClaheInputExtent();
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *contextAdapter,
-        outputImage->GetImage(),
+        input->GetImage(),
         VK_FORMAT_R32G32B32A32_SFLOAT,
-        width,
-        height
+        extent.width,
+        extent.height
     );
 
     // Collect valid luminance values and find absolute range
@@ -6218,16 +6018,11 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
 void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u32 height) {
     if (!claheInitialized) return;
 
-    // Dynamically update input image binding based on sensor state
-    VkImageView inputView = outputImage->GetView();
-
-    // If sensor is enabled, CLAHE should process sensor output
-    if (gpuSensorEnabled && sensorInitialized && sensorImage) {
-        inputView = sensorImage->GetView();
-        //QL_LOG_DEBUG("CLAHE: Processing sensor output");
-    } else {
-        //QL_LOG_DEBUG("CLAHE: Processing raw output");
-    }
+    // The camera's agcSource product (infrared) or corrected product
+    // (visible) feeds CLAHE when the camera is enabled; otherwise the raw
+    // accumulation. Callers only run CLAHE once a camera acquisition has
+    // completed, so the input product is present whenever the camera is.
+    VkImageView inputView = ClaheInputImage()->GetView();
 
     // Update descriptor set binding 0 (input image)
     VkDescriptorImageInfo inputImageInfo{};
@@ -6304,8 +6099,10 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     VkMemoryBarrier memBarrier{};
     memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 
-    // Memory barrier: wait for ray tracing to finish. Without the histogram
-    // passes the next reader is pass 3's compute, not the buffer fill.
+    // Memory barrier: wait for the input's last writer. Without the histogram
+    // passes the next reader is pass 3's compute, not the buffer fill. A
+    // camera-enabled frame's input is a compute product (the camera chain),
+    // not the ray tracing output.
     memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     memBarrier.dstAccessMask = needsHistogram
                                    ? VK_ACCESS_TRANSFER_WRITE_BIT
@@ -6313,7 +6110,8 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
 
     vkCmdPipelineBarrier(
         cmd,
-        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+        cameraConfig.enabled ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
+                             : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         needsHistogram ? VK_PIPELINE_STAGE_TRANSFER_BIT
                        : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0,

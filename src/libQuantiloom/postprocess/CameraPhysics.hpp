@@ -12,7 +12,10 @@ inline constexpr f64 kBoltzmannJPerK = 1.380649e-23;
 
 enum class NoiseClass : u32 {
     PhotonShot, DarkShot, Read, Bias, FixedPrnu, FixedDsnu,
-    ThermalRead, ThermalDrift, EmpiricalEffect
+    ThermalRead, ThermalDrift, EmpiricalEffect,
+    // Display-only empirical effects (M4-4 HSV stage). Independent streams, so
+    // enabling one never perturbs the trace-seed stream above.
+    EmpiricalNoise, EmpiricalDrift
 };
 
 [[nodiscard]] Result<void, String> ValidateResponse(const ResponseCurve& response);
@@ -85,6 +88,26 @@ BlackbodyThermalDerivativeWPerK(f64 temperatureK, const ResponseStack& response,
 [[nodiscard]] u32 CounterRandomU32(u32 deviceSeed, u32 pixelIndex,
                                    u64 acquisitionIndex, NoiseClass noiseClass,
                                    u32 counter);
+
+// Temporal stratification of one exposure window (M4-1), shared by the GPU
+// time-stratified trace and any CPU-side scheduling of the same physics.
+// `firstRowMidpointSeconds` is t0, the midpoint of row 0's exposure; the
+// window it integrates is [t0 - E/2, t0 + E/2]. Stratum k integrates the
+// sub-window [t0 - E/2 + k*E/T, t0 - E/2 + (k+1)*E/T) and is traced at its
+// midpoint t_k = t0 - E/2 + (k + 0.5) * E / T. Returns one time per stratum,
+// earliest first; `strata` == 0 returns empty.
+[[nodiscard]] inline std::vector<f64> ExposureStratumTimes(
+    f64 firstRowMidpointSeconds, f64 exposureSeconds, u32 strata) {
+    std::vector<f64> times;
+    if (strata == 0u) return times;
+    times.reserve(strata);
+    const f64 windowStart = firstRowMidpointSeconds - 0.5 * exposureSeconds;
+    const f64 spacing = exposureSeconds / static_cast<f64>(strata);
+    for (u32 k = 0; k < strata; ++k)
+        times.push_back(windowStart +
+                        (static_cast<f64>(k) + 0.5) * spacing);
+    return times;
+}
 // Stable UTF-8 FNV-1a device ID folded with the user's seed. Never std::hash:
 // CPU and GPU must receive the same 32-bit stream key on every platform.
 [[nodiscard]] u32 DeviceRandomSeed(const CameraConfig& config);

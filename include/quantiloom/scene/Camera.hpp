@@ -92,6 +92,14 @@ struct PushConstantsRayGen {
     // sequence, which is white noise with extra steps. That is the opposite of
     // what randomSeed wants, which is why these are two fields.
     u32 sequenceSeed;
+
+    // Temporal stratification of one camera exposure (M4-1). The measurement
+    // image (binding 28) is a 2D array with one layer per time stratum; each
+    // primary ray is routed to layer timeStratum and averaged progressively
+    // there. Zero/one count means "no stratification": layer 0, which is also
+    // the anchor carrying the primary-hit depth AOV (binding 22).
+    u32 timeStratum;         // layer this dispatch writes, 0-based
+    u32 timeStratumCount;    // layers in the current exposure, 0/1 = unstratified
 };
 
 /**

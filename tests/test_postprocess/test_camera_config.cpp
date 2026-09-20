@@ -134,14 +134,31 @@ document_version = "2026-01"
 auto_exposure = false
 auto_white_balance = false
 
+[[isp.defect_pixels]]
+x = 17
+y = 23
+
+[[isp.defect_pixels]]
+x = 100
+y = 200
+
 [isp.hsv]
 hue_offset_deg = 15.0
 saturation_scale = 0.8
 value_gamma = 1.2
 
+[isp.auto]
+target_luminance = 0.22
+smoothing = 0.3
+min_exposure_s = 0.0001
+max_exposure_s = 0.5
+max_gain = 8.0
+
 [effects.hsv]
 empirical_noise = true
 temporal_drift = false
+noise_sigma = 0.05
+drift_sigma = 0.01
 
 [camera.motion]
 interpolation = "linear"
@@ -173,6 +190,17 @@ look_at = [1.0, 0.0, -1.0]
     EXPECT_DOUBLE_EQ(first.value().isp.hsv.saturationScale, 0.8);
     EXPECT_DOUBLE_EQ(first.value().isp.hsv.valueGamma, 1.2);
     EXPECT_TRUE(first.value().isp.hsv.empiricalNoise);
+    EXPECT_DOUBLE_EQ(first.value().isp.hsv.empiricalNoiseSigma, 0.05);
+    EXPECT_DOUBLE_EQ(first.value().isp.hsv.temporalDriftSigma, 0.01);
+    EXPECT_DOUBLE_EQ(first.value().isp.autoControl.targetLuminance, 0.22);
+    EXPECT_DOUBLE_EQ(first.value().isp.autoControl.smoothing, 0.3);
+    EXPECT_DOUBLE_EQ(first.value().isp.autoControl.minExposureSeconds, 0.0001);
+    EXPECT_DOUBLE_EQ(first.value().isp.autoControl.maxExposureSeconds, 0.5);
+    EXPECT_DOUBLE_EQ(first.value().isp.autoControl.maxGain, 8.0);
+    ASSERT_EQ(first.value().isp.defectPixels.size(), 2u);
+    EXPECT_EQ(first.value().isp.defectPixels[0], (std::array<u32, 2>{17, 23}));
+    EXPECT_EQ(first.value().isp.defectPixels[1], (std::array<u32, 2>{100, 200}));
+    EXPECT_TRUE(first.value().isp.defectPixelsPath.empty());
     ASSERT_EQ(first.value().motion.keys.size(), 2u);
     EXPECT_DOUBLE_EQ(first.value().motion.keys[1].timeSeconds, 1.5);
 
@@ -199,6 +227,15 @@ look_at = [1.0, 0.0, -1.0]
               "QE datasheet");
     EXPECT_DOUBLE_EQ(second.value().isp.hsv.hueOffsetDegrees, 15.0);
     EXPECT_TRUE(second.value().isp.hsv.empiricalNoise);
+    EXPECT_DOUBLE_EQ(second.value().isp.hsv.empiricalNoiseSigma, 0.05);
+    EXPECT_DOUBLE_EQ(second.value().isp.hsv.temporalDriftSigma, 0.01);
+    EXPECT_DOUBLE_EQ(second.value().isp.autoControl.targetLuminance, 0.22);
+    EXPECT_DOUBLE_EQ(second.value().isp.autoControl.smoothing, 0.3);
+    EXPECT_DOUBLE_EQ(second.value().isp.autoControl.minExposureSeconds, 0.0001);
+    EXPECT_DOUBLE_EQ(second.value().isp.autoControl.maxExposureSeconds, 0.5);
+    EXPECT_DOUBLE_EQ(second.value().isp.autoControl.maxGain, 8.0);
+    ASSERT_EQ(second.value().isp.defectPixels.size(), 2u);
+    EXPECT_EQ(second.value().isp.defectPixels, first.value().isp.defectPixels);
     EXPECT_EQ(second.value().motion.keys, first.value().motion.keys);
 }
 
@@ -277,6 +314,57 @@ enabled = true
     const auto parsed = ParseCameraConfig(document.value(), SpectralMode::VIS_Hero);
     ASSERT_FALSE(parsed.has_value());
     EXPECT_NE(parsed.error().find("version"), String::npos);
+}
+
+TEST(CameraConfigIOTest, AutoControlAndHsvEffectFieldsAreValidated) {
+    const char* basePrefix = R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "validated_effects"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)";
+    const char* cases[] = {
+        "[isp.auto]\ntarget_luminance = -0.1",
+        "[isp.auto]\ntarget_luminance = 0.18\nsmoothing = 1.5",
+        "[isp.auto]\nmin_exposure_s = 0.5\nmax_exposure_s = 0.1",
+        "[isp.auto]\nmax_gain = 0.5",
+        "[effects.hsv]\nnoise_sigma = -0.01",
+        "[effects.hsv]\ndrift_sigma = -0.01",
+        "[isp.hsv]\nvalue_gamma = 0.0",
+    };
+    for (const char* fragment : cases) {
+        const std::string documentText =
+            std::string(basePrefix) + fragment + "\n";
+        const auto document = Config::Parse(documentText);
+        ASSERT_TRUE(document.has_value());
+        EXPECT_FALSE(ParseCameraConfig(document.value(), SpectralMode::VIS_Hero).has_value())
+            << "fragment should fail validation: " << fragment;
+    }
+    // The same skeleton with sane values parses.
+    const std::string good = std::string(basePrefix) +
+        "[isp.auto]\ntarget_luminance = 0.2\nsmoothing = 0.4\n"
+        "min_exposure_s = 0.0001\nmax_exposure_s = 0.5\nmax_gain = 8.0\n"
+        "[effects.hsv]\nnoise_sigma = 0.05\ndrift_sigma = 0.01\n";
+    const auto goodDocument = Config::Parse(good);
+    ASSERT_TRUE(goodDocument.has_value());
+    const auto parsed = ParseCameraConfig(goodDocument.value(), SpectralMode::VIS_Hero);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_DOUBLE_EQ(parsed.value().isp.autoControl.smoothing, 0.4);
+    EXPECT_DOUBLE_EQ(parsed.value().isp.hsv.empiricalNoiseSigma, 0.05);
 }
 
 TEST(CameraConfigIOTest, RelativeResponseNeedsAmplitudeSource) {
@@ -600,6 +688,7 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     authored.quality.timeSamples = 4;
     authored.quality.pixelSamples = 3;
     authored.quality.gpuTimePositions = 12;
+    authored.warmup.seconds = 1.25;
     authored.outputColorSpace = OutputColorSpace::DeviceNative;
     authored.products.tracedRadiance = true;
     authored.products.cieLinearSrgb = true;
@@ -728,6 +817,7 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     EXPECT_EQ(got.quality.timeSamples, 4u);
     EXPECT_EQ(got.quality.pixelSamples, 3u);
     EXPECT_EQ(got.quality.gpuTimePositions, 12u);
+    EXPECT_DOUBLE_EQ(got.warmup.seconds, 1.25);
     EXPECT_EQ(got.outputColorSpace, OutputColorSpace::DeviceNative);
     EXPECT_TRUE(got.products.tracedRadiance);
     EXPECT_TRUE(got.products.cieLinearSrgb);
@@ -760,4 +850,221 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     EXPECT_TRUE(got.isp.hsv.empiricalNoise);
     EXPECT_TRUE(got.isp.hsv.temporalDrift);
     EXPECT_EQ(got.motion.keys, authored.motion.keys);
+}
+
+TEST(CameraConfigIOTest, NegativeWarmupSecondsAreRejected) {
+    const auto document = Config::Parse(R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "bad_warmup"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[sensor.warmup]
+seconds = -1.0
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)");
+    ASSERT_TRUE(document.has_value());
+    EXPECT_FALSE(ParseCameraConfig(document.value(), SpectralMode::VIS_Hero).has_value());
+}
+
+TEST(CameraConfigIOTest, WarmupSecondsDefaultToZeroAndSurviveRoundTrip) {
+    const auto document = Config::Parse(R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "default_warmup"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[sensor.warmup]
+seconds = 2.5
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)");
+    ASSERT_TRUE(document.has_value());
+    const auto parsed = ParseCameraConfig(document.value(), SpectralMode::VIS_Hero);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_DOUBLE_EQ(parsed.value().warmup.seconds, 2.5);
+
+    const auto withoutTable = Config::Parse(R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "default_warmup"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)");
+    ASSERT_TRUE(withoutTable.has_value());
+    const auto defaulted = ParseCameraConfig(withoutTable.value(), SpectralMode::VIS_Hero);
+    ASSERT_TRUE(defaulted.has_value());
+    EXPECT_DOUBLE_EQ(defaulted.value().warmup.seconds, 0.0);
+}
+
+TEST(CameraConfigIOTest, DefectPixelFileResolvesBesideTheConfig) {
+    const auto temp = UniqueTemporaryDirectory("quantiloom_defect_file_test");
+    struct RemoveTemporaryDirectory {
+        std::filesystem::path path;
+        ~RemoveTemporaryDirectory() {
+            std::error_code ignored;
+            std::filesystem::remove_all(path, ignored);
+        }
+    } cleanup{temp};
+    {
+        std::ofstream file(temp / "dead_pixels.txt");
+        file << "# two-column defect list\n";
+        file << "3 4\n";
+        file << "5,6\n";
+        file << "7   8\n";
+    }
+    const auto document = Config::Parse(R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "defect_file_cmos"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[isp]
+defect_pixels_path = "dead_pixels.txt"
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)");
+    ASSERT_TRUE(document.has_value());
+    const auto parsed =
+        ParseCameraConfig(document.value(), SpectralMode::VIS_Hero,
+                          temp.string());
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_EQ(parsed.value().isp.defectPixels.size(), 3u);
+    EXPECT_EQ(parsed.value().isp.defectPixels[0], (std::array<u32, 2>{3, 4}));
+    EXPECT_EQ(parsed.value().isp.defectPixels[1], (std::array<u32, 2>{5, 6}));
+    EXPECT_EQ(parsed.value().isp.defectPixels[2], (std::array<u32, 2>{7, 8}));
+    EXPECT_EQ(parsed.value().isp.defectPixelsPath, "dead_pixels.txt");
+
+    // Serialization keeps the path form, and the path form reloads.
+    const auto saved = CameraConfigToToml(parsed.value());
+    const auto reloaded = Config::Parse(saved);
+    ASSERT_TRUE(reloaded.has_value());
+    const auto second =
+        ParseCameraConfig(reloaded.value(), SpectralMode::VIS_Hero, temp.string());
+    ASSERT_TRUE(second.has_value());
+    EXPECT_EQ(second.value().isp.defectPixels,
+              parsed.value().isp.defectPixels);
+    EXPECT_EQ(second.value().isp.defectPixelsPath, "dead_pixels.txt");
+}
+
+TEST(CameraConfigIOTest, DefectPixelsRejectOutOfBoundsAndDuplicates) {
+    const String base = R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "defect_bounds_cmos"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)";
+    const auto outOfBounds = Config::Parse(
+        base + R"(
+[[isp.defect_pixels]]
+x = 16
+y = 0
+)");
+    ASSERT_TRUE(outOfBounds.has_value());
+    EXPECT_FALSE(
+        ParseCameraConfig(outOfBounds.value(), SpectralMode::VIS_Hero).has_value());
+    const auto duplicate = Config::Parse(
+        base + R"(
+[[isp.defect_pixels]]
+x = 3
+y = 4
+[[isp.defect_pixels]]
+x = 3
+y = 4
+)");
+    ASSERT_TRUE(duplicate.has_value());
+    EXPECT_FALSE(
+        ParseCameraConfig(duplicate.value(), SpectralMode::VIS_Hero).has_value());
+}
+
+TEST(CameraConfigIOTest, DefectPixelsInlineAndPathAreMutuallyExclusive) {
+    const auto document = Config::Parse(R"(
+[sensor]
+version = 1
+enabled = true
+detector = "photon"
+device_id = "defect_conflict_cmos"
+cfa = "mono"
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 5.0
+sensor_width_px = 16
+sensor_height_px = 16
+[isp]
+defect_pixels_path = "dead_pixels.txt"
+[[isp.defect_pixels]]
+x = 1
+y = 1
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.qe]
+kind = "absolute_qe"
+wavelength_nm = [500.0, 600.0]
+value = [0.5, 0.5]
+)");
+    ASSERT_TRUE(document.has_value());
+    EXPECT_FALSE(
+        ParseCameraConfig(document.value(), SpectralMode::VIS_Hero).has_value());
 }

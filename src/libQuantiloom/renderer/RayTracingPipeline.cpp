@@ -377,7 +377,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(30);  // 28 camera measurement image, 29 response table
+    std::vector<VkDescriptorSetLayoutBinding> bindings(32);  // 28 camera measurement image, 29 response table, 30 dynamic counters, 31 stratum depth
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -708,11 +708,28 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
                               VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[29].pImmutableSamplers = nullptr;
 
+    // Dynamic-exposure counters (raygen atomics) and per-stratum primary
+    // depth. Camera-measurement mode only; the visibility and observer sets
+    // of this shared layout never bind them, hence PARTIALLY_BOUND below.
+    bindings[30].binding = 30;
+    bindings[30].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[30].descriptorCount = 1;
+    bindings[30].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[30].pImmutableSamplers = nullptr;
+
+    bindings[31].binding = 31;
+    bindings[31].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    bindings[31].descriptorCount = 1;
+    bindings[31].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[31].pImmutableSamplers = nullptr;
+
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(30, 0);
+    std::vector<VkDescriptorBindingFlags> bindingFlags(32, 0);
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
+    bindingFlags[30] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Camera dynamic counters
+    bindingFlags[31] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Camera stratum depth
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
     bindingFlagsInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
@@ -741,7 +758,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 60;  // three sets x (existing 19 + camera response)
+    poolSizes[2].descriptorCount = 61;  // three sets x (existing 19 + camera response) + camera dynamic counters
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = 3 * (m_maxTextures + 2);
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -1164,6 +1181,14 @@ void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const
 
 void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
     WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 29u, buffer);
+}
+
+void RayTracingPipeline::BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const {
+    WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 30u, buffer);
+}
+
+void RayTracingPipeline::BindCameraMeasurementDepthImage(const GpuImage& image) const {
+    WriteStorageImage(m_context.GetDevice(), m_cameraDescriptorSet, 31u, image);
 }
 
 void RayTracingPipeline::BindCameraDepthImage(const GpuImage& image) const {
@@ -1866,6 +1891,11 @@ void RayTracingPipeline::SetSamplingParams(const u32 frameIndex, const u32 sampl
     m_pushConstants.totalSamples = totalSamples;
     m_pushConstants.randomSeed = randomSeed;
     m_pushConstants.sequenceSeed = sequenceSeed;
+}
+
+void RayTracingPipeline::SetTimeStratum(const u32 stratum, const u32 count) {
+    m_pushConstants.timeStratum = stratum;
+    m_pushConstants.timeStratumCount = count;
 }
 
 } // namespace quantiloom

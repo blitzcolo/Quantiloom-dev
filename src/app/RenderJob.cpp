@@ -248,6 +248,7 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
         auto captured = ApplySensorChain(renderer, cameraState, outcome);
         if (!captured) {
             outcome.error = captured.error();
+            QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", outcome.error);
             return;
         }
         cameraPreview = std::move(captured.value());

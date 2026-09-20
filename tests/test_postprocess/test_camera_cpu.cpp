@@ -364,23 +364,35 @@ TEST(CpuCameraPipelineTest, IndependentNucMapsModifyCorrectionButNotRaw) {
 }
 
 TEST(CpuCameraPipelineTest, DisplayIsReprocessedFromQuantizedRaw) {
-    auto config = PhotonConfig(1, 1);
+    auto config = PhotonConfig(2, 1);
     config.photon.fullWellElectrons = 1000.0;
+    // One frame carrying both quantization levels: the dark pixel lands on DN
+    // 0 and the bright one on DN 1, and the two must come out of the tone
+    // stage as different display values.
+    const auto twoLevel = [](double left, double right) -> SpectralFrameSampler {
+        return [=](double, double) -> Result<Image, String> {
+            Image sample(2, 1, 1);
+            sample.data = {static_cast<f32>(left), static_cast<f32>(right)};
+            return sample;
+        };
+    };
     CaptureState state;
-    const auto below = CpuCameraPipeline(config).Capture(
-        state, 0.0, UniformRadiance(
-            1, 1, RadianceForElectrons(config, 0.4)));
-    const auto above = CpuCameraPipeline(config).Capture(
-        state, 0.1, UniformRadiance(
-            1, 1, RadianceForElectrons(config, 0.6)));
-    ASSERT_TRUE(below.has_value());
-    ASSERT_TRUE(above.has_value());
-    EXPECT_FLOAT_EQ(below.value().rawDn->image.data[0], 0.0f);
-    EXPECT_FLOAT_EQ(above.value().rawDn->image.data[0], 1.0f);
-    EXPECT_EQ(above.value().display->signal.kind, SignalKind::DevicePreviewSrgb);
-    EXPECT_EQ(above.value().display->signal.unit, "sRGB-preview");
-    EXPECT_FLOAT_EQ(below.value().display->image.data[0], 0.0f);
-    EXPECT_GT(above.value().display->image.data[0], 0.0f);
+    const auto captured = CpuCameraPipeline(config).Capture(
+        state, 0.0, twoLevel(
+            RadianceForElectrons(config, 0.4), RadianceForElectrons(config, 0.6)));
+    ASSERT_TRUE(captured.has_value());
+    EXPECT_FLOAT_EQ(captured.value().rawDn->image.data[0], 0.0f);
+    EXPECT_FLOAT_EQ(captured.value().rawDn->image.data[1], 1.0f);
+    EXPECT_EQ(captured.value().display->signal.kind, SignalKind::DisplaySrgb);
+    EXPECT_EQ(captured.value().display->signal.unit, "encoded sRGB");
+    // The display branch consumes the corrected signal: one DN is one
+    // electron here, normalized by the 1000 e- well. That is small, but
+    // distinctly nonzero. The display is 2x1x3; the bright pixel is the
+    // second pixel, i.e. channels 3..5.
+    EXPECT_FLOAT_EQ(captured.value().display->image.data[0], 0.0f);
+    for (u32 c = 0; c < 3; ++c)
+        EXPECT_NEAR(captured.value().display->image.data[3 + c],
+                    static_cast<f32>(12.92 / 1000.0), 1e-7f);
 }
 
 TEST(CpuCameraPipelineTest, RejectsShortOrNonfiniteNucCalibrationMaps) {

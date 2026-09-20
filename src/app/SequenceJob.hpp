@@ -34,7 +34,10 @@ struct SequenceOptions {
     /// Inclusive tick range. Absent means the whole of the timeline.
     std::optional<i64> fromTick;
     std::optional<i64> toTick;
-    /// Render every Nth tick. One is every tick.
+    /// Export every Nth tick; the ticks in between are still processed as
+    /// camera acquisitions when the camera is enabled (their state advances,
+    /// nothing is written) and skipped entirely otherwise. One exports every
+    /// processed tick.
     u32 every = 1;
 
     /// Where the frames go. Empty takes `renderer.output` and inserts

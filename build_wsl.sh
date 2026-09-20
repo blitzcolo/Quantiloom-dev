@@ -7,7 +7,7 @@
 # install to the same prefix, and Quantiloom-Qt cannot tell which one produced
 # the SDK it links. It stopped being true once -- build_windows.ps1 configured
 # tests OFF and ran no gate, so the Windows pair published whatever it built --
-# and the same four gates now run on both sides, from the same scripts. A gate
+# and the same gates now run on both sides, from the same scripts. A gate
 # added here belongs there too.
 #
 # set -e guarantees the install step is never reached if any build step fails.
@@ -94,6 +94,35 @@ case "$illum_status" in
     0) ;;
     3) echo "WARNING: illumination gate skipped, no GPU on this machine" >&2 ;;
     *) echo "Illumination gate failed -- not installing." >&2; exit "$illum_status" ;;
+esac
+
+# --- Camera gate -------------------------------------------------------------
+# The four camera checkers, run directly the way the suites above are: the
+# dynamic-exposure compositor against a numpy twin, the ISP display chain,
+# the acquisition history a `sequence --every N` run must keep advancing on
+# its skipped ticks, and the AE/AWB closed loop. Each reports through stdout
+# in ASCII and exits 0 pass / 1 wrong render / 2 no CLI or test binary /
+# 3 no usable GPU, so the aggregate below can keep the no-GPU skip.
+# check_camera_physics.py and check_camera_gpu_perf.py stay outside the gate:
+# the former is a config-coverage sweep and the latter a benchmark, not a
+# pass/fail measurement.
+
+set +e
+PY="${PYTHON:-python3}"
+"$PY" scripts/render-tests/check_camera_dynamic.py;  cam_dyn_status=$?
+"$PY" scripts/render-tests/check_camera_isp.py;      cam_isp_status=$?
+"$PY" scripts/render-tests/check_camera_history.py;  cam_hist_status=$?
+"$PY" scripts/render-tests/check_camera_ae.py;       cam_ae_status=$?
+set -e
+cam_status=0
+for s in "$cam_dyn_status" "$cam_isp_status" "$cam_hist_status" "$cam_ae_status"; do
+    if [ "$s" = 1 ] || [ "$s" = 2 ]; then cam_status=$s; break; fi
+    if [ "$s" = 3 ]; then cam_status=3; fi
+done
+case "$cam_status" in
+    0) ;;
+    3) echo "WARNING: camera gate skipped, no GPU on this machine" >&2 ;;
+    *) echo "Camera gate failed -- not installing." >&2; exit "$cam_status" ;;
 esac
 
 # --- Install (only reached on successful build + green tests + stable ABI) ---

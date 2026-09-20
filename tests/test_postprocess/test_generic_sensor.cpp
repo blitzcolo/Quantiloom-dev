@@ -94,7 +94,7 @@ TEST_F(GenericSensorTest, OutputMetadata) {
     EXPECT_EQ(raw.metadata.at("camera_signal_kind"), "raw_dn");
     EXPECT_EQ(raw.metadata.at("camera_unit"), "DN");
     EXPECT_EQ(raw.metadata.at("camera_input_semantics"), "fast_rgb_approximation");
-    EXPECT_EQ(preview.metadata.at("camera_signal_kind"), "device_preview_srgb");
+    EXPECT_EQ(preview.metadata.at("camera_signal_kind"), "display_srgb");
     EXPECT_EQ(preview.metadata.at("camera_input_semantics"), "fast_rgb_approximation");
 }
 
@@ -186,7 +186,7 @@ TEST_F(GenericSensorTest, RawAndPreviewHaveDistinctUnits) {
     EXPECT_EQ(raw.data[0], std::floor(raw.data[0]));
     EXPECT_GT(preview.data[0], 0.0f);
     EXPECT_LE(preview.data[0], 1.0f);
-    EXPECT_EQ(preview.metadata.at("camera_unit"), "sRGB-preview");
+    EXPECT_EQ(preview.metadata.at("camera_unit"), "encoded sRGB");
 }
 
 // ============================================================================

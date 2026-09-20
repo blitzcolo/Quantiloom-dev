@@ -299,6 +299,11 @@ set(TEST_SUPPORT_SOURCES
 set(TEST_POSTPROCESS_SOURCES
     test_postprocess/test_camera_pipeline.cpp
     test_postprocess/test_camera_cpu.cpp
+    test_postprocess/test_camera_history.cpp
+    test_postprocess/test_camera_isp.cpp
+    test_postprocess/test_camera_auto.cpp
+    test_postprocess/test_camera_hsv.cpp
+    test_postprocess/test_isp_coefficients.cpp
     test_postprocess/test_camera_config.cpp
     test_postprocess/test_generic_sensor.cpp
     test_postprocess/test_multiband_fusion.cpp
@@ -402,7 +407,14 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
-            "${CMAKE_SOURCE_DIR}/src/shaders/camera_preview.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_tiles.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_reduce.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_hist.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_cdf.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_demosaic.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_color.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_display.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/camera_dynamic.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
             "$<TARGET_FILE_DIR:libquantiloom_tests>"

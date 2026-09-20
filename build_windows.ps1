@@ -1,4 +1,4 @@
-# Build Quantiloom on Windows, behind the same four gates build_wsl.sh runs.
+# Build Quantiloom on Windows, behind the same gates build_wsl.sh runs.
 #
 # This script and build_wsl.sh must stay functionally equivalent, because they
 # install the same SDK into the same place and Quantiloom-Qt cannot tell which
@@ -135,6 +135,22 @@ if ($Python) {
             $RenderGates = "skipped: no GPU"
         } elseif ($LASTEXITCODE -ne 0) {
             throw "$($gate.Name) gate failed -- not installing."
+        }
+    }
+
+    # Camera gate: the same four checkers build_wsl.sh runs, against the same
+    # CLI and test binary. Each exits 0 pass / 1 wrong render / 2 no CLI or
+    # test binary / 3 no usable GPU; only 3 is a skip. check_camera_physics.py
+    # and check_camera_gpu_perf.py stay outside the gate: a config-coverage
+    # sweep and a benchmark, not pass/fail measurements.
+    foreach ($check in @("check_camera_dynamic.py", "check_camera_isp.py",
+                         "check_camera_history.py", "check_camera_ae.py")) {
+        & $Python "scripts\render-tests\$check"
+        if ($LASTEXITCODE -eq 3) {
+            Write-Warning "camera gate ($check) skipped, no GPU on this machine"
+            $RenderGates = "skipped: no GPU"
+        } elseif ($LASTEXITCODE -ne 0) {
+            throw "camera gate failed ($check, exit $LASTEXITCODE) -- not installing."
         }
     }
 } else {

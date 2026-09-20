@@ -4,6 +4,8 @@
 #include <cmath>
 #include <limits>
 #include <numbers>
+#include <utility>
+#include <vector>
 
 namespace quantiloom::camera {
 namespace {
@@ -264,6 +266,8 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
     if (config.quality.wavelengthSamples == 0 || config.quality.timeSamples == 0 ||
         config.quality.pixelSamples == 0 || config.quality.gpuTimePositions == 0)
         return Result<void, String>::Err("camera sample counts must be positive");
+    if (!FiniteNonnegative(config.warmup.seconds))
+        return Result<void, String>::Err("camera warmup seconds must be finite and nonnegative");
     const size_t calibratedSamples = static_cast<size_t>(config.optics.sensorWidthPx) *
         config.optics.sensorHeightPx *
         (config.device.cfa == CfaPattern::MultiChannel ?
@@ -353,6 +357,36 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
             }
         }
     }
+    if (config.isp.defectPixels.size() > 1) {
+        std::vector<std::pair<u32, u32>> pixels;
+        pixels.reserve(config.isp.defectPixels.size());
+        for (const auto& pixel : config.isp.defectPixels)
+            pixels.emplace_back(pixel[0], pixel[1]);
+        std::sort(pixels.begin(), pixels.end());
+        if (std::adjacent_find(pixels.begin(), pixels.end()) != pixels.end())
+            return Result<void, String>::Err("defect pixel list has a duplicate entry");
+    }
+    for (const auto& [x, y] : config.isp.defectPixels) {
+        if (x >= config.optics.sensorWidthPx || y >= config.optics.sensorHeightPx)
+            return Result<void, String>::Err(
+                "defect pixel lies outside the sensor array");
+    }
+    const auto& hsv = config.isp.hsv;
+    if (!std::isfinite(hsv.hueOffsetDegrees) ||
+        !std::isfinite(hsv.saturationScale) ||
+        !std::isfinite(hsv.valueGamma) || hsv.valueGamma <= 0.0 ||
+        !FiniteNonnegative(hsv.empiricalNoiseSigma) ||
+        !FiniteNonnegative(hsv.temporalDriftSigma))
+        return Result<void, String>::Err("invalid HSV effect parameters");
+    const auto& autoControl = config.isp.autoControl;
+    if (!FinitePositive(autoControl.targetLuminance) ||
+        !std::isfinite(autoControl.smoothing) ||
+        autoControl.smoothing < 0.0 || autoControl.smoothing > 1.0 ||
+        !FinitePositive(autoControl.minExposureSeconds) ||
+        !FinitePositive(autoControl.maxExposureSeconds) ||
+        autoControl.minExposureSeconds > autoControl.maxExposureSeconds ||
+        !FinitePositive(autoControl.maxGain) || autoControl.maxGain < 1.0)
+        return Result<void, String>::Err("invalid auto-control parameters");
     return Result<void, String>::Ok();
 }
 
@@ -695,7 +729,6 @@ Result<void, String> AnnotateProductMetadata(CameraProduct& product) {
     case SignalKind::RawDN: kind = "raw_dn"; break;
     case SignalKind::ApparentTemperature: kind = "apparent_temperature"; break;
     case SignalKind::FastRgbApproximation: kind = "fast_rgb_approximation"; break;
-    case SignalKind::DevicePreviewSrgb: kind = "device_preview_srgb"; break;
     }
     auto& metadata = product.image.metadata;
     metadata["camera_signal_kind"] = kind;

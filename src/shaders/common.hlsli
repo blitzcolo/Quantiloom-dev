@@ -303,14 +303,25 @@ struct Payload {
     // one; which function it is only affects how good the split is.
     float bsdfPdf;    // sr^-1, 0 = not a BSDF sample                     // 4 bytes
 
-    // TOTAL: 40 bytes (under 64-byte RT Core limit)
+    // Class of the surface the PRIMARY ray hit, written by the closest-hit
+    // shader on depth 0 and read by raygen once the primary trace returns.
+    // Bit 0: specular-weighted (metallic or near-mirror roughness). Bit 1:
+    // transparent (alpha-blended or transmissive). A reprojection between
+    // time strata cannot be trusted on either class -- specular energy moves
+    // with the viewpoint and transmission has no single surface depth -- so
+    // raygen folds these into the dynamic-exposure counters (binding 30).
+    // Misses and recursive payloads leave it 0, which counts as diffuse.
+    uint primaryMaterialFlags;                                           // 4 bytes
+
+    // TOTAL: 44 bytes (under 64-byte RT Core limit)
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into
     // a single-wavelength one and the frame loses most of its light. bsdfPdf has
     // the same property in the other direction: left uninitialised it can make
     // an ordinary ray claim to be a light-sampling candidate and lose the
-    // emission it should have carried.
+    // emission it should have carried. primaryMaterialFlags has the same
+    // "uninitialised reads as the safest class" property: 0 is diffuse.
 };
 
 // ============================================================================
@@ -941,6 +952,10 @@ struct PushConstantsRayGen {
     uint totalSamples;
     uint randomSeed;
     uint sequenceSeed;
+    // Temporal stratification of one camera exposure (M4-1). See the CPU-side
+    // twin in include/quantiloom/scene/Camera.hpp; the two must stay identical.
+    uint timeStratum;         // layer this dispatch writes, 0-based
+    uint timeStratumCount;    // layers in the current exposure, 0/1 = plain
 };
 
 [[vk::push_constant]] PushConstantsRayGen pushConsts;

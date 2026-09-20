@@ -252,6 +252,33 @@ public:
     [[nodiscard]] Result<camera::CameraOutput, String>
     CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds);
 
+    /// Snapshot everything one acquisition mutates, so a sequence host can
+    /// rewind and replay camera history (skipped-tick export, scrub back).
+    [[nodiscard]] Result<camera::CaptureCheckpoint, String>
+    CheckpointCamera(const camera::CaptureState& state);
+
+    /// Rewind the device state to a checkpoint. Bumps historyEpoch, so the
+    /// ticks replayed after a restore are distinguishable from the originals.
+    [[nodiscard]] Result<void, String>
+    RestoreCamera(camera::CaptureState& state,
+                  const camera::CaptureCheckpoint& checkpoint);
+
+    /// Advance the device state by one acquisition at @p timeSeconds without
+    /// producing any product. This is the skipped-tick path of a sequence:
+    /// intermediate ticks still become real acquisitions (thermal state, and
+    /// AE/AWB feedback fields once they close the loop) but nothing is
+    /// written. On success state.acquisitionIndex has moved forward by one
+    /// and state.frameTimeSeconds equals @p timeSeconds.
+    [[nodiscard]] Result<void, String>
+    AdvanceCameraState(camera::CaptureState& state, f64 timeSeconds);
+
+    /// Run round(seconds/framePeriodSeconds) product-free acquisitions on the
+    /// frame grid immediately before the state's current time, so the first
+    /// real frame meets an equilibrated device rather than a cold initial
+    /// condition. A zero @p seconds is a no-op.
+    [[nodiscard]] Result<void, String>
+    WarmUpCamera(camera::CaptureState& state, f64 seconds, f64 framePeriodSeconds);
+
     /**
      * @brief Move the clock to @p t_s
      *
@@ -270,6 +297,14 @@ public:
 
 private:
     OfflineRenderer();
+
+    // CaptureCamera's body, with a product-suppression switch: when a
+    // sequence skips a tick it still runs the full acquisition (the thermal
+    // state, and the AE/AWB feedback fields later, must see every frame) but
+    // asks for no product and skips the extra observer/trace renders.
+    [[nodiscard]] Result<camera::CameraOutput, String>
+    CaptureCameraInternal(camera::CaptureState& state, f64 frameTimeSeconds,
+                          bool suppressProducts);
 
     struct Impl;
     std::unique_ptr<Impl> m_impl;

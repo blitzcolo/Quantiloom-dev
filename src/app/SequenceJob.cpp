@@ -183,11 +183,44 @@ int RunSequence(const SequenceOptions& options) {
     i64 index = 0;
     u32 failures = 0;
     camera::CaptureState cameraState;
+    const bool cameraEnabled = renderer.GetCameraConfig().enabled;
+    const camera::CameraConfig& cameraConfig = renderer.GetCameraConfig();
     const auto sequenceStarted = std::chrono::steady_clock::now();
 
-    for (i64 tick = from; tick <= to; tick += every) {
-        ++index;
+    if (cameraEnabled && cameraConfig.warmup.seconds > 0.0) {
+        // The first exported frame meets a device that has already been
+        // acquiring for the configured pre-roll, not a cold initial
+        // condition. Anchoring the state at the first frame's time puts the
+        // whole warmup grid before the sequence instead of before t=0.
+        cameraState.frameTimeSeconds = info.TimeOfTick(from);
+        const auto warmed =
+            renderer.WarmUpCamera(cameraState, cameraConfig.warmup.seconds,
+                                  cameraConfig.readout.framePeriodSeconds);
+        if (!warmed) {
+            QL_LOG_ERROR("Camera warmup failed: {}", warmed.error());
+            return 1;
+        }
+    }
+
+    // Every tick becomes an acquisition when the camera is on: exported ticks
+    // render and write, the ticks between them only advance the device state
+    // (thermal history, and AE/AWB feedback once it closes the loop) so the
+    // exported frames sit on an unbroken acquisition sequence.
+    for (i64 tick = from; tick <= to; ++tick) {
         const f64 t = info.TimeOfTick(tick);
+        const bool exportFrame = (tick - from) % static_cast<i64>(every) == 0;
+        if (!exportFrame) {
+            if (cameraEnabled) {
+                if (auto advanced = renderer.AdvanceCameraState(cameraState, t);
+                    !advanced) {
+                    QL_LOG_ERROR("Tick {}: camera advance failed: {}", tick,
+                                 advanced.error());
+                    ++failures;
+                }
+            }
+            continue;
+        }
+        ++index;
         const auto frameStarted = std::chrono::steady_clock::now();
 
         if (auto moved = renderer.SetTimelineTime(t); !moved.has_value()) {

@@ -25,6 +25,16 @@ struct CameraPush {
     float sigmaBy;
     uint rngNoiseClass;
     uint rngCounter;
+    // Dynamic-exposure compositor (camera_dynamic.comp). The per-stratum
+    // camera frames ride in binding 10; these scalars describe the exposure.
+    uint timeStratumCount;      // T; 0/1 = plain copy of layer 0
+    uint rollingShutter;        // 0/1: rows integrate at firstRowMid + y*rowDelay
+    float exposureSeconds;      // E: integration window each row integrates over
+    float rowDelaySeconds;      // rolling-shutter per-row offset
+    float firstRowMidSeconds;   // t0: midpoint of row 0's exposure
+    // Multi-phase camera passes (camera_stats) select their stage here; 0 for
+    // every other pass. Must match CameraPush in GpuCameraPipeline.cpp.
+    uint ispPhase;
 };
 [[vk::push_constant]] CameraPush cameraPush;
 
@@ -45,7 +55,8 @@ static const uint CAMERA_MULTI_CHANNEL = 5u;
 static const uint CAMERA_PHOTON = 0u;
 static const uint CAMERA_THERMAL = 1u;
 
-// NoiseClass public enum values.
+// NoiseClass public enum values. Must match the NoiseClass enum in
+// postprocess/CameraPhysics.hpp bit for bit; new classes append at the end.
 static const uint NOISE_PHOTON_SHOT = 0u;
 static const uint NOISE_DARK_SHOT = 1u;
 static const uint NOISE_READ = 2u;
@@ -53,6 +64,8 @@ static const uint NOISE_BIAS = 3u;
 static const uint NOISE_FIXED_PRNU = 4u;
 static const uint NOISE_FIXED_DSNU = 5u;
 static const uint NOISE_THERMAL_READ = 6u;
+static const uint NOISE_EMPIRICAL_NOISE = 9u;
+static const uint NOISE_EMPIRICAL_DRIFT = 10u;
 
 uint CameraMix32(uint x) {
     x ^= x >> 16;

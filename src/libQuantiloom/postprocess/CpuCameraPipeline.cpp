@@ -1,6 +1,9 @@
 #include "postprocess/CpuCameraPipeline.hpp"
 
+#include "core/Log.hpp"
 #include "io/ImageIO.hpp"
+#include "postprocess/CameraAutoControl.hpp"
+#include "postprocess/CameraIsp.hpp"
 #include "postprocess/CameraPhysics.hpp"
 
 #include <algorithm>
@@ -10,12 +13,19 @@
 #include <numbers>
 #include <random>
 #include <sstream>
+#include <type_traits>
 
 namespace quantiloom::camera {
 namespace {
 
 template<class T> Result<T, String> Fail(const String& message) {
-    return typename Result<T, String>::Err(message);
+    // Result<void, E> is a specialization whose Err is a static factory,
+    // not a nested type; the primary template carries a nested Err wrapper.
+    if constexpr (std::is_void_v<T>) {
+        return Result<T, String>::Err(message);
+    } else {
+        return typename Result<T, String>::Err(message);
+    }
 }
 
 const ResponseCurve& DetectorCurve(const ResponseStack& stack, DetectorKind kind) {
@@ -222,12 +232,6 @@ f64 Quantize(f64 analogDn, u32 bits) {
     return std::clamp(std::floor(analogDn + 0.5), 0.0, upper);
 }
 
-f32 EncodeSrgb(f32 linear) {
-    const f32 clamped = std::clamp(linear, 0.0f, 1.0f);
-    return clamped <= 0.0031308f ? 12.92f * clamped :
-           1.055f * std::pow(clamped, 1.0f / 2.4f) - 0.055f;
-}
-
 String Precise(f64 value) {
     std::ostringstream out;
     out << std::scientific << std::setprecision(17) << value;
@@ -249,7 +253,6 @@ SignalDescriptor Descriptor(const CameraConfig& config, SignalKind kind,
          (config.optics.sensorHeightPx - 1) * config.readout.rowDelaySeconds : 0.0);
     signal.cfa = config.device.cfa;
     const bool displayProduct = kind == SignalKind::DisplaySrgb ||
-        kind == SignalKind::DevicePreviewSrgb ||
         kind == SignalKind::CieLinearSrgb;
     signal.channelsPerPixel = displayProduct ? 3u : OutputChannels(config);
     signal.responseMinNm = std::numeric_limits<f64>::max();
@@ -303,36 +306,79 @@ Result<f64, String> ApparentTemperature(f64 measurement, const CameraConfig& con
 
 CpuCameraPipeline::CpuCameraPipeline(CameraConfig config) : m_config(std::move(config)) {}
 
+CameraConfig CpuCameraPipeline::EffectiveConfig(const CaptureState& state,
+                                                bool commitState) const {
+    // The auto controller writes its output into state.next*; a committed
+    // acquisition consumes it as its config. A fresh state (nextExposure 0)
+    // means "never captured": start from the authored manual values. Each
+    // rail only overrides when its own loop is enabled, so with auto off the
+    // effective config is the authored one and legacy behavior is unchanged.
+    CameraConfig effective = m_config;
+    if (!commitState)
+        return effective;
+    const IspConfig& isp = m_config.isp;
+    const bool exposureFresh = state.nextExposureSeconds <= 0.0;
+    if (isp.autoExposure && !exposureFresh) {
+        effective.readout.exposureSeconds = state.nextExposureSeconds;
+        if (state.nextAnalogGain > 0.0)
+            effective.readout.analogGain = state.nextAnalogGain;
+    }
+    if (isp.autoWhiteBalance && !exposureFresh)
+        effective.isp.whiteBalance = state.nextWhiteBalance;
+    return effective;
+}
+
 Result<CameraOutput, String>
 CpuCameraPipeline::Capture(CaptureState& state, f64 firstRowMidpointSeconds,
                            const SpectralFrameSampler& sampler) const {
-    if (m_config.products.tracedRadiance || m_config.products.cieLinearSrgb)
+    return CaptureImpl(state, firstRowMidpointSeconds, sampler,
+                       /*commitState=*/true);
+}
+
+Result<CameraOutput, String>
+CpuCameraPipeline::CaptureReprocess(const CaptureState& state,
+                                    f64 firstRowMidpointSeconds,
+                                    const SpectralFrameSampler& sampler) const {
+    CaptureState working = state;
+    return CaptureImpl(working, firstRowMidpointSeconds, sampler,
+                       /*commitState=*/false);
+}
+
+Result<CameraOutput, String>
+CpuCameraPipeline::CaptureImpl(CaptureState& state, f64 firstRowMidpointSeconds,
+                               const SpectralFrameSampler& sampler,
+                               bool commitState) const {
+    // A committed acquisition consumes the feedback written by the previous
+    // one's auto controller; a reprocess (commitState=false) replays against
+    // the authored config so it cannot advance or even move the loop.
+    const CameraConfig captureConfig = EffectiveConfig(state, commitState);
+    if (captureConfig.products.tracedRadiance || captureConfig.products.cieLinearSrgb)
         return Fail<CameraOutput>(
             "traced and CIE products must be supplied by the renderer facade");
-    const auto valid = ValidateCameraConfig(m_config);
+    const auto valid = ValidateCameraConfig(captureConfig);
     if (!valid) return Fail<CameraOutput>(valid.error());
     if (!std::isfinite(firstRowMidpointSeconds) || !sampler)
         return Fail<CameraOutput>("camera capture needs finite frame time and a sampler");
-    const u32 width = m_config.optics.sensorWidthPx;
-    const u32 height = m_config.optics.sensorHeightPx;
-    const u32 channels = OutputChannels(m_config);
+    const u32 width = captureConfig.optics.sensorWidthPx;
+    const u32 height = captureConfig.optics.sensorHeightPx;
+    const u32 channels = OutputChannels(captureConfig);
     const size_t pixelCount = static_cast<size_t>(width) * height;
     const size_t elementCount = pixelCount * channels;
-    const auto wavelengths = WavelengthGrid(m_config);
-    const auto weights = MeasurementWeights(m_config, wavelengths);
+    const auto wavelengths = WavelengthGrid(captureConfig);
+    const auto weights = MeasurementWeights(captureConfig, wavelengths);
     if (!weights) return Fail<CameraOutput>(weights.error());
-    const auto omega = ApertureSolidAngleSr(m_config.optics.fNumber);
-    const auto area = PixelCollectionAreaM2(m_config.optics);
+    const auto omega = ApertureSolidAngleSr(captureConfig.optics.fNumber);
+    const auto area = PixelCollectionAreaM2(captureConfig.optics);
     if (!omega || !area) return Fail<CameraOutput>("invalid camera aperture or pixel area");
     std::optional<Image> knownPsf;
-    if (!m_config.optics.knownPsfPath.empty()) {
-        knownPsf = ImageIO::ReadImage(m_config.optics.knownPsfPath);
+    if (!captureConfig.optics.knownPsfPath.empty()) {
+        knownPsf = ImageIO::ReadImage(captureConfig.optics.knownPsfPath);
         if (!knownPsf) return Fail<CameraOutput>("could not load known PSF image");
     }
     std::vector<f64> vignette(pixelCount, 1.0);
-    if (m_config.optics.cosFourthVignetting) {
-        const f64 pitchM = m_config.optics.pixelPitchUm * 1e-6;
-        const f64 focalM = m_config.optics.focalLengthMm * 1e-3;
+    if (captureConfig.optics.cosFourthVignetting) {
+        const f64 pitchM = captureConfig.optics.pixelPitchUm * 1e-6;
+        const f64 focalM = captureConfig.optics.focalLengthMm * 1e-3;
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
                 const f64 dx = (x + 0.5 - width * 0.5) * pitchM;
@@ -343,18 +389,18 @@ CpuCameraPipeline::Capture(CaptureState& state, f64 firstRowMidpointSeconds,
             }
     }
     std::vector<f64> expected(elementCount, 0.0);
-    const bool rolling = m_config.readout.shutter == ShutterKind::Rolling;
+    const bool rolling = captureConfig.readout.shutter == ShutterKind::Rolling;
     const u32 rowGroups = rolling ? height : 1u;
     struct ExposureEvent { f64 time; u32 firstY; u32 lastY; };
     std::vector<ExposureEvent> events;
-    events.reserve(static_cast<size_t>(rowGroups) * m_config.quality.timeSamples);
+    events.reserve(static_cast<size_t>(rowGroups) * captureConfig.quality.timeSamples);
     for (u32 group = 0; group < rowGroups; ++group) {
-        for (u32 timeSample = 0; timeSample < m_config.quality.timeSamples; ++timeSample) {
+        for (u32 timeSample = 0; timeSample < captureConfig.quality.timeSamples; ++timeSample) {
             const f64 time = firstRowMidpointSeconds +
-                (rolling ? group * m_config.readout.rowDelaySeconds : 0.0) -
-                m_config.readout.exposureSeconds / 2.0 +
-                (timeSample + 0.5) * m_config.readout.exposureSeconds /
-                    m_config.quality.timeSamples;
+                (rolling ? group * captureConfig.readout.rowDelaySeconds : 0.0) -
+                captureConfig.readout.exposureSeconds / 2.0 +
+                (timeSample + 0.5) * captureConfig.readout.exposureSeconds /
+                    captureConfig.quality.timeSamples;
             events.push_back({time, rolling ? group : 0u,
                               rolling ? group + 1u : height});
         }
@@ -375,110 +421,112 @@ CpuCameraPipeline::Capture(CaptureState& state, f64 firstRowMidpointSeconds,
                 for (const f32 value : radiance.data)
                     if (!std::isfinite(value))
                         return Fail<CameraOutput>("spectral sampler returned nonfinite radiance");
-                const auto kernel = BuildKernel(m_config, wavelengths[wavelengthIndex], knownPsf);
+                const auto kernel = BuildKernel(captureConfig, wavelengths[wavelengthIndex], knownPsf);
                 if (!kernel) return Fail<CameraOutput>(kernel.error());
                 const Image blurred = Convolve(radiance, kernel.value());
                 for (u32 y = event.firstY; y < event.lastY; ++y)
                     for (u32 x = 0; x < width; ++x) {
                         const size_t pixel = static_cast<size_t>(y) * width + x;
                         const f64 irradiance = blurred(x, y, 0) * omega.value() * vignette[pixel];
-                        if (m_config.device.cfa == CfaPattern::MultiChannel) {
+                        if (captureConfig.device.cfa == CfaPattern::MultiChannel) {
                             for (u32 channel = 0; channel < channels; ++channel)
                                 expected[pixel * channels + channel] += irradiance *
                                     weights.value()[channel][wavelengthIndex] /
-                                    m_config.quality.timeSamples;
+                                    captureConfig.quality.timeSamples;
                         } else {
-                            const u32 channel = ChannelAt(m_config.device.cfa, x, y);
+                            const u32 channel = ChannelAt(captureConfig.device.cfa, x, y);
                             expected[pixel] += irradiance *
                                 weights.value()[channel][wavelengthIndex] /
-                                m_config.quality.timeSamples;
+                                captureConfig.quality.timeSamples;
                         }
                     }
             }
     }
     return Readout(state, firstRowMidpointSeconds, std::move(expected),
-                   false, true);
+                   false, true, commitState, captureConfig);
 }
 
 Result<CameraOutput, String>
 CpuCameraPipeline::CaptureMeasured(CaptureState& state, f64 firstRowMidpointSeconds,
                                    const Image& measuredRate) const {
-    if (m_config.products.tracedRadiance || m_config.products.cieLinearSrgb)
+    const CameraConfig captureConfig = EffectiveConfig(state, /*commitState=*/true);
+    if (captureConfig.products.tracedRadiance || captureConfig.products.cieLinearSrgb)
         return Fail<CameraOutput>(
             "traced and CIE products must be supplied by the renderer facade");
-    const auto valid = ValidateCameraConfig(m_config);
+    const auto valid = ValidateCameraConfig(captureConfig);
     if (!valid) return Fail<CameraOutput>(valid.error());
     if (!std::isfinite(firstRowMidpointSeconds) || !measuredRate.IsValid() ||
-        measuredRate.width != m_config.optics.sensorWidthPx ||
-        measuredRate.height != m_config.optics.sensorHeightPx ||
-        measuredRate.channels != OutputChannels(m_config))
+        measuredRate.width != captureConfig.optics.sensorWidthPx ||
+        measuredRate.height != captureConfig.optics.sensorHeightPx ||
+        measuredRate.channels != OutputChannels(captureConfig))
         return Fail<CameraOutput>("measured-input image has invalid time, shape or channels");
     std::vector<f64> expected(measuredRate.data.begin(), measuredRate.data.end());
     return Readout(state, firstRowMidpointSeconds, std::move(expected),
-                   false, false);
+                   false, false, /*commitState=*/true, captureConfig);
 }
 
 Result<CameraOutput, String>
 CpuCameraPipeline::CaptureFastRgb(CaptureState& state, f64 firstRowMidpointSeconds,
                                   const Image& linearRgb) const {
-    if (m_config.products.tracedRadiance || m_config.products.cieLinearSrgb)
+    const CameraConfig captureConfig = EffectiveConfig(state, /*commitState=*/true);
+    if (captureConfig.products.tracedRadiance || captureConfig.products.cieLinearSrgb)
         return Fail<CameraOutput>(
             "traced and CIE products must be supplied by the renderer facade");
-    const auto valid = ValidateCameraConfig(m_config);
+    const auto valid = ValidateCameraConfig(captureConfig);
     if (!valid) return Fail<CameraOutput>(valid.error());
-    const u32 width = m_config.optics.sensorWidthPx;
-    const u32 height = m_config.optics.sensorHeightPx;
-    const u32 outputChannels = OutputChannels(m_config);
+    const u32 width = captureConfig.optics.sensorWidthPx;
+    const u32 height = captureConfig.optics.sensorHeightPx;
+    const u32 outputChannels = OutputChannels(captureConfig);
     if (!std::isfinite(firstRowMidpointSeconds) || !linearRgb.IsValid() ||
         linearRgb.width != width || linearRgb.height != height ||
-        linearRgb.channels < 3 || m_config.device.channels.size() > 3)
+        linearRgb.channels < 3 || captureConfig.device.channels.size() > 3)
         return Fail<CameraOutput>("fast RGB input needs three linear channels and matching geometry");
     for (f32 value : linearRgb.data)
         if (!std::isfinite(value) || value < 0.0f)
             return Fail<CameraOutput>("fast RGB input must be finite and nonnegative");
-    const auto grid = WavelengthGrid(m_config);
-    const auto weights = MeasurementWeights(m_config, grid);
-    const auto omega = ApertureSolidAngleSr(m_config.optics.fNumber);
+    const auto grid = WavelengthGrid(captureConfig);
+    const auto weights = MeasurementWeights(captureConfig, grid);
+    const auto omega = ApertureSolidAngleSr(captureConfig.optics.fNumber);
     if (!weights || !omega) return Fail<CameraOutput>(
         weights ? omega.error() : weights.error());
     std::optional<Image> knownPsf;
-    if (!m_config.optics.knownPsfPath.empty()) {
-        knownPsf = ImageIO::ReadImage(m_config.optics.knownPsfPath);
+    if (!captureConfig.optics.knownPsfPath.empty()) {
+        knownPsf = ImageIO::ReadImage(captureConfig.optics.knownPsfPath);
         if (!knownPsf) return Fail<CameraOutput>("could not load known PSF image");
     }
-    const f64 radianceScale = m_config.fastRgbRadianceScale > 0.0 ?
-                              m_config.fastRgbRadianceScale : 1.0;
-    const f64 pitchM = m_config.optics.pixelPitchUm * 1e-6;
-    const f64 focalM = m_config.optics.focalLengthMm * 1e-3;
+    const f64 radianceScale = captureConfig.fastRgbRadianceScale > 0.0 ?
+                              captureConfig.fastRgbRadianceScale : 1.0;
+    const f64 pitchM = captureConfig.optics.pixelPitchUm * 1e-6;
+    const f64 focalM = captureConfig.optics.focalLengthMm * 1e-3;
     std::vector<f64> expected(static_cast<size_t>(width) * height * outputChannels, 0.0);
     for (u32 deviceChannel = 0;
-         deviceChannel < m_config.device.channels.size(); ++deviceChannel) {
+         deviceChannel < captureConfig.device.channels.size(); ++deviceChannel) {
         Image mapped(width, height, 1);
         const size_t row = static_cast<size_t>(deviceChannel) * 3;
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
                 f64 value = 0.0;
                 for (u32 rgb = 0; rgb < 3; ++rgb)
-                    value += m_config.fastRgbToDevice[row + rgb] *
+                    value += captureConfig.fastRgbToDevice[row + rgb] *
                              linearRgb(x, y, rgb);
                 mapped(x, y, 0) = static_cast<f32>(std::max(0.0, value));
             }
         const auto& curve = DetectorCurve(
-            m_config.device.channels[deviceChannel].response,
-            m_config.device.detector);
+            captureConfig.device.channels[deviceChannel].response,
+            captureConfig.device.detector);
         const f64 effectiveNm = 0.5 * (curve.MinNm() + curve.MaxNm());
-        const auto kernel = BuildKernel(m_config, effectiveNm, knownPsf);
+        const auto kernel = BuildKernel(captureConfig, effectiveNm, knownPsf);
         if (!kernel) return Fail<CameraOutput>(kernel.error());
         const Image blurred = Convolve(mapped, kernel.value());
         f64 responseWeight = 0.0;
         for (f64 weight : weights.value()[deviceChannel]) responseWeight += weight;
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
-                if (m_config.device.cfa != CfaPattern::MultiChannel &&
-                    ChannelAt(m_config.device.cfa, x, y) != deviceChannel)
+                if (captureConfig.device.cfa != CfaPattern::MultiChannel &&
+                    ChannelAt(captureConfig.device.cfa, x, y) != deviceChannel)
                     continue;
                 f64 vignette = 1.0;
-                if (m_config.optics.cosFourthVignetting) {
+                if (captureConfig.optics.cosFourthVignetting) {
                     const f64 dx = (x + 0.5 - width * 0.5) * pitchM;
                     const f64 dy = (y + 0.5 - height * 0.5) * pitchM;
                     const f64 cosine = 1.0 / std::sqrt(
@@ -487,26 +535,28 @@ CpuCameraPipeline::CaptureFastRgb(CaptureState& state, f64 firstRowMidpointSecon
                 }
                 const size_t pixel = static_cast<size_t>(y) * width + x;
                 const size_t index = pixel * outputChannels +
-                    (m_config.device.cfa == CfaPattern::MultiChannel ?
+                    (captureConfig.device.cfa == CfaPattern::MultiChannel ?
                      deviceChannel : 0u);
                 expected[index] = blurred(x, y, 0) * radianceScale *
                                   omega.value() * vignette * responseWeight;
             }
     }
     return Readout(state, firstRowMidpointSeconds, std::move(expected),
-                   true, false);
+                   true, false, /*commitState=*/true, captureConfig);
 }
 
 Result<CameraOutput, String>
 CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                            std::vector<f64> expected,
                            bool fastRgbApproximation,
-                           bool allowSignedMonteCarloResidual) const {
-    const u32 width = m_config.optics.sensorWidthPx;
-    const u32 height = m_config.optics.sensorHeightPx;
-    const u32 channels = OutputChannels(m_config);
+                           bool allowSignedMonteCarloResidual,
+                           bool commitState,
+                           const CameraConfig& config) const {
+    const u32 width = config.optics.sensorWidthPx;
+    const u32 height = config.optics.sensorHeightPx;
+    const u32 channels = OutputChannels(config);
     const size_t elementCount = static_cast<size_t>(width) * height * channels;
-    const u32 effectiveSeed = DeviceRandomSeed(m_config);
+    const u32 effectiveSeed = DeviceRandomSeed(config);
     if (expected.size() != elementCount)
         return Fail<CameraOutput>("measured-input element count is invalid");
     size_t negativeMcElements = 0;
@@ -524,27 +574,27 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             ++negativeMcElements;
         }
     }
-    const auto area = PixelCollectionAreaM2(m_config.optics);
+    const auto area = PixelCollectionAreaM2(config.optics);
     if (!area) return Fail<CameraOutput>(area.error());
-    std::vector<f64> thermalReadNoiseDn(m_config.device.channels.size(),
-                                         m_config.thermal.readNoiseDnRms);
-    if (m_config.device.detector == DetectorKind::Thermal &&
-        m_config.thermal.netdKelvin > 0.0) {
+    std::vector<f64> thermalReadNoiseDn(config.device.channels.size(),
+                                         config.thermal.readNoiseDnRms);
+    if (config.device.detector == DetectorKind::Thermal &&
+        config.thermal.netdKelvin > 0.0) {
         for (size_t channel = 0; channel < thermalReadNoiseDn.size(); ++channel) {
             const auto slope = BlackbodyThermalDerivativeWPerK(
-                m_config.thermal.netdReferenceTemperatureK,
-                m_config.device.channels[channel].response,
-                m_config.optics.fNumber, area.value());
+                config.thermal.netdReferenceTemperatureK,
+                config.device.channels[channel].response,
+                config.optics.fNumber, area.value());
             if (!slope) return Fail<CameraOutput>(slope.error());
-            thermalReadNoiseDn[channel] = m_config.thermal.netdKelvin *
-                slope.value() * m_config.thermal.responsivityDnPerWatt;
+            thermalReadNoiseDn[channel] = config.thermal.netdKelvin *
+                slope.value() * config.thermal.responsivityDnPerWatt;
             // White output noise, rectangular readout window, B = 1/(2T).
             // Zero window retains the documented reference bandwidth.
-            if (m_config.thermal.readoutWindowSeconds > 0.0) {
+            if (config.thermal.readoutWindowSeconds > 0.0) {
                 const f64 bandwidthHz =
-                    1.0 / (2.0 * m_config.thermal.readoutWindowSeconds);
+                    1.0 / (2.0 * config.thermal.readoutWindowSeconds);
                 thermalReadNoiseDn[channel] *= std::sqrt(
-                    bandwidthHz / m_config.thermal.netdNoiseBandwidthHz);
+                    bandwidthHz / config.thermal.netdNoiseBandwidthHz);
             }
         }
     }
@@ -553,13 +603,13 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     Image corrected(width, height, channels);
     for (u32 channel = 0; channel < channels; ++channel) {
         const String name = channels == 1 ? "Measurement" :
-            m_config.device.channels[channel].name;
+            config.device.channels[channel].name;
         measured.channelNames[channel] = name;
         raw.channelNames[channel] = channels == 1 ? "Raw" : name;
         corrected.channelNames[channel] = channels == 1 ? "Signal" : name;
     }
     CaptureState nextState = state;
-    if (m_config.device.detector == DetectorKind::Thermal &&
+    if (config.device.detector == DetectorKind::Thermal &&
         nextState.thermalPixelStateW.size() != elementCount)
         nextState.thermalPixelStateW = expected; // first-frame steady state.
     const f64 elapsed = std::max(0.0, firstRowMidpointSeconds - state.frameTimeSeconds);
@@ -572,42 +622,42 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             return Fail<CameraOutput>("camera measurement overflowed");
         measured.data[index] = static_cast<f32>(rateOrPower);
         f64 analogDn = 0.0, correctedValue = 0.0;
-        if (m_config.device.detector == DetectorKind::Photon) {
-            const auto& detector = m_config.photon;
-            const f64 exposure = m_config.readout.exposureSeconds;
-            const f64 prnu = (!m_config.quality.noiseFree && detector.enableFpn) ?
+        if (config.device.detector == DetectorKind::Photon) {
+            const auto& detector = config.photon;
+            const f64 exposure = config.readout.exposureSeconds;
+            const f64 prnu = (!config.quality.noiseFree && detector.enableFpn) ?
                 detector.prnuSigma * FixedGaussian(
                     effectiveSeed, noisePixel, NoiseClass::FixedPrnu) : 0.0;
             const f64 expectedLight = std::max(0.0, rateOrPower * exposure * (1.0 + prnu));
-            const f64 darkNonuniform = (!m_config.quality.noiseFree && detector.enableFpn) ?
+            const f64 darkNonuniform = (!config.quality.noiseFree && detector.enableFpn) ?
                 detector.dsnuElectronsRms *
                 (exposure / detector.dsnuReferenceExposureSeconds) *
                 FixedGaussian(effectiveSeed, noisePixel, NoiseClass::FixedDsnu) : 0.0;
             const f64 expectedDark = detector.enableDarkCurrent ?
                 std::max(0.0, detector.darkCurrentElectronsPerSecond * exposure +
                               darkNonuniform) : 0.0;
-            const f64 light = (!m_config.quality.noiseFree && detector.enableShotNoise) ?
+            const f64 light = (!config.quality.noiseFree && detector.enableShotNoise) ?
                 Poisson(expectedLight, effectiveSeed, noisePixel, state.acquisitionIndex,
                         NoiseClass::PhotonShot) : expectedLight;
-            const f64 dark = (!m_config.quality.noiseFree && detector.enableDarkShotNoise) ?
+            const f64 dark = (!config.quality.noiseFree && detector.enableDarkShotNoise) ?
                 Poisson(expectedDark, effectiveSeed, noisePixel, state.acquisitionIndex,
                         NoiseClass::DarkShot) : expectedDark;
             f64 electrons = std::min(detector.fullWellElectrons, light + dark);
-            if (!m_config.quality.noiseFree && detector.enableReadNoise)
+            if (!config.quality.noiseFree && detector.enableReadNoise)
                 electrons += detector.readNoiseElectronsRms *
                     TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                      NoiseClass::Read);
-            const f64 fixedBias = (!m_config.quality.noiseFree && detector.enableFpn) ?
+            const f64 fixedBias = (!config.quality.noiseFree && detector.enableFpn) ?
                 detector.biasDnRms * FixedGaussian(
                     effectiveSeed, noisePixel, NoiseClass::Bias) : 0.0;
-            analogDn = m_config.readout.analogGain * electrons /
-                       m_config.readout.electronsPerDn +
-                       m_config.readout.blackLevelDn + fixedBias;
-            const f64 dn = Quantize(analogDn, m_config.readout.adcBits);
+            analogDn = config.readout.analogGain * electrons /
+                       config.readout.electronsPerDn +
+                       config.readout.blackLevelDn + fixedBias;
+            const f64 dn = Quantize(analogDn, config.readout.adcBits);
             raw.data[index] = static_cast<f32>(dn);
-            correctedValue = (dn - m_config.readout.blackLevelDn - fixedBias) *
-                             m_config.readout.electronsPerDn /
-                             m_config.readout.analogGain;
+            correctedValue = (dn - config.readout.blackLevelDn - fixedBias) *
+                             config.readout.electronsPerDn /
+                             config.readout.analogGain;
             correctedValue -= detector.enableDarkCurrent ?
                 detector.darkCurrentElectronsPerSecond * exposure : 0.0;
             if (detector.applyNuc) {
@@ -616,32 +666,32 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                 const f64 offset = detector.nucOffsetElectronsMap.empty() ? 0.0 :
                                    detector.nucOffsetElectronsMap[index];
                 correctedValue = correctedValue * gain + offset;
-                if (!m_config.quality.noiseFree)
+                if (!config.quality.noiseFree)
                     correctedValue += detector.nucResidualFraction *
                                       (prnu * rateOrPower * exposure +
                                        darkNonuniform);
             }
             corrected.data[index] = static_cast<f32>(std::max(0.0, correctedValue));
         } else {
-            const auto& detector = m_config.thermal;
+            const auto& detector = config.thermal;
             const auto stepped = StepThermalResponse(nextState.thermalPixelStateW[index],
                 rateOrPower, elapsed, detector.timeConstantSeconds);
             if (!stepped) return Fail<CameraOutput>(stepped.error());
             nextState.thermalPixelStateW[index] = stepped.value();
             analogDn = stepped.value() * detector.responsivityDnPerWatt +
-                       m_config.readout.blackLevelDn +
+                       config.readout.blackLevelDn +
                        detector.driftDnPerSecond * firstRowMidpointSeconds;
-            if (!m_config.quality.noiseFree) {
-                const u32 deviceChannel = m_config.device.cfa == CfaPattern::MultiChannel ?
+            if (!config.quality.noiseFree) {
+                const u32 deviceChannel = config.device.cfa == CfaPattern::MultiChannel ?
                                           static_cast<u32>(index % channels) :
-                                          ChannelAt(m_config.device.cfa, x, y);
+                                          ChannelAt(config.device.cfa, x, y);
                 analogDn += thermalReadNoiseDn[deviceChannel] *
                     TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                      NoiseClass::ThermalRead);
             }
-            const f64 dn = Quantize(analogDn, m_config.readout.adcBits);
+            const f64 dn = Quantize(analogDn, config.readout.adcBits);
             raw.data[index] = static_cast<f32>(dn);
-            correctedValue = (dn - m_config.readout.blackLevelDn -
+            correctedValue = (dn - config.readout.blackLevelDn -
                 detector.driftDnPerSecond * firstRowMidpointSeconds) /
                 detector.responsivityDnPerWatt;
             if (!detector.nucGainMap.empty())
@@ -654,118 +704,100 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         (void)x;
         (void)y;
     }
-    Image display(width, height, 3);
-    display.channelNames = {"R", "G", "B"};
-    f64 minThermal = std::numeric_limits<f64>::max(), maxThermal = 0.0;
-    if (m_config.device.detector == DetectorKind::Thermal) {
-        for (const f32 value : corrected.data) {
-            minThermal = std::min(minThermal, static_cast<f64>(value));
-            maxThermal = std::max(maxThermal, static_cast<f64>(value));
-        }
+    // Acquisition statistics for the AE/AWB loop, computed while raw and
+    // corrected are still intact (the products below move out of them).
+    std::optional<AcquisitionStats> controlStats;
+    if (commitState &&
+        config.device.detector == DetectorKind::Photon &&
+        (config.isp.autoExposure || config.isp.autoWhiteBalance))
+        controlStats = ComputeAcquisitionStats(config, raw, corrected);
+    Image display;
+    if (config.products.display) {
+        auto isp = RunIsp(config, raw, corrected, state, firstRowMidpointSeconds);
+        if (!isp) return Fail<CameraOutput>(isp.error());
+        display = std::move(isp.value());
     }
-    for (u32 y = 0; y < height; ++y)
-        for (u32 x = 0; x < width; ++x) {
-            const size_t pixel = static_cast<size_t>(y) * width + x;
-            if (m_config.device.detector == DetectorKind::Photon) {
-                const f64 scale = 1.0 / m_config.photon.fullWellElectrons;
-                if (m_config.device.cfa == CfaPattern::MultiChannel && channels >= 3) {
-                    for (u32 c = 0; c < 3; ++c)
-                        display(x, y, c) = static_cast<f32>(std::clamp(
-                            corrected.data[pixel * channels + c] * scale, 0.0, 1.0));
-                } else {
-                    const f32 value = static_cast<f32>(std::clamp(
-                        corrected.data[pixel] * scale, 0.0, 1.0));
-                    for (u32 c = 0; c < 3; ++c) display(x, y, c) = value;
-                }
-            } else {
-                const f32 value = static_cast<f32>(std::clamp(
-                    (corrected.data[pixel * channels] - minThermal) /
-                    std::max(1e-30, maxThermal - minThermal), 0.0, 1.0));
-                for (u32 c = 0; c < 3; ++c) display(x, y, c) = value;
-            }
-        }
-    for (auto& value : display.data) value = EncodeSrgb(value);
     CameraOutput output;
     const u64 acquisition = state.acquisitionIndex;
-    if (m_config.products.bandMeasurement) {
-        auto product = Product(std::move(measured), Descriptor(m_config,
+    if (config.products.bandMeasurement) {
+        auto product = Product(std::move(measured), Descriptor(config,
             SignalKind::BandMeasurement,
-            m_config.device.detector == DetectorKind::Photon ? "e-/s" : "W",
+            config.device.detector == DetectorKind::Photon ? "e-/s" : "W",
             acquisition, firstRowMidpointSeconds));
         if (!product) return Fail<CameraOutput>(product.error());
         output.bandMeasurement = std::move(product.value());
     }
-    if (m_config.products.rawDn) {
-        auto product = Product(std::move(raw), Descriptor(m_config,
+    if (config.products.rawDn) {
+        auto product = Product(std::move(raw), Descriptor(config,
             SignalKind::RawDN, "DN", acquisition, firstRowMidpointSeconds));
         if (!product) return Fail<CameraOutput>(product.error());
         product.value().image.metadata["camera_adc_bits"] =
-            std::to_string(m_config.readout.adcBits);
+            std::to_string(config.readout.adcBits);
         product.value().image.metadata["camera_output_bits"] =
-            std::to_string(m_config.readout.outputBits);
-        if (m_config.device.detector == DetectorKind::Thermal &&
-            m_config.thermal.netdKelvin > 0.0) {
+            std::to_string(config.readout.outputBits);
+        if (config.device.detector == DetectorKind::Thermal &&
+            config.thermal.netdKelvin > 0.0) {
             product.value().image.metadata["camera_netd_reference_k"] =
-                std::to_string(m_config.thermal.netdReferenceTemperatureK);
+                std::to_string(config.thermal.netdReferenceTemperatureK);
             product.value().image.metadata["camera_netd_reference_bandwidth_hz"] =
-                std::to_string(m_config.thermal.netdNoiseBandwidthHz);
+                std::to_string(config.thermal.netdNoiseBandwidthHz);
             product.value().image.metadata["camera_netd_noise_model"] =
                 "white_noise_rectangular_readout";
             product.value().image.metadata["camera_readout_window_s"] =
-                std::to_string(m_config.thermal.readoutWindowSeconds);
+                std::to_string(config.thermal.readoutWindowSeconds);
         }
         output.rawDn = std::move(product.value());
     }
-    if (m_config.products.display) {
-        auto product = Product(std::move(display), Descriptor(m_config,
-            SignalKind::DevicePreviewSrgb, "sRGB-preview", acquisition,
+    if (config.products.display) {
+        auto product = Product(std::move(display), Descriptor(config,
+            SignalKind::DisplaySrgb, "encoded sRGB", acquisition,
             firstRowMidpointSeconds));
         if (!product) return Fail<CameraOutput>(product.error());
         output.display = std::move(product.value());
     }
-    if (m_config.products.apparentTemperature) {
+    if (config.products.apparentTemperature) {
         Image temperature(width, height, channels);
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
                 const size_t pixel = static_cast<size_t>(y) * width + x;
                 for (u32 c = 0; c < channels; ++c) {
-                    const u32 channel = m_config.device.cfa == CfaPattern::MultiChannel ?
-                                        c : ChannelAt(m_config.device.cfa, x, y);
-                    const f64 measurement = m_config.device.detector == DetectorKind::Photon ?
+                    const u32 channel = config.device.cfa == CfaPattern::MultiChannel ?
+                                        c : ChannelAt(config.device.cfa, x, y);
+                    const f64 measurement = config.device.detector == DetectorKind::Photon ?
                         corrected.data[pixel * channels + c] /
-                            m_config.readout.exposureSeconds :
+                            config.readout.exposureSeconds :
                         corrected.data[pixel * channels + c];
                     const auto kelvin = ApparentTemperature(
-                        measurement, m_config, channel, area.value());
+                        measurement, config, channel, area.value());
                     if (!kelvin) return Fail<CameraOutput>(kelvin.error());
                     temperature.data[pixel * channels + c] =
                         static_cast<f32>(kelvin.value());
                 }
             }
-        auto product = Product(std::move(temperature), Descriptor(m_config,
+        auto product = Product(std::move(temperature), Descriptor(config,
             SignalKind::ApparentTemperature, "K", acquisition, firstRowMidpointSeconds));
         if (!product) return Fail<CameraOutput>(product.error());
         output.apparentTemperature = std::move(product.value());
     }
-    if (m_config.products.correctedDeviceSignal) {
-        auto product = Product(std::move(corrected), Descriptor(m_config,
+    if (config.products.correctedDeviceSignal) {
+        auto product = Product(std::move(corrected), Descriptor(config,
             SignalKind::DeviceLinear,
-            m_config.device.detector == DetectorKind::Photon ? "e-" : "W",
+            config.device.detector == DetectorKind::Photon ? "e-" : "W",
             acquisition, firstRowMidpointSeconds));
         if (!product) return Fail<CameraOutput>(product.error());
         output.correctedDeviceSignal = std::move(product.value());
     }
     if (fastRgbApproximation) {
-        const auto annotateApproximation = [this](
+        const auto annotateApproximation = [this, &config](
             std::optional<CameraProduct>& product) {
             if (!product) return;
             auto& metadata = product->image.metadata;
             metadata["camera_input_semantics"] = "fast_rgb_approximation";
             metadata["camera_fast_rgb_scale_Wm2SrNm"] =
-                std::to_string(m_config.fastRgbRadianceScale > 0.0 ?
-                               m_config.fastRgbRadianceScale : 1.0);
+                std::to_string(config.fastRgbRadianceScale > 0.0 ?
+                               config.fastRgbRadianceScale : 1.0);
             metadata["camera_fast_rgb_mapping"] =
-                m_config.calibratedFastRgbInput ? "calibrated_matrix" :
+                config.calibratedFastRgbInput ? "calibrated_matrix" :
                                                  "generic_identity_assumption";
         };
         annotateApproximation(output.bandMeasurement);
@@ -774,11 +806,11 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         annotateApproximation(output.apparentTemperature);
         annotateApproximation(output.display);
     }
-    const auto annotateSeed = [this, effectiveSeed](
+    const auto annotateSeed = [this, &config, effectiveSeed](
         std::optional<CameraProduct>& product) {
         if (!product) return;
         product->image.metadata["camera_random_seed"] =
-            std::to_string(m_config.randomSeed);
+            std::to_string(config.randomSeed);
         product->image.metadata["camera_effective_device_seed"] =
             std::to_string(effectiveSeed);
         product->image.metadata["camera_random_algorithm"] =
@@ -810,10 +842,131 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
     }
     nextState.acquisitionIndex = acquisition + 1;
     nextState.frameTimeSeconds = firstRowMidpointSeconds;
-    nextState.nextExposureSeconds = m_config.readout.exposureSeconds;
-    nextState.nextAnalogGain = m_config.readout.analogGain;
-    state = std::move(nextState);
+    nextState.nextExposureSeconds = config.readout.exposureSeconds;
+    nextState.nextAnalogGain = config.readout.analogGain;
+    if (commitState) {
+        // AE/AWB closed loop. Only a committed photon-chain acquisition runs
+        // the controller: CaptureReprocess and the commitState=false path
+        // never reach this block, so a same-tick reprocess cannot advance the
+        // feedback. A thermal detector responds to absorbed power, not scene
+        // luminance -- AE has no physical meaning there, so the auto_* flags
+        // are treated as off and the write-back keeps the authored config.
+        const bool photon = config.device.detector == DetectorKind::Photon;
+        const bool autoWanted = config.isp.autoExposure || config.isp.autoWhiteBalance;
+        if (photon && controlStats) {
+            AutoControlState previous;
+            const bool freshState = state.nextExposureSeconds <= 0.0;
+            previous.exposure = freshState ? config.readout.exposureSeconds :
+                                             state.nextExposureSeconds;
+            previous.analogGain = freshState ? config.readout.analogGain :
+                                               state.nextAnalogGain;
+            previous.whiteBalance = freshState ? config.isp.whiteBalance :
+                                                 state.nextWhiteBalance;
+            AutoControlInput controlInput;
+            controlInput.lumaMean = controlStats->lumaMean;
+            const f64 total = static_cast<f64>(controlStats->saturatedCount +
+                                               controlStats->unsaturatedCount);
+            controlInput.saturatedFraction = total > 0.0 ?
+                static_cast<f64>(controlStats->saturatedCount) / total : 0.0;
+            controlInput.channelMeans = controlStats->channelMeans;
+            const AutoControlState next = StepAutoControl(
+                config.isp, previous, controlInput,
+                config.isp.autoExposure, config.isp.autoWhiteBalance);
+            nextState.nextExposureSeconds = next.exposure;
+            nextState.nextAnalogGain = next.analogGain;
+            nextState.nextWhiteBalance = next.whiteBalance;
+        } else if (!photon && autoWanted && !m_autoThermalNoted) {
+            m_autoThermalNoted = true;
+            QL_LOG_WARN(
+                "camera auto_exposure/auto_white_balance ignored: the thermal "
+                "detector responds to absorbed power, not scene luminance");
+        }
+        state = std::move(nextState);
+    }
     return output;
+}
+
+Result<CaptureCheckpoint, String>
+CheckpointCamera(const CaptureState& state) {
+    if (!std::isfinite(state.frameTimeSeconds) ||
+        !std::isfinite(state.nextExposureSeconds) ||
+        !std::isfinite(state.nextAnalogGain))
+        return Fail<CaptureCheckpoint>("capture state has non-finite history fields");
+    CaptureCheckpoint checkpoint;
+    checkpoint.acquisitionIndex = state.acquisitionIndex;
+    checkpoint.frameTimeSeconds = state.frameTimeSeconds;
+    checkpoint.historyEpoch = state.historyEpoch;
+    checkpoint.thermalPixelStateW = state.thermalPixelStateW;
+    checkpoint.nextExposureSeconds = state.nextExposureSeconds;
+    checkpoint.nextAnalogGain = state.nextAnalogGain;
+    checkpoint.nextWhiteBalance = state.nextWhiteBalance;
+    return checkpoint;
+}
+
+Result<void, String>
+RestoreCamera(CaptureState& state, const CaptureCheckpoint& checkpoint) {
+    if (!std::isfinite(checkpoint.frameTimeSeconds) ||
+        !std::isfinite(checkpoint.nextExposureSeconds) ||
+        !std::isfinite(checkpoint.nextAnalogGain))
+        return Result<void, String>::Err("capture checkpoint has non-finite history fields");
+    state.acquisitionIndex = checkpoint.acquisitionIndex;
+    state.frameTimeSeconds = checkpoint.frameTimeSeconds;
+    state.thermalPixelStateW = checkpoint.thermalPixelStateW;
+    state.nextExposureSeconds = checkpoint.nextExposureSeconds;
+    state.nextAnalogGain = checkpoint.nextAnalogGain;
+    state.nextWhiteBalance = checkpoint.nextWhiteBalance;
+    // A restore rewinds history: the epoch moves on so replayed ticks can be
+    // told apart from the originals by hosts and by the GPU twin state.
+    state.historyEpoch = checkpoint.historyEpoch + 1;
+    return Result<void, String>::Ok();
+}
+
+Result<void, String>
+AdvanceCameraState(CaptureState& state, f64 timeSeconds,
+                   const CameraAdvanceFn& advance) {
+    if (!std::isfinite(timeSeconds))
+        return Result<void, String>::Err("camera advance needs a finite frame time");
+    if (!advance)
+        return Result<void, String>::Err("camera advance needs an acquisition step");
+    const u64 before = state.acquisitionIndex;
+    auto stepped = advance(state, timeSeconds);
+    if (!stepped) return Result<void, String>::Err(stepped.error());
+    if (state.acquisitionIndex != before + 1)
+        return Result<void, String>::Err("camera advance did not advance the acquisition index");
+    return Result<void, String>::Ok();
+}
+
+Result<void, String>
+WarmUpCamera(CaptureState& state, f64 seconds, f64 framePeriodSeconds,
+             const CameraAdvanceFn& advance) {
+    if (!std::isfinite(seconds) || seconds < 0.0)
+        return Result<void, String>::Err("camera warmup seconds must be finite and nonnegative");
+    if (!std::isfinite(framePeriodSeconds) || framePeriodSeconds <= 0.0)
+        return Result<void, String>::Err("camera warmup frame period must be finite and positive");
+    if (!std::isfinite(state.frameTimeSeconds))
+        return Result<void, String>::Err("camera warmup needs a finite current frame time");
+    const u64 steps = static_cast<u64>(std::llround(seconds / framePeriodSeconds));
+    if (steps == 0) return Result<void, String>::Ok();
+    const f64 now = state.frameTimeSeconds;
+    // The warmup acquisitions sit on the frame grid that ends at now:
+    // nominal times now - K*T, ..., now - T. The grid start clamps to the
+    // clock origin; a clamped step lands on the same instant as its
+    // predecessor, measures an elapsed of zero, and so moves the acquisition
+    // index and the noise streams but not the thermal state.
+    const f64 start = std::max(now - static_cast<f64>(steps) * framePeriodSeconds,
+                               0.0);
+    // Rewind the frame-time anchor one period below the grid so the first
+    // advance measures a full period. Without this every warmup step would
+    // see a negative elapsed and the thermal state would stay frozen.
+    state.frameTimeSeconds = start - framePeriodSeconds;
+    for (u64 i = 0; i < steps; ++i) {
+        const f64 nominal = now - static_cast<f64>(steps) * framePeriodSeconds +
+                            static_cast<f64>(i) * framePeriodSeconds;
+        const f64 time = std::max(nominal, start);
+        auto stepped = AdvanceCameraState(state, time, advance);
+        if (!stepped) return stepped;
+    }
+    return Result<void, String>::Ok();
 }
 
 } // namespace quantiloom::camera

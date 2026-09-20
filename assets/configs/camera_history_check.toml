@@ -1,0 +1,128 @@
+# Fixture for scripts/render-tests/check_camera_history.py (M4-5).
+#
+# A hot block slides across a warm ground while a thermal-detector camera
+# watches from above. The detector integrates absorbed power with a first-
+# order lag (sensor.thermal.time_constant_s), so what any one frame reads
+# depends on every acquisition before it -- which is exactly the state a
+# `sequence --every N` run must keep advancing on the ticks it does not
+# export. The checker renders this scene with --every 2 and --every 1 and
+# requires the exported frames to agree value for value.
+#
+# No solver, no atmosphere work: self-emission in LWIR only, a dozen tiny
+# frames, and a read noise floor so the per-acquisition RNG stream (keyed on
+# the acquisition index) is genuinely exercised by the comparison.
+
+[renderer]
+resolution = [32, 32]
+spp = 8
+seed = 92017
+output = "build/camera_history_check/frame.exr"
+
+[spectral]
+mode = "single"
+wavelength_nm = 10000.0
+band = "LWIR"
+
+[scene]
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+# Ten ticks a second for one second; the block needs the whole span to
+# cross the view.
+[timeline]
+start_s = 0
+end_s = "1s"
+ticks_per_second = 10.0
+
+[[models]]
+file = "../models/shadow_scene/shadow_scene_open.gltf"
+name = "ground"
+
+[[models]]
+file = "../models/cube.glb"
+name = "block"
+scale = [1.5, 1.5, 1.5]
+
+# Linear drive from x = -6 to x = +6 across the second, then hold.
+[models.motion]
+interpolation = "linear"
+extrapolate = "hold"
+
+[[models.motion.keys]]
+t = 0
+position = [-6.0, 0.0, 1.5]
+
+[[models.motion.keys]]
+t = "1s"
+position = [6.0, 0.0, 1.5]
+
+[camera]
+position = [0.0, 20.0, 0.0]
+look_at = [0.0, 0.0, 0.0]
+up = [0.0, 0.0, 1.0]
+projection = "perspective"
+fov_y = 0.7
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.0, 0.0, 0.0]
+atmosphere_temperature_k = 300.0
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[material_overrides."shadow_scene_open"]
+ir_temperature_k = 300.0
+ir_emissivity = 1.0
+ir_transmittance = 0.0
+specular = 0.0
+
+# The block is the hot target the detector lag follows across the frame.
+[material_overrides."Material"]
+ir_temperature_k = 450.0
+ir_emissivity = 1.0
+ir_transmittance = 0.0
+specular = 0.0
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = true
+version = 1
+detector = "thermal"
+device_id = "checker_history"
+cfa = "mono"
+
+[sensor.optics]
+focal_length_mm = 50.0
+f_number = 2.8
+pixel_pitch_um = 20.0
+sensor_width_px = 32
+sensor_height_px = 32
+
+# tau is 1.5 frame periods, so the block's leading edge reads noticeably low
+# and the trailing edge noticeably high: the state, not the scene, is what
+# the exported frame carries.
+[sensor.thermal]
+time_constant_s = 0.15
+responsivity_dn_w = 1e11
+read_noise_dn_rms = 8.0
+
+[[sensor.channels]]
+name = "Mono"
+[sensor.channels.absorptance]
+kind = "thermal_absorptance"
+wavelength_nm = [8000.0, 14000.0]
+value = [1.0, 1.0]
+
+[sensor.readout]
+frame_period_s = 0.1
+
+[sensor.products]
+band_measurement = false
+raw_dn = true
+corrected_device_signal = false
+apparent_temperature = false
+display = true

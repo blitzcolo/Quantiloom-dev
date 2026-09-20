@@ -271,9 +271,50 @@ Result<Vector<std::pair<f64, f64>>, String> ReadStrictResponseFile(
     return samples;
 }
 
-Result<std::vector<f64>, String> ReadCalibrationFile(
+// A defect-pixel list: one "x y" (or "x,y") pair per line, '#' comments.
+// Loaded once at parse time; the path is kept on the config for round-trip.
+Result<Vector<std::array<u32, 2>>, String> ReadDefectPixelFile(
     const std::filesystem::path& path) {
     std::ifstream input(path);
+    if (!input) return Error<Vector<std::array<u32, 2>>>(
+        "cannot open defect pixel file: " + path.string());
+    Vector<std::array<u32, 2>> pixels;
+    String line;
+    size_t lineNumber = 0;
+    while (std::getline(input, line)) {
+        ++lineNumber;
+        if (const auto comment = line.find('#'); comment != String::npos)
+            line.resize(comment);
+        line = Trim(line);
+        if (line.empty()) continue;
+        const auto cells = SplitFields(line);
+        if (cells.size() != 2)
+            return Error<Vector<std::array<u32, 2>>>(
+                path.string() + ":" + std::to_string(lineNumber) +
+                ": defect pixel row needs exactly two numbers");
+        std::array<u32, 2> pixel{};
+        for (size_t i = 0; i < 2; ++i) {
+            const auto value = StrictNumber(
+                cells[i], path.string() + ":" + std::to_string(lineNumber));
+            if (!value) return Error<Vector<std::array<u32, 2>>>(value.error());
+            const f64 rounded = std::round(*value);
+            if (rounded < 0.0 || rounded > 4294967295.0 ||
+                std::fabs(rounded - *value) > 0.0)
+                return Error<Vector<std::array<u32, 2>>>(
+                    path.string() + ":" + std::to_string(lineNumber) +
+                    ": defect pixel coordinates must be unsigned integers");
+            pixel[i] = static_cast<u32>(rounded);
+        }
+        pixels.push_back(pixel);
+    }
+    if (input.bad())
+        return Error<Vector<std::array<u32, 2>>>(
+            "I/O error reading defect pixel file: " + path.string());
+    return pixels;
+}
+
+Result<std::vector<f64>, String> ReadCalibrationFile(
+    const std::filesystem::path& path) {    std::ifstream input(path);
     if (!input) return Error<std::vector<f64>>(
         "cannot open calibration file: " + path.string());
     std::vector<f64> values;
@@ -953,6 +994,24 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
         document.GetDouble("isp.contrast_low_percentile", isp.contrastLowPercentile);
     isp.contrastHighPercentile =
         document.GetDouble("isp.contrast_high_percentile", isp.contrastHighPercentile);
+    isp.defectPixelsPath = document.GetString("isp.defect_pixels_path", "");
+    if (!isp.defectPixelsPath.empty() && document.Has("isp.defect_pixels"))
+        return Error<CameraConfig>(
+            "isp.defect_pixels and isp.defect_pixels_path are mutually exclusive");
+    for (const Config& table : document.GetTableArray("isp.defect_pixels")) {
+        const auto x = table.Get<i64>("x", -1);
+        const auto y = table.Get<i64>("y", -1);
+        if (x < 0 || y < 0 || x > 4294967295LL || y > 4294967295LL)
+            return Error<CameraConfig>(
+                "isp.defect_pixels entries need unsigned integer x and y");
+        isp.defectPixels.push_back(
+            {static_cast<u32>(x), static_cast<u32>(y)});
+    }
+    if (!isp.defectPixelsPath.empty()) {
+        auto loaded = ReadDefectPixelFile(ResolvePath(isp.defectPixelsPath, baseDir));
+        if (!loaded) return Error<CameraConfig>(loaded.error());
+        isp.defectPixels = std::move(*loaded);
+    }
     isp.hsv.hueOffsetDegrees =
         document.GetDouble("isp.hsv.hue_offset_deg", isp.hsv.hueOffsetDegrees);
     isp.hsv.saturationScale =
@@ -963,6 +1022,20 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
         document.GetBool("effects.hsv.empirical_noise", isp.hsv.empiricalNoise);
     isp.hsv.temporalDrift =
         document.GetBool("effects.hsv.temporal_drift", isp.hsv.temporalDrift);
+    isp.hsv.empiricalNoiseSigma =
+        document.GetDouble("effects.hsv.noise_sigma", isp.hsv.empiricalNoiseSigma);
+    isp.hsv.temporalDriftSigma =
+        document.GetDouble("effects.hsv.drift_sigma", isp.hsv.temporalDriftSigma);
+    isp.autoControl.targetLuminance =
+        document.GetDouble("isp.auto.target_luminance", isp.autoControl.targetLuminance);
+    isp.autoControl.smoothing =
+        document.GetDouble("isp.auto.smoothing", isp.autoControl.smoothing);
+    isp.autoControl.minExposureSeconds =
+        document.GetDouble("isp.auto.min_exposure_s", isp.autoControl.minExposureSeconds);
+    isp.autoControl.maxExposureSeconds =
+        document.GetDouble("isp.auto.max_exposure_s", isp.autoControl.maxExposureSeconds);
+    isp.autoControl.maxGain =
+        document.GetDouble("isp.auto.max_gain", isp.autoControl.maxGain);
 
     auto backend = Backend(document.GetString("sensor.quality.backend", "cpu_reference"));
     if (!backend) return Error<CameraConfig>(backend.error());
@@ -979,6 +1052,10 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
                           camera.quality.gpuTimePositions);
     camera.quality.noiseFree =
         document.GetBool("sensor.quality.noise_free", camera.quality.noiseFree);
+    camera.warmup.seconds =
+        document.GetDouble("sensor.warmup.seconds", camera.warmup.seconds);
+    if (!std::isfinite(camera.warmup.seconds) || camera.warmup.seconds < 0.0)
+        return Error<CameraConfig>("sensor.warmup.seconds must be finite and nonnegative");
     auto colorSpace = ColorSpace(
         document.GetString("sensor.output_color_space", "display_srgb"));
     if (!colorSpace) return Error<CameraConfig>(colorSpace.error());
@@ -1157,8 +1234,12 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "wavelength_samples = " << quality.wavelengthSamples << '\n';
     out << "time_samples = " << quality.timeSamples << '\n';
     out << "pixel_samples = " << quality.pixelSamples << '\n';
+    // M4-1: consumed by the GPU preview's time-stratified exposure trace
+    // (min with spp layers); the CPU reference uses time_samples instead.
     out << "gpu_time_positions = " << quality.gpuTimePositions << '\n';
     out << "noise_free = " << (quality.noiseFree ? "true" : "false") << "\n\n";
+    out << "[sensor.warmup]\n";
+    out << "seconds = " << camera.warmup.seconds << "\n\n";
     const auto& products = camera.products;
     out << "[sensor.products]\n";
     out << "traced_radiance = " << (products.tracedRadiance ? "true" : "false") << '\n';
@@ -1195,7 +1276,22 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "infrared_tone = " << Quoted(Token(isp.infraredTone)) << '\n';
     out << "infrared_palette = " << Quoted(Token(isp.infraredPalette)) << '\n';
     out << "contrast_low_percentile = " << isp.contrastLowPercentile << '\n';
-    out << "contrast_high_percentile = " << isp.contrastHighPercentile << "\n\n";
+    out << "contrast_high_percentile = " << isp.contrastHighPercentile << '\n';
+    if (!isp.defectPixelsPath.empty()) {
+        out << "defect_pixels_path = " << Quoted(isp.defectPixelsPath) << '\n';
+    } else if (!isp.defectPixels.empty()) {
+        for (const auto& [x, y] : isp.defectPixels) {
+            out << "\n[[isp.defect_pixels]]\n";
+            out << "x = " << x << '\n';
+            out << "y = " << y << '\n';
+        }
+    }
+    out << "\n[isp.auto]\n";
+    out << "target_luminance = " << isp.autoControl.targetLuminance << '\n';
+    out << "smoothing = " << isp.autoControl.smoothing << '\n';
+    out << "min_exposure_s = " << isp.autoControl.minExposureSeconds << '\n';
+    out << "max_exposure_s = " << isp.autoControl.maxExposureSeconds << '\n';
+    out << "max_gain = " << isp.autoControl.maxGain << "\n\n";
     out << "[isp.hsv]\n";
     out << "hue_offset_deg = " << isp.hsv.hueOffsetDegrees << '\n';
     out << "saturation_scale = " << isp.hsv.saturationScale << '\n';
@@ -1204,7 +1300,9 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "empirical_noise = "
         << (isp.hsv.empiricalNoise ? "true" : "false") << '\n';
     out << "temporal_drift = "
-        << (isp.hsv.temporalDrift ? "true" : "false") << "\n\n";
+        << (isp.hsv.temporalDrift ? "true" : "false") << '\n';
+    out << "noise_sigma = " << isp.hsv.empiricalNoiseSigma << '\n';
+    out << "drift_sigma = " << isp.hsv.temporalDriftSigma << "\n\n";
 
     if (!camera.motion.keys.empty()) {
         out << "[camera.motion]\n";

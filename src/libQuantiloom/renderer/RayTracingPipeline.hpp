@@ -352,6 +352,14 @@ public:
     // header are bound by the pipeline itself until a host supplies these.
     void BindCameraMeasurementImage(const GpuImage& image) const;  // binding 28
     void BindCameraResponseBuffer(const GpuBuffer& buffer) const;   // binding 29
+    /// 4 x u32 atomic counters (transparent/specular primary hits) accumulated
+    /// by raygen in camera-measurement mode; the host zeroes it per
+    /// acquisition. Binding 30, camera set only -- PARTIALLY_BOUND so the
+    /// visibility and observer sets need not write it.
+    void BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const;  // binding 30
+    /// Per-stratum primary-hit depth, same 2D-array layering as the
+    /// measurement image. Binding 31, camera set only, PARTIALLY_BOUND.
+    void BindCameraMeasurementDepthImage(const GpuImage& image) const;   // binding 31
     void BindCameraDepthImage(const GpuImage& image) const;         // camera binding 22
     void BindCameraObserverOutputImage(const GpuImage& image) const; // observer binding 0
     void BindCameraObserverDepthImage(const GpuImage& image) const; // observer binding 22
@@ -360,6 +368,10 @@ public:
     void BindCameraObserverAtmosphereNN(const GpuBuffer* header,
                                         const GpuBuffer* data) const; // observer 17,20
     void SetUseCameraObserverSet(bool enabled) { m_useObserverDescriptorSet = enabled; }
+
+    /// Temporal stratum routing for the next TraceRays (M4-1). Stratum count
+    /// 0/1 writes layer 0, exactly like an unstratified exposure.
+    void SetTimeStratum(u32 stratum, u32 count);
 
     // Update all bindings (call after all Bind* calls)
     static void UpdateDescriptorSets();

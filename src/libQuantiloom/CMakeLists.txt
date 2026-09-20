@@ -211,6 +211,11 @@ add_library(quantiloom_core OBJECT
     postprocess/CameraPhysics.hpp
     postprocess/CpuCameraPipeline.cpp
     postprocess/CpuCameraPipeline.hpp
+    postprocess/CameraIsp.cpp
+    postprocess/CameraIsp.hpp
+    postprocess/CameraAutoControl.cpp
+    postprocess/CameraAutoControl.hpp
+    postprocess/CameraDemosaic.hpp
     postprocess/CameraConfigIO.cpp
     postprocess/CameraConfigIOInternal.hpp
     ${QL_PUBLIC_INC}/postprocess/CameraConfigIO.hpp

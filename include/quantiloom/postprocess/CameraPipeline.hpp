@@ -16,8 +16,7 @@ inline constexpr u32 kCameraConfigVersion = 1;
 // Storage shape never defines physical meaning.
 enum class SignalKind : u32 {
     SpectralRadiance, BandMeasurement, DeviceLinear, CieLinearSrgb,
-    DisplaySrgb, RawDN, ApparentTemperature, FastRgbApproximation,
-    DevicePreviewSrgb
+    DisplaySrgb, RawDN, ApparentTemperature, FastRgbApproximation
 };
 enum class DetectorKind : u32 { Photon, Thermal };
 enum class CalibrationStatus : u32 { GenericAssumption, HardwareReference, Calibrated };
@@ -164,6 +163,28 @@ struct HsvConfig {
     f64 valueGamma = 1.0;
     bool empiricalNoise = false;
     bool temporalDrift = false;
+    // Sigmas of the two empirical display effects, in display-value units.
+    // The streams are keyed on the acquisition index (see ApplyHsv), so the
+    // same acquisition always shows the same pattern and two different
+    // acquisitions never share one.
+    f64 empiricalNoiseSigma = 0.02;
+    f64 temporalDriftSigma = 0.02;
+};
+
+// Closed-loop acquisition control (M4-4). The controller is a photon-chain
+// feature: a thermal detector responds to absorbed power, not scene luminance,
+// so AE has no physical meaning there and the whole block is treated as off.
+// Fields are appended only; never reorder (public header).
+struct AutoControlConfig {
+    // Target mean of the unsaturated display-domain scalar (well fraction for
+    // a photon detector). The classic 18% grey-card value.
+    f64 targetLuminance = 0.18;
+    // First-order IIR smoothing fraction in [0, 1]: the fraction of the
+    // computed correction applied per acquisition. 1.0 disables smoothing.
+    f64 smoothing = 0.2;
+    f64 minExposureSeconds = 1e-5;
+    f64 maxExposureSeconds = 1.0;
+    f64 maxGain = 16.0;
 };
 
 struct IspConfig {
@@ -184,6 +205,12 @@ struct IspConfig {
     f64 contrastLowPercentile = 1.0;
     f64 contrastHighPercentile = 99.0;
     HsvConfig hsv;
+    // Dead/defective pixels replaced by the mean of their four in-range,
+    // non-defect neighbors before demosaic. Inline entries win over the
+    // file; a loaded file keeps its path for round-trip.
+    std::vector<std::array<u32, 2>> defectPixels;
+    String defectPixelsPath;
+    AutoControlConfig autoControl;
 };
 
 struct ProcessingQuality {
@@ -193,6 +220,14 @@ struct ProcessingQuality {
     u32 timeSamples = 1;
     u32 pixelSamples = 1;
     u32 gpuTimePositions = 8;
+};
+
+// Pre-roll before the first real acquisition: the device state is advanced
+// through round(seconds/frame_period) synthetic acquisitions ending at the
+// current time, so a thermal detector starts at its equilibrated history
+// rather than at whatever the initial condition says. Zero disables it.
+struct WarmupConfig {
+    f64 seconds = 0.0;
 };
 
 struct CameraPoseKey {
@@ -231,6 +266,7 @@ struct CameraConfig {
     ThermalDetectorConfig thermal;
     IspConfig isp;
     ProcessingQuality quality;
+    WarmupConfig warmup;
     CameraMotionConfig motion;
     ProductRequest products;
     OutputColorSpace outputColorSpace = OutputColorSpace::DisplaySrgb;
@@ -254,6 +290,23 @@ struct CaptureState {
     f64 nextAnalogGain = 1.0;
     std::array<f64, 3> nextWhiteBalance = {1.0, 1.0, 1.0};
     std::vector<f64> thermalPixelStateW;
+    // Bumped by every history restore, so a host (and the GPU twin of this
+    // state) can tell a replayed tick from the one that originally ran.
+    u64 historyEpoch = 0;
+};
+
+// A value snapshot of everything one acquisition mutates. Restoring it rewinds
+// the device to that acquisition's exit; the RNG streams are keyed on
+// acquisitionIndex, so replaying the same tick sequence from a checkpoint is
+// bit-identical to the original run.
+struct CaptureCheckpoint {
+    u64 acquisitionIndex = 0;
+    f64 frameTimeSeconds = 0.0;
+    u64 historyEpoch = 0;
+    std::vector<f64> thermalPixelStateW;
+    f64 nextExposureSeconds = 0.0;
+    f64 nextAnalogGain = 0.0;
+    std::array<f64, 3> nextWhiteBalance = {1.0, 1.0, 1.0};
 };
 
 struct SignalDescriptor {
