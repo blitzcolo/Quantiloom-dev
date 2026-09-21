@@ -305,6 +305,7 @@ set(TEST_POSTPROCESS_SOURCES
     test_postprocess/test_camera_hsv.cpp
     test_postprocess/test_isp_coefficients.cpp
     test_postprocess/test_camera_config.cpp
+    test_postprocess/test_camera_presets.cpp
     test_postprocess/test_generic_sensor.cpp
     test_postprocess/test_multiband_fusion.cpp
     test_postprocess/test_gpu_sensor_math.cpp

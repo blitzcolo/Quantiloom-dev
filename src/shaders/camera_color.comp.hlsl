@@ -1,6 +1,12 @@
 /**
  * @file camera_color.comp.hlsl
- * @brief CCM, optional denoise/sharpen, tone and sRGB encode
+ * @brief CCM, optional denoise/sharpen, tone and sRGB encode (legacy)
+ *
+ * NOTE (M5): this pass is superseded by the fused camera_demosaic pass, which
+ * runs the identical arithmetic (demosaic -> CCM -> denoise/sharpen ->
+ * tone -> sRGB) in one dispatch together with the display product. The file
+ * stays in the build because the shader list is fixed, but GpuCameraPipeline
+ * never dispatches it. The description below documents the original pass.
  *
  * The linear RGB produced by camera_demosaic passes through, in order:
  *   1. the 3x3 color correction matrix,

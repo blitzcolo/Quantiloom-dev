@@ -648,10 +648,11 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     const VkDeviceSize tileCount =
         static_cast<VkDeviceSize>((width + 15u) / 16u) * ((height + 15u) / 16u);
-    // Three float4 rows per tile: min/max/sum/sat, per-channel unsaturated
-    // sums, per-channel unsaturated counts (camera_stats phases 0/1).
+    // Three float4 rows per tile (min/max/sum/sat, per-channel unsaturated
+    // sums and counts -- camera_stats phases 0/1), then the per-tile 256-bin
+    // histogram block the phase-2 flush writes and the CDF pass merges.
     tileStatsBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), tileCount * 12u * sizeof(f32),
+        context.GetAllocator(), tileCount * (12u + 256u) * sizeof(u32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     if (!layerCameraBuffer->IsValid() || !dynamicCounterBuffer->IsValid() ||
         !ispStatsBuffer->IsValid() || !cdfBuffer->IsValid() ||
@@ -1033,9 +1034,13 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     // the CDF pass chain the ISP stage images.
     m_impl->UpdateSet(m_impl->sets[10], {
         m_impl->corrected.get(), dummy, dummy, dummy, dummy, dummy, dummy});
+    // Fused ISP pass: demosaic reads the corrected product and writes the
+    // linearRgb/colorRgb analysis products plus the display and agcSource
+    // images in one dispatch.
     m_impl->UpdateSet(m_impl->sets[11], {
         m_impl->corrected.get(), m_impl->linearRgb.get(),
-        dummy, dummy, dummy, dummy, dummy});
+        m_impl->colorRgb.get(), m_impl->display.get(),
+        m_impl->agcSource.get(), dummy, dummy});
     m_impl->UpdateSet(m_impl->sets[12], {
         dummy, m_impl->linearRgb.get(), m_impl->colorRgb.get(),
         dummy, dummy, dummy, dummy});
@@ -1096,17 +1101,11 @@ GpuCameraPipeline::RecordDisplayReprocess(
     // of unchanged parameters is bit-identical to the original display.
     auto push = m_impl->MakePush(m_impl->lastAcquisitionIndex,
                                  m_impl->lastFrameTimeSeconds);
-    // demosaic -> color -> display -> HSV. No statistics passes: the
+    // Fused demosaic/color/display -> HSV. No statistics passes: the
     // Linear-AGC window keeps riding in the statistics buffer, which is what
-    // makes a reprocess stateless. corrected/linearRgb/colorRgb still hold
-    // the last acquisition and serve as the inputs.
+    // makes a reprocess stateless. corrected still holds the last
+    // acquisition and serves as the input.
     m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11],
-                            push);
-    StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->colorPipeline, m_impl->sets[12],
-                            push);
-    StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->displayPipeline, m_impl->sets[4],
                             push);
     StorageBarrier(cmd);
     if (m_impl->ispFlags & isp::kFlagHsv) {
@@ -1458,12 +1457,15 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     m_impl->BindAndDispatch(cmd, m_impl->readoutPipeline, readoutSet, push);
     StorageBarrier(cmd);
     stamp(3);
-    // M4-3: the classic ISP. Statistics first: per-tile partials, a global
-    // reduce that also derives the next Linear-AGC window from the previous
-    // frame's histogram and then zeroes it, and the histogram itself (three
-    // compile-time phases of camera_stats.comp.hlsl), then the Equalize CDF,
-    // demosaic, color and the display/AGC pass. The reduce and CDF passes are
-    // single workgroups.
+    // M5: the classic ISP, restructured. Statistics first: per-tile
+    // partials, a global reduce that also derives the next Linear-AGC
+    // window from the previous frame's histogram (preloaded into shared
+    // memory there), and per-tile groupshared histograms flushed to the
+    // tile histogram block -- no whole-image global atomics. The CDF pass
+    // merges the tile histograms into the persistent global histogram and
+    // prefix-sums it in the same single workgroup. The demosaic pass then
+    // runs the fused demosaic + color + display product chain (former
+    // camera_demosaic/camera_color/camera_display) in one dispatch.
     m_impl->BindAndDispatch(cmd, m_impl->statsTilesPipeline, m_impl->sets[10],
                             push);
     StorageBarrier(cmd);
@@ -1477,12 +1479,6 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
                                 push, 1, 1);
     StorageBarrier(cmd);
     m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11],
-                            push);
-    StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->colorPipeline, m_impl->sets[12],
-                            push);
-    StorageBarrier(cmd);
-    m_impl->BindAndDispatch(cmd, m_impl->displayPipeline, m_impl->sets[4],
                             push);
     StorageBarrier(cmd);
     stamp(4);

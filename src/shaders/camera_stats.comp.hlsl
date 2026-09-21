@@ -6,26 +6,33 @@
  * the corrected DN (the infrared display's AGC input); photon detectors report
  * the well fraction max(corrected,0)/fullWell (the visible chain's input).
  * Three phases, selected by cameraPush.ispPhase, run back to back between
- * readout and demosaic:
+ * readout and the fused demosaic/color/display pass:
  *
  *   Phase 0 (per-16x16-tile groups): local min/max/sum/satCount plus the
  *     per-channel unsaturated sums and counts -> three tileStats rows
  *   Phase 1 (one group of 256): reduce tiles to global min/max/mean, build the
- *     NEXT Linear-AGC window from the PREVIOUS frame's histogram, then zero
- *     the histogram for this frame
- *   Phase 2 (full grid): bin unsaturated pixels (value < 0.98*adcMax in DN
- *     terms) into the persistent 256-bin histogram
+ *     NEXT Linear-AGC window from the PREVIOUS frame's histogram, preloaded
+ *     into shared memory so the percentile walk is a shared-memory scan
+ *     instead of hundreds of serial dependent global reads
+ *   Phase 2 (per-16x16-tile groups): bin unsaturated pixels (value < 0.98*adcMax
+ *     in DN terms) into a groupshared 256-bin histogram, then flush it to this
+ *     tile's row of the tile histogram block (appended to the per-tile stats
+ *     rows in binding 16). Per-tile private histograms replace the former
+ *     whole-image global atomics: the merge is a coalesced read with no
+ *     contention.
  *
  * The per-channel rows serve the M4-4 AWB closed loop: the channel means are
  * the unsaturated display-domain scalar gathered per CFA/device channel
  * BEFORE white balance, exactly CameraIsp::ComputeAcquisitionStats on the
  * CPU. The channel sums (float bits) and counts ride in stat slots 263-268.
  *
- * camera_cdf.comp.hlsl then prefix-sums the histogram into a CDF for the
- * Equalize tone. Everything lives in the ispStats buffer, whose slots persist
- * across frames: the window and the histogram describe the previous
- * acquisition, the globals describe the current one (they are written before
- * the display pass consumes them in the same command buffer).
+ * camera_cdf.comp.hlsl then merges the per-tile histograms into the
+ * persistent global histogram and prefix-sums it into a CDF for the Equalize
+ * tone. Everything lives in the ispStats buffer, whose slots persist across
+ * frames: the window and the histogram describe the previous acquisition, the
+ * globals describe the current one (they are written before the display pass
+ * consumes them in the same command buffer). The global histogram no longer
+ * needs zeroing between frames: the merge pass overwrites all 256 bins.
  *
  * The CPU twin of the Equalize tone is AgcTone in postprocess/CameraIsp.cpp;
  * it bins every pixel over [min,max], so the GPU histogram (unsaturated
@@ -38,7 +45,6 @@
 [[vk::binding(9, 0)]] StructuredBuffer<float4> cameraConfig;
 [[vk::binding(12, 0)]] StructuredBuffer<float4> ispConfig;
 [[vk::binding(14, 0)]] RWStructuredBuffer<uint> ispStats;    // 272 entries
-[[vk::binding(15, 0)]] RWStructuredBuffer<float4> tileStats; // 3 rows per 16x16 tile
 
 #define ISP_HISTOGRAM_BINS 256
 #define ISP_STAT_MIN    256
@@ -55,7 +61,7 @@
 #define ISP_STAT_CH_CNT_G 267
 #define ISP_STAT_CH_CNT_B 268
 
-// CFA channel at a pixel; mirrors CfaChannelAt in camera_demosaic.comp.hlsl.
+// CFA channel at a pixel; mirrors CfaChannelAt in the fused demosaic pass.
 uint CfaChannelAt(uint cfa, uint x, uint y) {
     const uint px = x & 1u;
     const uint py = y & 1u;
@@ -98,32 +104,18 @@ float SaturationThreshold() {
 }
 
 uint TilesX() { return (cameraPush.width + 15u) / 16u; }
+uint TileCount() { return TilesX() * ((cameraPush.height + 15u) / 16u); }
 
-// Nearest-rank percentile of the PREVIOUS histogram, reconstructed as a bin
-// position over [prevMin, prevMax]. Serial; called by one thread.
-float PreviousPercentile(float prevMin, float prevMax, uint prevUnsat,
-                         float percent) {
-    const float rank = floor(clamp(percent, 0.0, 100.0) * 0.01 *
-                                 float(prevUnsat - 1u) +
-                             0.5); // llround, as in CameraIsp.cpp
-    uint cumulative = 0;
-    uint bin = ISP_HISTOGRAM_BINS - 1u;
-    for (uint b = 0; b < ISP_HISTOGRAM_BINS; ++b) {
-        cumulative += ispStats[b];
-        // The rank is a 0-based index: its value is the (rank+1)-th sample.
-        if (cumulative > uint(rank)) {
-            bin = b;
-            break;
-        }
-    }
-    return prevMin + float(bin) * (prevMax - prevMin) /
-                         float(ISP_HISTOGRAM_BINS - 1u);
-}
+// First uint slot of the per-tile histogram block in binding 16: the partial
+// statistics occupy 3 float4 (= 12 uint) rows per tile.
+uint TileHistBase() { return TileCount() * 12u; }
 
 // ---------------------------------------------------------------------------
 // Phase 0: per-tile partial statistics
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_TILES
+
+[[vk::binding(16, 0)]] RWStructuredBuffer<float4> tileStats;
 
 // Three rows per tile: global min/max/sum/sat, per-channel unsaturated
 // sums, per-channel unsaturated counts.
@@ -203,17 +195,47 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
 #endif // CAMERA_STATS_PHASE_TILES
 
 // ---------------------------------------------------------------------------
-// Phase 1: global reduce, next window from the previous histogram, zero it
+// Phase 1: global reduce, next window from the previous histogram
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_REDUCE
+
+[[vk::binding(16, 0)]] RWStructuredBuffer<float4> tileStats;
 
 groupshared float4 sTiles[256];
 groupshared float4 sChSum[256];
 groupshared float4 sChCnt[256];
+groupshared uint sPrevHist[ISP_HISTOGRAM_BINS];
+
+// Nearest-rank percentile of the PREVIOUS histogram, reconstructed as a bin
+// position over [prevMin, prevMax]. Serial; called by one thread over the
+// shared-memory preload (the bins are a frame old and cold in every cache,
+// so this must not be a chain of dependent global reads).
+float PreviousPercentile(float prevMin, float prevMax, uint prevUnsat,
+                         float percent) {
+    const float rank = floor(clamp(percent, 0.0, 100.0) * 0.01 *
+                                 float(prevUnsat - 1u) +
+                             0.5); // llround, as in CameraIsp.cpp
+    uint cumulative = 0;
+    uint bin = ISP_HISTOGRAM_BINS - 1u;
+    for (uint b = 0; b < ISP_HISTOGRAM_BINS; ++b) {
+        cumulative += sPrevHist[b];
+        // The rank is a 0-based index: its value is the (rank+1)-th sample.
+        if (cumulative > uint(rank)) {
+            bin = b;
+            break;
+        }
+    }
+    return prevMin + float(bin) * (prevMax - prevMin) /
+                         float(ISP_HISTOGRAM_BINS - 1u);
+}
 
 [numthreads(256, 1, 1)]
 void main(uint localIndex : SV_GroupIndex) {
-    const uint tileCount = TilesX() * ((cameraPush.height + 15u) / 16u);
+    // Preload the previous frame's histogram in parallel: it is a full frame
+    // old and therefore cold in every cache, and the percentile walk would
+    // otherwise be hundreds of serial dependent DRAM reads.
+    sPrevHist[localIndex] = ispStats[localIndex];
+    const uint tileCount = TileCount();
     float gmin = 3.402823e+38f;
     float gmax = -3.402823e+38f;
     float gsum = 0.0f;
@@ -281,32 +303,48 @@ void main(uint localIndex : SV_GroupIndex) {
         ispStats[ISP_STAT_CH_CNT_G] = asuint(sChCnt[0].y);
         ispStats[ISP_STAT_CH_CNT_B] = asuint(sChCnt[0].z);
     }
-    GroupMemoryBarrierWithGroupSync();
-    // The histogram belongs to the previous frame until now.
-    ispStats[localIndex] = 0;
+    // No histogram zeroing here: camera_cdf merges the per-tile histograms
+    // into all 256 global bins, overwriting whatever the previous frame left.
 }
 
 #endif // CAMERA_STATS_PHASE_REDUCE
 
 // ---------------------------------------------------------------------------
-// Phase 2: bin the unsaturated pixels into the fresh histogram
+// Phase 2: per-tile groupshared histogram, flushed to the tile histogram
+// block for the camera_cdf merge
 // ---------------------------------------------------------------------------
 #ifdef CAMERA_STATS_PHASE_HISTOGRAM
 
+[[vk::binding(16, 0)]] RWStructuredBuffer<uint> tileStats;
+
+groupshared uint sHist[ISP_HISTOGRAM_BINS];
+
 [numthreads(16, 16, 1)]
-void main(uint3 id : SV_DispatchThreadID) {
-    const uint2 coord = id.xy;
-    if (coord.x >= cameraPush.width || coord.y >= cameraPush.height) return;
-    const float v = PixelValue(coord);
-    if (v >= SaturationThreshold()) return;
-    const float gmin = asfloat(ispStats[ISP_STAT_MIN]);
-    const float gmax = asfloat(ispStats[ISP_STAT_MAX]);
-    if (!(gmax > gmin)) return; // flat frame: nothing to bin
-    const uint bin = min(uint(saturate((v - gmin) / (gmax - gmin)) *
-                                  float(ISP_HISTOGRAM_BINS - 1u) +
-                              0.5f),
-                         ISP_HISTOGRAM_BINS - 1u);
-    InterlockedAdd(ispStats[bin], 1u);
+void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
+          uint localIndex : SV_GroupIndex) {
+    sHist[localIndex] = 0u;
+    GroupMemoryBarrierWithGroupSync();
+    const uint2 coord = groupId.xy * 16u + localId.xy;
+    if (coord.x < cameraPush.width && coord.y < cameraPush.height) {
+        const float v = PixelValue(coord);
+        if (v < SaturationThreshold()) {
+            const float gmin = asfloat(ispStats[ISP_STAT_MIN]);
+            const float gmax = asfloat(ispStats[ISP_STAT_MAX]);
+            if (gmax > gmin) {
+                const uint bin = min(uint(saturate((v - gmin) / (gmax - gmin)) *
+                                              float(ISP_HISTOGRAM_BINS - 1u) +
+                                          0.5f),
+                                     ISP_HISTOGRAM_BINS - 1u);
+                InterlockedAdd(sHist[bin], 1u);
+            }
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+    // Every thread flushes its own bin slot: 1 KB of coalesced writes per
+    // tile and no global atomic contention anywhere.
+    const uint tileIndex = groupId.y * TilesX() + groupId.x;
+    tileStats[TileHistBase() + tileIndex * ISP_HISTOGRAM_BINS + localIndex] =
+        sHist[localIndex];
 }
 
 #endif // CAMERA_STATS_PHASE_HISTOGRAM

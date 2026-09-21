@@ -955,6 +955,31 @@ public:
     /// Configure the versioned physical camera. Its true sensor extent is
     /// independent of viewport extent and render scale. Response/optics
     /// changes invalidate the next device measurement.
+    ///
+    /// Camera parameter changes fall into three invalidation tiers; a host
+    /// picks the cheapest call that covers its edit:
+    ///   1. Display reprocess (ReprocessCameraDisplay): white balance, CCM,
+    ///      denoise/sharpen, tone, palette, HSV grading and the empirical
+    ///      display effects. Re-runs demosaic -> color -> display -> HSV on
+    ///      the last completed acquisition. No ray is retraced, no statistics
+    ///      pass runs, and the acquisition state never advances -- thermal
+    ///      state, acquisition index, AE/AWB feedback and the noise streams
+    ///      are untouched, so the reprocessed display is bit-identical for
+    ///      unchanged display parameters.
+    ///   2. Readout reprocess (QueueCameraAcquisition of the same tick): a
+    ///      new committed acquisition that re-runs detector, ADC, NUC and ISP
+    ///      against a freshly traced measurement. Readout, exposure, gain,
+    ///      defect-pixel and product-request changes land here; the
+    ///      acquisition index does not advance for a same-tick re-record.
+    ///   3. Re-measurement (SetCameraConfig / Configure): response curves,
+    ///      optics, array geometry, dynamic exposure, motion or quality
+    ///      changes alter what the trace itself must measure. The device
+    ///      measurement tables and pipelines are (re)built; the host should
+    ///      reset the acquisition history (ResetCameraHistory) when the
+    ///      change is not meaningful to replay.
+    /// Tier-1 calls must never satisfy a tier-2/3 need: a display reprocess
+    /// that silently reused a stale measurement would look converged while
+    /// the device model changed underneath it.
     [[nodiscard]] Result<void, String> SetCameraConfig(
         const camera::CameraConfig& config);
     [[nodiscard]] const camera::CameraConfig& GetCameraConfig() const;

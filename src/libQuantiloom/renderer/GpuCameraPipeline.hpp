@@ -121,8 +121,8 @@ public:
     [[nodiscard]] Result<void, String> ApplyEffectiveConfig(
         const camera::CameraConfig& config);
     /// Re-run the display half of the ISP over the last acquisition without
-    /// touching anything stateful: demosaic -> color -> display -> HSV from
-    /// the standing corrected/linear/color images. No statistics passes (the
+    /// touching anything stateful: the fused demosaic/color/display pass ->
+    /// HSV from the standing corrected image. No statistics passes (the
     /// Linear-AGC window keeps riding in the statistics buffer), no AE/AWB, no
     /// thermal-state noise, no acquisition advance -- the noise streams key on
     /// the last acquisition index, so a reprocess is bit-identical for

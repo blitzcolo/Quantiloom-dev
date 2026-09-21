@@ -852,8 +852,86 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     EXPECT_EQ(got.motion.keys, authored.motion.keys);
 }
 
-TEST(CameraConfigIOTest, NegativeWarmupSecondsAreRejected) {
-    const auto document = Config::Parse(R"(
+// Round-trip audit (M5-2): the fields NOT exercised by
+// NondefaultCameraSettingsSurviveTypedRoundTrip, each set to a distinct
+// non-default value and compared field by field after serialize -> parse.
+// asymmetric finds from the audit get fixed in CameraConfigIO, not here.
+TEST(CameraConfigIOTest, RemainingNondefaultFieldsSurviveTypedRoundTrip) {
+    CameraConfig authored;
+    authored.enabled = true;
+    authored.device.id = "audit_thermal";
+    authored.device.detector = DetectorKind::Thermal;
+    authored.device.cfa = CfaPattern::Mono;
+    authored.device.calibration = CalibrationStatus::GenericAssumption;
+    authored.optics.focalLengthMm = 19.0;
+    authored.optics.fNumber = 1.2;
+    authored.optics.pixelPitchUm = 12.0;
+    authored.optics.sensorWidthPx = 8;
+    authored.optics.sensorHeightPx = 4;
+    ResponseCurve absorptance;
+    absorptance.kind = ResponseKind::ThermalAbsorptance;
+    absorptance.wavelengthNm = {8000.0, 14000.0};
+    absorptance.value = {0.8, 0.8};
+    ResponseStack stack;
+    stack.thermalAbsorptance = absorptance;
+    authored.device.channels.push_back({"Mono", stack});
+    authored.device.effectiveMinNm = 8000.0;
+    authored.device.effectiveMaxNm = 14000.0;
+    authored.readout.exposureSeconds = 1.0 / 60.0;
+    authored.readout.framePeriodSeconds = 1.0 / 60.0;
+    authored.readout.adcBits = 14;
+    authored.readout.outputBits = 14;
+    authored.thermal.timeConstantSeconds = 0.011;
+    authored.thermal.responsivityDnPerWatt = 2.5e13;
+    // Read noise is set and NETD left off: the two would double-count one
+    // output noise, so a document may carry only one of them.
+    authored.thermal.readNoiseDnRms = 1.5;
+    authored.thermal.driftDnPerSecond = 0.4;
+    authored.thermal.readoutWindowSeconds = 1.0 / 60.0;
+    authored.thermal.nucGainMap.resize(32);
+    authored.thermal.nucOffsetDnMap.resize(32);
+    for (size_t i = 0; i < 32; ++i) {
+        authored.thermal.nucGainMap[i] = 1.0 + 0.01 * static_cast<f64>(i % 5);
+        authored.thermal.nucOffsetDnMap[i] = 0.1 * static_cast<f64>(i % 7);
+    }
+    authored.products.apparentTemperature = true;
+    authored.isp.infraredTone = DisplayToneMode::Equalize;
+    authored.isp.infraredPalette = DisplayPalette::Ironbow;
+    // [effects.hsv] sigmas and the drift switch: the audit fields the big
+    // round-trip test above does not assert after a save/load cycle.
+    authored.isp.hsv.empiricalNoise = true;
+    authored.isp.hsv.temporalDrift = true;
+    authored.isp.hsv.empiricalNoiseSigma = 0.033;
+    authored.isp.hsv.temporalDriftSigma = 0.044;
+    authored.isp.autoControl.targetLuminance = 0.21;
+    authored.isp.autoControl.smoothing = 0.35;
+
+    const String saved = CameraConfigToToml(authored);
+    const auto document = Config::Parse(saved);
+    ASSERT_TRUE(document.has_value());
+    const auto parsed = ParseCameraConfig(document.value(), SpectralMode::LWIR_Fused);
+    ASSERT_TRUE(parsed.has_value());
+    const auto& got = parsed.value();
+    EXPECT_DOUBLE_EQ(got.thermal.timeConstantSeconds, 0.011);
+    EXPECT_DOUBLE_EQ(got.thermal.responsivityDnPerWatt, 2.5e13);
+    EXPECT_DOUBLE_EQ(got.thermal.readNoiseDnRms, 1.5);
+    EXPECT_DOUBLE_EQ(got.thermal.driftDnPerSecond, 0.4);
+    EXPECT_DOUBLE_EQ(got.thermal.readoutWindowSeconds, 1.0 / 60.0);
+    EXPECT_DOUBLE_EQ(got.thermal.netdKelvin, 0.0);
+    EXPECT_EQ(got.thermal.nucGainMap, authored.thermal.nucGainMap);
+    EXPECT_EQ(got.thermal.nucOffsetDnMap, authored.thermal.nucOffsetDnMap);
+    EXPECT_TRUE(got.products.apparentTemperature);
+    EXPECT_EQ(got.isp.infraredTone, DisplayToneMode::Equalize);
+    EXPECT_EQ(got.isp.infraredPalette, DisplayPalette::Ironbow);
+    EXPECT_TRUE(got.isp.hsv.empiricalNoise);
+    EXPECT_TRUE(got.isp.hsv.temporalDrift);
+    EXPECT_DOUBLE_EQ(got.isp.hsv.empiricalNoiseSigma, 0.033);
+    EXPECT_DOUBLE_EQ(got.isp.hsv.temporalDriftSigma, 0.044);
+    EXPECT_DOUBLE_EQ(got.isp.autoControl.targetLuminance, 0.21);
+    EXPECT_DOUBLE_EQ(got.isp.autoControl.smoothing, 0.35);
+}
+
+TEST(CameraConfigIOTest, NegativeWarmupSecondsAreRejected) {    const auto document = Config::Parse(R"(
 [sensor]
 version = 1
 enabled = true

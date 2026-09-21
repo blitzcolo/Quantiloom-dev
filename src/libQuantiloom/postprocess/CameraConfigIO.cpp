@@ -2,6 +2,7 @@
 #include "postprocess/CameraConfigIOInternal.hpp"
 
 #include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CameraPresets.hpp"
 #include "postprocess/PostprocessConfig.hpp"
 #include "scene/MotionSpec.hpp"
 
@@ -743,26 +744,57 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
     const Config& document, SpectralMode mode, const String& baseDir) {
     using namespace camera;
     CameraConfig camera;
-    if (!document.Has("sensor.version")) {
+    // `[sensor] preset = "..."` starts from a named hardware/generic preset;
+    // every explicit versioned key below then overrides the preset value it
+    // names (absent keys keep the preset's value). The legacy unversioned
+    // migration never combines with a preset: naming a preset opts the
+    // document into the versioned schema. `sensor.version` may be omitted
+    // (it defaults to the current schema) but a wrong explicit version is
+    // still an error. CameraConfigToToml never writes the preset key: it
+    // expands the config, so a preset document round-trips losslessly.
+    std::optional<CameraConfig> preset;
+    if (document.Has("sensor.preset")) {
+        const auto kind = CameraPresetFromToken(document.GetString("sensor.preset"));
+        if (!kind) return Error<CameraConfig>("sensor.preset: " + kind.error());
+        auto built = MakePresetCameraConfig(*kind);
+        if (!built) return Error<CameraConfig>("sensor.preset: " + built.error());
+        preset = std::move(*built);
+    }
+    if (!document.Has("sensor.version") && !preset) {
         camera = MigrateLegacy(document, mode);
     } else {
-        const u32 version = document.Get<u32>("sensor.version", 0);
+        const u32 version = document.Get<u32>(
+            "sensor.version", preset ? kCameraConfigVersion : 0);
         if (version != kCameraConfigVersion)
             return Error<CameraConfig>("unsupported sensor.version " +
                                        std::to_string(version));
+        if (preset) camera = std::move(*preset);
         camera.version = version;
-        camera.enabled = document.GetBool("sensor.enabled", false);
-        camera.device.id = document.GetString("sensor.device_id", "generic_photon");
-        camera.device.displayName = document.GetString("sensor.display_name", camera.device.id);
-        camera.device.documentVersion = document.GetString("sensor.document_version", "");
-        camera.device.documentUrl = document.GetString("sensor.document_url", "");
-        camera.device.readoutMode = document.GetString("sensor.readout_mode", "");
-        camera.device.effectiveMinNm = document.GetDouble("sensor.effective_min_nm", 0.0);
-        camera.device.effectiveMaxNm = document.GetDouble("sensor.effective_max_nm", 0.0);
-        auto detector = Detector(document.GetString("sensor.detector", "photon"));
+        camera.enabled = document.GetBool("sensor.enabled", camera.enabled);
+        camera.device.id = document.GetString(
+            "sensor.device_id", camera.device.id.empty() ? "generic_photon"
+                                                         : camera.device.id);
+        camera.device.displayName =
+            document.GetString("sensor.display_name",
+                               camera.device.displayName.empty()
+                                   ? camera.device.id
+                                   : camera.device.displayName);
+        camera.device.documentVersion = document.GetString(
+            "sensor.document_version", camera.device.documentVersion);
+        camera.device.documentUrl = document.GetString(
+            "sensor.document_url", camera.device.documentUrl);
+        camera.device.readoutMode = document.GetString(
+            "sensor.readout_mode", camera.device.readoutMode);
+        camera.device.effectiveMinNm = document.GetDouble(
+            "sensor.effective_min_nm", camera.device.effectiveMinNm);
+        camera.device.effectiveMaxNm = document.GetDouble(
+            "sensor.effective_max_nm", camera.device.effectiveMaxNm);
+        auto detector = Detector(
+            document.GetString("sensor.detector", Token(camera.device.detector)));
         auto calibration = Calibration(
-            document.GetString("sensor.calibration_status", "generic_assumption"));
-        auto cfa = Cfa(document.GetString("sensor.cfa", "mono"));
+            document.GetString("sensor.calibration_status",
+                               Token(camera.device.calibration)));
+        auto cfa = Cfa(document.GetString("sensor.cfa", Token(camera.device.cfa)));
         if (!detector) return Error<CameraConfig>(detector.error());
         if (!calibration) return Error<CameraConfig>(calibration.error());
         if (!cfa) return Error<CameraConfig>(cfa.error());
@@ -909,12 +941,16 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
 
         const auto channels = document.GetTableArray("sensor.channels");
         if (!channels.empty()) {
+            // Explicit channels replace a preset's wholesale; there is no
+            // per-slot merge.
+            camera.device.channels.clear();
             for (const Config& table : channels) {
                 auto channel = ReadChannel(table, camera.device.detector, baseDir);
                 if (!channel) return Error<CameraConfig>(channel.error());
                 camera.device.channels.push_back(std::move(*channel));
             }
-        } else {
+        }
+        if (camera.device.channels.empty()) {
             if (camera.device.calibration != CalibrationStatus::GenericAssumption)
                 return Error<CameraConfig>(
                     "hardware reference/calibrated sensor needs explicit response channels");

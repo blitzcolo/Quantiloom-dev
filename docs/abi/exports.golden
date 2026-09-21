@@ -1,6 +1,12 @@
+class quantiloom::Result<enum quantiloom::camera::CameraPresetKind,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::camera::CameraPresetFromToken(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 class quantiloom::Result<struct quantiloom::camera::CameraConfig,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ParseCameraConfig(class quantiloom::Config const &,enum quantiloom::SpectralMode,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+class quantiloom::Result<struct quantiloom::camera::CameraConfig,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::camera::MakePresetCameraConfig(enum quantiloom::camera::CameraPresetKind)
 class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::CameraConfigToToml(struct quantiloom::camera::CameraConfig const &)
+class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::camera::CameraPresetDisplayName(enum quantiloom::camera::CameraPresetKind)
+class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::camera::CameraPresetToken(enum quantiloom::camera::CameraPresetKind)
 class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::mcp::EncodeImageContent(struct quantiloom::Image const &,unsigned int)
+class std::vector<enum quantiloom::camera::CameraPresetKind,class std::allocator<enum quantiloom::camera::CameraPresetKind> > quantiloom::camera::AllCameraPresets(void)
+class std::vector<struct quantiloom::camera::PresetParameterNote,class std::allocator<struct quantiloom::camera::PresetParameterNote> > quantiloom::camera::CameraPresetProvenanceNotes(enum quantiloom::camera::CameraPresetKind)
 const quantiloom::GenericSensor::`vftable'
 double quantiloom::BandRadianceDerivativePerK(double,double,double)
 double quantiloom::BlackbodyBandRadiance(double,double,double)

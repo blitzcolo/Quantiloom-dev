@@ -1,6 +1,12 @@
 /**
  * @file camera_display.comp.hlsl
- * @brief Final camera display product and the AGC source image
+ * @brief Final camera display product and the AGC source image (legacy)
+ *
+ * NOTE (M5): this pass is superseded by the fused camera_demosaic pass, which
+ * produces the display and agcSource products in the same dispatch as the
+ * demosaic/color chain, with the identical arithmetic. The file stays in the
+ * build because the shader list is fixed, but GpuCameraPipeline never
+ * dispatches it. The description below documents the original pass.
  *
  * Two branches, one per detector family:
  *

@@ -9,6 +9,12 @@ namespace quantiloom {
 
 /// The single reading of the versioned camera sections, shared by CLI and Studio.
 /// A document without sensor.version is migrated from the legacy [sensor] keys.
+/// A document with `sensor.preset` starts from that camera preset (see
+/// CameraPresets.hpp) and every explicit versioned key overrides the preset
+/// value it names; absent keys keep the preset's value. `sensor.version` may
+/// be omitted with a preset but an explicit wrong version is still an error.
+/// Serialization never writes the preset key: the config is expanded, so
+/// preset documents round-trip losslessly.
 [[nodiscard]] QL_API Result<camera::CameraConfig, String> ParseCameraConfig(
     const Config& config, SpectralMode mode, const String& baseDir = {});
 
