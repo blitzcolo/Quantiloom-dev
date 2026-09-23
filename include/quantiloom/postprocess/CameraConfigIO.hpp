@@ -30,6 +30,13 @@ namespace camera {
 /// Resolve the camera pose at global scene time (linear keys, held endpoints).
 [[nodiscard]] QL_API Result<CameraPoseKey, String> CameraPoseAt(
     const CameraMotionConfig& motion, f64 timeSeconds);
+
+/// Map a requested scene time to the most recent physical device acquisition
+/// on the frame-period grid anchored at the sequence's first export time.
+[[nodiscard]] QL_API Result<u64, String> CameraAcquisitionIndexAt(
+    f64 firstTimeSeconds, f64 framePeriodSeconds, f64 sceneTimeSeconds);
+[[nodiscard]] QL_API Result<f64, String> CameraAcquisitionTimeAt(
+    f64 firstTimeSeconds, f64 framePeriodSeconds, u64 acquisitionIndex);
 } // namespace camera
 
 } // namespace quantiloom

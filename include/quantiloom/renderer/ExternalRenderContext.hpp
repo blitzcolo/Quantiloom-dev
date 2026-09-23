@@ -984,6 +984,22 @@ public:
         const camera::CameraConfig& config);
     [[nodiscard]] const camera::CameraConfig& GetCameraConfig() const;
 
+    /// Adopt display-only ISP fields for the next display reprocess without
+    /// discarding the completed acquisition or changing the device history.
+    /// Rejects a config that also changes measurement, readout, auto-control,
+    /// defect correction or product fields. A host may call this before the
+    /// first acquisition; the next frame then uses the new display settings.
+    [[nodiscard]] Result<void, String> UpdateCameraDisplayConfig(
+        const camera::CameraConfig& config);
+
+    /// Apply detector/readout-only edits without resetting device history.
+    /// Returns true when applied, false when another field also changed and
+    /// the caller must use SetCameraConfig for re-measurement. If a completed
+    /// frame exists, detector/ADC/ISP runs immediately from its standing
+    /// measured rate at the same acquisition index; no ray is retraced.
+    [[nodiscard]] Result<bool, String> TryUpdateCameraReadoutConfig(
+        const camera::CameraConfig& config);
+
     /// Request one device acquisition. Redrawing or re-presenting the previous
     /// frame does not advance thermal state or draw new detector noise.
     [[nodiscard]] Result<void, String> QueueCameraAcquisition(

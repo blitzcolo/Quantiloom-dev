@@ -130,6 +130,11 @@ public:
     /// (white balance, tone, palette, HSV).
     [[nodiscard]] Result<void, String> RecordDisplayReprocess(
         VkCommandBuffer cmd, const camera::CameraConfig& config);
+    /// Re-run detector/ADC/ISP from the standing PSF-blurred measurement.
+    /// Does not trace, resample wavelengths, blur again or advance the
+    /// detector's acquisition index or thermal history.
+    [[nodiscard]] Result<void, String> RecordReadoutReprocess(
+        VkCommandBuffer cmd, const camera::CameraConfig& config);
     /// `measuredRate` feeds the dynamic compositor (layer 0 when unstratified);
     /// `dynamic` may be null-equivalent (strataCount <= 1 or null strata
     /// images) for the plain single-layer path existing callers use.

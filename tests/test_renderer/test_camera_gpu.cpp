@@ -875,6 +875,12 @@ TEST_F(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHist
     ASSERT_TRUE(RecordCamera(Device(), *pipeline, *input, 1, 0.008).has_value());
     const auto reprocessed = ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1);
     ASSERT_EQ(reprocessed.size(), 4u);
+    Result<void, String> readoutReplay = Result<void, String>::Ok();
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        readoutReplay = pipeline->RecordReadoutReprocess(cmd, config);
+    });
+    ASSERT_TRUE(readoutReplay.has_value()) << readoutReplay.error();
+    EXPECT_EQ(ReadFloat(Device(), pipeline->GetOutputs().rawDn, 1, 1), reprocessed);
     const double firstStep = 2e-9 * (1.0 - std::exp(-1.0));
     EXPECT_NEAR(reprocessed[0], firstStep * 1e13, 1.0);
 
@@ -895,6 +901,38 @@ TEST_F(CameraGpuTest, SameAcquisitionRecomputesThermalStateFromItsPreCaptureHist
     const auto cpuLater = cpu.CaptureMeasured(state, 0.016, middle);
     ASSERT_TRUE(cpuLater.has_value());
     EXPECT_NEAR(later[0], cpuLater.value().rawDn->image.data[0], 1.0);
+}
+
+TEST_F(CameraGpuTest, ReadoutReprocessMatchesFreshReadoutOnSameMeasurement) {
+    auto original = CameraConfigFor(4, 4);
+    std::vector<f32> rgba(4u * 4u * 4u, 0.0f);
+    for (u32 pixel = 0; pixel < 16; ++pixel)
+        rgba[pixel * 4] = 10000.0f + static_cast<f32>(pixel) * 200.0f;
+    auto input = UploadMeasurement(Device(), 4, 4, rgba);
+    ASSERT_NE(input, nullptr);
+
+    auto first = GpuCameraPipeline::Create(Device(), 4, 4);
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(first.value()->Configure(original).has_value());
+    ASSERT_TRUE(RecordCamera(Device(), *first.value(), *input, 0, 0.0).has_value());
+
+    auto edited = original;
+    edited.readout.blackLevelDn += 128.0;
+    Result<void, String> reapplied = Result<void, String>::Ok();
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        reapplied = first.value()->RecordReadoutReprocess(cmd, edited);
+    });
+    ASSERT_TRUE(reapplied.has_value()) << reapplied.error();
+    const auto replayRaw = ReadFloat(Device(), first.value()->GetOutputs().rawDn, 4, 4);
+    const auto replayDisplay = ReadFloat(Device(), first.value()->GetOutputs().display, 4, 4);
+
+    auto fresh = GpuCameraPipeline::Create(Device(), 4, 4);
+    ASSERT_TRUE(fresh.has_value());
+    ASSERT_TRUE(fresh.value()->Configure(edited).has_value());
+    ASSERT_TRUE(RecordCamera(Device(), *fresh.value(), *input, 0, 0.0).has_value());
+    EXPECT_EQ(replayRaw, ReadFloat(Device(), fresh.value()->GetOutputs().rawDn, 4, 4));
+    EXPECT_EQ(replayDisplay,
+              ReadFloat(Device(), fresh.value()->GetOutputs().display, 4, 4));
 }
 
 TEST_F(CameraGpuTest, PreviewPixelCentersChoosePhysicalNucPixel) {
@@ -2617,17 +2655,39 @@ TEST_F(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) 
     ASSERT_TRUE(products.value().display.has_value());
     const std::vector<f32> displayBefore =
         products.value().display.value().image.data;
+    ASSERT_TRUE(products.value().rawDn.has_value());
+    const std::vector<f32> rawBefore = products.value().rawDn.value().image.data;
+
+    // Studio keeps the authored zero effective-span fields; SetCameraConfig
+    // resolves them inside the SDK. The display path must accept that copy.
+    auto displayConfig = config;
+    displayConfig.isp.toneGamma = 2.0;
+    const auto updated = context->UpdateCameraDisplayConfig(displayConfig);
+    ASSERT_TRUE(updated.has_value()) << updated.error();
+    EXPECT_EQ(context->GetCameraHistoryStatus().acquisitionIndex,
+              before.acquisitionIndex);
+
+    auto readoutChange = displayConfig;
+    readoutChange.readout.exposureSeconds *= 2.0;
+    EXPECT_FALSE(context->UpdateCameraDisplayConfig(readoutChange).has_value());
 
     const auto reprocessed = context->ReprocessCameraDisplay();
     ASSERT_TRUE(reprocessed.has_value()) << reprocessed.error();
     const auto productsAgain = context->CaptureCameraProducts();
     ASSERT_TRUE(productsAgain.has_value()) << productsAgain.error();
     ASSERT_TRUE(productsAgain.value().display.has_value());
+    ASSERT_TRUE(productsAgain.value().rawDn.has_value());
     const std::vector<f32>& displayAfter =
         productsAgain.value().display.value().image.data;
+    EXPECT_EQ(productsAgain.value().rawDn.value().image.data, rawBefore);
     ASSERT_EQ(displayBefore.size(), displayAfter.size());
-    for (size_t i = 0; i < displayBefore.size(); ++i)
-        EXPECT_FLOAT_EQ(displayBefore[i], displayAfter[i]) << "element " << i;
+    EXPECT_NE(displayBefore, displayAfter);
+
+    const auto sameAgain = context->ReprocessCameraDisplay();
+    ASSERT_TRUE(sameAgain.has_value()) << sameAgain.error();
+    const auto productsThird = context->CaptureCameraProducts();
+    ASSERT_TRUE(productsThird.has_value()) << productsThird.error();
+    EXPECT_EQ(productsThird.value().display.value().image.data, displayAfter);
 
     const auto after = context->GetCameraHistoryStatus();
     EXPECT_EQ(after.acquisitionIndex, before.acquisitionIndex);
@@ -2642,4 +2702,39 @@ TEST_F(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) 
             kViewportSize, kViewportSize);
     });
     EXPECT_TRUE(presented);
+}
+
+TEST_F(CameraSchedulerGpuTest, ReadoutEditRerecordsSameTickWithoutHistoryReset) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+    ApplyScene();
+    auto config = CameraConfigFor(kSensorSize, kSensorSize);
+    ASSERT_TRUE(context->SetCameraConfig(config).has_value());
+    DrawFrame();
+    const auto before = context->GetCameraHistoryStatus();
+    const auto first = context->CaptureCameraProducts();
+    ASSERT_TRUE(first.has_value()) << first.error();
+    ASSERT_TRUE(first.value().rawDn.has_value());
+    const auto rawBefore = first.value().rawDn->image.data;
+    const u32 samplesBefore = context->GetAccumulatedSamples();
+
+    auto readout = config; // authored effective span is still zero
+    readout.readout.blackLevelDn += 256.0;
+    const auto updated = context->TryUpdateCameraReadoutConfig(readout);
+    ASSERT_TRUE(updated.has_value()) << updated.error();
+    ASSERT_TRUE(updated.value());
+    EXPECT_EQ(context->GetAccumulatedSamples(), samplesBefore);
+    const auto reprocessed = context->CaptureCameraProducts();
+    ASSERT_TRUE(reprocessed.has_value()) << reprocessed.error();
+    ASSERT_TRUE(reprocessed.value().rawDn.has_value());
+    EXPECT_NE(reprocessed.value().rawDn->image.data, rawBefore);
+    auto exposure = readout;
+    exposure.readout.exposureSeconds *= 2.0;
+    const auto needsMeasurement = context->TryUpdateCameraReadoutConfig(exposure);
+    ASSERT_TRUE(needsMeasurement.has_value()) << needsMeasurement.error();
+    EXPECT_FALSE(needsMeasurement.value());
+
+    const auto after = context->GetCameraHistoryStatus();
+    EXPECT_EQ(after.epoch, before.epoch);
+    EXPECT_EQ(after.acquisitionIndex, before.acquisitionIndex);
+    EXPECT_EQ(context->GetAccumulatedSamples(), samplesBefore);
 }

@@ -793,6 +793,58 @@ CameraPush GpuCameraPipeline::Impl::MakePush(
     return push;
 }
 
+namespace {
+
+Result<void, String> UpdateReadoutRows(
+    const camera::CameraConfig& config,
+    std::array<std::array<f32, 4>, 9>& rows) {
+    const auto& optics = config.optics;
+    std::array<f32, 3> thermalNoise{
+        static_cast<f32>(config.thermal.readNoiseDnRms),
+        static_cast<f32>(config.thermal.readNoiseDnRms),
+        static_cast<f32>(config.thermal.readNoiseDnRms)};
+    if (config.device.detector == camera::DetectorKind::Thermal &&
+        config.thermal.netdKelvin > 0.0) {
+        const auto area = camera::PixelCollectionAreaM2(optics);
+        if (!area) return Result<void, String>::Err(area.error());
+        for (size_t i = 0; i < config.device.channels.size(); ++i) {
+            const auto slope = camera::BlackbodyThermalDerivativeWPerK(
+                config.thermal.netdReferenceTemperatureK,
+                config.device.channels[i].response, optics.fNumber, *area);
+            if (!slope) return Result<void, String>::Err(slope.error());
+            f64 noise = config.thermal.netdKelvin * *slope *
+                        config.thermal.responsivityDnPerWatt;
+            if (config.thermal.readoutWindowSeconds > 0.0)
+                noise *= std::sqrt(
+                    (1.0 / (2.0 * config.thermal.readoutWindowSeconds)) /
+                    config.thermal.netdNoiseBandwidthHz);
+            thermalNoise[i] = static_cast<f32>(noise);
+        }
+    }
+    const auto& photon = config.photon;
+    const auto& readout = config.readout;
+    const auto& thermal = config.thermal;
+    rows[0] = {{static_cast<f32>(readout.exposureSeconds),
+                static_cast<f32>(photon.fullWellElectrons),
+                static_cast<f32>(photon.darkCurrentElectronsPerSecond),
+                static_cast<f32>(photon.readNoiseElectronsRms)}};
+    rows[1] = {{static_cast<f32>(photon.prnuSigma),
+                static_cast<f32>(photon.dsnuElectronsRms),
+                static_cast<f32>(photon.dsnuReferenceExposureSeconds),
+                static_cast<f32>(photon.biasDnRms)}};
+    rows[2] = {{static_cast<f32>(readout.analogGain),
+                static_cast<f32>(readout.electronsPerDn),
+                static_cast<f32>(readout.blackLevelDn),
+                static_cast<f32>(photon.nucResidualFraction)}};
+    rows[3] = {{static_cast<f32>(thermal.timeConstantSeconds),
+                static_cast<f32>(thermal.responsivityDnPerWatt),
+                static_cast<f32>(thermal.driftDnPerSecond), thermalNoise[0]}};
+    rows[4] = {{thermalNoise[1], thermalNoise[2], 0.0f, 0.0f}};
+    return Result<void, String>::Ok();
+}
+
+} // namespace
+
 GpuCameraPipeline::GpuCameraPipeline(std::unique_ptr<Impl> impl)
     : m_impl(std::move(impl)) {}
 
@@ -850,54 +902,9 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
         m_impl->sigmaY[1] = m_impl->sigmaY[2] = m_impl->sigmaY[0];
     }
 
-    std::array<f32, 3> thermalNoise{
-        static_cast<f32>(config.thermal.readNoiseDnRms),
-        static_cast<f32>(config.thermal.readNoiseDnRms),
-        static_cast<f32>(config.thermal.readNoiseDnRms)};
-    if (config.device.detector == camera::DetectorKind::Thermal &&
-        config.thermal.netdKelvin > 0.0) {
-        const auto area = camera::PixelCollectionAreaM2(optics);
-        if (!area) return Result<void, String>::Err(area.error());
-        for (size_t i = 0; i < config.device.channels.size(); ++i) {
-            const auto slope = camera::BlackbodyThermalDerivativeWPerK(
-                config.thermal.netdReferenceTemperatureK,
-                config.device.channels[i].response, optics.fNumber, *area);
-            if (!slope) return Result<void, String>::Err(slope.error());
-            f64 noise = config.thermal.netdKelvin * *slope *
-                        config.thermal.responsivityDnPerWatt;
-            if (config.thermal.readoutWindowSeconds > 0.0)
-                noise *= std::sqrt(
-                    (1.0 / (2.0 * config.thermal.readoutWindowSeconds)) /
-                    config.thermal.netdNoiseBandwidthHz);
-            thermalNoise[i] = static_cast<f32>(noise);
-        }
-    }
-    const auto& photon = config.photon;
-    const auto& readout = config.readout;
-    const auto& thermal = config.thermal;
-    m_impl->configRows = {{
-        {{static_cast<f32>(readout.exposureSeconds),
-          static_cast<f32>(photon.fullWellElectrons),
-          static_cast<f32>(photon.darkCurrentElectronsPerSecond),
-          static_cast<f32>(photon.readNoiseElectronsRms)}},
-        {{static_cast<f32>(photon.prnuSigma),
-          static_cast<f32>(photon.dsnuElectronsRms),
-          static_cast<f32>(photon.dsnuReferenceExposureSeconds),
-          static_cast<f32>(photon.biasDnRms)}},
-        {{static_cast<f32>(readout.analogGain),
-          static_cast<f32>(readout.electronsPerDn),
-          static_cast<f32>(readout.blackLevelDn),
-          static_cast<f32>(photon.nucResidualFraction)}},
-        {{static_cast<f32>(thermal.timeConstantSeconds),
-          static_cast<f32>(thermal.responsivityDnPerWatt),
-          static_cast<f32>(thermal.driftDnPerSecond),
-          thermalNoise[0]}},
-        {{thermalNoise[1], thermalNoise[2], 0.0f, 0.0f}},
-        {{0.0f, 0.0f, 0.0f, 0.0f}},
-        {{0.0f, 0.0f, 0.0f, 0.0f}},
-        {{0.0f, 0.0f, 0.0f, 0.0f}},
-        {{0.0f, 0.0f, 0.0f, 0.0f}}
-    }};
+    m_impl->configRows = {};
+    if (auto rows = UpdateReadoutRows(config, m_impl->configRows); !rows)
+        return rows;
     // The RGB approximation starts with linear scene RGB. Each row maps it
     // to one latent device channel, then applies the same absolute radiance,
     // aperture, pixel-area and response integral as the CPU adapter.
@@ -1069,13 +1076,12 @@ GpuCameraPipeline::ApplyEffectiveConfig(const camera::CameraConfig& config) {
     // The effective capture config differs from the authored one only where
     // the AE/AWB loop moved exposure, gain or white balance; adopt it as the
     // pipeline's config so MakePush and the display/stats shading see one
-    // consistent state, and refresh the two buffers the shaders actually
-    // read. The PSF sigmas and response integrals do not depend on the
-    // dynamic rows, so the static configBuffer cells stay valid apart from
-    // the exposure/gain pair.
+    // consistent state. Refresh detector/readout rows 0-4 and the ISP buffer;
+    // PSF sigmas and response integrals in rows 5-8 remain tied to the
+    // measurement config and are never changed by this path.
     m_impl->config = config;
-    m_impl->configRows[0][0] = static_cast<f32>(config.readout.exposureSeconds);
-    m_impl->configRows[2][0] = static_cast<f32>(config.readout.analogGain);
+    if (auto rows = UpdateReadoutRows(config, m_impl->configRows); !rows)
+        return rows;
     if (!m_impl->configBuffer || !m_impl->ispConfigBuffer)
         return Result<void, String>::Err(
             "GPU camera parameter buffers are not allocated");
@@ -1111,6 +1117,41 @@ GpuCameraPipeline::RecordDisplayReprocess(
     if (m_impl->ispFlags & isp::kFlagHsv) {
         m_impl->BindAndDispatch(cmd, m_impl->hsvPipeline, m_impl->sets[14],
                                 push);
+        StorageBarrier(cmd);
+    }
+    return Result<void, String>::Ok();
+}
+
+Result<void, String> GpuCameraPipeline::RecordReadoutReprocess(
+    VkCommandBuffer cmd, const camera::CameraConfig& config) {
+    if (!m_impl->configured || !m_impl->hasCapture || cmd == VK_NULL_HANDLE)
+        return Result<void, String>::Err(
+            "GPU camera readout reprocess needs a completed acquisition");
+    if (auto applied = ApplyEffectiveConfig(config); !applied) return applied;
+    m_impl->TransitionImages(cmd);
+    auto push = m_impl->MakePush(m_impl->lastAcquisitionIndex,
+                                 m_impl->lastFrameTimeSeconds);
+    const VkDescriptorSet readoutSet =
+        m_impl->stateBefore == 0 ? m_impl->sets[2] : m_impl->sets[3];
+    // The standing blurred rate belongs to the last measurement. Reading
+    // stateBefore and overwriting stateCurrent replays that same device tick;
+    // it does not step the thermal state to a new acquisition.
+    m_impl->BindAndDispatch(cmd, m_impl->readoutPipeline, readoutSet, push);
+    StorageBarrier(cmd);
+    m_impl->BindAndDispatch(cmd, m_impl->statsTilesPipeline, m_impl->sets[10], push);
+    StorageBarrier(cmd);
+    m_impl->BindAndDispatchGrid(cmd, m_impl->statsReducePipeline,
+                                m_impl->sets[10], push, 1, 1);
+    StorageBarrier(cmd);
+    m_impl->BindAndDispatch(cmd, m_impl->statsHistPipeline, m_impl->sets[10], push);
+    StorageBarrier(cmd);
+    m_impl->BindAndDispatchGrid(cmd, m_impl->cdfPipeline,
+                                m_impl->sets[13], push, 1, 1);
+    StorageBarrier(cmd);
+    m_impl->BindAndDispatch(cmd, m_impl->demosaicPipeline, m_impl->sets[11], push);
+    StorageBarrier(cmd);
+    if (m_impl->ispFlags & isp::kFlagHsv) {
+        m_impl->BindAndDispatch(cmd, m_impl->hsvPipeline, m_impl->sets[14], push);
         StorageBarrier(cmd);
     }
     return Result<void, String>::Ok();

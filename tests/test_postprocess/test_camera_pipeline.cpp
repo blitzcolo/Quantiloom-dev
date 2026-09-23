@@ -69,6 +69,23 @@ TEST(CameraMotionTest, ValidatesAndEvaluatesPoseWithoutEditingStaticCamera) {
     EXPECT_FALSE(ValidateCameraMotion(motion).has_value());
 }
 
+TEST(CameraAcquisitionGridTest, DeviceCadenceIsIndependentOfTimelineTicks) {
+    constexpr f64 first = 1.25;
+    constexpr f64 period = 0.1;
+    const std::array<u64, 5> expected = {0, 0, 1, 1, 2};
+    for (size_t tick = 0; tick < expected.size(); ++tick) {
+        const f64 sceneTime = first + static_cast<f64>(tick) * 0.05;
+        const auto index = CameraAcquisitionIndexAt(first, period, sceneTime);
+        ASSERT_TRUE(index.has_value()) << index.error();
+        EXPECT_EQ(index.value(), expected[tick]);
+    }
+    const auto third = CameraAcquisitionTimeAt(first, period, 2);
+    ASSERT_TRUE(third.has_value()) << third.error();
+    EXPECT_NEAR(third.value(), 1.45, 1e-12);
+    EXPECT_FALSE(CameraAcquisitionIndexAt(first, 0.0, first).has_value());
+    EXPECT_FALSE(CameraAcquisitionIndexAt(first, period, first - 0.01).has_value());
+}
+
 TEST(CameraPhysicsTest, FlatSpectrumHasClosedFormPhotonRate) {
     // E_lambda = 2 W/m^2/nm, QE = 1/2, A = 1e-12 m^2.
     // Photon energy is hc/lambda, so the wavelength integral is quadratic.

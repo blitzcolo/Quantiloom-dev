@@ -770,20 +770,21 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // present; naming only a preset falls back to the shipped weights, so that
     // a config renders the same atmosphere here as it does in Studio.
     if (config.Has("atmosphere.model_pack") || config.Has("atmosphere.preset")) {
+        const auto presetName = config.Get<String>("atmosphere.preset", "clear");
+        const bool disabledPreset = presetName == "disabled";
         out.atmosphere.modelPackDir =
             config.Has("atmosphere.model_pack")
                 ? ResolveConfigPath(config.Get<String>("atmosphere.model_pack"), options.baseDir)
                 : options.atmosphereModelPackFallback;
-        if (out.atmosphere.modelPackDir.empty()) {
+        if (!disabledPreset && out.atmosphere.modelPackDir.empty()) {
             diag.Required("atmosphere.model_pack",
                           "[atmosphere] names a preset but no model pack was found. "
                           "Set atmosphere.model_pack, or point QUANTILOOM_ATMOS_MODELS "
                           "at the weights.");
-        } else {
+        } else if (!disabledPreset) {
             out.atmosphere.enabled = true;
         }
 
-        const auto presetName = config.Get<String>("atmosphere.preset", "clear");
         if (!out.atmosphere.ApplyPreset(presetName)) {
             diag.Warn("atmosphere.preset",
                       "  Unknown atmosphere preset '" + presetName + "', using 'clear'");

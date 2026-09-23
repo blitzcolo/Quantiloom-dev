@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Render-level check of the M4-5 camera acquisition history across a sequence.
 
-`sequence --every N` processes every tick but exports only every Nth frame;
-the ticks in between still advance the device state (thermal detector lag,
-AE/AWB feedback) through AdvanceCameraState, and every RNG stream in the
-chain is keyed on the acquisition index, not the export index. So an
+`sequence --every N` exports every Nth scene tick. The device advances at its
+own frame period (thermal detector lag, AE/AWB feedback) through
+AdvanceCameraState; a scene tick before the next device frame reuses the
+previous product. Every RNG stream is keyed on the acquisition index, not
+the export index. So an
 every-2 run and an every-1 run over the same tick range describe the SAME
 unbroken acquisition sequence, and the exported frames must agree:
 
@@ -22,7 +23,7 @@ exactly what makes the two runs disagree.
 Checks:
   a. the every-2 run exports exactly floor((B - A) / 2) + 1 frames, whose
      camera_acquisition_index metadata reads 0, 2, 4, ... -- the skipped
-     ticks became acquisitions, not nothing;
+     matching device-frame slots became acquisitions, not nothing;
   b. adjacent exported frames differ on rawDn and display (the history is
      actually moving -- a frozen state would leave every frame identical);
   c. every-2 frame k equals every-1 frame 2k to within 1e-6 (measured bit-
@@ -36,6 +37,8 @@ Checks:
      "warmup does not error and shifts the state", which the acquisition
      index (3 after a 0.3 s / 0.1 s warmup) plus the shifted noise draw
      already proves. See the comment at the warmup check below.
+  e. with scene ticks at 20/s and the device at 10/s, adjacent scene ticks
+     reuse the same product while every-2 and every-1 exports still agree.
 
 Run from either WSL or Windows after building the CLI. Exit 0 pass,
 1 wrong render, 2 no CLI, 3 no usable GPU. All output is ASCII for
@@ -58,6 +61,7 @@ BASE = ROOT / "assets/configs/camera_history_check.toml"
 # Derived configs must live beside the committed one: model paths in the
 # config resolve against its own directory.
 WARMUP_CFG = ROOT / "assets/configs/camera_history_check_warmup_work.toml"
+CROSS_RATE_CFG = ROOT / "assets/configs/camera_history_check_cross_rate_work.toml"
 WORK = ROOT / "build" / "camera_history_check"
 
 GPU_ABSENT = re.compile(r"No Vulkan-compatible GPUs|Failed to create Vulkan instance|No suitable")
@@ -152,11 +156,17 @@ def main():
         BASE.read_text(encoding="utf-8") +
         f"\n[sensor.warmup]\nseconds = {WARMUP_SECONDS}\n",
         encoding="utf-8")
+    CROSS_RATE_CFG.write_text(
+        BASE.read_text(encoding="utf-8").replace(
+            "ticks_per_second = 10.0", "ticks_per_second = 20.0"),
+        encoding="utf-8")
 
     try:
         every2 = run_sequence("every2", BASE, EVERY, TO_TICK)
         every1 = run_sequence("every1", BASE, 1, TO_TICK)
         warmup = run_sequence("warmup", WARMUP_CFG, 1, 2)
+        cross_every2 = run_sequence("cross_every2", CROSS_RATE_CFG, EVERY, TO_TICK)
+        cross_every1 = run_sequence("cross_every1", CROSS_RATE_CFG, 1, TO_TICK)
     except NoGpu as exc:
         print(exc)
         return 3
@@ -165,6 +175,7 @@ def main():
         return 1
     finally:
         WARMUP_CFG.unlink(missing_ok=True)
+        CROSS_RATE_CFG.unlink(missing_ok=True)
 
     # (a) Export count and the acquisition-index metadata: an every-2 run
     # over ticks 0..8 exports five frames, and the exported ones carry
@@ -236,12 +247,34 @@ def main():
         return fail("warmup run's first frame equals the no-warmup first "
                     "frame; warmup changed nothing")
 
+    # A 20 tick/s scene with a 10 acquisition/s device must not invent an
+    # acquisition at each scene tick. Every-2 still matches the full run at
+    # the same tick; adjacent full-run ticks share one physical frame.
+    if len(cross_every2) != EXPECTED_FRAMES or len(cross_every1) != TO_TICK + 1:
+        return fail("cross-rate sequence exported the wrong frame count")
+    cross_indices = [int(header_value(
+        WORK / "cross_every2" / f"frame_{tick:05}_rawdn.exr",
+        "camera_acquisition_index")) for tick in exported_ticks]
+    if cross_indices != [0, 1, 2, 3, 4]:
+        return fail(f"cross-rate acquisition indices {cross_indices}, want 0..4")
+    for product in PRODUCTS:
+        for tick in exported_ticks:
+            skipped = frame_products(WORK / "cross_every2", tick)[product]
+            full = frame_products(WORK / "cross_every1", tick)[product]
+            if np.max(np.abs(skipped - full)) > TOLERANCE:
+                return fail(f"cross-rate {product} tick {tick} differs by export stride")
+        first = frame_products(WORK / "cross_every1", 0)[product]
+        reused = frame_products(WORK / "cross_every1", 1)[product]
+        if np.max(np.abs(first - reused)) > TOLERANCE:
+            return fail(f"cross-rate {product} tick 1 invented a new acquisition")
+
     print(f"pass: {EXPECTED_FRAMES} every-2 frames, acquisition indices "
           f"{exported_ticks[0]}..{exported_ticks[-1]} by {EVERY}")
     print(f"pass: every-2 frame k equals every-1 frame 2k on "
           f"{', '.join(PRODUCTS)} (max delta {max_equal_delta:.6g})")
     print(f"pass: adjacent exported frames differ; warmup shifts the first "
           f"frame (delta {warmup_delta:.6g}, acquisition {warmup_index})")
+    print("pass: 20 tick/s timeline uses 10 acquisition/s device history")
     return 0
 
 

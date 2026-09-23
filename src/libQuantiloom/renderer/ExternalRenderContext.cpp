@@ -27,6 +27,7 @@
 #include "MaterialGpuData.hpp"
 #include "atmos/AtmosphereBaker.hpp"
 #include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 #include "postprocess/CameraConfigIOInternal.hpp"
 #include "postprocess/CameraAutoControl.hpp"
 #include "renderer/CameraResponseGpu.hpp"
@@ -3847,6 +3848,121 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(
 
 const camera::CameraConfig& ExternalRenderContext::GetCameraConfig() const {
     return m_impl->cameraConfig;
+}
+
+Result<void, String> ExternalRenderContext::UpdateCameraDisplayConfig(
+    const camera::CameraConfig& config) {
+    if (!m_impl->cameraConfig.enabled || !config.enabled)
+        return Result<void, String>::Err("camera capture is disabled");
+    if (m_impl->cameraCaptureRecorded)
+        return Result<void, String>::Err(
+            "complete the queued camera acquisition before editing display");
+    if (const auto valid = camera::ValidateCameraConfig(config); !valid)
+        return valid;
+
+    camera::CameraConfig expected = m_impl->cameraConfig;
+    auto& display = expected.isp;
+    const auto& requested = config.isp;
+    display.whiteBalance = requested.whiteBalance;
+    display.deviceToLinearSrgb = requested.deviceToLinearSrgb;
+    display.denoise = requested.denoise;
+    display.denoiseStrength = requested.denoiseStrength;
+    display.sharpen = requested.sharpen;
+    display.sharpenStrength = requested.sharpenStrength;
+    display.toneGamma = requested.toneGamma;
+    display.clipOutOfGamut = requested.clipOutOfGamut;
+    display.infraredTone = requested.infraredTone;
+    display.infraredPalette = requested.infraredPalette;
+    display.contrastLowPercentile = requested.contrastLowPercentile;
+    display.contrastHighPercentile = requested.contrastHighPercentile;
+    display.hsv = requested.hsv;
+
+    // SetCameraConfig normalizes a missing effective span from the channel
+    // curves. Studio keeps its authored config, which may still have zeros.
+    camera::CameraConfig authored = config;
+    if (authored.device.effectiveMinNm == 0.0 &&
+        authored.device.effectiveMaxNm == 0.0) {
+        authored.device.effectiveMinNm = expected.device.effectiveMinNm;
+        authored.device.effectiveMaxNm = expected.device.effectiveMaxNm;
+    }
+    if (CameraConfigToToml(authored) != CameraConfigToToml(expected))
+        return Result<void, String>::Err(
+            "display update also changes measurement, readout or control fields");
+
+    // RecordDisplayReprocess uploads the new ISP constants at its next call.
+    // The completed products, thermal state, AE/AWB feedback and scheduler
+    // remain untouched here.
+    m_impl->cameraConfig = std::move(expected);
+    return Result<void, String>::Ok();
+}
+
+Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
+    const camera::CameraConfig& config) {
+    if (!m_impl->cameraConfig.enabled || !config.enabled ||
+        m_impl->cameraCaptureRecorded)
+        return false;
+    if (const auto valid = camera::ValidateCameraConfig(config); !valid)
+        return Result<bool, String>::Err(valid.error());
+
+    camera::CameraConfig expected = m_impl->cameraConfig;
+    expected.readout.analogGain = config.readout.analogGain;
+    expected.readout.electronsPerDn = config.readout.electronsPerDn;
+    expected.readout.blackLevelDn = config.readout.blackLevelDn;
+    expected.readout.adcBits = config.readout.adcBits;
+    expected.readout.outputBits = config.readout.outputBits;
+    // These parameters act after the measured optical rate. Calibration
+    // maps and response curves are excluded: they need resource uploads.
+    expected.photon.fullWellElectrons = config.photon.fullWellElectrons;
+    expected.photon.darkCurrentElectronsPerSecond =
+        config.photon.darkCurrentElectronsPerSecond;
+    expected.photon.readNoiseElectronsRms = config.photon.readNoiseElectronsRms;
+    expected.photon.prnuSigma = config.photon.prnuSigma;
+    expected.photon.dsnuElectronsRms = config.photon.dsnuElectronsRms;
+    expected.photon.dsnuReferenceExposureSeconds =
+        config.photon.dsnuReferenceExposureSeconds;
+    expected.photon.biasDnRms = config.photon.biasDnRms;
+    expected.photon.nucResidualFraction = config.photon.nucResidualFraction;
+    expected.photon.enableShotNoise = config.photon.enableShotNoise;
+    expected.photon.enableDarkCurrent = config.photon.enableDarkCurrent;
+    expected.photon.enableDarkShotNoise = config.photon.enableDarkShotNoise;
+    expected.photon.enableReadNoise = config.photon.enableReadNoise;
+    expected.photon.enableFpn = config.photon.enableFpn;
+    expected.photon.applyNuc = config.photon.applyNuc;
+    expected.thermal.responsivityDnPerWatt = config.thermal.responsivityDnPerWatt;
+    expected.thermal.readNoiseDnRms = config.thermal.readNoiseDnRms;
+    expected.thermal.driftDnPerSecond = config.thermal.driftDnPerSecond;
+    expected.thermal.netdKelvin = config.thermal.netdKelvin;
+    expected.thermal.netdReferenceTemperatureK =
+        config.thermal.netdReferenceTemperatureK;
+    expected.thermal.netdNoiseBandwidthHz = config.thermal.netdNoiseBandwidthHz;
+    expected.thermal.readoutWindowSeconds = config.thermal.readoutWindowSeconds;
+    expected.thermal.netdOpticalCondition = config.thermal.netdOpticalCondition;
+    expected.products = config.products;
+
+    camera::CameraConfig authored = config;
+    if (authored.device.effectiveMinNm == 0.0 &&
+        authored.device.effectiveMaxNm == 0.0) {
+        authored.device.effectiveMinNm = expected.device.effectiveMinNm;
+        authored.device.effectiveMaxNm = expected.device.effectiveMaxNm;
+    }
+    if (CameraConfigToToml(authored) != CameraConfigToToml(expected))
+        return false;
+
+    camera::CameraConfig previous = std::move(m_impl->cameraConfig);
+    m_impl->cameraConfig = std::move(expected);
+    if (m_impl->cameraGpuPipeline && m_impl->cameraCaptureCompleted) {
+        Result<void, String> status = Result<void, String>::Ok();
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
+                                        [&](VkCommandBuffer cmd) {
+            status = m_impl->cameraGpuPipeline->RecordReadoutReprocess(
+                cmd, m_impl->EffectiveCameraConfig());
+        });
+        if (!status) {
+            m_impl->cameraConfig = std::move(previous);
+            return Result<bool, String>::Err(status.error());
+        }
+    }
+    return true;
 }
 
 Result<void, String> ExternalRenderContext::QueueCameraAcquisition(

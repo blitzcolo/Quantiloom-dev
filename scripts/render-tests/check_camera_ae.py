@@ -57,6 +57,10 @@ sensor_height_px = 32
 # exposure, and every pixel stays clear of the ADC ceiling so the loop's
 # unsaturated statistics carry a signal.
 time_s = 0.00001
+[sensor.readout]
+# This checker measures eight consecutive AE feedback steps. The separate
+# history checker exercises a device cadence different from scene ticks.
+frame_period_s = 0.1
 [sensor.photon]
 full_well_e = 20000.0
 dark_current_e_s = 0.0

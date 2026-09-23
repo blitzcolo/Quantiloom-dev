@@ -87,7 +87,8 @@ struct RenderOutcome {
 void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
                        camera::CaptureState& cameraState,
                        OfflineRenderOutput& rendered, SpectralMode spectralMode,
-                       RenderOutcome& outcome);
+                       RenderOutcome& outcome,
+                       const camera::CameraOutput* acquiredFrame = nullptr);
 
 RenderOutcome RenderConfigToFiles(const Config& config,
                                   const OfflineRenderer::InitParams& init);

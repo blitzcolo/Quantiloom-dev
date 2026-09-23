@@ -425,6 +425,36 @@ Result<CameraPoseKey, String> CameraPoseAt(const CameraMotionConfig& motion,
     return pose;
 }
 
+Result<u64, String> CameraAcquisitionIndexAt(
+    f64 firstTimeSeconds, f64 framePeriodSeconds, f64 sceneTimeSeconds) {
+    if (!std::isfinite(firstTimeSeconds) || !FinitePositive(framePeriodSeconds) ||
+        !std::isfinite(sceneTimeSeconds) || sceneTimeSeconds < firstTimeSeconds)
+        return Result<u64, String>::Err("invalid camera acquisition grid or scene time");
+    long double slots =
+        (static_cast<long double>(sceneTimeSeconds) - firstTimeSeconds) /
+        framePeriodSeconds;
+    const long double nearest = std::round(slots);
+    const long double tolerance =
+        8.0L * std::numeric_limits<f64>::epsilon() *
+        std::max(1.0L, std::abs(slots));
+    if (std::abs(slots - nearest) <= tolerance) slots = nearest;
+    if (slots >= static_cast<long double>(std::numeric_limits<u64>::max()))
+        return Result<u64, String>::Err("camera acquisition index overflows");
+    return static_cast<u64>(std::floor(slots));
+}
+
+Result<f64, String> CameraAcquisitionTimeAt(
+    f64 firstTimeSeconds, f64 framePeriodSeconds, u64 acquisitionIndex) {
+    if (!std::isfinite(firstTimeSeconds) || !FinitePositive(framePeriodSeconds))
+        return Result<f64, String>::Err("invalid camera acquisition grid");
+    const long double time = static_cast<long double>(firstTimeSeconds) +
+        static_cast<long double>(framePeriodSeconds) * acquisitionIndex;
+    if (time > std::numeric_limits<f64>::max() ||
+        time < -std::numeric_limits<f64>::max())
+        return Result<f64, String>::Err("camera acquisition time overflows");
+    return static_cast<f64>(time);
+}
+
 Result<f64, String> ApertureSolidAngleSr(f64 fNumber) {
     if (!FinitePositive(fNumber)) return Fail<f64>("f-number must be finite and positive");
     return std::numbers::pi_v<f64> / (1.0 + 4.0 * fNumber * fNumber);

@@ -484,6 +484,17 @@ preset = "disabled"
     EXPECT_FALSE(resolved.value().atmosphere.enabled);
 }
 
+TEST_F(ConfigResolveTest, DisabledPresetNeedsNoModelPack) {
+    // Studio writes this explicit token even when an authored scene had no
+    // atmosphere section. The disabled state must round-trip into the CLI
+    // without requiring NN weights that will never be sampled.
+    auto config = Parse({.atmosphereKeys = "preset = \"disabled\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FALSE(resolved.value().atmosphere.enabled);
+    EXPECT_TRUE(resolved.value().atmosphere.modelPackDir.empty());
+}
+
 TEST_F(ConfigResolveTest, LegacyAtmosphericSectionIsIgnoredWithAWarning) {
     // Studio used to map these onto NN presets; the core deprecated them. One
     // policy now, and it says so rather than silently doing nothing.

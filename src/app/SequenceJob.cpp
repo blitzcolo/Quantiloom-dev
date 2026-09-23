@@ -3,6 +3,7 @@
 #include "RenderJob.hpp"
 #include "core/Config.hpp"
 #include "core/Log.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 #include "renderer/OfflineRenderer.hpp"
 
 #include <charconv>
@@ -10,6 +11,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 
 namespace quantiloom::app {
 
@@ -202,23 +204,48 @@ int RunSequence(const SequenceOptions& options) {
         }
     }
 
-    // Every tick becomes an acquisition when the camera is on: exported ticks
-    // render and write, the ticks between them only advance the device state
-    // (thermal history, and AE/AWB feedback once it closes the loop) so the
-    // exported frames sit on an unbroken acquisition sequence.
-    for (i64 tick = from; tick <= to; ++tick) {
+    // Scene ticks choose export times; the device frame period independently
+    // chooses acquisitions. A faster timeline may reuse one device frame,
+    // while a faster device advances unexported captures between scene ticks.
+    const f64 firstTime = info.TimeOfTick(from);
+    u64 nextDeviceSlot = 0;
+    u64 cachedDeviceSlot = std::numeric_limits<u64>::max();
+    std::optional<camera::CameraOutput> cachedFrame;
+    for (i64 tick = from; tick <= to; tick += every) {
         const f64 t = info.TimeOfTick(tick);
-        const bool exportFrame = (tick - from) % static_cast<i64>(every) == 0;
-        if (!exportFrame) {
-            if (cameraEnabled) {
-                if (auto advanced = renderer.AdvanceCameraState(cameraState, t);
+        u64 targetDeviceSlot = 0;
+        if (cameraEnabled) {
+            const auto target = camera::CameraAcquisitionIndexAt(
+                firstTime, cameraConfig.readout.framePeriodSeconds, t);
+            if (!target) {
+                QL_LOG_ERROR("Tick {}: {}", tick, target.error());
+                ++failures;
+                continue;
+            }
+            targetDeviceSlot = target.value();
+            bool advanceFailed = false;
+            while (nextDeviceSlot < targetDeviceSlot) {
+                const auto at = camera::CameraAcquisitionTimeAt(
+                    firstTime, cameraConfig.readout.framePeriodSeconds,
+                    nextDeviceSlot);
+                if (!at) {
+                    QL_LOG_ERROR("Tick {}: {}", tick, at.error());
+                    advanceFailed = true;
+                    break;
+                }
+                if (auto advanced = renderer.AdvanceCameraState(cameraState, at.value());
                     !advanced) {
                     QL_LOG_ERROR("Tick {}: camera advance failed: {}", tick,
                                  advanced.error());
-                    ++failures;
+                    advanceFailed = true;
+                    break;
                 }
+                ++nextDeviceSlot;
             }
-            continue;
+            if (advanceFailed) {
+                ++failures;
+                continue;
+            }
         }
         ++index;
         const auto frameStarted = std::chrono::steady_clock::now();
@@ -251,9 +278,30 @@ int RunSequence(const SequenceOptions& options) {
             ++failures;
             continue;
         }
+        if (cameraEnabled && cachedDeviceSlot != targetDeviceSlot) {
+            const auto at = camera::CameraAcquisitionTimeAt(
+                firstTime, cameraConfig.readout.framePeriodSeconds,
+                targetDeviceSlot);
+            if (!at) {
+                QL_LOG_ERROR("Tick {}: {}", tick, at.error());
+                ++failures;
+                continue;
+            }
+            auto captured = renderer.CaptureCamera(cameraState, at.value());
+            if (!captured) {
+                QL_LOG_ERROR("Tick {}: camera capture failed: {}", tick,
+                             captured.error());
+                ++failures;
+                continue;
+            }
+            cachedFrame = std::move(captured.value());
+            cachedDeviceSlot = targetDeviceSlot;
+            nextDeviceSlot = targetDeviceSlot + 1;
+        }
         if (!rendered.wroteItsOwnOutput) {
             WriteFrameOutputs(config, renderer, cameraState, rendered,
-                              renderer.Params().mode, outcome);
+                              renderer.Params().mode, outcome,
+                              cameraEnabled ? &*cachedFrame : nullptr);
         }
         if (!outcome.error.empty()) ++failures;
 

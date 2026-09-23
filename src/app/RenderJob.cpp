@@ -10,6 +10,7 @@
 #include <chrono>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -25,11 +26,17 @@ namespace {
  */
 Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
                                        camera::CaptureState& state,
-                                       RenderOutcome& outcome) {
+                                       RenderOutcome& outcome,
+                                       const camera::CameraOutput* acquiredFrame) {
     QL_LOG_INFO("Applying sensor simulation...");
     const std::filesystem::path exrPath(outcome.exrPath);
-    const auto captured = renderer.CaptureCamera(state, renderer.GetTimelineInfo().current_s);
-    if (!captured) return Result<Image, String>::Err(captured.error());
+    std::optional<camera::CameraOutput> freshFrame;
+    if (!acquiredFrame) {
+        auto captured = renderer.CaptureCamera(state, renderer.GetTimelineInfo().current_s);
+        if (!captured) return Result<Image, String>::Err(captured.error());
+        freshFrame = std::move(captured.value());
+        acquiredFrame = &*freshFrame;
+    }
     const auto write = [&](const std::optional<camera::CameraProduct>& product,
                            const char* suffix) -> Result<void, String> {
         if (!product) return Result<void, String>::Ok();
@@ -39,7 +46,7 @@ Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
             return Result<void, String>::Err("failed to write camera product " + path.string());
         return Result<void, String>::Ok();
     };
-    const auto& output = captured.value();
+    const auto& output = *acquiredFrame;
     for (const auto& [product, suffix] : {
              std::pair{&output.bandMeasurement, "_measurement"},
              std::pair{&output.rawDn, "_rawdn"},
@@ -232,7 +239,8 @@ Image BuildPreview(const Image& img, const SpectralMode mode, const u32 width, c
 void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
                        camera::CaptureState& cameraState,
                        OfflineRenderOutput& rendered,
-                       const SpectralMode spectralMode, RenderOutcome& outcome) {
+                       const SpectralMode spectralMode, RenderOutcome& outcome,
+                       const camera::CameraOutput* acquiredFrame) {
     Image& img = rendered.radiance;
 
     // The compatibility thermography map is for scenes without the versioned
@@ -245,7 +253,7 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
 
     Image cameraPreview;
     if (renderer.GetCameraConfig().enabled) {
-        auto captured = ApplySensorChain(renderer, cameraState, outcome);
+        auto captured = ApplySensorChain(renderer, cameraState, outcome, acquiredFrame);
         if (!captured) {
             outcome.error = captured.error();
             QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", outcome.error);
