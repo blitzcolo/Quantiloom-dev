@@ -1,6 +1,7 @@
 #pragma once
 
 #include "postprocess/CameraPipeline.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 
 #include <span>
 
@@ -22,8 +23,6 @@ enum class NoiseClass : u32 {
 [[nodiscard]] Result<void, String> ValidateResponseStack(const ResponseStack& response,
                                                          DetectorKind detector);
 [[nodiscard]] Result<void, String> ValidateCameraConfig(const CameraConfig& config);
-[[nodiscard]] Result<CameraPoseKey, String> CameraPoseAt(
-    const CameraMotionConfig& motion, f64 timeSeconds);
 
 // The sole radiance-to-irradiance boundary. The input radiance is W/m^2/sr/nm.
 // The result is W/m^2/nm BEFORE any lens/filter/QE response is applied.

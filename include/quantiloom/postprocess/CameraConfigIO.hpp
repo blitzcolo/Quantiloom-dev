@@ -22,4 +22,14 @@ namespace quantiloom {
 /// The caller writes the static [camera] table and the rest of the scene.
 [[nodiscard]] QL_API String CameraConfigToToml(const camera::CameraConfig& config);
 
+/// Validate an authored camera trajectory before an editor commits it.
+namespace camera {
+[[nodiscard]] QL_API Result<void, String> ValidateCameraMotion(
+    const CameraMotionConfig& motion);
+
+/// Resolve the camera pose at global scene time (linear keys, held endpoints).
+[[nodiscard]] QL_API Result<CameraPoseKey, String> CameraPoseAt(
+    const CameraMotionConfig& motion, f64 timeSeconds);
+} // namespace camera
+
 } // namespace quantiloom

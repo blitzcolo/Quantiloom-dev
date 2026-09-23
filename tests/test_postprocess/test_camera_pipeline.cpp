@@ -2,6 +2,7 @@
 
 #include "io/ImageIO.hpp"
 #include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 
 #include <array>
 #include <cmath>
@@ -41,6 +42,32 @@ ResponseStack ThermalStack(double absorptance = 0.5) {
 }
 
 } // namespace
+
+TEST(CameraMotionTest, ValidatesAndEvaluatesPoseWithoutEditingStaticCamera) {
+    CameraMotionConfig motion;
+    motion.keys = {{0.0, {0.0, 0.0, 2.0}, {0.0, 0.0, 0.0}},
+                   {2.0, {2.0, 0.0, 2.0}, {2.0, 0.0, 0.0}}};
+    ASSERT_TRUE(ValidateCameraMotion(motion).has_value());
+    const auto before = CameraPoseAt(motion, -1.0);
+    const auto middle = CameraPoseAt(motion, 1.0);
+    const auto after = CameraPoseAt(motion, 3.0);
+    ASSERT_TRUE(before.has_value());
+    ASSERT_TRUE(middle.has_value());
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(before.value(), motion.keys.front());
+    EXPECT_DOUBLE_EQ(middle.value().position[0], 1.0);
+    EXPECT_DOUBLE_EQ(middle.value().lookAt[0], 1.0);
+    EXPECT_EQ(after.value(), motion.keys.back());
+    EXPECT_EQ(motion.keys.front().position[0], 0.0);
+
+    motion.keys[1].timeSeconds = 0.0;
+    EXPECT_FALSE(ValidateCameraMotion(motion).has_value());
+    motion.keys[1].timeSeconds = 2.0;
+    motion.keys[1].lookAt = motion.keys[1].position;
+    EXPECT_FALSE(ValidateCameraMotion(motion).has_value());
+    motion.keys[1].lookAt = {2.0, 0.0, 4.0};
+    EXPECT_FALSE(ValidateCameraMotion(motion).has_value());
+}
 
 TEST(CameraPhysicsTest, FlatSpectrumHasClosedFormPhotonRate) {
     // E_lambda = 2 W/m^2/nm, QE = 1/2, A = 1e-12 m^2.

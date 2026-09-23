@@ -1,4 +1,5 @@
 #include "postprocess/CameraPhysics.hpp"
+#include "postprocess/CameraConfigIO.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -315,48 +316,8 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
     if (!FiniteNonnegative(config.fastRgbRadianceScale) ||
         (config.calibratedFastRgbInput && !FinitePositive(config.fastRgbRadianceScale)))
         return Result<void, String>::Err("calibrated fast RGB needs an absolute radiance scale");
-    for (size_t i = 0; i < config.motion.keys.size(); ++i) {
-        const auto& key = config.motion.keys[i];
-        if (!std::isfinite(key.timeSeconds) ||
-            (i && key.timeSeconds <= config.motion.keys[i - 1].timeSeconds))
-            return Result<void, String>::Err("camera motion times must be finite and increasing");
-        for (const f64 coord : key.position) if (!std::isfinite(coord))
-            return Result<void, String>::Err("camera motion position must be finite");
-        for (const f64 coord : key.lookAt) if (!std::isfinite(coord))
-            return Result<void, String>::Err("camera motion target must be finite");
-        f64 distanceSquared = 0.0;
-        for (size_t axis = 0; axis < 3; ++axis) {
-            const f64 delta = key.lookAt[axis] - key.position[axis];
-            distanceSquared += delta * delta;
-        }
-        if (!FinitePositive(distanceSquared) || distanceSquared < 1e-24)
-            return Result<void, String>::Err("camera motion target must differ from position");
-        if (i) {
-            const auto& previous = config.motion.keys[i - 1];
-            f64 dot = 0.0, deltaNormSquared = 0.0, currentNormSquared = 0.0;
-            f64 priorDirection[3], delta[3];
-            for (size_t axis = 0; axis < 3; ++axis) {
-                priorDirection[axis] = previous.lookAt[axis] - previous.position[axis];
-                delta[axis] = (key.lookAt[axis] - key.position[axis]) - priorDirection[axis];
-                dot += priorDirection[axis] * delta[axis];
-                deltaNormSquared += delta[axis] * delta[axis];
-                currentNormSquared += priorDirection[axis] * priorDirection[axis];
-            }
-            if (deltaNormSquared > 0.0) {
-                const f64 zeroAt = -dot / deltaNormSquared;
-                if (zeroAt >= 0.0 && zeroAt <= 1.0) {
-                    f64 minimumNormSquared = 0.0;
-                    for (size_t axis = 0; axis < 3; ++axis) {
-                        const f64 component = priorDirection[axis] + zeroAt * delta[axis];
-                        minimumNormSquared += component * component;
-                    }
-                    if (minimumNormSquared <= 1e-24 * std::max(1.0, currentNormSquared))
-                        return Result<void, String>::Err(
-                            "interpolated camera motion has a zero viewing direction");
-                }
-            }
-        }
-    }
+    if (auto validMotion = ValidateCameraMotion(config.motion); !validMotion)
+        return validMotion;
     if (config.isp.defectPixels.size() > 1) {
         std::vector<std::pair<u32, u32>> pixels;
         pixels.reserve(config.isp.defectPixels.size());
@@ -390,14 +351,58 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
     return Result<void, String>::Ok();
 }
 
+Result<void, String> ValidateCameraMotion(const CameraMotionConfig& motion) {
+    for (size_t i = 0; i < motion.keys.size(); ++i) {
+        const auto& key = motion.keys[i];
+        if (!std::isfinite(key.timeSeconds) ||
+            (i && key.timeSeconds <= motion.keys[i - 1].timeSeconds))
+            return Result<void, String>::Err("camera motion times must be finite and increasing");
+        for (const f64 coord : key.position) if (!std::isfinite(coord))
+            return Result<void, String>::Err("camera motion position must be finite");
+        for (const f64 coord : key.lookAt) if (!std::isfinite(coord))
+            return Result<void, String>::Err("camera motion target must be finite");
+        f64 distanceSquared = 0.0;
+        for (size_t axis = 0; axis < 3; ++axis) {
+            const f64 delta = key.lookAt[axis] - key.position[axis];
+            distanceSquared += delta * delta;
+        }
+        if (!FinitePositive(distanceSquared) || distanceSquared < 1e-24)
+            return Result<void, String>::Err("camera motion target must differ from position");
+        if (i) {
+            const auto& previous = motion.keys[i - 1];
+            f64 dot = 0.0, deltaNormSquared = 0.0, currentNormSquared = 0.0;
+            f64 priorDirection[3], delta[3];
+            for (size_t axis = 0; axis < 3; ++axis) {
+                priorDirection[axis] = previous.lookAt[axis] - previous.position[axis];
+                delta[axis] = (key.lookAt[axis] - key.position[axis]) - priorDirection[axis];
+                dot += priorDirection[axis] * delta[axis];
+                deltaNormSquared += delta[axis] * delta[axis];
+                currentNormSquared += priorDirection[axis] * priorDirection[axis];
+            }
+            if (deltaNormSquared > 0.0) {
+                const f64 zeroAt = -dot / deltaNormSquared;
+                if (zeroAt >= 0.0 && zeroAt <= 1.0) {
+                    f64 minimumNormSquared = 0.0;
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        const f64 component = priorDirection[axis] + zeroAt * delta[axis];
+                        minimumNormSquared += component * component;
+                    }
+                    if (minimumNormSquared <= 1e-24 * std::max(1.0, currentNormSquared))
+                        return Result<void, String>::Err(
+                            "interpolated camera motion has a zero viewing direction");
+                }
+            }
+        }
+    }
+    return Result<void, String>::Ok();
+}
+
 Result<CameraPoseKey, String> CameraPoseAt(const CameraMotionConfig& motion,
                                           f64 timeSeconds) {
     if (!std::isfinite(timeSeconds) || motion.keys.empty())
         return Fail<CameraPoseKey>("camera motion needs finite time and at least one key");
-    for (size_t i = 0; i < motion.keys.size(); ++i)
-        if (!std::isfinite(motion.keys[i].timeSeconds) ||
-            (i && motion.keys[i].timeSeconds <= motion.keys[i - 1].timeSeconds))
-            return Fail<CameraPoseKey>("camera motion keys must be finite and increasing");
+    if (auto valid = ValidateCameraMotion(motion); !valid)
+        return Result<CameraPoseKey, String>::Err(valid.error());
     if (timeSeconds <= motion.keys.front().timeSeconds) return motion.keys.front();
     if (timeSeconds >= motion.keys.back().timeSeconds) return motion.keys.back();
     const auto high = std::upper_bound(motion.keys.begin(), motion.keys.end(), timeSeconds,
