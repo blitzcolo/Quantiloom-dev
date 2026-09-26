@@ -218,8 +218,26 @@ def write_manifest(path, data):
 DEFAULT_QL = REPO / "build" / "src" / "app" / "Release" / "Quantiloom.exe"
 
 
+def native_path(path):
+    """A filesystem path for the Python process, including Windows provenance."""
+    import os
+    value = str(path)
+    if os.name != "nt" and len(value) > 2 and value[1] == ":":
+        value = subprocess.check_output(["wslpath", "-u", value], text=True).strip()
+    return pathlib.Path(value)
+
+
+def cli_path(path, cli=DEFAULT_QL):
+    """A path argument for the selected CLI, not for its Python caller."""
+    import os
+    value = str(native_path(path).resolve())
+    if os.name != "nt" and str(cli).lower().endswith(".exe"):
+        value = subprocess.check_output(["wslpath", "-w", value], text=True).strip()
+    return value.replace("\\", "/")
+
+
 def run_quantiloom(config, cli=DEFAULT_QL, cwd=REPO, timeout=7200):
-    result = subprocess.run([str(cli), str(config)], cwd=str(cwd),
+    result = subprocess.run([str(native_path(cli)), cli_path(config, cli)], cwd=str(cwd),
                             capture_output=True, text=True, encoding="utf-8",
                             errors="replace", timeout=timeout)
     if result.returncode != 0:

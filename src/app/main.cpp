@@ -20,6 +20,9 @@
 #include "McpServe.hpp"
 #include "RenderJob.hpp"
 #include "Version.hpp"
+#include <string_view>
+static_assert(std::string_view(quantiloom::version::AppVersionString) ==
+              std::string_view(QUANTILOOM_EXPECTED_APP_VERSION));
 
 #include <iostream>
 #include <filesystem>

@@ -47,6 +47,10 @@ add_executable(Quantiloom
     ${CMAKE_CURRENT_BINARY_DIR}/Version.hpp
 )
 
+# Tie the object rebuild to the version even if MSVC's include tracking is stale.
+target_compile_definitions(Quantiloom PRIVATE
+    QUANTILOOM_EXPECTED_APP_VERSION="${PROJECT_VERSION}")
+
 # Include directories for generated files
 target_include_directories(Quantiloom
     PRIVATE
@@ -161,3 +165,10 @@ if(MSVC)
 endif()
 
 message(STATUS "Quantiloom executables configured successfully")
+
+add_custom_target(quantiloom_version_check ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DCLI=$<TARGET_FILE:Quantiloom> -DEXPECTED=${PROJECT_VERSION}
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/CheckVersion.cmake"
+    DEPENDS Quantiloom
+    VERBATIM)
