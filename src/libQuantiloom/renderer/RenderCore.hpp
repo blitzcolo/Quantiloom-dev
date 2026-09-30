@@ -408,11 +408,21 @@ public:
      */
     bool RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scene);
 
-    /// Refit the TLAS in place for transform-only edits: no allocation, no
-    /// teardown, same handle -- cheap enough to run per mouse-move during a
-    /// drag. Returns false without touching anything when a refit is not
-    /// possible (nothing built yet, or the instance count changed, i.e. a
-    /// topology edit); the caller falls back to a full rebuild.
+    /// Copy the scene's transforms into the CPU-side TLAS instance list.
+    /// Returns false when no TLAS exists or the instance count changed.
+    /// Multiple calls before RecordPreparedTlasRefit() coalesce to the latest
+    /// transforms without submitting GPU work.
+    [[nodiscard]] bool PrepareTlasRefit(const Scene& scene);
+
+    /// Record the prepared instance upload and in-place TLAS update into an
+    /// existing command buffer. Call only after PrepareTlasRefit() succeeds.
+    /// Barriers order prior ray queries/traces, the instance upload, the AS
+    /// update, and subsequent consumers on the graphics queue.
+    void RecordPreparedTlasRefit(VkCommandBuffer cmd);
+
+    /// Synchronous compatibility path for consumers that need the new TLAS
+    /// before returning (picking and thermal precompute). Interactive rendering
+    /// uses PrepareTlasRefit() + RecordPreparedTlasRefit() to avoid a CPU wait.
     [[nodiscard]] bool RefitTlas(VulkanContext& ctx, const Scene& scene);
 
     [[nodiscard]] bool IsValid() const { return m_tlas != nullptr; }

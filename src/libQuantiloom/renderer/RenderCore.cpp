@@ -1150,7 +1150,7 @@ void SceneGeometry::SetThermalElementBases(const Vector<u32>& bases) {
                            m_instances.size() * sizeof(InstanceGeometryInfo));
 }
 
-bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
+bool SceneGeometry::PrepareTlasRefit(const Scene& scene) {
     if (!m_tlas || !m_tlas->IsBuilt()) {
         return false;
     }
@@ -1172,8 +1172,22 @@ bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
         return false;
     }
 
+    return true;
+}
+
+void SceneGeometry::RecordPreparedTlasRefit(VkCommandBuffer cmd) {
+    if (!m_tlas || !m_tlas->IsBuilt()) {
+        throw std::runtime_error("RecordPreparedTlasRefit called before TLAS build");
+    }
+    m_tlas->Update(cmd);
+}
+
+bool SceneGeometry::RefitTlas(VulkanContext& ctx, const Scene& scene) {
+    if (!PrepareTlasRefit(scene)) {
+        return false;
+    }
     CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-        m_tlas->Update(cmd);
+        RecordPreparedTlasRefit(cmd);
     });
     return true;
 }

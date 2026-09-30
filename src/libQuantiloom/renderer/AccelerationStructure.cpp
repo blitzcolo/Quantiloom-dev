@@ -25,6 +25,7 @@ VkDeviceSize ScratchAlignment(const VulkanContext& context) {
 
 // VUID-VkAccelerationStructureGeometryInstancesDataKHR-arrayOfPointers-03779.
 constexpr VkDeviceSize kInstanceDataAlignment = 16;
+constexpr VkDeviceSize kMaxCmdUpdateBytes = 65536;
 
 // The failure mode this guards against has no error code -- an unaligned build
 // input hangs the GPU and the device-lost surfaces later, at whatever the next
@@ -383,7 +384,9 @@ void TLAS::Build(VkCommandBuffer cmd) {
         allocator,
         instanceBufferSize,
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU,
         kInstanceDataAlignment
     );
@@ -530,9 +533,47 @@ void TLAS::Update(VkCommandBuffer cmd) {
         throw std::runtime_error("Failed to load acceleration structure functions");
     }
 
-    // Same size, same buffer: only the transforms changed
-    m_instanceBuffer->Upload(m_instances.data(),
-                             m_instances.size() * sizeof(VkAccelerationStructureInstanceKHR));
+    // Reuse one device-address-stable input buffer. Recording the bytes into
+    // the command buffer avoids a host write racing a previous frame's AS
+    // update. vkCmdUpdateBuffer is limited to 64 KiB per call, so large scenes
+    // are split on the 64-byte instance boundary.
+    VkBufferMemoryBarrier inputWritable{};
+    inputWritable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    inputWritable.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                                  VK_ACCESS_TRANSFER_READ_BIT;
+    inputWritable.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    inputWritable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputWritable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputWritable.buffer = m_instanceBuffer->GetHandle();
+    inputWritable.offset = 0;
+    inputWritable.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 1, &inputWritable, 0, nullptr);
+
+    const VkDeviceSize instanceBytes =
+        m_instances.size() * sizeof(VkAccelerationStructureInstanceKHR);
+    const auto* source = reinterpret_cast<const u8*>(m_instances.data());
+    for (VkDeviceSize offset = 0; offset < instanceBytes; offset += kMaxCmdUpdateBytes) {
+        const VkDeviceSize bytes = std::min(kMaxCmdUpdateBytes, instanceBytes - offset);
+        vkCmdUpdateBuffer(cmd, m_instanceBuffer->GetHandle(), offset, bytes, source + offset);
+    }
+
+    VkBufferMemoryBarrier inputReady{};
+    inputReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    inputReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    inputReady.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+    inputReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    inputReady.buffer = m_instanceBuffer->GetHandle();
+    inputReady.offset = 0;
+    inputReady.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                         0, 0, nullptr, 1, &inputReady, 0, nullptr);
 
     VkAccelerationStructureGeometryKHR geometry{};
     geometry.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
@@ -567,7 +608,8 @@ void TLAS::Update(VkCommandBuffer cmd) {
     preBarrier.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     preBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
     vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
                          0, 1, &preBarrier, 0, nullptr, 0, nullptr);
 
@@ -582,7 +624,8 @@ void TLAS::Update(VkCommandBuffer cmd) {
     postBarrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     vkCmdPipelineBarrier(cmd,
                          VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &postBarrier, 0, nullptr, 0, nullptr);
 }
 

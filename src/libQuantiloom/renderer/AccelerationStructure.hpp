@@ -188,9 +188,11 @@ public:
     // Overwrite one instance's transform in the CPU-side list (before Update)
     void SetInstanceTransform(size_t index, const glm::mat4& transform);
 
-    // Refit in place: re-upload the instance list and record an UPDATE-mode
-    // build (src == dst == this AS). Transform-only edits; the instance
-    // count, BLAS references and flags must be unchanged since Build.
+    // Refit in place: record the instance-list upload and an UPDATE-mode build
+    // (src == dst == this AS). Transform-only edits; the instance count, BLAS
+    // references and flags must be unchanged since Build. The upload is part
+    // of @p cmd, so the caller can place it between old and new traces without
+    // a host wait or a host write racing an earlier update.
     // Orders of magnitude cheaper than a rebuild -- no allocation, no
     // teardown -- which is what makes interactive dragging possible.
     void Update(VkCommandBuffer cmd);
@@ -199,6 +201,11 @@ public:
     [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] size_t InstanceCount() const { return m_instances.size(); }
+    /// Exposed for synchronization regression tests that snapshot the exact
+    /// GPU input between two updates recorded into one command buffer.
+    [[nodiscard]] const GpuBuffer& InstanceBufferForDiagnostics() const {
+        return *m_instanceBuffer;
+    }
 
 private:
     VulkanContext& m_context;

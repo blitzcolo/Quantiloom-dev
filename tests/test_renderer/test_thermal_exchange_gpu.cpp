@@ -19,12 +19,14 @@
 
 #include "renderer/ThermalExchangePrecompute.hpp"
 
+#include "renderer/CommandHelper.hpp"
 #include "renderer/RenderCore.hpp"
 #include "support/VulkanTestDevice.hpp"
 #include "thermal/ThermalMesh.hpp"
 
 #include <cmath>
 #include <numbers>
+#include <array>
 
 using namespace quantiloom;
 using namespace quantiloom::rendercore;
@@ -284,4 +286,131 @@ TEST_F(ThermalExchangeGpuTest, AnOpenPlateIsFullyLit) {
 
     EXPECT_NEAR(exchange.sunVisibility[0], 1.0f, 1e-6f);
     EXPECT_NEAR(exchange.sunVisibility[1], 1.0f, 1e-6f);
+}
+
+TEST_F(ThermalExchangeGpuTest, PreparedRefitChunksLargeUploadsAndTracesConsecutiveUpdates) {
+    Scene scene = MakeScene();
+    AddQuad(scene, 0.0f, 5.0f, /*facingUp=*/true, 0);    // target, node 0
+    AddQuad(scene, 1.0f, 5.0f, /*facingUp=*/false, 0);   // blocker, node 1
+
+    // VkAccelerationStructureInstanceKHR is 64 bytes. 1025 instances exceed
+    // vkCmdUpdateBuffer's 64 KiB per-call limit and force a second chunk.
+    for (u32 i = 0; i < 1023; ++i) {
+        SceneNode filler;
+        filler.meshIndex = 1;
+        filler.active = true;
+        filler.transform = glm::translate(
+            glm::mat4(1.0f), glm::vec3(1000.0f + 20.0f * i, 0.0f, 0.0f));
+        scene.nodes.push_back(filler);
+    }
+
+    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    ASSERT_TRUE(geometry.IsValid());
+    ASSERT_EQ(geometry.InstanceCount(), 1025u);
+
+    ThermalExchangePrecompute precompute(Device());
+    if (!precompute.IsValid()) {
+        GTEST_SKIP() << "thermal_exchange.spv unavailable";
+    }
+    const std::array directions{glm::vec3(0.0f, 1.0f, 0.0f)};
+    const auto targetVisibility = [&]() {
+        const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
+        const auto visibility = precompute.RunSunVisibility(
+            geometry.Tlas().GetHandle(), mesh.elements, mesh.instanceElementBase,
+            directions, 1, 0.0f);
+        EXPECT_EQ(visibility.size(), mesh.elements.size());
+        return 0.5f * (visibility[0] + visibility[1]);
+    };
+
+    EXPECT_NEAR(targetVisibility(), 0.0f, 1e-6f);
+
+    const GpuBuffer& instanceInput = geometry.Tlas().InstanceBufferForDiagnostics();
+    GpuBuffer firstRecorded(Device().GetAllocator(), instanceInput.GetSize(),
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                            VMA_MEMORY_USAGE_GPU_TO_CPU);
+    GpuBuffer secondRecorded(Device().GetAllocator(), instanceInput.GetSize(),
+                             VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                             VMA_MEMORY_USAGE_GPU_TO_CPU);
+
+    scene.nodes[1].transform =
+        glm::translate(glm::mat4(1.0f), glm::vec3(100.0f, 0.0f, 0.0f));
+    ASSERT_TRUE(geometry.PrepareTlasRefit(scene));
+    bool preparedSecond = false;
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        const auto snapshotInput = [&](GpuBuffer& destination) {
+            VkBufferMemoryBarrier readable{};
+            readable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            readable.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+            readable.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            readable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            readable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            readable.buffer = instanceInput.GetHandle();
+            readable.offset = 0;
+            readable.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd,
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 0, nullptr, 1, &readable, 0, nullptr);
+
+            VkBufferCopy copy{};
+            copy.size = instanceInput.GetSize();
+            vkCmdCopyBuffer(cmd, instanceInput.GetHandle(), destination.GetHandle(), 1, &copy);
+
+            VkBufferMemoryBarrier hostReadable{};
+            hostReadable.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            hostReadable.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            hostReadable.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            hostReadable.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            hostReadable.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            hostReadable.buffer = destination.GetHandle();
+            hostReadable.offset = 0;
+            hostReadable.size = VK_WHOLE_SIZE;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT,
+                                 0, 0, nullptr, 1, &hostReadable, 0, nullptr);
+        };
+
+        geometry.RecordPreparedTlasRefit(cmd);
+        snapshotInput(firstRecorded);
+
+        // Change the CPU list while this command buffer is still recording.
+        // vkCmdUpdateBuffer must have copied the first pose into the command;
+        // no host write reaches the GPU instance input outside that command.
+        scene.nodes[1].transform = glm::mat4(1.0f);
+        preparedSecond = geometry.PrepareTlasRefit(scene);
+        if (!preparedSecond) return;
+        geometry.RecordPreparedTlasRefit(cmd);
+        snapshotInput(secondRecorded);
+    });
+    ASSERT_TRUE(preparedSecond);
+
+    const auto* firstInstances = static_cast<const VkAccelerationStructureInstanceKHR*>(
+        firstRecorded.MapRead());
+    ASSERT_NE(firstInstances, nullptr);
+    EXPECT_FLOAT_EQ(firstInstances[1].transform.matrix[0][3], 100.0f);
+    firstRecorded.Unmap();
+    const auto* secondInstances = static_cast<const VkAccelerationStructureInstanceKHR*>(
+        secondRecorded.MapRead());
+    ASSERT_NE(secondInstances, nullptr);
+    EXPECT_FLOAT_EQ(secondInstances[1].transform.matrix[0][3], 0.0f);
+    secondRecorded.Unmap();
+    EXPECT_NEAR(targetVisibility(), 0.0f, 1e-6f)
+        << "the second same-submission update must leave the blocker restored";
+
+    scene.nodes[1].transform =
+        glm::translate(glm::mat4(1.0f), glm::vec3(100.0f, 0.0f, 0.0f));
+    ASSERT_TRUE(geometry.PrepareTlasRefit(scene));
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        geometry.RecordPreparedTlasRefit(cmd);
+    });
+    EXPECT_NEAR(targetVisibility(), 1.0f, 1e-6f)
+        << "the first chunked update must move the blocker out of the sun ray";
+
+    scene.nodes[1].transform = glm::mat4(1.0f);
+    ASSERT_TRUE(geometry.PrepareTlasRefit(scene));
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        geometry.RecordPreparedTlasRefit(cmd);
+    });
+    EXPECT_NEAR(targetVisibility(), 0.0f, 1e-6f)
+        << "the second update must wait for prior AS-input reads and move it back";
 }
