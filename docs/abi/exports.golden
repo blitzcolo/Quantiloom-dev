@@ -293,6 +293,7 @@ public: void quantiloom::ExternalRenderContext::SetThermalEpochProgressCallback(
 public: void quantiloom::ExternalRenderContext::SetThermalMaterial(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::ThermalMaterialParams const &)
 public: void quantiloom::ExternalRenderContext::SetThermalSolveEnabled(bool)
 public: void quantiloom::ExternalRenderContext::SetThermalSolveParams(struct quantiloom::ThermalSolveParams const &)
+public: void quantiloom::ExternalRenderContext::SetViewportSampleBatch(unsigned int)
 public: void quantiloom::ExternalRenderContext::SetWavelength(float)
 public: void quantiloom::ExternalRenderContext::UpdateMaterial(unsigned int,struct quantiloom::Material const &)
 public: void quantiloom::Material::ComputeSpectralAlbedo(void)

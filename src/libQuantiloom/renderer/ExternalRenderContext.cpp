@@ -242,6 +242,7 @@ struct ExternalRenderContext::Impl {
     u32 debugParam = 0;
     f32 wavelength_nm = 550.0f;
     u32 spp = 1;
+    u32 viewportSampleBatch = 1;
     LightingParams lightingParams;
 
     // NN atmosphere state (baked lazily before rendering when the key changes)
@@ -1838,53 +1839,60 @@ void ExternalRenderContext::RenderFrame(
         static_cast<u32>(m_impl->spectralMode),
         m_impl->debugMode != DebugVisualizationMode::None);
 
-    // Set sampling parameters
-    // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
-    //
-    // Mixed with accumulatedSamples only. frameIndex used to be part of this,
-    // but it counts every frame ever drawn and is never reset, so it made the
-    // seed depend on session history rather than on the accumulation -- the one
-    // thing that had to be reproducible. Dropping it makes this identical to
-    // the CLI's `dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009)`, where
-    // frameIndex is fixed at 0 and sampleIndex is the accumulation index.
-    u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->accumulatedSamples * 1009);
+    // A presentation and a path sample are different units. Camera capture
+    // owns its own acquisition history and is deliberately never batched here.
+    const u32 samplesToRender = m_impl->cameraConfig.enabled ? 1u : m_impl->viewportSampleBatch;
+    for (u32 sample = 0; sample < samplesToRender; ++sample) {
+        // Set sampling parameters
+        // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
+        //
+        // Mixed with accumulatedSamples only. frameIndex used to be part of this,
+        // but it counts every frame ever drawn and is never reset, so it made the
+        // seed depend on session history rather than on the accumulation -- the one
+        // thing that had to be reproducible. Dropping it makes this identical to
+        // the CLI's `dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009)`, where
+        // frameIndex is fixed at 0 and sampleIndex is the accumulation index.
+        u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->accumulatedSamples * 1009);
 
-    // frameIndex is passed as 0, exactly as the CLI passes it. raygen.rgen
-    // folds this push constant into the per-pixel seed
-    // (`seed ^= pushConsts.frameIndex * 26699`) and uses it for nothing else,
-    // so feeding it the free-running frame counter made the image depend on how
-    // many frames the session had drawn before this accumulation began. The
-    // sample-to-sample variation it was there to provide already comes from
-    // sampleIndex below.
-    constexpr u32 kShaderFrameIndex = 0;
-    m_impl->pipeline->SetSamplingParams(
-        kShaderFrameIndex,
-        m_impl->accumulatedSamples,
-        m_impl->spp,
-        randomSeed,
-        m_impl->sequenceSeed
-    );
+        // frameIndex is passed as 0, exactly as the CLI passes it. raygen.rgen
+        // folds this push constant into the per-pixel seed
+        // (`seed ^= pushConsts.frameIndex * 26699`) and uses it for nothing else,
+        // so feeding it the free-running frame counter made the image depend on how
+        // many frames the session had drawn before this accumulation began. The
+        // sample-to-sample variation it was there to provide already comes from
+        // sampleIndex below.
+        constexpr u32 kShaderFrameIndex = 0;
+        m_impl->pipeline->SetSamplingParams(
+            kShaderFrameIndex,
+            m_impl->accumulatedSamples,
+            m_impl->spp,
+            randomSeed,
+            m_impl->sequenceSeed
+        );
 
-    if (m_impl->cameraConfig.enabled) {
-        // The camera chain owns the frame: it traces at the physical sensor
-        // extent and produces the display product. The visibility
-        // accumulation in outputImage is not traced in this mode; hosts that
-        // read CaptureScreenshot with the camera enabled get the last
-        // non-camera frame, if any.
-        if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
-            QL_LOG_WARN("Camera scheduler: {}", stepped.error());
+        if (m_impl->cameraConfig.enabled) {
+            // The camera chain owns the frame: it traces at the physical sensor
+            // extent and produces the display product. The visibility
+            // accumulation in outputImage is not traced in this mode; hosts that
+            // read CaptureScreenshot with the camera enabled get the last
+            // non-camera frame, if any.
+            if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
+                QL_LOG_WARN("Camera scheduler: {}", stepped.error());
+            }
+        } else {
+            // Execute ray tracing (writes to internal outputImage in GENERAL
+            // layout). Timestamps bracket the trace alone -- not CLAHE or the
+            // blit -- so what gets measured is the cost of one sample of *this
+            // scene*. The camera trace is bracketed by the camera perf queries
+            // inside RecordCameraMeasurement.
+            if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
+            m_impl->pipeline->TraceRays(cmd, renderW, renderH,
+                    sample + 1 == samplesToRender);
+            if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
+            m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
+            m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
         }
-    } else {
-        // Execute ray tracing (writes to internal outputImage in GENERAL
-        // layout). Timestamps bracket the trace alone -- not CLAHE or the
-        // blit -- so what gets measured is the cost of one sample of *this
-        // scene*. The camera trace is bracketed by the camera perf queries
-        // inside RecordCameraMeasurement.
-        if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
-        m_impl->pipeline->TraceRays(cmd, renderW, renderH);
-        if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
-        m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
-        m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
+        ++m_impl->accumulatedSamples;
     }
 
     // Post-processing, then the blit. Both halves are shared with
@@ -1908,7 +1916,6 @@ void ExternalRenderContext::RenderFrame(
                          blitSource.width, blitSource.height, width, height,
                          srcStage);
 
-    m_impl->accumulatedSamples++;
     m_impl->frameIndex++;
 }
 
@@ -2423,6 +2430,11 @@ void ExternalRenderContext::SetWavelength(f32 wavelength_nm) {
 void ExternalRenderContext::SetSPP(u32 spp) {
     m_impl->spp = spp;
 }
+
+void ExternalRenderContext::SetViewportSampleBatch(u32 sampleCount) {
+    m_impl->viewportSampleBatch = std::clamp(sampleCount, 1u, 16u);
+}
+
 
 SpectralMode ExternalRenderContext::GetSpectralMode() const {
     return m_impl->spectralMode;

@@ -2738,3 +2738,20 @@ TEST_F(CameraSchedulerGpuTest, ReadoutEditRerecordsSameTickWithoutHistoryReset) 
     EXPECT_EQ(after.acquisitionIndex, before.acquisitionIndex);
     EXPECT_EQ(context->GetAccumulatedSamples(), samplesBefore);
 }
+
+
+TEST_F(CameraSchedulerGpuTest, ViewportBatchDoesNotMultiplyPhysicalAcquisitions) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    ApplyScene();
+    ASSERT_TRUE(EnableCamera().has_value());
+    context->SetViewportSampleBatch(16);
+    DrawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), 1u);
+    const auto first = context->GetCameraHistoryStatus();
+    EXPECT_EQ(first.acquisitionIndex, 0u);
+    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    DrawFrame();
+    const auto second = context->GetCameraHistoryStatus();
+    EXPECT_EQ(second.acquisitionIndex, 1u);
+    EXPECT_EQ(second.epoch, first.epoch);
+}

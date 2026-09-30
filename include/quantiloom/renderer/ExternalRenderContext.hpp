@@ -682,6 +682,14 @@ public:
      */
     void SetSPP(u32 spp);
 
+    /// Record 1..16 path samples in each non-camera RenderFrame, followed by
+    /// one post-process/present. Default 1. The host clips this to its remaining
+    /// sample target; SetSPP describes the shader's sampling plan, not a cap.
+    /// Does not reset accumulation or seeds. Physical camera acquisitions
+    /// always retain one scheduler step per RenderFrame regardless of this.
+    void SetViewportSampleBatch(u32 sampleCount);
+
+
     /**
      * @brief Set the seed for the path tracer's per-sample sampling sequence.
      *

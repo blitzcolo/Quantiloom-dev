@@ -423,6 +423,43 @@ TEST_F(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
 }
 
 
+TEST_F(PickTest, ViewportSampleBatchesPreserveTheRawSeededAccumulation) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
+    constexpr u32 samples = 35;
+    context->SetSPP(samples);
+    context->SetSamplingSeed(424242u);
+    context->SetViewportSampleBatch(1);
+    for (u32 sample = 0; sample < samples; ++sample) RenderRawFrame();
+    const auto expected = context->CaptureScreenshot();
+    ASSERT_TRUE(expected.has_value()) << expected.error();
+    ASSERT_EQ(context->GetAccumulatedSamples(), samples);
+
+    context->SetSamplingSeed(424242u);
+    context->SetViewportSampleBatch(16);
+    RenderRawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), 16u);
+    RenderRawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), 32u);
+    context->SetViewportSampleBatch(3);
+    RenderRawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), samples);
+    const auto actual = context->CaptureScreenshot();
+    ASSERT_TRUE(actual.has_value()) << actual.error();
+    EXPECT_EQ(actual.value().data, expected.value().data);
+}
+
+TEST_F(PickTest, ViewportSampleBatchLimitsDoNotResetTheSequence) {
+    LoadEmitterScene();
+    context->SetViewportSampleBatch(0);
+    RenderRawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), 1u);
+    context->SetViewportSampleBatch(1000);
+    RenderRawFrame();
+    EXPECT_EQ(context->GetAccumulatedSamples(), 17u);
+}
+
+
 TEST_F(PickTest, OrdinaryMaterialUploadsWaitForSubmittedReaders) {
     LoadEmitterScene();
     auto edited = context->GetScene()->materials[1];
