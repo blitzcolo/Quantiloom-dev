@@ -120,10 +120,40 @@ public:
         f64 windSpeed_m_s = 0.0);
 
 private:
+    /// Storage whose size depends only on the largest step this instance has
+    /// seen. A timeline calls Step thousands of times with the same shape, so
+    /// retaining these capacities removes allocator work from every thermal
+    /// timestep while keeping the numerical loop and its order unchanged.
+    struct Workspace {
+        Vector<f64> surfacePrevious;
+        Vector<f64> lateralPrevious;
+        Vector<f64> lateralPreviousSensitivity;
+        Vector<f64> lateralPreviousLag;
+        Vector<f64> lateralPreviousParameter;
+
+        Vector<f64> lower;
+        Vector<f64> diag;
+        Vector<f64> upper;
+        Vector<f64> rhs;
+        Vector<f64> rhsTangent;
+        Vector<f64> rhsLag;
+        Vector<f64> rhsParameter;
+
+        Vector<f64> lagWeight;
+        Vector<f64> lateralRate;
+        Vector<f64> lateralRateTangent;
+        Vector<f64> lateralRateLag;
+        Vector<f64> lateralRateParameter;
+
+        Vector<std::span<f64>> rightHandSides;
+        Vector<std::span<f64>> parameterSides;
+    };
+
     ConvectionLaw m_convection;
     /// Element -> the triangle on the other side of the same shell, or
     /// ThermalMesh::kNoShellPartner. Empty when nothing is a shell.
     Vector<u32> m_shellPartner;
+    Workspace m_workspace;
 };
 
 }  // namespace quantiloom::thermal

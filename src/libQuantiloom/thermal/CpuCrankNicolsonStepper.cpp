@@ -513,11 +513,14 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         return;
     }
 
+    Workspace& workspace = m_workspace;
+
     // The radiative coupling reads every element's temperature, so it reads
     // the state as it was at the start of the step rather than as neighbours
     // update it. Surface values only: the interior nodes are not visible to
     // anything outside their own slab.
-    Vector<f64> surfacePrevious(elements.size());
+    Vector<f64>& surfacePrevious = workspace.surfacePrevious;
+    surfacePrevious.resize(elements.size());
     for (usize i = 0; i < elements.size(); ++i) {
         surfacePrevious[i] = state.Surface(i);
     }
@@ -529,16 +532,29 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // Allocated only for a scene that asked, since it doubles the state.
     const bool carryLateral = exchange.lateral.RowCount() == elements.size() &&
                               !exchange.lateral.value.empty();
-    Vector<f64> lateralPrevious;
-    Vector<f64> lateralPreviousSensitivity;
-    Vector<f64> lateralPreviousLag;
+    Vector<f64>& lateralPrevious = workspace.lateralPrevious;
+    Vector<f64>& lateralPreviousSensitivity = workspace.lateralPreviousSensitivity;
+    Vector<f64>& lateralPreviousLag = workspace.lateralPreviousLag;
     if (carryLateral) {
         lateralPrevious = state.temperature_K;
         if (state.HasSensitivity()) lateralPreviousSensitivity = state.sunSensitivity_K;
         if (state.HasLagSensitivity()) lateralPreviousLag = state.lagSensitivity_K;
+        if (!state.HasSensitivity()) lateralPreviousSensitivity.clear();
+        if (!state.HasLagSensitivity()) lateralPreviousLag.clear();
+    } else {
+        lateralPrevious.clear();
+        lateralPreviousSensitivity.clear();
+        lateralPreviousLag.clear();
     }
 
-    Vector<f64> lower(nodes), diag(nodes), upper(nodes), rhs(nodes);
+    Vector<f64>& lower = workspace.lower;
+    Vector<f64>& diag = workspace.diag;
+    Vector<f64>& upper = workspace.upper;
+    Vector<f64>& rhs = workspace.rhs;
+    lower.resize(nodes);
+    diag.resize(nodes);
+    upper.resize(nodes);
+    rhs.resize(nodes);
 
     // The tangent rides in the same matrix, so it needs a second right-hand
     // side and nothing else. No ping-pong copy beside surfacePrevious: the
@@ -546,7 +562,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // sun visibility, so it reads only its own previous value, which is still
     // in the state when its turn comes.
     const bool carryTangent = state.HasSensitivity();
-    Vector<f64> rhsTangent(carryTangent ? nodes : 0);
+    Vector<f64>& rhsTangent = workspace.rhsTangent;
+    rhsTangent.resize(carryTangent ? nodes : 0);
 
     // One more right-hand side per tracked sun column, and one source weight
     // each: what fraction of this step's short wave came from that column.
@@ -558,8 +575,10 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // others would not be the derivative of anything.
     const bool carryLags = carryTangent && state.HasLagSensitivity();
     const u32 lagSlots = carryLags ? state.LagSlots() : 0u;
-    Vector<f64> rhsLag(static_cast<usize>(lagSlots) * nodes);
-    Vector<f64> lagWeight(lagSlots, 0.0);
+    Vector<f64>& rhsLag = workspace.rhsLag;
+    Vector<f64>& lagWeight = workspace.lagWeight;
+    rhsLag.resize(static_cast<usize>(lagSlots) * nodes);
+    lagWeight.assign(lagSlots, 0.0);
     if (carryLags && shortwave.columnsKnown) {
         const f64 blend = std::clamp(shortwave.columnBlend, 0.0, 1.0);
         const f64 weights[2] = {1.0 - blend, blend};
@@ -586,7 +605,9 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // What the elimination is applied to, built once: the temperature first,
     // then whichever tangents this state carries. Every element has the same
     // node count, so the list does not change inside the loop.
-    Vector<std::span<f64>> rightHandSides;
+    Vector<std::span<f64>>& rightHandSides = workspace.rightHandSides;
+    rightHandSides.clear();
+    rightHandSides.reserve(2u + lagSlots);
     rightHandSides.emplace_back(rhs);
     if (carryTangent) rightHandSides.emplace_back(rhsTangent);
     for (u32 s = 0; s < lagSlots; ++s) {
@@ -599,9 +620,12 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // different rates; the node's own cell height cancels out of it, so the
     // form is the same for the half cells at the faces and the whole cells
     // between them.
-    Vector<f64> lateralRate(carryLateral ? nodes : 0, 0.0);
-    Vector<f64> lateralRateTangent(carryLateral && carryTangent ? nodes : 0, 0.0);
-    Vector<f64> lateralRateLag(carryLateral ? static_cast<usize>(lagSlots) * nodes : 0, 0.0);
+    Vector<f64>& lateralRate = workspace.lateralRate;
+    Vector<f64>& lateralRateTangent = workspace.lateralRateTangent;
+    Vector<f64>& lateralRateLag = workspace.lateralRateLag;
+    lateralRate.resize(carryLateral ? nodes : 0);
+    lateralRateTangent.resize(carryLateral && carryTangent ? nodes : 0);
+    lateralRateLag.resize(carryLateral ? static_cast<usize>(lagSlots) * nodes : 0);
 
     // One more right-hand side per material parameter being differentiated.
     // These are solved after the temperature rather than beside it: the matrix
@@ -610,16 +634,21 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // back-substituted. They reuse the factorisation.
     const bool carryParameters = state.HasParameterSensitivity();
     const usize parameterCount = carryParameters ? state.parameters.size() : 0;
-    Vector<f64> rhsParameter(parameterCount * nodes);
-    Vector<std::span<f64>> parameterSides;
+    Vector<f64>& rhsParameter = workspace.rhsParameter;
+    Vector<std::span<f64>>& parameterSides = workspace.parameterSides;
+    rhsParameter.resize(parameterCount * nodes);
+    parameterSides.clear();
+    parameterSides.reserve(parameterCount);
     for (usize p = 0; p < parameterCount; ++p) {
         parameterSides.emplace_back(rhsParameter.data() + p * nodes, nodes);
     }
-    Vector<f64> lateralRateParameter(
-        carryLateral ? parameterCount * nodes : 0, 0.0);
-    Vector<f64> lateralPreviousParameter;
+    Vector<f64>& lateralRateParameter = workspace.lateralRateParameter;
+    lateralRateParameter.resize(carryLateral ? parameterCount * nodes : 0);
+    Vector<f64>& lateralPreviousParameter = workspace.lateralPreviousParameter;
     if (carryLateral && carryParameters) {
         lateralPreviousParameter = state.parameterSensitivity;
+    } else {
+        lateralPreviousParameter.clear();
     }
 
     // Which elements are the far side of a shell, and therefore not stepped:

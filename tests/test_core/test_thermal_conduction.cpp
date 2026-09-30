@@ -794,3 +794,69 @@ TEST(ThermalInteriorTest, AnAmbientBackFaceAtEquilibriumMovesNothing) {
         EXPECT_NEAR(state.temperature_K[i], 290.0, 1e-6) << "node " << i;
     }
 }
+
+TEST(ThermalStepperWorkspaceTest, ReuseAcrossDifferentShapesPreservesEveryState) {
+    const Vector<ThermalMaterial> materials{LumpedMaterial()};
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 285.0;
+    forcing.sunIrradiance_W_m2 = 700.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+
+    Vector<ThermalElement> richElements(3, OneElement().front());
+    ExchangeGeometry richExchange = MakeOpenSkyExchange(richElements.size());
+    richExchange.lateral.rowStart = {0, 1, 3, 4};
+    richExchange.lateral.column = {1, 0, 2, 1};
+    richExchange.lateral.value = {2.0f, 2.0f, 3.0f, 3.0f};
+    const Vector<f32> richVisibility{0.2f, 0.6f, 0.9f};
+    ShortwaveSample richSun{richVisibility};
+    richSun.columnA = 0;
+    richSun.columnB = 1;
+    richSun.columnBlend = 0.25;
+    richSun.columnsKnown = true;
+
+    const auto makeRichState = [] {
+        ThermalState state = MakeState(3, 12, 310.0);
+        for (usize i = 0; i < state.temperature_K.size(); ++i) {
+            state.temperature_K[i] += static_cast<f64>(i) * 0.01;
+        }
+        state.sunSensitivity_K.assign(state.temperature_K.size(), 0.1);
+        state.lagColumn = {0, 1};
+        state.lagSensitivity_K.assign(state.temperature_K.size() * 2, 0.02);
+        state.parameters = {ThermalParameter::Convection,
+                            ThermalParameter::Emissivity};
+        state.parameterSensitivity.assign(state.temperature_K.size() * 2, -0.03);
+        return state;
+    };
+
+    CpuCrankNicolsonStepper reused;
+    ThermalState warmup = makeRichState();
+    reused.Step(warmup, richElements, materials, richExchange, forcing, 60.0, richSun);
+
+    // Shrink every reusable buffer and turn off the optional snapshots and
+    // right-hand sides. A stale size or stale flag would change this result.
+    const auto smallElements = OneElement();
+    const ExchangeGeometry smallExchange = MakeOpenSkyExchange(1);
+    ThermalState reusedSmall = MakeState(1, 5, 330.0);
+    ThermalState freshSmall = reusedSmall;
+    CpuCrankNicolsonStepper freshSmallStepper;
+    reused.Step(reusedSmall, smallElements, materials, smallExchange, forcing, 30.0,
+                {smallExchange.sunVisibility});
+    freshSmallStepper.Step(freshSmall, smallElements, materials, smallExchange, forcing,
+                           30.0, {smallExchange.sunVisibility});
+    EXPECT_EQ(reusedSmall.temperature_K, freshSmall.temperature_K);
+
+    // Grow back into the lateral/tangent case. All carried histories must be
+    // exactly the same as a stepper whose workspace has never been used.
+    ThermalState reusedRich = makeRichState();
+    ThermalState freshRich = reusedRich;
+    CpuCrankNicolsonStepper freshRichStepper;
+    reused.Step(reusedRich, richElements, materials, richExchange, forcing, 60.0, richSun);
+    freshRichStepper.Step(freshRich, richElements, materials, richExchange, forcing, 60.0,
+                          richSun);
+    EXPECT_EQ(reusedRich.temperature_K, freshRich.temperature_K);
+    EXPECT_EQ(reusedRich.sunSensitivity_K, freshRich.sunSensitivity_K);
+    EXPECT_EQ(reusedRich.lagColumn, freshRich.lagColumn);
+    EXPECT_EQ(reusedRich.lagSensitivity_K, freshRich.lagSensitivity_K);
+    EXPECT_EQ(reusedRich.parameters, freshRich.parameters);
+    EXPECT_EQ(reusedRich.parameterSensitivity, freshRich.parameterSensitivity);
+}
