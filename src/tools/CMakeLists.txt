@@ -80,6 +80,8 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_extents.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_histogram.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_tiles.comp.spv"

@@ -20,6 +20,7 @@
 #include "GpuBuffer.hpp"
 #include "AsyncPixelReadback.hpp"
 #include "GpuImage.hpp"
+#include "GpuDisplayRange.hpp"
 #include "TextureManager.hpp"
 #include "CommandHelper.hpp"
 #include "PerformanceLogger.hpp"
@@ -327,6 +328,8 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> claheHistogramBuffer;  // Per-tile histograms
     std::unique_ptr<GpuBuffer> claheCdfBuffer;        // Per-tile CDFs
     std::unique_ptr<GpuBuffer> claheMinMaxBuffer;     // Per-tile min/max for normalization
+    std::unique_ptr<rendercore::GpuDisplayRange> displayRange;
+    bool displayRangeInitAttempted = false;
     VkDescriptorSetLayout claheDescriptorSetLayout = VK_NULL_HANDLE;
     VkPipelineLayout clahePipelineLayout = VK_NULL_HANDLE;
     VkDescriptorPool claheDescriptorPool = VK_NULL_HANDLE;
@@ -526,6 +529,7 @@ struct ExternalRenderContext::Impl {
         pixelReadbackBuffer.reset();
 
         // Cleanup CLAHE resources
+        displayRange.reset();
         displayImage.reset();
         claheHistogramBuffer.reset();
         claheCdfBuffer.reset();
@@ -6078,10 +6082,33 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
 }
 
 void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
-    // Read back the CLAHE input image -- the camera's corrected product when
-    // the camera is enabled, else the raw accumulation.
     const GpuImage* input = ClaheInputImage();
     const auto extent = ClaheInputExtent();
+    if (!displayRangeInitAttempted) {
+        displayRangeInitAttempted = true;
+        auto created = rendercore::GpuDisplayRange::Create(*contextAdapter);
+        if (created) {
+            displayRange = std::move(created.value());
+        } else {
+            QL_LOG_WARN("GPU display range unavailable; using full image readback: {}",
+                        created.error());
+        }
+    }
+    if (displayRange) {
+        auto range = displayRange->Compute(
+            *input, extent.width, extent.height,
+            displayParams.percentileLow, displayParams.percentileHigh);
+        if (range) {
+            outMin = range.value().min;
+            outMax = range.value().max;
+            return;
+        }
+        QL_LOG_WARN("GPU display range failed; using full image readback: {}",
+                    range.error());
+    }
+
+    // Read back the CLAHE input image -- the camera's corrected product when
+    // the camera is enabled, else the raw accumulation.
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *contextAdapter,
         input->GetImage(),

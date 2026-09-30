@@ -135,6 +135,8 @@ if(DXC_EXECUTABLE)
     quantiloom_compile_hlsl(clahe_histogram clahe.comp.hlsl -D CLAHE_PASS_HISTOGRAM)
     quantiloom_compile_hlsl(clahe_cdf       clahe.comp.hlsl -D CLAHE_PASS_CDF)
     quantiloom_compile_hlsl(clahe_apply     clahe.comp.hlsl -D CLAHE_PASS_APPLY)
+    quantiloom_compile_hlsl(display_range_extents.comp display_range.comp.hlsl -D DISPLAY_RANGE_PASS_EXTENTS)
+    quantiloom_compile_hlsl(display_range_histogram.comp display_range.comp.hlsl -D DISPLAY_RANGE_PASS_HISTOGRAM)
 
     # Unified camera device preview (rate PSF, detector/RAW, ISP, RNG audit).
     quantiloom_compile_hlsl(camera_psf.comp         camera_psf.comp.hlsl)

@@ -109,6 +109,25 @@ else
     exit 1
 fi
 
+# Compile display-range reduction shaders (2 passes)
+echo "Compiling display_range_extents.comp..."
+dxc $COMP_FLAGS -E main -D DISPLAY_RANGE_PASS_EXTENTS -Fo src/shaders/display_range_extents.comp.spv src/shaders/display_range.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/display_range_extents.comp.spv created"
+else
+    echo "      ✗ Failed to compile display_range_extents"
+    exit 1
+fi
+
+echo "Compiling display_range_histogram.comp..."
+dxc $COMP_FLAGS -E main -D DISPLAY_RANGE_PASS_HISTOGRAM -Fo src/shaders/display_range_histogram.comp.spv src/shaders/display_range.comp.hlsl
+if [ $? -eq 0 ]; then
+    echo "      ✓ src/shaders/display_range_histogram.comp.spv created"
+else
+    echo "      ✗ Failed to compile display_range_histogram"
+    exit 1
+fi
+
 # Compile GPU Sensor compute shaders (5 passes)
 echo "[9/17] Compiling sensor_radiance_to_electrons.comp..."
 dxc $COMP_FLAGS -E main -Fo src/shaders/sensor_radiance_to_electrons.spv src/shaders/sensor_radiance_to_electrons.comp.hlsl
@@ -196,4 +215,3 @@ echo "========================================="
 echo "  All shaders compiled successfully!"
 echo "========================================="
 echo ""
-

@@ -146,6 +146,8 @@ add_library(quantiloom_core OBJECT
     renderer/GpuThermalStepper.hpp
     renderer/GpuCameraPipeline.cpp
     renderer/GpuCameraPipeline.hpp
+    renderer/GpuDisplayRange.cpp
+    renderer/GpuDisplayRange.hpp
     renderer/CameraResponseGpu.hpp
     renderer/ThermalPreview.cpp
     renderer/ThermalPreview.hpp

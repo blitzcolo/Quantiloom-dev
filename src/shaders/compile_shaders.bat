@@ -113,6 +113,25 @@ if %ERRORLEVEL% NEQ 0 (
 )
 echo       OK src/shaders/clahe_apply.spv created
 
+REM Compile display-range reduction shaders (2 passes)
+echo Compiling display_range_extents.comp...
+dxc %COMP_FLAGS% -E main -D DISPLAY_RANGE_PASS_EXTENTS -Fo src/shaders/display_range_extents.comp.spv src/shaders/display_range.comp.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile display_range_extents
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/display_range_extents.comp.spv created
+
+echo Compiling display_range_histogram.comp...
+dxc %COMP_FLAGS% -E main -D DISPLAY_RANGE_PASS_HISTOGRAM -Fo src/shaders/display_range_histogram.comp.spv src/shaders/display_range.comp.hlsl
+if %ERRORLEVEL% NEQ 0 (
+    echo       X Failed to compile display_range_histogram
+    pause
+    exit /b 1
+)
+echo       OK src/shaders/display_range_histogram.comp.spv created
+
 echo [9/24] Compiling pick.rayq...
 dxc %RQ_FLAGS% -E main -Fo src/shaders/pick.spv src/shaders/pick.rayq.hlsl
 if %ERRORLEVEL% NEQ 0 (

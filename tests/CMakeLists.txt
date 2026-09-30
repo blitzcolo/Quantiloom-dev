@@ -289,6 +289,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_camera_gpu.cpp
     test_renderer/test_camera_response_gpu.cpp
     test_renderer/test_offline_batch_scheduler.cpp
+    test_renderer/test_display_range_gpu.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
@@ -407,6 +408,8 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/display_range_extents.comp.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/display_range_histogram.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_tiles.comp.spv"
