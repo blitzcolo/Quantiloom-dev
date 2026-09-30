@@ -49,6 +49,7 @@
 #include "renderer/TimelineControl.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/Pick.hpp"
+#include "renderer/PixelReading.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
 #include "core/SpectralData.hpp"
@@ -1610,6 +1611,20 @@ public:
      *       original = (output - 0.5) * 2)
      */
     [[nodiscard]] Result<glm::vec4, String> ReadPixelValue(u32 x, u32 y);
+
+    /// Submit a raw pixel copy without waiting for the GPU. Call between
+    /// render submissions on the owning thread, after the host submitted its
+    /// recorded frame. false means all three reusable readback slots are busy;
+    /// retain/coalesce the latest request and retry after PollPixelValue().
+    /// Available after a non-camera accumulation sample of the current image.
+    [[nodiscard]] Result<bool, String> RequestPixelValue(u32 x, u32 y, u64 requestId);
+
+    /// Poll completed copies without waiting. Returns the newest completed
+    /// reading and releases every completed slot. Discards copies from an old
+    /// accumulation generation or camera acquisition, so a delayed reading
+    /// cannot describe a scene/time that was subsequently changed.
+    [[nodiscard]] Result<Optional<PixelReading>, String> PollPixelValue();
+
 
     /**
      * @brief What is under this pixel: trace the pixel's primary camera ray

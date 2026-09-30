@@ -18,6 +18,7 @@
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
 #include "GpuBuffer.hpp"
+#include "AsyncPixelReadback.hpp"
 #include "GpuImage.hpp"
 #include "TextureManager.hpp"
 #include "CommandHelper.hpp"
@@ -277,6 +278,9 @@ struct ExternalRenderContext::Impl {
     // Accumulation
     u32 accumulatedSamples = 0;
     u32 frameIndex = 0;
+    u64 pixelImageGeneration = 1;
+    u64 rawPixelGeneration = 0;
+    u32 rawPixelSamples = 0;
 
     // Random number generator for better sample distribution
     // Uses Mersenne Twister for high-quality randomness (matches CLI app)
@@ -300,6 +304,7 @@ struct ExternalRenderContext::Impl {
     // Restart the sampling sequence. Called from ResetAccumulation() so the
     // sequence and the accumulation it feeds always begin together.
     void ReseedRng() {
+        ++pixelImageGeneration;
         rng.seed(samplingSeed != 0U ? samplingSeed : std::random_device{}());
         sequenceSeed = randDist(rng);
     }
@@ -313,6 +318,7 @@ struct ExternalRenderContext::Impl {
 
     // Pixel readback buffer (for debug hover display)
     std::unique_ptr<GpuBuffer> pixelReadbackBuffer;
+    std::unique_ptr<rendercore::AsyncPixelReadback> asyncPixelReadback;
 
     // Display enhancement resources. The pipeline is still the three CLAHE
     // passes -- Linear skips the first two and Equalize sums across tiles.
@@ -514,6 +520,7 @@ struct ExternalRenderContext::Impl {
         spectralCurvesBuffer.reset();
         materialBuffer.reset();
         lightingParamsBuffer.reset();
+        asyncPixelReadback.reset();
         outputImage.reset();
         depthAovImage.reset();
         pixelReadbackBuffer.reset();
@@ -1850,6 +1857,8 @@ void ExternalRenderContext::RenderFrame(
         if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
         m_impl->pipeline->TraceRays(cmd, renderW, renderH);
         if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
+        m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
+        m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
     }
 
     // Post-processing, then the blit. Both halves are shared with
@@ -2562,6 +2571,8 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
         return;
     }
 
+    // Invalidate delayed readings as soon as the host changes the pose.
+    ++m_impl->pixelImageGeneration;
     // Update the node's transform in the scene
     m_impl->scene->nodes[nodeIndex].transform = transform;
 
@@ -3570,6 +3581,43 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     m_impl->pixelReadbackBuffer->Unmap();
 
     return result;
+}
+
+Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 requestId) {
+    if (x >= m_impl->targetWidth || y >= m_impl->targetHeight)
+        return Result<bool, String>::Err("Pixel coordinates out of bounds");
+    if (!m_impl->isReady || !m_impl->outputImage ||
+        m_impl->cameraConfig.enabled || m_impl->rawPixelSamples == 0 ||
+        m_impl->rawPixelGeneration != m_impl->pixelImageGeneration)
+        return Result<bool, String>::Err("No current raw accumulation pixel is available");
+    try {
+        if (!m_impl->asyncPixelReadback)
+            m_impl->asyncPixelReadback = std::make_unique<rendercore::AsyncPixelReadback>(
+                *m_impl->contextAdapter);
+        PixelReading reading;
+        reading.requestId = requestId;
+        reading.imageGeneration = m_impl->pixelImageGeneration;
+        reading.acquisitionIndex = m_impl->cameraAcquisitionIndex;
+        reading.frameIndex = m_impl->frameIndex;
+        reading.accumulatedSamples = m_impl->rawPixelSamples;
+        reading.x = x;
+        reading.y = y;
+        return m_impl->asyncPixelReadback->Submit(m_impl->outputImage->GetImage(),
+            Impl::MapToRender(x, m_impl->targetWidth, m_impl->width),
+            Impl::MapToRender(y, m_impl->targetHeight, m_impl->height), reading);
+    } catch (const std::exception& e) {
+        return Result<bool, String>::Err(e.what());
+    }
+}
+
+Result<Optional<PixelReading>, String> ExternalRenderContext::PollPixelValue() {
+    if (!m_impl->asyncPixelReadback) return Optional<PixelReading>{};
+    try {
+        return m_impl->asyncPixelReadback->Poll(m_impl->pixelImageGeneration,
+                                              m_impl->cameraAcquisitionIndex);
+    } catch (const std::exception& e) {
+        return Result<Optional<PixelReading>, String>::Err(e.what());
+    }
 }
 
 namespace {

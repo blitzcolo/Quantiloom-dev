@@ -12,6 +12,8 @@
 #include <gtest/gtest.h>
 
 #include "renderer/ExternalRenderContext.hpp"
+#include "renderer/CommandHelper.hpp"
+#include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "support/VulkanTestDevice.hpp"
 
@@ -83,6 +85,14 @@ protected:
         ASSERT_TRUE(report.ok()) << report.FirstError();
     }
 
+    void RenderRawFrame() {
+        GpuImage target(Device().GetAllocator(), Device().GetDevice(), kSize, kSize,
+            VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+            context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+        });
+    }
+
     std::filesystem::path testDir;
     std::unique_ptr<ExternalRenderContext> context;
 };
@@ -135,4 +145,75 @@ TEST_F(PickTest, OutOfBoundsIsAnError) {
     ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
     EXPECT_FALSE(context->Pick(kSize, 0).has_value());
     EXPECT_FALSE(context->Pick(0, kSize).has_value());
+}
+
+TEST_F(PickTest, AsynchronousPixelMatchesSynchronousReadingAndCarriesItsCoordinates) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
+    context->SetRenderScale(0.5f);
+    context->SetDebugMode(DebugVisualizationMode::ShadedNormal);
+    RenderRawFrame();
+    const auto expected = context->ReadPixelValue(kSize - 1, kSize / 2);
+    ASSERT_TRUE(expected.has_value());
+    const auto requested = context->RequestPixelValue(kSize - 1, kSize / 2, 73);
+    ASSERT_TRUE(requested.has_value()) << requested.error();
+    ASSERT_TRUE(requested.value());
+    // Waiting belongs to this deterministic test, never to Request/Poll.
+    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    const auto completed = context->PollPixelValue();
+    ASSERT_TRUE(completed.has_value()) << completed.error();
+    ASSERT_TRUE(completed.value().has_value());
+    const auto& reading = *completed.value();
+    EXPECT_EQ(reading.requestId, 73u);
+    EXPECT_EQ(reading.x, kSize - 1);
+    EXPECT_EQ(reading.y, kSize / 2);
+    EXPECT_EQ(reading.accumulatedSamples, 1u);
+    for (u32 c = 0; c < 4; ++c) EXPECT_EQ(reading.value[c], expected.value()[c]);
+    EXPECT_FALSE(context->PollPixelValue().value().has_value());
+}
+
+TEST_F(PickTest, AsynchronousPixelRingCoalescesCompletedCopiesAndReusesSlots) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
+    RenderRawFrame();
+    for (u32 i = 0; i < 3; ++i) {
+        const auto requested = context->RequestPixelValue(i, i + 1, 100 + i);
+        ASSERT_TRUE(requested.has_value());
+        ASSERT_TRUE(requested.value());
+    }
+    const auto busy = context->RequestPixelValue(10, 11, 103);
+    ASSERT_TRUE(busy.has_value());
+    EXPECT_FALSE(busy.value());
+    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    const auto completed = context->PollPixelValue();
+    ASSERT_TRUE(completed.has_value());
+    ASSERT_TRUE(completed.value().has_value());
+    EXPECT_EQ(completed.value()->requestId, 102u);
+    EXPECT_EQ(completed.value()->x, 2u);
+    EXPECT_EQ(completed.value()->y, 3u);
+    const auto reused = context->RequestPixelValue(10, 11, 103);
+    ASSERT_TRUE(reused.has_value());
+    EXPECT_TRUE(reused.value());
+}
+
+TEST_F(PickTest, AsynchronousPixelDropsResultsWhenTheAccumulationChanges) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    ApplyScene("position = [278.0, 274.0, -800.0]\nlook_at = [278.0, 274.0, 0.0]\n");
+    EXPECT_FALSE(context->RequestPixelValue(0, 0, 1).has_value());
+    RenderRawFrame();
+    ASSERT_TRUE(context->RequestPixelValue(0, 0, 1).value());
+    context->ResetAccumulation();
+    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    const auto stale = context->PollPixelValue();
+    ASSERT_TRUE(stale.has_value());
+    EXPECT_FALSE(stale.value().has_value());
+    EXPECT_FALSE(context->RequestPixelValue(0, 0, 2).has_value());
+    RenderRawFrame();
+    ASSERT_TRUE(context->RequestPixelValue(0, 0, 2).value());
+    ASSERT_EQ(vkQueueWaitIdle(Device().GetGraphicsQueue()), VK_SUCCESS);
+    const auto fresh = context->PollPixelValue();
+    ASSERT_TRUE(fresh.has_value());
+    ASSERT_TRUE(fresh.value().has_value());
+    EXPECT_EQ(fresh.value()->requestId, 2u);
+    EXPECT_FALSE(context->RequestPixelValue(kSize, 0, 3).has_value());
 }
