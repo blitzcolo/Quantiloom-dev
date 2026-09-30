@@ -145,6 +145,22 @@ TEST_F(VulkanDeviceTest, SceneGeometryKeepsInstanceOrderAcrossATlasRebuild) {
     }
 }
 
+TEST_F(VulkanDeviceTest, SceneGeometryReleasesStaticBlasScratchAndKeepsTlasRefittable) {
+    Scene scene;
+    scene.meshes.push_back(MakeMesh({MakeTriangle(0, true, true, true)}));
+    scene.nodes.push_back(MakeNode(0));
+
+    auto geometry = rendercore::SceneGeometry::Build(Device(), scene);
+
+    ASSERT_TRUE(geometry.IsValid());
+    EXPECT_FALSE(geometry.HasResidentBlasBuildScratch())
+        << "static BLAS build workspace must not remain resident after the build submission";
+
+    scene.nodes[0].transform = glm::translate(glm::mat4(1.0f), {1.0f, 0.0f, 0.0f});
+    EXPECT_TRUE(geometry.RefitTlas(Device(), scene))
+        << "the TLAS keeps its separate scratch allocation for transform updates";
+}
+
 TEST_F(VulkanDeviceTest, SceneGeometryRejectsASceneWithNoPrimitives) {
     Scene scene;
     scene.meshes.push_back(Mesh{});

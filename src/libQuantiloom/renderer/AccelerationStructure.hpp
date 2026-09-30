@@ -112,10 +112,16 @@ public:
     // Build BLAS from mesh data (records commands into cmd buffer)
     void Build(VkCommandBuffer cmd);
 
+    // Release the temporary build workspace after the submission containing
+    // Build() has completed. Static BLAS are never updated in place, so keeping
+    // this device-local allocation for their entire lifetime only wastes VRAM.
+    void ReleaseBuildScratch();
+
     // Accessors
     [[nodiscard]] VkAccelerationStructureKHR GetHandle() const { return m_as; }
     [[nodiscard]] VkDeviceAddress GetDeviceAddress() const { return m_deviceAddress; }
     [[nodiscard]] bool IsBuilt() const { return m_built; }
+    [[nodiscard]] bool HasBuildScratch() const { return m_scratchBuffer != nullptr; }
 
     // Geometry buffer accessors (for shader binding)
     [[nodiscard]] const GpuBuffer& GetVertexBuffer() const { return *m_vertexBuffer; }

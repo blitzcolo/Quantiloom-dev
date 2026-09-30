@@ -499,6 +499,10 @@ void BLAS::Build(VkCommandBuffer cmd) {
     QL_LOG_INFO("  BLAS built successfully (device address: 0x{:x})", m_deviceAddress);
 }
 
+void BLAS::ReleaseBuildScratch() {
+    m_scratchBuffer.reset();
+}
+
 // ============================================================================
 // TLAS Implementation
 // ============================================================================

@@ -834,6 +834,12 @@ SceneGeometry::~SceneGeometry() = default;
 SceneGeometry::SceneGeometry(SceneGeometry&&) noexcept = default;
 SceneGeometry& SceneGeometry::operator=(SceneGeometry&&) noexcept = default;
 
+bool SceneGeometry::HasResidentBlasBuildScratch() const {
+    return std::ranges::any_of(m_blas, [](const auto& blas) {
+        return blas->HasBuildScratch();
+    });
+}
+
 SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     QL_LOG_INFO("Building acceleration structures...");
 
@@ -963,6 +969,13 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
 
         result.m_tlas->Build(cmd);
     });
+
+    // ExecuteImmediate has waited for the build submission. BLAS are static,
+    // unlike the refittable TLAS, so their temporary build workspace is no
+    // longer needed once that submission completes.
+    for (auto& blas : result.m_blas) {
+        blas->ReleaseBuildScratch();
+    }
 
     result.m_instanceCount = static_cast<u32>(result.m_instances.size());
     result.m_primitiveOffsets = std::move(primitiveOffsets);

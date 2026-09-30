@@ -440,6 +440,10 @@ public:
     [[nodiscard]] u32 VertexCount() const { return m_vertexCount; }
     [[nodiscard]] u32 IndexCount() const { return m_indexCount; }
 
+    /// Diagnostic for the lifetime contract of static BLAS build workspace.
+    /// Build() must return false here; TLAS keeps its separate refit scratch.
+    [[nodiscard]] bool HasResidentBlasBuildScratch() const;
+
     /// The offsets written to InstanceInfo(), kept for tests and diagnostics.
     [[nodiscard]] const Vector<InstanceGeometryInfo>& Instances() const { return m_instances; }
 
