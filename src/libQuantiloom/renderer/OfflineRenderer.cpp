@@ -53,6 +53,7 @@
 #include "renderer/GpuImage.hpp"
 #include "renderer/TextureManager.hpp"
 #include "renderer/CommandHelper.hpp"
+#include "renderer/OfflineBatchScheduler.hpp"
 #include "renderer/PerformanceLogger.hpp"
 #include "renderer/LightingParams.hpp"
 #include "renderer/RenderCore.hpp"
@@ -1834,10 +1835,16 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         // frame.
         const u32 sequenceSeed = dist(rng) ^ (frameIndex * 0x9e3779b9U);
 
-        // Batch samples into groups. Each submit must stay WELL under the
-        // Windows TDR limit (~2s): heavy IR scenes run ~500ms/sample, so
-        // 2 per batch keeps a submit around 1s with safety margin.
-        constexpr u32 BATCH_SIZE = 2;
+        // The first submit keeps the historical two-sample size. Completed GPU
+        // timestamps then choose a conservative batch under a 100 ms budget:
+        // heavy scenes shrink to one, while cheap scenes grow gradually. This
+        // stays well below Windows' TDR interval and keeps each blocking fence
+        // wait short enough for a future cancellation hook to poll between them.
+        rendercore::OfflineBatchScheduler batchScheduler;
+        Vector<f32> batchGpuMs;
+        batchGpuMs.reserve(rendercore::OfflineBatchScheduler::kMaxSamples);
+        u32 submitCount = 0;
+        u32 largestBatch = 0;
 
         VkCommandPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -1863,8 +1870,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         VkFence fence = VK_NULL_HANDLE;
         vkCreateFence(context.GetDevice(), &fenceInfo, nullptr, &fence);
 
-        for (u32 batchStart = 0; batchStart < spp; batchStart += BATCH_SIZE) {
-            u32 batchEnd = std::min(batchStart + BATCH_SIZE, spp);
+        for (u32 batchStart = 0; batchStart < spp;) {
+            const u32 batchSize = batchScheduler.NextBatchSize(spp - batchStart);
+            const u32 batchEnd = batchStart + batchSize;
+
+            // A submitted primary command buffer is EXECUTABLE, not INITIAL.
+            // Reset it before recording the next batch into the same handle.
+            if (batchStart != 0 && vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) {
+                throw std::runtime_error("Failed to reset offline render command buffer");
+            }
 
             VkCommandBufferBeginInfo beginInfo{};
             beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -1895,15 +1909,24 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
                 throw std::runtime_error("Fence wait failed (possible GPU timeout / device lost)");
             }
 
+            batchGpuMs.clear();
             for (u32 i = batchStart; i < batchEnd; ++i) {
-                totalGpuMs += perfLogger->ResolveLastGpuMs();
+                const f32 gpuMs = perfLogger->ResolveLastGpuMs();
+                totalGpuMs += gpuMs;
+                batchGpuMs.push_back(gpuMs);
             }
+            batchScheduler.ObserveCompletedBatch(batchGpuMs);
+            ++submitCount;
+            largestBatch = std::max(largestBatch, batchSize);
+            batchStart = batchEnd;
         }
 
         vkDestroyFence(context.GetDevice(), fence, nullptr);
         vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
 
         QL_LOG_INFO("  All samples completed!");
+        QL_LOG_INFO("  GPU submits: {} (largest batch: {} samples)",
+                    submitCount, largestBatch);
         QL_LOG_INFO("  Total GPU time: {:.2f} ms ({:.2f} ms/sample)",
                     totalGpuMs, totalGpuMs / spp);
 

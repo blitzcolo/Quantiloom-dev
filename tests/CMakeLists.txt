@@ -288,6 +288,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_interactive_bench.cpp
     test_renderer/test_camera_gpu.cpp
     test_renderer/test_camera_response_gpu.cpp
+    test_renderer/test_offline_batch_scheduler.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
