@@ -16,6 +16,9 @@
 #include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "support/VulkanTestDevice.hpp"
+#include "support/LogCapture.hpp"
+#include <glm/gtc/matrix_transform.hpp>
+#include <array>
 
 #include <filesystem>
 #include <fstream>
@@ -83,6 +86,38 @@ protected:
         ASSERT_TRUE(loaded.has_value()) << "fixture TOML did not parse";
         const auto report = context->ApplyConfig(loaded.value());
         ASSERT_TRUE(report.ok()) << report.FirstError();
+    }
+
+    void LoadEmitterScene() {
+        const std::array<float, 9> positions{0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                             0.0f, 1.0f, 0.0f};
+        const std::array<u32, 3> indices{0, 1, 2};
+        {
+            std::ofstream binary(testDir / "triangle.bin", std::ios::binary);
+            binary.write(reinterpret_cast<const char*>(positions.data()), sizeof(positions));
+            binary.write(reinterpret_cast<const char*>(indices.data()), sizeof(indices));
+        }
+        const auto file = testDir / "emitters.gltf";
+        {
+            std::ofstream json(file);
+            json << R"({
+                "asset":{"version":"2.0"},
+                "buffers":[{"byteLength":48,"uri":"triangle.bin"}],
+                "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":36},
+                               {"buffer":0,"byteOffset":36,"byteLength":12}],
+                "accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+                             {"bufferView":1,"componentType":5125,"count":3,"type":"SCALAR"}],
+                "materials":[{"name":"light","emissiveFactor":[0.5,0.5,0.5]},
+                             {"name":"dark"}],
+                "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]},
+                          {"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":1}]}],
+                "nodes":[{"name":"lamp","mesh":0},
+                         {"name":"rock","mesh":1,"translation":[2,0,0]}],
+                "scenes":[{"nodes":[0,1]}],"scene":0
+            })";
+        }
+        const auto loaded = context->LoadSceneFromGltf(file.string());
+        ASSERT_TRUE(loaded.has_value()) << loaded.error();
     }
 
     void RenderRawFrame() {
@@ -216,4 +251,66 @@ TEST_F(PickTest, AsynchronousPixelDropsResultsWhenTheAccumulationChanges) {
     ASSERT_TRUE(fresh.value().has_value());
     EXPECT_EQ(fresh.value()->requestId, 2u);
     EXPECT_FALSE(context->RequestPixelValue(kSize, 0, 3).has_value());
+}
+
+TEST_F(PickTest, OrdinaryTransformsDoNotRebuildSampledEmission) {
+    LoadEmitterScene();
+    const auto* scene = context->GetScene();
+    ASSERT_NE(scene, nullptr);
+    u32 lamp = 0, rock = 0;
+    bool haveLamp = false, haveRock = false;
+    for (u32 i = 0; i < scene->nodes.size(); ++i) {
+        if (scene->nodes[i].name == "lamp") { lamp = i; haveLamp = true; }
+        if (scene->nodes[i].name == "rock") { rock = i; haveRock = true; }
+    }
+    ASSERT_TRUE(haveLamp && haveRock);
+    {
+        quantiloom::support::ScopedLogCapture capture;
+        context->SetNodeTransform(rock, glm::translate(glm::mat4(1.0f), {3.0f, 0.0f, 0.0f}));
+        context->RefitAccelerationStructure();
+        EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
+    }
+    {
+        quantiloom::support::ScopedLogCapture capture;
+        context->SetNodeTransform(lamp, glm::translate(glm::mat4(1.0f), {0.0f, 2.0f, 0.0f}));
+        context->RefitAccelerationStructure();
+        EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 1) << capture.Dump();
+    }
+    {
+        quantiloom::support::ScopedLogCapture capture;
+        context->RefitAccelerationStructure();
+        EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
+    }
+}
+
+TEST_F(PickTest, WavelengthChangesPreserveSampledEmitterGeometry) {
+    LoadEmitterScene();
+    quantiloom::support::ScopedLogCapture capture;
+    context->SetWavelength(612.0f);
+    EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
+}
+
+TEST_F(PickTest, MaterialEmissionEditsRefreshTheSamplingDistribution) {
+    LoadEmitterScene();
+    const auto* scene = context->GetScene();
+    ASSERT_NE(scene, nullptr);
+    u32 material = 0;
+    bool found = false;
+    for (u32 i = 0; i < scene->materials.size(); ++i) {
+        if (scene->materials[i].name == "light") { material = i; found = true; }
+    }
+    ASSERT_TRUE(found);
+    auto changed = scene->materials[material];
+    changed.emissiveFactor *= 2.0f;
+    {
+        quantiloom::support::ScopedLogCapture capture;
+        context->UpdateMaterial(material, changed);
+        EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 1) << capture.Dump();
+    }
+    changed.roughnessFactor = 0.2f;
+    {
+        quantiloom::support::ScopedLogCapture capture;
+        context->UpdateMaterial(material, changed);
+        EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
+    }
 }

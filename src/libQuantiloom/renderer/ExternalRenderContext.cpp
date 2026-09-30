@@ -38,6 +38,7 @@
 #include "renderer/ThermalEpochBuilder.hpp"
 #include "renderer/ThermalPreview.hpp"
 #include "renderer/TimelineState.hpp"
+#include "renderer/EmissiveInvalidation.hpp"
 #include "thermal/ThermalEpochs.hpp"
 #include "core/Log.hpp"
 #include "core/CacheDirectory.hpp"
@@ -146,6 +147,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> cieCmfBuffer;  // CIE 1931 CMF LUT for VIS_Fused mode (binding 19)
     std::unique_ptr<GpuBuffer> rgbToSpectrumBuffer;  // Jakob-Hanika coefficients (binding 25)
     std::unique_ptr<GpuBuffer> emissiveTriangleBuffer;  // world-space emitters for NEE (binding 23)
+    bool emissiveTransformDirty = false;
     /// Per-element surface temperatures (binding 24). The interactive path
     /// runs no thermal solve -- a solve is an offline step, and its output is
     /// a state the viewport would have to be told about rather than compute --
@@ -645,7 +647,7 @@ struct ExternalRenderContext::Impl {
     void RebuildSceneGpuResources();
 
     void BuildAccelerationStructures();
-    void UpdateGpuResources();
+    void UpdateGpuResources(bool rebuildEmitters = true);
     void RebuildEmissiveGeometry();
 
     /// Move the animated nodes to @p t_s and make the GPU agree.
@@ -2387,7 +2389,9 @@ void ExternalRenderContext::SetWavelength(f32 wavelength_nm) {
         // frame recorded before this setter may still read the old allocation.
         if (m_impl->device != VK_NULL_HANDLE)
             vkDeviceWaitIdle(m_impl->device);
-        m_impl->UpdateGpuResources();
+        // The emitter CDF contains positions, areas and material emission,
+        // none of which depends on the wavelength used to sample IR curves.
+        m_impl->UpdateGpuResources(false);
         if (m_impl->pipeline && m_impl->materialBuffer) {
             m_impl->pipeline->BindMaterialBuffer(*m_impl->materialBuffer);
         }
@@ -2575,6 +2579,11 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
         return;
     }
 
+    const auto& node = m_impl->scene->nodes[nodeIndex];
+    if (node.transform != transform &&
+        rendercore::NodeHasSampledEmission(*m_impl->scene, node))
+        m_impl->emissiveTransformDirty = true;
+
     // Invalidate delayed readings as soon as the host changes the pose.
     ++m_impl->pixelImageGeneration;
     // Update the node's transform in the scene
@@ -2615,6 +2624,12 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     // reading the old resolved curve index; full config application is what
     // uploads new curve data, so this immediate edit uses scalar fallback.
     const Material& previous = m_impl->scene->materials[materialIndex];
+    const bool emissionChanged = rendercore::SampledEmissionChanged(previous, material);
+    if (emissionChanged) {
+        // Both the material and emitter buffers may be read by submitted frames.
+        // Their contents change together, after those readers have completed.
+        vkDeviceWaitIdle(m_impl->device);
+    }
     auto indices = rendercore::IndicesFromMaterial(material);
     if (m_impl->materialGpuIndices.size() == m_impl->scene->materials.size()) {
         const auto& oldSlots = m_impl->materialGpuIndices[materialIndex];
@@ -2659,6 +2674,8 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
             }
         }
     }
+
+    if (emissionChanged) m_impl->RebuildEmissiveGeometry();
 
     // 5. Reset accumulation (visual feedback)
     ResetAccumulation();
@@ -2759,6 +2776,9 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
     m_impl->spectralCurveEntries.push_back(resolved.curve);
 
     const size_t bytes = m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
+    // The new emitter record refers to this curve. Complete prior descriptor
+    // readers before replacing the curve buffer, then publish both inputs.
+    vkDeviceWaitIdle(m_impl->device);
     m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
         m_impl->contextAdapter->GetAllocator(), bytes,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -3196,11 +3216,10 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s) {
     // rock that moved changes nothing in it, and rebuilding per tick for every
     // scene would put a full walk of the geometry on the scrub path.
     const bool emitterMoved =
-        std::any_of(timeline.Animated().begin(), timeline.Animated().end(),
-                    [&moved](const rendercore::AnimatedNode& animated) {
-                        return animated.emissive &&
-                               std::find(moved.begin(), moved.end(), animated.node) != moved.end();
-                    });
+        std::any_of(moved.begin(), moved.end(), [this](u32 node) {
+            return node < scene->nodes.size() &&
+                   rendercore::NodeHasSampledEmission(*scene, scene->nodes[node]);
+        });
     if (emitterMoved) RebuildEmissiveGeometry();
 
     return moved;
@@ -3425,7 +3444,7 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     // describing where the light used to be. Nothing else notices -- the TLAS
     // is correct, so the light renders in its new place while being sampled at
     // its old one, which reads as a light that has stopped illuminating.
-    m_impl->RebuildEmissiveGeometry();
+    if (m_impl->emissiveTransformDirty) m_impl->RebuildEmissiveGeometry();
 
     if (m_impl->thermalPreview) {
         m_impl->thermalPreview->InvalidateGeometry();
@@ -4692,13 +4711,13 @@ void ExternalRenderContext::Impl::BuildAccelerationStructures() {
     geometry = rendercore::SceneGeometry::Build(*contextAdapter, *scene);
 }
 
-void ExternalRenderContext::Impl::UpdateGpuResources() {
+void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     if (!scene) return;
 
     QL_LOG_INFO("Updating GPU resources...");
     materialBuffer = rendercore::BuildMaterialBuffer(
         *contextAdapter, *scene, wavelength_nm, materialGpuIndices);
-    RebuildEmissiveGeometry();
+    if (rebuildEmitters) RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
 }
 
@@ -4717,8 +4736,18 @@ void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
     const auto triangles = enableLightSampling
         ? rendercore::CollectEmissiveTriangles(*scene)
         : Vector<rendercore::EmissiveTriangleGPU>{};
-    emissiveTriangleBuffer =
-        rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
+    const size_t bytes = std::max(size_t{1}, triangles.size()) *
+                         sizeof(rendercore::EmissiveTriangleGPU);
+    const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->GetSize() < bytes;
+    if (moved) {
+        emissiveTriangleBuffer =
+            rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
+    } else {
+        const rendercore::EmissiveTriangleGPU empty{};
+        const void* data = triangles.empty() ? static_cast<const void*>(&empty)
+                                             : static_cast<const void*>(triangles.data());
+        emissiveTriangleBuffer->Upload(data, bytes);
+    }
 
     f32 totalPower = 0.0f;
     if (!triangles.empty()) {
@@ -4728,9 +4757,10 @@ void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
     lightingParams.emissiveTotalPower = totalPower;
     UploadLightingParams();
 
-    if (pipeline) {
+    if (pipeline && moved) {
         pipeline->BindEmissiveTriangleBuffer(*emissiveTriangleBuffer);
     }
+    emissiveTransformDirty = false;
 }
 
 void ExternalRenderContext::Impl::CreateDummyBuffers() {

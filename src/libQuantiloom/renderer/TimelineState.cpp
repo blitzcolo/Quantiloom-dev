@@ -1,4 +1,5 @@
 #include "renderer/TimelineState.hpp"
+#include "renderer/EmissiveInvalidation.hpp"
 
 #include "core/Log.hpp"
 
@@ -10,8 +11,6 @@
 namespace quantiloom::rendercore {
 
 namespace {
-
-constexpr glm::vec3 kLuminance{0.2126f, 0.7152f, 0.0722f};
 
 /// Radius of a sphere around the node in world units.
 ///
@@ -39,20 +38,6 @@ f32 NodeBoundRadius(const Scene& scene, const SceneNode& node, const glm::mat4& 
     const f32 scale = std::max({glm::length(glm::vec3(rest[0])), glm::length(glm::vec3(rest[1])),
                                 glm::length(glm::vec3(rest[2]))});
     return localRadius * scale;
-}
-
-/// Whether moving this node changes the emissive triangle list. The test
-/// matches CollectEmissiveTriangles exactly, including its refusal of textured
-/// emitters -- a node that is not in the list cannot change it by moving.
-bool NodeEmits(const Scene& scene, const SceneNode& node) {
-    if (node.meshIndex >= scene.meshes.size()) return false;
-    for (const GeometryPrimitive& primitive : scene.meshes[node.meshIndex].primitives) {
-        if (primitive.materialId >= scene.materials.size()) continue;
-        const Material& material = scene.materials[primitive.materialId];
-        if (material.emissiveTextureIndex >= 0) continue;
-        if (glm::dot(material.emissiveFactor, kLuminance) > 0.0f) return true;
-    }
-    return false;
 }
 
 /// Compile one spec, routing whatever it complained about into the report.
@@ -131,7 +116,7 @@ TimelineState TimelineState::Build(const Scene& scene, const TimelineConfig& con
         // evaluating a pose never inverts a matrix.
         animated.nodeRest = glm::inverse(animated.modelRest) * scene.nodes[i].transform;
         animated.boundRadius_m = NodeBoundRadius(scene, scene.nodes[i], scene.nodes[i].transform);
-        animated.emissive = NodeEmits(scene, scene.nodes[i]);
+        animated.emissive = NodeHasSampledEmission(scene, scene.nodes[i]);
         state.m_animated.push_back(std::move(animated));
     }
 
