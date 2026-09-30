@@ -1538,9 +1538,11 @@ public:
     /**
      * @brief Refit the acceleration structure after transform-only edits
      *
-     * The interactive path for RebuildAccelerationStructure: updates the
-     * existing TLAS in place (no allocation, no device idle) so a gizmo
-     * drag can apply SetNodeTransform per mouse-move without stalling.
+     * Prepares the latest transforms without waiting for normal node edits.
+     * RenderFrame records the instance upload and in-place TLAS UPDATE before
+     * tracing; multiple edits before that frame coalesce to the latest pose.
+     * Pick, thermal precompute and world-space emitter updates flush any
+     * pending refit synchronously when their inputs require completion.
      * Falls back to a full rebuild internally when a refit is not possible
      * (topology changed since the last build).
      *

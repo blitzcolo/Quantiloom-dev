@@ -214,6 +214,7 @@ struct ExternalRenderContext::Impl {
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
     rendercore::SceneGeometry geometry;
+    bool pendingTlasRefit = false;
 
     // Texture manager
     std::unique_ptr<TextureManager> textureManager;
@@ -660,7 +661,8 @@ struct ExternalRenderContext::Impl {
     /// precompute.
     ///
     /// @return the nodes that actually moved
-    Vector<u32> ApplyTimelinePose(f64 t_s);
+    Vector<u32> ApplyTimelinePose(f64 t_s, bool deferRefit = false);
+    void FlushPendingTlasRefit();
     // Config's renderer.enable_light_sampling. Held here rather than in
     // LightingParams, which has no bits left: turning it off is expressed by
     // publishing an emitter count of zero, which is the same thing the shader
@@ -1763,6 +1765,18 @@ void ExternalRenderContext::RenderFrame(
     if (!m_impl->isReady || !m_impl->pipeline) {
         QL_LOG_WARN("ExternalRenderContext::RenderFrame called but not ready");
         return;
+    }
+
+    // Ordinary poses are uploaded and refitted in this very submission, so
+    // prior traces finish before UPDATE and the new trace sees the new pose.
+    // Camera capture retains its synchronous pose/stratum contract.
+    if (m_impl->pendingTlasRefit) {
+        if (m_impl->cameraConfig.enabled) {
+            m_impl->FlushPendingTlasRefit();
+        } else {
+            m_impl->geometry.RecordPreparedTlasRefit(cmd);
+            m_impl->pendingTlasRefit = false;
+        }
     }
 
     // Collect GPU timings from frames the GPU has finished by now. Never
@@ -3126,6 +3140,9 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     const VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
     rendercore::ThermalPreview::SolveResult result;
     try {
+        // The precompute consumes the current TLAS, and the field upload
+        // below also needs old frame readers completed before host writes.
+        m_impl->FlushPendingTlasRefit();
         result = m_impl->thermalPreview->SolveAt(time_h, *m_impl->scene, tlas);
     } catch (const std::exception& ex) {
         return fail(String("thermal solve failed: ") + ex.what());
@@ -3186,16 +3203,31 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
 // The timeline
 // ============================================================================
 
-Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s) {
+void ExternalRenderContext::Impl::FlushPendingTlasRefit() {
+    if (!pendingTlasRefit) return;
+    CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
+        geometry.RecordPreparedTlasRefit(cmd);
+    });
+    pendingTlasRefit = false;
+}
+
+Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool deferRefit) {
     if (!scene) return {};
 
     Vector<u32> moved = timeline.Apply(*scene, t_s);
-    if (moved.empty()) return moved;
+    if (moved.empty()) {
+        if (!deferRefit) FlushPendingTlasRefit();
+        return moved;
+    }
 
     if (geometry.IsValid()) {
         // Same handle, updated in place -- no rebind, no device idle. The
         // refit's own barriers order it against tracing already in flight.
-        if (!geometry.RefitTlas(*contextAdapter, *scene)) {
+        const bool refitted = deferRefit
+            ? geometry.PrepareTlasRefit(*scene)
+            : geometry.RefitTlas(*contextAdapter, *scene);
+        pendingTlasRefit = deferRefit && refitted;
+        if (!refitted) {
             // A refit is refused only when the instance count moved, which a
             // trajectory cannot do. Rebuilding is the honest recovery for
             // whatever did.
@@ -3220,7 +3252,10 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s) {
             return node < scene->nodes.size() &&
                    rendercore::NodeHasSampledEmission(*scene, scene->nodes[node]);
         });
-    if (emitterMoved) RebuildEmissiveGeometry();
+    if (emitterMoved) {
+        FlushPendingTlasRefit();
+        RebuildEmissiveGeometry();
+    }
 
     return moved;
 }
@@ -3326,7 +3361,7 @@ Result<void, String> ExternalRenderContext::SetTimelineTime(const f64 t_s) {
         return Result<void, String>::Ok();
     }
 
-    m_impl->ApplyTimelinePose(t_s);
+    m_impl->ApplyTimelinePose(t_s, !m_impl->cameraConfig.enabled);
 
     // The hour follows the clock when the two are mapped. SetThermalTime
     // resets accumulation itself, so this does not do it twice.
@@ -3402,6 +3437,7 @@ void ExternalRenderContext::RebuildAccelerationStructure() {
     }
 
     // A frame the host submitted may still be tracing the TLAS being replaced.
+    m_impl->pendingTlasRefit = false;
     vkDeviceWaitIdle(m_impl->device);
 
     m_impl->geometry.RebuildTlas(*m_impl->contextAdapter, *m_impl->scene);
@@ -3434,7 +3470,7 @@ void ExternalRenderContext::RefitAccelerationStructure() {
 
     // Same handle, updated in place: no rebind, no device idle. The refit
     // command's own barriers order it against in-flight tracing.
-    if (!m_impl->geometry.RefitTlas(*m_impl->contextAdapter, *m_impl->scene)) {
+    if (!m_impl->geometry.PrepareTlasRefit(*m_impl->scene)) {
         QL_LOG_DEBUG("RefitAccelerationStructure: topology changed, rebuilding");
         RebuildAccelerationStructure();  // redoes the emitters itself
         return;
@@ -3444,7 +3480,13 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     // describing where the light used to be. Nothing else notices -- the TLAS
     // is correct, so the light renders in its new place while being sampled at
     // its old one, which reads as a light that has stopped illuminating.
-    if (m_impl->emissiveTransformDirty) m_impl->RebuildEmissiveGeometry();
+    m_impl->pendingTlasRefit = true;
+    if (m_impl->emissiveTransformDirty) {
+        // The world-space emitter buffer is still updated synchronously;
+        // normal nodes need no emitter upload and take the deferred path.
+        m_impl->FlushPendingTlasRefit();
+        m_impl->RebuildEmissiveGeometry();
+    }
 
     if (m_impl->thermalPreview) {
         m_impl->thermalPreview->InvalidateGeometry();
@@ -3677,6 +3719,12 @@ static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch"
 }  // namespace
 
 Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
+    try {
+        m_impl->FlushPendingTlasRefit();
+    } catch (const std::exception& ex) {
+        return Result<PickResult, String>::Err(String("Pick: ") + ex.what());
+    }
+
     if (!m_impl->isReady || !m_impl->geometry.IsValid()) {
         return Result<PickResult, String>::Err("Pick: no scene loaded");
     }

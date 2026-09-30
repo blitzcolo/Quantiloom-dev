@@ -314,3 +314,53 @@ TEST_F(PickTest, MaterialEmissionEditsRefreshTheSamplingDistribution) {
         EXPECT_EQ(capture.Count(Log::Level::Info, "Emissive geometry:"), 0) << capture.Dump();
     }
 }
+
+
+TEST_F(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
+    LoadEmitterScene();
+    const auto* scene = context->GetScene();
+    ASSERT_NE(scene, nullptr);
+    for (u32 material = 0; material < scene->materials.size(); ++material) {
+        auto dark = scene->materials[material];
+        dark.emissiveFactor = glm::vec3(0.0f);
+        context->UpdateMaterial(material, dark);
+    }
+    context->SetCameraLookAt({0.25f, 0.25f, 5.0f}, {0.25f, 0.25f, 0.0f}, {0.0f, 1.0f, 0.0f});
+    context->SetDebugMode(DebugVisualizationMode::GeometricNormal);
+    std::vector<glm::mat4> rest;
+    for (const auto& node : scene->nodes) rest.push_back(node.transform);
+    RenderRawFrame();
+    const auto baseline = context->CaptureScreenshot();
+    ASSERT_TRUE(baseline.has_value());
+    ASSERT_TRUE(context->Pick(kSize / 2, kSize / 2).value().hit);
+    const auto away = glm::translate(glm::mat4(1.0f), {1000.0f, 1000.0f, 1000.0f});
+    const auto move = [&](bool offscreen) {
+        for (u32 node = 0; node < rest.size(); ++node)
+            context->SetNodeTransform(node, offscreen ? away * rest[node] : rest[node]);
+        context->RefitAccelerationStructure();
+    };
+
+    // Multiple host edits before the next frame coalesce to the final pose.
+    move(true);
+    move(false);
+    context->ResetAccumulation();
+    RenderRawFrame();
+    auto returned = context->CaptureScreenshot();
+    ASSERT_TRUE(returned.has_value());
+    EXPECT_EQ(returned.value().data, baseline.value().data);
+
+    // No synchronous pick/solve in between: RenderFrame itself must record UPDATE.
+    move(true);
+    context->ResetAccumulation();
+    RenderRawFrame();
+    const auto shifted = context->CaptureScreenshot();
+    ASSERT_TRUE(shifted.has_value());
+    EXPECT_NE(shifted.value().data, baseline.value().data);
+    EXPECT_FALSE(context->Pick(kSize / 2, kSize / 2).value().hit);
+
+    // Exact picking flushes a pending pose even before another frame is drawn.
+    move(false);
+    const auto restored = context->Pick(kSize / 2, kSize / 2);
+    ASSERT_TRUE(restored.has_value());
+    EXPECT_TRUE(restored.value().hit);
+}
