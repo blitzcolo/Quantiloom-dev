@@ -164,6 +164,10 @@ public:
     // Map buffer memory (returns nullptr on failure)
     void* Map();
 
+    // Map for reading GPU-written data after the caller has waited for completion.
+    // Invalidates non-coherent host caches; does not synchronize GPU execution.
+    const void* MapRead();
+
     // Unmap buffer memory
     void Unmap();
 

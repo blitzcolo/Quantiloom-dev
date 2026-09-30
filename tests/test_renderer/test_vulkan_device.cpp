@@ -13,6 +13,7 @@
 
 #include "support/VulkanTestDevice.hpp"
 
+#include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/VulkanContext.hpp"
 
@@ -66,4 +67,47 @@ TEST_F(VulkanDeviceTest, RoundTripsHostVisibleMemory) {
     buffer.Unmap();
 
     EXPECT_EQ(readBack, written);
+}
+
+// A readback may stay mapped across GPU writes. Every read still needs cache
+// invalidation after GPU completion, including when Map() returns an old pointer.
+TEST_F(VulkanDeviceTest, ReadsRepeatedGpuWritesThroughAnExistingMapping) {
+    constexpr VkDeviceSize bytes = 256 * sizeof(u32);
+    GpuBuffer readback(Device().GetAllocator(), bytes,
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    for (u32 pattern : {0x12345678u, 0x89abcdefu, 0u}) {
+        CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+            vkCmdFillBuffer(cmd, readback.GetHandle(), 0, bytes, pattern);
+            VkBufferMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.buffer = readback.GetHandle();
+            barrier.size = bytes;
+            vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_HOST_BIT, 0,
+                                 0, nullptr, 1, &barrier, 0, nullptr);
+        });
+        const auto* data = static_cast<const u32*>(readback.MapRead());
+        ASSERT_NE(data, nullptr);
+        for (usize i = 0; i < bytes / sizeof(u32); ++i) EXPECT_EQ(data[i], pattern);
+    }
+    readback.Unmap();
+}
+
+TEST_F(VulkanDeviceTest, AlignsSbtDeviceAddressesAtTheAllocationBase) {
+    const auto alignment = Device().GetRayTracingProperties().shaderGroupBaseAlignment;
+    ASSERT_GT(alignment, 0u);
+    // Keep several small allocations alive so this exercises suballocation
+    // offsets, rather than only the naturally aligned start of a VMA block.
+    std::vector<GpuBuffer> buffers;
+    for (u32 i = 0; i < 9; ++i) {
+        buffers.emplace_back(Device().GetAllocator(), (i + 1) * alignment,
+            VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR |
+                VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU, alignment);
+        EXPECT_EQ(buffers.back().GetDeviceAddress(Device().GetDevice()) % alignment, 0u);
+    }
 }

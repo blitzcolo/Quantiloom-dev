@@ -1073,7 +1073,7 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
     variant.sbtBuffer = std::make_unique<GpuBuffer>(
         m_context.GetAllocator(), sbtSize,
         VK_BUFFER_USAGE_SHADER_BINDING_TABLE_BIT_KHR | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU);
+        VMA_MEMORY_USAGE_CPU_TO_GPU, baseAlignment);
     variant.sbtBuffer->Upload(sbtData.data(), sbtSize);
 
     const VkDeviceAddress sbtAddress = variant.sbtBuffer->GetDeviceAddress(device);

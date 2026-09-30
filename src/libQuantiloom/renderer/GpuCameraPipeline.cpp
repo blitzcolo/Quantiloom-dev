@@ -1279,7 +1279,7 @@ GpuCameraPipeline::ReadDynamicCounters() const {
         vkCmdCopyBuffer(cmd, m_impl->dynamicCounterBuffer->GetHandle(),
                         staging.GetHandle(), 1, &copy);
     });
-    const void* data = staging.Map();
+    const void* data = staging.MapRead();
     if (!data)
         return Result<std::array<u32, 4>, String>::Err(
             "cannot map GPU camera counter staging");
@@ -1318,7 +1318,7 @@ GpuCameraPipeline::ReadIspStats() const {
         vkCmdCopyBuffer(cmd, m_impl->ispStatsBuffer->GetHandle(),
                         staging.GetHandle(), 1, &copy);
     });
-    const void* data = staging.Map();
+    const void* data = staging.MapRead();
     if (!data)
         return Result<IspStats, String>::Err(
             "cannot map GPU camera statistics staging");

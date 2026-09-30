@@ -367,8 +367,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     // ------------------------------------------------------------------
     // Reduce the hit records into sparse rows
     // ------------------------------------------------------------------
-    const u32* records = static_cast<const u32*>(recordBuffer.Map());
-    const f32* sun = static_cast<const f32*>(sunBuffer.Map());
+    const u32* records = static_cast<const u32*>(recordBuffer.MapRead());
+    const f32* sun = static_cast<const f32*>(sunBuffer.MapRead());
 
     exchange.viewFactors.rowStart.reserve(elementCount + 1);
     exchange.viewFactors.rowStart.push_back(0);
@@ -576,7 +576,7 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
                              1, &hostBarrier, 0, nullptr);
     });
 
-    const f32* mapped = static_cast<const f32*>(sunBuffer.Map());
+    const f32* mapped = static_cast<const f32*>(sunBuffer.MapRead());
     Vector<f32> result(mapped, mapped + static_cast<usize>(K) * elementCount);
     sunBuffer.Unmap();
 

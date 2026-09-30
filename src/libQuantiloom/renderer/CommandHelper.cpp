@@ -257,7 +257,7 @@ std::vector<f32> CommandHelper::ReadbackImage(
 
     // Map staging buffer and read pixel data
     std::vector<f32> pixels(width * height * 4);
-    const void* mappedData = stagingBuffer.Map();
+    const void* mappedData = stagingBuffer.MapRead();
     if (mappedData == nullptr) {
         throw std::runtime_error("Failed to map staging buffer for readback");
     }

@@ -3559,12 +3559,12 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
     vkFreeCommandBuffers(m_impl->device, m_impl->commandPool, 1, &cmd);
 
     // Map staging buffer and read pixel value
-    void* mappedData = m_impl->pixelReadbackBuffer->Map();
+    const void* mappedData = m_impl->pixelReadbackBuffer->MapRead();
     if (mappedData == nullptr) {
         return Result<glm::vec4, String>::Err("Failed to map pixel readback buffer");
     }
 
-    f32* pixelData = static_cast<f32*>(mappedData);
+    const f32* pixelData = static_cast<const f32*>(mappedData);
     glm::vec4 result(pixelData[0], pixelData[1], pixelData[2], pixelData[3]);
 
     m_impl->pixelReadbackBuffer->Unmap();
@@ -3692,7 +3692,8 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     });
 
     PickResultGpu gpu{};
-    void* mapped = m_impl->pickOutputBuffer->Map();
+    const void* mapped = m_impl->pickOutputBuffer->MapRead();
+    if (!mapped) return Result<PickResult, String>::Err("Pick: cannot map readback memory");
     std::memcpy(&gpu, mapped, sizeof(gpu));
     m_impl->pickOutputBuffer->Unmap();
 
@@ -4325,7 +4326,7 @@ DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() cons
                                 m_impl->cameraDynamicCounterBuffer->GetHandle(),
                                 staging.GetHandle(), 1, &copy);
             });
-            if (const void* data = staging.Map()) {
+            if (const void* data = staging.MapRead()) {
                 std::memcpy(raygenCounts.data(), data, sizeof(raygenCounts));
                 staging.Unmap();
                 haveRaygen = true;

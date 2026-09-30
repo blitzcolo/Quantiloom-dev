@@ -110,6 +110,19 @@ void* GpuBuffer::Map() {
     return m_mappedData;
 }
 
+const void* GpuBuffer::MapRead() {
+    void* mapped = Map();
+    if (!mapped) return nullptr;
+
+    const VkResult result = vmaInvalidateAllocation(m_allocator, m_allocation, 0, VK_WHOLE_SIZE);
+    if (result != VK_SUCCESS) {
+        QL_LOG_ERROR("Failed to invalidate readback memory: error code {}", static_cast<int>(result));
+        Unmap();
+        return nullptr;
+    }
+    return mapped;
+}
+
 void GpuBuffer::Unmap() {
     if (m_mappedData != nullptr) {
         vmaUnmapMemory(m_allocator, m_allocation);
