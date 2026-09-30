@@ -165,6 +165,38 @@ TEST_F(ThermalExchangeGpuTest, TwoParallelPlatesSeeEachOtherByTheAnalyticFactor)
     EXPECT_NEAR(MeanSkyFraction(exchange, 0, 2) + measured, 1.0f, 0.02f);
 }
 
+TEST_F(ThermalExchangeGpuTest, OpacityRebuildProducesATraceableAlphaTestedBlas) {
+    Scene scene = MakeScene();
+    AddQuad(scene, 0.0f, 5.0f, /*facingUp=*/true, 0);
+    AddQuad(scene, 2.0f, 5.0f, /*facingUp=*/false, 0);
+
+    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    ASSERT_TRUE(geometry.IsValid());
+
+    // Crossing OPAQUE -> MASK replaces the BLAS. Zero coverage makes the
+    // inline ray-query shader reject every non-opaque candidate, so the lower
+    // plate must see sky through the upper one. This exercises the replacement
+    // BLAS address and the opacity flag rather than only inspecting host state.
+    scene.materials[0].alphaMode = Material::AlphaMode::Mask;
+    ASSERT_TRUE(geometry.RefreshMaterialOpacity(Device(), scene));
+
+    const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
+    ThermalExchangePrecompute precompute(Device());
+    if (!precompute.IsValid()) {
+        GTEST_SKIP() << "thermal_exchange.spv unavailable";
+    }
+    precompute.SetMaterialCoverage({0.0f});
+
+    ThermalExchangePrecompute::Params params;
+    params.hemisphereRays = 256;
+    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+                                         mesh.instanceElementBase, params);
+
+    ASSERT_EQ(exchange.skyFraction.size(), 4u);
+    EXPECT_NEAR(MeanSkyFraction(exchange, 0, 2), 1.0f, 1e-6f)
+        << "zero-coverage MASK geometry must not occlude the lower plate";
+}
+
 TEST_F(ThermalExchangeGpuTest, EveryRowSumsToOneWithItsSkyFraction) {
     // The invariant the solver depends on. A row that sums to less than one is
     // a surface exchanging with less than a whole hemisphere, which over a

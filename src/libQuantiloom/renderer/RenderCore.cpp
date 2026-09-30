@@ -1003,6 +1003,7 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
     // Walk the primitives in the same order Build did, so index i of m_blas is
     // the i'th primitive of the scene.
     bool changed = false;
+    Vector<BLAS*> rebuilt;
     size_t globalPrim = 0;
     for (const auto& mesh : scene.meshes) {
         for (const auto& prim : mesh.primitives) {
@@ -1014,6 +1015,7 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
                 QL_LOG_INFO("  Rebuilding BLAS {} as {}", globalPrim,
                             wanted ? "opaque" : "alpha-tested");
                 m_blas[globalPrim] = std::make_unique<BLAS>(ctx, prim, wanted);
+                rebuilt.push_back(m_blas[globalPrim].get());
                 changed = true;
             }
             ++globalPrim;
@@ -1022,6 +1024,18 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
 
     if (!changed) {
         return false;
+    }
+
+    // Construction uploads the replacement's geometry but does not create its
+    // acceleration structure. Build every replacement before the TLAS reads
+    // its device address; otherwise AddInstance receives address zero.
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        for (BLAS* blas : rebuilt) {
+            blas->Build(cmd);
+        }
+    });
+    for (BLAS* blas : rebuilt) {
+        blas->ReleaseBuildScratch();
     }
 
     // Every instance references a BLAS by address, so replacing one invalidates
