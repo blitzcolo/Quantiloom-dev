@@ -19,6 +19,9 @@
 #include "support/LogCapture.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <array>
+#include <chrono>
+#include <functional>
+#include <thread>
 
 #include <filesystem>
 #include <fstream>
@@ -118,6 +121,60 @@ protected:
         }
         const auto loaded = context->LoadSceneFromGltf(file.string());
         ASSERT_TRUE(loaded.has_value()) << loaded.error();
+    }
+
+    void ExpectUploadCompletesPriorReader(const std::function<void()>& upload) {
+        const VkDevice device = Device().GetDevice();
+        GpuImage target(Device().GetAllocator(), device, kSize, kSize,
+                        VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        struct Resources {
+            VkDevice device;
+            VkEvent event = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+            VkCommandPool pool = VK_NULL_HANDLE;
+            bool submitted = false;
+            ~Resources() {
+                if (submitted) vkQueueWaitIdle(queue);
+                if (event) vkDestroyEvent(device, event, nullptr);
+                if (fence) vkDestroyFence(device, fence, nullptr);
+                if (pool) vkDestroyCommandPool(device, pool, nullptr);
+            }
+            VkQueue queue;
+        } resources{device};
+        resources.queue = Device().GetGraphicsQueue();
+        VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+        ASSERT_EQ(vkCreateEvent(device, &eventInfo, nullptr, &resources.event), VK_SUCCESS);
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        ASSERT_EQ(vkCreateFence(device, &fenceInfo, nullptr, &resources.fence), VK_SUCCESS);
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.queueFamilyIndex = Device().GetGraphicsQueueFamily();
+        ASSERT_EQ(vkCreateCommandPool(device, &poolInfo, nullptr, &resources.pool), VK_SUCCESS);
+        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocation.commandPool = resources.pool;
+        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocation.commandBufferCount = 1;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        ASSERT_EQ(vkAllocateCommandBuffers(device, &allocation, &cmd), VK_SUCCESS);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        ASSERT_EQ(vkBeginCommandBuffer(cmd, &begin), VK_SUCCESS);
+        // Hold a real old trace in the queue. This deterministically exposes
+        // a setter that writes shared bytes while that reader is still pending.
+        vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
+                        0, nullptr, 0, nullptr);
+        context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+        ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        ASSERT_EQ(vkQueueSubmit(resources.queue, 1, &submit, resources.fence), VK_SUCCESS);
+        resources.submitted = true;
+        std::jthread release([device, event = resources.event] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            vkSetEvent(device, event);
+        });
+        upload();
+        EXPECT_EQ(vkGetFenceStatus(device, resources.fence), VK_SUCCESS);
     }
 
     void RenderRawFrame() {
@@ -363,4 +420,32 @@ TEST_F(PickTest, DeferredRefitsUseTheLatestPoseInTheRecordedFrameAndExactPick) {
     const auto restored = context->Pick(kSize / 2, kSize / 2);
     ASSERT_TRUE(restored.has_value());
     EXPECT_TRUE(restored.value().hit);
+}
+
+
+TEST_F(PickTest, OrdinaryMaterialUploadsWaitForSubmittedReaders) {
+    LoadEmitterScene();
+    auto edited = context->GetScene()->materials[1];
+    edited.roughnessFactor = 0.3f;
+    ExpectUploadCompletesPriorReader([&] { context->UpdateMaterial(1, edited); });
+}
+
+TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
+    LoadEmitterScene();
+    ThermalMaterialParams material;
+    material.conductivity_W_mK = 80.0f;
+    context->SetThermalMaterial("light", material);
+    context->SetThermalMaterial("dark", material);
+    ThermalSolveParams params;
+    params.initial = ThermalInitialCondition::Uniform;
+    params.initialTemperature_K = 293.15;
+    params.exchangeRays = 16;
+    context->SetThermalSolveParams(params);
+    context->SetThermalSolveEnabled(true);
+    ASSERT_TRUE(context->SetThermalTime(0.0).has_value());
+    context->SetSpectralMode(SpectralMode::LWIR_Fused);
+    ExpectUploadCompletesPriorReader([&] {
+        const auto uploaded = context->SetThermalTime(0.0);
+        EXPECT_TRUE(uploaded.has_value()) << uploaded.error();
+    });
 }

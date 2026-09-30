@@ -1612,6 +1612,9 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
     const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K,
     const Vector<f32>& lagVisibility, const Vector<glm::vec3>& lagDirection) {
+    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+        throw std::runtime_error("cannot complete previous GPU thermal field readers");
+
     const auto records = rendercore::MakeThermalSunResponse(
         sunSensitivity_K, sunVisibility, sunDirection, lagSensitivity_K, lagVisibility,
         lagDirection);
@@ -1640,6 +1643,9 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
 ///         caller the descriptor has to be rewritten.
 bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangent,
                                                        const f32 step) {
+    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+        throw std::runtime_error("cannot complete previous GPU thermal field readers");
+
     Vector<f32> records;
     records.reserve(tangent.size() + 1);
     records.push_back(tangent.empty() ? 0.0f : step);
@@ -2639,10 +2645,11 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     // uploads new curve data, so this immediate edit uses scalar fallback.
     const Material& previous = m_impl->scene->materials[materialIndex];
     const bool emissionChanged = rendercore::SampledEmissionChanged(previous, material);
-    if (emissionChanged) {
-        // Both the material and emitter buffers may be read by submitted frames.
-        // Their contents change together, after those readers have completed.
-        vkDeviceWaitIdle(m_impl->device);
+    // Material bytes are shared by every submitted trace, including ordinary
+    // roughness/IR edits that do not rebuild an AS or the emitter list.
+    if (vkQueueWaitIdle(m_impl->graphicsQueue) != VK_SUCCESS) {
+        QL_LOG_ERROR("UpdateMaterial: cannot complete previous GPU readers");
+        return;
     }
     auto indices = rendercore::IndicesFromMaterial(material);
     if (m_impl->materialGpuIndices.size() == m_impl->scene->materials.size()) {
@@ -3151,6 +3158,11 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         return fail(result.error);
     }
     m_impl->thermalLastError.clear();
+
+    // A cached solve can do no GPU work and have no pending TLAS refit.
+    // Complete old readers even on that path before rewriting shared fields.
+    if (vkQueueWaitIdle(m_impl->graphicsQueue) != VK_SUCCESS)
+        return fail("cannot complete previous GPU thermal field readers");
 
     if (result.elementCountChanged || result.surfaceTemperature_K.size() * sizeof(f32) !=
             (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
