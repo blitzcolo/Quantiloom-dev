@@ -3,18 +3,31 @@
 #include "GpuBuffer.hpp"
 #include "CommandHelper.hpp"
 #include "core/Log.hpp"
+#include <algorithm>
 #include <stdexcept>
-#include <cstring>
 #include <cmath>
 
 namespace quantiloom {
+
+struct TextureManager::PendingUpload {
+    std::unique_ptr<GpuBuffer> staging;
+    std::unique_ptr<GpuImage> image;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    u32 width = 0;
+    u32 height = 0;
+    u32 mipLevels = 1;
+    u32 bufferRowLength = 0;
+    u32 bufferImageHeight = 0;
+    bool compressed = false;
+};
 
 // ============================================================================
 // Construction / Destruction
 // ============================================================================
 
-TextureManager::TextureManager(VulkanContext& context)
-    : m_context(context) {
+TextureManager::TextureManager(VulkanContext& context, VkDeviceSize uploadBatchBytes)
+    : m_context(context)
+    , m_uploadBatchBytes(std::max<VkDeviceSize>(uploadBatchBytes, 1)) {
     // Resources are allocated lazily in UploadTextures
 }
 
@@ -42,13 +55,19 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     }
     m_samplers.clear();
     m_imageViews.clear();
+    m_lastUploadBatchCount = 0;
 
     // Handle empty texture list: create dummy 1x1 white texture
     if (textures.empty()) {
         QL_LOG_INFO("No textures to upload, creating dummy 1x1 white texture");
         Texture dummyTex = CreateDummyTexture();
 
-        m_images.push_back(UploadTexture(dummyTex));
+        auto pending = PrepareTexture(dummyTex);
+        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+            RecordTextureUpload(cmd, *pending);
+        });
+        ++m_lastUploadBatchCount;
+        m_images.push_back(std::move(pending->image));
         m_samplers.push_back(CreateSampler(dummyTex.sampler));
         m_imageViews.push_back(m_images.back()->GetView());
 
@@ -58,30 +77,66 @@ void TextureManager::UploadTextures(std::vector<Texture>& textures) {
     // Upload all textures
     QL_LOG_INFO("Uploading {} textures to GPU", textures.size());
 
+    struct BatchEntry {
+        Texture* source = nullptr;
+        std::unique_ptr<PendingUpload> upload;
+    };
+    std::vector<BatchEntry> batch;
+    VkDeviceSize batchBytes = 0;
+
+    const auto flush = [&]() {
+        if (batch.empty()) return;
+        CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+            for (const BatchEntry& entry : batch) {
+                RecordTextureUpload(cmd, *entry.upload);
+            }
+        });
+        ++m_lastUploadBatchCount;
+
+        for (BatchEntry& entry : batch) {
+            VkSampler sampler = CreateSampler(entry.source->sampler);
+            m_imageViews.push_back(entry.upload->image->GetView());
+            m_samplers.push_back(sampler);
+            m_images.push_back(std::move(entry.upload->image));
+
+            // Release only after the submission that consumed the staging
+            // bytes completed. Retained pixels feed interactive re-unmixing.
+            if (!entry.source->retainCpuPixels) {
+                entry.source->ReleaseCPUMemory();
+            }
+        }
+        batch.clear();
+        batchBytes = 0;
+    };
+
     for (Texture& texture : textures) {
-        // Upload texture to GPU
-        auto gpuImage = UploadTexture(texture);
+        const VkDeviceSize rawBytes =
+            static_cast<VkDeviceSize>(texture.width) * texture.height * 4;
+        const VkDeviceSize estimate = texture.HasBC7Data()
+            ? static_cast<VkDeviceSize>(texture.bc7Data->data.size()) : rawBytes;
+        if (!batch.empty() && batchBytes + estimate > m_uploadBatchBytes) {
+            flush();
+        }
 
-        // Create sampler for this texture
-        VkSampler sampler = CreateSampler(texture.sampler);
+        auto pending = PrepareTexture(texture);
+        const VkDeviceSize uploadBytes = pending->staging->GetSize();
+        if (!batch.empty() && batchBytes + uploadBytes > m_uploadBatchBytes) {
+            flush();
+        }
+        batchBytes += uploadBytes;
+        batch.push_back({&texture, std::move(pending)});
 
-        // Store resources
-        m_imageViews.push_back(gpuImage->GetView());
-        m_samplers.push_back(sampler);
-        m_images.push_back(std::move(gpuImage));
-
-        // CRITICAL: Release CPU memory after GPU upload to free ~8GB RAM
-        // The pixel data and BC7 compressed data are now on the GPU.
-        // Unless the texture asked to keep them: an interactive session
-        // re-unmixes base colours against new endmembers, and the GPU copy is
-        // compressed, mipped and unreadable for that.
-        if (!texture.retainCpuPixels) {
-            texture.ReleaseCPUMemory();
+        // A texture at or above the cap owns one batch. The cap bounds staging
+        // memory for ordinary textures; a single larger texture is unavoidable.
+        if (batchBytes >= m_uploadBatchBytes) {
+            flush();
         }
     }
+    flush();
 
-    QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers (CPU memory released)",
-                m_images.size(), m_samplers.size());
+    QL_LOG_INFO("  Texture upload complete: {} textures, {} samplers, {} batch(es) "
+                "(CPU memory released)",
+                m_images.size(), m_samplers.size(), m_lastUploadBatchCount);
 }
 
 i32 TextureManager::AppendTexture(const Texture& texture) {
@@ -111,6 +166,15 @@ i32 TextureManager::AppendTexture(const Texture& texture) {
 // ============================================================================
 
 std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) const {
+    auto pending = PrepareTexture(texture);
+    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
+        RecordTextureUpload(cmd, *pending);
+    });
+    return std::move(pending->image);
+}
+
+std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareTexture(
+    const Texture& texture) const {
     // Validate texture data
     if (texture.pixels.empty()) {
         QL_LOG_ERROR("Texture '{}' has no pixel data", texture.name);
@@ -147,14 +211,14 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         compressed.data = texture.bc7Data->data;  // Copy to avoid modifying original
 
         QL_LOG_DEBUG("  Using pre-compressed BC7 data for '{}'", texture.name);
-        return UploadBC7Texture(texture, compressed);
+        return PrepareBC7Texture(texture, compressed);
     }
 
     // Fall back to runtime compression if no pre-compressed data
     if (TextureCompressor::IsAvailable() && TextureCompressor::CanCompress(texture)) {
         auto compressed = TextureCompressor::CompressBC7(texture, false /* fast mode */);
         if (compressed.has_value()) {
-            return UploadBC7Texture(texture, compressed.value());
+            return PrepareBC7Texture(texture, compressed.value());
         }
         // Fall through to uncompressed upload if compression failed
         QL_LOG_WARN("BC7 compression failed for '{}', using uncompressed", texture.name);
@@ -170,7 +234,8 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
                 texture.name, texture.width, texture.height, formatName, uncompressedSize);
 
     // Step 1: Create staging buffer (CPU-accessible)
-    GpuBuffer stagingBuffer(
+    auto pending = std::make_unique<PendingUpload>();
+    pending->staging = std::make_unique<GpuBuffer>(
         m_context.GetAllocator(),
         uncompressedSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -178,13 +243,11 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
     );
 
     // Step 2: Upload CPU pixel data to staging buffer
-    void* data = stagingBuffer.Map();
-    std::memcpy(data, texture.pixels.data(), uncompressedSize);
-    stagingBuffer.Unmap();
+    pending->staging->Upload(texture.pixels.data(), uncompressedSize);
 
     // Step 3: Create device-local GPU image with correct format and full mipmap chain
     u32 mipLevels = static_cast<u32>(std::floor(std::log2(std::max(texture.width, texture.height)))) + 1;
-    auto gpuImage = std::make_unique<GpuImage>(
+    pending->image = std::make_unique<GpuImage>(
         m_context.GetAllocator(),
         m_context.GetDevice(),
         texture.width,
@@ -195,45 +258,11 @@ std::unique_ptr<GpuImage> TextureManager::UploadTexture(const Texture& texture) 
         mipLevels  // Full mipmap chain
     );
 
-    // Step 4: Execute upload via command buffer
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL (base level only, for upload)
-        CommandHelper::TransitionImageLayout(
-            cmd,
-            gpuImage->GetImage(),
-            format,  // Use correct format (SRGB or UNORM)
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1  // Only base level for initial upload
-        );
-
-        // Define copy region (buffer -> image)
-        VkBufferImageCopy region{};
-        region.bufferOffset = 0;
-        region.bufferRowLength = 0;   // Tightly packed
-        region.bufferImageHeight = 0; // Tightly packed
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = 0;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = {0, 0, 0};
-        region.imageExtent = {texture.width, texture.height, 1};
-
-        // Copy staging buffer to GPU image (base level only)
-        vkCmdCopyBufferToImage(
-            cmd,
-            stagingBuffer.GetHandle(),
-            gpuImage->GetImage(),
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1,
-            &region
-        );
-
-        // Generate mipmaps using vkCmdBlitImage
-        GenerateMipmaps(cmd, gpuImage.get(), format, texture.width, texture.height, mipLevels);
-    });
-
-    return gpuImage;
+    pending->format = format;
+    pending->width = texture.width;
+    pending->height = texture.height;
+    pending->mipLevels = mipLevels;
+    return pending;
 }
 
 VkSampler TextureManager::CreateSampler(const TextureSampler& samplerInfo) const {
@@ -330,7 +359,7 @@ Texture TextureManager::CreateDummyTexture() {
 // BC7 Compressed Texture Upload
 // ============================================================================
 
-std::unique_ptr<GpuImage> TextureManager::UploadBC7Texture(
+std::unique_ptr<TextureManager::PendingUpload> TextureManager::PrepareBC7Texture(
     const Texture& texture,
     const BC7CompressedData& compressed) const {
 
@@ -354,7 +383,8 @@ std::unique_ptr<GpuImage> TextureManager::UploadBC7Texture(
 
     // Step 1: Create staging buffer for compressed data
     VkDeviceSize compressedSize = static_cast<VkDeviceSize>(compressed.GetCompressedSize());
-    GpuBuffer stagingBuffer(
+    auto pending = std::make_unique<PendingUpload>();
+    pending->staging = std::make_unique<GpuBuffer>(
         m_context.GetAllocator(),
         compressedSize,
         VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
@@ -362,14 +392,12 @@ std::unique_ptr<GpuImage> TextureManager::UploadBC7Texture(
     );
 
     // Step 2: Copy compressed data to staging buffer
-    void* data = stagingBuffer.Map();
-    std::memcpy(data, compressed.data.data(), compressedSize);
-    stagingBuffer.Unmap();
+    pending->staging->Upload(compressed.data.data(), compressedSize);
 
     // Step 3: Create device-local GPU image with BC7 format
     // Note: For BC7, image dimensions should be the original texture dimensions,
     // not the aligned dimensions. Vulkan handles the block alignment internally.
-    auto gpuImage = std::make_unique<GpuImage>(
+    pending->image = std::make_unique<GpuImage>(
         m_context.GetAllocator(),
         m_context.GetDevice(),
         texture.width,  // Original width (Vulkan handles alignment)
@@ -380,65 +408,58 @@ std::unique_ptr<GpuImage> TextureManager::UploadBC7Texture(
         mipLevels
     );
 
-    // Step 4: Execute upload via command buffer
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        // Transition: UNDEFINED -> TRANSFER_DST_OPTIMAL
-        CommandHelper::TransitionImageLayout(
-            cmd,
-            gpuImage->GetImage(),
-            format,
-            VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            mipLevels
-        );
+    pending->format = format;
+    pending->width = texture.width;
+    pending->height = texture.height;
+    pending->mipLevels = mipLevels;
+    pending->bufferRowLength = alignedWidth;
+    pending->bufferImageHeight = alignedHeight;
+    pending->compressed = true;
+    return pending;
+}
 
-        // Define copy region for BC7 (buffer -> image)
-        // For block-compressed formats, bufferRowLength/bufferImageHeight are in texels, not blocks
-        VkBufferImageCopy region{};
-        region.bufferOffset = 0;
-        region.bufferRowLength = alignedWidth;   // Width in texels (aligned to block size)
-        region.bufferImageHeight = alignedHeight; // Height in texels (aligned to block size)
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.mipLevel = 0;
-        region.imageSubresource.baseArrayLayer = 0;
-        region.imageSubresource.layerCount = 1;
-        region.imageOffset = {0, 0, 0};
-        region.imageExtent = {texture.width, texture.height, 1};
+void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
+                                         const PendingUpload& upload) const {
+    CommandHelper::TransitionImageLayout(
+        cmd, upload.image->GetImage(), upload.format,
+        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+        upload.compressed ? upload.mipLevels : 1);
 
-        // Copy compressed data to GPU image
-        vkCmdCopyBufferToImage(
-            cmd,
-            stagingBuffer.GetHandle(),
-            gpuImage->GetImage(),
-            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1,
-            &region
-        );
+    VkBufferImageCopy region{};
+    region.bufferOffset = 0;
+    region.bufferRowLength = upload.bufferRowLength;
+    region.bufferImageHeight = upload.bufferImageHeight;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = 0;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {upload.width, upload.height, 1};
+    vkCmdCopyBufferToImage(cmd, upload.staging->GetHandle(), upload.image->GetImage(),
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        // Transition: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-        VkImageMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-        barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image = gpuImage->GetImage();
-        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        barrier.subresourceRange.baseMipLevel = 0;
-        barrier.subresourceRange.levelCount = mipLevels;
-        barrier.subresourceRange.baseArrayLayer = 0;
-        barrier.subresourceRange.layerCount = 1;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    if (!upload.compressed) {
+        GenerateMipmaps(cmd, upload.image.get(), upload.format,
+                        upload.width, upload.height, upload.mipLevels);
+        return;
+    }
 
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-            0, nullptr,
-            0, nullptr,
-            1, &barrier);
-    });
-
-    return gpuImage;
+    VkImageMemoryBarrier ready{};
+    ready.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    ready.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    ready.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ready.image = upload.image->GetImage();
+    ready.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    ready.subresourceRange.baseMipLevel = 0;
+    ready.subresourceRange.levelCount = upload.mipLevels;
+    ready.subresourceRange.baseArrayLayer = 0;
+    ready.subresourceRange.layerCount = 1;
+    ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        0, nullptr, 0, nullptr, 1, &ready);
 }
 
 // ============================================================================

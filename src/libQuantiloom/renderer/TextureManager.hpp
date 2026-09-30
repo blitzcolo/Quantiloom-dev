@@ -94,13 +94,16 @@ namespace quantiloom {
  */
 class TextureManager {
 public:
+    static constexpr VkDeviceSize kDefaultUploadBatchBytes = 64ull * 1024ull * 1024ull;
     // ========================================================================
     // Construction / Destruction
     // ========================================================================
 
     // Create texture manager
     // Note: Does not upload any textures yet (call UploadTextures)
-    explicit TextureManager(VulkanContext& context);
+    explicit TextureManager(
+        VulkanContext& context,
+        VkDeviceSize uploadBatchBytes = kDefaultUploadBatchBytes);
 
     // Destructor: automatically destroys all VkSampler objects
     // (GpuImage handles VkImage/VkImageView destruction via RAII)
@@ -144,6 +147,15 @@ public:
     // Index matches original texture index from scene
     [[nodiscard]] const std::vector<VkSampler>& GetSamplers() const { return m_samplers; }
 
+    /// Number of queue submissions used by the most recent UploadTextures().
+    /// Exposed for load-path regression tests and diagnostics.
+    [[nodiscard]] u32 GetLastUploadBatchCount() const { return m_lastUploadBatchCount; }
+
+    /// Internal diagnostic access for byte/mip/format GPU upload tests.
+    [[nodiscard]] const GpuImage& GetImageForDiagnostics(u32 index) const {
+        return *m_images.at(index);
+    }
+
     // Upload one more texture and return its index, leaving the ones already
     // uploaded alone.
     //
@@ -166,15 +178,17 @@ private:
     // Internal Helper Functions
     // ========================================================================
 
+    struct PendingUpload;
+
+    [[nodiscard]] std::unique_ptr<PendingUpload> PrepareTexture(
+        const Texture& texture) const;
+    [[nodiscard]] std::unique_ptr<PendingUpload> PrepareBC7Texture(
+        const Texture& texture, const BC7CompressedData& compressed) const;
+    void RecordTextureUpload(VkCommandBuffer cmd, const PendingUpload& upload) const;
+
     // Upload a single texture to GPU
     // Returns GpuImage containing VkImage + VkImageView
     [[nodiscard]] std::unique_ptr<GpuImage> UploadTexture(const Texture& texture) const;
-
-    // Upload a BC7 compressed texture to GPU
-    // Returns GpuImage with VK_FORMAT_BC7_*_BLOCK format
-    [[nodiscard]] std::unique_ptr<GpuImage> UploadBC7Texture(
-        const Texture& texture,
-        const BC7CompressedData& compressed) const;
 
     // Generate mipmaps for an uncompressed texture using vkCmdBlitImage
     void GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
@@ -198,6 +212,8 @@ private:
     // ========================================================================
 
     VulkanContext& m_context;
+    VkDeviceSize m_uploadBatchBytes = kDefaultUploadBatchBytes;
+    u32 m_lastUploadBatchCount = 0;
 
     // GPU image resources (VkImage + VkImageView managed by GpuImage)
     std::vector<std::unique_ptr<GpuImage>> m_images;

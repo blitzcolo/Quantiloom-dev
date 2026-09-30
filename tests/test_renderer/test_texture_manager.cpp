@@ -15,7 +15,11 @@
 
 #include <gtest/gtest.h>
 #include "scene/Texture.hpp"
+#include "renderer/CommandHelper.hpp"
+#include "renderer/GpuBuffer.hpp"
+#include "renderer/TextureManager.hpp"
 #include "renderer/TextureCompressor.hpp"
+#include "support/VulkanTestDevice.hpp"
 #include "core/Types.hpp"
 #include <vector>
 #include <unordered_map>
@@ -25,6 +29,7 @@
 #include <thread>
 #include <future>
 #include <mutex>
+#include <utility>
 
 using namespace quantiloom;
 
@@ -60,6 +65,67 @@ Texture CreateTestTexture(u32 width, u32 height, const std::string& name = "Test
     return tex;
 }
 
+std::vector<u8> ReadTextureMip(VulkanContext& context, const GpuImage& image,
+                               u32 mip, u32 width, u32 height) {
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
+    GpuBuffer readback(context.GetAllocator(), bytes,
+                       VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                       VMA_MEMORY_USAGE_GPU_TO_CPU);
+    CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+        VkImageMemoryBarrier toCopy{};
+        toCopy.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toCopy.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toCopy.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toCopy.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toCopy.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toCopy.image = image.GetImage();
+        toCopy.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        toCopy.subresourceRange.baseMipLevel = mip;
+        toCopy.subresourceRange.levelCount = 1;
+        toCopy.subresourceRange.baseArrayLayer = 0;
+        toCopy.subresourceRange.layerCount = 1;
+        toCopy.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        toCopy.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &toCopy);
+
+        VkBufferImageCopy copy{};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.mipLevel = mip;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent = {width, height, 1};
+        vkCmdCopyImageToBuffer(cmd, image.GetImage(),
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               readback.GetHandle(), 1, &copy);
+
+        VkBufferMemoryBarrier hostReady{};
+        hostReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        hostReady.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hostReady.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        hostReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        hostReady.buffer = readback.GetHandle();
+        hostReady.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT, 0,
+                             0, nullptr, 1, &hostReady, 0, nullptr);
+
+        std::swap(toCopy.oldLayout, toCopy.newLayout);
+        toCopy.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toCopy.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &toCopy);
+    });
+
+    const auto* mapped = static_cast<const u8*>(readback.MapRead());
+    if (!mapped) return {};
+    std::vector<u8> result(mapped, mapped + bytes);
+    readback.Unmap();
+    return result;
+}
+
 /**
  * @brief Simple texture cache for deduplication testing
  * (Mirrors the implementation in UsdLoader.cpp)
@@ -89,6 +155,62 @@ struct TextureCache {
 };
 
 } // anonymous namespace
+
+class TextureUploadGpuTest : public quantiloom::testing::VulkanDeviceTest {};
+
+TEST_F(TextureUploadGpuTest, BatchesUploadsWithoutChangingIdsFormatsPixelsOrMips) {
+    TextureManager manager(Device(), /*uploadBatchBytes=*/32);
+    std::vector<Texture> textures;
+    textures.push_back(CreateTestTexture(2, 2, "srgb"));
+    textures.push_back(CreateTestTexture(2, 2, "linear"));
+    textures.push_back(CreateTestTexture(4, 4, "oversize"));
+    textures.push_back(CreateTestTexture(2, 2, "tail"));
+    textures[1].isSRGB = false;
+    textures[2].isSRGB = false;
+    textures[2].retainCpuPixels = true;
+    for (usize i = 0; i < textures[2].pixels.size(); i += 4) {
+        textures[2].pixels[i + 0] = 32;
+        textures[2].pixels[i + 1] = 64;
+        textures[2].pixels[i + 2] = 96;
+        textures[2].pixels[i + 3] = 255;
+    }
+    const std::vector<u8> expectedSrgb = textures[0].pixels;
+    const std::vector<u8> expectedLinear = textures[1].pixels;
+
+    manager.UploadTextures(textures);
+
+    EXPECT_EQ(manager.GetTextureCount(), 4u);
+    EXPECT_EQ(manager.GetImageViews().size(), 4u);
+    EXPECT_EQ(manager.GetSamplers().size(), 4u);
+    EXPECT_EQ(manager.GetLastUploadBatchCount(), 3u)
+        << "two small textures, one oversized texture, and one tail batch";
+    EXPECT_EQ(manager.GetImageForDiagnostics(0).GetFormat(), VK_FORMAT_R8G8B8A8_SRGB);
+    EXPECT_EQ(manager.GetImageForDiagnostics(1).GetFormat(), VK_FORMAT_R8G8B8A8_UNORM);
+
+    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(0), 0, 2, 2),
+              expectedSrgb);
+    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(1), 0, 2, 2),
+              expectedLinear);
+    EXPECT_EQ(manager.GetImageForDiagnostics(2).GetMipLevels(), 3u);
+    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(2), 2, 1, 1),
+              (std::vector<u8>{32, 64, 96, 255}));
+
+    EXPECT_TRUE(textures[0].pixels.empty());
+    EXPECT_TRUE(textures[1].pixels.empty());
+    EXPECT_FALSE(textures[2].pixels.empty()) << "retainCpuPixels must survive batching";
+    EXPECT_TRUE(textures[3].pixels.empty());
+}
+
+TEST_F(TextureUploadGpuTest, EmptySceneStillUploadsOneWhiteDummyInOneBatch) {
+    TextureManager manager(Device(), /*uploadBatchBytes=*/8);
+    std::vector<Texture> textures;
+    manager.UploadTextures(textures);
+
+    ASSERT_EQ(manager.GetTextureCount(), 1u);
+    EXPECT_EQ(manager.GetLastUploadBatchCount(), 1u);
+    EXPECT_EQ(ReadTextureMip(Device(), manager.GetImageForDiagnostics(0), 0, 1, 1),
+              (std::vector<u8>{255, 255, 255, 255}));
+}
 
 // ============================================================================
 // Texture Deduplication Tests
