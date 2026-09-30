@@ -397,6 +397,106 @@ TEST_F(ThermalStepGpuTest, MaterialsWithNoConductivityAreNeverWritten) {
     EXPECT_DOUBLE_EQ(state.Surface(0), 300.0);
 }
 
+TEST_F(ThermalStepGpuTest, StaticResourcesAreReusedAndContentChangesInvalidateThem) {
+    GpuThermalStepper gpuStepper(Device());
+    if (!gpuStepper.IsValid()) {
+        GTEST_SKIP() << "thermal_step.spv unavailable";
+    }
+
+    Vector<ThermalElement> elements = OneElement();
+
+    ThermalMaterial material;
+    material.conductivity_W_mK = 1.4f;
+    material.density_kg_m3 = 2300.0f;
+    material.specificHeat_J_kgK = 880.0f;
+    material.thickness_m = 0.2f;
+    material.convection_W_m2K = 10.0f;
+    material.shortwaveAbsorptivity = 0.4f;
+    material.longwaveEmissivity = 0.92f;
+    Vector<ThermalMaterial> materials{material};
+
+    ExchangeGeometry exchange = MakeOpenSkyExchange(1);
+    SunVisibilityTable sunTable;
+    sunTable.sampleTime_h = {0.0};
+    sunTable.visibility = {1.0f};
+    sunTable.reflectedGain = {0.1f};
+    sunTable.diffuseGain = {1.0f};
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 293.15;
+    forcing.sunIrradiance_W_m2 = 850.0;
+    forcing.diffuseIrradiance_W_m2 = 100.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+    forcing.skyTemperature_K = 270.0;
+
+    Vector<ThermalBatchStep> batch(120);
+    for (auto& step : batch) {
+        step.forcing = forcing;
+        step.dt_s = 60.0;
+    }
+
+    const auto run = [&](GpuThermalStepper& stepper) {
+        ThermalState state = MakeState(1, 10, 290.0, true);
+        stepper.StepMany(state, elements, materials, exchange, sunTable, batch);
+        return state;
+    };
+    const auto expectColdMatch = [&](const ThermalState& cached) {
+        GpuThermalStepper coldStepper(Device());
+        ASSERT_TRUE(coldStepper.IsValid());
+        const ThermalState cold = run(coldStepper);
+        EXPECT_EQ(cached.temperature_K, cold.temperature_K);
+        EXPECT_EQ(cached.sunSensitivity_K, cold.sunSensitivity_K);
+    };
+
+    const ThermalState first = run(gpuStepper);
+    const usize firstGeneration = gpuStepper.StaticInputGenerationForTesting();
+    const usize firstAllocations = gpuStepper.BufferAllocationCountForTesting();
+    ASSERT_EQ(firstGeneration, 1u);
+
+    // Rewinding to the same CPU state must use the resident static buffers and
+    // the same dynamic allocations, while producing the exact same f32 answer.
+    const ThermalState warm = run(gpuStepper);
+    EXPECT_EQ(gpuStepper.StaticInputGenerationForTesting(), firstGeneration);
+    EXPECT_EQ(gpuStepper.BufferAllocationCountForTesting(), firstAllocations);
+    EXPECT_EQ(warm.temperature_K, first.temperature_K);
+    EXPECT_EQ(warm.sunSensitivity_K, first.sunSensitivity_K);
+
+    // These vectors are deliberately edited in place. Pointer-based cache keys
+    // would miss every one of the changes below.
+    materials[0].shortwaveAbsorptivity = 0.8f;
+    const ThermalState changedMaterial = run(gpuStepper);
+    EXPECT_EQ(gpuStepper.StaticInputGenerationForTesting(), firstGeneration + 1);
+    EXPECT_EQ(gpuStepper.BufferAllocationCountForTesting(), firstAllocations);
+    EXPECT_NE(changedMaterial.temperature_K, warm.temperature_K);
+    expectColdMatch(changedMaterial);
+
+    exchange.skyFraction[0] = 0.25f;
+    const ThermalState changedEpoch = run(gpuStepper);
+    EXPECT_EQ(gpuStepper.StaticInputGenerationForTesting(), firstGeneration + 2);
+    EXPECT_EQ(gpuStepper.BufferAllocationCountForTesting(), firstAllocations);
+    EXPECT_NE(changedEpoch.temperature_K, changedMaterial.temperature_K);
+    expectColdMatch(changedEpoch);
+
+    sunTable.visibility[0] = 0.2f;
+    const ThermalState changedSunTable = run(gpuStepper);
+    EXPECT_EQ(gpuStepper.StaticInputGenerationForTesting(), firstGeneration + 3);
+    EXPECT_EQ(gpuStepper.BufferAllocationCountForTesting(), firstAllocations);
+    EXPECT_NE(changedSunTable.temperature_K, changedEpoch.temperature_K);
+    expectColdMatch(changedSunTable);
+
+    // Per-step forcing is pushed on every dispatch rather than cached in a
+    // buffer. It must change the result without invalidating static resources.
+    for (auto& step : batch) {
+        step.forcing.airTemperature_K = 310.0;
+        step.forcing.sunIrradiance_W_m2 = 500.0;
+    }
+    const ThermalState changedForcing = run(gpuStepper);
+    EXPECT_EQ(gpuStepper.StaticInputGenerationForTesting(), firstGeneration + 3);
+    EXPECT_EQ(gpuStepper.BufferAllocationCountForTesting(), firstAllocations);
+    EXPECT_NE(changedForcing.temperature_K, changedSunTable.temperature_K);
+    expectColdMatch(changedForcing);
+}
+
 TEST_F(ThermalStepGpuTest, MoreThanMaxNodesIsRefused) {
     GpuThermalStepper gpuStepper(Device());
     if (!gpuStepper.IsValid()) {

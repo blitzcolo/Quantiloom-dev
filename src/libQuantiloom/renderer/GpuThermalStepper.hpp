@@ -32,6 +32,13 @@ public:
 
     [[nodiscard]] bool IsValid() const;
 
+    /// Diagnostics used by the GPU regression tests. The static-input
+    /// generation advances once for each StepMany call that changes bytes read
+    /// by a static binding; the allocation count advances only when a buffer
+    /// has to be created or resized.
+    [[nodiscard]] usize StaticInputGenerationForTesting() const;
+    [[nodiscard]] usize BufferAllocationCountForTesting() const;
+
     void Step(thermal::ThermalState& state, const Vector<thermal::ThermalElement>& elements,
               const Vector<thermal::ThermalMaterial>& materials,
               const thermal::ExchangeGeometry& exchange, const thermal::ThermalForcing& forcing,

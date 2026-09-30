@@ -13,6 +13,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <type_traits>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -132,7 +133,22 @@ struct GpuThermalStepper::Impl {
     VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
     VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
 
-    // GPU buffers, created per PrepareStatic / StepMany call
+    // The static inputs keep an exact copy of the bytes uploaded to Vulkan.
+    // The timeline mutates its epoch/material/sun-table storage in place, so
+    // pointer identity cannot say whether any of these bindings is current.
+    Vector<ThermalElementGpu> cachedElements;
+    Vector<ThermalMaterialGpu> cachedMaterials;
+    Vector<u32> cachedCsrRowStart;
+    Vector<u32> cachedCsrColumn;
+    Vector<f32> cachedCsrValue;
+    Vector<f32> cachedSkyFraction;
+    Vector<f32> cachedSunVisibility;
+    Vector<f32> cachedReflectedGain;
+    Vector<f32> cachedDiffuseGain;
+
+    // GPU buffers survive StepMany calls. Static buffers are uploaded only
+    // when the exact bytes above change; dynamic buffers are uploaded on every
+    // call but keep their allocations while their sizes are unchanged.
     std::unique_ptr<GpuBuffer> elementBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     std::unique_ptr<GpuBuffer> csrRowStartBuffer;
@@ -154,6 +170,8 @@ struct GpuThermalStepper::Impl {
     /// False when binding 11 holds a placeholder, i.e. the caller sized no
     /// tangent into the state and does not want one stepped.
     bool carryTangent = false;
+    usize staticInputGeneration = 0;
+    usize bufferAllocationCount = 0;
 
     explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
 
@@ -255,12 +273,62 @@ struct GpuThermalStepper::Impl {
         return true;
     }
 
+    template <typename T>
+    static bool SameBytes(const Vector<T>& a, const Vector<T>& b) {
+        static_assert(std::is_trivially_copyable_v<T>);
+        return a.size() == b.size() &&
+               (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(T)) == 0);
+    }
+
+    bool EnsureBuffer(std::unique_ptr<GpuBuffer>& buffer, VkDeviceSize size,
+                      VkBufferUsageFlags usage) {
+        size = std::max(size, VkDeviceSize{1});
+        if (buffer && buffer->GetSize() == size) return false;
+        buffer = std::make_unique<GpuBuffer>(context.GetAllocator(), size, usage,
+                                             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        ++bufferAllocationCount;
+        return true;
+    }
+
+    template <typename T>
+    bool UpdateStaticBuffer(std::unique_ptr<GpuBuffer>& buffer, Vector<T>& cached,
+                            const Vector<T>& values, bool& staticChanged) {
+        const bool handleChanged = EnsureBuffer(
+            buffer, std::max(values.size(), usize{1}) * sizeof(T),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (handleChanged || !SameBytes(cached, values)) {
+            if (values.empty()) {
+                const T zero{};
+                buffer->Upload(&zero, sizeof(T));
+            } else {
+                buffer->Upload(values.data(), values.size() * sizeof(T));
+            }
+            cached = values;
+            staticChanged = true;
+        }
+        return handleChanged;
+    }
+
+    template <typename T>
+    bool UploadDynamicBuffer(std::unique_ptr<GpuBuffer>& buffer,
+                             const Vector<T>& values,
+                             VkBufferUsageFlags usage) {
+        const bool handleChanged = EnsureBuffer(
+            buffer, std::max(values.size(), usize{1}) * sizeof(T), usage);
+        if (values.empty()) {
+            const T zero{};
+            buffer->Upload(&zero, sizeof(T));
+        } else {
+            buffer->Upload(values.data(), values.size() * sizeof(T));
+        }
+        return handleChanged;
+    }
+
     void UploadAndBind(const Vector<thermal::ThermalElement>& elements,
                        const Vector<thermal::ThermalMaterial>& materials,
                        const thermal::ExchangeGeometry& exchange,
                        const thermal::SunVisibilityTable& sunTable,
                        const thermal::ThermalState& state) {
-        VmaAllocator alloc = context.GetAllocator();
         const u32 n = static_cast<u32>(elements.size());
         const u32 nodes = state.nodeCount;
         lastElementCount = n;
@@ -274,11 +342,6 @@ struct GpuThermalStepper::Impl {
             gpuElements[e].normal = elements[e].normal;
             gpuElements[e].materialId = elements[e].materialId;
         }
-        elementBuffer = std::make_unique<GpuBuffer>(
-            alloc, n * sizeof(ThermalElementGpu),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        elementBuffer->Upload(gpuElements.data(), n * sizeof(ThermalElementGpu));
-
         // Materials
         Vector<ThermalMaterialGpu> gpuMats(materials.size());
         for (usize m = 0; m < materials.size(); ++m) {
@@ -294,83 +357,63 @@ struct GpuThermalStepper::Impl {
             gpuMats[m].interiorTemperature = materials[m].interiorTemperature_K;
             gpuMats[m].wetnessFactor = materials[m].wetnessFactor;
         }
-        materialBuffer = std::make_unique<GpuBuffer>(
-            alloc, gpuMats.size() * sizeof(ThermalMaterialGpu),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        materialBuffer->Upload(gpuMats.data(), gpuMats.size() * sizeof(ThermalMaterialGpu));
+        // Canonicalise the fallbacks before comparing. This makes the cache key
+        // exactly the bytes the shader can read rather than every field in the
+        // source objects (sample times/directions are consumed by the caller).
+        Vector<f32> skyFraction(n, 0.0f);
+        std::copy_n(exchange.skyFraction.begin(),
+                    std::min(exchange.skyFraction.size(), usize{n}),
+                    skyFraction.begin());
 
-        // CSR
-        csrRowStartBuffer = std::make_unique<GpuBuffer>(
-            alloc, exchange.viewFactors.rowStart.size() * sizeof(u32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        csrRowStartBuffer->Upload(exchange.viewFactors.rowStart.data(),
-                                  exchange.viewFactors.rowStart.size() * sizeof(u32));
-
-        const VkDeviceSize colBytes = std::max(exchange.viewFactors.column.size(), usize{1}) * sizeof(u32);
-        csrColumnBuffer = std::make_unique<GpuBuffer>(
-            alloc, colBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        if (!exchange.viewFactors.column.empty()) {
-            csrColumnBuffer->Upload(exchange.viewFactors.column.data(),
-                                    exchange.viewFactors.column.size() * sizeof(u32));
-        }
-
-        const VkDeviceSize valBytes = std::max(exchange.viewFactors.value.size(), usize{1}) * sizeof(f32);
-        csrValueBuffer = std::make_unique<GpuBuffer>(
-            alloc, valBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        if (!exchange.viewFactors.value.empty()) {
-            csrValueBuffer->Upload(exchange.viewFactors.value.data(),
-                                   exchange.viewFactors.value.size() * sizeof(f32));
-        }
-
-        // Sky fraction
-        skyFractionBuffer = std::make_unique<GpuBuffer>(
-            alloc, n * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        skyFractionBuffer->Upload(exchange.skyFraction.data(), n * sizeof(f32));
-
-        // Sun visibility table
         const usize sunSize = std::max(sunTable.visibility.size(), usize{n});
-        sunVisBuffer = std::make_unique<GpuBuffer>(
-            alloc, sunSize * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        Vector<f32> sunVisibility(sunSize, 0.0f);
         if (!sunTable.visibility.empty()) {
-            sunVisBuffer->Upload(sunTable.visibility.data(),
-                                 sunTable.visibility.size() * sizeof(f32));
+            std::copy(sunTable.visibility.begin(), sunTable.visibility.end(),
+                      sunVisibility.begin());
         } else if (!exchange.sunVisibility.empty()) {
-            sunVisBuffer->Upload(exchange.sunVisibility.data(), n * sizeof(f32));
+            std::copy_n(exchange.sunVisibility.begin(),
+                        std::min(exchange.sunVisibility.size(), usize{n}),
+                        sunVisibility.begin());
         }
 
-        // Reflected gain: same K-column layout as the visibility. Nothing baked
-        // means a one-float placeholder and a flag the shader checks, rather
-        // than a K*n buffer of zeros nobody reads.
         hasReflectedGain = sunTable.reflectedGain.size() == sunTable.visibility.size() &&
                            !sunTable.reflectedGain.empty();
-        const usize reflectedSize = hasReflectedGain ? sunTable.reflectedGain.size() : 1;
-        reflectedGainBuffer = std::make_unique<GpuBuffer>(
-            alloc, reflectedSize * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        if (hasReflectedGain) {
-            reflectedGainBuffer->Upload(sunTable.reflectedGain.data(),
-                                        reflectedSize * sizeof(f32));
+        Vector<f32> reflectedGain = hasReflectedGain
+                                        ? sunTable.reflectedGain
+                                        : Vector<f32>{0.0f};
+
+        Vector<f32> diffuseGain(n, 0.0f);
+        if (sunTable.diffuseGain.size() == n) {
+            diffuseGain = sunTable.diffuseGain;
         } else {
-            const f32 zero = 0.0f;
-            reflectedGainBuffer->Upload(&zero, sizeof(f32));
+            diffuseGain = skyFraction;
         }
 
-        // Diffuse gain: one column. With nothing baked the fallback is the bare
-        // sky fraction, which is what the CPU stepper falls back to -- uploaded
-        // rather than branched on, so the shader has one path.
-        diffuseGainBuffer = std::make_unique<GpuBuffer>(
-            alloc, n * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        if (sunTable.diffuseGain.size() == n) {
-            diffuseGainBuffer->Upload(sunTable.diffuseGain.data(), n * sizeof(f32));
-        } else if (exchange.skyFraction.size() >= n) {
-            diffuseGainBuffer->Upload(exchange.skyFraction.data(), n * sizeof(f32));
-        } else {
-            const Vector<f32> zeros(n, 0.0f);
-            diffuseGainBuffer->Upload(zeros.data(), n * sizeof(f32));
-        }
+        bool descriptorsChanged = false;
+        bool staticChanged = false;
+        descriptorsChanged |= UpdateStaticBuffer(elementBuffer, cachedElements,
+                                                  gpuElements, staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(materialBuffer, cachedMaterials,
+                                                  gpuMats, staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(csrRowStartBuffer, cachedCsrRowStart,
+                                                  exchange.viewFactors.rowStart,
+                                                  staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(csrColumnBuffer, cachedCsrColumn,
+                                                  exchange.viewFactors.column,
+                                                  staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(csrValueBuffer, cachedCsrValue,
+                                                  exchange.viewFactors.value,
+                                                  staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(skyFractionBuffer, cachedSkyFraction,
+                                                  skyFraction, staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(sunVisBuffer, cachedSunVisibility,
+                                                  sunVisibility, staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(reflectedGainBuffer,
+                                                  cachedReflectedGain,
+                                                  reflectedGain, staticChanged);
+        descriptorsChanged |= UpdateStaticBuffer(diffuseGainBuffer, cachedDiffuseGain,
+                                                  diffuseGain, staticChanged);
+        if (staticChanged) ++staticInputGeneration;
 
         // State: f64 → f32 upload
         const usize stateSize = static_cast<usize>(n) * nodes;
@@ -378,46 +421,39 @@ struct GpuThermalStepper::Impl {
         for (usize i = 0; i < stateSize; ++i) {
             stateF32[i] = static_cast<f32>(state.temperature_K[i]);
         }
-        stateBuffer = std::make_unique<GpuBuffer>(
-            alloc, stateSize * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
-        stateBuffer->Upload(stateF32.data(), stateSize * sizeof(f32));
+        descriptorsChanged |= UploadDynamicBuffer(
+            stateBuffer, stateF32,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 
         // Tangent: same layout as the state, uploaded only when the caller is
         // carrying one. A one-float placeholder otherwise -- the descriptor
         // must be valid either way, and pc.carryTangent is what keeps the
         // shader off it.
         carryTangent = state.HasSensitivity();
-        const usize sensitivitySize = carryTangent ? stateSize : 1;
-        sensitivityBuffer = std::make_unique<GpuBuffer>(
-            alloc, sensitivitySize * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        Vector<f32> sensitivityF32(carryTangent ? stateSize : 1, 0.0f);
         if (carryTangent) {
-            Vector<f32> sensitivityF32(stateSize);
             for (usize i = 0; i < stateSize; ++i) {
                 sensitivityF32[i] = static_cast<f32>(state.sunSensitivity_K[i]);
             }
-            sensitivityBuffer->Upload(sensitivityF32.data(), stateSize * sizeof(f32));
-        } else {
-            const f32 zero = 0.0f;
-            sensitivityBuffer->Upload(&zero, sizeof(f32));
         }
+        descriptorsChanged |= UploadDynamicBuffer(
+            sensitivityBuffer, sensitivityF32,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
 
         // Surface ping-pong: 2 * n floats
-        surfaceBuffer = std::make_unique<GpuBuffer>(
-            alloc, 2u * n * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
         // Seed both halves from the initial surface temperatures
         Vector<f32> surfInit(2u * n);
         for (u32 e = 0; e < n; ++e) {
             surfInit[e] = stateF32[static_cast<usize>(e) * nodes];       // parity 0
             surfInit[n + e] = stateF32[static_cast<usize>(e) * nodes];   // parity 1
         }
-        surfaceBuffer->Upload(surfInit.data(), surfInit.size() * sizeof(f32));
+        descriptorsChanged |= UploadDynamicBuffer(
+            surfaceBuffer, surfInit, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
-        // Bind descriptors
+        if (!descriptorsChanged) return;
+
+        // Buffer handles only change on creation or resize. Contents can be
+        // refreshed without rewriting the descriptor set.
         const VkDescriptorBufferInfo infos[kBindingCount] = {
             {elementBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {materialBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
@@ -451,9 +487,10 @@ struct GpuThermalStepper::Impl {
         const u32 n = lastElementCount;
         const u32 nodes = lastNodeCount;
 
-        const f32* mapped = static_cast<const f32*>(stateBuffer->Map());
+        const f32* mapped = static_cast<const f32*>(stateBuffer->MapRead());
+        if (!mapped) return;
         const f32* tangent = carryTangent && state.HasSensitivity()
-                                 ? static_cast<const f32*>(sensitivityBuffer->Map())
+                                 ? static_cast<const f32*>(sensitivityBuffer->MapRead())
                                  : nullptr;
         for (usize e = 0; e < n; ++e) {
             const u32 matId = elements[e].materialId;
@@ -486,6 +523,14 @@ GpuThermalStepper::~GpuThermalStepper() = default;
 bool GpuThermalStepper::IsValid() const {
     return m_impl && m_impl->pipeline != VK_NULL_HANDLE &&
            m_impl->descriptorSet != VK_NULL_HANDLE;
+}
+
+usize GpuThermalStepper::StaticInputGenerationForTesting() const {
+    return m_impl ? m_impl->staticInputGeneration : 0;
+}
+
+usize GpuThermalStepper::BufferAllocationCountForTesting() const {
+    return m_impl ? m_impl->bufferAllocationCount : 0;
 }
 
 void GpuThermalStepper::Step(thermal::ThermalState& state,
