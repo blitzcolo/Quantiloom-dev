@@ -1,10 +1,8 @@
 // ============================================================================
 // Quantiloom - Unit Tests for renderer/AccelerationStructure
 // ============================================================================
-// Tests cover:
-// - Normal buffer creation and fallback generation
-// - Buffer accessor validation
-// - BLAS construction with and without normals
+// Tests cover GeometryPrimitive's normal-data validation. GPU BLAS construction
+// and merged-buffer fallbacks are covered by test_scene_geometry.cpp.
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -17,8 +15,7 @@ using namespace quantiloom;
 // GeometryPrimitive - Normal Handling Tests
 // ============================================================================
 // These tests document the expected behavior when normals are missing.
-// BLAS (in AccelerationStructure.cpp) will automatically generate flat normals
-// for primitives without normals at GPU upload time.
+// SceneGeometry reserves a +Y fallback slice in the merged normal buffer.
 // ============================================================================
 
 TEST(AccelerationStructureTest, PrimitiveWithoutNormals) {
@@ -35,8 +32,7 @@ TEST(AccelerationStructureTest, PrimitiveWithoutNormals) {
     EXPECT_TRUE(prim.IsValid());
     EXPECT_TRUE(prim.normals.empty());
 
-    // Note: BLAS will automatically generate flat normals during GPU upload
-    // See AccelerationStructure.cpp:UploadGeometryBuffers() for implementation
+    // SceneGeometry will fill this primitive's merged normal slice with +Y.
 }
 
 TEST(AccelerationStructureTest, PrimitiveWithNormals) {
@@ -58,7 +54,7 @@ TEST(AccelerationStructureTest, PrimitiveWithNormals) {
     EXPECT_FALSE(prim.normals.empty());
     EXPECT_EQ(prim.normals.size(), 3);
 
-    // BLAS will use these normals directly for smooth shading
+    // SceneGeometry copies these normals into the merged shader buffer.
 }
 
 TEST(AccelerationStructureTest, FlatNormalGeneration) {
@@ -72,7 +68,7 @@ TEST(AccelerationStructureTest, FlatNormalGeneration) {
     };
     prim.indices = {0, 1, 2};
 
-    // Compute geometric normal (what BLAS will generate)
+    // Compute the geometric normal a loader-side generator would produce.
     glm::vec3 v0 = prim.positions[0];
     glm::vec3 v1 = prim.positions[1];
     glm::vec3 v2 = prim.positions[2];
@@ -111,7 +107,7 @@ TEST(AccelerationStructureTest, QuadMeshWithNormals) {
     EXPECT_EQ(prim.normals.size(), 4);
     EXPECT_EQ(prim.GetTriangleCount(), 2);
 
-    // BLAS will interpolate these normals for smooth shading
+    // The shader will interpolate these merged normals for smooth shading.
 }
 
 TEST(AccelerationStructureTest, CubeMeshWithFlatNormals) {

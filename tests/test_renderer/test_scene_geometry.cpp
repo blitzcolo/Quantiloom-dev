@@ -68,6 +68,8 @@ TEST_F(VulkanDeviceTest, SceneGeometryConcatenatesPrimitivesInOrder) {
 
     ASSERT_TRUE(geometry.IsValid());
     EXPECT_EQ(geometry.BlasCount(), 2u);
+    EXPECT_TRUE(geometry.AllBlasUseMergedGeometryBuffers())
+        << "BLAS must reference the shader's merged geometry instead of owning copies";
     EXPECT_EQ(geometry.VertexCount(), 6u);
     EXPECT_EQ(geometry.IndexCount(), 6u);
 

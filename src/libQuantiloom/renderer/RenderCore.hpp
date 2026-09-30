@@ -444,6 +444,10 @@ public:
     /// Build() must return false here; TLAS keeps its separate refit scratch.
     [[nodiscard]] bool HasResidentBlasBuildScratch() const;
 
+    /// Diagnostic that pins the no-duplicate-storage contract: every BLAS must
+    /// build from this object's merged vertex and index buffers.
+    [[nodiscard]] bool AllBlasUseMergedGeometryBuffers() const;
+
     /// The offsets written to InstanceInfo(), kept for tests and diagnostics.
     [[nodiscard]] const Vector<InstanceGeometryInfo>& Instances() const { return m_instances; }
 
@@ -453,13 +457,15 @@ public:
     [[nodiscard]] const Vector<u32>& InstanceToNode() const { return m_instanceToNode; }
 
 private:
-    Vector<std::unique_ptr<BLAS>> m_blas;
-    std::unique_ptr<TLAS> m_tlas;
+    // Declared before the BLAS so reverse destruction order keeps these alive
+    // until every non-owning GeometrySlice is gone.
     std::unique_ptr<GpuBuffer> m_vertices;
     std::unique_ptr<GpuBuffer> m_indices;
     std::unique_ptr<GpuBuffer> m_normals;
     std::unique_ptr<GpuBuffer> m_uvs;
     std::unique_ptr<GpuBuffer> m_tangents;
+    Vector<std::unique_ptr<BLAS>> m_blas;
+    std::unique_ptr<TLAS> m_tlas;
     std::unique_ptr<GpuBuffer> m_instanceInfo;
     Vector<InstanceGeometryInfo> m_instances;
     Vector<u32> m_instanceToNode;

@@ -55,16 +55,12 @@ namespace quantiloom {
  * Each GeometryPrimitive (subset of a Mesh with one material) gets its own BLAS.
  *
  * Build process:
- * 1. Constructor uploads vertex/index/UV/tangent/normal data to GPU buffers
+ * 1. Constructor receives a slice of the scene's merged vertex/index buffers
  * 2. Build() records VkAccelerationStructureBuildGeometryInfoKHR into command buffer
  * 3. GPU executes build asynchronously (requires synchronization before TLAS build)
  *
  * Memory layout:
- * - Vertex buffer: Device-local, contains positions (vec3)
- * - Index buffer: Device-local, contains triangle indices (u32)
- * - UV buffer: Device-local, optional texture coordinates (vec2)
- * - Tangent buffer: Device-local, optional tangent vectors (vec4)
- * - Normal buffer: Device-local, required smooth normals (vec3)
+ * - Vertex/index data: non-owning slices of SceneGeometry's merged buffers
  * - AS buffer: Device-local, contains acceleration structure data
  * - Scratch buffer: Device-local, temporary storage during build (destroyed after)
  *
@@ -73,9 +69,7 @@ namespace quantiloom {
  * // Create BLAS for each primitive in scene
  * std::vector<BLAS> blasList;
  * for (const auto& mesh : scene.meshes) {
- *     for (const auto& primitive : mesh.primitives) {
- *         blasList.emplace_back(context, primitive);
- *     }
+ *     // SceneGeometry constructs each BLAS with the primitive's merged slices.
  * }
  *
  * // Build all BLAS on GPU
@@ -88,7 +82,7 @@ namespace quantiloom {
  *
  * @note Non-copyable, movable (transfer ownership)
  * @note Build() must be called before BLAS can be used in TLAS
- * @note Geometry buffers are uploaded automatically in constructor
+ * @note The referenced geometry buffers must outlive the BLAS
  *
  * @see TLAS for scene-level acceleration structure
  * @see GeometryPrimitive for input geometry data
@@ -96,11 +90,20 @@ namespace quantiloom {
  */
 class BLAS {
 public:
+    struct GeometrySlice {
+        const GpuBuffer* vertices = nullptr;
+        const GpuBuffer* indices = nullptr;
+        u32 vertexOffset = 0;  ///< In glm::vec3 elements
+        u32 vertexCount = 0;
+        u32 indexOffset = 0;   ///< In u32 elements
+        u32 indexCount = 0;
+    };
+
     /// @param opaque  Whether the traversal may skip the any-hit shader for this
     ///                geometry. False for a material with alphaMode MASK or BLEND,
     ///                whose coverage is decided per texel. Frozen at build time --
     ///                see IsOpaque() and SceneGeometry::RefreshMaterialOpacity.
-    BLAS(VulkanContext& context, const GeometryPrimitive& primitive, bool opaque = true);
+    BLAS(VulkanContext& context, GeometrySlice geometry, bool opaque = true);
     ~BLAS();
 
     // Non-copyable, movable
@@ -123,20 +126,12 @@ public:
     [[nodiscard]] bool IsBuilt() const { return m_built; }
     [[nodiscard]] bool HasBuildScratch() const { return m_scratchBuffer != nullptr; }
 
-    // Geometry buffer accessors (for shader binding)
-    [[nodiscard]] const GpuBuffer& GetVertexBuffer() const { return *m_vertexBuffer; }
-    [[nodiscard]] const GpuBuffer& GetIndexBuffer() const { return *m_indexBuffer; }
-    [[nodiscard]] const GpuBuffer& GetUVBuffer() const { return *m_uvBuffer; }  // UV coordinates
-    [[nodiscard]] bool HasUVs() const { return m_uvBuffer != nullptr; }  // Check if UVs are available
-    [[nodiscard]] const GpuBuffer& GetTangentBuffer() const { return *m_tangentBuffer; }  // Tangent vectors
-    [[nodiscard]] bool HasTangents() const { return m_tangentBuffer != nullptr; }  // Check if tangents are available
-    [[nodiscard]] const GpuBuffer& GetNormalBuffer() const { return *m_normalBuffer; }  // Normal vectors
-    [[nodiscard]] bool HasNormals() const { return m_normalBuffer != nullptr; }  // Check if normals are available
+    [[nodiscard]] bool UsesGeometryBuffers(const GpuBuffer& vertices,
+                                           const GpuBuffer& indices) const {
+        return m_geometry.vertices == &vertices && m_geometry.indices == &indices;
+    }
 
 private:
-    // Helper: Upload vertex and index data to GPU buffers
-    void UploadGeometryBuffers();
-
     VulkanContext& m_context;
 
     // Acceleration structure handle
@@ -144,11 +139,6 @@ private:
 
     // Buffers (backing memory for AS)
     std::unique_ptr<GpuBuffer> m_asBuffer;       // AS storage
-    std::unique_ptr<GpuBuffer> m_vertexBuffer;   // Vertex data (device-local)
-    std::unique_ptr<GpuBuffer> m_indexBuffer;    // Index data (device-local)
-    std::unique_ptr<GpuBuffer> m_uvBuffer;       // UV coordinates (device-local, optional)
-    std::unique_ptr<GpuBuffer> m_tangentBuffer;  // Tangent vectors (device-local, optional)
-    std::unique_ptr<GpuBuffer> m_normalBuffer;   // Normal vectors (device-local, required for smooth shading)
     std::unique_ptr<GpuBuffer> m_scratchBuffer;  // Scratch space for build
 
     // Device address
@@ -162,8 +152,9 @@ private:
     // alphaMode means rebuilding, and this is what says whether we have to.
     bool m_opaque = true;
 
-    // Cached geometry info
-    const GeometryPrimitive& m_primitive;
+    // Non-owning slice of SceneGeometry's merged buffers. SceneGeometry owns
+    // the buffers and destroys its BLAS before releasing them.
+    GeometrySlice m_geometry;
 
 public:
     /// Whether this was built opaque. Compare against the material's current

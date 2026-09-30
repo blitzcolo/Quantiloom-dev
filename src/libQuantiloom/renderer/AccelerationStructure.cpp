@@ -1,10 +1,8 @@
 #include "AccelerationStructure.hpp"
-#include "CommandHelper.hpp"
 #include "core/Log.hpp"
 #include <glm/gtc/type_ptr.hpp>
 #include <algorithm>
 #include <stdexcept>
-#include <cstring>
 #include <memory>
 
 namespace quantiloom {
@@ -45,258 +43,18 @@ void WarnIfMisaligned(const char* what, VkDeviceAddress address, VkDeviceSize al
 // BLAS Implementation
 // ============================================================================
 
-BLAS::BLAS(VulkanContext& context, const GeometryPrimitive& primitive, bool opaque)
+BLAS::BLAS(VulkanContext& context, GeometrySlice geometry, bool opaque)
     : m_context(context)
     , m_opaque(opaque)
-    , m_primitive(primitive)
+    , m_geometry(geometry)
 {
-    if (primitive.positions.empty()) {
-        throw std::runtime_error("Cannot create BLAS from empty primitive");
+    if (!geometry.vertices || !geometry.indices || geometry.vertexCount == 0 ||
+        geometry.indexCount == 0) {
+        throw std::runtime_error("Cannot create BLAS from an empty geometry slice");
     }
 
     QL_LOG_INFO("Creating BLAS for primitive with {} vertices, {} triangles",
-                primitive.positions.size(), primitive.indices.size() / 3);
-
-    // Upload vertex and index data to GPU immediately (using ExecuteImmediate)
-    // This ensures staging buffers are not destroyed before GPU upload completes
-    UploadGeometryBuffers();
-}
-
-void BLAS::UploadGeometryBuffers() {
-    VmaAllocator allocator = m_context.GetAllocator();
-
-    const VkDeviceSize vertexBufferSize = m_primitive.positions.size() * sizeof(glm::vec3);
-    const VkDeviceSize indexBufferSize = m_primitive.indices.size() * sizeof(u32);
-
-    // Create device-local buffers (GPU-only, fastest for AS build and shader access)
-    // CRITICAL: Add VK_BUFFER_USAGE_STORAGE_BUFFER_BIT for shader StructuredBuffer access
-    m_vertexBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        vertexBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // Required for StructuredBuffer in shaders
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    m_indexBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        indexBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-        VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // Required for StructuredBuffer in shaders
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-
-    // Create UV buffer if UVs are present (optional)
-    const bool hasUVs = !m_primitive.uvs.empty();
-    if (hasUVs) {
-        const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
-        m_uvBuffer = std::make_unique<GpuBuffer>(
-            allocator,
-            uvBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
-            VMA_MEMORY_USAGE_GPU_ONLY
-        );
-        QL_LOG_DEBUG("  [DEBUG] Created UV buffer: {} UVs ({} bytes)", m_primitive.uvs.size(), uvBufferSize);
-    } else {
-        QL_LOG_DEBUG("  [DEBUG] No UVs to upload (primitive.uvs is empty)");
-    }
-
-    // Create tangent buffer (always create, use fallback if not present)
-    // CRITICAL: Always bind tangent buffer to prevent GPU crash when shader accesses it
-    const bool hasTangents = !m_primitive.tangents.empty();
-    const size_t tangentCount = hasTangents ? m_primitive.tangents.size() : m_primitive.positions.size();
-    const VkDeviceSize tangentBufferSize = tangentCount * sizeof(glm::vec4);
-    m_tangentBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        tangentBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-    if (hasTangents) {
-        QL_LOG_DEBUG("  BLAS: Created tangent buffer: {} tangents ({} bytes)", tangentCount, tangentBufferSize);
-    } else {
-        QL_LOG_DEBUG("  BLAS: Created fallback tangent buffer: {} vertices ({} bytes)", tangentCount, tangentBufferSize);
-    }
-
-    // Create normal buffer (always create, use fallback if not present)
-    // CRITICAL: Always bind normal buffer for smooth shading interpolation
-    const bool hasNormals = !m_primitive.normals.empty();
-    const size_t normalCount = hasNormals ? m_primitive.normals.size() : m_primitive.positions.size();
-    const VkDeviceSize normalBufferSize = normalCount * sizeof(glm::vec3);
-    m_normalBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        normalBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,  // For StructuredBuffer access in shaders
-        VMA_MEMORY_USAGE_GPU_ONLY
-    );
-    if (hasNormals) {
-        QL_LOG_DEBUG("  BLAS: Created normal buffer: {} normals ({} bytes)", normalCount, normalBufferSize);
-    } else {
-        QL_LOG_WARN("  BLAS: No normals provided, creating fallback flat normal buffer: {} vertices ({} bytes)", normalCount, normalBufferSize);
-    }
-
-    // Upload data using ExecuteImmediate (ensures staging buffers live until upload completes)
-    // CRITICAL: Staging buffers MUST be created OUTSIDE the lambda to ensure they
-    // remain valid until the command buffer is submitted and GPU operations complete.
-    // If created inside the lambda, they would be destroyed before vkEndCommandBuffer,
-    // causing validation errors (VkBuffer destroyed while command buffer still recording).
-
-    // Create staging buffers OUTSIDE the lambda (CPU-accessible)
-    GpuBuffer vertexStaging(
-        allocator,
-        vertexBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
-
-    GpuBuffer indexStaging(
-        allocator,
-        indexBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
-
-    // Upload data to staging buffers
-    vertexStaging.Upload(m_primitive.positions.data(), vertexBufferSize);
-    indexStaging.Upload(m_primitive.indices.data(), indexBufferSize);
-
-    // Create UV staging buffer if needed
-    std::unique_ptr<GpuBuffer> uvStaging;
-    if (hasUVs) {
-        const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
-        uvStaging = std::make_unique<GpuBuffer>(
-            allocator,
-            uvBufferSize,
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_CPU_ONLY
-        );
-        uvStaging->Upload(m_primitive.uvs.data(), uvBufferSize);
-    }
-
-    // Create tangent staging buffer
-    GpuBuffer tangentStaging(
-        allocator,
-        tangentBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
-
-    if (hasTangents) {
-        tangentStaging.Upload(m_primitive.tangents.data(), tangentBufferSize);
-        QL_LOG_DEBUG("  BLAS: Prepared {} real tangents for upload", tangentCount);
-    } else {
-        // Generate fallback tangents dynamically based on vertex normals
-        // This ensures the tangent is always perpendicular to the normal,
-        // avoiding TBN matrix degeneration when normal is parallel to X-axis
-        std::vector<glm::vec4> fallbackTangents;
-        fallbackTangents.reserve(tangentCount);
-
-        // Use normals if available, otherwise generate from face
-        const bool hasNormals = !m_primitive.normals.empty();
-
-        for (size_t i = 0; i < tangentCount; ++i) {
-            glm::vec3 normal;
-            if (hasNormals && i < m_primitive.normals.size()) {
-                normal = glm::normalize(m_primitive.normals[i]);
-            } else {
-                // Fallback to up vector if no normals
-                normal = glm::vec3(0.0f, 1.0f, 0.0f);
-            }
-
-            // Choose a reference vector that is not parallel to the normal
-            // If normal is close to Y-axis (up/down), use X-axis as reference
-            // Otherwise, use Y-axis as reference
-            glm::vec3 refVector = (std::abs(normal.y) > 0.9f)
-                ? glm::vec3(1.0f, 0.0f, 0.0f)
-                : glm::vec3(0.0f, 1.0f, 0.0f);
-
-            // Compute tangent as cross product of normal and reference vector
-            glm::vec3 tangent = glm::normalize(glm::cross(normal, refVector));
-
-            // Store tangent with handedness = +1 (right-handed)
-            fallbackTangents.emplace_back(tangent, 1.0f);
-        }
-
-        tangentStaging.Upload(fallbackTangents.data(), tangentBufferSize);
-        QL_LOG_DEBUG("  BLAS: Prepared {} dynamic fallback tangents for upload", tangentCount);
-    }
-
-    // Create normal staging buffer
-    GpuBuffer normalStaging(
-        allocator,
-        normalBufferSize,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_CPU_ONLY
-    );
-
-    if (hasNormals) {
-        normalStaging.Upload(m_primitive.normals.data(), normalBufferSize);
-        QL_LOG_DEBUG("  BLAS: Prepared {} real normals for upload", normalCount);
-    } else {
-        // Loaders should have generated normals - this is a fallback for edge cases
-        QL_LOG_WARN("  BLAS: Mesh has no normals after loading - using fallback up vector");
-        std::vector<glm::vec3> fallbackNormals(normalCount, glm::vec3(0.0f, 1.0f, 0.0f));
-        normalStaging.Upload(fallbackNormals.data(), normalBufferSize);
-    }
-
-    // Execute copy commands (staging buffers remain valid throughout)
-    CommandHelper::ExecuteImmediate(m_context, [&](VkCommandBuffer cmd) {
-        // Copy staging → device-local
-        VkBufferCopy vertexCopyRegion{};
-        vertexCopyRegion.size = vertexBufferSize;
-        vkCmdCopyBuffer(cmd, vertexStaging.GetHandle(), m_vertexBuffer->GetHandle(), 1, &vertexCopyRegion);
-
-        VkBufferCopy indexCopyRegion{};
-        indexCopyRegion.size = indexBufferSize;
-        vkCmdCopyBuffer(cmd, indexStaging.GetHandle(), m_indexBuffer->GetHandle(), 1, &indexCopyRegion);
-
-        // Upload UV data if present
-        if (hasUVs && uvStaging) {
-            const VkDeviceSize uvBufferSize = m_primitive.uvs.size() * sizeof(glm::vec2);
-            VkBufferCopy uvCopyRegion{};
-            uvCopyRegion.size = uvBufferSize;
-            vkCmdCopyBuffer(cmd, uvStaging->GetHandle(), m_uvBuffer->GetHandle(), 1, &uvCopyRegion);
-
-            QL_LOG_DEBUG("  [DEBUG] Uploaded {} UV coordinates to GPU", m_primitive.uvs.size());
-        }
-
-        // Upload tangent data
-        VkBufferCopy tangentCopyRegion{};
-        tangentCopyRegion.size = tangentBufferSize;
-        vkCmdCopyBuffer(cmd, tangentStaging.GetHandle(), m_tangentBuffer->GetHandle(), 1, &tangentCopyRegion);
-
-        // Upload normal data
-        VkBufferCopy normalCopyRegion{};
-        normalCopyRegion.size = normalBufferSize;
-        vkCmdCopyBuffer(cmd, normalStaging.GetHandle(), m_normalBuffer->GetHandle(), 1, &normalCopyRegion);
-
-        // Insert barrier - transfer writes must complete before AS build reads
-        VkMemoryBarrier barrier{};
-        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        barrier.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
-
-        vkCmdPipelineBarrier(
-            cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
-            0,
-            1, &barrier,
-            0, nullptr,
-            0, nullptr
-        );
-    });
-    // Staging buffers are destroyed here, AFTER ExecuteImmediate completes (GPU done)
-
-    QL_LOG_INFO("  Uploaded geometry via staging buffers: {} vertices, {} indices",
-                m_primitive.positions.size(), m_primitive.indices.size());
+                geometry.vertexCount, geometry.indexCount / 3);
 }
 
 BLAS::~BLAS() {
@@ -314,15 +72,11 @@ BLAS::BLAS(BLAS&& other) noexcept
     : m_context(other.m_context)
     , m_as(other.m_as)
     , m_asBuffer(std::move(other.m_asBuffer))
-    , m_vertexBuffer(std::move(other.m_vertexBuffer))
-    , m_indexBuffer(std::move(other.m_indexBuffer))
-    , m_uvBuffer(std::move(other.m_uvBuffer))
-    , m_tangentBuffer(std::move(other.m_tangentBuffer))
-    , m_normalBuffer(std::move(other.m_normalBuffer))
     , m_scratchBuffer(std::move(other.m_scratchBuffer))
     , m_deviceAddress(other.m_deviceAddress)
     , m_built(other.m_built)
-    , m_primitive(other.m_primitive)
+    , m_opaque(other.m_opaque)
+    , m_geometry(other.m_geometry)
 {
     other.m_as = VK_NULL_HANDLE;
     other.m_deviceAddress = 0;
@@ -344,14 +98,11 @@ BLAS& BLAS::operator=(BLAS&& other) noexcept {
         // Move from other
         m_as = other.m_as;
         m_asBuffer = std::move(other.m_asBuffer);
-        m_vertexBuffer = std::move(other.m_vertexBuffer);
-        m_indexBuffer = std::move(other.m_indexBuffer);
-        m_uvBuffer = std::move(other.m_uvBuffer);
-        m_tangentBuffer = std::move(other.m_tangentBuffer);
-        m_normalBuffer = std::move(other.m_normalBuffer);
         m_scratchBuffer = std::move(other.m_scratchBuffer);
         m_deviceAddress = other.m_deviceAddress;
         m_built = other.m_built;
+        m_opaque = other.m_opaque;
+        m_geometry = other.m_geometry;
 
         // Nullify source
         other.m_as = VK_NULL_HANDLE;
@@ -365,9 +116,8 @@ void BLAS::Build(VkCommandBuffer cmd) {
     VkDevice device = m_context.GetDevice();
     VmaAllocator allocator = m_context.GetAllocator();
 
-    // Verify geometry buffers were uploaded in constructor
-    if (!m_vertexBuffer || !m_indexBuffer) {
-        throw std::runtime_error("Geometry buffers not uploaded. This should not happen.");
+    if (!m_geometry.vertices || !m_geometry.indices) {
+        throw std::runtime_error("BLAS geometry slice is invalid");
     }
 
     // Get function pointers
@@ -397,11 +147,15 @@ void BLAS::Build(VkCommandBuffer cmd) {
 
     geometry.geometry.triangles.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
     geometry.geometry.triangles.vertexFormat = VK_FORMAT_R32G32B32_SFLOAT;
-    geometry.geometry.triangles.vertexData.deviceAddress = m_vertexBuffer->GetDeviceAddress(device);
+    geometry.geometry.triangles.vertexData.deviceAddress =
+        m_geometry.vertices->GetDeviceAddress(device) +
+        static_cast<VkDeviceSize>(m_geometry.vertexOffset) * sizeof(glm::vec3);
     geometry.geometry.triangles.vertexStride = sizeof(glm::vec3);
-    geometry.geometry.triangles.maxVertex = static_cast<u32>(m_primitive.positions.size() - 1);
+    geometry.geometry.triangles.maxVertex = m_geometry.vertexCount - 1;
     geometry.geometry.triangles.indexType = VK_INDEX_TYPE_UINT32;
-    geometry.geometry.triangles.indexData.deviceAddress = m_indexBuffer->GetDeviceAddress(device);
+    geometry.geometry.triangles.indexData.deviceAddress =
+        m_geometry.indices->GetDeviceAddress(device) +
+        static_cast<VkDeviceSize>(m_geometry.indexOffset) * sizeof(u32);
 
     // Build info
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
@@ -413,7 +167,7 @@ void BLAS::Build(VkCommandBuffer cmd) {
     buildInfo.pGeometries = &geometry;
 
     // Query build sizes
-    u32 primitiveCount = static_cast<u32>(m_primitive.indices.size() / 3);
+    u32 primitiveCount = m_geometry.indexCount / 3;
     VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
     sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 

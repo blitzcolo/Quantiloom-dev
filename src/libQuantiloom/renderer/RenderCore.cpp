@@ -819,13 +819,29 @@ bool IsDoubleSided(const Scene& scene, u32 materialId) {
 
 
 std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VmaAllocator allocator,
-                                                const void* data, size_t bytes) {
+                                                const void* data, size_t bytes,
+                                                VkBufferUsageFlags extraUsage = 0) {
     auto buffer = std::make_unique<GpuBuffer>(
         allocator, bytes,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            extraUsage,
         VMA_MEMORY_USAGE_CPU_TO_GPU);
     buffer->Upload(data, bytes);
     return buffer;
+}
+
+BLAS::GeometrySlice BlasGeometrySlice(const GpuBuffer& vertices,
+                                      const GpuBuffer& indices,
+                                      const InstanceGeometryInfo& offset,
+                                      const GeometryPrimitive& primitive) {
+    BLAS::GeometrySlice slice;
+    slice.vertices = &vertices;
+    slice.indices = &indices;
+    slice.vertexOffset = offset.vertexOffset;
+    slice.vertexCount = static_cast<u32>(primitive.positions.size());
+    slice.indexOffset = offset.indexOffset;
+    slice.indexCount = static_cast<u32>(primitive.indices.size());
+    return slice;
 }
 
 }  // namespace
@@ -838,6 +854,13 @@ bool SceneGeometry::HasResidentBlasBuildScratch() const {
     return std::ranges::any_of(m_blas, [](const auto& blas) {
         return blas->HasBuildScratch();
     });
+}
+
+bool SceneGeometry::AllBlasUseMergedGeometryBuffers() const {
+    return m_vertices && m_indices &&
+        std::ranges::all_of(m_blas, [&](const auto& blas) {
+            return blas->UsesGeometryBuffers(*m_vertices, *m_indices);
+        });
 }
 
 SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
@@ -919,9 +942,13 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
 
     VmaAllocator allocator = ctx.GetAllocator();
     result.m_vertices = UploadGeometryBuffer(allocator, vertices.data(),
-                                             vertices.size() * sizeof(glm::vec3));
+        vertices.size() * sizeof(glm::vec3),
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     result.m_indices = UploadGeometryBuffer(allocator, indices.data(),
-                                            indices.size() * sizeof(u32));
+        indices.size() * sizeof(u32),
+        VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+            VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
     result.m_normals = UploadGeometryBuffer(allocator, normals.data(),
                                             normals.size() * sizeof(glm::vec3));
     result.m_uvs = UploadGeometryBuffer(allocator, uvs.data(),
@@ -933,10 +960,14 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     QL_LOG_INFO("  Created merged geometry buffers");
 
     // One BLAS per primitive, shared by every node that instances the mesh.
+    primIdx = 0;
     for (const auto& mesh : scene.meshes) {
         for (const auto& prim : mesh.primitives) {
-            result.m_blas.emplace_back(
-                std::make_unique<BLAS>(ctx, prim, IsOpaqueForRayTracing(scene, prim.materialId)));
+            result.m_blas.emplace_back(std::make_unique<BLAS>(
+                ctx,
+                BlasGeometrySlice(*result.m_vertices, *result.m_indices,
+                                  primitiveOffsets[primIdx++], prim),
+                IsOpaqueForRayTracing(scene, prim.materialId)));
         }
     }
 
@@ -1014,7 +1045,11 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
             if (m_blas[globalPrim]->IsOpaque() != wanted) {
                 QL_LOG_INFO("  Rebuilding BLAS {} as {}", globalPrim,
                             wanted ? "opaque" : "alpha-tested");
-                m_blas[globalPrim] = std::make_unique<BLAS>(ctx, prim, wanted);
+                m_blas[globalPrim] = std::make_unique<BLAS>(
+                    ctx,
+                    BlasGeometrySlice(*m_vertices, *m_indices,
+                                      m_primitiveOffsets[globalPrim], prim),
+                    wanted);
                 rebuilt.push_back(m_blas[globalPrim].get());
                 changed = true;
             }
@@ -1026,9 +1061,9 @@ bool SceneGeometry::RefreshMaterialOpacity(VulkanContext& ctx, const Scene& scen
         return false;
     }
 
-    // Construction uploads the replacement's geometry but does not create its
-    // acceleration structure. Build every replacement before the TLAS reads
-    // its device address; otherwise AddInstance receives address zero.
+    // Construction selects the replacement's merged geometry slice but does
+    // not create its acceleration structure. Build every replacement before
+    // the TLAS reads its device address; otherwise AddInstance receives zero.
     CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
         for (BLAS* blas : rebuilt) {
             blas->Build(cmd);
