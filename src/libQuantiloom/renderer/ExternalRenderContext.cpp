@@ -1667,6 +1667,8 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
 }
 
 void ExternalRenderContext::Impl::UploadLightingParams() {
+    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+        throw std::runtime_error("cannot complete previous GPU lighting readers");
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
         effective.atmosphereTemperature_K =
@@ -1683,16 +1685,18 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
 void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
     constexpr uint64_t kDisabledKey = 1;  // 0 = dirty, 1 = disabled uploaded
 
-    auto uploadDisabled = [this]() {
+    auto uploadDisabled = [this](uint64_t completedKey) {
+        if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+            throw std::runtime_error("cannot complete previous GPU atmosphere readers");
         AtmosNNHeaderGPU disabledHeader{};
         atmosHeaderBuffer->Upload(&disabledHeader, sizeof(disabledHeader));
-        atmosBakeKey = kDisabledKey;
+        atmosBakeKey = completedKey;
         atmosphereActive = false;
         UploadLightingParams();  // Hand the fallback temperature back to the host
     };
 
     if (!atmosphereConfig.enabled || !atmosModelPack) {
-        if (atmosBakeKey != kDisabledKey) uploadDisabled();
+        if (atmosBakeKey != kDisabledKey) uploadDisabled(kDisabledKey);
         return;
     }
 
@@ -1705,7 +1709,7 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
             else
                 QL_LOG_WARN("NN atmosphere: spectral mode has no NN coverage, "
                             "atmosphere disabled for this mode");
-            uploadDisabled();
+            uploadDisabled(kDisabledKey);
         }
         return;
     }
@@ -1737,7 +1741,7 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
             QL_LOG_CRITICAL("NN atmosphere: baked LUT ({} floats) exceeds GPU "
                             "buffer capacity ({})", baked.data.size(),
                             kAtmosMaxDataFloats);
-            uploadDisabled();
+            uploadDisabled(key);
             return;
         }
         const glm::vec3 s = glm::length(sunDir) > 1e-6f
@@ -1748,6 +1752,8 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
         baked.header.worldUnitsToMeters =
             lightingParams.worldUnitsToMeters > 0.0f
                 ? lightingParams.worldUnitsToMeters : 1.0f;
+        if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+            throw std::runtime_error("cannot complete previous GPU atmosphere readers");
         atmosDataBuffer->Upload(baked.data.data(),
                                 baked.data.size() * sizeof(f32));
         atmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
@@ -1757,7 +1763,7 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
     } catch (const std::exception& e) {
         QL_LOG_CRITICAL("NN atmosphere bake failed, atmosphere disabled: {}",
                         e.what());
-        uploadDisabled();
+        uploadDisabled(key);
     }
 }
 
@@ -1794,8 +1800,8 @@ void ExternalRenderContext::RenderFrame(
     }
 
     // Update CLAHE min/max cache from previous frame's output image
-    // This is safe here because QVulkanWindow ensures the previous frame's
-    // GPU work is complete before calling startNextFrame/RenderFrame again
+    // The histogram's own queue-ordered completion points protect these
+    // reads; a new QVulkanWindow callback does not complete all older frames.
     // Only update every N frames to reduce readback overhead, but always update
     // on frame 1 (after first render) and whenever cache is invalid
     constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames

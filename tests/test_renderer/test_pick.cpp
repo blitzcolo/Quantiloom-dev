@@ -486,3 +486,11 @@ TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
         EXPECT_TRUE(uploaded.has_value()) << uploaded.error();
     });
 }
+
+
+TEST_F(PickTest, LightingUploadsWaitForSubmittedReaders) {
+    LoadEmitterScene();
+    auto lighting = context->GetLightingParams();
+    lighting.skyRadiance_rgb *= 0.5f;
+    ExpectUploadCompletesPriorReader([&] { context->SetLightingParams(lighting); });
+}
