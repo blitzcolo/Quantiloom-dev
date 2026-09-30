@@ -82,9 +82,11 @@ public:
                     const Vector<std::pair<f64, ThermalForcing>>& forcingSeries,
                     const ThermalForcing& constantForcing, IThermalStepper& stepper);
 
-    /// The state at the given time. Steps from the nearest checkpoint, creating
-    /// new checkpoints as it goes. Off-grid times use a partial step into a
-    /// scratch state that is discarded on the next call.
+    /// The state at the given time. Forward queries continue from the most
+    /// recently replayed complete grid state; backwards queries restore the
+    /// nearest checkpoint. Off-grid times use a partial step into a separate
+    /// scratch state, so that partial result can never become the next fixed
+    /// step's starting point.
     const ThermalState& StateAt(f64 time_h);
 
     /// One element's surface balance at a time, term by term.
@@ -155,6 +157,12 @@ private:
 
     std::map<i64, ThermalState> m_checkpoints;
     i64 m_checkpointStride = 1;  // in grid steps
+    /// Most recently replayed COMPLETE fixed-grid state. Keeping this separate
+    /// from m_scratch is what makes repeated forward queries O(the new steps)
+    /// without letting an off-grid partial step change the trajectory.
+    ThermalState m_gridState;
+    i64 m_gridStateStep = 0;
+    bool m_hasGridState = false;
     ThermalState m_scratch;
     u32 m_lastStepCount = 0;
     u32 m_participatingElements = 0;

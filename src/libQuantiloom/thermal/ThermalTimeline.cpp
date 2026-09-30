@@ -228,49 +228,59 @@ usize ThermalTimeline::EpochForStep(const i64 k) const {
 const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
     const f64 clamped = std::max(time_h, m_desc.startTime_h);
     const i64 target = GridIndex(clamped);
-
-    // Find nearest checkpoint at or before target
-    auto it = m_checkpoints.upper_bound(target);
-    if (it != m_checkpoints.begin()) --it;
-    // it now points to the largest key <= target
-
-    const i64 from = it->first;
-    if (from == target) {
-        m_lastStepCount = 0;
-        return it->second;
-    }
-
-    // Step from checkpoint to target, creating new checkpoints along the way
-    m_scratch = it->second;
-    StepRange(m_scratch, from, target);
-
-    // If target sits on a checkpoint boundary, store it
-    if (target % m_checkpointStride == 0) {
-        m_checkpoints[target] = m_scratch;
-        return m_checkpoints[target];
-    }
-
-    // Check if the partial-step time doesn't align perfectly with the grid
     const f64 gridTime = GridTime(target);
     const f64 remainder_s = (clamped - gridTime) * 3600.0;
-    if (remainder_s > 0.01) {
-        // Off-grid: do a partial step into scratch (discarded next call)
-        const f64 t_mid = gridTime + 0.5 * remainder_s / 3600.0;
-        const ThermalGeometryEpoch& epoch = m_schedule->At(t_mid);
-        const ThermalForcing forcing =
-            SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
-        Vector<f32> sunVis;
-        Vector<f32> reflected;
-        ShortwaveSample sample;
-        SampleShortwaveAt(epoch.sunTable, epoch.exchange, t_mid, epoch.elements.size(),
-                          sunVis, reflected, &sample);
-        sample.sunVisibility = sunVis;
-        sample.reflectedGain = reflected;
-        sample.diffuseGain = epoch.sunTable.diffuseGain;
-        m_stepper.Step(m_scratch, epoch.elements, m_materials, epoch.exchange, forcing,
-                       remainder_s, sample);
-        ++m_lastStepCount;
+
+    // Find the nearest checkpoint at or before the complete grid state the
+    // query needs. A more recent complete state can be closer still: this is
+    // the common timeline/trajectory case, where each query is one or a few
+    // steps after the previous one.
+    auto it = m_checkpoints.upper_bound(target);
+    if (it != m_checkpoints.begin()) --it;
+    const bool useRecent = m_hasGridState && m_gridStateStep <= target &&
+                           m_gridStateStep > it->first;
+
+    if (!useRecent) {
+        m_gridState = it->second;
+        m_gridStateStep = it->first;
+        m_hasGridState = true;
     }
+
+    if (m_gridStateStep < target) {
+        StepRange(m_gridState, m_gridStateStep, target);
+        m_gridStateStep = target;
+    } else {
+        m_lastStepCount = 0;
+    }
+
+    if (remainder_s <= 0.01) {
+        // StepRange stored a boundary target. Return that stable copy when one
+        // exists; otherwise the recent full-grid cache is the answer itself.
+        if (target % m_checkpointStride == 0) {
+            return m_checkpoints.at(target);
+        }
+        return m_gridState;
+    }
+
+    // Off-grid: branch from the complete fixed-grid cache into disposable
+    // scratch. In particular, never advance m_gridState by this partial dt:
+    // the next complete step must still begin on the regular grid.
+    m_scratch = m_gridState;
+    const f64 t_mid = gridTime + 0.5 * remainder_s / 3600.0;
+    const ThermalGeometryEpoch& epoch = m_schedule->At(t_mid);
+    const ThermalForcing forcing =
+        SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
+    Vector<f32> sunVis;
+    Vector<f32> reflected;
+    ShortwaveSample sample;
+    SampleShortwaveAt(epoch.sunTable, epoch.exchange, t_mid, epoch.elements.size(),
+                      sunVis, reflected, &sample);
+    sample.sunVisibility = sunVis;
+    sample.reflectedGain = reflected;
+    sample.diffuseGain = epoch.sunTable.diffuseGain;
+    m_stepper.Step(m_scratch, epoch.elements, m_materials, epoch.exchange, forcing,
+                   remainder_s, sample);
+    ++m_lastStepCount;
 
     return m_scratch;
 }

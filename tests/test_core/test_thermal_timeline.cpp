@@ -22,6 +22,7 @@
 #include "thermal/ThermalTimeline.hpp"
 
 #include <cmath>
+#include <limits>
 
 using namespace quantiloom;
 using namespace quantiloom::thermal;
@@ -75,6 +76,16 @@ SunVisibilityTable OneColumnTable(usize n, f64 time_h) {
     table.sampleTime_h = {time_h};
     table.visibility.assign(n, 1.0f);
     return table;
+}
+
+void ExpectStateExact(const ThermalState& actual, const ThermalState& expected) {
+    EXPECT_EQ(actual.nodeCount, expected.nodeCount);
+    EXPECT_EQ(actual.temperature_K, expected.temperature_K);
+    EXPECT_EQ(actual.sunSensitivity_K, expected.sunSensitivity_K);
+    EXPECT_EQ(actual.lagSensitivity_K, expected.lagSensitivity_K);
+    EXPECT_EQ(actual.lagColumn, expected.lagColumn);
+    EXPECT_EQ(actual.parameterSensitivity, expected.parameterSensitivity);
+    EXPECT_EQ(actual.parameters, expected.parameters);
 }
 
 }  // namespace
@@ -135,6 +146,90 @@ TEST(ThermalTimelineTest, AnOffGridQueryLeavesTheGridUntouched) {
         EXPECT_DOUBLE_EQ(s1.temperature_K[i], s2.temperature_K[i])
             << "off-grid query contaminated the grid at node " << i;
     }
+}
+
+TEST(ThermalTimelineTest, ForwardMinuteQueriesOnlyRunEachCompleteStepOnce) {
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{ConcreteMaterial()};
+    const auto forcing = ConstantForcing();
+    const Vector<std::pair<f64, ThermalForcing>> noSeries;
+
+    ThermalGeometryEpoch open;
+    open.from_h = -std::numeric_limits<f64>::infinity();
+    open.elements = elements;
+    open.exchange = MakeOpenSkyExchange(1);
+    open.sunTable.sampleTime_h = {0.0, 0.5, 1.0};
+    open.sunTable.visibility = {0.2f, 0.8f, 0.4f};
+    open.sunTable.sampleDirection.assign(3, glm::vec3(0.0f, 1.0f, 0.0f));
+
+    ThermalGeometryEpoch shaded = open;
+    shaded.from_h = 0.5;
+    shaded.exchange.skyFraction = {0.4f};
+    shaded.sunTable.sampleTime_h = {0.5, 0.75, 1.0};
+    shaded.sunTable.visibility = {0.1f, 0.3f, 0.0f};
+
+    ThermalGeometrySchedule schedule;
+    schedule.epochs = {std::move(open), std::move(shaded)};
+
+    auto desc = DefaultDesc();
+    desc.initial = InitialCondition::Uniform;
+    desc.checkpointStride_h = 2.0;  // no checkpoint hides the forward-state reuse
+    desc.sunMemoryLags = 2;
+    desc.parameters = {ThermalParameter::Convection, ThermalParameter::Emissivity};
+
+    CpuCrankNicolsonStepper sequentialStepper;
+    ThermalTimeline sequential(desc, schedule, materials, noSeries, forcing,
+                               sequentialStepper);
+
+    u32 totalSteps = 0;
+    for (u32 minute = 1; minute <= 59; ++minute) {
+        const f64 time_h = std::nextafter(static_cast<f64>(minute) / 60.0,
+                                          std::numeric_limits<f64>::infinity());
+        sequential.StateAt(time_h);
+        EXPECT_EQ(sequential.LastStepCount(), 1u) << "minute " << minute;
+        totalSteps += sequential.LastStepCount();
+    }
+    EXPECT_EQ(totalSteps, 59u);
+    const f64 finalTime_h = std::nextafter(59.0 / 60.0,
+                                           std::numeric_limits<f64>::infinity());
+    EXPECT_EQ(sequential.EpochAt(finalTime_h), 1u);
+    const ThermalState sequentialState = sequential.StateAt(finalTime_h);
+    EXPECT_EQ(sequential.LastStepCount(), 0u);
+
+    // One uninterrupted replay is the numerical reference. Equality covers
+    // every complete-grid history carried by the state: temperature, present
+    // sun tangent, lag tangents and material-parameter tangents.
+    CpuCrankNicolsonStepper directStepper;
+    ThermalTimeline direct(desc, schedule, materials, noSeries, forcing, directStepper);
+    const ThermalState directState = direct.StateAt(finalTime_h);
+    EXPECT_EQ(direct.LastStepCount(), 59u);
+    ExpectStateExact(sequentialState, directState);
+}
+
+TEST(ThermalTimelineTest, AnOffGridQueryAfterACheckpointRunsItsPartialStep) {
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{ConcreteMaterial()};
+    const auto exchange = MakeOpenSkyExchange(1);
+    const auto sunTable = OneColumnTable(1, 0.0);
+    const auto forcing = ConstantForcing();
+    const Vector<std::pair<f64, ThermalForcing>> noSeries;
+    auto desc = DefaultDesc();
+    desc.initial = InitialCondition::Uniform;
+
+    CpuCrankNicolsonStepper stepper;
+    ThermalTimeline timeline(desc, elements, materials, exchange, sunTable,
+                             noSeries, forcing, stepper);
+    const f64 checkpointTemperature = timeline.StateAt(1.0).Surface(0);
+    const f64 query_h = 1.0 + 30.0 / 3600.0;
+    const ThermalState offGrid = timeline.StateAt(query_h);
+    EXPECT_EQ(timeline.LastStepCount(), 1u);
+    EXPECT_NE(offGrid.Surface(0), checkpointTemperature);
+
+    CpuCrankNicolsonStepper directStepper;
+    ThermalTimeline direct(desc, elements, materials, exchange, sunTable,
+                           noSeries, forcing, directStepper);
+    const ThermalState expected = direct.StateAt(query_h);
+    ExpectStateExact(offGrid, expected);
 }
 
 TEST(ThermalTimelineTest, ScrubbingBackwardsReusesACheckpoint) {
