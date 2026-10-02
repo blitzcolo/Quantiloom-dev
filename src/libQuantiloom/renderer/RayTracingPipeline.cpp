@@ -1,6 +1,7 @@
 #include "RayTracingPipeline.hpp"
 #include "CommandHelper.hpp"
 #include "core/Log.hpp"
+#include "core/SpectralData.hpp"
 #include <algorithm>
 #include <fstream>
 #include <stdexcept>
@@ -278,6 +279,14 @@ RayTracingPipeline::RayTracingPipeline(
         m_cameraFallbackResponse = std::make_unique<GpuBuffer>(
             m_context.GetAllocator(), 64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        const SpectralCurveGPU emptyCurve{};
+        m_spectralFallback = std::make_unique<GpuBuffer>(m_context.GetAllocator(),
+            sizeof(emptyCurve), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_spectralFallback->Upload(&emptyCurve, sizeof(emptyCurve));
+        const ComplexRefractiveIndexGPU emptyCri{};
+        m_criFallback = std::make_unique<GpuBuffer>(m_context.GetAllocator(),
+            sizeof(emptyCri), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        m_criFallback->Upload(&emptyCri, sizeof(emptyCri));
         const u32 disabledHeader[16] = {};
         m_cameraFallbackResponse->Upload(disabledHeader, sizeof(disabledHeader));
         m_cameraFallbackAtmosHeader = std::make_unique<GpuBuffer>(
@@ -811,7 +820,7 @@ void RayTracingPipeline::CreatePipelineLayout() {
                                     VK_SHADER_STAGE_MISS_BIT_KHR |
                                     VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     pushConstantRange.offset = 0;
-    pushConstantRange.size = sizeof(PushConstantsRayGen);
+    pushConstantRange.size = sizeof(TracePushConstants);
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -1381,6 +1390,7 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
     }
 
     if (imageViews.empty()) {
+        m_pushConstants.textureCount = 0;
         QL_LOG_WARN("No textures to bind (TextureManager should provide at least a dummy texture)");
         return;
     }
@@ -1394,6 +1404,7 @@ void RayTracingPipeline::BindTextures(const std::vector<VkImageView>& imageViews
         throw std::runtime_error("Scene texture count exceeds device capability");
     }
 
+    m_pushConstants.textureCount = textureCount;
     QL_LOG_INFO("Binding {} textures to descriptor set", textureCount);
 
     // Build descriptor image info array for textures
@@ -1523,11 +1534,7 @@ void RayTracingPipeline::BindBRDFLut(VkImageView imageView, VkSampler sampler) c
 void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const {
     VkDevice device = m_context.GetDevice();
 
-    if (buffer == nullptr) {
-        QL_LOG_INFO("Spectral curves buffer is null - spectral curve lookup will use RGB fallback");
-        // Note: Shader must handle spectralReflectanceCurveIndex < 0 for fallback
-        return;
-    }
+    if (buffer == nullptr) buffer = m_spectralFallback.get();
 
     QL_LOG_INFO("Binding spectral curves buffer to descriptor set (binding 13)");
     QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
@@ -1557,11 +1564,7 @@ void RayTracingPipeline::BindSpectralCurvesBuffer(const GpuBuffer* buffer) const
 void RayTracingPipeline::BindComplexRefractiveIndexBuffer(const GpuBuffer* buffer) const {
     VkDevice device = m_context.GetDevice();
 
-    if (buffer == nullptr) {
-        QL_LOG_INFO("Complex refractive index buffer is null - will use PBR F0 approximation");
-        // Note: Shader must handle complexRefractiveIndexIndex < 0 for fallback
-        return;
-    }
+    if (buffer == nullptr) buffer = m_criFallback.get();
 
     QL_LOG_INFO("Binding complex refractive index buffer to descriptor set (binding 14)");
     QL_LOG_INFO("  Buffer size: {} bytes", buffer->GetSize());
@@ -1845,7 +1848,7 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
         VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
             VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
         0,
-        sizeof(PushConstantsRayGen),
+        sizeof(TracePushConstants),
         &m_pushConstants
     );
 
@@ -1881,21 +1884,21 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
 }
 
 void RayTracingPipeline::SetCameraData(const CameraData& cameraData) {
-    m_pushConstants.camera = cameraData;
+    m_pushConstants.cameraAndSampling.camera = cameraData;
 }
 
 void RayTracingPipeline::SetSamplingParams(const u32 frameIndex, const u32 sampleIndex, const u32 totalSamples,
                                            const u32 randomSeed, const u32 sequenceSeed) {
-    m_pushConstants.frameIndex = frameIndex;
-    m_pushConstants.sampleIndex = sampleIndex;
-    m_pushConstants.totalSamples = totalSamples;
-    m_pushConstants.randomSeed = randomSeed;
-    m_pushConstants.sequenceSeed = sequenceSeed;
+    m_pushConstants.cameraAndSampling.frameIndex = frameIndex;
+    m_pushConstants.cameraAndSampling.sampleIndex = sampleIndex;
+    m_pushConstants.cameraAndSampling.totalSamples = totalSamples;
+    m_pushConstants.cameraAndSampling.randomSeed = randomSeed;
+    m_pushConstants.cameraAndSampling.sequenceSeed = sequenceSeed;
 }
 
 void RayTracingPipeline::SetTimeStratum(const u32 stratum, const u32 count) {
-    m_pushConstants.timeStratum = stratum;
-    m_pushConstants.timeStratumCount = count;
+    m_pushConstants.cameraAndSampling.timeStratum = stratum;
+    m_pushConstants.cameraAndSampling.timeStratumCount = count;
 }
 
 } // namespace quantiloom

@@ -6,6 +6,7 @@
  */
 
 // VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition
+#include <type_traits>
 #include <vk_mem_alloc.h>
 
 #include "renderer/ExternalRenderContext.hpp"
@@ -646,10 +647,49 @@ struct ExternalRenderContext::Impl {
     void AdoptScene(Scene&& loaded,
                     Vector<rendercore::MaterialGpuIndices> indices = {});
 
+    rendercore::MaterialResourceCounts ResourceCounts() const {
+        return {textureManager ? textureManager->GetTextureCount() : 0u,
+                spectralCurveEntries.size(), criEntries.size()};
+    }
+
+    template<class Entry>
+    std::unique_ptr<GpuBuffer> PrepareLookupTable(const Vector<Entry>& entries) {
+        if (entries.empty()) return nullptr;
+        const auto bytes = entries.size() * sizeof(Entry);
+        auto buffer = std::make_unique<GpuBuffer>(contextAdapter->GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        buffer->Upload(entries.data(), bytes);
+        return buffer;
+    }
+
+    bool CompleteLookupReaders() {
+        if (vkDeviceWaitIdle(device) == VK_SUCCESS) return true;
+        QL_LOG_ERROR("Cannot replace lookup table: previous GPU readers did not complete");
+        return false;
+    }
+
+    template<class Entry>
+    bool ReplaceLookupTable(Vector<Entry> entries, Vector<Entry>& current,
+                            std::unique_ptr<GpuBuffer>& buffer) {
+        // Prepare before waiting; failed synchronization leaves all published state intact.
+        auto replacement = PrepareLookupTable(entries);
+        if (!CompleteLookupReaders()) return false;
+        if (pipeline) {
+            if constexpr (std::is_same_v<Entry, SpectralCurveGPU>)
+                pipeline->BindSpectralCurvesBuffer(replacement.get());
+            else pipeline->BindComplexRefractiveIndexBuffer(replacement.get());
+        }
+        buffer = std::move(replacement);
+        current = std::move(entries);
+        return true;
+    }
+
     void RebuildSceneGpuResources();
 
     void BuildAccelerationStructures();
     void UpdateGpuResources(bool rebuildEmitters = true);
+    void UpdateMaterial(u32 index, const Material& material, ExternalRenderContext& owner,
+                        bool readersComplete = false);
     void RebuildEmissiveGeometry();
 
     /// Move the animated nodes to @p t_s and make the GPU agree.
@@ -1160,6 +1200,14 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         }
     }
 
+    auto newCurves = m_impl->PrepareLookupTable(spectra.curves);
+    auto newCri = m_impl->PrepareLookupTable(spectra.refractiveIndices);
+    if (!m_impl->CompleteLookupReaders()) {
+        report.messages.push_back({ConfigApplyMessage::Severity::Error, "renderer",
+                                   "Previous GPU readers did not complete"});
+        return report;
+    }
+
     // 4. Render state before the scene, so the one rebuild AdoptScene triggers
     //    already builds the material buffer at the right wavelength. Setting it
     //    afterwards would work and rebuild everything a second time.
@@ -1174,22 +1222,10 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // The curve and refractive-index tables the material indices point into.
     // Uploaded directly rather than through AddSpectralCurve, which rebuilds
     // the whole buffer per curve and would do so before the scene exists.
-    m_impl->spectralCurveEntries = spectra.curves;
-    m_impl->criEntries = spectra.refractiveIndices;
-    if (!m_impl->spectralCurveEntries.empty()) {
-        const size_t bytes = m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
-        m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-            m_impl->contextAdapter->GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
-    }
-    if (!m_impl->criEntries.empty()) {
-        const size_t bytes = m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU);
-        m_impl->criBuffer = std::make_unique<GpuBuffer>(
-            m_impl->contextAdapter->GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        m_impl->criBuffer->Upload(m_impl->criEntries.data(), bytes);
-    }
+    m_impl->spectralCurvesBuffer = std::move(newCurves);
+    m_impl->criBuffer = std::move(newCri);
+    m_impl->spectralCurveEntries = std::move(spectra.curves);
+    m_impl->criEntries = std::move(spectra.refractiveIndices);
 
     // 5. One GPU rebuild: textures, acceleration structures, material buffer,
     //    pipeline. CreatePipeline binds whatever buffers are current, which is
@@ -1200,7 +1236,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         auto slots = rendercore::IndicesFromMaterial(mat);
         if (auto it = spectra.materialNameToIrEmissivityCurve.find(mat.name);
             it != spectra.materialNameToIrEmissivityCurve.end()) {
-            if (it->second < 0 || static_cast<usize>(it->second) >= spectra.curves.size()) {
+            if (it->second < 0 || static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
                 report.messages.push_back({ConfigApplyMessage::Severity::Error,
                                            "materials", "IR emissivity curve index is invalid for '" +
                                                mat.name + "'"});
@@ -1210,7 +1246,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         }
         if (auto it = spectra.materialNameToIrTransmittanceCurve.find(mat.name);
             it != spectra.materialNameToIrTransmittanceCurve.end()) {
-            if (it->second < 0 || static_cast<usize>(it->second) >= spectra.curves.size()) {
+            if (it->second < 0 || static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
                 report.messages.push_back({ConfigApplyMessage::Severity::Error,
                                            "materials", "IR transmittance curve index is invalid for '" +
                                                mat.name + "'"});
@@ -2637,15 +2673,20 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
 }
 
 void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& material) {
-    if (!m_impl->scene) {
+    m_impl->UpdateMaterial(materialIndex, material, *this);
+}
+
+void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Material& material,
+                                                ExternalRenderContext& owner, bool readersComplete) {
+    if (!scene) {
         QL_LOG_WARN("UpdateMaterial: No scene loaded");
         return;
     }
-    if (materialIndex >= m_impl->scene->materials.size()) {
+    if (materialIndex >= scene->materials.size()) {
         QL_LOG_WARN("UpdateMaterial: Invalid material index {}", materialIndex);
         return;
     }
-    if (!m_impl->materialBuffer) {
+    if (!materialBuffer) {
         QL_LOG_WARN("UpdateMaterial: No material buffer");
         return;
     }
@@ -2656,22 +2697,22 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
     // material and leaves the geometry solid. Compared before the write, and
     // acted on after it, because the classifier reads the scene.
     const bool wasOpaque =
-        rendercore::IsOpaqueForRayTracing(*m_impl->scene, materialIndex);
+        rendercore::IsOpaqueForRayTracing(*scene, materialIndex);
 
     // 1. Update CPU-side scene data. A newly supplied IR curve must not keep
     // reading the old resolved curve index; full config application is what
     // uploads new curve data, so this immediate edit uses scalar fallback.
-    const Material& previous = m_impl->scene->materials[materialIndex];
+    const Material& previous = scene->materials[materialIndex];
     const bool emissionChanged = rendercore::SampledEmissionChanged(previous, material);
     // Material bytes are shared by every submitted trace, including ordinary
     // roughness/IR edits that do not rebuild an AS or the emitter list.
-    if (vkQueueWaitIdle(m_impl->graphicsQueue) != VK_SUCCESS) {
+    if (!readersComplete && vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS) {
         QL_LOG_ERROR("UpdateMaterial: cannot complete previous GPU readers");
         return;
     }
     auto indices = rendercore::IndicesFromMaterial(material);
-    if (m_impl->materialGpuIndices.size() == m_impl->scene->materials.size()) {
-        const auto& oldSlots = m_impl->materialGpuIndices[materialIndex];
+    if (materialGpuIndices.size() == scene->materials.size()) {
+        const auto& oldSlots = materialGpuIndices[materialIndex];
         indices.irEmissivityCurve =
             material.irEmissivityCurve == previous.irEmissivityCurve
                 ? oldSlots.irEmissivityCurve : -1;
@@ -2680,46 +2721,47 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
                 ? oldSlots.irTransmittanceCurve : -1;
         const auto validIndex = [&](i32 curve) {
             return curve < 0 ||
-                static_cast<usize>(curve) < m_impl->spectralCurveEntries.size();
+                static_cast<usize>(curve) < spectralCurveEntries.size();
         };
         if (!validIndex(indices.irEmissivityCurve)) indices.irEmissivityCurve = -1;
         if (!validIndex(indices.irTransmittanceCurve)) indices.irTransmittanceCurve = -1;
-        m_impl->materialGpuIndices[materialIndex] = indices;
+        materialGpuIndices[materialIndex] = indices;
     }
-    m_impl->scene->materials[materialIndex] = material;
+    scene->materials[materialIndex] = material;
 
     // 2. Convert to GPU format
+    const auto resources = ResourceCounts();
     MaterialDataCPU cpuMat = rendercore::ConvertMaterial(
-        material, m_impl->wavelength_nm, indices);
+        material, wavelength_nm, indices, &resources);
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
-    m_impl->materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
+    materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
 
     // 4. Rebuild the geometry only when the opacity classification actually
     //    moved. Doing it on every edit would put an acceleration-structure
     //    rebuild behind a roughness slider.
-    if (m_impl->geometry.IsValid() &&
-        rendercore::IsOpaqueForRayTracing(*m_impl->scene, materialIndex) != wasOpaque) {
+    if (geometry.IsValid() &&
+        rendercore::IsOpaqueForRayTracing(*scene, materialIndex) != wasOpaque) {
         // A frame the host submitted may still be tracing the structures being
         // replaced, as RebuildAccelerationStructure has to assume too.
-        vkDeviceWaitIdle(m_impl->device);
-        if (m_impl->geometry.RefreshMaterialOpacity(*m_impl->contextAdapter,
-                                                    *m_impl->scene) &&
-            m_impl->pipeline) {
-            m_impl->pipeline->BindAccelerationStructure(m_impl->geometry.Tlas().GetHandle());
-            if (m_impl->geometry.InstanceCount() > 0) {
-                m_impl->pipeline->BindInstanceGeometryBuffer(m_impl->geometry.InstanceInfo());
+        vkDeviceWaitIdle(device);
+        if (geometry.RefreshMaterialOpacity(*contextAdapter,
+                                                    *scene) &&
+            pipeline) {
+            pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
+            if (geometry.InstanceCount() > 0) {
+                pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
             }
         }
     }
 
-    if (emissionChanged) m_impl->RebuildEmissiveGeometry();
+    if (emissionChanged) RebuildEmissiveGeometry();
 
     // 5. Reset accumulation (visual feedback)
-    ResetAccumulation();
+    owner.ResetAccumulation();
 
-    if (m_impl->thermalPreview) m_impl->thermalPreview->InvalidateMaterialEmissivity();
+    if (thermalPreview) thermalPreview->InvalidateMaterialEmissivity();
 
     QL_LOG_DEBUG("UpdateMaterial: Updated material {} ('{}')", materialIndex, material.name);
 }
@@ -2733,26 +2775,11 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
     // Convert CPU → GPU format (resample to uniform 64-sample grid)
     ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
 
-    // Append to entries
-    i32 index = static_cast<i32>(m_impl->criEntries.size());
-    m_impl->criEntries.push_back(gpuCRI);
-
-    // Rebuild GPU buffer
-    auto allocator = m_impl->contextAdapter->GetAllocator();
-    m_impl->criBuffer = std::make_unique<GpuBuffer>(
-        allocator,
-        m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU
-    );
-    m_impl->criBuffer->Upload(
-        m_impl->criEntries.data(),
-        m_impl->criEntries.size() * sizeof(ComplexRefractiveIndexGPU));
-
-    // Rebind descriptor
-    if (m_impl->pipeline) {
-        m_impl->pipeline->BindComplexRefractiveIndexBuffer(m_impl->criBuffer.get());
-    }
+    const i32 index = static_cast<i32>(m_impl->criEntries.size());
+    auto entries = m_impl->criEntries;
+    entries.push_back(gpuCRI);
+    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->criEntries, m_impl->criBuffer))
+        return -1;
 
     QL_LOG_INFO("AddComplexRefractiveIndex: Added CRI at index {} "
                 "(wavelength range: {:.0f}-{:.0f} nm, {} samples)",
@@ -2785,7 +2812,9 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
         // worse than keeping a number whose provenance changed.
         material.emissiveRadianceCurveIndex = -1;
         material.emissiveCurveSource.clear();
-        UpdateMaterial(materialIndex, material);
+        if (!m_impl->CompleteLookupReaders())
+            return EmissionResult::Err("SetMaterialEmissionSpectrum: previous GPU readers did not complete");
+        m_impl->UpdateMaterial(materialIndex, material, *this, true);
         return EmissionResult(Vector<String>{});
     }
 
@@ -2812,26 +2841,18 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
     // already resampled and levelled -- going back through the CPU curve would
     // discard the band clipping and the band averaging that make it right.
     const auto index = static_cast<i32>(m_impl->spectralCurveEntries.size());
-    m_impl->spectralCurveEntries.push_back(resolved.curve);
-
-    const size_t bytes = m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
-    // The new emitter record refers to this curve. Complete prior descriptor
-    // readers before replacing the curve buffer, then publish both inputs.
-    vkDeviceWaitIdle(m_impl->device);
-    m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-        m_impl->contextAdapter->GetAllocator(), bytes,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
-    if (m_impl->pipeline) {
-        m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
-    }
+    auto entries = m_impl->spectralCurveEntries;
+    entries.push_back(resolved.curve);
+    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
+                                   m_impl->spectralCurvesBuffer))
+        return EmissionResult::Err("SetMaterialEmissionSpectrum: previous GPU readers did not complete");
 
     material.emissiveRadianceCurveIndex = index;
     material.emissiveCurveSource = sourceOrEmpty;
     if (resolved.rewriteRgb) {
         material.emissiveFactor = resolved.renderedRgb;
     }
-    UpdateMaterial(materialIndex, material);
+    m_impl->UpdateMaterial(materialIndex, material, *this, true);
 
     QL_LOG_INFO("SetMaterialEmissionSpectrum: '{}' on material {} ('{}'), curve index {}, "
                 "colour [{:.4g}, {:.4g}, {:.4g}]",
@@ -2851,18 +2872,11 @@ i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
     }
 
     const i32 index = static_cast<i32>(m_impl->spectralCurveEntries.size());
-    m_impl->spectralCurveEntries.push_back(SpectralCurveGPU::FromCPU(curve));
-
-    const size_t bytes =
-        m_impl->spectralCurveEntries.size() * sizeof(SpectralCurveGPU);
-    m_impl->spectralCurvesBuffer = std::make_unique<GpuBuffer>(
-        m_impl->contextAdapter->GetAllocator(), bytes,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    m_impl->spectralCurvesBuffer->Upload(m_impl->spectralCurveEntries.data(), bytes);
-
-    if (m_impl->pipeline) {
-        m_impl->pipeline->BindSpectralCurvesBuffer(m_impl->spectralCurvesBuffer.get());
-    }
+    auto entries = m_impl->spectralCurveEntries;
+    entries.push_back(SpectralCurveGPU::FromCPU(curve));
+    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
+                                   m_impl->spectralCurvesBuffer))
+        return -1;
 
     QL_LOG_INFO("AddSpectralCurve: Added curve at index {} ({} curves total)",
                 index, m_impl->spectralCurveEntries.size());
@@ -4793,8 +4807,9 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     if (!scene) return;
 
     QL_LOG_INFO("Updating GPU resources...");
+    const auto resources = ResourceCounts();
     materialBuffer = rendercore::BuildMaterialBuffer(
-        *contextAdapter, *scene, wavelength_nm, materialGpuIndices);
+        *contextAdapter, *scene, wavelength_nm, materialGpuIndices, &resources);
     if (rebuildEmitters) RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
 }

@@ -494,3 +494,59 @@ TEST_F(PickTest, LightingUploadsWaitForSubmittedReaders) {
     lighting.skyRadiance_rgb *= 0.5f;
     ExpectUploadCompletesPriorReader([&] { context->SetLightingParams(lighting); });
 }
+
+TEST_F(PickTest, AppendingSpectralTablesWaitsForSubmittedReaders) {
+    LoadEmitterScene();
+    SpectralCurve curve;
+    curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
+    ComplexRefractiveIndex cri;
+    cri.wavelengths_nm = {400.0f, 780.0f};
+    cri.n = {1.4f, 1.5f};
+    cri.k = {0.0f, 0.0f};
+    const auto curveIndex = context->AddSpectralCurve(curve);
+    const auto criIndex = context->AddComplexRefractiveIndex(cri);
+    ASSERT_GE(curveIndex, 0);
+    ASSERT_GE(criIndex, 0);
+    auto material = context->GetScene()->materials[0];
+    material.spectralReflectanceCurveIndex = curveIndex;
+    material.complexRefractiveIndexIndex = criIndex;
+    context->UpdateMaterial(0, material);
+    ExpectUploadCompletesPriorReader([&] { EXPECT_GE(context->AddSpectralCurve(curve), 0); });
+    ExpectUploadCompletesPriorReader([&] { EXPECT_GE(context->AddComplexRefractiveIndex(cri), 0); });
+    ExpectUploadCompletesPriorReader([&] {
+        const auto bound = context->SetMaterialEmissionSpectrum(0, "d65", "match_luminance", "");
+        EXPECT_TRUE(bound.has_value());
+    });
+}
+
+TEST_F(PickTest, ApplyingConfigWaitsBeforeReplacingLiveSpectralTables) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf unavailable";
+    const std::string cameraKeys = "position = [278.0, 273.0, -800.0]\n"
+                                   "look_at = [278.0, 273.0, 0.0]\n";
+    ApplyScene(cameraKeys);
+    SpectralCurve curve;
+    curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
+    ASSERT_GE(context->AddSpectralCurve(curve), 0);
+    auto loaded = Config::Load((testDir / "scene.toml").string());
+    ASSERT_TRUE(loaded.has_value());
+    ExpectUploadCompletesPriorReader([&] {
+        const auto applied = context->ApplyConfig(loaded.value());
+        EXPECT_TRUE(applied.ok()) << applied.FirstError();
+    });
+}
+
+TEST_F(PickTest, InvalidSdkMaterialReferencesUseLoggedFallbacks) {
+    LoadEmitterScene();
+    auto material = context->GetScene()->materials[0];
+    material.baseColorTextureIndex = 1000000;
+    material.normalTextureIndex = -2;
+    material.spectralReflectanceCurveIndex = 1000000;
+    material.complexRefractiveIndexIndex = 1000000;
+    material.emissiveRadianceCurveIndex = 1000000;
+    material.fluorescenceExcitationCurveIndex = 1000000;
+    material.fluorescenceEmissionCurveIndex = 1000000;
+    quantiloom::support::ScopedLogCapture capture;
+    context->UpdateMaterial(0, material);
+    EXPECT_GE(capture.Count(Log::Level::Warn, "using fallback"), 7) << capture.Dump();
+    RenderRawFrame();
+}

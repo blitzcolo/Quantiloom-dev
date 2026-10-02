@@ -424,16 +424,20 @@ struct ComplexRefractiveIndexGPU {
 // wavelength loops call this once or twice per iteration.
 float2 SampleComplexRefractiveIndex(StructuredBuffer<ComplexRefractiveIndexGPU> buf,
                                     int index, float query_wavelength_nm) {
-    if (index < 0) {
+    uint count, stride;
+    buf.GetDimensions(count, stride);
+    if (index < 0 || uint(index) >= count) {
         return float2(1.0, 0.0);  // Default: air
     }
     const uint numSamples = buf[index].numSamples;
-    if (numSamples == 0) {
+    if (numSamples == 0 || numSamples > 64) {
         return float2(1.0, 0.0);
     }
 
     const float start = buf[index].startWavelength_nm;
     const float step  = buf[index].stepSize_nm;
+    if (!isfinite(query_wavelength_nm) || !isfinite(start) || !isfinite(step) || step <= 0.0)
+        return float2(1.0, 0.0);
     const float index_f = (query_wavelength_nm - start) / step;
 
     if (index_f < 0.0) {
@@ -956,6 +960,7 @@ struct PushConstantsRayGen {
     // twin in include/quantiloom/scene/Camera.hpp; the two must stay identical.
     uint timeStratum;         // layer this dispatch writes, 0-based
     uint timeStratumCount;    // layers in the current exposure, 0/1 = plain
+    uint textureCount;       // actual bound descriptors, including the dummy texture
 };
 
 [[vk::push_constant]] PushConstantsRayGen pushConsts;

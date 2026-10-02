@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace quantiloom::rendercore {
 
@@ -269,9 +270,18 @@ glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
     // "B","G","R" -- so sampling 0,1,2 swapped red and blue on every EXR
     // environment map. A .hdr goes through stb_image, whose data really is
     // R,G,B in that order, and was never affected. See Image::ChannelIndex.
-    const u32 cr = equirect.ChannelIndex("R", 0);
-    const u32 cg = equirect.ChannelIndex("G", 1);
-    const u32 cb = equirect.ChannelIndex("B", 2);
+    const u32 grey = equirect.LuminanceChannelIndex();
+    const bool monochrome = equirect.channels <= 2;
+    const u32 cr = monochrome ? grey : equirect.ChannelIndex("R", 0);
+    const u32 cg = monochrome ? grey : equirect.ChannelIndex("G", 1);
+    const u32 cb = monochrome ? grey : equirect.ChannelIndex("B", 2);
+    if (cr >= equirect.channels || cg >= equirect.channels || cb >= equirect.channels)
+        throw std::invalid_argument("Environment map channel index exceeds storage");
+    for (const u32 channel : {cr, cg, cb}) {
+        if (channel < equirect.channelNames.size() &&
+            (equirect.channelNames[channel] == "A" || equirect.channelNames[channel] == "Alpha"))
+            throw std::invalid_argument("Environment map has no unambiguous colour channels");
+    }
 
     const glm::vec3 c00(equirect(x0, y0, cr), equirect(x0, y0, cg), equirect(x0, y0, cb));
     const glm::vec3 c10(equirect(x1, y0, cr), equirect(x1, y0, cg), equirect(x1, y0, cb));
@@ -287,6 +297,8 @@ glm::vec3 SampleEquirect(const Image& equirect, const glm::vec3& dir) {
 }  // namespace
 
 Vector<Image> EquirectToCubemap(const Image& equirect, const u32 faceSize) {
+    if (!equirect.IsValid() || faceSize == 0)
+        throw std::invalid_argument("Environment map has invalid dimensions or pixel storage");
     QL_LOG_INFO("  Converting equirectangular to cubemap ({}x{} per face)...",
                 faceSize, faceSize);
 
@@ -656,7 +668,12 @@ Result<EnvironmentCubemap, String> EnvironmentCubemap::Load(VulkanContext& ctx,
     QL_LOG_INFO("  HDR image loaded: {}x{}, {} channels",
                 equirect->width, equirect->height, equirect->channels);
 
-    const Vector<Image> faces = EquirectToCubemap(equirect.value(), params.faceSize);
+    Vector<Image> faces;
+    try {
+        faces = EquirectToCubemap(equirect.value(), params.faceSize);
+    } catch (const std::invalid_argument& ex) {
+        return Result<EnvironmentCubemap, String>::Err(ex.what());
+    }
 
     EnvironmentCubemap result;
     result.m_device = ctx.GetDevice();
@@ -1224,7 +1241,8 @@ void PackUvTransform(const UvTransform& src, glm::vec4& outMat, glm::vec2& outOf
 } // namespace
 
 MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm,
-                                const MaterialGpuIndices& indices) {
+                                const MaterialGpuIndices& indices,
+                                const MaterialResourceCounts* resources) {
     MaterialDataCPU cpuMat{};
     cpuMat.baseColorFactor = material.baseColorFactor;
     cpuMat.baseColorTextureIndex = material.baseColorTextureIndex;
@@ -1365,6 +1383,47 @@ MaterialDataCPU ConvertMaterial(const Material& material, const f32 wavelengthNm
                     cpuMat.uvTransformMat[UV_SLOT_DIFFUSE_TRANSMISSION_COLOR],
                     cpuMat.uvTransformOffset[UV_SLOT_DIFFUSE_TRANSMISSION_COLOR]);
 
+    if (resources) {
+        const auto validate = [&](i32& index, usize count, const char* slot) {
+            if (index < -1 || (index >= 0 && static_cast<usize>(index) >= count)) {
+                QL_LOG_WARN("Material '{}': invalid {} index {}, live count {}; using fallback",
+                            material.name, slot, index, count);
+                index = -1;
+            }
+        };
+        validate(cpuMat.baseColorTextureIndex, resources->textures, "baseColor texture");
+        validate(cpuMat.metallicRoughnessTextureIndex, resources->textures, "metallicRoughness texture");
+        validate(cpuMat.normalTextureIndex, resources->textures, "normal texture");
+        validate(cpuMat.emissiveTextureIndex, resources->textures, "emissive texture");
+        validate(cpuMat.temperatureTextureIndex, resources->textures, "temperature texture");
+        validate(cpuMat.transmissionTextureIndex, resources->textures, "transmission texture");
+        validate(cpuMat.thicknessTextureIndex, resources->textures, "thickness texture");
+        validate(cpuMat.weightTextureIndex, resources->textures, "weight texture");
+        validate(cpuMat.sheenColorTextureIndex, resources->textures, "sheenColor texture");
+        validate(cpuMat.sheenRoughnessTextureIndex, resources->textures, "sheenRoughness texture");
+        validate(cpuMat.specularTextureIndex, resources->textures, "specular texture");
+        validate(cpuMat.specularColorTextureIndex, resources->textures, "specularColor texture");
+        validate(cpuMat.anisotropyTextureIndex, resources->textures, "anisotropy texture");
+        validate(cpuMat.clearcoatTextureIndex, resources->textures, "clearcoat texture");
+        validate(cpuMat.clearcoatRoughnessTextureIndex, resources->textures, "clearcoatRoughness texture");
+        validate(cpuMat.clearcoatNormalTextureIndex, resources->textures, "clearcoatNormal texture");
+        validate(cpuMat.diffuseTransmissionTextureIndex, resources->textures, "diffuseTransmission texture");
+        validate(cpuMat.diffuseTransmissionColorTextureIndex, resources->textures, "diffuseTransmissionColor texture");
+        validate(cpuMat.spectralReflectanceCurveIndex, resources->spectralCurves, "spectralReflectance curve");
+        validate(cpuMat.emissiveRadianceCurveIndex, resources->spectralCurves, "emissiveRadiance curve");
+        validate(cpuMat.irEmissivityCurveIndex, resources->spectralCurves, "irEmissivity curve");
+        validate(cpuMat.irTransmittanceCurveIndex, resources->spectralCurves, "irTransmittance curve");
+        validate(cpuMat.sheenReflectanceCurveIndex, resources->spectralCurves, "sheenReflectance curve");
+        validate(cpuMat.clearcoatReflectanceCurveIndex, resources->spectralCurves, "clearcoatReflectance curve");
+        validate(cpuMat.diffuseTransmissionColorCurveIndex, resources->spectralCurves, "diffuseTransmissionColor curve");
+        validate(cpuMat.fluorescenceExcitationCurveIndex, resources->spectralCurves, "fluorescenceExcitation curve");
+        validate(cpuMat.fluorescenceEmissionCurveIndex, resources->spectralCurves, "fluorescenceEmission curve");
+        validate(cpuMat.endmemberCurveIndex1, resources->spectralCurves, "endmember curve");
+        validate(cpuMat.endmemberCurveIndex2, resources->spectralCurves, "endmember curve");
+        validate(cpuMat.endmemberCurveIndex3, resources->spectralCurves, "endmember curve");
+        validate(cpuMat.complexRefractiveIndexIndex, resources->refractiveIndices, "refractive index");
+    }
+
     return cpuMat;
 }
 
@@ -1394,7 +1453,8 @@ bool IsOpaqueForRayTracing(const Scene& scene, u32 materialId) {
 
 std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
                                                const f32 wavelengthNm,
-                                               const Vector<MaterialGpuIndices>& indices) {
+                                               const Vector<MaterialGpuIndices>& indices,
+                                               const MaterialResourceCounts* resources) {
     if (scene.materials.empty()) {
         return nullptr;
     }
@@ -1406,7 +1466,7 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
         const Material& material = scene.materials[i];
         const MaterialGpuIndices resolved =
             i < indices.size() ? indices[i] : IndicesFromMaterial(material);
-        gpuMaterials.push_back(ConvertMaterial(material, wavelengthNm, resolved));
+        gpuMaterials.push_back(ConvertMaterial(material, wavelengthNm, resolved, resources));
     }
 
     const size_t bytes = gpuMaterials.size() * sizeof(MaterialDataCPU);

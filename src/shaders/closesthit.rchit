@@ -998,9 +998,12 @@ float FluorescenceExcitationWithLight(MaterialData material, float NdotL,
         return 0.0;
     }
     const int curveIndex = material.fluorescenceExcitationCurveIndex;
+    uint curveCount, curveStride;
+    spectralCurves.GetDimensions(curveCount, curveStride);
+    if (curveIndex < 0 || uint(curveIndex) >= curveCount) return 0.0;
     const uint nEx = spectralCurves[curveIndex].numSamples;
     const float exStep = spectralCurves[curveIndex].stepSize_nm;
-    if (nEx < 2 || exStep <= 0.0) return 0.0;
+    if (nEx < 2 || nEx > 64 || !isfinite(exStep) || exStep <= 0.0) return 0.0;
     const float lo = spectralCurves[curveIndex].startWavelength_nm;
     const float hi = lo + float(nEx - 1u) * exStep;
     const float lambda = lo + (hi - lo) *

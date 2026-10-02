@@ -66,10 +66,7 @@ struct HitAttributes {
 // Texture sampling
 // ============================================================================
 
-// Maximum valid texture index (must match MAX_TEXTURES in RayTracingPipeline.cpp)
-// CRITICAL: This bounds check prevents GPU hangs from invalid descriptor access
-static const int MAX_TEXTURE_INDEX = 1024;
-
+// Bound descriptor count is carried by the trace host, including on 32-slot devices.
 // Ray tracing has no screen-space derivatives, so the mip level has to be
 // stated rather than inferred -- and every fetch here states 0.
 //
@@ -87,11 +84,11 @@ static const int MAX_TEXTURE_INDEX = 1024;
 float4 SampleTexture(int textureIndex, int samplerIndex, float2 uv, float4 fallback) {
     // Check both lower AND upper bounds to prevent invalid descriptor access
     // Invalid indices (negative or out-of-range) can cause GPU hangs with PARTIALLY_BOUND descriptors
-    if (textureIndex < 0 || textureIndex >= MAX_TEXTURE_INDEX) {
+    if (textureIndex < 0 || uint(textureIndex) >= pushConsts.textureCount) {
         return fallback;
     }
     // Ensure sampler index is also valid (use same index as texture for 1:1 mapping)
-    if (samplerIndex < 0 || samplerIndex >= MAX_TEXTURE_INDEX) {
+    if (samplerIndex < 0 || uint(samplerIndex) >= pushConsts.textureCount) {
         return fallback;
     }
     return textures[NonUniformResourceIndex(textureIndex)].SampleLevel(

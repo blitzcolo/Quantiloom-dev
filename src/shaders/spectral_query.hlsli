@@ -60,7 +60,9 @@ float EvaluateSpectralCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                            float lambda_nm) {
     // Bounds checking: lower AND upper bound for safety
     // Upper bound prevents GPU memory access violations if curveIndex is corrupted
-    if (curveIndex < 0 || curveIndex >= MAX_SPECTRAL_CURVES) {
+    uint resourceCount, resourceStride;
+    spectralCurves.GetDimensions(resourceCount, resourceStride);
+    if (curveIndex < 0 || uint(curveIndex) >= resourceCount || !isfinite(lambda_nm)) {
         return 0.0;
     }
 
@@ -70,13 +72,14 @@ float EvaluateSpectralCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     uint numSamples = spectralCurves[curveIndex].numSamples;
 
     // Empty curve check
-    if (numSamples == 0) {
+    if (numSamples == 0 || numSamples > 64u) {
         return 0.0;
     }
 
     // Read sampling parameters (only 8 bytes total)
     float startWavelength = spectralCurves[curveIndex].startWavelength_nm;
     float stepSize = spectralCurves[curveIndex].stepSize_nm;
+    if (!isfinite(lambda_nm) || !isfinite(startWavelength) || !isfinite(stepSize) || stepSize <= 0.0) return 0.0;
 
     // OPTIMIZATION: O(1) direct index computation
     // Compute fractional index: (λ - λ₀) / Δλ
@@ -129,7 +132,9 @@ float EvaluateSpectralCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
 float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                             int curveIndex,
                             float lambda_nm) {
-    if (curveIndex < 0 || curveIndex >= MAX_SPECTRAL_CURVES) {
+    uint resourceCount, resourceStride;
+    spectralCurves.GetDimensions(resourceCount, resourceStride);
+    if (curveIndex < 0 || uint(curveIndex) >= resourceCount || !isfinite(lambda_nm)) {
         return 0.0;
     }
 
@@ -156,7 +161,7 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
             const uint n = spectralCurves[segment].numSamples;
             const float step = spectralCurves[segment].stepSize_nm;
             const bool packed = step == 0.0;
-            if (n < 2u || (packed && n > 32u) || (!packed && step < 0.0))
+            if (n < 2u || n > 64u || (packed && n > 32u) || !isfinite(step) || (!packed && step <= 0.0))
                 return 0.0;
             const float lo = packed ? spectralCurves[segment].values[0]
                                     : spectralCurves[segment].startWavelength_nm;
@@ -179,7 +184,7 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     }
 
     uint numSamples = spectralCurves[curveIndex].numSamples;
-    if (numSamples == 0) {
+    if (numSamples == 0 || numSamples > 64u) {
         return 0.0;
     }
 
@@ -205,6 +210,7 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
 
     float startWavelength = spectralCurves[curveIndex].startWavelength_nm;
     float stepSize = spectralCurves[curveIndex].stepSize_nm;
+    if (!isfinite(lambda_nm) || !isfinite(startWavelength) || !isfinite(stepSize) || stepSize <= 0.0) return 0.0;
     if (stepSize <= 0.0) {
         return 0.0;
     }

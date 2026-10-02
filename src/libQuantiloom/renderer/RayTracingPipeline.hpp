@@ -71,6 +71,7 @@
 #include "scene/Camera.hpp"
 #include <vulkan/vulkan.h>
 #include <vector>
+#include <cstddef>
 #include <string>
 #include <memory>
 #include <unordered_map>
@@ -382,7 +383,7 @@ public:
 
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
-    [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.camera; }
+    [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.cameraAndSampling.camera; }
 
     // Set accumulation sampling parameters (call before TraceRays).
     //
@@ -502,7 +503,15 @@ private:
     u32 m_maxTextures = 1024;
 
     // Push constants (camera + sampling parameters)
-    PushConstantsRayGen m_pushConstants{};
+    struct TracePushConstants {
+        PushConstantsRayGen cameraAndSampling;
+        u32 textureCount = 0;
+    };
+    static_assert(offsetof(TracePushConstants, textureCount) == 108);
+    static_assert(sizeof(TracePushConstants) <= 128);
+    mutable TracePushConstants m_pushConstants{};
+    std::unique_ptr<GpuBuffer> m_spectralFallback;
+    std::unique_ptr<GpuBuffer> m_criFallback;
 };
 
 } // namespace quantiloom

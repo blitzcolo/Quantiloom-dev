@@ -576,8 +576,15 @@ struct MaterialGpuIndices {
  * @note Both are clamped to [0, 1]. Emissivity above 1 is unphysical, and the clamp
  *       was already on the context's side.
  */
+struct MaterialResourceCounts {
+    usize textures = 0;
+    usize spectralCurves = 0;
+    usize refractiveIndices = 0;
+};
+
 MaterialDataCPU ConvertMaterial(const Material& material, f32 wavelengthNm,
-                                const MaterialGpuIndices& indices = {});
+                                const MaterialGpuIndices& indices = {},
+                                const MaterialResourceCounts* resources = nullptr);
 
 /**
  * @brief Convert and upload every material in the scene
@@ -588,7 +595,8 @@ MaterialDataCPU ConvertMaterial(const Material& material, f32 wavelengthNm,
  */
 std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& scene,
                                                f32 wavelengthNm,
-                                               const Vector<MaterialGpuIndices>& indices = {});
+                                               const Vector<MaterialGpuIndices>& indices = {},
+                                               const MaterialResourceCounts* resources = nullptr);
 
 /**
  * @brief Create the ray tracing target: an RGBA32F storage image in GENERAL layout

@@ -14,6 +14,7 @@
 #include "renderer/RenderCore.hpp"
 
 #include <glm/gtc/constants.hpp>
+#include <stdexcept>
 
 using namespace quantiloom;
 
@@ -479,4 +480,124 @@ TEST(RenderCoreSensorAdjustment, KeepsAHostChosenWavelength) {
 
     EXPECT_FLOAT_EQ(adjustment.wavelengthNm, 0.0f) << "0 leaves the caller's value";
     EXPECT_FLOAT_EQ(adjustment.radianceScale, 4000.0f) << "the scale still applies";
+}
+
+TEST(RenderCoreConvertMaterial, RejectsEveryOutOfRangeResourceReference) {
+    Material material;
+    rendercore::MaterialGpuIndices slots;
+    material.baseColorTextureIndex = 1;
+    material.metallicRoughnessTextureIndex = 1;
+    material.normalTextureIndex = 1;
+    material.emissiveTextureIndex = 1;
+    material.temperatureTextureIndex = 1;
+    material.transmissionTextureIndex = 1;
+    material.thicknessTextureIndex = 1;
+    material.weightTextureIndex = 1;
+    material.sheenColorTextureIndex = 1;
+    material.sheenRoughnessTextureIndex = 1;
+    material.specularTextureIndex = 1;
+    material.specularColorTextureIndex = 1;
+    material.anisotropyTextureIndex = 1;
+    material.clearcoatTextureIndex = 1;
+    material.clearcoatRoughnessTextureIndex = 1;
+    material.clearcoatNormalTextureIndex = 1;
+    material.diffuseTransmissionTextureIndex = 1;
+    material.diffuseTransmissionColorTextureIndex = 1;
+    slots.spectralReflectanceCurve = 1;
+    slots.complexRefractiveIndex = 1;
+    slots.endmemberCurve1 = 1;
+    slots.endmemberCurve2 = 1;
+    slots.endmemberCurve3 = 1;
+    slots.weightTexture = 1;
+    slots.sheenReflectanceCurve = 1;
+    slots.clearcoatReflectanceCurve = 1;
+    slots.diffuseTransmissionColorCurve = 1;
+    slots.emissiveRadianceCurve = 1;
+    slots.fluorescenceExcitationCurve = 1;
+    slots.fluorescenceEmissionCurve = 1;
+    slots.irEmissivityCurve = 1;
+    slots.irTransmittanceCurve = 1;
+    const rendercore::MaterialResourceCounts counts{1, 1, 1};
+    const auto gpu = rendercore::ConvertMaterial(material, 550.0f, slots, &counts);
+    EXPECT_EQ(gpu.baseColorTextureIndex, -1);
+    EXPECT_EQ(gpu.metallicRoughnessTextureIndex, -1);
+    EXPECT_EQ(gpu.normalTextureIndex, -1);
+    EXPECT_EQ(gpu.emissiveTextureIndex, -1);
+    EXPECT_EQ(gpu.temperatureTextureIndex, -1);
+    EXPECT_EQ(gpu.transmissionTextureIndex, -1);
+    EXPECT_EQ(gpu.thicknessTextureIndex, -1);
+    EXPECT_EQ(gpu.weightTextureIndex, -1);
+    EXPECT_EQ(gpu.sheenColorTextureIndex, -1);
+    EXPECT_EQ(gpu.sheenRoughnessTextureIndex, -1);
+    EXPECT_EQ(gpu.specularTextureIndex, -1);
+    EXPECT_EQ(gpu.specularColorTextureIndex, -1);
+    EXPECT_EQ(gpu.anisotropyTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatRoughnessTextureIndex, -1);
+    EXPECT_EQ(gpu.clearcoatNormalTextureIndex, -1);
+    EXPECT_EQ(gpu.diffuseTransmissionTextureIndex, -1);
+    EXPECT_EQ(gpu.diffuseTransmissionColorTextureIndex, -1);
+    EXPECT_EQ(gpu.spectralReflectanceCurveIndex, -1);
+    EXPECT_EQ(gpu.emissiveRadianceCurveIndex, -1);
+    EXPECT_EQ(gpu.irEmissivityCurveIndex, -1);
+    EXPECT_EQ(gpu.irTransmittanceCurveIndex, -1);
+    EXPECT_EQ(gpu.sheenReflectanceCurveIndex, -1);
+    EXPECT_EQ(gpu.clearcoatReflectanceCurveIndex, -1);
+    EXPECT_EQ(gpu.diffuseTransmissionColorCurveIndex, -1);
+    EXPECT_EQ(gpu.fluorescenceExcitationCurveIndex, -1);
+    EXPECT_EQ(gpu.fluorescenceEmissionCurveIndex, -1);
+    EXPECT_EQ(gpu.endmemberCurveIndex1, -1);
+    EXPECT_EQ(gpu.endmemberCurveIndex2, -1);
+    EXPECT_EQ(gpu.endmemberCurveIndex3, -1);
+    EXPECT_EQ(gpu.complexRefractiveIndexIndex, -1);
+}
+
+TEST(RenderCoreConvertMaterial, PreservesLiveResourceIndicesAndRejectsNegativeGarbage) {
+    Material material;
+    material.baseColorTextureIndex = 0;
+    material.normalTextureIndex = -2;
+    rendercore::MaterialGpuIndices slots;
+    slots.spectralReflectanceCurve = 0;
+    slots.complexRefractiveIndex = 0;
+    const rendercore::MaterialResourceCounts counts{1, 1, 1};
+    const auto gpu = rendercore::ConvertMaterial(material, 550.0f, slots, &counts);
+    EXPECT_EQ(gpu.baseColorTextureIndex, 0);
+    EXPECT_EQ(gpu.normalTextureIndex, -1);
+    EXPECT_EQ(gpu.spectralReflectanceCurveIndex, 0);
+    EXPECT_EQ(gpu.complexRefractiveIndexIndex, 0);
+}
+
+TEST(RenderCoreEnvironment, GrayscaleAndNamedGrayAlphaReplicateLuminance) {
+    for (const u32 channels : {1u, 2u}) {
+        Image image(2, 1, channels);
+        image.channelNames = channels == 1 ? Vector<String>{"Y"} : Vector<String>{"A", "Y"};
+        for (u32 x = 0; x < 2; ++x) {
+            image(x, 0, channels - 1) = 0.25f;
+            if (channels == 2) image(x, 0, 0) = 0.9f;
+        }
+        const auto faces = rendercore::EquirectToCubemap(image, 2);
+        for (const auto& face : faces)
+            for (const auto value : face.data) EXPECT_FLOAT_EQ(value, 0.25f);
+    }
+}
+
+TEST(RenderCoreEnvironment, RejectsTruncatedStorageAndAlphaOnlyInput) {
+    Image truncated(2, 1, 3);
+    truncated.data.pop_back();
+    EXPECT_THROW(rendercore::EquirectToCubemap(truncated, 1), std::invalid_argument);
+    Image alpha(1, 1, 1);
+    alpha.channelNames = {"A"};
+    EXPECT_THROW(rendercore::EquirectToCubemap(alpha, 1), std::invalid_argument);
+}
+
+TEST(RenderCoreEnvironment, NamedRgbaRetainsRgbWithoutAlpha) {
+    Image image(1, 1, 4);
+    image.channelNames = {"A", "B", "G", "R"};
+    image.data = {0.9f, 0.3f, 0.2f, 0.1f};
+    const auto faces = rendercore::EquirectToCubemap(image, 1);
+    for (const auto& face : faces) {
+        EXPECT_FLOAT_EQ(face(0, 0, 0), 0.1f);
+        EXPECT_FLOAT_EQ(face(0, 0, 1), 0.2f);
+        EXPECT_FLOAT_EQ(face(0, 0, 2), 0.3f);
+    }
 }
