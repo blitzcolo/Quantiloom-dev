@@ -326,13 +326,13 @@ auto MultibandFusion::Upsample(const Image& img, const u32 targetWidth,
             const f32 srcX = std::min(static_cast<f32>(x) * xRatio, static_cast<f32>(img.width - 1));
             const f32 srcY = std::min(static_cast<f32>(y) * yRatio, static_cast<f32>(img.height - 1));
 
-            const u32 x0 = static_cast<u32>(srcX);
-            const u32 y0 = static_cast<u32>(srcY);
+            const u32 x0 = std::min(static_cast<u32>(srcX), img.width - 1);
+            const u32 y0 = std::min(static_cast<u32>(srcY), img.height - 1);
             const u32 x1 = std::min(x0 + 1, img.width - 1);
             const u32 y1 = std::min(y0 + 1, img.height - 1);
 
-            const f32 fx = srcX - static_cast<f32>(x0);
-            const f32 fy = srcY - static_cast<f32>(y0);
+            const f32 fx = std::clamp(srcX - static_cast<f32>(x0), 0.0f, 1.0f);
+            const f32 fy = std::clamp(srcY - static_cast<f32>(y0), 0.0f, 1.0f);
 
             for (u32 c = 0; c < img.channels; ++c) {
                 const f32 v00 = img(x0, y0, c);
