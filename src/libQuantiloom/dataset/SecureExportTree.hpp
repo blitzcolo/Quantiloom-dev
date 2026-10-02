@@ -21,6 +21,20 @@
 namespace quantiloom::dataset::detail {
 namespace fs = std::filesystem;
 
+#ifdef _WIN32
+// The claim + random staging name can exceed Win32's legacy directory limit
+// even when the user's output filename itself is short. Use the extended form
+// for every native API and writer path, including UNC shares.
+inline std::wstring Win32Path(const fs::path& path) {
+    auto absolute = fs::absolute(path).lexically_normal();
+    absolute.make_preferred();
+    const auto value = absolute.wstring();
+    if (value.starts_with(L"\\\\?\\")) return value;
+    if (value.starts_with(L"\\\\")) return L"\\\\?\\UNC\\" + value.substr(2);
+    return L"\\\\?\\" + value;
+}
+#endif
+
 // Directory capabilities live for the whole transaction. Windows denies rename
 // and deletion of every ancestor; POSIX always addresses children through dirfd.
 // POSIX cannot forbid a same-user directory rename. Identity checks reject a
@@ -64,9 +78,10 @@ class SecureExportTree {
         auto dir = std::make_unique<Directory>();
         dir->path = path;
 #ifdef _WIN32
-        if (create && parent && !CreateDirectoryW(path.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-            throw std::runtime_error("cannot create export directory: " + path.string());
-        dir->handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+        if (create && parent && !CreateDirectoryW(Win32Path(path).c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+            throw std::runtime_error("cannot create export directory: " + path.string() +
+                " (Windows error " + std::to_string(GetLastError()) + ")");
+        dir->handle = CreateFileW(Win32Path(path).c_str(), FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
             FILE_SHARE_READ, nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         FILE_ATTRIBUTE_TAG_INFO attributes{};
@@ -74,7 +89,8 @@ class SecureExportTree {
             !GetFileInformationByHandleEx(dir->handle, FileAttributeTagInfo, &attributes, sizeof(attributes)) ||
             !(attributes.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
             (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
-            throw std::runtime_error("unsafe export directory: " + path.string());
+            throw std::runtime_error("unsafe export directory: " + path.string() +
+                " (Windows error " + std::to_string(GetLastError()) + ")");
 #else
         if (create && parent && ::mkdirat(parent->handle, path.filename().c_str(), 0700) != 0 && errno != EEXIST)
             throw std::runtime_error("cannot create export directory: " + path.string());
@@ -88,7 +104,7 @@ class SecureExportTree {
     }
     static bool ExistsIn(const Directory& dir, const fs::path& leaf) {
 #ifdef _WIN32
-        const auto attrs = GetFileAttributesW((dir.path / leaf).c_str());
+        const auto attrs = GetFileAttributesW(Win32Path(dir.path / leaf).c_str());
         if (attrs != INVALID_FILE_ATTRIBUTES) return true;
         const auto error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) return false;
@@ -104,7 +120,7 @@ class SecureExportTree {
         [[maybe_unused]] auto& dir = Open(path, false, false);
 #ifdef _WIN32
         WIN32_FIND_DATAW data{};
-        const auto find = FindFirstFileW((path / L"*").c_str(), &data);
+        const auto find = FindFirstFileW(Win32Path(path / L"*").c_str(), &data);
         if (find == INVALID_HANDLE_VALUE) return;
         try {
             do {
@@ -114,8 +130,8 @@ class SecureExportTree {
                 if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                     if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) Clear(child);
                     directories.erase(child);
-                    RemoveDirectoryW(child.c_str());
-                } else DeleteFileW(child.c_str());
+                    RemoveDirectoryW(Win32Path(child).c_str());
+                } else DeleteFileW(Win32Path(child).c_str());
             } while (FindNextFileW(find, &data));
         } catch (...) { FindClose(find); throw; }
         FindClose(find);
@@ -145,7 +161,7 @@ public:
     fs::path FilePath(const fs::path& path) {
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
 #ifdef _WIN32
-        return path;
+        return fs::path(Win32Path(path));
 #else
         // Streaming writers receive a capability path, not a replaceable ancestry.
         return fs::path("/proc/self/fd") / std::to_string(parent.handle) / path.filename();
@@ -155,7 +171,7 @@ public:
     bool Regular(const fs::path& path) {
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
 #ifdef _WIN32
-        const auto attrs = GetFileAttributesW(path.c_str());
+        const auto attrs = GetFileAttributesW(Win32Path(path).c_str());
         return attrs != INVALID_FILE_ATTRIBUTES && !(attrs & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT));
 #else
         struct stat status{};
@@ -165,7 +181,7 @@ public:
     void Claim(const fs::path& path) {
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
 #ifdef _WIN32
-        const bool made = CreateDirectoryW(path.c_str(), nullptr) != 0;
+        const bool made = CreateDirectoryW(Win32Path(path).c_str(), nullptr) != 0;
 #else
         const bool made = ::mkdirat(parent.handle, path.filename().c_str(), 0700) == 0;
 #endif
@@ -177,7 +193,7 @@ public:
         [[maybe_unused]] auto& src = Open(from.parent_path(), false, false);
         [[maybe_unused]] auto& dst = Open(to.parent_path(), false, false);
 #ifdef _WIN32
-        if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        if (!MoveFileExW(Win32Path(from).c_str(), Win32Path(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
 #else
         if (::renameat(src.handle, from.filename().c_str(), dst.handle, to.filename().c_str()) != 0)
 #endif
@@ -187,7 +203,7 @@ public:
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
         directories.erase(path);
 #ifdef _WIN32
-        RemoveDirectoryW(path.c_str());
+        RemoveDirectoryW(Win32Path(path).c_str());
 #else
         ::unlinkat(parent.handle, path.filename().c_str(), AT_REMOVEDIR);
 #endif

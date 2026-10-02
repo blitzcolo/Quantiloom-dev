@@ -67,12 +67,12 @@ public:
                 std::wstring name = L"ql_";
                 for (auto value : random) { name += L"0123456789abcdef"[value >> 4]; name += L"0123456789abcdef"[value & 15]; }
                 const auto candidate = parent / name;
-                if (CreateDirectoryW(candidate.c_str(), &attributes)) { directory = candidate; created = true; break; }
+                if (CreateDirectoryW(quantiloom::dataset::detail::Win32Path(candidate).c_str(), &attributes)) { directory = candidate; created = true; break; }
                 if (GetLastError() != ERROR_ALREADY_EXISTS) throw std::runtime_error("Cannot create private executable directory");
             }
             if (!created) throw std::runtime_error("Cannot allocate private executable directory");
             tree.Ensure(directory);
-            executable = directory / L"LutHelper.exe";
+            executable = quantiloom::dataset::detail::Win32Path(directory / L"LutHelper.exe");
             {
                 Handle file;
                 file.value = CreateFileW(executable.c_str(), GENERIC_WRITE, 0, &attributes,

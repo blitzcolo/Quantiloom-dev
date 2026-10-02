@@ -521,7 +521,11 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
     Json errors = Json::array();
     Json provenance = nullptr;
     try {
+#ifdef _WIN32
+        const fs::path path(detail::Win32Path(fs::path(recordPath)));
+#else
         const fs::path path(recordPath);
+#endif
         const auto record = ReadJson(path);
         ValidateRecordShape(record);
         if (record.at("schema") != "quantiloom.dataset.export" ||

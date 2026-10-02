@@ -329,3 +329,23 @@ TEST_F(ExportSessionTest, KeepsRootAndStagingParentsPinnedForStreamingWriter) {
     EXPECT_FALSE(session.value()->RegisterFile("deep/nested/data.bin", "data", "{}"));
 #endif
 }
+
+TEST_F(ExportSessionTest, PublishesWhenPrivateStagingExceedsLegacyWindowsPathLimit) {
+    // The visible output remains below MAX_PATH, while the claim and random
+    // staging ID push its private paths beyond the old 248-character limit.
+    const auto longRoot = root / std::string(150, 'x');
+    fs::create_directory(longRoot);
+    auto session = ExportSession::Create((longRoot / "frame.exr").string(), config, {"{}"});
+    ASSERT_TRUE(session) << session.error();
+    const auto staged = session.value()->StagingPath("bands/band.exr");
+    ASSERT_TRUE(staged) << staged.error();
+#ifdef _WIN32
+    EXPECT_GT(staged.value().size(), 260u);
+    EXPECT_TRUE(staged.value().starts_with("\\\\?\\"));
+#endif
+    ASSERT_TRUE(session.value()->WriteImage("bands/band.exr", "band", image, "{}"));
+    ASSERT_TRUE(session.value()->Commit());
+    EXPECT_TRUE(ExportSession::Verify((longRoot / "frame.metadata.json").string()).valid);
+    session.value().reset();
+    EXPECT_FALSE(fs::exists(longRoot / "frame.exr.quantiloom-export.lock"));
+}
