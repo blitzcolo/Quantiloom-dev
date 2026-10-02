@@ -3,8 +3,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace quantiloom {
+namespace {
+u32 MaximumPyramidLevels(u32 width, u32 height) {
+    if (width == 0 || height == 0) return 0;
+    u32 levels = 1;
+    while (width > 1 && height > 1) {
+        width /= 2;
+        height /= 2;
+        ++levels;
+    }
+    return levels;
+}
+}
 
 // ============================================================================
 // Main Interface
@@ -24,8 +37,13 @@ auto MultibandFusion::Fuse(const Image& vis, const Image& swir,
         return Result<Image>(Result<Image>::Err("Image dimensions must match"));
     }
 
-    if (vis.channels != swir.channels || vis.channels != mwir.channels) {
-        return Result<Image>(Result<Image>::Err("Image channel counts must match"));
+    if (vis.channels != 1 || swir.channels != 1 || mwir.channels != 1) {
+        return Result<Image>::Err("Fusion requires single-channel band images");
+    }
+    if (params.method == FusionMethod::LaplacianPyramid &&
+        (params.pyramidLevels == 0 ||
+         params.pyramidLevels > MaximumPyramidLevels(vis.width, vis.height))) {
+        return Result<Image>::Err("Pyramid levels must be positive and fit both image dimensions");
     }
 
     Log::Info("Multiband fusion: {}x{} VIS/SWIR/MWIR → {} mode",
@@ -200,6 +218,9 @@ auto MultibandFusion::LaplacianPyramid(const Image& vis, const Image& swir,
 // ============================================================================
 
 auto MultibandFusion::BuildGaussianPyramid(const Image& img, const u32 levels) -> Vector<Image> {
+    if (!img.IsValid() || img.channels != 1 || levels == 0 ||
+        levels > MaximumPyramidLevels(img.width, img.height))
+        throw std::invalid_argument("Invalid pyramid image or depth");
     Vector<Image> pyramid;
     pyramid.reserve(levels);
     pyramid.push_back(img);
@@ -261,6 +282,8 @@ auto MultibandFusion::CollapseLaplacianPyramid(const Vector<Image>& pyramid) -> 
 // ============================================================================
 
 auto MultibandFusion::Downsample(const Image& img) -> Image {
+    if (!img.IsValid() || img.width < 2 || img.height < 2)
+        throw std::invalid_argument("Cannot downsample an empty or single-pixel dimension");
     const u32 newWidth = img.width / 2;
     const u32 newHeight = img.height / 2;
 
@@ -288,16 +311,20 @@ auto MultibandFusion::Downsample(const Image& img) -> Image {
 
 auto MultibandFusion::Upsample(const Image& img, const u32 targetWidth,
                                 const u32 targetHeight) -> Image {
+    if (!img.IsValid() || targetWidth == 0 || targetHeight == 0)
+        throw std::invalid_argument("Cannot upsample an empty image");
     Image result(targetWidth, targetHeight, img.channels);
 
     // Bilinear interpolation
-    const f32 xRatio = static_cast<f32>(img.width - 1) / static_cast<f32>(targetWidth - 1);
-    const f32 yRatio = static_cast<f32>(img.height - 1) / static_cast<f32>(targetHeight - 1);
+    const f32 xRatio = targetWidth > 1
+        ? static_cast<f32>(img.width - 1) / static_cast<f32>(targetWidth - 1) : 0.0f;
+    const f32 yRatio = targetHeight > 1
+        ? static_cast<f32>(img.height - 1) / static_cast<f32>(targetHeight - 1) : 0.0f;
 
     for (u32 y = 0; y < targetHeight; ++y) {
         for (u32 x = 0; x < targetWidth; ++x) {
-            const f32 srcX = static_cast<f32>(x) * xRatio;
-            const f32 srcY = static_cast<f32>(y) * yRatio;
+            const f32 srcX = std::min(static_cast<f32>(x) * xRatio, static_cast<f32>(img.width - 1));
+            const f32 srcY = std::min(static_cast<f32>(y) * yRatio, static_cast<f32>(img.height - 1));
 
             const u32 x0 = static_cast<u32>(srcX);
             const u32 y0 = static_cast<u32>(srcY);

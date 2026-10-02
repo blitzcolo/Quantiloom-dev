@@ -11,6 +11,7 @@
 #include "io/ImageIO.hpp"
 #include "postprocess/MultibandFusion.hpp"
 #include "postprocess/PostprocessConfig.hpp"
+#include "FusionInput.hpp"
 
 #include <iostream>
 #include <filesystem>
@@ -102,23 +103,10 @@ int main(int argc, char** argv) {
         // channel list in -- so index 0 is the alpha, a constant 1.0. Taken
         // positionally, all three bands here were the same flat image and the
         // fusion had nothing to fuse. See Image::ChannelIndex.
-        const u32 visC = visImg.LuminanceChannelIndex();
-        const u32 swirC = swirImg.LuminanceChannelIndex();
-        const u32 mwirC = mwirImg.LuminanceChannelIndex();
-        QL_LOG_INFO("  Radiance channels: VIS '{}', SWIR '{}', MWIR '{}'",
-                    visImg.channelNames[visC], swirImg.channelNames[swirC],
-                    mwirImg.channelNames[mwirC]);
-
-        Image visGray(visImg.width, visImg.height, 1);
-        Image swirGray(swirImg.width, swirImg.height, 1);
-        Image mwirGray(mwirImg.width, mwirImg.height, 1);
-
-        for (u32 y = 0; y < visImg.height; ++y) {
-            for (u32 x = 0; x < visImg.width; ++x) {
-                visGray(x, y, 0) = visImg(x, y, visC);
-                swirGray(x, y, 0) = swirImg(x, y, swirC);
-                mwirGray(x, y, 0) = mwirImg(x, y, mwirC);
-            }
+        auto bands = PrepareFusionInputs(visImg, swirImg, mwirImg);
+        if (!bands.has_value()) {
+            QL_LOG_ERROR("Invalid fusion inputs: {}", bands.error());
+            return 1;
         }
 
         // ====================================================================
@@ -126,7 +114,8 @@ int main(int argc, char** argv) {
         // ====================================================================
         QL_LOG_INFO("Fusing VIS/SWIR/MWIR bands...");
 
-        auto fusionResult = MultibandFusion::Fuse(visGray, swirGray, mwirGray, fusionParams);
+        auto fusionResult = MultibandFusion::Fuse(
+            bands.value()[0], bands.value()[1], bands.value()[2], fusionParams);
         if (!fusionResult.has_value()) {
             QL_LOG_ERROR("Fusion failed: {}", fusionResult.error());
             return 1;

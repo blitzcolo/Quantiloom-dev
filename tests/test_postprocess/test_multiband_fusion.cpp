@@ -14,6 +14,8 @@
 #include "postprocess/MultibandFusion.hpp"
 #include "core/Image.hpp"
 #include <cmath>
+#include <limits>
+#include "../../src/tools/FusionInput.hpp"
 
 using namespace quantiloom;
 
@@ -99,6 +101,70 @@ TEST_F(MultibandFusionTest, MismatchedChannelsReturnsError) {
 
     EXPECT_FALSE(result.has_value());
     EXPECT_NE(result.error().find("channel"), std::string::npos);
+}
+
+TEST_F(MultibandFusionTest, MatchingMultichannelInputsAreRejectedByEveryMethod) {
+    const Image rgb(4, 4, 3);
+    for (const auto method : {FusionMethod::WeightedAverage, FusionMethod::MaxResponse,
+                              FusionMethod::LaplacianPyramid, FusionMethod::PseudoColor}) {
+        params.method = method;
+        EXPECT_FALSE(MultibandFusion::Fuse(rgb, rgb, rgb, params).has_value());
+    }
+}
+
+TEST_F(MultibandFusionTest, RejectsZeroAndExcessivePyramidDepth) {
+    const Image small(8, 8, 1);
+    params.method = FusionMethod::LaplacianPyramid;
+    for (const u32 depth : {0u, 5u, std::numeric_limits<u32>::max()}) {
+        params.pyramidLevels = depth;
+        EXPECT_FALSE(MultibandFusion::Fuse(small, small, small, params).has_value());
+    }
+    params.method = FusionMethod::WeightedAverage;
+    EXPECT_TRUE(MultibandFusion::Fuse(small, small, small, params).has_value());
+}
+
+TEST_F(MultibandFusionTest, PyramidAcceptsLastNonemptyLevelAndSinglePixelBands) {
+    params.method = FusionMethod::LaplacianPyramid;
+    params.autoNormalize = false;
+    for (const auto extent : {std::pair{16u, 16u}, std::pair{1u, 8u},
+                              std::pair{8u, 1u}, std::pair{1u, 1u}, std::pair{7u, 5u}}) {
+        Image input(extent.first, extent.second, 1);
+        std::fill(input.data.begin(), input.data.end(), 0.4f);
+        params.pyramidLevels = extent.first == 16 ? 5 : (extent.first == 7 ? 3 : 1);
+        const auto result = MultibandFusion::Fuse(input, input, input, params);
+        ASSERT_TRUE(result.has_value());
+        for (const auto value : result.value().data) EXPECT_NEAR(value, 0.4f, 1e-6f);
+    }
+}
+
+TEST(FusionInputTest, RejectsDifferentExtentsBeforeJointCopy) {
+    const Image vis(4, 4, 1), smaller(2, 2, 1), larger(8, 8, 1);
+    EXPECT_FALSE(PrepareFusionInputs(vis, smaller, vis).has_value());
+    EXPECT_FALSE(PrepareFusionInputs(vis, vis, larger).has_value());
+    Image malformed = vis;
+    malformed.data.pop_back();
+    EXPECT_FALSE(PrepareFusionInputs(vis, malformed, vis).has_value());
+}
+
+TEST(FusionInputTest, ExtractsNamedRadianceFromIndependentChannelLayouts) {
+    Image rgba(2, 2, 4), gray(2, 2, 1), rgb(2, 2, 3);
+    rgba.channelNames = {"A", "B", "G", "R"};
+    rgb.channelNames = {"B", "G", "R"};
+    for (u32 y = 0; y < 2; ++y) {
+        for (u32 x = 0; x < 2; ++x) {
+            rgba(x, y, 0) = 1.0f;
+            rgba(x, y, 3) = 0.2f;
+            gray(x, y, 0) = 0.3f;
+            rgb(x, y, 2) = 0.4f;
+        }
+    }
+    const auto bands = PrepareFusionInputs(rgba, gray, rgb);
+    ASSERT_TRUE(bands.has_value());
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(bands.value()[i].channels, 1u);
+        for (const auto value : bands.value()[i].data)
+            EXPECT_NEAR(value, 0.2f + static_cast<float>(i) * 0.1f, 1e-6f);
+    }
 }
 
 // ============================================================================

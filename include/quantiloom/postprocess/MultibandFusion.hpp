@@ -41,7 +41,8 @@
  * }
  * @endcode
  *
- * @note All input images must have same width/height (validated at runtime)
+ * @note Inputs must be single-channel bands of the same nonzero width/height.
+ * @note Pyramid depth includes the original image and must not produce empty levels.
  * @note Laplacian pyramid recommended for best detail preservation
  * @note Auto-normalization uses min/max per band (can be overridden)
  *
