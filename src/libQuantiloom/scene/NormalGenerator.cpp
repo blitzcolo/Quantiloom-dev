@@ -9,6 +9,7 @@
 #include <queue>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 
 namespace quantiloom {
 
@@ -150,6 +151,15 @@ void NormalGenerator::GenerateWithDihedralAngle(
     GeometryPrimitive& primitive,
     const NormalGenerationConfig& config)
 {
+    // Validate before any vertex reads, including callers with authored normals.
+    const auto validStream = [&](size_t count) { return count == 0 || count == primitive.positions.size(); };
+    if (!validStream(primitive.normals.size()) || !validStream(primitive.uvs.size()) ||
+        !validStream(primitive.tangents.size()) || primitive.indices.size() % 3 != 0 ||
+        std::any_of(primitive.indices.begin(), primitive.indices.end(),
+                    [&](u32 i) { return i >= primitive.positions.size(); })) {
+        throw std::invalid_argument("Invalid triangle indices for normal generation");
+    }
+
     // Early exit if already has normals
     if (!primitive.normals.empty()) {
         return;

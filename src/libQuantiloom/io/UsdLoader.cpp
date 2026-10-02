@@ -29,6 +29,8 @@
 #include "core/Log.hpp"
 
 #include <cctype>
+#include <limits>
+#include <algorithm>
 #include <string_view>
 
 // Conditional compilation based on OpenUSD availability
@@ -549,6 +551,23 @@ static void FillPerPoint(const AttrSource<T>& source, size_t pointCount,
     }
 }
 
+// Validate topology before either triangulation or face-varying expansion.
+static bool ValidPolygonTopology(const std::vector<i32>& counts,
+                                 const std::vector<i32>& indices,
+                                 size_t pointCount = std::numeric_limits<size_t>::max()) {
+    size_t total = 0;
+    for (i32 count : counts) {
+        if (count < 0 || static_cast<size_t>(count) > indices.size() - total) {
+            return false;
+        }
+        total += static_cast<size_t>(count);
+    }
+    if (total != indices.size()) { return false; }
+    return std::all_of(indices.begin(), indices.end(), [&](i32 index) {
+        return index >= 0 && static_cast<size_t>(index) < pointCount;
+    });
+}
+
 // ============================================================================
 // TriangulatePolygons - Convert polygon faces to triangles
 // ============================================================================
@@ -557,6 +576,10 @@ std::vector<u32> UsdLoader::TriangulatePolygons(
     const std::vector<i32>& faceVertexCounts,
     const std::vector<i32>& faceVertexIndices) {
 
+    if (!ValidPolygonTopology(faceVertexCounts, faceVertexIndices)) {
+        QL_LOG_ERROR("USD mesh has invalid polygon topology");
+        return {};
+    }
     std::vector<u32> triangleIndices;
 
     size_t indexOffset = 0;
@@ -584,8 +607,12 @@ std::vector<u32> UsdLoader::TriangulatePolygonsWithFaceMap(
     const std::vector<i32>& faceVertexIndices,
     std::vector<u32>& outTriangleToFace) {
 
-    std::vector<u32> triangleIndices;
     outTriangleToFace.clear();
+    if (!ValidPolygonTopology(faceVertexCounts, faceVertexIndices)) {
+        QL_LOG_ERROR("USD mesh has invalid polygon topology");
+        return {};
+    }
+    std::vector<u32> triangleIndices;
 
     size_t indexOffset = 0;
     for (size_t faceIdx = 0; faceIdx < faceVertexCounts.size(); ++faceIdx) {
@@ -928,6 +955,11 @@ Mesh UsdLoader::ParseMesh(const void* stagePtr, const void* primPtr,
 
     std::vector<i32> fvcVec(faceVertexCounts.begin(), faceVertexCounts.end());
     std::vector<i32> fviVec(faceVertexIndices.begin(), faceVertexIndices.end());
+
+    if (!ValidPolygonTopology(fvcVec, fviVec, positions.size())) {
+        QL_LOG_ERROR("USD mesh '{}' has invalid polygon topology", mesh.name);
+        return mesh;
+    }
 
     // Triangulate with face mapping for GeomSubsets
     std::vector<u32> triangleToFace;

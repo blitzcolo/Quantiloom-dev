@@ -48,6 +48,13 @@ Result<std::unique_ptr<SegmentExpressions>, String> SegmentExpressions::Compile(
     impl.symbols.add_constants();  // pi, epsilon, inf
 
     exprtk::parser<f64> parser;
+    // Scene expressions are scalar functions, never executable programs.
+    using Settings = exprtk::parser<f64>::settings_t;
+    parser.settings().disable_control_structure(Settings::e_ctrl_while_loop)
+        .disable_control_structure(Settings::e_ctrl_for_loop)
+        .disable_control_structure(Settings::e_ctrl_repeat_loop)
+        .disable_all_assignment_ops().disable_local_vardef()
+        .disable_base_function(Settings::e_bf_swap);
     impl.expressions.reserve(expressions.size());
     for (const String& text : expressions) {
         const String source = text.empty() ? String("0") : text;

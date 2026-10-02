@@ -475,3 +475,24 @@ TEST(MotionSpecTest, AMissingCsvIsReportedNotThrown) {
     auto keys = LoadMotionKeysCsv("this-file-does-not-exist-12345.csv");
     EXPECT_FALSE(keys.has_value());
 }
+
+TEST(MotionTest, RejectsExecutableExpressionConstructs) {
+    for (const char* source : {"while (1) { 1; }", "for (;;) { 1; }",
+                               "repeat { 1; } until (0)", "t := 10", "s += 1",
+                               "var x := 1; x", "swap(t,s)", "if(t>0,t:=2,0)"}) {
+        SCOPED_TRACE(source);
+        EXPECT_FALSE(SegmentExpressions::Compile({source}).has_value());
+    }
+}
+
+TEST(MotionTest, ScalarAndConditionalExpressionsRemainAvailable) {
+    auto compiled = SegmentExpressions::Compile({"if(t > 2, sin(pi/2) + s, 0)", "t^2 + sqrt(4)", ""});
+    ASSERT_TRUE(compiled.has_value()) << compiled.error();
+    f64 values[3]{};
+    (*compiled)->Evaluate(3, 4, values);
+    EXPECT_DOUBLE_EQ(values[0], 5);
+    EXPECT_DOUBLE_EQ(values[1], 11);
+    EXPECT_DOUBLE_EQ(values[2], 0);
+    (*compiled)->Evaluate(1, 8, values);
+    EXPECT_DOUBLE_EQ(values[0], 0);
+}

@@ -17,6 +17,9 @@
 #include "scene/Material.hpp"
 #include <filesystem>
 #include <fstream>
+#include <chrono>
+#include "scene/NormalGenerator.hpp"
+#include <stdexcept>
 
 using namespace quantiloom;
 
@@ -1259,4 +1262,203 @@ TEST_F(GltfLoaderTest, APlainMaterialGetsNoDerivedTangents) {
     const Scene& scene = *result;
     ASSERT_FALSE(scene.meshes.empty());
     EXPECT_TRUE(scene.meshes[0].primitives[0].tangents.empty());
+}
+
+namespace {
+class GltfBoundaryTest : public ::testing::Test {
+protected:
+    std::filesystem::path directory;
+    void SetUp() override {
+        directory = std::filesystem::temp_directory_path() /
+            ("quantiloom_gltf_boundary_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory);
+        const float positions[] = {0,0,0, 1,0,0, 0,1,0};
+        const uint16_t indices[] = {0,1,2};
+        std::ofstream bin(directory / "data.bin", std::ios::binary);
+        bin.write(reinterpret_cast<const char*>(positions), sizeof(positions));
+        bin.write(reinterpret_cast<const char*>(indices), sizeof(indices));
+    }
+    void TearDown() override { std::filesystem::remove_all(directory); }
+    static std::string Base() {
+        return R"({"asset":{"version":"2.0"},"buffers":[{"uri":"data.bin","byteLength":42}],
+"bufferViews":[{"buffer":0,"byteLength":36},{"buffer":0,"byteOffset":36,"byteLength":6}],
+"accessors":[{"bufferView":0,"componentType":5126,"count":3,"type":"VEC3"},
+{"bufferView":1,"componentType":5123,"count":3,"type":"SCALAR"}],
+"meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1}]}],
+"nodes":[{"mesh":0}],"scenes":[{"nodes":[0]}],"scene":0})";
+    }
+    static std::string Change(std::string json, const std::string& before, const std::string& after) {
+        const auto offset = json.find(before);
+        EXPECT_NE(offset, std::string::npos);
+        if (offset != std::string::npos) { json.replace(offset, before.size(), after); }
+        return json;
+    }
+    Result<Scene, String> Load(const std::string& json) {
+        const auto path = directory / "input.gltf";
+        { std::ofstream file(path); file << json; }
+        return GltfLoader::LoadFromFile(path.string());
+    }
+};
+}
+
+TEST_F(GltfBoundaryTest, RejectsMalformedAccessorReferencesAndRanges) {
+    const std::pair<const char*, const char*> changes[] = {
+        {"\"POSITION\":0", "\"POSITION\":9"},
+        {"\"POSITION\":0", "\"POSITION\":-1"},
+        {"\"POSITION\":0", "\"POSITION\":0,\"TANGENT\":9"},
+        {"\"bufferView\":0", "\"bufferView\":9"},
+        {"\"bufferView\":0", "\"bufferView\":-1"},
+        {"\"buffer\":0", "\"buffer\":9"},
+        {"\"byteLength\":36", "\"byteLength\":35"},
+        {"\"byteLength\":36", "\"byteLength\":36,\"byteStride\":8"},
+        {"\"byteLength\":36", "\"byteLength\":36,\"byteStride\":256"},
+        {"\"count\":3", "\"count\":4"},
+        {"\"count\":3", "\"count\":0"},
+        {"\"count\":3", "\"count\":18446744073709551615"},
+        {"\"bufferView\":0", "\"bufferView\":0,\"byteOffset\":18446744073709551615"},
+        {"\"type\":\"VEC3\"", "\"type\":\"VEC4\""},
+        {"\"componentType\":5126", "\"componentType\":5125"},
+        {"\"componentType\":5123", "\"componentType\":5126"},
+        {"\"POSITION\":0", "\"POSITION\":0,\"NORMAL\":1"},
+        {"\"indices\":1", "\"indices\":9"},
+        {"\"bufferView\":0", "\"bufferView\":0,\"sparse\":{\"count\":1,\"indices\":{\"bufferView\":1,\"componentType\":5123},\"values\":{\"bufferView\":0}}"}
+    };
+    for (const auto& [before, after] : changes) {
+        SCOPED_TRACE(after);
+        EXPECT_FALSE(Load(Change(Base(), before, after)).has_value());
+    }
+}
+
+TEST_F(GltfBoundaryTest, RejectsOutOfRangeTriangleIndicesBeforeNormals) {
+    const uint16_t invalid = 3;
+    std::fstream bin(directory / "data.bin", std::ios::binary | std::ios::in | std::ios::out);
+    bin.seekp(40); bin.write(reinterpret_cast<const char*>(&invalid), sizeof(invalid)); bin.close();
+    EXPECT_FALSE(Load(Base()).has_value());
+    EXPECT_FALSE(Load(Change(Base(), "\"POSITION\":0", "\"POSITION\":0,\"NORMAL\":0")).has_value());
+    EXPECT_FALSE(Load(Change(Base(), "\"count\":3,\"type\":\"SCALAR\"", "\"count\":2,\"type\":\"SCALAR\"")).has_value());
+}
+
+TEST_F(GltfBoundaryTest, RejectsInvalidGraphsAndMeshReferences) {
+    for (const char* nodes : {"[{\"mesh\":9}]", "[{\"children\":[0]}]",
+                             "[{\"children\":[1]},{\"children\":[0]}]",
+                             "[{\"children\":[1,1]},{}]",
+                             "[{\"children\":[2]},{\"children\":[2]},{}]",
+                             "[{\"children\":[9]}]"}) {
+        SCOPED_TRACE(nodes);
+        EXPECT_FALSE(Load(Change(Base(), "[{\"mesh\":0}]", nodes)).has_value());
+    }
+    EXPECT_FALSE(Load(Change(Base(), "\"nodes\":[0]", "\"nodes\":[0,0]")).has_value());
+    EXPECT_FALSE(Load(Change(Base(), "\"scene\":0", "\"scene\":9")).has_value());
+}
+
+TEST_F(GltfBoundaryTest, DeepTreeUsesBoundedIterativeTraversal) {
+    std::string nodes = "[";
+    constexpr int depth = 10000;
+    for (int i = 0; i < depth - 1; ++i) {
+        nodes += "{\"children\":[" + std::to_string(i+1) + "]},";
+    }
+    nodes += "{\"mesh\":0}]";
+    auto scene = Load(Change(Base(), "[{\"mesh\":0}]", nodes));
+    ASSERT_TRUE(scene.has_value()) << scene.error();
+    ASSERT_EQ(scene->nodes.size(), 1u);
+    EXPECT_EQ(scene->nodes[0].meshIndex, 0u);
+}
+
+TEST_F(GltfBoundaryTest, RejectsCoreAndExtensionTextureReferences) {
+    const std::string prefix = "\"materials\":[";
+    for (const char* material : {"{\"normalTexture\":{\"index\":9}}",
+                                "{\"pbrMetallicRoughness\":{\"baseColorTexture\":{\"index\":9}}}",
+                                "{\"extensions\":{\"KHR_materials_clearcoat\":{\"clearcoatNormalTexture\":{\"index\":9}}}}"}) {
+        EXPECT_FALSE(Load(Change(Base(), "\"meshes\":[", prefix + material + "],\"meshes\":[")).has_value());
+    }
+    EXPECT_FALSE(Load(Change(Base(), "\"meshes\":[", "\"textures\":[{\"source\":9}],\"meshes\":[")).has_value());
+}
+
+TEST_F(GltfBoundaryTest, ValidTriangleRetainsGeometry) {
+    auto result = Load(Base());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    ASSERT_EQ(result->meshes.size(), 1u);
+    ASSERT_EQ(result->meshes[0].primitives.size(), 1u);
+    const auto& p = result->meshes[0].primitives[0];
+    EXPECT_EQ(p.indices.size(), 3u);
+    EXPECT_EQ(p.positions.size(), 3u);
+    EXPECT_EQ(p.normals.size(), 3u);
+}
+
+TEST(GltfGeometryBoundary, NormalGeneratorRejectsInvalidIndicesEvenWithNormals) {
+    GeometryPrimitive p;
+    p.positions = {{0,0,0},{1,0,0},{0,1,0}};
+    p.indices = {0,1,3};
+    EXPECT_THROW(NormalGenerator::GenerateWithDihedralAngle(p), std::invalid_argument);
+    p.normals.resize(3);
+    EXPECT_THROW(NormalGenerator::GenerateWithDihedralAngle(p), std::invalid_argument);
+    p.indices = {0,1};
+    EXPECT_THROW(NormalGenerator::GenerateWithDihedralAngle(p), std::invalid_argument);
+}
+
+TEST_F(GltfBoundaryTest, NormalAndUvCountsMustMatchPositions) {
+    const std::string extra = R"({"bufferView":0,"componentType":5126,"count":2,"type":"VEC3"})";
+    auto json = Change(Base(), "\"accessors\":[", "\"accessors\":[" + extra + ",");
+    json = Change(json, "\"POSITION\":0", "\"POSITION\":1,\"NORMAL\":0");
+    json = Change(json, "\"indices\":1", "\"indices\":2");
+    EXPECT_FALSE(Load(json).has_value());
+    json = Change(json, "\"NORMAL\":0", "\"TEXCOORD_0\":0");
+    json = Change(json, "\"count\":2,\"type\":\"VEC3\"", "\"count\":2,\"type\":\"VEC2\"");
+    EXPECT_FALSE(Load(json).has_value());
+}
+
+TEST_F(GltfBoundaryTest, InterleavedPositionsAndUnalignedIndicesDecodeSafely) {
+    const float positions[] = {0,0,0,99, 1,0,0,99, 0,1,0,99};
+    const uint16_t indices[] = {0,1,2};
+    std::ofstream bin(directory / "data.bin", std::ios::binary | std::ios::trunc);
+    bin.write(reinterpret_cast<const char*>(positions), sizeof(positions));
+    bin.put(0);
+    bin.write(reinterpret_cast<const char*>(indices), sizeof(indices));
+    bin.close();
+    auto json = Change(Base(), "\"byteLength\":42", "\"byteLength\":55");
+    json = Change(json, "\"byteLength\":36", "\"byteLength\":48,\"byteStride\":16");
+    json = Change(json, "\"byteOffset\":36", "\"byteOffset\":49");
+    auto result = Load(json);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const auto& p = result->meshes[0].primitives[0];
+    EXPECT_EQ(p.positions.size(), 3u);
+    EXPECT_EQ(p.indices.size(), 3u);
+    EXPECT_EQ(p.positions[1], glm::vec3(1,0,0));
+}
+
+TEST_F(GltfBoundaryTest, NormalizedIntegerUvCoordinatesRemainSupported) {
+    const uint16_t uvs[] = {0,0,65535,0,0,65535};
+    std::ofstream bin(directory / "data.bin", std::ios::binary | std::ios::app);
+    bin.write(reinterpret_cast<const char*>(uvs), sizeof(uvs)); bin.close();
+    auto json = Change(Base(), "\"byteLength\":42", "\"byteLength\":54");
+    json = Change(json, "\"bufferViews\":[", R"("bufferViews":[{"buffer":0,"byteOffset":42,"byteLength":12},)");
+    json = Change(json, "\"bufferView\":0", "\"bufferView\":1");
+    json = Change(json, "\"bufferView\":1,\"componentType\":5123", "\"bufferView\":2,\"componentType\":5123");
+    json = Change(json, "\"accessors\":[", R"("accessors":[{"bufferView":0,"componentType":5123,"normalized":true,"count":3,"type":"VEC2"},)");
+    json = Change(json, "\"POSITION\":0", "\"POSITION\":1,\"TEXCOORD_0\":0");
+    json = Change(json, "\"indices\":1", "\"indices\":2");
+    auto result = Load(json);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const auto& p = result->meshes[0].primitives[0];
+    ASSERT_EQ(p.uvs.size(), 3u);
+    EXPECT_EQ(p.uvs[1], glm::vec2(1,0));
+}
+
+TEST_F(GltfBoundaryTest, QuantizedNormalizedNormalsRemainSupported) {
+    const int8_t normals[] = {0,0,127,0, 0,0,127,0, 0,0,127,0};
+    std::ofstream bin(directory / "data.bin", std::ios::binary | std::ios::app);
+    bin.write(reinterpret_cast<const char*>(normals), sizeof(normals)); bin.close();
+    auto json = Change(Base(), "\"byteLength\":42", "\"byteLength\":54");
+    json = Change(json, "\"bufferViews\":[", R"("bufferViews":[{"buffer":0,"byteOffset":42,"byteLength":12,"byteStride":4},)");
+    json = Change(json, "\"bufferView\":0", "\"bufferView\":1");
+    json = Change(json, "\"bufferView\":1,\"componentType\":5123", "\"bufferView\":2,\"componentType\":5123");
+    json = Change(json, "\"accessors\":[", R"("accessors":[{"bufferView":0,"componentType":5120,"normalized":true,"count":3,"type":"VEC3"},)");
+    json = Change(json, "\"POSITION\":0", "\"POSITION\":1,\"NORMAL\":0");
+    json = Change(json, "\"indices\":1", "\"indices\":2");
+    json = Change(json, "\"asset\":", R"("extensionsRequired":["KHR_mesh_quantization"],"extensionsUsed":["KHR_mesh_quantization"],"asset":)");
+    auto result = Load(json);
+    ASSERT_TRUE(result.has_value()) << result.error();
+    const auto& p = result->meshes[0].primitives[0];
+    ASSERT_EQ(p.normals.size(), 3u);
+    EXPECT_EQ(p.normals[0], glm::vec3(0,0,1));
 }

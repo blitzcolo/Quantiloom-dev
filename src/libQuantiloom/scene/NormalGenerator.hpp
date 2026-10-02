@@ -86,11 +86,13 @@ public:
     /**
      * @brief Main entry point: generates normals with dihedral-based hard/smooth detection
      *
-     * If primitive already has normals, returns immediately (no-op).
+     * Rejects invalid triangle indices before reading positions.
+     * If valid primitive already has normals, returns immediately (no-op).
      * May duplicate vertices for hard edges (modifies positions, uvs, tangents, indices).
      *
      * @param primitive Geometry to process (modified in-place)
      * @param config Generation parameters (threshold, weighting)
+     * @throws std::invalid_argument for incomplete triangles or out-of-range indices
      */
     static void GenerateWithDihedralAngle(
         GeometryPrimitive& primitive,

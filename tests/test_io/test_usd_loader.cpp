@@ -2979,3 +2979,45 @@ TEST_F(UsdLoaderTest, TexturesInsideAUsdzArePackageRelativeAndStillLoad) {
     EXPECT_GT(base.height, 0u);
     EXPECT_TRUE(base.isSRGB) << "a base colour is colour whatever archive it came from";
 }
+
+TEST_F(UsdLoaderTest, RejectsMalformedFaceTopologyBeforeTriangulation) {
+    if (!hasOpenUSD) { GTEST_SKIP() << "OpenUSD unavailable"; }
+    struct Case { const char* counts; const char* indices; };
+    const Case cases[] = {
+        {"[-3, 3]", "[0,1,2]"}, {"[4]", "[0,1,2]"},
+        {"[2]", "[0,1,2]"}, {"[3]", "[0,1,-1]"},
+        {"[3]", "[0,1,3]"}, {"[2147483647]", "[0,1,2]"}
+    };
+    for (size_t i = 0; i < std::size(cases); ++i) {
+        SCOPED_TRACE(i);
+        const auto path = WriteUsda("invalid_topology_" + std::to_string(i) + ".usda",
+            std::string("#usda 1.0\ndef Mesh \"Bad\" {\n") +
+            "point3f[] points = [(0,0,0),(1,0,0),(0,1,0)]\n" +
+            "int[] faceVertexCounts = " + cases[i].counts + "\n" +
+            "int[] faceVertexIndices = " + cases[i].indices + "\n" +
+            "normal3f[] normals = [(0,0,1),(0,0,1),(0,0,1)] (interpolation = \"faceVarying\")\n" +
+            "}\n");
+        auto result = UsdLoader::LoadFromFile(path.string());
+        if (result.has_value()) {
+            for (const auto& mesh : result->meshes) { EXPECT_TRUE(mesh.primitives.empty()); }
+        }
+        std::filesystem::remove(path);
+    }
+}
+
+TEST_F(UsdLoaderTest, DegenerateFacesKeepTheirOffsetsWithoutTriangles) {
+    if (!hasOpenUSD) { GTEST_SKIP() << "OpenUSD unavailable"; }
+    const auto path = WriteUsda("small_faces_topology.usda", R"(#usda 1.0
+def Mesh "SmallFaces" {
+point3f[] points = [(0,0,0),(1,0,0),(0,1,0)]
+int[] faceVertexCounts = [0,1,2,3]
+int[] faceVertexIndices = [0, 0,1, 0,1,2]
+uniform token subdivisionScheme = "none"
+})");
+    auto result = UsdLoader::LoadFromFile(path.string());
+    ASSERT_TRUE(result.has_value()) << result.error();
+    ASSERT_EQ(result->meshes.size(), 1u);
+    ASSERT_EQ(result->meshes[0].primitives.size(), 1u);
+    EXPECT_EQ(result->meshes[0].primitives[0].indices.size(), 3u);
+    std::filesystem::remove(path);
+}
