@@ -144,7 +144,8 @@ if ($Python) {
     # and check_camera_gpu_perf.py stay outside the gate: a config-coverage
     # sweep and a benchmark, not pass/fail measurements.
     foreach ($check in @("check_camera_dynamic.py", "check_camera_isp.py",
-                         "check_camera_history.py", "check_camera_ae.py")) {
+                         "check_camera_history.py", "check_camera_ae.py",
+                         "check_dataset_prerequisites.py")) {
         & $Python "scripts\render-tests\$check"
         if ($LASTEXITCODE -eq 3) {
             Write-Warning "camera gate ($check) skipped, no GPU on this machine"

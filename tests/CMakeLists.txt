@@ -247,6 +247,8 @@ set(TEST_SCENE_SOURCES
 
 # IO tests
 set(TEST_IO_SOURCES
+    test_io/test_export_session.cpp
+    test_io/test_product_geometry.cpp
     test_io/test_image_io.cpp
     test_io/test_spectral_io.cpp
     test_io/test_spectral_basis_loader.cpp

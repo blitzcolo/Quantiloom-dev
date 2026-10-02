@@ -80,6 +80,11 @@ enum class AdaptiveSamplingMode : u32 {
  * @endcode
  */
 struct HyperspectralConfig {
+    // Internal offline-export context. Empty for legacy standalone callers.
+    String exportRecordId;
+    String exportSidecar;
+    String exportProvenance;
+
     // ========================================================================
     // Wavelength Range Parameters
     // ========================================================================

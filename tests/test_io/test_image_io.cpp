@@ -18,6 +18,7 @@
 #include <fstream>
 #include <map>
 #include <cstdio>
+#include <cstdlib>
 
 using namespace quantiloom;
 
@@ -488,4 +489,43 @@ TEST_F(ImageIOTest, ManyChannelsImage) {
     EXPECT_NEAR((*loaded)(25, 25, 0), 0.0f, 1e-6f);
     EXPECT_NEAR((*loaded)(25, 25, 100), 100.0f / 200.0f, 1e-6f);
     EXPECT_NEAR((*loaded)(25, 25, 199), 199.0f / 200.0f, 1e-6f);
+}
+
+TEST_F(ImageIOTest, UIntExrPreservesEveryIdentityBitAndMetadata) {
+    UIntImage image;
+    image.width = 3;
+    image.height = 2;
+    image.pixels = {0, 1, 16777217u, 2147483649u, 4294967295u, 17};
+    image.metadata["quantiloom_product_id"] = "mask-target";
+    const auto path = GetTestPath("mask.exr").string();
+    const auto written = ImageIO::WriteUIntEXR(path, image);
+    ASSERT_TRUE(written) << written.error();
+    const auto read = ImageIO::ReadUIntEXR(path);
+    ASSERT_TRUE(read) << read.error();
+    EXPECT_EQ(read.value().width, image.width);
+    EXPECT_EQ(read.value().height, image.height);
+    EXPECT_EQ(read.value().pixels, image.pixels);
+    EXPECT_EQ(read.value().metadata, image.metadata);
+    // Optional handoff to the independent Python/OpenEXR checker.
+    if (const char* fixture = std::getenv("QUANTILOOM_UINT_EXR_FIXTURE"))
+        ASSERT_TRUE(ImageIO::WriteUIntEXR(fixture, image));
+}
+TEST_F(ImageIOTest, UIntExrRefusesFloatChannelsWithoutConvertingThem) {
+    Image image(2, 2, 1);
+    image.channelNames = {"instance_id"};
+    const auto path = GetTestPath("float_mask.exr").string();
+    ASSERT_TRUE(ImageIO::WriteEXR(path, image));
+    EXPECT_FALSE(ImageIO::ReadUIntEXR(path));
+}
+TEST_F(ImageIOTest, UIntExrRejectsInvalidGridAndReservedMetadata) {
+    UIntImage image;
+    const auto path = GetTestPath("bad_mask.exr").string();
+    EXPECT_FALSE(ImageIO::WriteUIntEXR(path, image));
+    image.width = image.height = 2;
+    image.pixels = {0, 1, 2};
+    EXPECT_FALSE(ImageIO::WriteUIntEXR(path, image));
+    image.pixels.push_back(3);
+    image.metadata["channels"] = "override";
+    EXPECT_FALSE(ImageIO::WriteUIntEXR(path, image));
+    EXPECT_FALSE(std::filesystem::exists(path));
 }

@@ -61,6 +61,12 @@ add_library(quantiloom_core OBJECT
     ${QL_PUBLIC_INC}/core/LUT.hpp
     core/AtmosphereTransmittanceLUT.hpp
 
+    # Dataset export transactions
+    dataset/ExportSession.cpp
+    dataset/ProductGeometry.cpp
+    ${QL_PUBLIC_INC}/dataset/ProductGeometry.hpp
+    ${QL_PUBLIC_INC}/dataset/ExportSession.hpp
+
     # IO module
     io/ImageIO.cpp
     ${QL_PUBLIC_INC}/io/ImageIO.hpp

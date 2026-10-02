@@ -27,6 +27,7 @@
  */
 
 #include "hs_core/HyperspectralRenderer.hpp"
+#include <nlohmann/json.hpp>
 #include "hs_core/HyperspectralConfig.hpp"
 #include "hs_core/BatchRenderer.hpp"
 #include "hs_core/SpectralAnalyzer.hpp"
@@ -301,6 +302,9 @@ HyperspectralStatus HyperspectralRenderer::Render(
     // Phase 2/4: Spectral Reconstruction (if adaptive)
     // ========================================================================
 
+    bool reconstructedOnGpu = false;
+    String reconstructionFallback;
+    const auto tracedWavelengths = sparseCube.wavelengths;
     if (useAdaptive) {
         LOG_INFO("Reconstructing full spectrum from adaptive samples...");
 
@@ -320,6 +324,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
             );
 
             if (gpuStatus == GpuReconstructorStatus::Success) {
+                reconstructedOnGpu = true;
                 m_impl->result = std::move(gpuResult);
                 LOG_INFO("GPU reconstruction complete in {:.3f}s ({:.2f} Mpixels/s)",
                          m_impl->gpuReconstructor->GetLastReconstructionTime(),
@@ -328,6 +333,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
                 LOG_WARN("GPU reconstruction failed ({}), falling back to CPU",
                          GpuReconstructorStatusToString(gpuStatus));
 
+                reconstructionFallback = GpuReconstructorStatusToString(gpuStatus);
                 // Fallback to CPU reconstruction
                 SpectralReconstructor reconstructor;
                 m_impl->result = reconstructor.Reconstruct(
@@ -338,6 +344,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
                 );
             }
         } else {
+            if (config.useGpuReconstruction) reconstructionFallback = "gpu_reconstruction_not_supported";
             // CPU reconstruction (Phase 2 behavior)
             SpectralReconstructor reconstructor;
             m_impl->result = reconstructor.Reconstruct(
@@ -352,6 +359,24 @@ HyperspectralStatus HyperspectralRenderer::Render(
     } else {
         // No reconstruction needed for uniform sampling
         m_impl->result = std::move(sparseCube);
+    }
+
+    if (!config.exportRecordId.empty()) {
+        const auto base = std::filesystem::path(config.outputPath).filename().string();
+        const String extension = config.outputFormat == HyperspectralOutputFormat::GeoTIFF ? ".tif" :
+            config.outputFormat == HyperspectralOutputFormat::EXR_Spectral ? ".exr" : ".dat";
+        auto& metadata = m_impl->result.metadata;
+        metadata["quantiloom_record_id"] = config.exportRecordId;
+        metadata["quantiloom_product_id"] = base + extension;
+        metadata["quantiloom_sidecar"] = config.exportSidecar;
+        metadata["quantiloom_provenance"] = config.exportProvenance;
+        metadata["quantiloom_spectral_provenance"] = nlohmann::json{
+            {"output_wavelengths_nm", m_impl->result.wavelengths},
+            {"traced_wavelengths_nm", tracedWavelengths},
+            {"reconstruction", useAdaptive ? "catmull_rom" : "none"},
+            {"reconstruction_backend", useAdaptive ? (reconstructedOnGpu ? "gpu" : "cpu") : "none"},
+            {"reconstruction_fallback", reconstructionFallback}
+        }.dump();
     }
 
     // Calculate final statistics
@@ -406,6 +431,13 @@ HyperspectralStatus HyperspectralRenderer::Render(
             // Add metadata
             bandImage.metadata["wavelength_nm"] = std::to_string(wavelength);
             bandImage.metadata["band_index"] = std::to_string(bandIdx);
+            if (!config.exportRecordId.empty()) {
+                bandImage.metadata["quantiloom_record_id"] = config.exportRecordId;
+                bandImage.metadata["quantiloom_sidecar"] = "../" + config.exportSidecar;
+                bandImage.metadata["quantiloom_provenance"] = config.exportProvenance;
+                bandImage.metadata["band_source"] = std::find(tracedWavelengths.begin(), tracedWavelengths.end(), wavelength) !=
+                    tracedWavelengths.end() ? "directly_traced" : "reconstructed";
+            }
 
             // Generate filename
             char filename[256];
@@ -413,9 +445,12 @@ HyperspectralStatus HyperspectralRenderer::Render(
                          "band_%03u_%04.0fnm.exr", bandIdx, wavelength);
 
             std::filesystem::path filePath = intermediateDir / filename;
+            if (!config.exportRecordId.empty())
+                bandImage.metadata["quantiloom_product_id"] = baseName + "_bands/" + filename;
 
             if (!ImageIO::WriteEXR(filePath.string(), bandImage)) {
                 LOG_WARN("Failed to save intermediate band {}: {}", bandIdx, filePath.string());
+                return HyperspectralStatus::OutputWriteFailed;
             }
         }
 

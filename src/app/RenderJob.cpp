@@ -1,6 +1,7 @@
 #include "RenderJob.hpp"
 
 #include "core/Log.hpp"
+#include "dataset/ExportSession.hpp"
 #include "io/ImageIO.hpp"
 #include "postprocess/PostprocessConfig.hpp"
 #include "postprocess/Thermography.hpp"
@@ -16,6 +17,16 @@
 
 namespace quantiloom::app {
 namespace {
+bool WriteProduct(const String& path, const Image& image, dataset::ExportSession* session) {
+    if (session) {
+        const auto name = std::filesystem::path(path).filename().string();
+        const auto result = session->WriteImage(name, name, image, "{}");
+        if (!result) QL_LOG_ERROR("Dataset product: {}", result.error());
+        return result.has_value();
+    }
+    return std::filesystem::path(path).extension() == ".png" ?
+        ImageIO::WritePNG(path, image) : ImageIO::WriteEXR(path, image);
+}
 
 /**
  * @brief Run the sensor imaging chain over the traced frame
@@ -27,7 +38,7 @@ namespace {
 Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
                                        camera::CaptureState& state,
                                        RenderOutcome& outcome,
-                                       const camera::CameraOutput* acquiredFrame) {
+                                       const camera::CameraOutput* acquiredFrame, dataset::ExportSession* session) {
     QL_LOG_INFO("Applying sensor simulation...");
     const std::filesystem::path exrPath(outcome.exrPath);
     std::optional<camera::CameraOutput> freshFrame;
@@ -42,7 +53,7 @@ Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
         if (!product) return Result<void, String>::Ok();
         const auto path = exrPath.parent_path() /
             (exrPath.stem().string() + suffix + ".exr");
-        if (!ImageIO::WriteEXR(path.string(), product->image))
+        if (!WriteProduct(path.string(), product->image, session))
             return Result<void, String>::Err("failed to write camera product " + path.string());
         return Result<void, String>::Ok();
     };
@@ -96,7 +107,7 @@ Result<Image, String> ApplySensorChain(OfflineRenderer& renderer,
  */
 void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& rendered,
                               const Image& img, const SpectralMode mode,
-                              const String& outputPath, RenderOutcome& outcome) {
+                              const String& outputPath, RenderOutcome& outcome, dataset::ExportSession* session) {
     const auto band = GetFusedBandInfo(mode);
     if (!band.has_value() || !IsIRFusedMode(mode)) {
         QL_LOG_WARN("Thermography is enabled but the render mode is {}, which carries no "
@@ -137,6 +148,8 @@ void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& r
     std::nth_element(values.begin(), middle, values.end());
     const f64 medianK = static_cast<f64>(*middle);
 
+    if (const auto found = img.metadata.find("quantiloom_provenance"); found != img.metadata.end())
+        temperature.metadata["quantiloom_provenance"] = found->second;
     temperature.metadata["units"] = "K";
     temperature.metadata["band_nm"] = std::to_string(band->lambdaMinNm) + "-" +
                                       std::to_string(band->lambdaMaxNm);
@@ -168,12 +181,13 @@ void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& r
     const String tappPath =
         (exrPath.parent_path() / (exrPath.stem().string() + "_tapp.exr")).string();
 
-    if (ImageIO::WriteEXR(tappPath, temperature)) {
+    if (WriteProduct(tappPath, temperature, session)) {
         outcome.tappPath = tappPath;
         QL_LOG_INFO("  [OK] Saved temperature map to {} ({:.1f}-{:.1f} K, median {:.1f} K)",
                     tappPath, minK, maxK, medianK);
     } else {
         QL_LOG_WARN("  [WARN] Failed to save temperature map to {}", tappPath);
+        outcome.error = "failed to write " + tappPath;
     }
 }
 
@@ -193,6 +207,8 @@ void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& r
 Image BuildPreview(const Image& img, const SpectralMode mode, const u32 width, const u32 height) {
     Image pngImg(width, height, 3);
     pngImg.channelNames = {"R", "G", "B"};
+    pngImg.metadata = img.metadata;
+    pngImg.metadata["processing"] = "display_preview";
 
     for (u32 y = 0; y < height; ++y) {
         for (u32 x = 0; x < width; ++x) {
@@ -242,18 +258,34 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
                        const SpectralMode spectralMode, RenderOutcome& outcome,
                        const camera::CameraOutput* acquiredFrame) {
     Image& img = rendered.radiance;
+    if (!rendered.error.empty() || !img.IsValid()) {
+        outcome.error = rendered.error.empty() ? "renderer returned an invalid frame" : rendered.error;
+        return;
+    }
+    std::unique_ptr<dataset::ExportSession> session;
+    if (config.GetBool("dataset.metadata", true)) {
+        const auto found = img.metadata.find("quantiloom_provenance");
+        if (found == img.metadata.end()) {
+            outcome.error = "render has no frozen provenance";
+            return;
+        }
+        auto created = dataset::ExportSession::Create(outcome.exrPath, config, {found->second});
+        if (!created) { outcome.error = created.error(); return; }
+        session = std::move(created.value());
+    }
 
     // The compatibility thermography map is for scenes without the versioned
     // camera. A camera capture writes its own response-weighted _tapp product.
     if (!renderer.GetCameraConfig().enabled &&
         PostprocessConfig::IsThermographyEnabled(config)) {
         WriteApparentTemperature(config, rendered, img, spectralMode, outcome.exrPath,
-                                 outcome);
+                                 outcome, session.get());
+        if (!outcome.error.empty()) return;
     }
 
     Image cameraPreview;
     if (renderer.GetCameraConfig().enabled) {
-        auto captured = ApplySensorChain(renderer, cameraState, outcome, acquiredFrame);
+        auto captured = ApplySensorChain(renderer, cameraState, outcome, acquiredFrame, session.get());
         if (!captured) {
             outcome.error = captured.error();
             QL_LOG_ERROR("  [FAIL] Sensor simulation failed: {}", outcome.error);
@@ -264,7 +296,7 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
         QL_LOG_INFO("Sensor simulation disabled (sensor.enabled = false)");
     }
 
-    if (ImageIO::WriteEXR(outcome.exrPath, img)) {
+    if (WriteProduct(outcome.exrPath, img, session.get())) {
         QL_LOG_INFO("  [OK] Saved spectral image to {}", outcome.exrPath);
     } else {
         QL_LOG_ERROR("  [FAIL] Failed to save image to {}", outcome.exrPath);
@@ -288,12 +320,17 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
             std::move(cameraPreview) :
             BuildPreview(img, spectralMode, outcome.width, outcome.height);
 
-        if (ImageIO::WritePNG(pngPath.string(), outcome.preview)) {
+        if (WriteProduct(pngPath.string(), outcome.preview, session.get())) {
             QL_LOG_INFO("  [OK] Saved PNG preview to {}", pngPath.string());
             outcome.pngPath = pngPath.string();
         } else {
             QL_LOG_WARN("  [WARN] Failed to save PNG preview to {}", pngPath.string());
+            outcome.error = "failed to write " + pngPath.string();
         }
+    }
+    if (session && outcome.error.empty()) {
+        const auto committed = session->Commit();
+        if (!committed) outcome.error = committed.error();
     }
 }
 
@@ -329,6 +366,7 @@ RenderOutcome RenderConfigToFiles(const Config& config,
     if (!rendered.error.empty()) {
         QL_LOG_ERROR("{}", rendered.error);
         outcome.error = rendered.error;
+        return outcome;
     }
 
     outcome.wroteItsOwnOutput = rendered.wroteItsOwnOutput;

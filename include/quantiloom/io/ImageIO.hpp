@@ -40,6 +40,14 @@
 
 namespace quantiloom {
 
+/// One native-grid integer channel. Kept separate from Image because f32
+/// cannot represent all instance identities (in particular IDs above 2^24).
+struct UIntImage {
+    u32 width = 0, height = 0;
+    Vector<u32> pixels;
+    std::unordered_map<String, String> metadata;
+};
+
 // ============================================================================
 // ImageIO - EXR image reading/writing using OpenEXR 3.x
 // ============================================================================
@@ -96,6 +104,11 @@ namespace quantiloom {
  */
 class QL_API ImageIO {
 public:
+    /// Lossless UINT EXR with one channel named instance_id, top-left origin.
+    /// No float conversion, resampling, or quantization occurs at either end.
+    static Result<void, String> WriteUIntEXR(const String& filepath, const UIntImage& image);
+    static Result<UIntImage, String> ReadUIntEXR(const String& filepath);
+
     // ========================================================================
     // EXR Writing
     // ========================================================================

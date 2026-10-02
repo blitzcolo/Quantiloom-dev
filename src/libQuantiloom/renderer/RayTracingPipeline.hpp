@@ -382,6 +382,7 @@ public:
 
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
+    [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.camera; }
 
     // Set accumulation sampling parameters (call before TraceRays).
     //

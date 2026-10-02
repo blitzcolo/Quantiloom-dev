@@ -25,6 +25,7 @@ private: quantiloom::Config::Config(class std::unique_ptr<struct quantiloom::Con
 private: quantiloom::ExternalRenderContext::ExternalRenderContext(void)
 private: quantiloom::OfflineRenderer::OfflineRenderer(void)
 private: quantiloom::RenderDevice::RenderDevice(void)
+private: quantiloom::dataset::ExportSession::ExportSession(void)
 private: quantiloom::mcp::Server::Server(void)
 private: static enum quantiloom::Log::Level quantiloom::Log::s_CurrentLevel
 public: __int64 quantiloom::Config::Get<__int64>(class std::basic_string_view<char,struct std::char_traits<char> >,__int64 const &)const
@@ -72,6 +73,8 @@ public: class quantiloom::Result<class quantiloom::Config,class std::basic_strin
 public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequiredString(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::DumpThermalElements(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ExportSession::StagingPath(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
+public: class quantiloom::Result<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ProductGeometry::ToJson(void)const
 public: class quantiloom::Result<class std::optional<struct quantiloom::PixelReading>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::PollPixelValue(void)
 public: class quantiloom::Result<class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::SetMaterialEmissionSpectrum(unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<class std::vector<float,class std::allocator<float> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::GetThermalParameterSensitivity(enum quantiloom::ThermalSensitivityParameter)const
@@ -121,6 +124,9 @@ public: class quantiloom::Result<void,class std::basic_string<char,struct std::c
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::RestoreCamera(struct quantiloom::camera::CaptureState &,struct quantiloom::camera::CaptureCheckpoint const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::SetTimelineTime(double)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::WarmUpCamera(struct quantiloom::camera::CaptureState &,double,double)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ExportSession::Commit(void)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ExportSession::RegisterFile(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ExportSession::WriteImage(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::RegisterTool(struct quantiloom::mcp::ToolDef const &)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene &&)
 public: class quantiloom::Scene & quantiloom::Scene::operator=(class quantiloom::Scene const &)
@@ -128,6 +134,8 @@ public: class quantiloom::Scene const * quantiloom::ExternalRenderContext::GetSc
 public: class quantiloom::SpectralIO & quantiloom::SpectralIO::operator=(class quantiloom::SpectralIO &&)
 public: class quantiloom::SpectralIO & quantiloom::SpectralIO::operator=(class quantiloom::SpectralIO const &)
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::ExternalRenderContext::GetPipelineCachePath(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::dataset::ExportSession::RecordId(void)const
+public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const & quantiloom::dataset::ExportSession::SidecarName(void)const
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::Get<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > >(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::GetString(class std::basic_string_view<char,struct std::char_traits<char> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)const
 public: class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > quantiloom::Config::ToToml(class std::basic_string_view<char,struct std::char_traits<char> >)const
@@ -185,6 +193,8 @@ public: quantiloom::Scene::Scene(class quantiloom::Scene &&)
 public: quantiloom::Scene::Scene(class quantiloom::Scene const &)
 public: quantiloom::Scene::Scene(void)
 public: quantiloom::Scene::~Scene(void)
+public: quantiloom::dataset::ExportSession::~ExportSession(void)
+public: quantiloom::dataset::ProductGeometry::ProductGeometry(void)
 public: quantiloom::mcp::Server::~Server(void)
 public: static bool quantiloom::ImageIO::FileExists(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static bool quantiloom::ImageIO::WriteEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::Image const &)
@@ -195,6 +205,7 @@ public: static class quantiloom::Result<class quantiloom::Scene,class std::basic
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::ExternalRenderContext,struct std::default_delete<class quantiloom::ExternalRenderContext> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::Create(struct quantiloom::ExternalRenderContext::InitParams const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::OfflineRenderer,struct std::default_delete<class quantiloom::OfflineRenderer> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::Create(class quantiloom::Config const &,struct quantiloom::OfflineRenderer::InitParams const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::RenderDevice,struct std::default_delete<class quantiloom::RenderDevice> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::RenderDevice::Create(struct quantiloom::RenderDevice::InitParams const &)
+public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::dataset::ExportSession,struct std::default_delete<class quantiloom::dataset::ExportSession> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::dataset::ExportSession::Create(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class quantiloom::Config const &,struct quantiloom::dataset::RenderProvenance const &)
 public: static class quantiloom::Result<class std::unique_ptr<class quantiloom::mcp::Server,struct std::default_delete<class quantiloom::mcp::Server> >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::mcp::Server::Create(struct quantiloom::mcp::ServerOptions const &)
 public: static class quantiloom::Result<class std::vector<struct std::pair<float,float>,class std::allocator<struct std::pair<float,float> > >,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadSpectralCurveCSV(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::ComplexRefractiveIndex,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadRefractiveIndexYAML(class std::filesystem::path const &)
@@ -204,8 +215,10 @@ public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class s
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGS(class std::filesystem::path const &,class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadUSGSAuto(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct quantiloom::SpectralCurve,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::ReconstructBasisCurve(class std::filesystem::path const &,class std::filesystem::path const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static class quantiloom::Result<struct quantiloom::UIntImage,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ImageIO::ReadUIntEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class quantiloom::Result<struct std::pair<struct quantiloom::SpectralCurve,struct quantiloom::SpectralCurve>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadASTMG173SunAndSky(class std::filesystem::path const &)
 public: static class quantiloom::Result<struct std::pair<struct quantiloom::SpectralCurve,struct quantiloom::SpectralCurve>,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::SpectralIO::LoadLibRadtranSunAndSky(class std::filesystem::path const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,unsigned int,unsigned int,bool)
+public: static class quantiloom::Result<void,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ImageIO::WriteUIntEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &,struct quantiloom::UIntImage const &)
 public: static class std::optional<class std::tuple<unsigned int,unsigned int,unsigned int> > quantiloom::ImageIO::GetDimensions(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadEXR(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static class std::optional<struct quantiloom::Image> quantiloom::ImageIO::ReadImage(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
@@ -213,6 +226,7 @@ public: static class std::vector<struct quantiloom::SpectralIO::EmissionSpectrum
 public: static enum quantiloom::Log::Level quantiloom::Log::GetLevel(void)
 public: static int const quantiloom::Material::MAX_ENDMEMBERS
 public: static struct quantiloom::Material quantiloom::Material::CreateLambertian(struct glm::vec<3,float,0> const &,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
+public: static struct quantiloom::dataset::VerificationReport quantiloom::dataset::ExportSession::Verify(class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > const &)
 public: static void quantiloom::Log::Critical(class std::basic_string_view<char,struct std::char_traits<char> >)
 public: static void quantiloom::Log::Debug(class std::basic_string_view<char,struct std::char_traits<char> >)
 public: static void quantiloom::Log::Error(class std::basic_string_view<char,struct std::char_traits<char> >)
@@ -244,6 +258,8 @@ public: struct quantiloom::TimelineInfo quantiloom::ExternalRenderContext::GetTi
 public: struct quantiloom::TimelineInfo quantiloom::OfflineRenderer::GetTimelineInfo(void)const
 public: struct quantiloom::camera::CameraConfig const & quantiloom::ExternalRenderContext::GetCameraConfig(void)const
 public: struct quantiloom::camera::CameraConfig const & quantiloom::OfflineRenderer::GetCameraConfig(void)const
+public: struct quantiloom::dataset::ProductGeometry & quantiloom::dataset::ProductGeometry::operator=(struct quantiloom::dataset::ProductGeometry &&)
+public: struct quantiloom::dataset::ProductGeometry & quantiloom::dataset::ProductGeometry::operator=(struct quantiloom::dataset::ProductGeometry const &)
 public: unsigned __int64 quantiloom::AtmosphereNNConfig::BakeHash(void)const
 public: unsigned __int64 quantiloom::Config::Get<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64 const &)const
 public: unsigned __int64 quantiloom::Config::GetUInt64(class std::basic_string_view<char,struct std::char_traits<char> >,unsigned __int64)const

@@ -14,6 +14,7 @@
 
 #include "core/Log.hpp"
 #include "core/Config.hpp"
+#include "dataset/ExportSession.hpp"
 
 #include "BatchJob.hpp"
 #include "SequenceJob.hpp"
@@ -102,6 +103,7 @@ void PrintHelp(const char* progname) {
         << "\n"
         << "Options:\n"
         << "  <config.toml>          Scene configuration file (required)\n"
+        << "  dataset-verify <record.json>  Check export state and managed file hashes\n"
         << "  batch <list.txt>       Render every config the list names, in order,\n"
         << "                         reusing one GPU device across all of them\n"
         << "  sequence <config.toml> Render the config's [timeline] tick by tick on one\n"
@@ -217,6 +219,17 @@ int RunApp(int argc, char* argv[]) {
         std::cerr << "Error: no configuration file provided.\n\n";
         PrintHelp(argv[0]);
         return 1;
+    }
+
+    // Machine-readable verification does not initialize a GPU or write a log.
+    if (std::strcmp(argv[1], "dataset-verify") == 0) {
+        if (argc != 3) {
+            std::cerr << "Usage: " << argv[0] << " dataset-verify <record.json>\n";
+            return 2;
+        }
+        const auto report = dataset::ExportSession::Verify(argv[2]);
+        std::cout << report.json << "\n";
+        return report.valid ? 0 : 1;
     }
 
     // ========================================================================

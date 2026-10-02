@@ -32,6 +32,11 @@
 #include "renderer/OfflineRenderer.hpp"
 
 #include "core/Log.hpp"
+#include "core/Sha256.hpp"
+#include "dataset/ProductGeometry.hpp"
+#include "dataset/ExportSession.hpp"
+#include "postprocess/CameraConfigIO.hpp"
+#include <nlohmann/json.hpp>
 #include "core/SpectralData.hpp"
 #include "io/SpectralIO.hpp"
 #include "renderer/ConfigResolve.hpp"
@@ -108,6 +113,63 @@ struct OfflineRenderer::Impl {
     // ------------------------------------------------------------------
     // Not GPU state; position among the members is free.
     // ------------------------------------------------------------------
+    String ProductSnapshot(f64 timeSeconds, u32 width, u32 height, bool physical, bool staticSceneCamera = false, const CameraData* boundCamera = nullptr) const {
+        using Json = nlohmann::json;
+        CameraData actualCamera{};
+        if (boundCamera) actualCamera = *boundCamera;
+        else if (staticSceneCamera) actualCamera = loadedScene.camera.GetCameraData();
+        else {
+            const auto pose = CameraDataAt(timeSeconds, params.mode, params.wavelengthNm, physical);
+            if (!pose) throw std::runtime_error(pose.error());
+            actualCamera = pose.value();
+        }
+        dataset::ProductGeometry productGeometry;
+        productGeometry.width = width;
+        productGeometry.height = height;
+        productGeometry.referenceTimeSeconds = timeSeconds;
+        productGeometry.worldUnitsToMeters = lightingParams.worldUnitsToMeters;
+        productGeometry.camera = actualCamera;
+        const auto calibration = productGeometry.ToJson();
+        if (!calibration) throw std::runtime_error(calibration.error());
+        const auto& gpu = contextRef->GetDeviceProperties();
+        const auto vector = [](const glm::vec3& v) { return Json::array({v.x,v.y,v.z}); };
+        const auto& sun = lightingParams.sunDirection;
+        f64 azimuth = std::atan2(sun.x, sun.z) * 180.0 / constants::PI;
+        if (azimuth < 0.0) azimuth += 360.0;
+        Json snapshot = {
+            {"version", 1}, {"geometry", Json::parse(calibration.value())},
+            {"software", {{"sdk_version", version::LibVersionString}}},
+            {"device", {{"name", gpu.deviceName}, {"vendor_id", gpu.vendorID},
+                        {"device_id", gpu.deviceID}, {"driver_version", gpu.driverVersion},
+                        {"vulkan_api_version", gpu.apiVersion}}},
+            {"lighting", {{"sun_direction_to_sun", vector(sun)},
+                          {"sun_azimuth_deg", azimuth},
+                          {"sun_elevation_deg", std::asin(std::clamp(static_cast<f64>(sun.y),-1.0,1.0))*180.0/constants::PI},
+                          {"sun_radiance_rgb", vector(lightingParams.sunRadiance_rgb)},
+                          {"sky_radiance_rgb", vector(lightingParams.skyRadiance_rgb)},
+                          {"environment_map_enabled", lightingParams.enableEnvironmentMap != 0},
+                          {"solar_sky_lut_enabled", resolved.solarSunSky.has_value()}}},
+            {"sampling", {{"requested_spp", params.spp}, {"mode", params.modeName},
+                          {"wavelength_nm", params.wavelengthNm}}},
+            {"reproducibility", {{"verified", false},
+                {"reason", "Resource-load and execution-binary fingerprints are not yet captured"}}}
+        };
+        const auto clock = timeline.Info();
+        snapshot["timeline"] = {{"present", clock.present}, {"start_s", clock.start_s},
+            {"end_s", clock.end_s}, {"current_s", timeline.Current_s()},
+            {"ticks_per_second", clock.ticksPerSecond}};
+        snapshot["thermal"] = {{"hour", ThermalHourNow()},
+            {"epoch_count", thermalSession ? thermalSession->EpochCount() : 0u},
+            {"epoch_index", thermalSession ? thermalSession->EpochAt(ThermalHourNow()) : 0u}};
+        snapshot["state_snapshot_time_s"] = timeline.Current_s();
+        snapshot["input_base_dir"] = init.baseDir;
+        snapshot["diagnostics"] = Json::array();
+        for (const auto& message : configReport.messages)
+            snapshot["diagnostics"].push_back({{"key", message.key}, {"text", message.text},
+                {"severity", message.severity == ConfigApplyMessage::Severity::Error ? "error" :
+                    message.severity == ConfigApplyMessage::Severity::Warning ? "warning" : "info"}});
+        return snapshot.dump();
+    }
     Config config;
     InitParams init;
     OfflineRenderParams params;
@@ -1194,6 +1256,10 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
 // ============================================================================
 
 OfflineRenderOutput OfflineRenderer::Render() {
+    const auto pose = m_impl->CameraDataAt(m_impl->timeline.Current_s(),
+        m_impl->params.mode, m_impl->params.wavelengthNm, false);
+    if (!pose) return OfflineRenderOutput{{}, 1.0f, 0.0f, false, pose.error()};
+    m_impl->pipeline->SetCameraData(pose.value());
     if (m_impl->params.mode == SpectralMode::Multispectral) {
         return m_impl->RenderHyperspectral();
     }
@@ -1371,9 +1437,30 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         captured = camera.Capture(nextState, frameTimeSeconds, sampler);
     }
     if (!captured) return captured;
+    // Freeze sensor-product state before an optional observer render moves the
+    // clock again. Asking for a CIE/traced product must not rewrite the capture
+    // description of a sensor image that has already been generated.
+    if (!suppressProducts && impl.config.GetBool("dataset.metadata", true)) {
+        const bool physicalProjection = impl.resolved.cameraConfig.inputKind !=
+            camera::CameraInputKind::FastRgbApproximation;
+        const auto freeze = [&](std::optional<camera::CameraProduct>& product) {
+            if (product) product->image.metadata["quantiloom_provenance"] =
+                impl.ProductSnapshot(frameTimeSeconds, product->image.width,
+                    product->image.height, physicalProjection);
+        };
+        freeze(captured.value().bandMeasurement);
+        freeze(captured.value().rawDn);
+        freeze(captured.value().correctedDeviceSignal);
+        freeze(captured.value().apparentTemperature);
+        freeze(captured.value().display);
+    }
     if (!suppressProducts && (wantsObserver || wantsTraced)) {
         auto moved = SetTimelineTime(frameTimeSeconds);
         if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
+        const auto pose = impl.CameraDataAt(frameTimeSeconds, impl.params.mode,
+                                            impl.params.wavelengthNm, false);
+        if (!pose) return Result<camera::CameraOutput, String>::Err(pose.error());
+        impl.pipeline->SetCameraData(pose.value());
         OfflineRenderOutput observer = impl.RenderSingleFrame();
         if (!observer.error.empty())
             return Result<camera::CameraOutput, String>::Err(observer.error);
@@ -1391,6 +1478,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
                 for (u32 x = 0; x < image.width; ++x)
                     for (u32 c = 0; c < 3; ++c)
                         image(x, y, c) = observer.radiance(x, y, c);
+            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance"); frozen != observer.radiance.metadata.end())
+                image.metadata["quantiloom_provenance"] = frozen->second;
             camera::CameraProduct product{std::move(image), std::move(signal)};
             auto annotated = camera::AnnotateProductMetadata(product);
             if (!annotated)
@@ -1411,6 +1500,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
             for (u32 y = 0; y < image.height; ++y)
                 for (u32 x = 0; x < image.width; ++x)
                     image(x, y, 0) = observer.radiance(x, y, 0);
+            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance"); frozen != observer.radiance.metadata.end())
+                image.metadata["quantiloom_provenance"] = frozen->second;
             camera::CameraProduct product{std::move(image), std::move(signal)};
             auto annotated = camera::AnnotateProductMetadata(product);
             if (!annotated)
@@ -1487,6 +1578,55 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
     markSceneGrid(captured.value().correctedDeviceSignal);
     markSceneGrid(captured.value().apparentTemperature);
     markSceneGrid(captured.value().display);
+    if (!suppressProducts && impl.config.GetBool("dataset.metadata", true)) {
+        using Json = nlohmann::json;
+        const auto summarizeState = [](const camera::CaptureState& value) {
+            core::Sha256 hash;
+            hash.UpdateU32(value.version);
+            hash.UpdateU64(value.acquisitionIndex);
+            hash.UpdateF64(value.frameTimeSeconds);
+            hash.UpdateF64(value.nextExposureSeconds);
+            hash.UpdateF64(value.nextAnalogGain);
+            for (f64 channel : value.nextWhiteBalance) hash.UpdateF64(channel);
+            hash.UpdateU64(value.thermalPixelStateW.size());
+            for (f64 pixel : value.thermalPixelStateW) hash.UpdateF64(pixel);
+            hash.UpdateU64(value.historyEpoch);
+            return Json{{"sha256", hash.FinalizeHex()}, {"acquisition_index", value.acquisitionIndex},
+                        {"frame_time_s", value.frameTimeSeconds}, {"history_epoch", value.historyEpoch}};
+        };
+        const auto before = summarizeState(state), after = summarizeState(nextState);
+        const auto annotate = [&](std::optional<camera::CameraProduct>& product, bool physical) {
+            if (!product) return;
+            const bool fastRgb = impl.resolved.cameraConfig.inputKind == camera::CameraInputKind::FastRgbApproximation;
+            const auto frozen = product->image.metadata.find("quantiloom_provenance");
+            auto snapshot = frozen != product->image.metadata.end()
+                ? Json::parse(frozen->second)
+                : Json::parse(impl.ProductSnapshot(frameTimeSeconds,
+                    product->image.width, product->image.height, physical && !fastRgb));
+            if (physical && fastRgb) snapshot["processing"] = "fast_rgb_bilinear_resample_to_sensor_grid";
+            snapshot["capture"] = {{"acquisition_index", product->signal.acquisitionIndex},
+                {"reference_time_s", frameTimeSeconds},
+                {"reference_time_definition", "first_row_exposure_midpoint"},
+                {"exposure_start_s", product->signal.exposureStartSeconds},
+                {"exposure_end_s", product->signal.exposureEndSeconds},
+                {"row_delay_s", physical && impl.resolved.cameraConfig.readout.shutter == camera::ShutterKind::Rolling ?
+                    impl.resolved.cameraConfig.readout.rowDelaySeconds : 0.0},
+                {"first_row_exposure_s", physical ? 2.0 * (frameTimeSeconds - product->signal.exposureStartSeconds) : 0.0},
+                {"row_midpoint_formula", "reference_time_s + row_index * row_delay_s"},
+                {"state_before", before}, {"state_after", after}};
+            snapshot["units"] = product->signal.unit;
+            snapshot["channel_wavelength_nm"] = product->signal.channelWavelengthNm;
+            snapshot["camera_config_toml"] = CameraConfigToToml(impl.resolved.cameraConfig);
+            product->image.metadata["quantiloom_provenance"] = snapshot.dump();
+        };
+        annotate(captured.value().tracedRadiance, false);
+        annotate(captured.value().cieLinearSrgb, false);
+        annotate(captured.value().bandMeasurement, true);
+        annotate(captured.value().rawDn, true);
+        annotate(captured.value().correctedDeviceSignal, true);
+        annotate(captured.value().apparentTemperature, true);
+        annotate(captured.value().display, true);
+    }
     state = std::move(nextState);
     return captured;
 }
@@ -1669,6 +1809,27 @@ TimelineInfo OfflineRenderer::GetTimelineInfo() const {
 OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     VulkanContext& context = *contextRef;
 
+    // BatchRenderer reads Scene::camera for every wavelength. Bind the current
+    // authored pose for this cube and restore the scene camera on every exit,
+    // including cancellation and writer failures.
+    struct RestoreCamera {
+        Camera& target;
+        Camera original;
+        ~RestoreCamera() { target = original; }
+    } restore{loadedScene.camera, loadedScene.camera};
+    if (!resolved.cameraConfig.motion.keys.empty()) {
+        const auto pose = camera::CameraPoseAt(resolved.cameraConfig.motion, timeline.Current_s());
+        if (!pose) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, pose.error()};
+        const auto& position = pose.value().position;
+        const auto& lookAt = pose.value().lookAt;
+        loadedScene.camera = Camera(
+            glm::vec3(static_cast<f32>(position[0]), static_cast<f32>(position[1]), static_cast<f32>(position[2])),
+            glm::vec3(static_cast<f32>(lookAt[0]), static_cast<f32>(lookAt[1]), static_cast<f32>(lookAt[2])),
+            restore.original.GetUpReference(), restore.original.GetFovY(), restore.original.GetAspectRatio());
+        loadedScene.camera.SetProjection(restore.original.GetProjection());
+        loadedScene.camera.SetOrthoHeight(restore.original.GetOrthoHeight());
+    }
+
     QL_LOG_INFO("========================================");
     QL_LOG_INFO("  MULTISPECTRAL RENDERING MODE");
     QL_LOG_INFO("========================================");
@@ -1715,6 +1876,19 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     QL_LOG_INFO("  Save intermediates: {}", hsConfig.saveIntermediates ? "enabled" : "disabled");
     QL_LOG_INFO("========================================");
 
+    std::unique_ptr<dataset::ExportSession> exportSession;
+    if (config.GetBool("dataset.metadata", true)) {
+        hsConfig.exportProvenance = ProductSnapshot(timeline.Current_s(), params.width, params.height, false, true);
+        auto created = dataset::ExportSession::Create(params.outputPath, config, {hsConfig.exportProvenance});
+        if (!created) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, created.error()};
+        exportSession = std::move(created.value());
+        const auto staged = exportSession->StagingPath(outPath.stem().string());
+        if (!staged) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, staged.error()};
+        hsConfig.outputPath = staged.value();
+        hsConfig.exportRecordId = exportSession->RecordId();
+        hsConfig.exportSidecar = exportSession->SidecarName();
+    }
+
     // Create hyperspectral renderer
     HyperspectralRenderer hsRenderer(context, *pipeline, loadedScene);
 
@@ -1755,6 +1929,24 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     auto status = hsRenderer.Render(hsConfig, progressCallback, progressUserData);
 
     if (status == HyperspectralStatus::Success) {
+        if (exportSession) {
+            namespace fs = std::filesystem;
+            const auto& cube = hsRenderer.GetResult();
+            const fs::path stagedRoot = fs::path(hsConfig.outputPath).parent_path();
+            for (const auto& file : fs::recursive_directory_iterator(stagedRoot)) {
+                if (!file.is_regular_file()) continue;
+                const auto name = file.path().lexically_relative(stagedRoot).generic_string();
+                if (name.starts_with(".internal/") || name.ends_with(".replay.toml")) continue;
+                nlohmann::json description{{"width", cube.width}, {"height", cube.height},
+                    {"channels", cube.nbands}, {"provenance", nlohmann::json::parse(hsConfig.exportProvenance)},
+                    {"spectral", nlohmann::json::parse(cube.metadata.at("quantiloom_spectral_provenance"))}};
+                if (name.find("_bands/") != String::npos) description["channels"] = 1;
+                const auto added = exportSession->RegisterFile(name, name, description.dump());
+                if (!added) { output.error = added.error(); return output; }
+            }
+            const auto committed = exportSession->Commit();
+            if (!committed) { output.error = committed.error(); return output; }
+        }
         QL_LOG_INFO("  Hyperspectral rendering complete!");
         QL_LOG_INFO("  Total render time: {:.2f} seconds", hsRenderer.GetLastRenderTime());
         QL_LOG_INFO("  Average time per band: {:.3f} seconds", hsRenderer.GetAverageTimePerBand());
@@ -1782,6 +1974,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     const u32 width = params.width;
     const u32 height = params.height;
     const u32 spp = params.spp;
+    const bool recordMetadata = config.GetBool("dataset.metadata", true);
+    String productSnapshot;
+    if (recordMetadata) productSnapshot = ProductSnapshot(timeline.Current_s(), width, height, false, false, &pipeline->GetCameraData());
 
     // No preview warning here. Whether a render is quantitative is a property
     // of its materials, not of its mode, and ResolveMaterialSpectra already
@@ -1834,6 +2029,15 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         // with frameIndex so an animation does not reuse one pattern for every
         // frame.
         const u32 sequenceSeed = dist(rng) ^ (frameIndex * 0x9e3779b9U);
+        if (recordMetadata) {
+            auto snapshot = nlohmann::json::parse(productSnapshot);
+            snapshot["sampling"]["actual_render_seed"] = renderSeed;
+            snapshot["sampling"]["sequence_seed"] = sequenceSeed;
+            snapshot["sampling"]["frame_index"] = frameIndex;
+            snapshot["sampling"]["random_stream_version"] = 1;
+            snapshot["sampling"]["generator"] = "std::mt19937_uniform_u32";
+            productSnapshot = snapshot.dump();
+        }
 
         // The first submit keeps the historical two-sample size. Completed GPU
         // timestamps then choose a conservative batch under a 100 ms budget:
@@ -2004,6 +2208,11 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     }
     img.metadata["resolution"] = std::to_string(width) + "x" + std::to_string(height);
     img.metadata["spp"] = std::to_string(spp);
+    if (recordMetadata) {
+        auto snapshot = nlohmann::json::parse(productSnapshot);
+        snapshot["sampling"]["actual_spp"] = spp;
+        img.metadata["quantiloom_provenance"] = snapshot.dump();
+    }
 
     // Copy pixel data
     for (u32 y = 0; y < height; ++y) {

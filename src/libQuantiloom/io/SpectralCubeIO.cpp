@@ -99,7 +99,7 @@ bool SpectralCubeIO::WriteENVIHeader(
     }
 
     hdr.close();
-    return true;
+    return !hdr.fail();
 }
 
 Vector<f32> SpectralCubeIO::ConvertInterleave(
@@ -223,6 +223,10 @@ bool SpectralCubeIO::WriteENVI(
     }
 
     dat.close();
+    if (dat.fail()) {
+        LOG_ERROR("Error closing ENVI data file: {}", dataPath);
+        return false;
+    }
 
     LOG_INFO("Wrote ENVI hyperspectral cube: {} ({} x {} x {} bands)",
              basePath, cube.width, cube.height, cube.nbands);
@@ -760,6 +764,10 @@ bool SpectralCubeIO::WriteGeoTIFF(
     file.write(reinterpret_cast<const char*>(cube.data.data()),
                static_cast<std::streamsize>(pixelBytes));
     file.close();
+    if (file.fail()) {
+        LOG_ERROR("Error writing TIFF cube: {}", path);
+        return false;
+    }
 
     LOG_INFO("Wrote TIFF cube: {} ({} x {} x {} bands, {:.1f}-{:.1f} nm, "
              "float32, band descriptions in GDAL_METADATA)",
