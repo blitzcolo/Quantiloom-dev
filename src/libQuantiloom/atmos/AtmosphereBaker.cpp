@@ -8,6 +8,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <span>
 
 namespace quantiloom {
 
@@ -37,9 +38,11 @@ uint64_t Fnv1a(const void* data, size_t n, uint64_t h) {
 // 4-column geometry block is filled positionally.
 void FillRow(const AtmosNet& net, const AtmosphereNNConfig& cfg,
              double sunZenithDeg, double sunRelAzimuthDeg, double h1Km,
-             double viewZenithDeg, double rangeKm, double* row) {
+             double viewZenithDeg, double rangeKm, std::span<double> row) {
     const auto& names = net.FeatureNames();
     const int P = net.NumFeatures();
+    if (P < 4 || row.size() != static_cast<size_t>(P))
+        throw std::runtime_error("AtmosphereBaker: invalid raw parameter row size");
     const int sampledEnd = P - 4;
     for (int i = 0; i < sampledEnd; ++i) {
         const std::string& n = names[i];
@@ -352,7 +355,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
         std::vector<double> rows(static_cast<size_t>(countA) * P);
         for (int ia = 0; ia < countA; ++ia)
             FillRow(net, cfg, sunZen, 0.0, h1, viewZenith[ia], rangeKm[ia],
-                    rows.data() + static_cast<size_t>(ia) * P);
+                    std::span<double>(rows).subspan(static_cast<size_t>(ia) * P, P));
         std::vector<double> out(static_cast<size_t>(countA) * K);
         for (size_t s = 0; s < static_cast<size_t>(countA); s += kInferChunkRows) {
             const size_t n = std::min(kInferChunkRows, static_cast<size_t>(countA) - s);
@@ -387,7 +390,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
             for (int iaz = 0; iaz < countAz; ++iaz) {
                 const double relAz = azStart + azStep * iaz;
                 FillRow(net, cfg, sunZen, relAz, h1, viewZenith[ia], rangeKm[ia],
-                        rows.data() + (static_cast<size_t>(ia) * countAz + iaz) * P);
+                        std::span<double>(rows).subspan((static_cast<size_t>(ia) * countAz + iaz) * P, P));
             }
         }
         std::vector<double> lvK(K), avg(numLambda);
@@ -426,7 +429,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
         std::vector<double> row(P);
         // ldown ignores viewing geometry (excluded inputs); fill neutral values.
         FillRow(net, cfg, sunZen, 0.0, h1, ground ? 90.0 : 135.0,
-                ground ? 1.0 : SlantRangeKm(h1, 135.0), row.data());
+                ground ? 1.0 : SlantRangeKm(h1, 135.0), row);
         std::vector<double> out(static_cast<size_t>(net.T()) * K);
         net.Infer(row.data(), 1, out.data());
         std::vector<double> lvK(K), avg(numLambda);

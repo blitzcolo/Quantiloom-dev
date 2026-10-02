@@ -7,6 +7,9 @@
 #include <vector>
 #include <unordered_map>
 #include <filesystem>
+#include <limits>
+#include <cmath>
+#include <stdexcept>
 
 // ============================================================================
 // SpectralBasisLoader - Load SpectralBaker NMF basis functions and materials
@@ -104,12 +107,18 @@ struct BasisFunctions {
 
     // Get basis function value at (basisIndex, sampleIndex)
     [[nodiscard]] f32 Get(u32 basisIndex, u32 sampleIndex) const {
-        return data[basisIndex * numSamples + sampleIndex];
+        if (!IsValid() || basisIndex >= numBasis || sampleIndex >= numSamples)
+            throw std::out_of_range("Spectral basis index out of range");
+        return data.at(static_cast<size_t>(basisIndex) * numSamples + sampleIndex);
     }
 
     // Check if valid
     [[nodiscard]] bool IsValid() const {
-        return numBasis > 0 && numSamples > 0 && data.size() == numBasis * numSamples;
+        return numBasis > 0 && numSamples > 0 &&
+               std::isfinite(wavelengthStart_um) && std::isfinite(wavelengthEnd_um) &&
+               wavelengthStart_um > 0 && wavelengthEnd_um > wavelengthStart_um &&
+               static_cast<size_t>(numBasis) <= std::numeric_limits<size_t>::max() / numSamples &&
+               data.size() == static_cast<size_t>(numBasis) * numSamples;
     }
 };
 

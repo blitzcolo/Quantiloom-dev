@@ -12,6 +12,8 @@
 #include <cmath>
 #include <fstream>
 #include <string>
+#include <array>
+#include <limits>
 
 #if defined(_WIN32)
     #include <process.h>
@@ -84,9 +86,7 @@ bool ReadPod(std::istream& in, T& value) {
 /// holds except the digest itself. The header is in there because it carries
 /// the counts the gate line is printed from, and a temperature range flipped
 /// by bit rot would otherwise be reported as a measurement.
-String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
-    core::Sha256 hasher;
-
+void HashHeader(core::Sha256& hasher, const CacheHeader& header) {
     hasher.UpdateU32(header.magic);
     hasher.UpdateU32(header.formatVersion);
     hasher.Update(header.keyHex, kKeyHexLength);
@@ -108,6 +108,11 @@ String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
     hasher.UpdateF64(header.minTemperature_K);
     hasher.UpdateF64(header.maxTemperature_K);
     hasher.UpdateF64(header.meanTemperature_K);
+}
+
+String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
+    core::Sha256 hasher;
+    HashHeader(hasher, header);
 
     const auto feed = [&hasher](const auto& vec) {
         if (!vec.empty()) {
@@ -295,7 +300,8 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
 }
 
 std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& file,
-                                                   StringView expectedKeyHex) {
+                                                   StringView expectedKeyHex,
+                                                   const ThermalMesh* expectedMesh) try {
     std::error_code ec;
     if (!std::filesystem::exists(file, ec) || ec) {
         return std::nullopt;  // the ordinary miss: not a warning
@@ -351,6 +357,8 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
     const u64 elements = header.elementCount;
     const bool countsSane =
         elements > 0 && header.temperatureCount == elements &&
+        header.lagSlots <= std::numeric_limits<u32>::max() &&
+        header.lagSlots <= std::numeric_limits<u64>::max() / elements &&
         (header.sensitivityCount == 0 || header.sensitivityCount == elements) &&
         (header.visibilityCount == 0 || header.visibilityCount == elements) &&
         header.lagSensitivityCount == header.lagSlots * elements &&
@@ -361,8 +369,57 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
                     file.string());
         return std::nullopt;
     }
+    if (expectedMesh && (elements != expectedMesh->elements.size() ||
+                         header.instanceBaseCount != expectedMesh->instanceElementBase.size()))
+        return std::nullopt;
 
     ThermalResult result;
+    // Validate byte counts against the same open file before any array is sized.
+    // Hash in fixed-size chunks so even a corrupt entry cannot request memory
+    // through its counts before its complete payload has been checked.
+    const auto payloadStart = in.tellg();
+    if (payloadStart < 0) return std::nullopt;
+    in.seekg(0, std::ios::end);
+    const auto fileEnd = in.tellg();
+    if (fileEnd < payloadStart || fileEnd - payloadStart < static_cast<std::streamoff>(kKeyHexLength))
+        return std::nullopt;
+    u64 bytesRemaining = static_cast<u64>(fileEnd - payloadStart) - kKeyHexLength;
+    const u64 payloadBytes = bytesRemaining;
+    const auto fits = [&bytesRemaining](u64 count, const auto& vec) {
+        using Value = typename std::decay_t<decltype(vec)>::value_type;
+        if (count > vec.max_size() || count > bytesRemaining / sizeof(Value) ||
+            count > static_cast<u64>(std::numeric_limits<std::streamsize>::max()) / sizeof(Value))
+            return false;
+        bytesRemaining -= count * sizeof(Value);
+        return true;
+    };
+    if (!fits(header.temperatureCount, result.surfaceTemperature_K) ||
+        !fits(header.instanceBaseCount, result.instanceElementBase) ||
+        !fits(header.sensitivityCount, result.sunSensitivity_K) ||
+        !fits(header.visibilityCount, result.sunVisibility) ||
+        !fits(header.lagSensitivityCount, result.lagSensitivity_K) ||
+        !fits(header.lagVisibilityCount, result.lagVisibility) ||
+        !fits(header.lagDirectionCount, result.lagDirection) || bytesRemaining != 0)
+        return std::nullopt;
+    in.seekg(payloadStart);
+    core::Sha256 hasher;
+    HashHeader(hasher, header);
+    std::array<char, 64 * 1024> chunk;
+    u64 unhashed = payloadBytes;
+    while (unhashed > 0) {
+        const auto count = static_cast<std::streamsize>(std::min<u64>(unhashed, chunk.size()));
+        in.read(chunk.data(), count);
+        if (in.gcount() != count) return std::nullopt;
+        hasher.Update(chunk.data(), static_cast<usize>(count));
+        unhashed -= static_cast<u64>(count);
+    }
+    char checkedDigest[kKeyHexLength] = {};
+    in.read(checkedDigest, kKeyHexLength);
+    if (static_cast<usize>(in.gcount()) != kKeyHexLength ||
+        hasher.FinalizeHex() != StringView(checkedDigest, kKeyHexLength))
+        return std::nullopt;
+    in.seekg(payloadStart);
+    if (!in) return std::nullopt;
     // resize to exactly the stored count: zero stays empty, which is a
     // different claim from an array of zeros and is why the counts are stored
     // separately rather than inferred from elementCount.
@@ -413,8 +470,23 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
         QL_LOG_WARN("  Thermal cache: {} failed its digest; solving instead", file.string());
         return std::nullopt;
     }
+    if (expectedMesh) {
+        // The key and digest are public hashes, not authentication. A cache
+        // mapping must equal the scene's mapping before the renderer uses it.
+        // A trusted mesh may have a base equal to elementCount for an empty
+        // trailing primitive, which has no hit that could dereference it.
+        if (result.instanceElementBase != expectedMesh->instanceElementBase)
+            return std::nullopt;
+    } else {
+        for (u32 base : result.instanceElementBase)
+            if (base != std::numeric_limits<u32>::max() && base > header.elementCount)
+                return std::nullopt;
+    }
 
     return result;
+} catch (const std::exception& e) {
+    QL_LOG_WARN("  Thermal cache: cannot read entry: {}; solving instead", e.what());
+    return std::nullopt;
 }
 
 bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex,

@@ -5,6 +5,7 @@
 #include <cstring>
 #include <fstream>
 #include <stdexcept>
+#include <limits>
 
 namespace quantiloom {
 
@@ -31,6 +32,9 @@ SafetensorsFile::SafetensorsFile(const std::filesystem::path& path) : path_(path
     if (!f) Fail(path, "cannot open file");
     const std::streamoff fileSize = f.tellg();
     if (fileSize < 8) Fail(path, "file too small for header length");
+    if (static_cast<uintmax_t>(fileSize) > storage_.max_size() ||
+        static_cast<uintmax_t>(fileSize) > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+        Fail(path, "file exceeds addressable storage");
     f.seekg(0);
     storage_.resize(static_cast<size_t>(fileSize));
     if (!f.read(reinterpret_cast<char*>(storage_.data()), fileSize))
@@ -77,6 +81,8 @@ SafetensorsFile::SafetensorsFile(const std::filesystem::path& path) : path_(path
                 Fail(path, "tensor '" + name + "' has non-integer shape");
             const int64_t dim = d.get<int64_t>();
             if (dim < 0) Fail(path, "tensor '" + name + "' has negative dimension");
+            if (dim != 0 && numel > std::numeric_limits<int64_t>::max() / dim)
+                Fail(path, "tensor '" + name + "' shape product overflows");
             t.shape.push_back(dim);
             numel *= dim;
         }
@@ -88,11 +94,21 @@ SafetensorsFile::SafetensorsFile(const std::filesystem::path& path) : path_(path
         const uint64_t o1 = info["data_offsets"][1].get<uint64_t>();
         if (o1 < o0 || o1 > blobSize)
             Fail(path, "tensor '" + name + "' data_offsets out of bounds");
-        if (o1 - o0 != static_cast<uint64_t>(numel) * DtypeSize(t.dtype))
+        if (static_cast<uint64_t>(numel) > std::numeric_limits<size_t>::max() / DtypeSize(t.dtype) ||
+            o1 - o0 != static_cast<uint64_t>(numel) * DtypeSize(t.dtype))
             Fail(path, "tensor '" + name + "' byte size does not match shape");
 
         t.data = blob + o0;
         t.byteSize = static_cast<size_t>(o1 - o0);
+        // Safetensors does not require header padding or aligned blob offsets.
+        // Copy such F32 tensors before exposing a float pointer to consumers.
+        if (t.dtype == SafetensorsDtype::F32 &&
+            reinterpret_cast<uintptr_t>(t.data) % alignof(float) != 0) {
+            t.alignedStorage = std::make_shared<std::vector<float>>(static_cast<size_t>(numel));
+            if (t.byteSize != 0)
+                std::memcpy(t.alignedStorage->data(), t.data, t.byteSize);
+            t.data = reinterpret_cast<const uint8_t*>(t.alignedStorage->data());
+        }
         if (!tensors_.emplace(name, std::move(t)).second)
             Fail(path, "duplicate tensor name '" + name + "'");
     }

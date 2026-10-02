@@ -34,7 +34,7 @@ static T ReadLE(const std::vector<u8>& data, size_t& offset) {
 // ============================================================================
 // LoadBasis - Parse binary basis file
 // ============================================================================
-bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) {
+bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) try {
     QL_LOG_INFO("Loading spectral basis from: {}", basisFilePath.string());
 
     // Read entire file
@@ -44,7 +44,12 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
         return false;
     }
 
-    size_t fileSize = static_cast<size_t>(file.tellg());
+    const auto length = file.tellg();
+    if (length < static_cast<std::streamoff>(HEADER_SIZE) ||
+        static_cast<uintmax_t>(length) > std::numeric_limits<size_t>::max() ||
+        static_cast<uintmax_t>(length) > static_cast<uintmax_t>(std::numeric_limits<std::streamsize>::max()))
+        return false;
+    size_t fileSize = static_cast<size_t>(length);
     file.seekg(0, std::ios::beg);
 
     std::vector<u8> data(fileSize);
@@ -70,26 +75,28 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
     offset += 4;
 
     // Version
-    m_basisVersion = ReadLE<u32>(data, offset);
-    if (m_basisVersion != SUPPORTED_VERSION) {
-        QL_LOG_ERROR("  Unsupported version {} (expected {})", m_basisVersion, SUPPORTED_VERSION);
+    const u32 basisVersion = ReadLE<u32>(data, offset);
+    if (basisVersion != SUPPORTED_VERSION) {
+        QL_LOG_ERROR("  Unsupported version {} (expected {})", basisVersion, SUPPORTED_VERSION);
         return false;
     }
 
     // Number of bands
     u32 numBands = ReadLE<u32>(data, offset);
-    QL_LOG_INFO("  Version: {}, Bands: {}", m_basisVersion, numBands);
+    if (numBands == 0 || numBands > static_cast<u32>(NMFBandType::Count))
+        return false;
+    QL_LOG_INFO("  Version: {}, Bands: {}", basisVersion, numBands);
 
     // Skip reserved bytes
     offset = HEADER_SIZE;
 
     // Parse each band
-    m_basisFunctions.clear();
+    std::unordered_map<String, BasisFunctions> basisFunctions;
 
     static const char* bandNames[] = {"VIS", "NIR", "SWIR", "MWIR", "LWIR"};
 
     for (u32 bandIdx = 0; bandIdx < numBands; ++bandIdx) {
-        if (offset + BAND_HEADER_SIZE > fileSize) {
+        if (offset > fileSize || BAND_HEADER_SIZE > fileSize - offset) {
             QL_LOG_ERROR("  Unexpected end of file at band {}", bandIdx);
             return false;
         }
@@ -104,25 +111,37 @@ bool SpectralBasisLoader::LoadBasis(const std::filesystem::path& basisFilePath) 
         basis.numBasis = ReadLE<u32>(data, offset);
 
         // Read basis data
-        size_t dataSize = basis.numBasis * basis.numSamples * sizeof(f32);
-        if (offset + dataSize > fileSize) {
+        if (basis.numBasis == 0 || basis.numSamples == 0 ||
+            static_cast<size_t>(basis.numBasis) > std::numeric_limits<size_t>::max() / basis.numSamples)
+            return false;
+        const size_t count = static_cast<size_t>(basis.numBasis) * basis.numSamples;
+        if (count > std::numeric_limits<size_t>::max() / sizeof(f32)) return false;
+        const size_t dataSize = count * sizeof(f32);
+        if (dataSize > fileSize - offset) {
             QL_LOG_ERROR("  Unexpected end of file reading band {} data", bandIdx);
             return false;
         }
 
-        basis.data.resize(basis.numBasis * basis.numSamples);
+        basis.data.resize(count);
         std::memcpy(basis.data.data(), data.data() + offset, dataSize);
         offset += dataSize;
+        if (!basis.IsValid()) return false;
 
         QL_LOG_INFO("  {} band: {:.3f}-{:.3f} um, {} samples, {} basis functions",
                     basis.name, basis.wavelengthStart_um, basis.wavelengthEnd_um,
                     basis.numSamples, basis.numBasis);
 
-        m_basisFunctions[basis.name] = std::move(basis);
+        basisFunctions[basis.name] = std::move(basis);
     }
 
+    if (offset != fileSize) return false;
+    m_basisFunctions = std::move(basisFunctions);
+    m_basisVersion = basisVersion;
     QL_LOG_INFO("  Loaded {} bands total", m_basisFunctions.size());
     return true;
+} catch (const std::exception& e) {
+    QL_LOG_ERROR("  Failed to load basis file: {}", e.what());
+    return false;
 }
 
 // ============================================================================

@@ -16,8 +16,18 @@
 #include <filesystem>
 #include <fstream>
 #include <cstring>
+#include <limits>
 
 using namespace quantiloom;
+
+namespace {
+template<class T>
+void RewriteBasisField(const std::filesystem::path& path, std::streamoff offset, T value) {
+    std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+    file.seekp(offset);
+    file.write(reinterpret_cast<const char*>(&value), sizeof(value));
+}
+}
 
 // ============================================================================
 // Test Fixture with Temporary File Management
@@ -530,6 +540,67 @@ TEST_F(SpectralBasisLoaderTest, ReconstructFullSpectrum) {
 // ============================================================================
 // BasisFunctions Helper Tests
 // ============================================================================
+
+TEST_F(SpectralBasisLoaderTest, RejectsWrappedDimensionsWithoutReplacingLoadedBasis) {
+    const auto good = GetTempFilePath("good.bin");
+    const auto bad = GetTempFilePath("bad.bin");
+    CreateTestBasisFile(good, 1);
+    CreateTestBasisFile(bad, 1);
+    // 65536*65536 wraps to zero in u32, although neither dimension is zero.
+    RewriteBasisField(bad, 72, u32{65536});
+    RewriteBasisField(bad, 76, u32{65536});
+    SpectralBasisLoader loader;
+    ASSERT_TRUE(loader.LoadBasis(good));
+    EXPECT_FALSE(loader.LoadBasis(bad));
+    ASSERT_NE(loader.GetBasis("VIS"), nullptr);
+    EXPECT_EQ(loader.GetBasis("VIS")->numSamples, 10u);
+    EXPECT_EQ(loader.GetBasisVersion(), 3u);
+}
+
+TEST_F(SpectralBasisLoaderTest, RejectsUnsupportedAndTruncatedBands) {
+    const auto path = GetTempFilePath("bad.bin");
+    SpectralBasisLoader loader;
+    for (u32 bands : {0u, 6u, std::numeric_limits<u32>::max()}) {
+        CreateTestBasisFile(path, 1);
+        RewriteBasisField(path, 8, bands);
+        EXPECT_FALSE(loader.LoadBasis(path));
+    }
+    CreateTestBasisFile(path, 1);
+    std::filesystem::resize_file(path, 79);
+    EXPECT_FALSE(loader.LoadBasis(path));
+    CreateTestBasisFile(path, 1);
+    std::filesystem::resize_file(path, 80 + 4 * 10 * sizeof(f32) - 1);
+    EXPECT_FALSE(loader.LoadBasis(path));
+}
+
+TEST_F(SpectralBasisLoaderTest, RejectsZeroDimensionsAndInvalidWavelengthBounds) {
+    const auto path = GetTempFilePath("bad.bin");
+    SpectralBasisLoader loader;
+    for (std::streamoff offset : {72, 76}) {
+        CreateTestBasisFile(path, 1);
+        RewriteBasisField(path, offset, u32{0});
+        EXPECT_FALSE(loader.LoadBasis(path));
+    }
+    CreateTestBasisFile(path, 1);
+    RewriteBasisField(path, 64, std::numeric_limits<f32>::quiet_NaN());
+    EXPECT_FALSE(loader.LoadBasis(path));
+}
+
+TEST_F(SpectralBasisLoaderTest, BasisAccessorChecksBothIndicesAndWideProduct) {
+    BasisFunctions basis;
+    basis.wavelengthStart_um = 0.35f;
+    basis.wavelengthEnd_um = 0.78f;
+    basis.numBasis = 2;
+    basis.numSamples = 2;
+    basis.data = {1, 2, 3, 4};
+    EXPECT_FLOAT_EQ(basis.Get(1, 1), 4);
+    EXPECT_THROW(basis.Get(0, 2), std::out_of_range);
+    EXPECT_THROW(basis.Get(2, 0), std::out_of_range);
+    basis.numBasis = basis.numSamples = 65536;
+    basis.data.clear();
+    EXPECT_FALSE(basis.IsValid());
+    EXPECT_THROW(basis.Get(0, 0), std::out_of_range);
+}
 
 TEST_F(SpectralBasisLoaderTest, BasisFunctionsGetWavelength) {
     auto basisPath = GetTempFilePath("wavelength_test.bin");

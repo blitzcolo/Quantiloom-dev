@@ -7,6 +7,9 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <limits>
+#include <stdexcept>
+#include <memory>
 
 namespace quantiloom {
 
@@ -29,16 +32,31 @@ enum class SafetensorsDtype : uint8_t {
 struct TensorView {
     SafetensorsDtype dtype = SafetensorsDtype::F32;
     std::vector<int64_t> shape;
-    const uint8_t* data = nullptr;  // Points into SafetensorsFile storage
+    const uint8_t* data = nullptr;  // File storage, or alignedStorage when needed
     size_t byteSize = 0;
+    // Only needed for a legal F32 tensor whose file offset is not aligned.
+    // Shared ownership keeps data stable when a view is copied or moved.
+    std::shared_ptr<std::vector<float>> alignedStorage;
 
     int64_t NumElements() const {
         int64_t n = 1;
-        for (int64_t d : shape) n *= d;
+        for (int64_t d : shape) {
+            if (d < 0 || (d != 0 && n > std::numeric_limits<int64_t>::max() / d))
+                throw std::runtime_error("safetensors: tensor shape product out of range");
+            n *= d;
+        }
         return n;
     }
-    const float* F32Data() const { return reinterpret_cast<const float*>(data); }
-    const uint8_t* U8Data() const { return data; }
+    const float* F32Data() const {
+        if (dtype != SafetensorsDtype::F32)
+            throw std::runtime_error("safetensors: tensor is not F32 data");
+        return reinterpret_cast<const float*>(data);
+    }
+    const uint8_t* U8Data() const {
+        if (dtype != SafetensorsDtype::U8)
+            throw std::runtime_error("safetensors: tensor is not U8 data");
+        return data;
+    }
 };
 
 class SafetensorsFile {

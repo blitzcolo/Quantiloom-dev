@@ -137,14 +137,17 @@ struct ThermalSolveCacheKeyInputs {
  * @brief Read an entry back, if it is there and it is ours
  *
  * Checks magic, format version, the key it was written under, the array counts
- * against each other, and a digest over everything but the digest itself. The
+ * against each other and the supplied mesh, and a digest over everything but
+ * the digest itself. Renderer callers must supply their current mesh so a
+ * valid public digest cannot substitute another instance-to-element mapping. The
  * header is inside that digest deliberately: it carries the counts and the
  * temperature range the summary line is printed from, and bit rot there would
  * otherwise be reported to the downstream gates as a measurement. Any
  * disagreement warns and returns nothing -- the caller re-solves and overwrites.
  */
 [[nodiscard]] std::optional<ThermalResult> LoadThermalSolveCache(
-    const std::filesystem::path& file, StringView expectedKeyHex);
+    const std::filesystem::path& file, StringView expectedKeyHex,
+    const ThermalMesh* expectedMesh = nullptr);
 
 /**
  * @brief Write an entry, atomically

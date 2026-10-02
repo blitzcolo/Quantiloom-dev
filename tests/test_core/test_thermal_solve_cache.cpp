@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 using namespace quantiloom;
 using namespace quantiloom::thermal;
@@ -278,6 +279,98 @@ TEST_F(ThermalSolveCacheTest, ForeignFileIsRefused) {
 TEST_F(ThermalSolveCacheTest, EmptyFileIsRefused) {
     { std::ofstream out(Entry(), std::ios::binary); }
     EXPECT_FALSE(LoadThermalSolveCache(Entry(), kKeyA).has_value());
+}
+
+TEST_F(ThermalSolveCacheTest, ForgedCountsAreRejectedBeforeAllocation) {
+    const String key(64, 'a');
+    // Counts start after magic, version and the key. Independently exercise
+    // instance bases as well as element-sized arrays and the lag slot narrowing.
+    for (std::streamoff offset : {72, 80, 88, 96, 104, 112, 120, 128}) {
+        ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, MakeResult()));
+        {
+            std::fstream file(Entry(), std::ios::binary | std::ios::in | std::ios::out);
+            file.seekp(offset);
+            const u64 count = std::numeric_limits<u64>::max();
+            file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        }
+        EXPECT_NO_THROW(EXPECT_FALSE(LoadThermalSolveCache(Entry(), key).has_value()));
+        std::filesystem::remove(Entry());
+    }
+}
+
+TEST_F(ThermalSolveCacheTest, WrappedLagProductIsRejected) {
+    const String key(64, 'a');
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, MakeResult()));
+    {
+        std::fstream file(Entry(), std::ios::binary | std::ios::in | std::ios::out);
+        file.seekp(104);
+        // elementCount is four; 2^62 * four wraps to zero, matching empty
+        // lag arrays unless the multiplication and narrowing are checked.
+        const u64 slots = u64{1} << 62;
+        file.write(reinterpret_cast<const char*>(&slots), sizeof(slots));
+    }
+    EXPECT_NO_THROW(EXPECT_FALSE(LoadThermalSolveCache(Entry(), key).has_value()));
+}
+
+TEST_F(ThermalSolveCacheTest, TrailingBytesAreRejected) {
+    const String key(64, 'a');
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, MakeResult()));
+    {
+        std::ofstream file(Entry(), std::ios::binary | std::ios::app);
+        file.put('x');
+    }
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), key));
+}
+
+TEST_F(ThermalSolveCacheTest, PayloadLargerThanDigestChunkRoundTrips) {
+    const String key(64, 'a');
+    ThermalResult result;
+    result.elementCount = 20000;
+    result.surfaceTemperature_K.assign(result.elementCount, 301.5f);
+    result.instanceElementBase = {0};
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, result));
+    const auto loaded = LoadThermalSolveCache(Entry(), key);
+    ASSERT_TRUE(loaded);
+    EXPECT_EQ(loaded->surfaceTemperature_K, result.surfaceTemperature_K);
+    EXPECT_EQ(loaded->instanceElementBase, result.instanceElementBase);
+    EXPECT_TRUE(loaded->sunSensitivity_K.empty());
+}
+
+TEST_F(ThermalSolveCacheTest, ValidDigestCannotAuthorizeAnOutOfBoundsInstanceBase) {
+    const String key(64, 'a');
+    ThermalResult result = MakeResult();
+    result.instanceElementBase[1] = result.elementCount + 1;
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, result));
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), key));
+}
+
+TEST_F(ThermalSolveCacheTest, CacheCountsAndMappingMustMatchTheExpectedMesh) {
+    const String key(64, 'a');
+    const auto result = MakeResult();
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, result));
+    ThermalMesh mesh;
+    mesh.elements.resize(result.elementCount);
+    mesh.instanceElementBase = result.instanceElementBase;
+    ASSERT_TRUE(LoadThermalSolveCache(Entry(), key, &mesh));
+    mesh.elements.pop_back();
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), key, &mesh));
+    mesh.elements.resize(result.elementCount);
+    mesh.instanceElementBase.push_back(0);
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), key, &mesh));
+    mesh.instanceElementBase = {0, 1};
+    EXPECT_FALSE(LoadThermalSolveCache(Entry(), key, &mesh));
+}
+
+TEST_F(ThermalSolveCacheTest, TrustedEmptyTrailingPrimitiveKeepsItsEndBase) {
+    const String key(64, 'a');
+    auto result = MakeResult();
+    result.instanceElementBase.push_back(result.elementCount);
+    ASSERT_TRUE(StoreThermalSolveCache(Entry(), key, result));
+    ASSERT_TRUE(LoadThermalSolveCache(Entry(), key));
+    ThermalMesh mesh;
+    mesh.elements.resize(result.elementCount);
+    mesh.instanceElementBase = result.instanceElementBase;
+    ASSERT_TRUE(LoadThermalSolveCache(Entry(), key, &mesh));
 }
 
 TEST_F(ThermalSolveCacheTest, TruncatedHeaderIsRefused) {

@@ -16,6 +16,17 @@ using nlohmann::json;
 namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kDeg2Rad = kPi / 180.0;
+
+int ReadDimension(const json& value, const char* name, bool allowZero = false) {
+    const auto& number = value.at(name);
+    if (!number.is_number_integer() ||
+        (number.is_number_unsigned() && number.get<uint64_t>() > static_cast<uint64_t>(std::numeric_limits<int>::max())))
+        throw std::runtime_error(std::string("AtmosNet: invalid integer dimension ") + name);
+    const auto dimension = number.get<int64_t>();
+    if (dimension < (allowZero ? 0 : 1) || dimension > std::numeric_limits<int>::max())
+        throw std::runtime_error(std::string("AtmosNet: dimension out of range ") + name);
+    return static_cast<int>(dimension);
+}
 }  // namespace
 
 struct AtmosNet::InputEntry {
@@ -55,22 +66,53 @@ AtmosNet::AtmosNet(const std::filesystem::path& file) : path_(file) {
     band_.v1_cm = band.at("v1_cm").get<double>();
     band_.v2_cm = band.at("v2_cm").get<double>();
     band_.dv_cm = band.at("dv_cm").get<double>();
-    band_.K = band.at("K").get<int>();
+    band_.K = ReadDimension(band, "K");
     band_.thermal = band.at("thermal").get<bool>();
 
-    for (auto& n : featNames) featureNames_.push_back(n.get<std::string>());
+    if (band_.K <= 0 || !std::isfinite(band_.v1_cm) || !std::isfinite(band_.v2_cm) ||
+        !std::isfinite(band_.dv_cm) || band_.v1_cm <= 0 || band_.v2_cm < band_.v1_cm ||
+        band_.dv_cm <= 0 || !std::isfinite(opaqueDelta_) || !std::isfinite(deltaClamp_) ||
+        opaqueDelta_ < 0 || deltaClamp_ <= 0)
+        throw std::runtime_error("AtmosNet: invalid spectral grid or deployment bounds");
+    if (!featNames.is_array() || featNames.size() < 4 ||
+        featNames.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("AtmosNet: missing geometry feature block");
 
-    dIn_ = model.at("d_in").get<int>();
-    dOut_ = model.at("d_out").get<int>();
+    for (auto& n : featNames) featureNames_.push_back(n.get<std::string>());
+    static constexpr const char* geometry[] = {"h1_km", "h2_km", "cos_view_zenith", "range_km"};
+    for (size_t i = 0; i < 4; ++i)
+        if (featureNames_[featureNames_.size() - 4 + i] != geometry[i])
+            throw std::runtime_error("AtmosNet: geometry feature block is out of order");
+
+    dIn_ = ReadDimension(model, "d_in");
+    dOut_ = ReadDimension(model, "d_out");
+    const int width = ReadDimension(model, "width");
+    const int blocks = ReadDimension(model, "blocks", true);
+    const int nPc = ReadDimension(model, "n_pc", true);
+    if (dIn_ <= 0 || dOut_ <= 0 || width <= 0 || blocks < 0 || nPc < 0)
+        throw std::runtime_error("AtmosNet: invalid model dimensions");
+    // Each residual block owns six tensors; a tiny file cannot describe an
+    // enormous block allocation merely by putting that count in metadata.
+    if (static_cast<size_t>(blocks) > st.TensorNames().size() / 6)
+        throw std::runtime_error("AtmosNet: block count exceeds available tensors");
+    if (!ispec.at("entries").is_array() || ispec.at("entries").empty())
+        throw std::runtime_error("AtmosNet: empty input entries");
 
     for (auto& e : ispec.at("entries")) {
         InputEntry ie;
         const std::string kind = e.at("kind").get<std::string>();
         ie.name = e.at("name").get<std::string>();
-        ie.col = e.at("col").get<int>();
+        ie.col = ReadDimension(e, "col", true);
         if (kind == "onehot") {
             ie.kind = InputEntry::Kind::Onehot;
+            if (!e.at("values").is_array())
+                throw std::runtime_error("AtmosNet: onehot values must be an array");
             for (auto& v : e.at("values")) ie.values.push_back(v.get<double>());
+            if (ie.values.empty())
+                throw std::runtime_error("AtmosNet: empty onehot values");
+            for (double value : ie.values)
+                if (!std::isfinite(value))
+                    throw std::runtime_error("AtmosNet: nonfinite onehot value");
         } else {
             if (kind == "linear") ie.kind = InputEntry::Kind::Linear;
             else if (kind == "log") ie.kind = InputEntry::Kind::Log;
@@ -80,6 +122,8 @@ AtmosNet::AtmosNet(const std::filesystem::path& file) : path_(file) {
                                          ": unknown input entry kind '" + kind + "'");
             ie.lo = e.at("lo").get<double>();
             ie.hi = e.at("hi").get<double>();
+            if (!std::isfinite(ie.lo) || !std::isfinite(ie.hi) || ie.hi <= ie.lo)
+                throw std::runtime_error("AtmosNet: invalid input normalization range");
         }
         if (ie.col < 0 || ie.col >= static_cast<int>(featureNames_.size()))
             throw std::runtime_error("AtmosNet: " + file.string() +
@@ -90,21 +134,28 @@ AtmosNet::AtmosNet(const std::filesystem::path& file) : path_(file) {
     }
 
     // Consistency check: expanded feature count must equal d_in
-    int expanded = 0;
-    for (const auto& e : entries_)
-        expanded += (e.kind == InputEntry::Kind::Onehot)
-                        ? static_cast<int>(e.values.size())
-                        : 1;
-    if (expanded != dIn_)
+    size_t expanded = 0;
+    for (const auto& e : entries_) {
+        const size_t count = e.kind == InputEntry::Kind::Onehot ? e.values.size() : 1;
+        if (count > static_cast<size_t>(dIn_) - expanded)
+            throw std::runtime_error("AtmosNet: expanded input count exceeds model d_in");
+        expanded += count;
+    }
+    if (expanded != static_cast<size_t>(dIn_))
         throw std::runtime_error("AtmosNet: " + file.string() +
                                  ": input_spec expands to " + std::to_string(expanded) +
                                  " features but model d_in=" + std::to_string(dIn_));
 
     // Targets and per-target normalization arrays
-    const int K = targets.at("K").get<int>();
+    const int K = ReadDimension(targets, "K");
     if (K != band_.K)
         throw std::runtime_error("AtmosNet: " + file.string() +
                                  ": targets K != band K");
+    const auto& targetRows = targets.at("rows");
+    if (!targetRows.is_array() || targetRows.empty() ||
+        targetRows.size() > static_cast<size_t>(dOut_) / static_cast<size_t>(K) ||
+        targetRows.size() * static_cast<size_t>(K) != static_cast<size_t>(dOut_))
+        throw std::runtime_error("AtmosNet: T*K != model d_out");
     int t = 0;
     for (auto& r : targets.at("rows")) {
         AtmosTargetRow row;
@@ -135,13 +186,12 @@ AtmosNet::AtmosNet(const std::filesystem::path& file) : path_(file) {
         norm_.push_back(std::move(nr));
         ++t;
     }
-    if (static_cast<int>(targets_.size()) * K != dOut_)
+    if (targets_.size() * static_cast<size_t>(K) != static_cast<size_t>(dOut_))
         throw std::runtime_error("AtmosNet: " + file.string() +
                                  ": T*K != model d_out");
 
-    mlp_.Load(st, dIn_, dOut_, model.at("width").get<int>(),
-              model.at("blocks").get<int>(), model.at("pca_mode").get<std::string>(),
-              model.at("n_pc").get<int>());
+    mlp_.Load(st, dIn_, dOut_, width, blocks,
+              model.at("pca_mode").get<std::string>(), nPc);
 }
 
 AtmosNet::~AtmosNet() = default;
@@ -232,6 +282,10 @@ void AtmosNet::AssembleFeatures(const double* rows, size_t n, float* X) const {
 
 void AtmosNet::Infer(const double* rows, size_t n, double* out) const {
     if (n == 0) return;
+    const size_t maxElements = static_cast<size_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(double);
+    if (!rows || !out || n > maxElements / static_cast<size_t>(NumFeatures()) ||
+        n > maxElements / static_cast<size_t>(dIn_) || n > maxElements / static_cast<size_t>(dOut_))
+        throw std::runtime_error("AtmosNet: inference dimensions exceed addressable storage");
     std::vector<float> X(n * dIn_);
     AssembleFeatures(rows, n, X.data());
     std::vector<float> Z(n * dOut_);
