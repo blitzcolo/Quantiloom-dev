@@ -26,6 +26,28 @@
 
 namespace quantiloom::scene {
 
+// ExprTk implements swap both as a special statement and as the <=> operator;
+// neither consults the disabled base-function or assignment settings. Inspect
+// its own normalized tokens so whitespace/case variants cannot bypass the
+// scalar-expression contract. Invalid tokenization is left to parser.compile.
+static bool HasSwapOperation(const String& source) {
+    exprtk::lexer::generator tokens;
+    if (!tokens.process(source)) { return false; }
+    exprtk::lexer::helper::operator_joiner joinTwo(2);
+    exprtk::lexer::helper::operator_joiner joinThree(3);
+    joinTwo.process(tokens);
+    joinThree.process(tokens);
+    for (size_t i = 0; i < tokens.size(); ++i) {
+        const auto& token = tokens[i];
+        if (token.type == exprtk::lexer::token::e_swap ||
+            (token.type == exprtk::lexer::token::e_symbol &&
+             exprtk::details::imatch(token.value, "swap"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
 struct SegmentExpressions::Impl {
     /// Written by Evaluate before each read of the compiled expressions. It is
     /// what makes evaluation non-re-entrant, which the header says out loud.
@@ -58,6 +80,10 @@ Result<std::unique_ptr<SegmentExpressions>, String> SegmentExpressions::Compile(
     impl.expressions.reserve(expressions.size());
     for (const String& text : expressions) {
         const String source = text.empty() ? String("0") : text;
+        if (HasSwapOperation(source)) {
+            return Result<std::unique_ptr<SegmentExpressions>, String>::Err(
+                "Swap operations are not allowed in motion expressions");
+        }
         exprtk::expression<f64> expression;
         expression.register_symbol_table(impl.symbols);
         if (!parser.compile(source, expression)) {

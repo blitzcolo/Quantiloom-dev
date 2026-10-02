@@ -479,20 +479,23 @@ TEST(MotionSpecTest, AMissingCsvIsReportedNotThrown) {
 TEST(MotionTest, RejectsExecutableExpressionConstructs) {
     for (const char* source : {"while (1) { 1; }", "for (;;) { 1; }",
                                "repeat { 1; } until (0)", "t := 10", "s += 1",
-                               "var x := 1; x", "swap(t,s)", "if(t>0,t:=2,0)"}) {
+                               "var x := 1; x", "swap(t,s)", "if(t>0,t:=2,0)",
+                               "SWAP(t,s)", "t <=> s", "t <= > s", "t < = > s",
+                               "if(t>0,swap(t,s),0)", "(t<=>s)+1"}) {
         SCOPED_TRACE(source);
         EXPECT_FALSE(SegmentExpressions::Compile({source}).has_value());
     }
 }
 
 TEST(MotionTest, ScalarAndConditionalExpressionsRemainAvailable) {
-    auto compiled = SegmentExpressions::Compile({"if(t > 2, sin(pi/2) + s, 0)", "t^2 + sqrt(4)", ""});
+    auto compiled = SegmentExpressions::Compile({"if(t > 2, sin(pi/2) + s, 0)", "t^2 + sqrt(4)", "", "t /* swap(t,s) <=> */ + s"});
     ASSERT_TRUE(compiled.has_value()) << compiled.error();
-    f64 values[3]{};
+    f64 values[4]{};
     (*compiled)->Evaluate(3, 4, values);
     EXPECT_DOUBLE_EQ(values[0], 5);
     EXPECT_DOUBLE_EQ(values[1], 11);
     EXPECT_DOUBLE_EQ(values[2], 0);
+    EXPECT_DOUBLE_EQ(values[3], 7);
     (*compiled)->Evaluate(1, 8, values);
     EXPECT_DOUBLE_EQ(values[0], 0);
 }
