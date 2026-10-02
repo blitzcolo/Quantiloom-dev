@@ -31,7 +31,9 @@ struct SF_API ClusterResult {
 };
 
 // Cluster texture pixels by color in CIELAB space.
-// pixels: raw RGBA/RGB data. isSRGB: apply sRGB gamma decode.
+// pixels: width*height*channels bytes of gray, gray-alpha, RGB or RGBA data.
+// The caller owns that storage; invalid dimensions/channels throw invalid_argument.
+// isSRGB: apply sRGB gamma decode. Pixels with alpha below 128 are ignored.
 SF_API ClusterResult ClusterTextureColors(
     const u8* pixels, u32 width, u32 height, u32 channels,
     bool isSRGB, u32 K, u32 maxIterations = 20

@@ -252,6 +252,8 @@ set(TEST_IO_SOURCES
     test_io/test_image_io.cpp
     test_io/test_spectral_io.cpp
     test_io/test_spectral_basis_loader.cpp
+    test_io/test_atmos_net.cpp
+    test_io/test_private_executable.cpp
     test_io/test_lut_loader.cpp
     test_io/test_atmosphere_transmittance_lut_loader.cpp
     test_io/test_gltf_loader.cpp
@@ -353,6 +355,15 @@ set(TEST_APP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/app/RenderJob.cpp
 )
 
+# Compile SpectraForge against the same core objects as this executable; linking
+# its DLL here would also load a second copy of Quantiloom's global state.
+set(TEST_SPECTRAFORGE_SOURCES
+    test_postprocess/test_spectraforge.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/libSpectraForge/ColorCluster.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/libSpectraForge/IRMaterialDatabase.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/libSpectraForge/SpectraForge.cpp
+)
+
 # Combine all test sources
 set(ALL_TEST_SOURCES
     ${TEST_MAIN_SOURCE}
@@ -365,6 +376,7 @@ set(ALL_TEST_SOURCES
     ${TEST_HS_CORE_SOURCES}
     ${TEST_MCP_SOURCES}
     ${TEST_APP_SOURCES}
+    ${TEST_SPECTRAFORGE_SOURCES}
 )
 
 # ============================================================================
@@ -486,6 +498,7 @@ endif()
 # so the test binary is self-contained apart from third-party runtimes.
 
 if(WIN32 AND NOT QUANTILOOM_STANDALONE_TESTS)
+    target_link_libraries(libquantiloom_tests PRIVATE bcrypt advapi32)
     # Copy OpenUSD DLLs if enabled
     if(QUANTILOOM_USE_OPENUSD AND COMMAND copy_usd_dlls)
         copy_usd_dlls(libquantiloom_tests)

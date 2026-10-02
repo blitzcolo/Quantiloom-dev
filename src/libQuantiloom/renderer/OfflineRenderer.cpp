@@ -579,7 +579,7 @@ void OfflineRenderer::Impl::BuildThermalSession() {
 
         if (!cacheKey.empty()) {
             const std::filesystem::path cacheFile = thermalCacheDir / (cacheKey + ".qltc");
-            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey)) {
+            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey, &thermalMesh)) {
                 QL_LOG_INFO("  Thermal cache: hit ({}...)", cacheKey.substr(0, 12));
                 // The gate line, from the entry rather than from a solve. A
                 // render served from cache has to be indistinguishable in the
@@ -703,7 +703,7 @@ void OfflineRenderer::Impl::UploadThermalFieldAt(const f64 time_h) {
         cacheKey = thermal::ComputeThermalSolveCacheKey(keyInputs);
         if (!cacheKey.empty()) {
             cacheFile = thermalCacheDir / (cacheKey + ".qltc");
-            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey)) {
+            if (auto cached = thermal::LoadThermalSolveCache(cacheFile, cacheKey, &thermalMesh)) {
                 QL_LOG_INFO("  Thermal cache: hit ({}...)", cacheKey.substr(0, 12));
                 result = std::move(*cached);
                 served = true;
@@ -976,8 +976,11 @@ SetupResult OfflineRenderer::Impl::BuildIlluminants() {
         materialIndices.push_back(slots);
     }
 
+    const rendercore::MaterialResourceCounts materialResources{
+        textureManager ? textureManager->GetTextureCount() : 0,
+        spectra.curves.size(), spectra.refractiveIndices.size()};
     materialBuffer = rendercore::BuildMaterialBuffer(
-        context, loadedScene, params.wavelengthNm, materialIndices);
+        context, loadedScene, params.wavelengthNm, materialIndices, &materialResources);
     if (!materialBuffer) {
         return SetupResult::Err("Scene has no materials");
     }
@@ -1887,6 +1890,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
         hsConfig.outputPath = staged.value();
         hsConfig.exportRecordId = exportSession->RecordId();
         hsConfig.exportSidecar = exportSession->SidecarName();
+        hsConfig.reserveBandArtifact = [&exportSession](const String& name) {
+            return exportSession->StagingPath(name);
+        };
     }
 
     // Create hyperspectral renderer

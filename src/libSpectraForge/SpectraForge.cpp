@@ -3,6 +3,7 @@
 #include "IRMaterialDatabase.hpp"
 #include "core/Log.hpp"
 #include <format>
+#include <limits>
 
 namespace spectraforge {
 
@@ -27,7 +28,11 @@ bool SpectraForge::ProcessSingle(
 {
     LABColor lab;
 
-    if (baseColorTex && baseColorTex->IsValid() && !baseColorTex->pixels.empty()) {
+    if (baseColorTex && baseColorTex->width > 0 && baseColorTex->height > 0 &&
+        baseColorTex->channels >= 1 && baseColorTex->channels <= 4 &&
+        static_cast<size_t>(baseColorTex->width) <=
+            std::numeric_limits<size_t>::max() / baseColorTex->height / baseColorTex->channels &&
+        baseColorTex->IsValid() && !baseColorTex->pixels.empty()) {
         auto result = ClusterTextureColors(
             baseColorTex->pixels.data(),
             baseColorTex->width,

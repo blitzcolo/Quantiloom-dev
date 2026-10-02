@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <numeric>
 #include <limits>
+#include <stdexcept>
 
 namespace spectraforge {
 
@@ -127,25 +128,29 @@ ClusterResult ClusterTextureColors(
     const u8* pixels, u32 width, u32 height, u32 channels,
     bool isSRGB, u32 K, u32 maxIterations)
 {
-    u32 totalPixels = width * height;
+    if (!pixels || width == 0 || height == 0 || channels < 1 || channels > 4 ||
+        static_cast<size_t>(width) > std::numeric_limits<size_t>::max() / height / channels)
+        throw std::invalid_argument("Invalid texture storage dimensions");
+    const size_t totalPixels = static_cast<size_t>(width) * height;
 
     // Subsample stride: target ~10000 samples
-    u32 stride = std::max(1u, static_cast<u32>(std::sqrt(
-        static_cast<f32>(totalPixels) / 10000.0f)));
+    const size_t stride = std::max(size_t{1}, static_cast<size_t>(std::sqrt(
+        static_cast<double>(totalPixels) / 10000.0)));
 
     // Collect samples in LAB space
     Vector<LABColor> samples;
     samples.reserve(totalPixels / (stride * stride) + 1);
 
-    for (u32 y = 0; y < height; y += stride) {
-        for (u32 x = 0; x < width; x += stride) {
-            u32 idx = (y * width + x) * channels;
+    for (size_t y = 0; y < height; y += stride) {
+        for (size_t x = 0; x < width; x += stride) {
+            const size_t idx = (y * width + x) * channels;
 
             // Skip transparent pixels
-            if (channels >= 4 && pixels[idx + 3] < 128) continue;
+            if ((channels == 2 && pixels[idx + 1] < 128) ||
+                (channels == 4 && pixels[idx + 3] < 128)) continue;
 
             f32 r = static_cast<f32>(pixels[idx + 0]) / 255.0f;
-            f32 g = static_cast<f32>(pixels[idx + 1]) / 255.0f;
+            f32 g = (channels >= 3) ? static_cast<f32>(pixels[idx + 1]) / 255.0f : r;
             f32 b = (channels >= 3) ? static_cast<f32>(pixels[idx + 2]) / 255.0f : r;
 
             if (isSRGB) {
