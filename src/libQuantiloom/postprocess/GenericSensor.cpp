@@ -25,6 +25,9 @@ auto GenericSensor::Apply(const Image& hdr, const SensorParams& params)
                            hdr.channels != 4))
         return Result<SensorOutput, String>::Err(
             "GenericSensor needs a valid mono or linear RGB image");
+    size_t displayCount = 0;
+    if (!Image::TryElementCount(hdr.width, hdr.height, 3, displayCount))
+        return Result<SensorOutput, String>::Err("sensor display exceeds image storage limits");
     if (!m_impl->seeded || m_impl->requestedSeed != params.noiseSeed) {
         m_impl->requestedSeed = params.noiseSeed;
         m_impl->effectiveSeed = params.noiseSeed != 0 ?

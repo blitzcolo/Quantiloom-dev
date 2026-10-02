@@ -1146,3 +1146,34 @@ value = [0.5, 0.5]
     EXPECT_FALSE(
         ParseCameraConfig(document.value(), SpectralMode::VIS_Hero).has_value());
 }
+
+TEST(CameraConfigIOTest, RejectsNonFiniteAndUnorderedAgcWindows) {
+    CameraConfig authored;
+    authored.enabled = true;
+    authored.device.cfa = CfaPattern::Mono;
+    authored.device.detector = DetectorKind::Photon;
+    authored.optics.sensorWidthPx = 2;
+    authored.optics.sensorHeightPx = 1;
+    ResponseCurve qe;
+    qe.kind = ResponseKind::AbsoluteQE;
+    qe.wavelengthNm = {500.0, 600.0};
+    qe.value = {0.5, 0.5};
+    ResponseStack response;
+    response.quantumEfficiency = qe;
+    authored.device.channels.push_back({"Mono", response});
+    const String validToml = CameraConfigToToml(authored);
+    const auto validDocument = Config::Parse(validToml);
+    ASSERT_TRUE(validDocument.has_value());
+    ASSERT_TRUE(ParseCameraConfig(*validDocument, SpectralMode::RGB).has_value());
+    for (const char* invalid : {"nan", "inf", "-inf", "101.0", "-1.0"}) {
+        String invalidToml = validToml;
+        const auto start = invalidToml.find("contrast_high_percentile = ");
+        ASSERT_NE(start, String::npos);
+        const auto end = invalidToml.find('\n', start);
+        invalidToml.replace(start, end - start,
+            String("contrast_high_percentile = ") + invalid);
+        const auto document = Config::Parse(invalidToml);
+        ASSERT_TRUE(document.has_value());
+        EXPECT_FALSE(ParseCameraConfig(*document, SpectralMode::RGB).has_value());
+    }
+}

@@ -70,13 +70,19 @@ std::vector<f64> AgcTone(const std::vector<f64>& values,
                          const IspConfig& isp, bool* usedEqualizeFallback) {
     const size_t count = values.size();
     std::vector<f64> tone(values.size(), 0.5);
+    if (count == 0) return tone;
     if (isp.infraredTone == DisplayToneMode::Linear) {
         std::vector<f64> sorted = values;
         std::sort(sorted.begin(), sorted.end());
         const auto percentile = [&sorted](f64 p) {
             const f64 rank = Clamp01(p / 100.0) *
                              static_cast<f64>(sorted.size() - 1);
-            return sorted[static_cast<size_t>(std::llround(rank))];
+            if (!std::isfinite(rank) || rank < 0.0 ||
+                rank > static_cast<f64>(sorted.size() - 1))
+                return sorted.front();
+            const size_t index = std::min(static_cast<size_t>(std::floor(rank + 0.5)),
+                                          sorted.size() - 1);
+            return sorted[index];
         };
         const f64 lo = percentile(isp.contrastLowPercentile);
         const f64 hi = percentile(isp.contrastHighPercentile);
@@ -506,6 +512,18 @@ Result<Image, String> RunIsp(const CameraConfig& config, const Image& rawDn,
         corrected.height != height || corrected.channels != rawChannels)
         return Result<Image, String>::Err(
             "corrected device image does not match the sensor array shape");
+    size_t displayCount = 0;
+    if (!Image::TryElementCount(width, height, 3, displayCount))
+        return Result<Image, String>::Err("ISP display exceeds image storage limits");
+    if (!std::isfinite(config.isp.contrastLowPercentile) ||
+        !std::isfinite(config.isp.contrastHighPercentile) ||
+        config.isp.contrastLowPercentile < 0.0 ||
+        config.isp.contrastHighPercentile > 100.0 ||
+        config.isp.contrastLowPercentile >= config.isp.contrastHighPercentile)
+        return Result<Image, String>::Err("invalid AGC percentile window");
+    for (f32 value : corrected.data)
+        if (!std::isfinite(value))
+            return Result<Image, String>::Err("ISP input contains non-finite values");
     bool usedEqualizeFallback = false;
     Result<Image, String> display = thermal ?
         RunInfraredDisplay(config, corrected, &usedEqualizeFallback) :

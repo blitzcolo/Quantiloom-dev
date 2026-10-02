@@ -76,12 +76,12 @@ static void SetupFrameBufferForWrite(
 
     buffers.resize(img.channels);
     for (u32 c = 0; c < img.channels; ++c) {
-        buffers[c].resize(img.width * img.height);
+        buffers[c].resize(img.PixelCount());
 
         // De-interleave: extract channel c from image data
         for (u32 y = 0; y < img.height; ++y) {
             for (u32 x = 0; x < img.width; ++x) {
-                buffers[c][y * img.width + x] = img(x, y, c);
+                buffers[c][static_cast<size_t>(y) * img.width + x] = img(x, y, c);
             }
         }
 
@@ -110,12 +110,12 @@ static void ReadFrameBufferToImage(
 {
     img.channels = static_cast<u32>(channelNames.size());
     img.channelNames = channelNames;
-    img.data.resize(img.width * img.height * img.channels, 0.0f);
+    img.data.resize(Image::CheckedElementCount(img.width, img.height, img.channels), 0.0f);
 
     // Allocate temporary per-channel buffers
     std::vector<std::vector<float>> buffers(img.channels);
     for (u32 c = 0; c < img.channels; ++c) {
-        buffers[c].resize(img.width * img.height);
+        buffers[c].resize(img.PixelCount());
     }
 
     // Setup FrameBuffer for reading
@@ -123,23 +123,21 @@ static void ReadFrameBufferToImage(
     for (u32 c = 0; c < img.channels; ++c) {
         fb.insert(
             channelNames[c].c_str(),
-            Imf::Slice(
-                Imf::FLOAT,
-                reinterpret_cast<char *>(buffers[c].data()),
-                sizeof(float),
-                sizeof(float) * img.width
-            )
+            Imf::Slice::Make(
+                Imf::FLOAT, buffers[c].data(), file.header().dataWindow(),
+                sizeof(float), sizeof(float) * img.width)
         );
     }
 
     file.setFrameBuffer(fb);
-    file.readPixels(0, static_cast<int>(img.height) - 1);
+    const auto& window = file.header().dataWindow();
+    file.readPixels(window.min.y, window.max.y);
 
     // Interleave channels into image data (channel-last format)
     for (u32 y = 0; y < img.height; ++y) {
         for (u32 x = 0; x < img.width; ++x) {
             for (u32 c = 0; c < img.channels; ++c) {
-                img(x, y, c) = buffers[c][y * img.width + x];
+                img(x, y, c) = buffers[c][static_cast<size_t>(y) * img.width + x];
             }
         }
     }
@@ -373,25 +371,33 @@ std::optional<Image> ImageIO::ReadEXR(const std::string& filepath) {
 
         // Get dimensions
         const Imath::Box2i dw = header.dataWindow();
-        u32 width = dw.max.x - dw.min.x + 1;
-        u32 height = dw.max.y - dw.min.y + 1;
+        const i64 extentX = static_cast<i64>(dw.max.x) - dw.min.x + 1;
+        const i64 extentY = static_cast<i64>(dw.max.y) - dw.min.y + 1;
+        if (extentX <= 0 || extentY <= 0 ||
+            extentX > std::numeric_limits<int>::max() ||
+            extentY > std::numeric_limits<int>::max())
+            return std::nullopt;
+        const u32 width = static_cast<u32>(extentX);
+        const u32 height = static_cast<u32>(extentY);
 
         // Get channel names
         std::vector<std::string> channelNames;
         const Imf::ChannelList& channels = header.channels();
         for (auto it = channels.begin(); it != channels.end(); ++it) {
+            if (it.channel().xSampling != 1 || it.channel().ySampling != 1) {
+                QL_LOG_ERROR("ImageIO::ReadEXR: Subsampled channels are unsupported in {}", filepath);
+                return std::nullopt;
+            }
             channelNames.emplace_back(it.name());
         }
 
-        if (channelNames.empty()) {
+        if (channelNames.empty() || channelNames.size() > std::numeric_limits<u32>::max()) {
             QL_LOG_ERROR("ImageIO::ReadEXR: No channels found in {}", filepath);
             return std::nullopt;
         }
 
         // Create image
-        Image img;
-        img.width = width;
-        img.height = height;
+        Image img(width, height, static_cast<u32>(channelNames.size()));
 
         // Read pixel data
         ReadFrameBufferToImage(file, img, channelNames);
@@ -463,10 +469,17 @@ std::optional<Image> ImageIO::ReadImage(const std::string& filepath) {
 
     // Create Image and fill with data
     Image img;
-    img.width = static_cast<u32>(width);
-    img.height = static_cast<u32>(height);
-    img.channels = static_cast<u32>(channels);
-    img.data.resize(static_cast<size_t>(width) * height * channels);
+    try {
+        if (width <= 0 || height <= 0 || channels <= 0)
+            throw std::length_error("invalid decoded image dimensions");
+        img.Resize(static_cast<u32>(width), static_cast<u32>(height),
+                   static_cast<u32>(channels));
+    } catch (const std::exception& e) {
+        stbi_image_free(floatData);
+        stbi_image_free(byteData);
+        QL_LOG_ERROR("ImageIO::ReadImage: Invalid storage for {}: {}", filepath, e.what());
+        return std::nullopt;
+    }
 
     // Set default channel names based on channel count
     if (channels == 1) {
@@ -524,15 +537,27 @@ std::optional<std::tuple<u32, u32, u32>> ImageIO::GetDimensions(const std::strin
         const Imf::Header& header = file.header();
 
         const Imath::Box2i& dw = header.dataWindow();
-        u32 width = dw.max.x - dw.min.x + 1;
-        u32 height = dw.max.y - dw.min.y + 1;
+        const i64 extentX = static_cast<i64>(dw.max.x) - dw.min.x + 1;
+        const i64 extentY = static_cast<i64>(dw.max.y) - dw.min.y + 1;
+        if (extentX <= 0 || extentY <= 0 ||
+            extentX > std::numeric_limits<int>::max() ||
+            extentY > std::numeric_limits<int>::max())
+            return std::nullopt;
+        const u32 width = static_cast<u32>(extentX);
+        const u32 height = static_cast<u32>(extentY);
 
         u32 channels = 0;
         const Imf::ChannelList& channelList = header.channels();
         for (auto it = channelList.begin(); it != channelList.end(); ++it) {
+            if (it.channel().xSampling != 1 || it.channel().ySampling != 1 ||
+                channels == std::numeric_limits<u32>::max())
+                return std::nullopt;
             ++channels;
         }
 
+        size_t count = 0;
+        if (channels == 0 || !Image::TryElementCount(width, height, channels, count))
+            return std::nullopt;
         return std::make_tuple(width, height, channels);
 
     } catch (const std::exception& e) {

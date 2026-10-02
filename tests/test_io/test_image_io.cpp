@@ -19,6 +19,9 @@
 #include <map>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <utility>
+#include <vector>
 
 using namespace quantiloom;
 
@@ -528,4 +531,103 @@ TEST_F(ImageIOTest, UIntExrRejectsInvalidGridAndReservedMetadata) {
     image.metadata["channels"] = "override";
     EXPECT_FALSE(ImageIO::WriteUIntEXR(path, image));
     EXPECT_FALSE(std::filesystem::exists(path));
+}
+
+namespace {
+// Minimal uncompressed OpenEXR fixture, encoded explicitly so the IO regression
+// tests do not need access to the core library's private OpenEXR headers.
+void WriteWindowedExr(const std::filesystem::path& path, i32 originX, i32 originY,
+                      i32 sampling = 1, i32 extentX = 2, i32 extentY = 2) {
+    std::vector<unsigned char> bytes;
+    const auto integer = [](std::vector<unsigned char>& out, u64 value, u32 width) {
+        for (u32 i = 0; i < width; ++i)
+            out.push_back(static_cast<unsigned char>((value >> (8 * i)) & 255));
+    };
+    const auto text = [](std::vector<unsigned char>& out, const char* value) {
+        do { out.push_back(static_cast<unsigned char>(*value)); } while (*value++);
+    };
+    const auto attribute = [&](const char* name, const char* type,
+                               const std::vector<unsigned char>& payload) {
+        text(bytes, name);
+        text(bytes, type);
+        integer(bytes, payload.size(), 4);
+        bytes.insert(bytes.end(), payload.begin(), payload.end());
+    };
+    integer(bytes, 20000630, 4); // Magic, version 2 scanline file.
+    integer(bytes, 2, 4);
+    std::vector<unsigned char> channels;
+    text(channels, "Signal");
+    integer(channels, 2, 4); // FLOAT
+    integer(channels, 0, 4); // pLinear and reserved
+    integer(channels, sampling, 4);
+    integer(channels, sampling, 4);
+    channels.push_back(0);
+    attribute("channels", "chlist", channels);
+    attribute("compression", "compression", {0});
+    std::vector<unsigned char> window;
+    integer(window, static_cast<u32>(originX), 4);
+    integer(window, static_cast<u32>(originY), 4);
+    integer(window, static_cast<u32>(static_cast<i64>(originX) + extentX - 1), 4);
+    integer(window, static_cast<u32>(static_cast<i64>(originY) + extentY - 1), 4);
+    attribute("dataWindow", "box2i", window);
+    attribute("displayWindow", "box2i", window);
+    attribute("lineOrder", "lineOrder", {0});
+    attribute("pixelAspectRatio", "float", {0, 0, 128, 63});
+    attribute("screenWindowCenter", "v2f", std::vector<unsigned char>(8, 0));
+    attribute("screenWindowWidth", "float", {0, 0, 128, 63});
+    bytes.push_back(0);
+    // Deliberately oversized headers need no body: they must fail before any
+    // pixel allocation or offset lookup.
+    if (extentX == 2 && extentY == 2) {
+        const u64 firstBlock = bytes.size() + 2 * 8;
+        integer(bytes, firstBlock, 8);
+        integer(bytes, firstBlock + 16, 8);
+        for (u32 y = 0; y < 2; ++y) {
+            integer(bytes, static_cast<u32>(originY + static_cast<i32>(y)), 4);
+            integer(bytes, 8, 4);
+            for (u32 x = 0; x < 2; ++x) {
+                const float value = static_cast<float>(1 + y * 2 + x);
+                u32 bits = 0;
+                std::memcpy(&bits, &value, sizeof(bits));
+                integer(bytes, bits, 4);
+            }
+        }
+    }
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+}
+} // namespace
+
+TEST_F(ImageIOTest, ReadsPositiveAndNegativeDataWindowOrigins) {
+    for (const auto origin : {std::pair{7, 11}, std::pair{-7, -11},
+                              std::pair{-3, 5}}) {
+        const auto path = GetTestPath("shifted.exr");
+        WriteWindowedExr(path, origin.first, origin.second);
+        const auto image = ImageIO::ReadEXR(path.string());
+        ASSERT_TRUE(image.has_value());
+        EXPECT_EQ(image->width, 2u);
+        EXPECT_EQ(image->height, 2u);
+        ASSERT_EQ(image->data.size(), 4u);
+        for (u32 y = 0; y < 2; ++y)
+            for (u32 x = 0; x < 2; ++x)
+                EXPECT_FLOAT_EQ((*image)(x, y, 0), static_cast<float>(1 + y * 2 + x));
+        const auto dimensions = ImageIO::GetDimensions(path.string());
+        ASSERT_TRUE(dimensions.has_value());
+        EXPECT_EQ(std::get<0>(*dimensions), 2u);
+        EXPECT_EQ(std::get<1>(*dimensions), 2u);
+    }
+}
+
+TEST_F(ImageIOTest, RejectsSubsampledExrChannels) {
+    const auto path = GetTestPath("subsampled.exr");
+    WriteWindowedExr(path, 0, 0, 2);
+    EXPECT_FALSE(ImageIO::ReadEXR(path.string()).has_value());
+}
+
+TEST_F(ImageIOTest, RejectsExrExtentProductBeforeAllocation) {
+    const auto path = GetTestPath("oversized.exr");
+    WriteWindowedExr(path, 0, 0, 1, 65536, 65537);
+    EXPECT_FALSE(ImageIO::ReadEXR(path.string()).has_value());
+    EXPECT_FALSE(ImageIO::GetDimensions(path.string()).has_value());
 }

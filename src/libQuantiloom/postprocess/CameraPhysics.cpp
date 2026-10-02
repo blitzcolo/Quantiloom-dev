@@ -247,6 +247,16 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
         config.device.cfa != CfaPattern::MultiChannel &&
         config.device.channels.size() != 3)
         return Result<void, String>::Err("Bayer detector needs R, G and B response channels");
+    if (config.device.channels.size() > std::numeric_limits<u32>::max())
+        return Result<void, String>::Err("camera device channel count is too large");
+    const u32 rawChannels = config.device.cfa == CfaPattern::MultiChannel ?
+        static_cast<u32>(config.device.channels.size()) : 1u;
+    size_t calibratedSamples = 0, displaySamples = 0;
+    if (!Image::TryElementCount(config.optics.sensorWidthPx,
+            config.optics.sensorHeightPx, rawChannels, calibratedSamples) ||
+        !Image::TryElementCount(config.optics.sensorWidthPx,
+            config.optics.sensorHeightPx, 3, displaySamples))
+        return Result<void, String>::Err("camera sensor array exceeds image storage limits");
     for (const auto& channel : config.device.channels) {
         const auto valid = ValidateResponseStack(channel.response, config.device.detector);
         if (!valid) return valid;
@@ -269,10 +279,7 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
         return Result<void, String>::Err("camera sample counts must be positive");
     if (!FiniteNonnegative(config.warmup.seconds))
         return Result<void, String>::Err("camera warmup seconds must be finite and nonnegative");
-    const size_t calibratedSamples = static_cast<size_t>(config.optics.sensorWidthPx) *
-        config.optics.sensorHeightPx *
-        (config.device.cfa == CfaPattern::MultiChannel ?
-         config.device.channels.size() : 1u);
+
     const auto validCalibration = [calibratedSamples](
         const std::vector<f64>& values, bool mustBePositive) {
         if (!values.empty() && values.size() != calibratedSamples) return false;
@@ -332,6 +339,12 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
             return Result<void, String>::Err(
                 "defect pixel lies outside the sensor array");
     }
+    if (!std::isfinite(config.isp.contrastLowPercentile) ||
+        !std::isfinite(config.isp.contrastHighPercentile) ||
+        config.isp.contrastLowPercentile < 0.0 ||
+        config.isp.contrastHighPercentile > 100.0 ||
+        config.isp.contrastLowPercentile >= config.isp.contrastHighPercentile)
+        return Result<void, String>::Err("AGC percentiles must be finite and satisfy 0 <= low < high <= 100");
     const auto& hsv = config.isp.hsv;
     if (!std::isfinite(hsv.hueOffsetDegrees) ||
         !std::isfinite(hsv.saturationScale) ||

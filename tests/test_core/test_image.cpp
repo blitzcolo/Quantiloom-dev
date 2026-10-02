@@ -259,3 +259,42 @@ TEST(ImageTest, HDRValues) {
     EXPECT_EQ(img(5, 5, 1), -100.0f);
     EXPECT_EQ(img(5, 5, 2), 0.00001f);
 }
+
+TEST(ImageTest, RejectsWrappedDimensionsBeforeAllocation) {
+    EXPECT_THROW(Image(65536u, 65537u, 3u), std::length_error);
+    EXPECT_THROW(Image(65536u, 65536u, 1u), std::length_error);
+    EXPECT_THROW(Image(32768u, 32768u, 4u), std::length_error);
+    EXPECT_THROW(Image(std::numeric_limits<u32>::max(),
+                       std::numeric_limits<u32>::max(),
+                       std::numeric_limits<u32>::max()), std::length_error);
+    size_t count = 0;
+    EXPECT_TRUE(Image::TryElementCount(640, 480, 3, count));
+    EXPECT_EQ(count, 921600u);
+}
+
+TEST(ImageTest, PublicDimensionMutationCannotValidateWrappedStorage) {
+    Image image(1, 1, 1);
+    image.width = 65536u;
+    image.height = 65537u;
+    image.data.resize(65536u); // Former u32 product wrapped to this size.
+    EXPECT_FALSE(image.IsValid());
+    EXPECT_THROW(image.PixelCount(), std::length_error);
+    EXPECT_THROW(image.TotalElements(), std::length_error);
+}
+
+TEST(ImageTest, FailedResizePreservesPixelsNamesAndMetadata) {
+    Image image(2, 3, 1);
+    image(1, 2, 0) = 42.0f;
+    image.channelNames = {"Signal"};
+    image.metadata["unit"] = "W";
+    EXPECT_THROW(image.Resize(65536u, 65537u, 3u), std::length_error);
+    EXPECT_EQ(image.width, 2u);
+    EXPECT_EQ(image.height, 3u);
+    EXPECT_EQ(image.channels, 1u);
+    EXPECT_TRUE(image.IsValid());
+    EXPECT_FLOAT_EQ(image(1, 2, 0), 42.0f);
+    EXPECT_EQ(image.channelNames[0], "Signal");
+    EXPECT_EQ(image.metadata.at("unit"), "W");
+    image.Resize(2, 3, 1);
+    EXPECT_FLOAT_EQ(image(1, 2, 0), 0.0f);
+}

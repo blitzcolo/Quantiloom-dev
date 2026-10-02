@@ -648,3 +648,15 @@ TEST(CpuCameraPipelineTest, NegativeMonteCarloMeasurementIsClampedAndRecorded) {
     EXPECT_FALSE(rejected.has_value());
     EXPECT_EQ(directState.acquisitionIndex, 0u);
 }
+
+TEST(CpuCameraPipelineTest, RejectsWrappedSensorExtentBeforeAllocation) {
+    auto config = PhotonConfig(65536u, 65537u);
+    EXPECT_FALSE(ValidateCameraConfig(config));
+    CpuCameraPipeline pipeline(config);
+    CaptureState state;
+    EXPECT_FALSE(pipeline.CaptureFastRgb(state, 0.0, Image{}));
+    EXPECT_EQ(state.acquisitionIndex, 0u);
+    // A scalar sensor may fit while its required three-channel preview cannot.
+    config = PhotonConfig(65536u, 32768u);
+    EXPECT_FALSE(ValidateCameraConfig(config));
+}

@@ -29,6 +29,9 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <limits>
+#include <stdexcept>
+#include <algorithm>
 
 namespace quantiloom {
 
@@ -94,8 +97,28 @@ struct Image {
 
     Image() = default;
 
+    // Counts must fit the public u32 count API and the allocation's byte size.
+    [[nodiscard]] static bool TryElementCount(u32 w, u32 h, u32 c,
+                                              size_t& count) noexcept {
+        const size_t limit = std::min<size_t>(std::numeric_limits<u32>::max(),
+            std::numeric_limits<size_t>::max() / sizeof(f32));
+        size_t pixels = w;
+        if (h != 0 && pixels > limit / h) return false;
+        pixels *= h;
+        if (c != 0 && pixels > limit / c) return false;
+        count = pixels * c;
+        return true;
+    }
+
+    [[nodiscard]] static size_t CheckedElementCount(u32 w, u32 h, u32 c) {
+        size_t count = 0;
+        if (!TryElementCount(w, h, c, count))
+            throw std::length_error("image dimensions exceed representable storage");
+        return count;
+    }
+
     Image(const u32 w, const u32 h, const u32 c)
-        : width(w), height(h), channels(c), data(w * h * c, 0.0f) {
+        : width(w), height(h), channels(c), data(CheckedElementCount(w, h, c), 0.0f) {
         channelNames.resize(c);
         for (u32 i = 0; i < c; ++i) {
             channelNames[i] = "Channel_" + std::to_string(i);
@@ -109,20 +132,20 @@ struct Image {
     // Get pixel value at (x, y, channel)
     // No bounds checking in release mode for performance
     inline f32& operator()(const u32 x, const u32 y, const u32 c) {
-        return data[y * width * channels + x * channels + c];
+        return data[(static_cast<size_t>(y) * width + x) * channels + c];
     }
 
     inline const f32& operator()(const u32 x, const u32 y, const u32 c) const {
-        return data[y * width * channels + x * channels + c];
+        return data[(static_cast<size_t>(y) * width + x) * channels + c];
     }
 
     // Get pointer to pixel (x, y) - useful for bulk operations
     inline f32* PixelPtr(const u32 x, const u32 y) {
-        return &data[y * width * channels + x * channels];
+        return &data[(static_cast<size_t>(y) * width + x) * channels];
     }
 
     [[nodiscard]] inline const f32* PixelPtr(const u32 x, const u32 y) const {
-        return &data[y * width * channels + x * channels];
+        return &data[(static_cast<size_t>(y) * width + x) * channels];
     }
 
     // Index of a named channel, or `fallback` if this image does not name one.
@@ -165,15 +188,20 @@ struct Image {
     // ========================================================================
 
     // Total number of pixels
-    [[nodiscard]] inline u32 PixelCount() const { return width * height; }
+    [[nodiscard]] inline u32 PixelCount() const {
+        return static_cast<u32>(CheckedElementCount(width, height, 1));
+    }
 
     // Total number of elements (pixels * channels)
-    [[nodiscard]] inline u32 TotalElements() const { return width * height * channels; }
+    [[nodiscard]] inline u32 TotalElements() const {
+        return static_cast<u32>(CheckedElementCount(width, height, channels));
+    }
 
     // Check if image is valid
     [[nodiscard]] inline bool IsValid() const {
+        size_t count = 0;
         return width > 0 && height > 0 && channels > 0 &&
-               data.size() == TotalElements();
+               TryElementCount(width, height, channels, count) && data.size() == count;
     }
 
     // Clear image data (set all to zero)
@@ -181,14 +209,12 @@ struct Image {
 
     // Resize image (will clear existing data)
     void Resize(const u32 w, const u32 h, const u32 c) {
+        Image replacement(w, h, c);
+        data.swap(replacement.data);
+        channelNames.swap(replacement.channelNames);
         width = w;
         height = h;
         channels = c;
-        data.resize(w * h * c, 0.0f);
-        channelNames.resize(c);
-        for (u32 i = 0; i < c; ++i) {
-            channelNames[i] = "Channel_" + std::to_string(i);
-        }
     }
 };
 

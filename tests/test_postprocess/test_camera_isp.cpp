@@ -11,6 +11,7 @@
 #include <fstream>
 #include <functional>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <regex>
@@ -711,4 +712,37 @@ TEST(CameraIspTest, DisplayProductCarriesAcquisitionMetadata) {
     const auto display = RunIsp(config, raw, raw, state, 0.0);
     ASSERT_TRUE(display.has_value());
     EXPECT_EQ(display.value().metadata.at("camera_acquisition_index"), "41");
+}
+
+TEST(CameraIspTest, RejectsInvalidPercentilesBeforeAgcRanking) {
+    auto config = ThermalMonoConfig(2, 1);
+    const Image raw = MakeRaw(config, [](u32 x, u32, u32) { return 1.0 + x; });
+    for (const auto window : std::array<std::array<f64, 2>, 6>{{
+             {std::numeric_limits<f64>::quiet_NaN(), 100.0},
+             {0.0, std::numeric_limits<f64>::infinity()},
+             {-1.0, 100.0}, {0.0, 101.0}, {50.0, 50.0}, {80.0, 20.0}}}) {
+        config.isp.contrastLowPercentile = window[0];
+        config.isp.contrastHighPercentile = window[1];
+        EXPECT_FALSE(ValidateCameraConfig(config));
+        EXPECT_FALSE(RunOnRaw(config, raw));
+    }
+    config.isp.contrastLowPercentile = 0.0;
+    config.isp.contrastHighPercentile = 100.0;
+    EXPECT_TRUE(ValidateCameraConfig(config));
+    EXPECT_TRUE(RunOnRaw(config, raw));
+}
+
+TEST(CameraIspTest, RejectsNonFiniteInputsForEveryAgcTone) {
+    auto config = ThermalMonoConfig(2, 1);
+    Image raw = MakeRaw(config, [](u32 x, u32, u32) { return 1.0 + x; });
+    for (const auto mode : {DisplayToneMode::Linear, DisplayToneMode::Equalize,
+                            DisplayToneMode::Clahe}) {
+        config.isp.infraredTone = mode;
+        for (const f32 invalid : {std::numeric_limits<f32>::quiet_NaN(),
+                                 std::numeric_limits<f32>::infinity()}) {
+            raw.data[0] = invalid;
+            EXPECT_FALSE(RunOnRaw(config, raw));
+        }
+    }
+    EXPECT_FALSE(RunOnRaw(config, Image{}));
 }
