@@ -128,7 +128,7 @@ if(WIN32)
         QLTrans/QLTrans.rc
     )
     target_include_directories(QLTrans PRIVATE QLTrans)
-    target_link_libraries(QLTrans PRIVATE tomlplusplus::tomlplusplus)
+    target_link_libraries(QLTrans PRIVATE tomlplusplus::tomlplusplus bcrypt advapi32)
     set_target_properties(QLTrans PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
     if(MSVC)
         target_compile_options(QLTrans PRIVATE /W4 /wd4996)

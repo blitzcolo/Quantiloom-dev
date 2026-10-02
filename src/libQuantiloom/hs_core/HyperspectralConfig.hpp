@@ -20,6 +20,7 @@
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
 #include <string>
+#include <functional>
 
 namespace quantiloom {
 
@@ -84,6 +85,9 @@ struct HyperspectralConfig {
     String exportRecordId;
     String exportSidecar;
     String exportProvenance;
+    // Reserve each intermediate artifact before opening it, including its
+    // directory capabilities. The callback belongs to the offline session.
+    std::function<Result<String, String>(const String&)> reserveBandArtifact;
 
     // ========================================================================
     // Wavelength Range Parameters

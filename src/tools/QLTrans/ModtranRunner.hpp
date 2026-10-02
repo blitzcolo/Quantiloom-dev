@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include "PrivateExecutable.hpp"
 
 #define IDR_MODTRAN_EXE 101
 
@@ -47,42 +48,23 @@ inline void RunModtran(const std::filesystem::path& workDir)
     const void* data = LockResource(hGlob);
     if (!data || size == 0) throw std::runtime_error("LockResource failed");
 
-    // Build temp path: %TEMP%\ql_<pid>_LutHelper.exe
-    wchar_t tmpDir[MAX_PATH];
-    GetTempPathW(MAX_PATH, tmpDir);
-    std::wstring tmpPath = std::wstring(tmpDir) + L"ql_" +
-                           std::to_wstring(GetCurrentProcessId()) + L"_LutHelper.exe";
-
-    // Write to temp file
-    HANDLE hFile = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile == INVALID_HANDLE_VALUE)
-        throw std::runtime_error("Cannot create temp EXE");
-    DWORD written = 0;
-    WriteFile(hFile, data, size, &written, nullptr);
-    CloseHandle(hFile);
-
-    // Run via CreateProcess in workDir
-    std::wstring cmd = L"\"" + tmpPath + L"\"";
-    std::wstring wd  = workDir.wstring();
+    detail::PrivateExecutable extracted(data, size);
+    const std::wstring application = extracted.Path().wstring();
+    std::wstring cmd = L"\"" + application + L"\"";
+    const std::wstring wd = workDir.wstring();
     STARTUPINFOW si{}; si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
-    BOOL ok = CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
-                             0, nullptr, wd.c_str(), &si, &pi);
-    if (!ok) {
-        DeleteFileW(tmpPath.c_str());
+    if (!CreateProcessW(application.c_str(), cmd.data(), nullptr, nullptr, FALSE,
+                        0, nullptr, wd.c_str(), &si, &pi))
         throw std::runtime_error("CreateProcess failed for LutHelper.exe");
-    }
-    WaitForSingleObject(pi.hProcess, INFINITE);
+    detail::Handle process, thread;
+    process.value = pi.hProcess;
+    thread.value = pi.hThread;
+    if (WaitForSingleObject(process.value, INFINITE) != WAIT_OBJECT_0)
+        throw std::runtime_error("Cannot wait for LutHelper.exe");
     DWORD exitCode = 0;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-
-    // Cleanup temp EXE
-    if (!DeleteFileW(tmpPath.c_str()))
-        MoveFileExW(tmpPath.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
-
+    if (!GetExitCodeProcess(process.value, &exitCode))
+        throw std::runtime_error("Cannot read LutHelper.exe exit code");
     if (exitCode != 0)
         throw std::runtime_error("LutHelper.exe exited with code " + std::to_string(exitCode));
 }

@@ -41,6 +41,9 @@ public:
                                   const Image& image, const String& descriptionJson);
     /// Reserve a staged path for a streaming writer, then register it only after
     /// that writer closes successfully. Unregistered files are never published.
+    /// The path is valid only for this session's lifetime. On Linux it uses a
+    /// /proc/self/fd directory capability and must not be canonicalized or passed
+    /// to another process. Windows holds non-deletable, non-reparse ancestors.
     Result<String, String> StagingPath(const String& name) const;
     Result<void, String> RegisterFile(const String& name, const String& productId,
                                     const String& descriptionJson);

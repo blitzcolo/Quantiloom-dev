@@ -1,4 +1,5 @@
 #include "dataset/ExportSession.hpp"
+#include "dataset/SecureExportTree.hpp"
 #include "core/Sha256.hpp"
 #include "io/ImageIO.hpp"
 
@@ -134,15 +135,6 @@ void WriteText(const fs::path& path, const String& text) {
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     file.close();
     if (!file) throw std::runtime_error("write failed: " + path.string());
-}
-void Replace(const fs::path& from, const fs::path& to) {
-#ifdef _WIN32
-    if (!MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-        throw std::runtime_error("atomic replacement failed: " + to.string() +
-                                 " (Windows error " + std::to_string(GetLastError()) + ")");
-#else
-    fs::rename(from, to);
-#endif
 }
 String NewId() {
     std::random_device random;
@@ -324,6 +316,7 @@ Json ReadJson(const fs::path& path) {
 
 struct ExportSession::Impl {
     fs::path directory, staging;
+    detail::SecureExportTree tree;
     Vector<fs::path> claims;
     String id, sidecar, replay;
     Json record;
@@ -336,26 +329,20 @@ struct ExportSession::Impl {
         const auto claim = ClaimPath(destination);
         const ReservationGate gate;
         if (std::find(claims.begin(), claims.end(), claim) != claims.end()) return;
-        CheckParents(directory, name);
-        // Creating parent directories under the gate makes a file-versus-
-        // descendant collision symmetric: either the ancestor is claimed or
-        // it already exists as a directory and cannot become a product file.
-        for (auto parent = destination.parent_path(); !parent.empty();) {
-            if (fs::exists(ClaimPath(parent)) || fs::exists(parent / lockSuffix))
+        tree.Ensure(destination.parent_path(), true);
+        for (auto parent = destination.parent_path();;) {
+            if (tree.Exists(parent / lockSuffix) ||
+                (parent != parent.root_path() && tree.Exists(ClaimPath(parent))))
                 throw std::runtime_error("output ancestor is locked: " + parent.string());
-            const auto next = parent.parent_path();
-            if (next == parent) break;
-            parent = next;
+            if (parent == parent.root_path()) break;
+            parent = parent.parent_path();
         }
-        const auto status = fs::symlink_status(destination);
-        if (fs::is_symlink(status) || fs::is_directory(status))
+        if (tree.Exists(destination) && !tree.Regular(destination))
             throw std::runtime_error("output is not a regular file: " + destination.string());
-        fs::create_directories(destination.parent_path());
         // Allocate ownership bookkeeping before creating the on-disk claim.
         claims.push_back(claim);
         try {
-            if (!fs::create_directory(claim))
-                throw std::runtime_error("output is locked: " + destination.string());
+            tree.Claim(claim);
         } catch (...) {
             claims.pop_back();
             throw;
@@ -364,16 +351,17 @@ struct ExportSession::Impl {
 
     void PublishRecord() {
         const auto temporary = staging / ".internal" / "record.tmp";
-        WriteText(temporary, record.dump(2) + "\n");
-        Replace(temporary, directory / sidecar);
+        WriteText(tree.FilePath(temporary), record.dump(2) + "\n");
+        tree.Replace(temporary, directory / sidecar);
     }
     void RequireOpen() const {
         if (publishing || complete) throw std::runtime_error("export session is no longer writable");
     }
     ~Impl() {
-        std::error_code ec;
-        if (!staging.empty()) fs::remove_all(staging, ec);
-        for (auto it = claims.rbegin(); it != claims.rend(); ++it) fs::remove(*it, ec);
+        if (!staging.empty()) { try { tree.RemoveTree(staging); } catch (...) {} }
+        for (auto it = claims.rbegin(); it != claims.rend(); ++it) {
+            try { tree.Remove(*it); } catch (...) {}
+        }
     }
 };
 ExportSession::ExportSession() : m_impl(std::make_unique<Impl>()) {}
@@ -388,7 +376,7 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         const fs::path output = fs::absolute(fs::path(outputPath));
         if (!Basename(output.filename().string()) || output.stem().empty())
             throw std::runtime_error("invalid export basename");
-        impl.directory = fs::weakly_canonical(output.parent_path());
+        impl.directory = output.parent_path().lexically_normal();
         impl.sidecar = output.stem().string() + ".metadata.json";
         impl.replay = output.stem().string() + ".replay.toml";
         if (!RelativeArtifact(output.filename().string())) throw std::runtime_error("reserved export basename");
@@ -397,21 +385,21 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         impl.Reserve(impl.replay);
         impl.id = NewId();
         impl.staging = impl.claims.front() / impl.id;
-        fs::create_directory(impl.staging);
-        fs::create_directory(impl.staging / ".internal");
+        impl.tree.Ensure(impl.staging);
+        impl.tree.Ensure(impl.staging / ".internal");
         impl.names.insert(".internal");
         const auto frozen = Json::parse(provenance.json, UniqueKeys());
         if (!frozen.is_object()) throw std::runtime_error("provenance must be an object");
         impl.names.insert("record.tmp");
         impl.names.insert(Fold(impl.sidecar));
         impl.names.insert(Fold(impl.replay));
-        WriteText(impl.staging / impl.replay, replayConfig.ToToml());
+        WriteText(impl.tree.FilePath(impl.staging / impl.replay), replayConfig.ToToml());
         impl.record = {
             {"schema", "quantiloom.dataset.export"}, {"schema_version", schemaVersion},
             {"record_id", impl.id}, {"state", "staging"},
             {"capture_status", "complete"}, {"pairing_status", "not_requested"},
             {"provenance", frozen}, {"products", Json::array()},
-            {"replay", {{"path", impl.replay}, {"sha256", Digest(impl.staging / impl.replay)},
+            {"replay", {{"path", impl.replay}, {"sha256", Digest(impl.tree.FilePath(impl.staging / impl.replay))},
                         {"replayable", false}, {"reason", "Resource and execution history verification is not implemented"}}}
         };
         return Result<std::unique_ptr<ExportSession>, String>(std::move(session));
@@ -425,9 +413,8 @@ Result<String, String> ExportSession::StagingPath(const String& name) const {
         if (!RelativeArtifact(name) || m_impl->names.contains(Fold(name)))
             throw std::runtime_error("invalid or duplicate product filename: " + name);
         m_impl->Reserve(fs::path(name));
-        CheckParents(m_impl->staging, fs::path(name));
-        fs::create_directories((m_impl->staging / name).parent_path());
-        return Result<String, String>((m_impl->staging / name).string());
+        m_impl->tree.Ensure((m_impl->staging / name).parent_path());
+        return Result<String, String>(m_impl->tree.FilePath(m_impl->staging / name).string());
     } catch (const std::exception& e) { return Result<String, String>::Err(e.what()); }
 }
 Status ExportSession::RegisterFile(const String& name, const String& productId,
@@ -440,7 +427,7 @@ Status ExportSession::RegisterFile(const String& name, const String& productId,
         const auto description = Json::parse(descriptionJson, UniqueKeys());
         if (!description.is_object()) throw std::runtime_error("product description must be an object");
         const fs::path staged(path.value());
-        if (!fs::is_regular_file(fs::symlink_status(staged)))
+        if (!m_impl->tree.Regular(m_impl->staging / name))
             throw std::runtime_error("product is not a regular file: " + name);
         m_impl->record["products"].push_back({
             {"product_id", productId}, {"path", name},
@@ -495,28 +482,25 @@ Status ExportSession::Commit() {
         for (const auto& product : impl.record["products"]) {
             ValidateGeometry(product.at("description"));
             const fs::path stagedName(product.at("path").get<String>());
-            CheckParents(impl.staging, stagedName);
-            if (!fs::is_regular_file(fs::symlink_status(impl.staging / stagedName)))
+            if (!impl.tree.Regular(impl.staging / stagedName))
                 throw std::runtime_error("staged product is no longer a regular file");
-            if (Digest(impl.staging / product.at("path").get<String>()) != product.at("sha256").get<String>())
+            if (Digest(impl.tree.FilePath(impl.staging / product.at("path").get<String>())) != product.at("sha256").get<String>())
                 throw std::runtime_error("staged product changed before publication");
-            CheckProductImage(impl.staging / stagedName, stagedName, fs::path(impl.sidecar), impl.id, product);
+            CheckProductImage(impl.tree.FilePath(impl.staging / stagedName), stagedName, fs::path(impl.sidecar), impl.id, product);
         }
-        if (Digest(impl.staging / impl.replay) != impl.record["replay"]["sha256"].get<String>())
+        if (Digest(impl.tree.FilePath(impl.staging / impl.replay)) != impl.record["replay"]["sha256"].get<String>())
             throw std::runtime_error("staged replay configuration changed");
         impl.record["state"] = "publishing";
         impl.PublishRecord();
         impl.publishing = true;
-        Replace(impl.staging / impl.replay, impl.directory / impl.replay);
+        impl.tree.Replace(impl.staging / impl.replay, impl.directory / impl.replay);
         for (const auto& product : impl.record["products"]) {
             const auto name = product.at("path").get<String>();
-            CheckParents(impl.directory, fs::path(name));
-            fs::create_directories((impl.directory / name).parent_path());
-            Replace(impl.staging / name, impl.directory / name);
-            if (Digest(impl.directory / name) != product.at("sha256").get<String>())
+            impl.tree.Replace(impl.staging / name, impl.directory / name);
+            if (Digest(impl.tree.FilePath(impl.directory / name)) != product.at("sha256").get<String>())
                 throw std::runtime_error("published product hash mismatch: " + name);
         }
-        if (Digest(impl.directory / impl.replay) != impl.record["replay"]["sha256"].get<String>())
+        if (Digest(impl.tree.FilePath(impl.directory / impl.replay)) != impl.record["replay"]["sha256"].get<String>())
             throw std::runtime_error("published replay hash mismatch");
         impl.record["state"] = "complete";
         impl.PublishRecord();

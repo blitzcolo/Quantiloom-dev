@@ -410,7 +410,8 @@ HyperspectralStatus HyperspectralRenderer::Render(
         }
 
         std::filesystem::path intermediateDir = outDir / (baseName + "_bands");
-        std::filesystem::create_directories(intermediateDir);
+        if (!config.reserveBandArtifact)
+            std::filesystem::create_directories(intermediateDir);
 
         const SpectralCube& cube = m_impl->result;
         u32 width = cube.width;
@@ -445,6 +446,14 @@ HyperspectralStatus HyperspectralRenderer::Render(
                          "band_%03u_%04.0fnm.exr", bandIdx, wavelength);
 
             std::filesystem::path filePath = intermediateDir / filename;
+            if (config.reserveBandArtifact) {
+                const auto reserved = config.reserveBandArtifact(baseName + "_bands/" + filename);
+                if (!reserved) {
+                    LOG_WARN("Failed to reserve intermediate band {}: {}", bandIdx, reserved.error());
+                    return HyperspectralStatus::OutputWriteFailed;
+                }
+                filePath = reserved.value();
+            }
             if (!config.exportRecordId.empty())
                 bandImage.metadata["quantiloom_product_id"] = baseName + "_bands/" + filename;
 

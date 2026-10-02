@@ -4,6 +4,12 @@
 #include <filesystem>
 #include <fstream>
 #include <nlohmann/json.hpp>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 using namespace quantiloom;
 using dataset::ExportSession;
@@ -253,4 +259,73 @@ TEST_F(ExportSessionTest, RejectedNestedCreateCannotTurnClaimedFileIntoDirectory
     EXPECT_FALSE(fs::exists(root / "destination"));
     ASSERT_TRUE(first.value()->WriteImage("frame.exr", "frame", image, "{}"));
     EXPECT_TRUE(first.value()->Commit());
+}
+
+TEST_F(ExportSessionTest, NestedDestinationCannotBeRedirectedAfterReservation) {
+    const auto foreign = root / "foreign";
+    fs::create_directory(foreign);
+    std::ofstream(foreign / "band.exr") << "untouched";
+    auto session = Create(); ASSERT_TRUE(session);
+    ASSERT_TRUE(session.value()->WriteImage("bands/band.exr", "band", image, "{}"));
+    std::error_code error;
+    fs::rename(root / "bands", root / "retired", error);
+#ifdef _WIN32
+    // A junction cannot be inserted: the existing directory cannot be moved.
+    EXPECT_TRUE(error);
+    const auto writableDirectory = CreateFileW((root / "bands").c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    EXPECT_EQ(writableDirectory, INVALID_HANDLE_VALUE);
+    if (writableDirectory != INVALID_HANDLE_VALUE) CloseHandle(writableDirectory);
+    ASSERT_TRUE(session.value()->Commit());
+    EXPECT_TRUE(Valid());
+#else
+    ASSERT_FALSE(error) << error.message();
+    fs::create_directory_symlink(foreign, root / "bands");
+    EXPECT_FALSE(session.value()->Commit());
+#endif
+    std::string sentinel;
+    std::ifstream(foreign / "band.exr") >> sentinel;
+    EXPECT_EQ(sentinel, "untouched");
+    session.value().reset();
+    EXPECT_TRUE(fs::exists(foreign / "band.exr"));
+}
+
+TEST_F(ExportSessionTest, RejectsExistingLinkedNestedParent) {
+    const auto foreign = root / "foreign";
+    fs::create_directory(foreign);
+    std::error_code error;
+    fs::create_directory_symlink(foreign, root / "bands", error);
+    if (error) GTEST_SKIP() << "Directory symlink creation is unavailable";
+    auto session = Create(); ASSERT_TRUE(session);
+    EXPECT_FALSE(session.value()->StagingPath("bands/band.exr"));
+    EXPECT_TRUE(fs::is_empty(foreign));
+}
+
+TEST_F(ExportSessionTest, KeepsRootAndStagingParentsPinnedForStreamingWriter) {
+    auto session = Create(); ASSERT_TRUE(session);
+    const auto staged = session.value()->StagingPath("deep/nested/data.bin"); ASSERT_TRUE(staged);
+    std::error_code error;
+#ifdef _WIN32
+    fs::rename(fs::path(staged.value()).parent_path(), root / "stolen", error);
+    EXPECT_TRUE(error);
+    fs::rename(root, fs::path(root.string() + "_moved"), error);
+    EXPECT_TRUE(error);
+#else
+    // The directory descriptor path remains usable even if an attacker renames
+    // its original directory. No pathname traversal can redirect this writer.
+    const auto original = root / "frame.exr.quantiloom-export.lock" / session.value()->RecordId() / "deep/nested";
+    fs::rename(original, original.parent_path() / "moved", error);
+    ASSERT_FALSE(error);
+    fs::create_directory_symlink(root, original);
+#endif
+    { std::ofstream(staged.value()) << "private staged bytes"; }
+    EXPECT_FALSE(fs::exists(root / "data.bin"));
+#ifdef _WIN32
+    ASSERT_TRUE(session.value()->RegisterFile("deep/nested/data.bin", "data", "{}"));
+    ASSERT_TRUE(session.value()->Commit());
+    EXPECT_TRUE(Valid());
+#else
+    EXPECT_FALSE(session.value()->RegisterFile("deep/nested/data.bin", "data", "{}"));
+#endif
 }
