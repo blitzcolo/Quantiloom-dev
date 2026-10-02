@@ -1360,8 +1360,8 @@ TEST_F(GltfBoundaryTest, DeepTreeUsesBoundedIterativeTraversal) {
     nodes += "{\"mesh\":0}]";
     auto scene = Load(Change(Base(), "[{\"mesh\":0}]", nodes));
     ASSERT_TRUE(scene.has_value()) << scene.error();
-    ASSERT_EQ(scene->nodes.size(), 1u);
-    EXPECT_EQ(scene->nodes[0].meshIndex, 0u);
+    ASSERT_EQ(scene.value().nodes.size(), 1u);
+    EXPECT_EQ(scene.value().nodes[0].meshIndex, 0u);
 }
 
 TEST_F(GltfBoundaryTest, RejectsCoreAndExtensionTextureReferences) {
@@ -1377,9 +1377,9 @@ TEST_F(GltfBoundaryTest, RejectsCoreAndExtensionTextureReferences) {
 TEST_F(GltfBoundaryTest, ValidTriangleRetainsGeometry) {
     auto result = Load(Base());
     ASSERT_TRUE(result.has_value()) << result.error();
-    ASSERT_EQ(result->meshes.size(), 1u);
-    ASSERT_EQ(result->meshes[0].primitives.size(), 1u);
-    const auto& p = result->meshes[0].primitives[0];
+    ASSERT_EQ(result.value().meshes.size(), 1u);
+    ASSERT_EQ(result.value().meshes[0].primitives.size(), 1u);
+    const auto& p = result.value().meshes[0].primitives[0];
     EXPECT_EQ(p.indices.size(), 3u);
     EXPECT_EQ(p.positions.size(), 3u);
     EXPECT_EQ(p.normals.size(), 3u);
@@ -1420,7 +1420,7 @@ TEST_F(GltfBoundaryTest, InterleavedPositionsAndUnalignedIndicesDecodeSafely) {
     json = Change(json, "\"byteOffset\":36", "\"byteOffset\":49");
     auto result = Load(json);
     ASSERT_TRUE(result.has_value()) << result.error();
-    const auto& p = result->meshes[0].primitives[0];
+    const auto& p = result.value().meshes[0].primitives[0];
     EXPECT_EQ(p.positions.size(), 3u);
     EXPECT_EQ(p.indices.size(), 3u);
     EXPECT_EQ(p.positions[1], glm::vec3(1,0,0));
@@ -1439,7 +1439,7 @@ TEST_F(GltfBoundaryTest, NormalizedIntegerUvCoordinatesRemainSupported) {
     json = Change(json, "\"indices\":1", "\"indices\":2");
     auto result = Load(json);
     ASSERT_TRUE(result.has_value()) << result.error();
-    const auto& p = result->meshes[0].primitives[0];
+    const auto& p = result.value().meshes[0].primitives[0];
     ASSERT_EQ(p.uvs.size(), 3u);
     EXPECT_EQ(p.uvs[1], glm::vec2(1,0));
 }
@@ -1458,7 +1458,7 @@ TEST_F(GltfBoundaryTest, QuantizedNormalizedNormalsRemainSupported) {
     json = Change(json, "\"asset\":", R"("extensionsRequired":["KHR_mesh_quantization"],"extensionsUsed":["KHR_mesh_quantization"],"asset":)");
     auto result = Load(json);
     ASSERT_TRUE(result.has_value()) << result.error();
-    const auto& p = result->meshes[0].primitives[0];
+    const auto& p = result.value().meshes[0].primitives[0];
     ASSERT_EQ(p.normals.size(), 3u);
     EXPECT_EQ(p.normals[0], glm::vec3(0,0,1));
 }

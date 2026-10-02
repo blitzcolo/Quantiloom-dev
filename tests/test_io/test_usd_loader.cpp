@@ -2999,7 +2999,7 @@ TEST_F(UsdLoaderTest, RejectsMalformedFaceTopologyBeforeTriangulation) {
             "}\n");
         auto result = UsdLoader::LoadFromFile(path.string());
         if (result.has_value()) {
-            for (const auto& mesh : result->meshes) { EXPECT_TRUE(mesh.primitives.empty()); }
+            for (const auto& mesh : result.value().meshes) { EXPECT_TRUE(mesh.primitives.empty()); }
         }
         std::filesystem::remove(path);
     }
@@ -3016,8 +3016,8 @@ uniform token subdivisionScheme = "none"
 })");
     auto result = UsdLoader::LoadFromFile(path.string());
     ASSERT_TRUE(result.has_value()) << result.error();
-    ASSERT_EQ(result->meshes.size(), 1u);
-    ASSERT_EQ(result->meshes[0].primitives.size(), 1u);
-    EXPECT_EQ(result->meshes[0].primitives[0].indices.size(), 3u);
+    ASSERT_EQ(result.value().meshes.size(), 1u);
+    ASSERT_EQ(result.value().meshes[0].primitives.size(), 1u);
+    EXPECT_EQ(result.value().meshes[0].primitives[0].indices.size(), 3u);
     std::filesystem::remove(path);
 }
