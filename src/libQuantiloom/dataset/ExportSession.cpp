@@ -350,6 +350,7 @@ struct ExportSession::Impl {
     }
 
     void PublishRecord() {
+        const ReservationGate gate;
         const auto temporary = staging / ".internal" / "record.tmp";
         WriteText(tree.FilePath(temporary), record.dump(2) + "\n");
         tree.Replace(temporary, directory / sidecar);
@@ -373,7 +374,7 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
     try {
         auto session = std::unique_ptr<ExportSession>(new ExportSession);
         auto& impl = *session->m_impl;
-        const fs::path output = fs::absolute(fs::path(outputPath));
+        const fs::path output = fs::absolute(fs::path(outputPath)).lexically_normal();
         if (!Basename(output.filename().string()) || output.stem().empty())
             throw std::runtime_error("invalid export basename");
         impl.directory = output.parent_path().lexically_normal();
@@ -385,7 +386,7 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         impl.Reserve(impl.replay);
         impl.id = NewId();
         impl.staging = impl.claims.front() / impl.id;
-        impl.tree.Ensure(impl.staging);
+        impl.tree.CreatePrivate(impl.staging);
         impl.tree.Ensure(impl.staging / ".internal");
         impl.names.insert(".internal");
         const auto frozen = Json::parse(provenance.json, UniqueKeys());
@@ -493,10 +494,16 @@ Status ExportSession::Commit() {
         impl.record["state"] = "publishing";
         impl.PublishRecord();
         impl.publishing = true;
-        impl.tree.Replace(impl.staging / impl.replay, impl.directory / impl.replay);
+        {
+            const ReservationGate gate;
+            impl.tree.Replace(impl.staging / impl.replay, impl.directory / impl.replay);
+        }
         for (const auto& product : impl.record["products"]) {
             const auto name = product.at("path").get<String>();
-            impl.tree.Replace(impl.staging / name, impl.directory / name);
+            {
+                const ReservationGate gate;
+                impl.tree.Replace(impl.staging / name, impl.directory / name);
+            }
             if (Digest(impl.tree.FilePath(impl.directory / name)) != product.at("sha256").get<String>())
                 throw std::runtime_error("published product hash mismatch: " + name);
         }
@@ -547,7 +554,10 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
             if (hash.size() != 64 || hash.find_first_not_of("0123456789abcdef") != String::npos)
                 throw std::runtime_error("invalid SHA-256");
             CheckParents(path.parent_path(), fs::path(name));
-            const auto artifact = path.parent_path() / name;
+            auto artifact = path.parent_path() / name;
+#ifdef _WIN32
+            artifact = detail::Win32Path(artifact);
+#endif
             if (!fs::is_regular_file(fs::symlink_status(artifact)))
                 throw std::runtime_error("missing or non-regular artifact: " + name);
             if (Digest(artifact) != hash) errors.push_back("hash mismatch: " + name);
@@ -562,7 +572,11 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
             if (!product.at("description").is_object()) throw std::runtime_error("invalid product description");
             ValidateGeometry(product.at("description"));
             check(product);
-            CheckProductImage(path.parent_path() / product.at("path").get<String>(),
+            auto artifact = path.parent_path() / product.at("path").get<String>();
+#ifdef _WIN32
+            artifact = detail::Win32Path(artifact);
+#endif
+            CheckProductImage(artifact,
                 fs::path(product.at("path").get<String>()), path.filename(), id, product);
 
         }

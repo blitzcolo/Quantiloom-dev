@@ -9,6 +9,10 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <winioctl.h>
+#include <aclapi.h>
+#include <vector>
+#include <cstring>
 #endif
 
 using namespace quantiloom;
@@ -35,7 +39,8 @@ protected:
         auto session = Create();
         ASSERT_TRUE(session) << session.error();
         ASSERT_TRUE(session.value()->WriteImage("frame.exr", "radiance", image, "{}"));
-        ASSERT_TRUE(session.value()->Commit());
+        const auto committed = session.value()->Commit();
+        ASSERT_TRUE(committed) << committed.error();
     }
 };
 TEST_F(ExportSessionTest, StagesBeforePublishingAndPreservesPixelsAndMetadata) {
@@ -44,8 +49,9 @@ TEST_F(ExportSessionTest, StagesBeforePublishingAndPreservesPixelsAndMetadata) {
     ASSERT_TRUE(session);
     ASSERT_TRUE(session.value()->WriteImage("frame.exr", "radiance", image, "{}"));
     EXPECT_FALSE(fs::exists(root / "frame.exr"));
-    ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(Valid());
+    const auto committed = session.value()->Commit();
+    ASSERT_TRUE(committed) << committed.error();
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
     auto loaded = ImageIO::ReadEXR((root / "frame.exr").string());
     ASSERT_TRUE(loaded);
     EXPECT_EQ(loaded->data, image.data);
@@ -56,7 +62,7 @@ TEST_F(ExportSessionTest, StagesBeforePublishingAndPreservesPixelsAndMetadata) {
     const auto completed = Record();
     EXPECT_FALSE(session.value()->Commit());
     EXPECT_EQ(Record(), completed);
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 }
 TEST_F(ExportSessionTest, RejectsConcurrentWriterAndReleasesLock) {
     { auto first = Create(); ASSERT_TRUE(first); EXPECT_FALSE(Create()); }
@@ -68,7 +74,7 @@ TEST_F(ExportSessionTest, AbandonedStagingPreservesPreviousCompleteSample) {
     { auto next = Create(); ASSERT_TRUE(next);
       ASSERT_TRUE(next.value()->WriteImage("frame.exr", "radiance", image, "{}")); }
     EXPECT_EQ(Record(), previous);
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 }
 TEST_F(ExportSessionTest, ReplacementGetsNewIdentityAndOldUnlistedFilesAreNotProducts) {
     Publish();
@@ -77,7 +83,7 @@ TEST_F(ExportSessionTest, ReplacementGetsNewIdentityAndOldUnlistedFilesAreNotPro
     Publish();
     EXPECT_NE(Record()["record_id"], id);
     EXPECT_EQ(Record()["products"].size(), 1u);
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 }
 TEST_F(ExportSessionTest, DetectsChangedProductAndReplay) {
     Publish();
@@ -116,14 +122,14 @@ TEST_F(ExportSessionTest, ModifiedStagingDoesNotInvalidatePreviousSample) {
     std::ofstream(staged.value(), std::ios::app) << "changed";
     EXPECT_FALSE(session.value()->Commit());
     EXPECT_EQ(Record(), previous);
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 }
 
 TEST_F(ExportSessionTest, PublishesNestedBandsWithRelativeSummary) {
     auto session = Create(); ASSERT_TRUE(session);
     ASSERT_TRUE(session.value()->WriteImage("frame_bands/band.exr", "band", image, "{}"));
     ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
     auto loaded = ImageIO::ReadEXR((root / "frame_bands/band.exr").string());
     ASSERT_TRUE(loaded);
     EXPECT_EQ(loaded->metadata["quantiloom_sidecar"], "../frame.metadata.json");
@@ -140,7 +146,7 @@ TEST_F(ExportSessionTest, PngSummaryCarriesTheTransactionIdentity) {
     auto session = Create(); ASSERT_TRUE(session);
     ASSERT_TRUE(session.value()->WriteImage("frame.png", "preview", image, "{}"));
     ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
     auto record = Record();
     record["products"][0]["product_id"] = "different_preview";
     std::ofstream(root / "frame.metadata.json") << record.dump();
@@ -188,7 +194,7 @@ TEST_F(ExportSessionTest, RefusesToPublishImageWithMissingOrForeignRecordSummary
     ASSERT_TRUE(session.value()->RegisterFile("foreign.exr", "foreign", R"({"width":2,"height":2,"channels":1})"));
     EXPECT_FALSE(session.value()->Commit());
     EXPECT_EQ(Record(), previous);
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 }
 
 TEST_F(ExportSessionTest, RejectsDescriptionDimensionsThatDisagreeWithTheImage) {
@@ -207,7 +213,7 @@ TEST_F(ExportSessionTest, DisjointOutputSetsShareADirectory) {
     ASSERT_TRUE(second.value()->WriteImage("other.exr", "second", image, "{}"));
     ASSERT_TRUE(second.value()->Commit());
     ASSERT_TRUE(first.value()->Commit());
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
     EXPECT_TRUE(ExportSession::Verify((root / "other.metadata.json").string()).valid);
 }
 TEST_F(ExportSessionTest, NestedWritersCannotClaimTheSameArtifact) {
@@ -275,10 +281,31 @@ TEST_F(ExportSessionTest, NestedDestinationCannotBeRedirectedAfterReservation) {
     const auto writableDirectory = CreateFileW((root / "bands").c_str(), GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
         OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-    EXPECT_EQ(writableDirectory, INVALID_HANDLE_VALUE);
-    if (writableDirectory != INVALID_HANDLE_VALUE) CloseHandle(writableDirectory);
+    ASSERT_NE(writableDirectory, INVALID_HANDLE_VALUE);
+    struct DirectoryGuard { HANDLE value; ~DirectoryGuard() { CloseHandle(value); } } guard{writableDirectory};
+    // The pinned claim keeps this directory nonempty, which rejects in-place
+    // reparse changes while still permitting legitimate publication writes.
+    const std::wstring substitute = L"\\??\\" + foreign.wstring();
+    const std::wstring printed = foreign.wstring();
+    const auto bytes = static_cast<WORD>(substitute.size() * sizeof(wchar_t));
+    const auto printBytes = static_cast<WORD>(printed.size() * sizeof(wchar_t));
+    std::vector<unsigned char> reparse(16 + bytes + printBytes + 4);
+    const DWORD tag = IO_REPARSE_TAG_MOUNT_POINT;
+    const WORD length = static_cast<WORD>(reparse.size() - 8);
+    std::memcpy(reparse.data(), &tag, sizeof(tag));
+    std::memcpy(reparse.data() + 4, &length, sizeof(length));
+    std::memcpy(reparse.data() + 10, &bytes, sizeof(bytes));
+    const WORD printOffset = bytes + 2;
+    std::memcpy(reparse.data() + 12, &printOffset, sizeof(printOffset));
+    std::memcpy(reparse.data() + 14, &printBytes, sizeof(printBytes));
+    std::memcpy(reparse.data() + 16, substitute.data(), bytes);
+    std::memcpy(reparse.data() + 16 + printOffset, printed.data(), printBytes);
+    DWORD returned = 0;
+    EXPECT_FALSE(DeviceIoControl(writableDirectory, FSCTL_SET_REPARSE_POINT, reparse.data(),
+        static_cast<DWORD>(reparse.size()), nullptr, 0, &returned, nullptr));
+    EXPECT_EQ(GetLastError(), ERROR_DIR_NOT_EMPTY);
     ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 #else
     ASSERT_FALSE(error) << error.message();
     fs::create_directory_symlink(foreign, root / "bands");
@@ -324,7 +351,7 @@ TEST_F(ExportSessionTest, KeepsRootAndStagingParentsPinnedForStreamingWriter) {
 #ifdef _WIN32
     ASSERT_TRUE(session.value()->RegisterFile("deep/nested/data.bin", "data", "{}"));
     ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(Valid());
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
 #else
     EXPECT_FALSE(session.value()->RegisterFile("deep/nested/data.bin", "data", "{}"));
 #endif
@@ -345,7 +372,31 @@ TEST_F(ExportSessionTest, PublishesWhenPrivateStagingExceedsLegacyWindowsPathLim
 #endif
     ASSERT_TRUE(session.value()->WriteImage("bands/band.exr", "band", image, "{}"));
     ASSERT_TRUE(session.value()->Commit());
-    EXPECT_TRUE(ExportSession::Verify((longRoot / "frame.metadata.json").string()).valid);
+    EXPECT_TRUE(ExportSession::Verify((longRoot / "frame.metadata.json").string()).valid) << ExportSession::Verify((longRoot / "frame.metadata.json").string()).json;
     session.value().reset();
     EXPECT_FALSE(fs::exists(longRoot / "frame.exr.quantiloom-export.lock"));
 }
+
+#ifdef _WIN32
+TEST_F(ExportSessionTest, ClaimsAndRandomStagingUseProtectedOwnerOnlyPermissions) {
+    auto session = Create(); ASSERT_TRUE(session);
+    const auto claim = root / "frame.exr.quantiloom-export.lock";
+    for (const auto path : {claim, claim / session.value()->RecordId()}) {
+        PSECURITY_DESCRIPTOR descriptor = nullptr;
+        PACL acl = nullptr;
+        ASSERT_EQ(GetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION, nullptr, nullptr, &acl, nullptr, &descriptor), ERROR_SUCCESS);
+        struct Guard { PSECURITY_DESCRIPTOR value; ~Guard() { LocalFree(value); } } guard{descriptor};
+        SECURITY_DESCRIPTOR_CONTROL control{}; DWORD revision = 0;
+        ASSERT_TRUE(GetSecurityDescriptorControl(descriptor, &control, &revision));
+        EXPECT_NE(control & SE_DACL_PROTECTED, 0);
+        ASSERT_NE(acl, nullptr); ASSERT_EQ(acl->AceCount, 1u);
+        void* ace = nullptr; ASSERT_TRUE(GetAce(acl, 0, &ace));
+        const auto* allowed = static_cast<const ACCESS_ALLOWED_ACE*>(ace);
+        ASSERT_EQ(allowed->Header.AceType, ACCESS_ALLOWED_ACE_TYPE);
+        PSID owner = nullptr; BOOL defaulted = FALSE;
+        ASSERT_TRUE(GetSecurityDescriptorOwner(descriptor, &owner, &defaulted));
+        EXPECT_TRUE(EqualSid(owner, const_cast<DWORD*>(&allowed->SidStart)));
+    }
+}
+#endif

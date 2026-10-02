@@ -11,6 +11,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include "PrivateDirectorySecurity.hpp"
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -36,7 +37,9 @@ inline std::wstring Win32Path(const fs::path& path) {
 #endif
 
 // Directory capabilities live for the whole transaction. Windows denies rename
-// and deletion of every ancestor; POSIX always addresses children through dirfd.
+// and deletion of every ancestor. Public directories initially deny write sharing
+// too, until a pinned child keeps them nonempty; private directories instead use
+// an owner-only ACL and matching integrity label. POSIX addresses children by fd.
 // POSIX cannot forbid a same-user directory rename. Identity checks reject a
 // detected rename; the descriptors keep concurrent operations on the original
 // directories instead of following a replacement link into a foreign tree.
@@ -44,6 +47,8 @@ class SecureExportTree {
     struct Directory {
 #ifdef _WIN32
         HANDLE handle = INVALID_HANDLE_VALUE;
+        bool writeShared = false;
+        bool privateDirectory = false;
         ~Directory() { if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle); }
 #else
         int handle = -1;
@@ -54,7 +59,25 @@ class SecureExportTree {
     std::map<fs::path, std::unique_ptr<Directory>> directories;
     static constexpr const char* suffix = ".quantiloom-export.lock";
 
-    Directory& Open(const fs::path& path, bool create, bool checkClaims) {
+#ifdef _WIN32
+    static void ShareWrites(Directory& directory) {
+        if (directory.writeShared) return;
+        const auto next = CreateFileW(Win32Path(directory.path).c_str(), FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (next == INVALID_HANDLE_VALUE) throw std::runtime_error("cannot retain export directory protection");
+        BY_HANDLE_FILE_INFORMATION before{}, after{};
+        const bool same = GetFileInformationByHandle(directory.handle, &before) && GetFileInformationByHandle(next, &after) &&
+            before.dwVolumeSerialNumber == after.dwVolumeSerialNumber && before.nFileIndexHigh == after.nFileIndexHigh &&
+            before.nFileIndexLow == after.nFileIndexLow && !(after.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT);
+        if (!same) { CloseHandle(next); throw std::runtime_error("export directory identity changed"); }
+        // Both leases deny delete: replacement is impossible throughout.
+        CloseHandle(directory.handle);
+        directory.handle = next;
+        directory.writeShared = true;
+    }
+#endif
+    Directory& Open(const fs::path& path, bool create, bool checkClaims, [[maybe_unused]] bool privateDirectory = false) {
         if (auto it = directories.find(path); it != directories.end()) {
 #ifndef _WIN32
             if (path != path.root_path()) {
@@ -78,11 +101,13 @@ class SecureExportTree {
         auto dir = std::make_unique<Directory>();
         dir->path = path;
 #ifdef _WIN32
+        dir->privateDirectory = privateDirectory || (parent && parent->privateDirectory);
+        dir->writeShared = dir->privateDirectory;
         if (create && parent && !CreateDirectoryW(Win32Path(path).c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
             throw std::runtime_error("cannot create export directory: " + path.string() +
                 " (Windows error " + std::to_string(GetLastError()) + ")");
         dir->handle = CreateFileW(Win32Path(path).c_str(), FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
-            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_SHARE_READ | (dir->writeShared ? FILE_SHARE_WRITE : 0), nullptr, OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         FILE_ATTRIBUTE_TAG_INFO attributes{};
         if (dir->handle == INVALID_HANDLE_VALUE ||
@@ -100,6 +125,12 @@ class SecureExportTree {
 #endif
         auto& result = *dir;
         directories.emplace(path, std::move(dir));
+#ifdef _WIN32
+        // A pinned child keeps this parent nonempty. NTFS rejects adding a
+        // junction/symlink in-place to a nonempty directory, so sharing writes
+        // is now safe and permits other sessions and atomic file publication.
+        if (parent) ShareWrites(*parent);
+#endif
         return result;
     }
     static bool ExistsIn(const Directory& dir, const fs::path& leaf) {
@@ -178,26 +209,32 @@ public:
         return ::fstatat(parent.handle, path.filename().c_str(), &status, AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG(status.st_mode);
 #endif
     }
-    void Claim(const fs::path& path) {
+    void CreatePrivate(const fs::path& path) {
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);
 #ifdef _WIN32
-        const bool made = CreateDirectoryW(Win32Path(path).c_str(), nullptr) != 0;
+        PrivateDirectorySecurity security;
+        const bool made = CreateDirectoryW(Win32Path(path).c_str(), &security.Attributes()) != 0;
 #else
         const bool made = ::mkdirat(parent.handle, path.filename().c_str(), 0700) == 0;
 #endif
         if (!made) throw std::runtime_error("output is locked: " + path.string());
-        try { (void)Open(path, false, false); }
+        try { (void)Open(path, false, false, true); }
         catch (...) { Remove(path); throw; }
     }
+    void Claim(const fs::path& path) { CreatePrivate(path); }
     void Replace(const fs::path& from, const fs::path& to) {
         [[maybe_unused]] auto& src = Open(from.parent_path(), false, false);
         [[maybe_unused]] auto& dst = Open(to.parent_path(), false, false);
 #ifdef _WIN32
-        if (!MoveFileExW(Win32Path(from).c_str(), Win32Path(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+        if (!MoveFileExW(Win32Path(from).c_str(), Win32Path(to).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            const auto error = GetLastError();
+            throw std::runtime_error("atomic replacement failed: " + to.string() +
+                " (Windows error " + std::to_string(error) + ")");
+        }
 #else
         if (::renameat(src.handle, from.filename().c_str(), dst.handle, to.filename().c_str()) != 0)
-#endif
             throw std::runtime_error("atomic replacement failed: " + to.string());
+#endif
     }
     void Remove(const fs::path& path) {
         [[maybe_unused]] auto& parent = Open(path.parent_path(), false, false);

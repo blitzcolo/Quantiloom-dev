@@ -25,39 +25,13 @@ class PrivateExecutable {
 public:
     PrivateExecutable(const void* bytes, DWORD size) {
         try {
-            Handle token;
-            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value))
-                throw std::runtime_error("Cannot read process security token");
-            const auto tokenInfo = [&](TOKEN_INFORMATION_CLASS kind) {
-                DWORD length = 0;
-                GetTokenInformation(token.value, kind, nullptr, 0, &length);
-                std::vector<unsigned char> buffer(length);
-                if (!length || !GetTokenInformation(token.value, kind, buffer.data(), length, &length))
-                    throw std::runtime_error("Cannot read process security identity");
-                return buffer;
-            };
-            const auto user = tokenInfo(TokenUser), integrity = tokenInfo(TokenIntegrityLevel);
-            LPWSTR userSid = nullptr, integritySid = nullptr;
-            if (!ConvertSidToStringSidW(reinterpret_cast<const TOKEN_USER*>(user.data())->User.Sid, &userSid))
-                throw std::runtime_error("Cannot format process identity");
-            const std::wstring owner(userSid); LocalFree(userSid);
-            if (!ConvertSidToStringSidW(reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(integrity.data())->Label.Sid, &integritySid))
-                throw std::runtime_error("Cannot format process integrity");
-            const std::wstring label(integritySid); LocalFree(integritySid);
-            // Protected owner-only ACL, with the process's own integrity label.
-            // A low-integrity process sharing the user's SID cannot alter it.
-            // Equal-integrity code already running as this user is outside this
-            // boundary: it can control the host process itself.
-            const std::wstring sddl = L"O:" + owner + L"D:P(A;OICI;FA;;;" + owner + L")S:(ML;OICI;NW;;;" + label + L")";
-            PSECURITY_DESCRIPTOR descriptor = nullptr;
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
-                throw std::runtime_error("Cannot build private executable security descriptor");
-            struct DescriptorGuard { PSECURITY_DESCRIPTOR value; ~DescriptorGuard() { LocalFree(value); } } guard{descriptor};
-            SECURITY_ATTRIBUTES attributes{sizeof(attributes), descriptor, FALSE};
+            quantiloom::dataset::detail::PrivateDirectorySecurity security;
+            auto& attributes = security.Attributes();
             std::vector<wchar_t> temp(32768);
             const DWORD length = GetTempPathW(static_cast<DWORD>(temp.size()), temp.data());
             if (!length || length >= temp.size()) throw std::runtime_error("Cannot find temporary directory");
-            const auto parent = std::filesystem::absolute(std::filesystem::path(temp.data())).lexically_normal();
+            auto parent = std::filesystem::absolute(std::filesystem::path(temp.data())).lexically_normal();
+            if (parent != parent.root_path() && parent.filename().empty()) parent = parent.parent_path();
             tree.Ensure(parent);
             bool created = false;
             for (int attempt = 0; attempt < 16; ++attempt) {

@@ -340,6 +340,10 @@ target_link_libraries(quantiloom_core
         glm::glm  # Link privately for build, consumers use find_package(glm)
 )
 
+if(WIN32)
+    target_link_libraries(quantiloom_core PRIVATE advapi32)
+endif()
+
 # ExprTk is one 1.5 MB header of deeply nested templates: MSVC runs out of
 # sections in the object file without /bigobj. Only the one translation unit
 # that includes it pays.
