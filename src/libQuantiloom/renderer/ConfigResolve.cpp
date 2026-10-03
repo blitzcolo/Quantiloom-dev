@@ -1940,7 +1940,8 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         materialTables.emplace_back(std::move(name), std::move(table));
     }
     for (const auto& overrideName : config.GetSubtableNames("material_overrides")) {
-        auto table = config.GetTable("material_overrides." + overrideName);
+        auto root = config.GetTable("material_overrides");
+        auto table = root.value().GetNamedTable(overrideName);
         if (table.has_value()) {
             materialTables.emplace_back(overrideName, std::move(table.value()));
         }
@@ -3579,6 +3580,9 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     if (diag.failed()) {
         return SpectraResult::Err(diag.firstError());
     }
+    const auto transport=ResolveFusionTransport(config,scene);
+    if(!transport) return SpectraResult::Err(transport.error());
+    out.fusionTransport=*transport;
     return SpectraResult(std::move(out));
 }
 

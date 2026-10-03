@@ -206,10 +206,10 @@ public:
     [[nodiscard]] f32 GetAspectRatio() const { return m_aspectRatio; }
 
     // Get camera data for GPU (push constants)
-    [[nodiscard]] CameraData GetCameraData() const;
+    [[nodiscard]] QL_API CameraData GetCameraData() const;
 
     // Load camera from TOML config
-    static Result<Camera, String> FromConfig(const Config& config, f32 aspectRatio);
+    static QL_API Result<Camera, String> FromConfig(const Config& config, f32 aspectRatio);
 
 private:
     // Recompute forward/right/up from position/lookAt/m_upReference. Reads the

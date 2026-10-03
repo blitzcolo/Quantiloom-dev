@@ -3,6 +3,7 @@
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "core/Platform.hpp"
+#include "io/ImageIO.hpp"
 
 #include <memory>
 
@@ -39,6 +40,8 @@ public:
     /// Description is frozen product metadata, not the current renderer state.
     Result<void, String> WriteImage(const String& name, const String& productId,
                                   const Image& image, const String& descriptionJson);
+    Result<void,String> WriteUIntImage(const String& name,const String& productId,
+                                      const UIntImage& image,const String& descriptionJson);
     /// Reserve a staged path for a streaming writer, then register it only after
     /// that writer closes successfully. Unregistered files are never published.
     /// The path is valid only for this session's lifetime. On Linux it uses a

@@ -3,6 +3,7 @@
 #include "../core/Image.hpp"
 #include "../core/Types.hpp"
 #include "../renderer/DisplayControl.hpp"
+#include "../scene/CameraProjection.hpp"
 
 #include <array>
 #include <limits>
@@ -88,6 +89,7 @@ struct OpticsConfig {
     String knownPsfPath;
     String knownPsfSourcePath; // Authored path for config round-trip.
     f64 psfSigmaPixelsOverride = -1.0; // Legacy or measured Gaussian width; -1 uses Airy.
+    CameraProjection projection;
 };
 
 struct ReadoutConfig {

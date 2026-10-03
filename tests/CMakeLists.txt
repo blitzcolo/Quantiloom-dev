@@ -238,6 +238,9 @@ set(TEST_SCENE_SOURCES
     test_scene/test_material.cpp
     test_scene/test_tangent_generator.cpp
     test_scene/test_camera.cpp
+    test_scene/test_camera_projection.cpp
+    test_io/test_rig_config.cpp
+    test_renderer/test_fusion_transport.cpp
     test_scene/test_mesh.cpp
     test_scene/test_mesh_optimizer.cpp
     test_scene/test_scene.cpp
@@ -418,6 +421,7 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
             "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/ibl_brdf_lut.spv"
+            "${CMAKE_SOURCE_DIR}/src/shaders/fusion_geometry.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/spectral_reconstruct.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
             "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"

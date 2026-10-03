@@ -835,6 +835,30 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetDouble("sensor.optics.focus_distance_m", camera.optics.focusDistanceM);
         camera.optics.cosFourthVignetting =
             document.GetBool("sensor.optics.cos_fourth_vignetting", false);
+        auto& projection = camera.optics.projection;
+        const auto model = document.GetString("sensor.optics.projection.model", "pinhole");
+        if (model == "pinhole") projection.model = camera::ProjectionModel::Pinhole;
+        else if (model == "brown_conrady") projection.model = camera::ProjectionModel::BrownConrady;
+        else if (model == "fisheye") projection.model = camera::ProjectionModel::Fisheye;
+        else return Error<CameraConfig>("unsupported sensor.optics.projection.model");
+        const auto intrinsics = document.GetDoubleArray("sensor.optics.projection.intrinsics");
+        if (document.Has("sensor.optics.projection.intrinsics")) {
+            if (intrinsics.size() != 4)
+                return Error<CameraConfig>("projection.intrinsics requires [fx,fy,cx,cy]");
+            projection.explicitIntrinsics = true;
+            projection.fx=intrinsics[0]; projection.fy=intrinsics[1];
+            projection.cx=intrinsics[2]; projection.cy=intrinsics[3];
+        }
+        const auto coefficients = document.GetDoubleArray("sensor.optics.projection.coefficients");
+        if (document.Has("sensor.optics.projection.coefficients")) {
+            const size_t expected = projection.model == camera::ProjectionModel::Fisheye ? 4 :
+                projection.model == camera::ProjectionModel::BrownConrady ? 5 : 0;
+            if (coefficients.size() != expected)
+                return Error<CameraConfig>("wrong coefficient count for camera projection model");
+            std::copy(coefficients.begin(), coefficients.end(), projection.coefficients.begin());
+        }
+        projection.maxThetaRadians = document.GetDouble(
+            "sensor.optics.projection.max_theta_deg", 89.0) * 0.017453292519943295;
         camera.optics.knownPsfSourcePath =
             document.GetString("sensor.optics.known_psf_path", "");
         camera.optics.knownPsfPath =
@@ -927,7 +951,7 @@ Result<camera::CameraConfig, String> ParseCameraConfig(
             document.GetDouble("sensor.thermal.netd_noise_bandwidth_hz",
                                thermal.netdNoiseBandwidthHz);
         thermal.netdOpticalCondition =
-            document.GetString("sensor.thermal.netd_optical_condition", "");
+            document.GetString("sensor.thermal.netd_optical_condition", thermal.netdOpticalCondition);
         auto thermalGain = ReadCalibration(
             document, "sensor.thermal.nuc_gain_map",
             "sensor.thermal.nuc_gain_map_path", baseDir,
@@ -1164,6 +1188,24 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
         out << "known_psf_path = " <<
             Quoted(optics.knownPsfSourcePath.empty()
                        ? optics.knownPsfPath : optics.knownPsfSourcePath) << '\n';
+    const auto& projection = optics.projection;
+    out << "\n[sensor.optics.projection]\nmodel = "
+        << Quoted(camera::ProjectionModelName(projection.model)) << '\n';
+    if (projection.explicitIntrinsics)
+        out << "intrinsics = [" << projection.fx << ", " << projection.fy << ", "
+            << projection.cx << ", " << projection.cy << "]\n";
+    const size_t coefficientCount = projection.model == camera::ProjectionModel::Fisheye ? 4 :
+        projection.model == camera::ProjectionModel::BrownConrady ? 5 : 0;
+    if (coefficientCount) {
+        out << "coefficients = [";
+        for (size_t i=0;i<coefficientCount;++i) {
+            if (i) out << ", ";
+            out << projection.coefficients[i];
+        }
+        out << "]\n";
+    }
+    if (projection.model == camera::ProjectionModel::Fisheye)
+        out << "max_theta_deg = " << projection.maxThetaRadians / 0.017453292519943295 << '\n';
     out << "\n[sensor.exposure]\ntime_s = " << camera.readout.exposureSeconds << '\n';
 
     const auto& readout = camera.readout;

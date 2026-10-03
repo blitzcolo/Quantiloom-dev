@@ -364,6 +364,13 @@ Vector<String> Config::GetSubtableNames(const StringView key) const {
     return names;
 }
 
+Result<Config,String> Config::GetNamedTable(StringView name) const {
+    const auto* node=m_impl->root.get(name);
+    if(!node || !node->is_table()) return Result<Config,String>::Err("Named table not found: "+String(name));
+    toml::table cloned=*node->as_table();
+    return Config(std::make_unique<Impl>(std::move(cloned)));
+}
+
 Vector<Config> Config::GetTableArray(const StringView key) const {
     Vector<Config> result;
 

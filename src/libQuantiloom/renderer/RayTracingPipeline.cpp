@@ -2,6 +2,7 @@
 #include "CommandHelper.hpp"
 #include "core/Log.hpp"
 #include "core/SpectralData.hpp"
+#include "core/Image.hpp"
 #include <algorithm>
 #include <fstream>
 #include <stdexcept>
@@ -289,6 +290,14 @@ RayTracingPipeline::RayTracingPipeline(
         m_criFallback->Upload(&emptyCri, sizeof(emptyCri));
         const u32 disabledHeader[16] = {};
         m_cameraFallbackResponse->Upload(disabledHeader, sizeof(disabledHeader));
+        for (u32 i=0;i<3;++i) {
+            m_projectionBuffers[i] = std::make_unique<GpuBuffer>(m_context.GetAllocator(),
+                64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            SetCameraProjection(nullptr,i);
+        }
+        SetFusionTransport({rendercore::FusionTransportGpu{}});
+        BeginFusionRecording(0,0,0,0);
+        SetFusionProbes({});
         m_cameraFallbackAtmosHeader = std::make_unique<GpuBuffer>(
             m_context.GetAllocator(), 80u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -352,6 +361,7 @@ RayTracingPipeline::RayTracingPipeline(
 
 RayTracingPipeline::~RayTracingPipeline() {
     VkDevice device = m_context.GetDevice();
+    if(m_geometryPipeline!=VK_NULL_HANDLE) vkDestroyPipeline(device,m_geometryPipeline,nullptr);
 
     m_activeVariant = nullptr;
     m_pipeline = VK_NULL_HANDLE;  // just a copied handle, owned by variant cache
@@ -386,7 +396,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Define bindings (matches shader layout)
     // NOTE: Texture array size dynamically adjusted based on device capabilities
     // 1024 if descriptor indexing available, 32 otherwise
-    std::vector<VkDescriptorSetLayoutBinding> bindings(32);  // 28 camera measurement image, 29 response table, 30 dynamic counters, 31 stratum depth
+    std::vector<VkDescriptorSetLayoutBinding> bindings(38);
 
     // Binding 0: Output image (RWTexture2D)
     bindings[0].binding = 0;
@@ -734,7 +744,23 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
 
     // Enable descriptor indexing flags for texture arrays
     // This allows runtime indexing and partially bound descriptors
-    std::vector<VkDescriptorBindingFlags> bindingFlags(32, 0);
+    bindings[32].binding = 32;
+    bindings[32].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[32].descriptorCount = 1;
+    bindings[32].stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+    bindings[33].binding=33;
+    bindings[33].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    bindings[33].descriptorCount=1;
+    bindings[33].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
+    bindings[34]=bindings[33];bindings[34].binding=34;
+    bindings[35]=bindings[33];bindings[35].binding=35;
+    bindings[35].stageFlags|=VK_SHADER_STAGE_RAYGEN_BIT_KHR|VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[36]=bindings[35];bindings[36].binding=36;
+    bindings[37]=bindings[35];bindings[37].binding=37;
+    for(auto& binding:bindings) binding.stageFlags|=VK_SHADER_STAGE_COMPUTE_BIT;
+    std::vector<VkDescriptorBindingFlags> bindingFlags(38, 0);
+    bindingFlags[33]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
+    bindingFlags[34]=VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
     bindingFlags[6] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all textures need to be bound
     bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Not all samplers need to be bound
     bindingFlags[30] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;  // Camera dynamic counters
@@ -759,7 +785,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Create descriptor pool
     std::vector<VkDescriptorPoolSize> poolSizes(5);
     poolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    poolSizes[0].descriptorCount = 9;  // three sets x (output + depth + measurement)
+    poolSizes[0].descriptorCount = 12;
     poolSizes[1].type = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     poolSizes[1].descriptorCount = 3;
     poolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -767,7 +793,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // layout rather than from the list below, which had drifted: it omitted the
     // atmosphere data blob (binding 20) and so asked the pool for one fewer
     // descriptor than the set declares.
-    poolSizes[2].descriptorCount = 61;  // three sets x (existing 19 + camera response) + camera dynamic counters
+    poolSizes[2].descriptorCount = 81;
     poolSizes[3].type = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
     poolSizes[3].descriptorCount = 3 * (m_maxTextures + 2);
     poolSizes[4].type = VK_DESCRIPTOR_TYPE_SAMPLER;
@@ -818,7 +844,7 @@ void RayTracingPipeline::CreatePipelineLayout() {
     pushConstantRange.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR |
                                     VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                                     VK_SHADER_STAGE_MISS_BIT_KHR |
-                                    VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
+                                    VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT;
     pushConstantRange.offset = 0;
     pushConstantRange.size = sizeof(TracePushConstants);
 
@@ -1190,6 +1216,135 @@ void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const
 
 void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
     WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 29u, buffer);
+}
+
+void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, u32 set) {
+    if (set >= 3) throw std::invalid_argument("invalid projection descriptor set");
+    std::array<f32,16> values{};
+    if (p) {
+        values[0]=1; values[1]=static_cast<f32>(p->model);
+        values[2]=static_cast<f32>(p->maxThetaRadians);
+        values[4]=static_cast<f32>(p->fx); values[5]=static_cast<f32>(p->fy);
+        values[6]=static_cast<f32>(p->cx); values[7]=static_cast<f32>(p->cy);
+        for(size_t i=0;i<5;++i) values[8+i]=static_cast<f32>(p->coefficients[i]);
+    }
+    m_projectionBuffers[set]->Upload(values.data(),sizeof(values));
+    const VkDescriptorSet sets[]={m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet};
+    WriteStorageBuffer(m_context.GetDevice(),sets[set],32u,*m_projectionBuffers[set]);
+}
+
+void RayTracingPipeline::SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records) {
+    const auto size=std::max<size_t>(1,records.size())*sizeof(rendercore::FusionTransportGpu);
+    auto replacement=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    const rendercore::FusionTransportGpu disabled{};
+    replacement->Upload(records.empty() ? &disabled : records.data(),size);
+    for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
+        WriteStorageBuffer(m_context.GetDevice(),set,35u,*replacement);
+    m_fusionTransportBuffer=std::move(replacement);
+}
+
+void RayTracingPipeline::BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays) {
+    const u64 total=static_cast<u64>(width)*height*spp;
+    if(total>std::numeric_limits<u32>::max()) throw std::runtime_error("fusion ray indexing exceeds UINT range");
+    const u32 stride=total && maxRays ? static_cast<u32>((total+maxRays-1)/maxRays) : 1;
+    const u32 count=total ? static_cast<u32>((total+stride-1)/stride) : 0;
+    constexpr u32 slots=9;
+    const size_t size=128+static_cast<size_t>(count)*(32+slots*80);
+    if(size>m_context.GetDeviceProperties().limits.maxStorageBufferRange)
+        throw std::runtime_error("fusion record buffer exceeds device storage range; lower fusionMaxRecordedRays");
+    auto replacement=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
+    Vector<u8> zero(size,0);
+    u32 header[32]={count ? 1u : 0u,stride,count,slots,width,height,spp,0};
+    header[8]=static_cast<u32>(m_initialFusionMedia.size());
+    if(m_initialFusionMedia.size()>8)throw std::runtime_error("invalid initial medium count");
+    for(size_t i=0;i<m_initialFusionMedia.size();++i)header[16+i]=m_initialFusionMedia[i];
+    std::memcpy(zero.data(),header,sizeof(header));replacement->Upload(zero.data(),size);
+    for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
+        WriteStorageBuffer(m_context.GetDevice(),set,36u,*replacement);
+    m_fusionRecordBuffer=std::move(replacement);
+}
+
+Vector<u8> RayTracingPipeline::ReadFusionRecording() {
+    if(!m_fusionRecordBuffer) return {};
+    CommandHelper::ExecuteImmediate(m_context,[&](VkCommandBuffer cmd) {
+        VkBufferMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer=m_fusionRecordBuffer->GetHandle();barrier.size=VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,VK_PIPELINE_STAGE_HOST_BIT,
+            0,0,nullptr,1,&barrier,0,nullptr);
+    });
+    Vector<u8> bytes(static_cast<size_t>(m_fusionRecordBuffer->GetSize()));
+    const void* data=m_fusionRecordBuffer->MapRead();
+    if(!data) throw std::runtime_error("cannot read fusion path records");
+    std::memcpy(bytes.data(),data,bytes.size());m_fusionRecordBuffer->Unmap();return bytes;
+}
+
+void RayTracingPipeline::SetFusionProbes(const Vector<ProbeRay>& probes) {
+    const size_t size=std::max<size_t>(1,probes.size())*sizeof(ProbeRay);
+    auto buffer=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    const ProbeRay disabled{};
+    buffer->Upload(probes.empty() ? &disabled : probes.data(),size);
+    for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
+        WriteStorageBuffer(m_context.GetDevice(),set,37u,*buffer);
+    m_fusionProbeBuffer=std::move(buffer);
+    const u32 count=static_cast<u32>(probes.size());m_fusionRecordBuffer->Upload(&count,4,40);
+}
+
+Vector<RayTracingPipeline::GeometryHit> RayTracingPipeline::CapturePrimaryGeometry(u32 width,u32 height,
+    const Vector<glm::vec2>* queryPixels) {
+    if(!width || !height) throw std::invalid_argument("invalid geometry grid");
+    const VkDevice device=m_context.GetDevice();
+    if(m_geometryPipeline==VK_NULL_HANDLE) {
+        const auto code=LoadSPIRV((std::filesystem::path(m_raygenPath).parent_path()/"fusion_geometry.spv").string());
+        const auto module=CreateShaderModule(code);
+        VkComputePipelineCreateInfo info{};
+        info.sType=VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        info.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        info.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;
+        info.stage.module=module;info.stage.pName="main";info.layout=m_pipelineLayout;
+        const auto result=vkCreateComputePipelines(device,VK_NULL_HANDLE,1,&info,nullptr,&m_geometryPipeline);
+        vkDestroyShaderModule(device,module,nullptr);
+        if(result!=VK_SUCCESS) throw std::runtime_error("cannot create geometry capture pipeline");
+    }
+    const size_t count=Image::CheckedElementCount(width,height,1);
+    if(queryPixels && queryPixels->size()!=count) throw std::invalid_argument("geometry query count mismatch");
+    std::unique_ptr<GpuBuffer> pixels;
+    if(queryPixels) {
+        pixels=std::make_unique<GpuBuffer>(m_context.GetAllocator(),count*sizeof(glm::vec2),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+        pixels->Upload(queryPixels->data(),count*sizeof(glm::vec2));
+        WriteStorageBuffer(device,m_descriptorSet,34u,*pixels);
+    }
+    GpuBuffer output(m_context.GetAllocator(),count*sizeof(GeometryHit),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
+    WriteStorageBuffer(device,m_descriptorSet,33u,output);
+    auto pc=m_pushConstants;
+    pc.cameraAndSampling.sampleIndex=width;pc.cameraAndSampling.totalSamples=height;
+    pc.cameraAndSampling.frameIndex=queryPixels ? 1u : 0u;
+    CommandHelper::ExecuteImmediate(m_context,[&](VkCommandBuffer cmd) {
+        vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_geometryPipeline);
+        vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_pipelineLayout,0,1,&m_descriptorSet,0,nullptr);
+        vkCmdPushConstants(cmd,m_pipelineLayout,VK_SHADER_STAGE_RAYGEN_BIT_KHR|
+            VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR|VK_SHADER_STAGE_MISS_BIT_KHR|
+            VK_SHADER_STAGE_ANY_HIT_BIT_KHR|VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(pc),&pc);
+        vkCmdDispatch(cmd,(width+7)/8,(height+7)/8,1);
+        VkBufferMemoryBarrier barrier{};
+        barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+        barrier.buffer=output.GetHandle();barrier.size=VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,
+            0,0,nullptr,1,&barrier,0,nullptr);
+    });
+    Vector<GeometryHit> hits(count);
+    const auto* data=output.MapRead();
+    if(!data) throw std::runtime_error("cannot read geometry capture buffer");
+    std::memcpy(hits.data(),data,count*sizeof(GeometryHit));output.Unmap();
+    return hits;
 }
 
 void RayTracingPipeline::BindCameraDynamicCounterBuffer(const GpuBuffer& buffer) const {
@@ -1846,7 +2001,7 @@ void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u
         cmd,
         m_pipelineLayout,
         VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
-            VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
+            VK_SHADER_STAGE_MISS_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR | VK_SHADER_STAGE_COMPUTE_BIT,
         0,
         sizeof(TracePushConstants),
         &m_pushConstants

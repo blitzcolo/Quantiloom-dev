@@ -1487,6 +1487,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 report.spectralCurvesLoaded, report.refractiveIndicesLoaded,
                 report.materialsTemperatureBackfilled, report.materialsOverridden,
                 report.atmosphereEnabled ? "on" : "off");
+    if(m_impl->pipeline) m_impl->pipeline->SetFusionTransport(spectra.fusionTransport);
     return report;
 }
 
@@ -3774,6 +3775,7 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     }
     // Target-extent coordinates, like ReadPixelValue's -- the pick ray is
     // reconstructed from the render grid, so map into it first.
+    const u32 targetPixelX=x,targetPixelY=y;
     if (x >= m_impl->targetWidth || y >= m_impl->targetHeight) {
         return Result<PickResult, String>::Err("Pick: pixel out of bounds");
     }
@@ -3830,6 +3832,23 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     // about which projection is in use.
     pc.projection = cameraData.projection;
     pc.orthoHeight = cameraData.orthoHeight;
+    if(m_impl->cameraConfig.enabled) {
+        const auto& optics=m_impl->cameraConfig.optics;
+        const auto projection=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,
+            optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
+        if(!projection) return Result<PickResult,String>::Err(projection.error());
+        const auto pose=m_impl->CameraDataForCapture(SpectralMode::Single,550.0,m_impl->timeline.Current_s());
+        if(!pose) return Result<PickResult,String>::Err(pose.error());
+        const glm::dvec2 pixel((targetPixelX+0.5)*optics.sensorWidthPx/m_impl->targetWidth,
+            (targetPixelY+0.5)*optics.sensorHeightPx/m_impl->targetHeight);
+        const auto ray=camera::UnprojectPixel(*projection,pixel);
+        if(!ray.valid) return PickResult{};
+        const auto& c=pose.value();
+        pc.origin=c.origin;
+        pc.forward=glm::normalize(static_cast<f32>(ray.direction.x)*c.right-
+            static_cast<f32>(ray.direction.y)*c.up+static_cast<f32>(ray.direction.z)*c.forward);
+        pc.fovScale=0;pc.pixelX=pc.pixelY=0;pc.width=pc.height=1;pc.projection=0;
+    }
 
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_impl->pickPipeline);
@@ -5105,6 +5124,15 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     vkDeviceWaitIdle(device);
     const u32 physicalW = cameraConfig.optics.sensorWidthPx;
     const u32 physicalH = cameraConfig.optics.sensorHeightPx;
+    const auto nativeProjection=camera::ResolveProjection(cameraConfig.optics.projection,
+        physicalW,physicalH,cameraConfig.optics.focalLengthMm,cameraConfig.optics.pixelPitchUm);
+    if(!nativeProjection) return Result<void,String>::Err(nativeProjection.error());
+    if((nativeProjection.value().model!=camera::ProjectionModel::Pinhole ||
+        cameraConfig.optics.projection.explicitIntrinsics) &&
+       (!cameraConfig.motion.keys.empty() || timeline.HasMotion()))
+        return Result<void,String>::Err("distorted GPU capture currently requires a static scene and camera");
+    pipeline->SetCameraProjection(&*nativeProjection,
+        cameraConfig.inputKind==camera::CameraInputKind::FastRgbApproximation ? 0u : 1u);
     const auto allocator = contextAdapter->GetAllocator();
     const auto makeImage = [&](VkFormat format) {
         auto image = std::make_unique<GpuImage>(
@@ -5638,6 +5666,11 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
 Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
     VkCommandBuffer cmd) {
     if (auto ready = EnsureCameraResources(); !ready) return ready;
+    const auto& optics=cameraConfig.optics;
+    const auto projection=camera::ResolveProjection(optics.projection,
+        optics.sensorWidthPx,optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
+    if(!projection) return Result<void,String>::Err(projection.error());
+    pipeline->SetCameraProjection(&*projection,2u);
     const f64 centerNm = 0.5 * (cameraConfig.device.effectiveMinNm +
                                  cameraConfig.device.effectiveMaxNm);
     const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);

@@ -37,6 +37,8 @@
 #include "core/Image.hpp"
 #include "renderer/TimelineControl.hpp"
 #include "postprocess/CameraPipeline.hpp"
+#include "dataset/GeometryTruth.hpp"
+#include "dataset/FusionPathTruth.hpp"
 
 #include <functional>
 #include <memory>
@@ -204,6 +206,8 @@ public:
          * default, and unused by a non-hyperspectral render.
          */
         std::function<void(const OfflineProgress&)> onProgress;
+        u32 fusionMaxRecordedRays=4096;
+        std::function<void(const dataset::FusionPathChunk&)> onFusionPathChunk;
     };
 
     /**
@@ -220,6 +224,13 @@ public:
         const Config& config, const InitParams& params = {});
 
     ~OfflineRenderer();
+    /// Deterministic native-grid surface geometry, independent of path SPP.
+    Result<dataset::GeometryTruth,String> CaptureGeometry(f64 referenceTimeSeconds,
+        const camera::CameraProjection* projectionOverride=nullptr);
+    Result<Vector<dataset::SurfaceQuery>,String> QuerySurfaces(
+        const Vector<glm::vec2>& nativePixels,f64 referenceTimeSeconds);
+    Result<Vector<dataset::OpticalProbeResult>,String> QueryOpticalPaths(
+        const Vector<dataset::OpticalProbe>& probes,f64 referenceTimeSeconds);
 
     OfflineRenderer(const OfflineRenderer&) = delete;
     OfflineRenderer& operator=(const OfflineRenderer&) = delete;

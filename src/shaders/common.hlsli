@@ -312,8 +312,17 @@ struct Payload {
     // raygen folds these into the dynamic-exposure counters (binding 30).
     // Misses and recursive payloads leave it 0, which counts as diffuse.
     uint primaryMaterialFlags;                                           // 4 bytes
+    uint fusionMediumCount;
+    uint fusionMedia[8];
+    uint fusionFlags;
+    uint fusionRoute;
+    float3 fusionContributions;
+    uint fusionPathId;
+    uint fusionTerminalDepth;
+    uint fusionForced,fusionBranchMask;
 
-    // TOTAL: 44 bytes (under 64-byte RT Core limit)
+    // The opt-in fusion medium stack and contribution decomposition travel
+    // with a scalar wavelength. Every constructor must initialize them.
     //
     // Every site that constructs a Payload must set heroLambda. Left
     // uninitialised it is not a crash -- it silently turns an ordinary ray into
@@ -323,6 +332,29 @@ struct Payload {
     // emission it should have carried. primaryMaterialFlags has the same
     // "uninitialised reads as the safest class" property: 0 is diffuse.
 };
+
+static uint fusionActiveMediumCount=0;
+static uint fusionActiveMedia[8];
+struct FusionMediumContext {uint count;uint media[8];};
+FusionMediumContext SaveFusionMedium() {
+    FusionMediumContext value;value.count=fusionActiveMediumCount;
+    [unroll] for(uint i=0;i<8;++i)value.media[i]=fusionActiveMedia[i];
+    return value;
+}
+void RestoreFusionMedium(FusionMediumContext value) {
+    fusionActiveMediumCount=value.count;
+    [unroll] for(uint i=0;i<8;++i)fusionActiveMedia[i]=value.media[i];
+}
+float3 FusionClassify(float value,uint route) {
+    return route==1 ? float3(0,value,0) : route==2 ? float3(0,0,value) : float3(value,0,0);
+}
+void InheritFusionMedium(inout Payload child) {
+    child.fusionMediumCount=fusionActiveMediumCount;
+    child.fusionFlags=0;child.fusionRoute=0;child.fusionContributions=0;
+    child.fusionPathId=0xFFFFFFFFu;
+    child.fusionForced=0;child.fusionBranchMask=0;
+    [unroll] for(uint i=0;i<8;++i) child.fusionMedia[i]=fusionActiveMedia[i];
+}
 
 // ============================================================================
 // Spectral Curve Data Structure (GPU) - OPTIMIZED

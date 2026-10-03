@@ -424,7 +424,7 @@ float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload
         sunRay.TMin = 0.0;
         sunRay.TMax = 1e10;
 
-        Payload sunPayload;
+        Payload sunPayload=(Payload)0;
         sunPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         sunPayload.isShadowed = 1;   // cleared by shadow_miss
         sunPayload.depth = 0;
@@ -433,9 +433,12 @@ float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload
         sunPayload.primaryHitT = -1.0;
         sunPayload.bsdfPdf = 0.0;
 
-        TraceRay(scene,
+        const FusionMediumContext fusionContext0=SaveFusionMedium();
+    InheritFusionMedium(sunPayload);
+    TraceRay(scene,
                  RAY_FLAG_SKIP_CLOSEST_HIT_SHADER | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
                  0xFF, 0, 0, 1, sunRay, sunPayload);
+    RestoreFusionMedium(fusionContext0);
 
         const float visible = (sunPayload.isShadowed == 0) ? 1.0 : 0.0;
         correction += (visible - response.y) * response.x;
@@ -969,7 +972,7 @@ bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
     // Stop short of the emitter, or the emitter itself is the occluder.
     shadowRay.TMax      = s.dist * 0.999;
 
-    Payload shadowPayload;
+    Payload shadowPayload=(Payload)0;
     shadowPayload.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     shadowPayload.isShadowed  = 1;   // cleared by shadow_miss
     shadowPayload.depth       = 0;
@@ -978,8 +981,11 @@ bool LightSampleVisible(float3 hitPos, float3 normal, LightSample s) {
     shadowPayload.primaryHitT = -1.0;
     shadowPayload.bsdfPdf     = 0.0;
 
+    const FusionMediumContext fusionContext1=SaveFusionMedium();
+    InheritFusionMedium(shadowPayload);
     TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
              0xFF, 0, 0, 1, shadowRay, shadowPayload);
+    RestoreFusionMedium(fusionContext1);
 
     return shadowPayload.isShadowed == 0;
 }
@@ -1278,7 +1284,7 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     bounceRay.TMin      = 0.0;
     bounceRay.TMax      = 1e9;
 
-    Payload child;
+    Payload child=(Payload)0;
     child.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     child.isShadowed  = 0;
     child.depth       = payload.depth + 1;
@@ -1290,7 +1296,10 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     // the light sampling the same vertex did. The mixture density, evaluated at
     // the direction actually taken -- see BsdfMixturePdf.
     child.bsdfPdf     = BsdfMixturePdf(normal, V, wi, roughness, qSpec, aniso);
+    const FusionMediumContext fusionContext2=SaveFusionMedium();
+    InheritFusionMedium(child);
     TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, bounceRay, child);
+    RestoreFusionMedium(fusionContext2);
 
     // Carry the child's consumption forward, or the parent's later draws
     // repeat numbers the child already used. With paths this long that
@@ -1307,8 +1316,12 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
 // Closest Hit Entry Point
 // ============================================================================
 
+#include "fusion_transport.hlsli"
+
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
+    fusionActiveMediumCount=payload.fusionMediumCount;
+    [unroll] for(uint medium=0;medium<8;++medium) fusionActiveMedia[medium]=payload.fusionMedia[medium];
     // Record this ray's hit distance for the depth AOV. Only the depth-0
     // (primary) value survives: raygen snapshots its own payload right after
     // the primary trace, and recursive rays carry separate Payload instances.
@@ -1397,7 +1410,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ========================================================================
     float3 edge1 = v1 - v0;
     float3 edge2 = v2 - v0;
-    float3 objectGeometricNormal = SafeNormalize(cross(edge1, edge2), float3(0.0, 1.0, 0.0));
+    const float3 triangleCross=cross(edge1,edge2);
+    const float triangleScale=max(abs(triangleCross.x),max(abs(triangleCross.y),abs(triangleCross.z)));
+    float3 objectGeometricNormal=triangleScale>0 && isfinite(triangleScale)
+        ? normalize(triangleCross/triangleScale) : float3(0,1,0);
 
     // Transform geometric normal to world space using inverse-transpose
     // mul(v, M) = v * M = transpose(M) * v, and we want transpose(inverse(ObjectToWorld)) * v
@@ -1447,6 +1463,18 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 uv1 = uvBuffer[geoInfo.uvOffset + idx1];
     float2 uv2 = uvBuffer[geoInfo.uvOffset + idx2];
     float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
+    if(payload.fusionPathId!=0xFFFFFFFFu) {
+        const FusionTransportData data=fusionTransport[1+InstanceIndex()];
+        FusionRecordVertex(payload,WorldRayOrigin()+WorldRayDirection()*RayTCurrent(),
+            worldGeometricNormal,data.nodeId,PrimitiveIndex(),data.mode==0 ? 3 : data.mode);
+    }
+    if(FusionScalarTransport()) {
+      if(fusionTransport[1+InstanceIndex()].mode!=0) {
+        const float3 hit=WorldRayOrigin()+WorldRayDirection()*RayTCurrent();
+        const float temperature=GetSurfaceTemperatureK(material,geoInfo,PrimitiveIndex(),uv,hit,payload);
+        if(TraceFusionInterface(payload,material,1+InstanceIndex(),hit,worldGeometricNormal,hitBackFace,temperature)) return;
+      }
+    }
 
     // Per-slot UV, from KHR_texture_transform. `uv` itself stays untransformed:
     // it is what the debug UV view shows, and it is what the temperature slot
@@ -2005,7 +2033,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowRay.TMax = 1e10;  // Infinite distance (directional light)
 
         // Initialize shadow payload - assume shadowed (will be cleared by shadow_miss)
-        Payload shadowPayload;
+        Payload shadowPayload=(Payload)0;
         shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         shadowPayload.isShadowed = 1;  // Assume shadowed, shadow_miss will clear this
         shadowPayload.heroLambda = payload.heroLambda;
@@ -2014,7 +2042,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Trace shadow ray with optimized flags:
         // - RAY_FLAG_SKIP_CLOSEST_HIT_SHADER: Don't run closest hit, just check occlusion
         // - RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH: Accept first hit and terminate (fast shadow test)
-        TraceRay(
+        const FusionMediumContext fusionContext3=SaveFusionMedium();
+    InheritFusionMedium(shadowPayload);
+    TraceRay(
             scene,                                              // Acceleration structure
             RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |                  // Skip closest hit shader
             RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,           // Accept first hit, terminate search
@@ -2025,6 +2055,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             shadowRay,
             shadowPayload
         );
+    RestoreFusionMedium(fusionContext3);
 
         // shadowPayload.isShadowed: 1 = hit occluder (shadowed), 0 = miss (lit)
         shadowFactor = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
@@ -2053,16 +2084,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 dtRay.TMin = 0.0;
                 dtRay.TMax = 1e10;
 
-                Payload dtPayload;
+                Payload dtPayload=(Payload)0;
                 dtPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
                 dtPayload.isShadowed = 1;
                 dtPayload.heroLambda = payload.heroLambda;
                 dtPayload.bsdfPdf = 0.0;
 
-                TraceRay(scene,
+                const FusionMediumContext fusionContext4=SaveFusionMedium();
+    InheritFusionMedium(dtPayload);
+    TraceRay(scene,
                          RAY_FLAG_SKIP_CLOSEST_HIT_SHADER |
                          RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH,
                          0xFF, 0, 0, 1, dtRay, dtPayload);
+    RestoreFusionMedium(fusionContext4);
                 dtShadow = (dtPayload.isShadowed == 0) ? 1.0 : 0.0;
             }
         }
@@ -5047,7 +5081,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowRay.TMin = 0.001;
         shadowRay.TMax = 10000.0;
 
-        Payload shadowPayload;
+        Payload shadowPayload=(Payload)0;
         shadowPayload.radiance = float4(0.0, 0.0, 0.0, 0.0);
         shadowPayload.isShadowed = 1;  // Assume shadowed until miss shader says otherwise
         shadowPayload.heroLambda = payload.heroLambda;
@@ -5056,8 +5090,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         shadowPayload.bsdfPdf = 0.0;   // not a BSDF sample
 
         // Trace shadow ray (uses miss shader index 1 for shadows)
-        TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
+        const FusionMediumContext fusionContext5=SaveFusionMedium();
+    InheritFusionMedium(shadowPayload);
+    TraceRay(scene, RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_CLOSEST_HIT_SHADER,
                  0xFF, 0, 0, 1, shadowRay, shadowPayload);
+    RestoreFusionMedium(fusionContext5);
 
         float sunVisibility = (shadowPayload.isShadowed == 0) ? 1.0 : 0.0;
 
@@ -5196,7 +5233,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         recursiveRay.TMax = 10000.0;
 
         // Prepare recursive payload template
-        Payload recursivePayload;
+        Payload recursivePayload=(Payload)0;
         recursivePayload.isShadowed = 0;
         // A refracted or specularly reflected ray is not a BSDF *sample* in the
         // MIS sense -- the direction was determined, not drawn from a density --
@@ -5280,7 +5317,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             recursivePayload.rngState = payload.rngState;
             recursiveRay.Direction = (xi < F) ? reflectDir : refractDir;
 
-            TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+            const FusionMediumContext fusionContext6=SaveFusionMedium();
+    InheritFusionMedium(recursivePayload);
+    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+    RestoreFusionMedium(fusionContext6);
 
             // Scalar spectral radiance, by the contract on Payload::heroLambda.
             float L_h = recursivePayload.radiance.r;
@@ -5360,7 +5400,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     recursiveRay.Direction = refractDir;
                 }
 
-                TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+                const FusionMediumContext fusionContext7=SaveFusionMedium();
+    InheritFusionMedium(recursivePayload);
+    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+    RestoreFusionMedium(fusionContext7);
 
                 // Extract the channel-specific contribution
                 float channelValue = (ch == 0) ? recursivePayload.radiance.r :
@@ -5431,7 +5474,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // call sites for no benefit.
             bool reflected = (xi < F);
             recursiveRay.Direction = reflected ? reflectDir : refractDir;
-            TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+            const FusionMediumContext fusionContext8=SaveFusionMedium();
+    InheritFusionMedium(recursivePayload);
+    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
+    RestoreFusionMedium(fusionContext8);
 
             if (reflected) {
                 transmissionRadiance = recursivePayload.radiance;
@@ -5528,4 +5574,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Every mode but a quartet carrier writes zero into the fourth component
     // and reads it nowhere, so this one assignment serves all of them.
     payload.radiance = output_radiance;
+    payload.fusionTerminalDepth=payload.depth;
+    if(FusionScalarTransport()) {
+        payload.fusionContributions=FusionClassify(output_radiance.x,payload.fusionRoute);
+        FusionAttenuateSegment(payload,RayTCurrent());
+    }
 }

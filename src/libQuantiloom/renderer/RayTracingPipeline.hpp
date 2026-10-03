@@ -63,6 +63,9 @@
  */
 
 #pragma once
+#include "scene/CameraProjection.hpp"
+#include "renderer/FusionTransport.hpp"
+#include <array>
 
 #include "core/Types.hpp"
 #include "VulkanContext.hpp"
@@ -383,6 +386,25 @@ public:
 
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
+    /// Projection lives outside the frozen CameraData/push-constant ABI.
+    /// Set 0 is ordinary/CPU spectral capture, 1 is GPU measurement, 2 observer.
+    void SetCameraProjection(const camera::CameraProjection* projection, u32 set = 0);
+    void SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records);
+    void BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays);
+    Vector<u8> ReadFusionRecording();
+    void SetFusionInitialMedia(const Vector<u32>& media) { m_initialFusionMedia=media; }
+    struct ProbeRay {glm::vec3 origin;f32 wavelength;glm::vec3 direction;u32 branchMask;};
+    void SetFusionProbes(const Vector<ProbeRay>& probes);
+    struct GeometryHit {
+        u32 hit=0,instanceIndex=0,primitiveIndex=0;
+        f32 distance=-1;
+        glm::vec3 position{}; f32 depth=-1;
+        glm::vec3 normal{}; u32 validity=0;
+        glm::vec2 bary{},padding{};
+    };
+    static_assert(sizeof(GeometryHit)==64);
+    Vector<GeometryHit> CapturePrimaryGeometry(u32 width,u32 height,
+        const Vector<glm::vec2>* queryPixels=nullptr);
     [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.cameraAndSampling.camera; }
 
     // Set accumulation sampling parameters (call before TraceRays).
@@ -462,6 +484,12 @@ private:
     std::unique_ptr<GpuImage> m_cameraFallbackImage;
     std::unique_ptr<GpuImage> m_cameraFallbackDepth;
     std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;
+    std::array<std::unique_ptr<GpuBuffer>, 3> m_projectionBuffers;
+    VkPipeline m_geometryPipeline=VK_NULL_HANDLE;
+    std::unique_ptr<GpuBuffer> m_fusionTransportBuffer;
+    std::unique_ptr<GpuBuffer> m_fusionRecordBuffer;
+    Vector<u32> m_initialFusionMedia;
+    std::unique_ptr<GpuBuffer> m_fusionProbeBuffer;
     std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosHeader;
     std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosData;
 

@@ -15,6 +15,7 @@
 #include "core/Log.hpp"
 #include "core/Config.hpp"
 #include "dataset/ExportSession.hpp"
+#include "dataset/FusionExportJob.hpp"
 
 #include "BatchJob.hpp"
 #include "SequenceJob.hpp"
@@ -104,6 +105,7 @@ void PrintHelp(const char* progname) {
         << "Options:\n"
         << "  <config.toml>          Scene configuration file (required)\n"
         << "  dataset-verify <record.json>  Check export state and managed file hashes\n"
+        << "  fusion-export <job.toml> [--dry-run]  Export a physical multi-camera sample\n"
         << "  batch <list.txt>       Render every config the list names, in order,\n"
         << "                         reusing one GPU device across all of them\n"
         << "  sequence <config.toml> Render the config's [timeline] tick by tick on one\n"
@@ -236,6 +238,17 @@ int RunApp(int argc, char* argv[]) {
     // Initialize Logging
     // ========================================================================
     Log::Init("quantiloom.log", Log::Level::Info);
+    if (std::strcmp(argv[1], "fusion-export") == 0) {
+        const bool dryRun=argc==4 && std::strcmp(argv[3],"--dry-run")==0;
+        if(argc!=3 && !dryRun) {
+            std::cerr<<"Usage: "<<argv[0]<<" fusion-export <job.toml> [--dry-run]\n";
+            Log::Shutdown(); return 2;
+        }
+        const auto result=dataset::FusionExportJob::RunFile(argv[2],dryRun);
+        if(result) std::cout<<result.value().summaryJson<<"\n";
+        else std::cerr<<"Fusion export failed: "<<result.error()<<"\n";
+        Log::Shutdown(); return result ? 0 : 1;
+    }
 
     // ========================================================================
     // serve → answer MCP instead of rendering one scene and exiting

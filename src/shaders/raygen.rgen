@@ -10,6 +10,8 @@
 
 #include "common.hlsli"
 #include "camera_response.hlsli"
+#include "camera_projection.hlsli"
+#include "fusion_records.hlsli"
 
 // ============================================================================
 // Bindings
@@ -37,6 +39,8 @@
 // miss. Overwritten every frame (never accumulated) so it always reflects the
 // current scene; consumed by ExternalRenderContext::BlitDepthTo.
 [[vk::binding(22, 0)]] RWTexture2D<float> depthImage;
+struct FusionProbeRay {float3 origin;float wavelength;float3 direction;uint branchMask;};
+[[vk::binding(37,0)]] StructuredBuffer<FusionProbeRay> fusionProbeRays;
 
 // The push-constant block lives in common.hlsli, shared with the closest-hit
 // and miss shaders.
@@ -135,6 +139,25 @@ void main() {
         origin = pushConsts.camera.origin;
     }
 
+    // Native lens geometry applies before tracing, including subpixel jitter.
+    if (fusionRecords.Load(40)==0 && !orthographic && projectionConfig[0].x != 0) {
+        float3 localDirection;
+        if (!NativePixelDirection(pixelCenter, localDirection)) {
+            outputImage[launchID] = 0;
+            uint dw,dh;
+            depthImage.GetDimensions(dw,dh);
+            if(launchID.x<dw && launchID.y<dh) depthImage[launchID]=-1;
+            if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+                cameraMeasurementImage[uint3(launchID,pushConsts.timeStratum)]=0;
+                cameraMeasurementDepthImage[uint3(launchID,pushConsts.timeStratum)]=-1;
+            }
+            return;
+        }
+        direction=normalize(localDirection.x*pushConsts.camera.right-
+                            localDirection.y*pushConsts.camera.up+
+                            localDirection.z*pushConsts.camera.forward);
+    }
+
     // Setup ray
     RayDesc ray;
     ray.Origin = origin;
@@ -146,7 +169,16 @@ void main() {
     // Trace the primary ray
     // ========================================================================
     // Initialize payload
-    Payload payload;
+    Payload payload=(Payload)0;
+    payload.fusionPathId=0xFFFFFFFFu;
+    payload.fusionMediumCount=fusionRecords.Load(32);
+    [unroll] for(uint medium=0;medium<8;++medium) payload.fusionMedia[medium]=fusionRecords.Load(64+medium*4);
+    if(fusionRecords.Load(0)!=0 &&
+       (SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
+        const uint stride=fusionRecords.Load(4);
+        const uint root=pushConsts.sampleIndex*launchSize.x*launchSize.y+launchID.y*launchSize.x+launchID.x;
+        if(root%stride==0 && root/stride<fusionRecords.Load(8)) payload.fusionPathId=root/stride;
+    }
     payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
 
     // Initialize shadow flag (will be set by shadow miss shader)
@@ -185,6 +217,11 @@ void main() {
     }
 
     // Initialize recursion depth (0 = primary ray)
+    if(fusionRecords.Load(40)!=0) {
+        const FusionProbeRay probe=fusionProbeRays[launchID.x];
+        ray.Origin=probe.origin;ray.Direction=probe.direction;
+        payload.heroLambda=probe.wavelength;payload.fusionForced=1;payload.fusionBranchMask=probe.branchMask;
+    }
     payload.depth = 0;
 
     // Initialize RNG state from pixel seed for stochastic decisions
@@ -221,6 +258,19 @@ void main() {
     // strata carry their own depth in binding 31, and the interactive depth
     // blit must keep showing the anchor view.
     uint depthWidth, depthHeight;
+    if(fusionRecords.Load(0)!=0 &&
+       (SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
+        uint unused;
+        fusionRecords.InterlockedOr(28,payload.fusionFlags,unused);
+        if(payload.fusionPathId!=0xFFFFFFFFu) {
+            const uint address=128+payload.fusionPathId*32;
+            const float remainder=payload.radiance.x-dot(payload.fusionContributions,float3(1,1,1));
+            payload.fusionContributions+=FusionClassify(remainder,payload.fusionRoute);
+            fusionRecords.Store4(address,asuint(float4(payload.fusionContributions,payload.radiance.x)));
+            fusionRecords.Store4(address+16,uint4(launchID.y*launchSize.x+launchID.x,
+                pushConsts.sampleIndex,payload.fusionFlags,payload.fusionTerminalDepth|0x80000000u));
+        }
+    }
     depthImage.GetDimensions(depthWidth, depthHeight);
     if (launchID.x < depthWidth && launchID.y < depthHeight &&
         pushConsts.timeStratum == 0u)

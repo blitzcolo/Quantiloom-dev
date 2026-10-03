@@ -143,6 +143,8 @@ public:
     /// Get a nested table as a Config object
     /// @param key Dot-separated key path
     [[nodiscard]] Result<Config, String> GetTable(StringView key) const;
+    /// A literal child table name; dots/slashes in a material name are not paths.
+    [[nodiscard]] Result<Config,String> GetNamedTable(StringView name) const;
 
     /// Get an array of tables as a vector of Config objects
     /// @param key Dot-separated key path to array of tables

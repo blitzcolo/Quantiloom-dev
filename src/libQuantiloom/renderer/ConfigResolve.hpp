@@ -51,6 +51,7 @@
  */
 
 #pragma once
+#include "renderer/FusionTransport.hpp"
 
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "thermal/ThermalSolver.hpp"
@@ -275,6 +276,7 @@ struct EndmemberSlots {
 };
 
 struct ResolvedMaterialSpectra {
+    Vector<FusionTransportGpu> fusionTransport;
     Vector<SpectralCurveGPU> curves;
     std::unordered_map<String, i32> materialNameToCurve;
 

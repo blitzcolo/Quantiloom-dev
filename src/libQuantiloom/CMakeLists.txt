@@ -64,6 +64,12 @@ add_library(quantiloom_core OBJECT
     # Dataset export transactions
     dataset/ExportSession.cpp
     dataset/ProductGeometry.cpp
+    dataset/RigConfig.cpp
+    dataset/FusionExportJob.cpp
+    dataset/OpticalCorrespondence.cpp
+    dataset/OpticalCorrespondence.hpp
+    ${QL_PUBLIC_INC}/dataset/FusionExportJob.hpp
+    ${QL_PUBLIC_INC}/dataset/RigConfig.hpp
     ${QL_PUBLIC_INC}/dataset/ProductGeometry.hpp
     ${QL_PUBLIC_INC}/dataset/ExportSession.hpp
 
@@ -134,6 +140,8 @@ add_library(quantiloom_core OBJECT
     renderer/VulkanContextAdapter.cpp
     renderer/VulkanContextAdapter.hpp
     renderer/RenderCore.cpp
+    renderer/FusionTransport.cpp
+    renderer/FusionTransport.hpp
     renderer/RenderCore.hpp
     renderer/ConfigResolve.cpp
     renderer/ConfigResolve.hpp
@@ -171,6 +179,8 @@ add_library(quantiloom_core OBJECT
 
     # Scene module
     scene/Camera.cpp
+    scene/CameraProjection.cpp
+    ${QL_PUBLIC_INC}/scene/CameraProjection.hpp
     ${QL_PUBLIC_INC}/scene/Camera.hpp
     ${QL_PUBLIC_INC}/scene/Mesh.hpp
     scene/MeshOptimizer.cpp

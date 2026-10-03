@@ -1,4 +1,5 @@
 #include "dataset/ExportSession.hpp"
+#include "scene/CameraProjection.hpp"
 #include "dataset/SecureExportTree.hpp"
 #include "core/Sha256.hpp"
 #include "io/ImageIO.hpp"
@@ -242,6 +243,19 @@ void ValidateRecordShape(const Json& record) {
                 "missing or invalid product size");
         Require(product.contains("description") && product.at("description").is_object(),
                 "missing or invalid product description");
+        if(record.at("schema_version")==2) {
+            const auto& d=product.at("description");
+            Require(d.contains("role") && d.at("role").is_string(),"v2 product requires a role");
+            if(d.at("role")=="observation" || d.at("role")=="ground_truth") {
+                const auto& s=d.at("signal");
+                Require(s.is_object(),"v2 image requires a signal descriptor");
+                for(const char* key:{"kind","unit","storage","transfer"})
+                    Require(s.at(key).is_string() && !s.at(key).get<String>().empty(),"missing signal semantics");
+                Require(s.at("storage")=="float32" || s.at("storage")=="uint32","unsupported signal storage");
+                Require(s.at("channels")==d.at("channel_names"),"signal channel names disagree");
+                if(s.at("kind")=="instance_id") Require(s.at("storage")=="uint32","instance IDs require UINT storage");
+            }
+        }
     }
 }
 void ValidateGeometry(const Json& description) {
@@ -250,7 +264,7 @@ void ValidateGeometry(const Json& description) {
     Require(provenance.is_object(), "product provenance must be an object");
     if (!provenance.contains("geometry")) return;
     const auto& g = provenance.at("geometry");
-    Require(g.is_object() && g.at("version") == 1, "invalid geometry version");
+    Require(g.is_object() && (g.at("version") == 1 || g.at("version") == 2), "invalid geometry version");
     for (const char* key : {"width", "height"}) {
         Require(NonnegativeInteger(g.at(key)) && g.at(key).get<u64>() > 0 && g.at(key) == description.at(key),
                 "geometry and product grid disagree");
@@ -278,8 +292,27 @@ void ValidateGeometry(const Json& description) {
     }
     if (g.at("projection") == "perspective") {
         const auto k = array(g.at("intrinsics"), 9);
-        Require(k[0] > 0 && k[4] > 0 && k[8] == 1 && k[1] == 0 && k[3] == 0 && k[6] == 0 && k[7] == 0 &&
-                k[2] == scalar(g.at("width"))/2 && k[5] == scalar(g.at("height"))/2, "invalid intrinsics");
+        Require(k[0] > 0 && k[4] > 0 && k[8] == 1 && k[1] == 0 && k[3] == 0 && k[6] == 0 && k[7] == 0,
+                "invalid intrinsics");
+        if (g.at("version") == 1)
+            Require(k[2] == scalar(g.at("width"))/2 && k[5] == scalar(g.at("height"))/2,
+                    "legacy geometry requires centred intrinsics");
+        else {
+            camera::CameraProjection p;
+            p.explicitIntrinsics=true; p.fx=k[0]; p.fy=k[4]; p.cx=k[2]; p.cy=k[5];
+            const auto model=g.at("camera_model").get<String>();
+            if(model=="pinhole") p.model=camera::ProjectionModel::Pinhole;
+            else if(model=="brown_conrady") p.model=camera::ProjectionModel::BrownConrady;
+            else if(model=="fisheye") p.model=camera::ProjectionModel::Fisheye;
+            else throw std::runtime_error("unsupported camera model");
+            const auto& distortion=g.at("distortion");
+            Require(distortion.at("model")==model,"distortion model mismatch");
+            const auto coefficients=array(distortion.at("coefficients"),5);
+            std::copy(coefficients.begin(),coefficients.end(),p.coefficients.begin());
+            p.maxThetaRadians=scalar(distortion.at("max_theta_radians"));
+            const auto valid=camera::ValidateProjection(p,g.at("width").get<u32>(),g.at("height").get<u32>());
+            Require(valid.has_value(),"invalid native camera projection");
+        }
     } else {
         Require(g.at("projection") == "orthographic" && g.at("intrinsics").is_null() &&
                 scalar(g.at("film_height_world_units")) > 0 && scalar(g.at("film_width_world_units")) > 0,
@@ -391,12 +424,14 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         impl.names.insert(".internal");
         const auto frozen = Json::parse(provenance.json, UniqueKeys());
         if (!frozen.is_object()) throw std::runtime_error("provenance must be an object");
+        const u32 requestedVersion=frozen.value("export_schema_version",schemaVersion);
+        if(requestedVersion!=1 && requestedVersion!=2) throw std::runtime_error("unsupported export schema version");
         impl.names.insert("record.tmp");
         impl.names.insert(Fold(impl.sidecar));
         impl.names.insert(Fold(impl.replay));
         WriteText(impl.tree.FilePath(impl.staging / impl.replay), replayConfig.ToToml());
         impl.record = {
-            {"schema", "quantiloom.dataset.export"}, {"schema_version", schemaVersion},
+            {"schema", "quantiloom.dataset.export"}, {"schema_version", requestedVersion},
             {"record_id", impl.id}, {"state", "staging"},
             {"capture_status", "complete"}, {"pairing_status", "not_requested"},
             {"provenance", frozen}, {"products", Json::array()},
@@ -464,12 +499,47 @@ Status ExportSession::WriteImage(const String& name, const String& productId,
         description["channels"] = image.channels;
         description["channel_names"] = image.channelNames;
         description["image_metadata"] = image.metadata;
+        if(!description.contains("signal")) {
+            const auto value=[&](const char* key,const String& fallback=String{}) {
+                const auto it=image.metadata.find(key);return it==image.metadata.end() ? fallback : it->second;
+            };
+            const String kind=value("signal_kind",value("camera_signal_kind"));
+            const String unit=value("unit",value("camera_unit"));
+            if(!kind.empty() && !unit.empty()) {
+                description["signal"]={{"kind",kind},{"unit",unit},{"channels",image.channelNames},
+                    {"storage","float32"},{"transfer",value("transfer",kind=="display_srgb" ? "sRGB" : "linear")},
+                    {"colour_space",value("colour_space",kind=="cie_linear_srgb" || kind=="display_srgb" ? "sRGB" : "device_native")},
+                    {"integration",value("integration","declared_camera_pipeline")}};
+                for(const char* key:{"data_channels","channel_aliases","auxiliary_channels","band_nm","camera_cfa"})
+                    if(image.metadata.contains(key))description["signal"][key]=image.metadata.at(key);
+            }
+        }
         if (const auto found = image.metadata.find("quantiloom_provenance"); found != image.metadata.end()) {
             description["provenance"] = Json::parse(found->second, UniqueKeys());
             description["image_metadata"].erase("quantiloom_provenance");
         }
         return RegisterFile(name, productId, description.dump());
     } catch (const std::exception& e) { return Status::Err(e.what()); }
+}
+
+Status ExportSession::WriteUIntImage(const String& name,const String& productId,
+    const UIntImage& image,const String& descriptionJson) {
+    try {
+        const auto staged=StagingPath(name);
+        if(!staged) return Status::Err(staged.error());
+        UIntImage product=image;
+        product.metadata["quantiloom_record_id"]=m_impl->id;
+        product.metadata["quantiloom_product_id"]=productId;
+        product.metadata["quantiloom_sidecar"]=fs::path(m_impl->sidecar).lexically_relative(
+            fs::path(name).parent_path().empty() ? fs::path(".") : fs::path(name).parent_path()).generic_string();
+        const auto written=ImageIO::WriteUIntEXR(*staged,product);
+        if(!written) return Status::Err(written.error());
+        auto description=Json::parse(descriptionJson,UniqueKeys());
+        description["width"]=image.width;description["height"]=image.height;
+        description["channels"]=1;description["channel_names"]={"instance_id"};
+        description["storage"]="uint32";
+        return RegisterFile(name,productId,description.dump());
+    } catch(const std::exception& e) { return Status::Err(e.what()); }
 }
 Status ExportSession::Commit() {
     auto& impl = *m_impl;
@@ -536,7 +606,8 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
         const auto record = ReadJson(path);
         ValidateRecordShape(record);
         if (record.at("schema") != "quantiloom.dataset.export" ||
-            !record.at("schema_version").is_number_integer() || record.at("schema_version") != schemaVersion)
+            !record.at("schema_version").is_number_integer() ||
+            (record.at("schema_version") != 1 && record.at("schema_version") != 2))
             throw std::runtime_error("unsupported record schema");
         if (record.at("state") != "complete") throw std::runtime_error("record is not complete");
         const auto id = record.at("record_id").get<String>();

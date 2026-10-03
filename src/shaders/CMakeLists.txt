@@ -124,6 +124,7 @@ function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
 endfunction()
 
 if(DXC_EXECUTABLE)
+    quantiloom_compile_hlsl(fusion_geometry fusion_geometry.rayq.hlsl)
     # Ray tracing shaders
     quantiloom_compile_hlsl(raygen       raygen.rgen)
     quantiloom_compile_hlsl(closesthit   closesthit.rchit)

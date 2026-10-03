@@ -225,6 +225,15 @@ Result<void, String> ValidateCameraConfig(const CameraConfig& config) {
          config.optics.psfSigmaPixelsOverride != -1.0) ||
         config.optics.sensorWidthPx == 0 || config.optics.sensorHeightPx == 0)
         return Result<void, String>::Err("invalid physical camera geometry");
+    const auto projection = ResolveProjection(config.optics.projection,
+        config.optics.sensorWidthPx, config.optics.sensorHeightPx,
+        config.optics.focalLengthMm, config.optics.pixelPitchUm);
+    if (!projection) return Result<void, String>::Err(projection.error());
+    if (projection.value().model == ProjectionModel::Fisheye && config.optics.cosFourthVignetting)
+        return Result<void, String>::Err("fisheye cannot use perspective cos-fourth vignetting");
+    if (config.inputKind==CameraInputKind::FastRgbApproximation &&
+        (config.optics.projection.model!=ProjectionModel::Pinhole || config.optics.projection.explicitIntrinsics))
+        return Result<void,String>::Err("custom lens projection requires spectral camera input");
     if (!FinitePositive(config.readout.exposureSeconds) ||
         !FinitePositive(config.readout.framePeriodSeconds) ||
         !FiniteNonnegative(config.readout.rowDelaySeconds) ||

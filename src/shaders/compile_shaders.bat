@@ -133,6 +133,8 @@ if %ERRORLEVEL% NEQ 0 (
 echo       OK src/shaders/display_range_histogram.comp.spv created
 
 echo [9/24] Compiling pick.rayq...
+dxc %RQ_FLAGS% -E main -Fo src/shaders/fusion_geometry.spv src/shaders/fusion_geometry.rayq.hlsl
+if errorlevel 1 exit /b 1
 dxc %RQ_FLAGS% -E main -Fo src/shaders/pick.spv src/shaders/pick.rayq.hlsl
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile pick

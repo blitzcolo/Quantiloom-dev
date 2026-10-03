@@ -21,7 +21,7 @@ Result<String, String> ProductGeometry::ToJson() const {
         std::abs(glm::dot(d, f)) > 1e-5 || !std::isfinite(camera.aspectRatio) ||
         camera.aspectRatio <= 0.0f)
         return Result<String, String>::Err("invalid camera basis");
-    Json out = {{"version", version}, {"width", width}, {"height", height},
+    Json out = {{"version", nativeProjection ? 2u : version}, {"width", width}, {"height", height},
         {"reference_time_s", referenceTimeSeconds}, {"kind", "instantaneous_geometry"},
         {"world_units_to_meters", worldUnitsToMeters},
         {"camera_axes", "right_down_forward"}, {"pixel_origin", "top_left"},
@@ -40,6 +40,20 @@ Result<String, String> ProductGeometry::ToJson() const {
         out["intrinsics"] = {fx,0.0,width*0.5,0.0,fy,height*0.5,0.0,0.0,1.0};
         out["fov_y_radians"] = 2.0 * std::atan(camera.fovScale);
         out["fov_x_radians"] = 2.0 * std::atan(camera.fovScale * camera.aspectRatio);
+        if (nativeProjection) {
+            const auto valid = camera::ValidateProjection(*nativeProjection, width, height);
+            if (!valid) return Result<String,String>::Err(valid.error());
+            const auto& p=*nativeProjection;
+            out["intrinsics"]={p.fx,0.0,p.cx,0.0,p.fy,p.cy,0.0,0.0,1.0};
+            out["camera_model"]=camera::ProjectionModelName(p.model);
+            out["distortion"]={{"model",camera::ProjectionModelName(p.model)},
+                {"coefficients",p.coefficients},{"max_theta_radians",p.maxThetaRadians},
+                {"coefficient_order",p.model==camera::ProjectionModel::Fisheye ?
+                    "k1_k2_k3_k4" : "k1_k2_p1_p2_k3"}};
+            out["fov_y_radians"]=nullptr;
+            out["fov_x_radians"]=nullptr;
+            out["valid_domain"]="native_grid_and_invertible_lens_field";
+        }
     } else {
         if (!std::isfinite(camera.orthoHeight) || camera.orthoHeight <= 0.0f)
             return Result<String, String>::Err("invalid orthographic projection");

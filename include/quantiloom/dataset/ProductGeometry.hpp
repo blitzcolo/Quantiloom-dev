@@ -1,6 +1,8 @@
 #pragma once
 #include "core/Platform.hpp"
 #include "scene/Camera.hpp"
+#include "scene/CameraProjection.hpp"
+#include <optional>
 
 namespace quantiloom::dataset {
 
@@ -13,6 +15,7 @@ struct QL_API ProductGeometry {
     f64 referenceTimeSeconds = 0.0;
     f64 worldUnitsToMeters = 1.0;
     CameraData camera{};
+    std::optional<camera::CameraProjection> nativeProjection;
 
     [[nodiscard]] Result<String, String> ToJson() const;
 };
