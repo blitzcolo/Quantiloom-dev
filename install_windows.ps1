@@ -28,7 +28,17 @@ if ($Force) {
     # gates, so the stamp describes a build that no longer exists.
     if (Test-Path $Dll) {
         $dllNow = (Get-Item $Dll).LastWriteTimeUtc
-        if ($dllNow -gt [datetime]::Parse($stamp.dllWriteUtc).ToUniversalTime().AddSeconds(1)) {
+        # PowerShell 7 converts ISO JSON strings to DateTime automatically.
+        # Preserve that UTC kind; reparsing its culture-formatted string would
+        # reinterpret UTC as local time and reject an unchanged DLL.
+        $gateDllUtc = if ($stamp.dllWriteUtc -is [datetime]) {
+            $stamp.dllWriteUtc.ToUniversalTime()
+        } else {
+            [datetime]::Parse([string]$stamp.dllWriteUtc,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()
+        }
+        if ($dllNow -gt $gateDllUtc.AddSeconds(1)) {
             throw "the build is newer than the gate stamp -- re-run ./build_windows.ps1, or -Force to override."
         }
     }
