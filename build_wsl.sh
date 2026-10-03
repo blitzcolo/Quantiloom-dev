@@ -114,9 +114,10 @@ PY="${PYTHON:-python3}"
 "$PY" scripts/render-tests/check_camera_history.py;  cam_hist_status=$?
 "$PY" scripts/render-tests/check_camera_ae.py;       cam_ae_status=$?
 "$PY" scripts/render-tests/check_dataset_prerequisites.py; dataset_status=$?
+"$PY" scripts/render-tests/check_fusion_ready.py; fusion_status=$?
 set -e
 cam_status=0
-for s in "$cam_dyn_status" "$cam_isp_status" "$cam_hist_status" "$cam_ae_status" "$dataset_status"; do
+for s in "$cam_dyn_status" "$cam_isp_status" "$cam_hist_status" "$cam_ae_status" "$dataset_status" "$fusion_status"; do
     if [ "$s" = 1 ] || [ "$s" = 2 ]; then cam_status=$s; break; fi
     if [ "$s" = 3 ]; then cam_status=3; fi
 done

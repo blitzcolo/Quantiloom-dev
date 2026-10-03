@@ -46,8 +46,8 @@ def digest(path):
         return hash.hexdigest()
 
 def check_geometry(g):
-    if not g['version'] == 1:
-        raise ValueError("invalid g['version'] == 1")
+    if g['version'] not in (1, 2):
+        raise ValueError('invalid geometry version')
     if not (type(g['width']) is int and g['width'] > 0):
         raise ValueError("invalid type(g['width']) is int and g['width'] > 0")
     if not (type(g['height']) is int and g['height'] > 0):
@@ -84,8 +84,26 @@ def check_geometry(g):
             raise ValueError('invalid k[0] > 0 and k[4] > 0 and (k[8] == 1)')
         if not k[1] == k[3] == k[6] == k[7] == 0:
             raise ValueError('invalid k[1] == k[3] == k[6] == k[7] == 0')
-        if not (k[2] == g['width'] / 2 and k[5] == g['height'] / 2):
+        if g['version'] == 1 and not (k[2] == g['width'] / 2 and k[5] == g['height'] / 2):
             raise ValueError("invalid k[2] == g['width'] / 2 and k[5] == g['height'] / 2")
+        if g['version'] == 2:
+            model = g['camera_model']
+            distortion = g['distortion']
+            if model not in ('pinhole', 'brown_conrady', 'fisheye') or distortion['model'] != model:
+                raise ValueError('invalid native projection model')
+            coefficients = distortion['coefficients']
+            if len(coefficients) != 5 or not all(math.isfinite(x) for x in coefficients):
+                raise ValueError('invalid native projection coefficients')
+            if model == 'pinhole' and any(coefficients):
+                raise ValueError('pinhole carries distortion')
+            if model == 'fisheye':
+                theta = distortion['max_theta_radians']
+                if not 0 < theta < math.pi / 2 or coefficients[4] != 0:
+                    raise ValueError('invalid fisheye field')
+                for i in range(1025):
+                    t = theta * i / 1024
+                    if 1 + sum((2*j+3)*coefficients[j]*t**(2*j+2) for j in range(4)) <= 1e-8:
+                        raise ValueError('non-monotone fisheye')
     else:
         if not (g['projection'] == 'orthographic' and g['intrinsics'] is None):
             raise ValueError("invalid g['projection'] == 'orthographic' and g['intrinsics'] is None")
@@ -153,6 +171,18 @@ def validate_record_shape(record):
             raise ValueError('invalid product size')
         if not isinstance(product['description'], dict):
             raise ValueError('product description must be an object')
+        if record['schema_version'] == 2:
+            d = product['description']
+            if not isinstance(d.get('role'), str):
+                raise ValueError('v2 product requires role')
+            if d['role'] in ('observation', 'ground_truth'):
+                signal = d['signal']
+                if not all(isinstance(signal.get(k), str) and signal[k] for k in ('kind', 'unit', 'storage', 'transfer')):
+                    raise ValueError('missing v2 signal semantics')
+                if signal['storage'] not in ('float32', 'uint32') or signal['channels'] != d['channel_names']:
+                    raise ValueError('signal storage/channels mismatch')
+                if signal['kind'] == 'instance_id' and signal['storage'] != 'uint32':
+                    raise ValueError('instance IDs must be UINT')
 
 
 def verify(record_path, inspect_exr=False):
@@ -160,8 +190,8 @@ def verify(record_path, inspect_exr=False):
     validate_record_shape(record)
     if not record['schema'] == 'quantiloom.dataset.export':
         raise ValueError("invalid record['schema'] == 'quantiloom.dataset.export'")
-    if not (type(record['schema_version']) is int and record['schema_version'] == 1):
-        raise ValueError("invalid type(record['schema_version']) is int and record['schema_version'] == 1")
+    if not (type(record['schema_version']) is int and record['schema_version'] in (1, 2)):
+        raise ValueError('unsupported export schema version')
     if not record['state'] == record['capture_status'] == 'complete':
         raise ValueError("invalid record['state'] == record['capture_status'] == 'complete'")
     if not record['pairing_status'] in ('not_requested', 'pending', 'complete', 'failed'):
@@ -225,6 +255,8 @@ def verify(record_path, inspect_exr=False):
             with OpenEXR.File(str(path), separate_channels=True) as image:
                 summary = dict(image.header())
                 channels = image.channels()
+                if 'channel_names' in description and set(channels) != set(description['channel_names']):
+                    raise ValueError('EXR channel names disagree with description')
                 if not len(channels) == description['channels']:
                     raise ValueError("invalid len(channels) == description['channels']")
                 for channel in channels.values():
@@ -233,6 +265,9 @@ def verify(record_path, inspect_exr=False):
                         raise ValueError("invalid pixels.shape[:2] == (description['height'], description['width'])")
                     if not pixels.dtype in (np.dtype('float32'), np.dtype('uint32')):
                         raise ValueError("invalid pixels.dtype in (np.dtype('float32'), np.dtype('uint32'))")
+                    signal = description.get('signal')
+                    if signal and pixels.dtype != np.dtype(signal['storage']):
+                        raise ValueError('EXR storage type disagrees with signal')
                     if not np.isfinite(pixels).all():
                         raise ValueError('non-finite EXR pixels')
         if summary is not None:

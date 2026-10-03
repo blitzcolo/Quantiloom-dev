@@ -1,0 +1,195 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:quantiloom:dataset:export:2",
+  "title": "Quantiloom export transaction, version 2",
+  "type": "object",
+  "required": [
+    "schema",
+    "schema_version",
+    "record_id",
+    "state",
+    "capture_status",
+    "pairing_status",
+    "provenance",
+    "replay",
+    "products"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema": {
+      "const": "quantiloom.dataset.export"
+    },
+    "schema_version": {
+      "const": 2
+    },
+    "record_id": {
+      "$ref": "#/$defs/hash"
+    },
+    "state": {
+      "enum": [
+        "staging",
+        "publishing",
+        "complete",
+        "failed",
+        "incomplete"
+      ]
+    },
+    "capture_status": {
+      "enum": [
+        "complete",
+        "failed",
+        "incomplete"
+      ]
+    },
+    "pairing_status": {
+      "enum": [
+        "not_requested",
+        "pending",
+        "complete",
+        "failed"
+      ]
+    },
+    "provenance": {
+      "type": "object"
+    },
+    "error": {
+      "type": "string"
+    },
+    "replay": {
+      "$ref": "#/$defs/artifact"
+    },
+    "products": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/artifact"
+          }
+        ],
+        "required": [
+          "product_id",
+          "size_bytes",
+          "description"
+        ],
+        "properties": {
+          "product_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "size_bytes": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "description": {
+            "type": "object",
+            "required": [
+              "role"
+            ],
+            "properties": {
+              "role": {
+                "enum": [
+                  "observation",
+                  "ground_truth",
+                  "path_truth",
+                  "path_correspondence",
+                  "manifest",
+                  "calibration_resource"
+                ]
+              },
+              "signal": {
+                "$ref": "#/$defs/signal"
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "role": {
+                      "enum": [
+                        "observation",
+                        "ground_truth"
+                      ]
+                    }
+                  }
+                },
+                "then": {
+                  "required": [
+                    "signal",
+                    "width",
+                    "height",
+                    "channels",
+                    "channel_names"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\:]+$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        }
+      }
+    },
+    "signal": {
+      "type": "object",
+      "required": [
+        "kind",
+        "unit",
+        "channels",
+        "storage",
+        "transfer"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unit": {
+          "type": "string",
+          "minLength": 1
+        },
+        "channels": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "storage": {
+          "enum": [
+            "float32",
+            "uint32"
+          ]
+        },
+        "transfer": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

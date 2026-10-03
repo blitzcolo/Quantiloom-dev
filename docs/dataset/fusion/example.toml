@@ -1,0 +1,51 @@
+[fusion]
+scene_config = "../example/scene.toml"
+output_directory = "../../../build/fusion-example"
+sample_id = "plate"
+seed = 42
+time_s = 0.0
+
+[rig]
+version = 1
+id = "two-visible-cameras"
+reference_camera = "reference"
+
+[[rig.cameras]]
+id = "reference"
+camera_to_rig = [1,0,0,0, 0,-1,0,0, 0,0,-1,3, 0,0,0,1]
+[rig.cameras.sensor]
+preset = "generic_cmos"
+[rig.cameras.sensor.optics]
+focal_length_mm = 1.0
+pixel_pitch_um = 50.0
+sensor_width_px = 32
+sensor_height_px = 24
+[rig.cameras.sensor.quality]
+noise_free = true
+wavelength_samples = 4
+[rig.cameras.sensor.products]
+raw_dn = true
+corrected_device_signal = true
+display = true
+
+[[rig.cameras]]
+id = "offset"
+camera_to_rig = [1,0,0,0.1, 0,-1,0,0, 0,0,-1,3, 0,0,0,1]
+[rig.cameras.sensor]
+preset = "generic_cmos"
+[rig.cameras.sensor.optics]
+focal_length_mm = 1.0
+pixel_pitch_um = 50.0
+sensor_width_px = 24
+sensor_height_px = 16
+[rig.cameras.sensor.optics.projection]
+model = "brown_conrady"
+intrinsics = [20.0, 20.0, 11.2, 8.3]
+coefficients = [-0.08, 0.01, 0.001, -0.002, 0.0]
+[rig.cameras.sensor.quality]
+noise_free = true
+wavelength_samples = 4
+[rig.cameras.sensor.products]
+raw_dn = true
+corrected_device_signal = true
+display = true

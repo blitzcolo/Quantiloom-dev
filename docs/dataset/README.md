@@ -1,5 +1,10 @@
 # Offline export records
 
+The [fusion-ready rig exporter](fusion/README.md) adds native Brown and
+fisheye projection, separate geometry/path truth, and export schema v2. Existing
+v1 records remain readable. Rebuild SDK consumers after updating public camera
+configuration types. See [export.v2.schema.json](export.v2.schema.json).
+
 SDK 0.5.0 records and verifies **export integrity**. It publishes offline images with a versioned JSON sidecar, a TOML configuration snapshot, file hashes and embedded record references. It does **not** yet provide verified replay or dataset ground truth. `reproducibility_verified` and `replay.replayable` are false; a successful integrity check is not a reproducibility claim.
 
 The export schema remains version 1. SDK 0.5.0 adds the separate `UIntImage` / UINT EXR API, reserves individual output files across concurrent sessions, and applies the current camera pose to ordinary and hyperspectral offline renders. Existing floating-point image interfaces remain available.

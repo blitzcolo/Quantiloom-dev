@@ -430,6 +430,23 @@ def fresnel_exact_conductor(cos_theta: float, n: float, k: float) -> float:
     return 0.5 * (Rs + Rp)
 
 
+def homogeneous_slab_coefficients(n, sigma_per_m, thickness_m):
+    """Normal-incidence parallel dielectric slab, including all internal returns.
+
+    Fresnel interfaces: PBRT 4e, Reflection Models/Dielectric BSDF.
+    Beer attenuation: PBRT 4e, Volume Scattering/Transmittance.
+    The geometric series gives R,T and the LTE absorption/emission fraction A.
+    """
+    if n <= 0 or sigma_per_m < 0 or thickness_m <= 0:
+        raise ValueError('invalid slab parameters')
+    f = fresnel_exact_dielectric(1, 1, n)
+    a = math.exp(-sigma_per_m * thickness_m)
+    denominator = 1 - f*f*a*a
+    t = (1-f)**2*a/denominator
+    r = f + (1-f)**2*f*a*a/denominator
+    return r, t, 1-r-t
+
+
 def fresnel_exact_dielectric(cosI: float, n1: float, n2: float) -> float:
     """
     Exact Fresnel reflectance for a dielectric-dielectric interface.

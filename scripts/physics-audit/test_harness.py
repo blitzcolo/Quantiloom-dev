@@ -230,6 +230,10 @@ def test_camera_physical_fov_and_airy_normalization():
 
 
 if __name__ == "__main__":
+    for n, sigma, thickness in ((1.0, 0.0, .2), (1.5, 0.0, .2), (1.5, 10.0, .2)):
+        r,t,a=H.homogeneous_slab_coefficients(n,sigma,thickness)
+        assert abs(r+t+a-1)<1e-12 and min(r,t,a)>-1e-12
+    assert approx(H.homogeneous_slab_coefficients(1.5,0,.2)[1],12/13,1e-12)
     test_planck_300k_peak()
     test_wien_displacement()
     test_fresnel_aluminum()
