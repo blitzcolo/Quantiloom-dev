@@ -543,6 +543,15 @@ TEST_F(ConfigTest, MergeOverrideWinsAcrossTypes) {
 // and writing it back unchanged is what lets a trajectory survive a save from
 // a host that cannot author one.
 
+TEST(ConfigToTomlTest, RemovingTopLevelKeysPreservesNestedValuesAndSource) {
+    auto original=Config::Parse("name='glass'\nspectral_material_refs=['old']\n[transport]\nior=1.5\n");
+    ASSERT_TRUE(original);
+    const auto reduced=original.value().WithoutKeys({"spectral_material_refs","missing"});
+    EXPECT_FALSE(reduced.Has("spectral_material_refs"));
+    EXPECT_TRUE(original.value().Has("spectral_material_refs"));
+    EXPECT_EQ(reduced.GetString("name"),"glass");
+    EXPECT_DOUBLE_EQ(reduced.GetDouble("transport.ior"),1.5);
+}
 TEST(ConfigToTomlTest, RoundTripsThroughAParse) {
     const auto original = Config::Parse(R"(
 [renderer]

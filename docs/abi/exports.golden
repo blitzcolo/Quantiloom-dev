@@ -65,6 +65,7 @@ public: class quantiloom::Camera const & quantiloom::ExternalRenderContext::GetC
 public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config &&)
 public: class quantiloom::Config & quantiloom::Config::operator=(class quantiloom::Config const &)
 public: class quantiloom::Config quantiloom::Config::MergedWith(class quantiloom::Config const &)const
+public: class quantiloom::Config quantiloom::Config::WithoutKeys(class std::vector<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> >,class std::allocator<class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > > const &)const
 public: class quantiloom::ExternalRenderContext & quantiloom::ExternalRenderContext::operator=(class quantiloom::ExternalRenderContext &&)
 public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO &&)
 public: class quantiloom::ImageIO & quantiloom::ImageIO::operator=(class quantiloom::ImageIO const &)

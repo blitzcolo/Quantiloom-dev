@@ -241,6 +241,7 @@ set(TEST_SCENE_SOURCES
     test_scene/test_camera_projection.cpp
     test_io/test_rig_config.cpp
     test_renderer/test_fusion_transport.cpp
+    test_renderer/test_fusion_publication.cpp
     test_scene/test_mesh.cpp
     test_scene/test_mesh_optimizer.cpp
     test_scene/test_scene.cpp

@@ -356,6 +356,7 @@ struct ExportSession::Impl {
     std::set<String> names, products;
     bool publishing = false;
     bool complete = false;
+    bool recoveryRequired = false;
 
     void Reserve(const fs::path& name) {
         const auto destination = directory / name;
@@ -392,6 +393,8 @@ struct ExportSession::Impl {
         if (publishing || complete) throw std::runtime_error("export session is no longer writable");
     }
     ~Impl() {
+        // A failed rollback must retain its recovery files and reservations.
+        if (recoveryRequired) return;
         if (!staging.empty()) { try { tree.RemoveTree(staging); } catch (...) {} }
         for (auto it = claims.rbegin(); it != claims.rend(); ++it) {
             try { tree.Remove(*it); } catch (...) {}
@@ -545,11 +548,13 @@ Status ExportSession::Commit() {
     auto& impl = *m_impl;
     if (impl.complete || impl.publishing)
         return Status::Err("export session has already finished or started publication");
+    struct Replacement { fs::path name, backup; bool saved = false, installed = false; };
+    Vector<Replacement> replacements;
     try {
         impl.RequireOpen();
         if (impl.products.empty()) throw std::runtime_error("cannot publish an empty export");
         ValidateRecordShape(impl.record);
-        // Check staged bytes before invalidating a previous complete export.
+        // Validate every staged byte before touching the previous export.
         for (const auto& product : impl.record["products"]) {
             ValidateGeometry(product.at("description"));
             const fs::path stagedName(product.at("path").get<String>());
@@ -561,19 +566,35 @@ Status ExportSession::Commit() {
         }
         if (Digest(impl.tree.FilePath(impl.staging / impl.replay)) != impl.record["replay"]["sha256"].get<String>())
             throw std::runtime_error("staged replay configuration changed");
-        impl.record["state"] = "publishing";
-        impl.PublishRecord();
+        impl.tree.Ensure(impl.staging / ".internal" / "previous");
+        const auto add = [&](const fs::path& name) {
+            replacements.push_back({name, impl.staging / ".internal" / "previous" /
+                std::to_string(replacements.size())});
+        };
+        // The record is installed last, after all products and their hashes.
+        add(impl.sidecar);
+        add(impl.replay);
+        for (const auto& product : impl.record["products"]) add(product.at("path").get<String>());
         impl.publishing = true;
-        {
+        // Keep the original files themselves, rather than copies whose write can
+        // fail after destroying the old bytes. Reverse this journal on failure.
+        for (auto& replacement : replacements) {
             const ReservationGate gate;
-            impl.tree.Replace(impl.staging / impl.replay, impl.directory / impl.replay);
+            const auto destination = impl.directory / replacement.name;
+            if (impl.tree.Exists(destination)) {
+                if (!impl.tree.Regular(destination)) throw std::runtime_error("output is not a regular file");
+                impl.tree.Replace(destination, replacement.backup);
+                replacement.saved = true;
+            }
+        }
+        for (auto& replacement : replacements) {
+            if (replacement.name == impl.sidecar) continue;
+            const ReservationGate gate;
+            impl.tree.Replace(impl.staging / replacement.name, impl.directory / replacement.name);
+            replacement.installed = true;
         }
         for (const auto& product : impl.record["products"]) {
             const auto name = product.at("path").get<String>();
-            {
-                const ReservationGate gate;
-                impl.tree.Replace(impl.staging / name, impl.directory / name);
-            }
             if (Digest(impl.tree.FilePath(impl.directory / name)) != product.at("sha256").get<String>())
                 throw std::runtime_error("published product hash mismatch: " + name);
         }
@@ -581,15 +602,25 @@ Status ExportSession::Commit() {
             throw std::runtime_error("published replay hash mismatch");
         impl.record["state"] = "complete";
         impl.PublishRecord();
+        replacements.front().installed = true;
         impl.complete = true;
         return Status::Ok();
     } catch (const std::exception& e) {
-        if (impl.publishing) {
-            impl.record["state"] = "failed";
-            impl.record["error"] = e.what();
-            try { impl.PublishRecord(); } catch (...) { /* publishing remains invalid */ }
+        String recoveryError;
+        for (auto it = replacements.rbegin(); it != replacements.rend(); ++it) {
+            try {
+                // Never expose an old complete record over a partial recovery.
+                if (it->name == impl.sidecar && impl.recoveryRequired) continue;
+                const ReservationGate gate;
+                if (it->installed) impl.tree.Replace(impl.directory / it->name, impl.staging / it->name);
+                if (it->saved) impl.tree.Replace(it->backup, impl.directory / it->name);
+            } catch (const std::exception& restore) {
+                impl.recoveryRequired = true;
+                recoveryError += String("; rollback failed: ") + restore.what();
+            }
         }
-        return Status::Err(e.what());
+        if (impl.recoveryRequired) recoveryError += "; recovery files retained at " + impl.staging.string();
+        return Status::Err(String(e.what()) + recoveryError);
     }
 }
 const String& ExportSession::RecordId() const { return m_impl->id; }

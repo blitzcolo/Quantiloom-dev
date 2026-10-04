@@ -452,6 +452,12 @@ String Config::ToToml() const {
     return oss.str();
 }
 
+Config Config::WithoutKeys(const Vector<String>& keys) const {
+    Config result(*this);
+    for (const auto& key : keys) result.m_impl->root.erase(key);
+    return result;
+}
+
 String Config::ToToml(StringView topLevelKey) const {
     const auto it = m_impl->root.find(topLevelKey);
     if (it == m_impl->root.end()) return {};

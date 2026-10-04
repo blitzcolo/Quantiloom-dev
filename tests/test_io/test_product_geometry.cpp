@@ -1,9 +1,23 @@
 #include <gtest/gtest.h>
 #include "dataset/ProductGeometry.hpp"
+#include "dataset/RectificationSupport.hpp"
 #include <nlohmann/json.hpp>
 #include <cmath>
 
 using namespace quantiloom;
+TEST(ProductGeometryTest, RectificationRequiresEveryNativeInterpolationNeighbour) {
+    camera::CameraProjection fish;
+    fish.model=camera::ProjectionModel::Fisheye;
+    fish.fx=fish.fy=10;fish.cx=fish.cy=4;fish.maxThetaRadians=.29;
+    auto ideal=fish;ideal.model=camera::ProjectionModel::Pinhole;
+    const auto ray=camera::UnprojectPixel(ideal,{2.5,1.5});ASSERT_TRUE(ray.valid);
+    const auto native=camera::ProjectDirection(fish,ray.direction);ASSERT_TRUE(native.valid);
+    EXPECT_FALSE(dataset::detail::HasRectificationSupport(fish,native.pixel,8,8));
+    EXPECT_TRUE(dataset::detail::HasRectificationSupport(fish,{4,4},8,8));
+    EXPECT_TRUE(dataset::detail::HasRectificationSupport(ideal,{7.5,7.5},8,8));
+    EXPECT_FALSE(dataset::detail::HasRectificationSupport(ideal,{7.50001,7.5},8,8));
+    EXPECT_FALSE(dataset::detail::HasRectificationSupport(ideal,{.49,4},8,8));
+}
 TEST(ProductGeometryTest, NativePixelCentresReprojectWithRightDownForwardAxes) {
     Camera camera({2,3,7}, {-1,0,0}, {0,1,0}, 47.0f, 1.7f);
     dataset::ProductGeometry geometry;

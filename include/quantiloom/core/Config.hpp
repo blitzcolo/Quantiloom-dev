@@ -190,6 +190,10 @@ public:
     /// @return The merged configuration
     [[nodiscard]] Config MergedWith(const Config& overrides) const;
 
+    /// Copy the document without the named top-level keys. Other values and
+    /// nested tables remain unchanged; the source document is not modified.
+    [[nodiscard]] Config WithoutKeys(const Vector<String>& keys) const;
+
     // ========================================================================
     // Template Interface (for backward compatibility)
     // Supported types: String, i32, i64, u32, u64, f32, f64, bool

@@ -25,8 +25,10 @@ struct VerificationReport {
 /// across subdirectories; disjoint sets can render and publish concurrently.
 /// Claims survive a crash (inspect and remove stale *.quantiloom-export.lock
 /// directories explicitly). StagingPath reserves its destination until destruction.
-/// Destruction before Commit leaves the previous sample intact. Once publication
-/// begins, a failed transaction leaves a non-complete record.
+/// Destruction before Commit leaves the previous sample intact. Commit retains
+/// previous files until success and rolls them back on publication failure.
+/// Readers may see an unavailable record during commit. If recovery itself fails,
+/// private backups and claims are retained and their location is reported.
 class QL_API ExportSession {
 public:
     static Result<std::unique_ptr<ExportSession>, String> Create(

@@ -93,15 +93,16 @@ TEST_F(ExportSessionTest, DetectsChangedProductAndReplay) {
     std::ofstream(root / "frame.replay.toml", std::ios::app) << "# changed";
     EXPECT_FALSE(Valid());
 }
-TEST_F(ExportSessionTest, FailedPublicationInvalidatesOldSample) {
+TEST_F(ExportSessionTest, FailedPublicationPreservesOldRecord) {
     Publish();
+    const auto previous = Record();
     auto session = Create(); ASSERT_TRUE(session);
     fs::remove(root / "frame.exr");
     fs::create_directory(root / "frame.exr");
     std::ofstream(root / "frame.exr" / "blocker") << "x";
     ASSERT_TRUE(session.value()->WriteImage("frame.exr", "radiance", image, "{}"));
     EXPECT_FALSE(session.value()->Commit());
-    EXPECT_EQ(Record()["state"], "failed");
+    EXPECT_EQ(Record(), previous);
     EXPECT_FALSE(Valid());
 }
 TEST_F(ExportSessionTest, RejectsTraversalDuplicateAndReservedNames) {
@@ -398,5 +399,52 @@ TEST_F(ExportSessionTest, ClaimsAndRandomStagingUseProtectedOwnerOnlyPermissions
         ASSERT_TRUE(GetSecurityDescriptorOwner(descriptor, &owner, &defaulted));
         EXPECT_TRUE(EqualSid(owner, const_cast<DWORD*>(&allowed->SidStart)));
     }
+}
+
+TEST_F(ExportSessionTest, LockedLateProductRollsBackAllEarlierFiles) {
+    {
+        auto old = Create(); ASSERT_TRUE(old);
+        ASSERT_TRUE(old.value()->WriteImage("frame.exr", "first", image, "{}"));
+        ASSERT_TRUE(old.value()->WriteImage("late.exr", "last", image, "{}"));
+        ASSERT_TRUE(old.value()->Commit());
+    }
+    const auto previous = Record();
+    auto next = Create(); ASSERT_TRUE(next);
+    image.data = {5,6,7,8};
+    ASSERT_TRUE(next.value()->WriteImage("frame.exr", "first", image, "{}"));
+    ASSERT_TRUE(next.value()->WriteImage("late.exr", "last", image, "{}"));
+    const auto handle = CreateFileW((root / "late.exr").c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    ASSERT_NE(handle, INVALID_HANDLE_VALUE);
+    const auto status = next.value()->Commit();
+    CloseHandle(handle);
+    EXPECT_FALSE(status);
+    EXPECT_EQ(Record(), previous);
+    EXPECT_TRUE(Valid()) << ExportSession::Verify((root / "frame.metadata.json").string()).json;
+    auto original = ImageIO::ReadEXR((root / "frame.exr").string());
+    ASSERT_TRUE(original);
+    EXPECT_EQ(original->data, (Vector<f32>{1,2,3,4}));
+    EXPECT_FALSE(next.value()->Commit());
+}
+
+TEST_F(ExportSessionTest, FailedInstallRemovesNewProductsAndRestoresReplacedBytes) {
+    Publish();
+    const auto previous=Record();
+    auto next=Create();ASSERT_TRUE(next);
+    image.data={5,6,7,8};
+    ASSERT_TRUE(next.value()->WriteImage("frame.exr","first",image,"{}"));
+    ASSERT_TRUE(next.value()->WriteImage("new.exr","new",image,"{}"));
+    const auto staged=next.value()->StagingPath("last.exr");ASSERT_TRUE(staged);
+    ASSERT_TRUE(next.value()->WriteImage("last.exr","last",image,"{}"));
+    // Reads/hashing succeed, but moving the last staged file fails after the
+    // first two new products have already been installed.
+    const auto handle=CreateFileW(fs::path(*staged).c_str(),GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);
+    ASSERT_NE(handle,INVALID_HANDLE_VALUE);
+    const auto status=next.value()->Commit();CloseHandle(handle);
+    EXPECT_FALSE(status);EXPECT_EQ(Record(),previous);EXPECT_TRUE(Valid());
+    EXPECT_FALSE(fs::exists(root/"new.exr"));EXPECT_FALSE(fs::exists(root/"last.exr"));
+    auto original=ImageIO::ReadEXR((root/"frame.exr").string());ASSERT_TRUE(original);
+    EXPECT_EQ(original->data,(Vector<f32>{1,2,3,4}));
 }
 #endif

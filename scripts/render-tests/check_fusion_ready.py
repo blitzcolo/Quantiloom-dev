@@ -55,6 +55,8 @@ def run():
         if not np.any(mask==1):raise ValueError('pair fixture has no verified correspondences')
     print('Fusion gate passed: %d cameras, %d pairs, %d checked opaque pixels' % (report['camera_count'],report['pair_count'],checked))
     check_transmission(root,cli)
+    from fusion_rectification_reference import check
+    check(root,cli)
     return 0
 
 

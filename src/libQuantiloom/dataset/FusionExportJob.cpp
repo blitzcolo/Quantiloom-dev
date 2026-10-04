@@ -1,6 +1,7 @@
 #include "dataset/FusionExportJob.hpp"
 #include "dataset/ExportSession.hpp"
 #include "dataset/OpticalCorrespondence.hpp"
+#include "dataset/RectificationSupport.hpp"
 #include "io/ImageIO.hpp"
 #include "postprocess/CameraConfigIO.hpp"
 #include "postprocess/CameraPhysics.hpp"
@@ -60,8 +61,7 @@ Image Rectify(const Image& input,const camera::CameraProjection& native,
         const auto ray=camera::UnprojectPixel(target,{x+0.5,y+0.5});
         if(!ray.valid) continue;
         const auto q=camera::ProjectDirection(native,ray.direction);
-        if(!q.valid || q.pixel.x<.5 || q.pixel.y<.5 ||
-            q.pixel.x>input.width-.5 || q.pixel.y>input.height-.5) continue;
+        if(!q.valid || !detail::HasRectificationSupport(native,q.pixel,input.width,input.height)) continue;
         const double u=q.pixel.x-.5,v=q.pixel.y-.5;
         const u32 x0=static_cast<u32>(u),y0=static_cast<u32>(v);
         const u32 x1=std::min(x0+1,input.width-1),y1=std::min(y0+1,input.height-1);
@@ -368,6 +368,8 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
             ++completed;
         }
         for(const auto& p:rig.pairs) for(u32 variant=0;variant<(options.rectify ? 2u : 1u);++variant) {
+            if(options.onProgress) options.onProgress({completed,completed,p.sourceCamera,"correspondence"});
+            if(options.cancelled && options.cancelled()) throw std::runtime_error("fusion export cancelled");
             if(!primaryProducts.contains(p.sourceCamera) || !primaryProducts.contains(p.targetCamera))
                 throw std::runtime_error("pair references unknown camera");
             const String suffix=variant ? "/rectified" : "";
@@ -393,8 +395,9 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                 if(variant) {
                     const auto ray=camera::UnprojectPixel(projection,q.pixel);
                     const auto native=camera::ProjectDirection(*geometries.at(p.targetCamera).geometry.nativeProjection,ray.direction);
-                    if(!native.valid || native.pixel.x<.5 || native.pixel.y<.5 ||
-                       native.pixel.x>target.geometry.width-.5 || native.pixel.y>target.geometry.height-.5) {
+                    if(!native.valid || !detail::HasRectificationSupport(
+                       *geometries.at(p.targetCamera).geometry.nativeProjection,native.pixel,
+                       target.geometry.width,target.geometry.height)) {
                         validity.data[i]=2;continue;
                     }
                     queries[i]=glm::vec2(native.pixel);
@@ -455,6 +458,7 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
         WriteText(*staged,manifest.dump(2)+"\n");
         auto registered=session.RegisterFile(manifestName,"manifest",R"({"role":"manifest"})");
         if(!registered) throw std::runtime_error(registered.error());
+        if(options.onProgress) options.onProgress({completed,completed,"","ready_to_publish"});
         if(options.cancelled && options.cancelled()) throw std::runtime_error("fusion export cancelled");
         if(options.onProgress) options.onProgress({completed,completed,"","publish"});
         auto committed=session.Commit();
