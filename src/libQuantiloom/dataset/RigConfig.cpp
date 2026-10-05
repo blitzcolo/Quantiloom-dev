@@ -112,9 +112,19 @@ String RigConfigToToml(const RigConfig& rig) {
     out<<"[fusion]\nseed = "<<rig.seed<<"\n[rig]\nversion = "<<rig.version
         <<"\nid = "<<std::quoted(rig.id)<<"\nreference_camera = "<<std::quoted(rig.referenceCamera)<<"\nrig_to_world = ";
     matrix(rig.rigToWorld);
+    if(rig.pairs.empty())out<<"pairs = []\n";
     for(const auto& c:rig.cameras) {
         out<<"\n[[rig.cameras]]\nid = "<<std::quoted(c.id)<<"\ncamera_to_rig = ";matrix(c.cameraToRig);
-        std::istringstream sensor(CameraConfigToToml(c.sensor));String line;
+        auto frozen=c.sensor;
+        frozen.optics.knownPsfSourcePath.clear();
+        frozen.photon.nucGainMapPath.clear();frozen.photon.nucOffsetElectronsMapPath.clear();
+        frozen.thermal.nucGainMapPath.clear();frozen.thermal.nucOffsetDnMapPath.clear();
+        frozen.isp.defectPixelsPath.clear();
+        for(auto& channel:frozen.device.channels)for(auto* curve:{&channel.response.lensTransmission,
+            &channel.response.filterTransmission,&channel.response.quantumEfficiency,
+            &channel.response.thermalAbsorptance,&channel.response.systemResponse})
+            if(*curve)(*curve)->dataPath.clear();
+        std::istringstream sensor(CameraConfigToToml(frozen));String line;
         while(std::getline(sensor,line)) {
             if(!line.empty() && line.front()=='[') {
                 const size_t position=line.find_first_not_of('[');

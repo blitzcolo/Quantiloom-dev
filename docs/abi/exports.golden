@@ -102,6 +102,7 @@ public: class quantiloom::Result<struct quantiloom::ThermalElementTrajectory,cla
 public: class quantiloom::Result<struct quantiloom::camera::CameraOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::ExternalRenderContext::CaptureCameraProducts(void)
 public: class quantiloom::Result<struct quantiloom::camera::CameraOutput,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::CaptureCamera(struct quantiloom::camera::CaptureState &,double)
 public: class quantiloom::Result<struct quantiloom::camera::CaptureCheckpoint,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::CheckpointCamera(struct quantiloom::camera::CaptureState const &)
+public: class quantiloom::Result<struct quantiloom::dataset::FusionCaptureResultV2,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::CaptureFusionV2(struct quantiloom::camera::CaptureState &,double,struct quantiloom::dataset::FusionCaptureOptionsV2 const &)
 public: class quantiloom::Result<struct quantiloom::dataset::GeometryTruth,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::OfflineRenderer::CaptureGeometry(double,struct quantiloom::camera::CameraProjection const *)
 public: class quantiloom::Result<unsigned __int64,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned __int64>(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: class quantiloom::Result<unsigned int,class std::basic_string<char,struct std::char_traits<char>,class std::allocator<char> > > quantiloom::Config::GetRequired<unsigned int>(class std::basic_string_view<char,struct std::char_traits<char> >)const
@@ -338,5 +339,6 @@ struct glm::vec<3,float,0> quantiloom::EmissionSpectrumToRenderedLinearSrgb(stru
 struct glm::vec<3,float,0> quantiloom::ReflectanceToLinearSrgbD65(struct quantiloom::SpectralCurve const &)
 struct glm::vec<3,float,0> quantiloom::SpectralIrradianceToLinearSrgb(struct quantiloom::SpectralCurve const &)
 struct quantiloom::SpectralCurve quantiloom::MakeEqualEnergyIlluminant(float,float)
+struct quantiloom::camera::LensResultV2 quantiloom::camera::UnprojectPixelV2(struct quantiloom::camera::CameraProjection const &,struct glm::vec<2,double,0> const &,unsigned int,unsigned int)
 struct quantiloom::camera::ProjectionResult quantiloom::camera::ProjectDirection(struct quantiloom::camera::CameraProjection const &,struct glm::vec<3,double,0> const &)
 struct quantiloom::camera::UnprojectionResult quantiloom::camera::UnprojectPixel(struct quantiloom::camera::CameraProjection const &,struct glm::vec<2,double,0> const &)

@@ -14,7 +14,9 @@ using SpectralFrameSampler =
 
 class CpuCameraPipeline {
 public:
-    explicit CpuCameraPipeline(CameraConfig config);
+    explicit CpuCameraPipeline(CameraConfig config, bool samplerAppliesVignetting=false,
+        const std::array<Image,4>* sampledContributions=nullptr,
+        std::array<Image,5>* integratedContributions=nullptr);
 
     // An acquisition advances state only after every spectral sample, readout
     // and requested product succeeds. firstRowMidpointSeconds is the clock
@@ -60,6 +62,9 @@ private:
             bool allowSignedMonteCarloResidual, bool commitState,
             const CameraConfig& config) const;
     CameraConfig m_config;
+    bool m_samplerAppliesVignetting=false;
+    const std::array<Image,4>* m_sampledContributions=nullptr;
+    std::array<Image,5>* m_integratedContributions=nullptr;
     // Warns once: auto_* flags on a thermal detector are ignored (AE has no
     // physical meaning on a power-responding detector).
     mutable bool m_autoThermalNoted = false;

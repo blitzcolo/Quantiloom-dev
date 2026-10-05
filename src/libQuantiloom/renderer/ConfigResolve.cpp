@@ -3479,7 +3479,9 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             auto result =
                 SpectralIO::LoadRefractiveIndexYAML(ResolveConfigPath(yamlPath, options.baseDir));
             if (!result) {
-                diag.Warn("refractive_index", "    Failed to load: " + result.error());
+                if(strictCamera && !approximateNkAllowed)
+                    diag.Fatal("refractive_index", "Failed to load requested n,k data: "+result.error());
+                else diag.Warn("refractive_index", "    Failed to load: " + result.error());
                 continue;
             }
 
@@ -3579,6 +3581,12 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
     }
     if (diag.failed()) {
         return SpectraResult::Err(diag.firstError());
+    }
+    for(auto& material:scene.materials) {
+        if(const auto it=out.materialNameToCurve.find(material.name);it!=out.materialNameToCurve.end())
+            material.spectralReflectanceCurveIndex=it->second;
+        if(const auto it=out.materialNameToRefractiveIndex.find(material.name);it!=out.materialNameToRefractiveIndex.end())
+            material.complexRefractiveIndexIndex=it->second;
     }
     const auto transport=ResolveFusionTransport(config,scene);
     if(!transport) return SpectraResult::Err(transport.error());

@@ -318,6 +318,11 @@ struct Payload {
     uint fusionRoute;
     float3 fusionContributions;
     uint fusionPathId;
+    float fusionResidual;
+    float fusionSegmentOffset;
+    float3 fusionPreviousPosition;
+    float3 fusionPreviousNormal;
+    uint fusionPreviousInstance;
     uint fusionTerminalDepth;
     uint fusionForced,fusionBranchMask;
 
@@ -349,6 +354,8 @@ float3 FusionClassify(float value,uint route) {
     return route==1 ? float3(0,value,0) : route==2 ? float3(0,0,value) : float3(value,0,0);
 }
 void InheritFusionMedium(inout Payload child) {
+    child.fusionSegmentOffset=0;
+    child.fusionPreviousInstance=0xFFFFFFFFu;
     child.fusionMediumCount=fusionActiveMediumCount;
     child.fusionFlags=0;child.fusionRoute=0;child.fusionContributions=0;
     child.fusionPathId=0xFFFFFFFFu;

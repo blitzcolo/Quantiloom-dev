@@ -131,6 +131,7 @@ struct ExternalRenderContext::Impl {
     // Side table for curve slots not stored on the public Material type. Kept
     // in scene-material order and replaced atomically on every scene adoption.
     Vector<rendercore::MaterialGpuIndices> materialGpuIndices;
+    Vector<rendercore::FusionTransportGpu> fusionTransport;
 
     // Acceleration structures
 
@@ -140,6 +141,7 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> lightingParamsBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     std::unique_ptr<GpuBuffer> spectralCurvesBuffer;
+    std::unique_ptr<GpuBuffer> cameraLightingParamsBuffer;
     std::unique_ptr<GpuBuffer> criBuffer;
     std::unique_ptr<GpuBuffer> solarLutBuffer;
     std::optional<std::pair<SpectralCurve, SpectralCurve>> cameraSolarSources;
@@ -528,6 +530,7 @@ struct ExternalRenderContext::Impl {
         spectralCurvesBuffer.reset();
         materialBuffer.reset();
         lightingParamsBuffer.reset();
+        cameraLightingParamsBuffer.reset();
         asyncPixelReadback.reset();
         outputImage.reset();
         depthAovImage.reset();
@@ -1487,7 +1490,8 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 report.spectralCurvesLoaded, report.refractiveIndicesLoaded,
                 report.materialsTemperatureBackfilled, report.materialsOverridden,
                 report.atmosphereEnabled ? "on" : "off");
-    if(m_impl->pipeline) m_impl->pipeline->SetFusionTransport(spectra.fusionTransport);
+    m_impl->fusionTransport=spectra.fusionTransport;
+    if(m_impl->pipeline) m_impl->pipeline->SetFusionTransport(m_impl->fusionTransport);
     return report;
 }
 
@@ -1506,6 +1510,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
 // Shared by the three loaders, which had identical tails.
 void ExternalRenderContext::Impl::AdoptScene(
     Scene&& loaded, Vector<rendercore::MaterialGpuIndices> indices) {
+    fusionTransport.clear();
     scene = std::make_unique<Scene>(std::move(loaded));
     materialGpuIndices = std::move(indices);
     if (materialGpuIndices.size() != scene->materials.size()) {
@@ -1712,8 +1717,13 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
             static_cast<f32>(atmosphereConfig.tGroundK);
     }
     effective.enableEnvironmentMap =
-        (lightingParams.enableEnvironmentMap != 0 && hasCustomEnvMap) ? 1u : 0u;
+        (lightingParams.enableEnvironmentMap != 0 && hasCustomEnvMap && spectralMode==SpectralMode::RGB) ? 1u : 0u;
     lightingParamsBuffer->Upload(&effective, sizeof(LightingParams));
+    if(!cameraLightingParamsBuffer)cameraLightingParamsBuffer=std::make_unique<GpuBuffer>(
+        contextAdapter->GetAllocator(),sizeof(LightingParams),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
+    if(cameraConfig.inputKind!=camera::CameraInputKind::FastRgbApproximation)effective.enableEnvironmentMap=0;
+    cameraLightingParamsBuffer->Upload(&effective,sizeof(LightingParams));
+    if(pipeline)pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
 }
 
 // Lazily (re)bakes the NN atmosphere LUT when the bake key changed and
@@ -4999,6 +5009,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);
+    if(cameraLightingParamsBuffer)pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
 }
 
 Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
@@ -5119,6 +5130,7 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
         return Result<void, String>::Ok();
     const auto valid = camera::ValidateCameraConfig(cameraConfig);
     if (!valid) return Result<void, String>::Err(valid.error());
+    UploadLightingParams();
     // Configuration changes happen between frames; wait before replacing
     // descriptor-backed images/buffers that a submitted frame may still use.
     vkDeviceWaitIdle(device);
@@ -5508,6 +5520,8 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
             rendercore::kCameraTimeStrataMax);
         const bool anythingMoves = !cameraConfig.motion.keys.empty() ||
                                    timeline.HasMotion();
+        if(anythingMoves && !fusionTransport.empty() && fusionTransport[0].mode!=0)
+            return Result<void,String>::Err("fusion optical preview requires a frozen scene and camera");
         strataCount = anythingMoves
                           ? std::min<u32>(requested, spectralSamples)
                           : 1u;
@@ -5559,6 +5573,11 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
                                                stratumTime);
         if (!pose) return Result<void, String>::Err(pose.error());
         pipeline->SetCameraData(pose.value());
+        if(scene && !fusionTransport.empty() && fusionTransport[0].mode!=0) {
+            const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
+            if(!initial)return Result<void,String>::Err(initial.error());
+            pipeline->SetFusionInitialMedia(*initial);
+        }
         pipeline->SetTimeStratum(stratum, strataCount);
         const auto& cameraData = pose.value();
         auto& frame = layerCameras[stratum];
@@ -5676,6 +5695,11 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
     const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);
     if (!pose) return Result<void, String>::Err(pose.error());
     pipeline->SetUseCameraObserverSet(true);
+    if(scene && !fusionTransport.empty() && fusionTransport[0].mode!=0) {
+        const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
+        if(!initial)return Result<void,String>::Err(initial.error());
+        pipeline->SetFusionInitialMedia(*initial);
+    }
     pipeline->SetCameraData(pose.value());
     pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
     const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);

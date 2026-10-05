@@ -113,6 +113,9 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
         for(auto& c:rig.cameras) {
             if(!SafeId(c.id) || !cameraIds.insert(c.id).second) throw std::runtime_error("invalid or duplicate camera identity");
             InlineResponses(c.sensor);
+            // A native sensor observation anchors truth; auxiliary observer
+            // renders retain separate acquisitions even when other products are off.
+            c.sensor.products.bandMeasurement=true;
             const auto valid=camera::ValidateCameraConfig(c.sensor);
             if(!valid) throw std::runtime_error(valid.error());
         }
@@ -122,7 +125,7 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
         if(!canonicalRig) throw std::runtime_error(canonicalRig.error());
         rig=*canonicalRig;
         if(!cameraIds.contains(rig.referenceCamera)) throw std::runtime_error("unknown fusion reference camera");
-        Json manifest={{"schema","quantiloom.fusion.sample"},{"schema_version",1},
+        Json manifest={{"schema","quantiloom.fusion.sample"},{"schema_version",2},
             {"sample_id",options.sampleId},{"rig_id",rig.id},{"reference_camera",rig.referenceCamera},
             {"reference_time_s",options.referenceTimeSeconds},{"observations",Json::array()},
             {"ground_truth",Json::array()},{"pairs",Json::array()},
@@ -173,29 +176,7 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
             cameraInit.onFusionPathChunk=[&](const FusionPathChunk& chunk) {
                 if(options.cancelled && options.cancelled()) throw std::runtime_error("fusion export cancelled");
                 const String id=options.sampleId+"/"+c.id+"/paths/"+std::to_string(chunkIndex);
-                const String path="ground_truth/"+c.id+"/paths_"+std::to_string(chunkIndex++)+".bin";
-                auto staged=session.StagingPath(path);
-                if(!staged)throw std::runtime_error(staged.error());
-                std::ofstream stream(fs::path(*staged),std::ios::binary);
-                stream.write(reinterpret_cast<const char*>(chunk.bytes.data()),static_cast<std::streamsize>(chunk.bytes.size()));
-                stream.flush();if(!stream)throw std::runtime_error("cannot write fusion path records");
-                stream.close();if(!stream)throw std::runtime_error("cannot close fusion path records");
-                const Json description={{"role","path_truth"},{"schema","quantiloom.fusion.paths"},{"schema_version",1},
-                    {"byte_order","little_endian"},{"header_bytes",128},{"ray_bytes",32},{"vertex_bytes",80},
-                    {"native_width",chunk.width},{"native_height",chunk.height},{"spp",chunk.spp},
-                    {"ray_stride",chunk.rayStride},{"stored_rays",chunk.storedRays},{"slots_per_ray",chunk.slotsPerRay},
-                    {"wavelength_nm",chunk.wavelengthNm},{"reference_time_s",chunk.referenceTimeSeconds},
-                    {"acquisition_index",chunk.acquisitionIndex},{"diagnostic_flags",chunk.diagnosticFlags},
-                    {"contribution_unit","W/m^2/sr/nm"},{"contribution_definition","first_camera_side_branch"},
-                    {"coverage",chunk.rayStride==1 ? "all_rays" : "stride_subset"},
-                    {"unrecorded_rays_are_unknown",true},{"truncated_path_contribution","unknown"},
-                    {"ray_fields",{"direct_f32","reflected_f32","transmitted_f32","radiance_f32","pixel_u32","sample_u32","flags_u32","terminal_depth_present_u32"}},
-                    {"vertex_fields",{"position_xyz_lambda_f32x4","face_forward_normal_xyz_distance_f32x4",
-                        "kind_node_primitive_route_u32x4","outgoing_xyz_coefficient_f32x4","n1_n2_sigma_segment_transmittance_f32x4"}},
-                    {"vertex_kinds",{{"unfilled",0},{"thin_sheet",1},{"solid_interface",2},{"opaque_terminal",3}}}};
-                auto registered=session.RegisterFile(path,id,description.dump());
-                if(!registered)throw std::runtime_error(registered.error());
-                pathChunks.push_back({{"product_id",id},{"path",path},{"description",description}});
+                ++chunkIndex;
                 auto decoded=DecodeOpticalEndpoints(chunk,id,pathGeometry);
                 auto& cache=endpoints[c.id];cache.insert(cache.end(),decoded.begin(),decoded.end());
             };
@@ -211,9 +192,12 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                 auto warm=renderer.value()->WarmUpCamera(state,c.sensor.warmup.seconds,c.sensor.readout.framePeriodSeconds);
                 if(!warm) throw std::runtime_error(warm.error());
             }
-            auto captured=renderer.value()->CaptureCamera(state,options.referenceTimeSeconds);
+            chunkIndex=0;endpoints[c.id].clear();pathChunks=Json::array();
+            FusionCaptureOptionsV2 captureOptions;captureOptions.maxRecordedRays=options.maxRecordedRays;
+            captureOptions.cancelled=options.cancelled;
+            auto captured=renderer.value()->CaptureFusionV2(state,options.referenceTimeSeconds,captureOptions);
             if(!captured) throw std::runtime_error(captured.error());
-            auto& images=captured.value();
+            auto& images=captured.value().products;
             const auto geometryJson=truth.value().geometry.ToJson();
             if(!geometryJson) throw std::runtime_error(geometryJson.error());
             const Json geometry=Json::parse(*geometryJson);
@@ -228,6 +212,40 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                 {"instances",Json::parse(truth.value().instancesJson)},
                 {"geometry",geometry},{"sampling","instantaneous_pixel_centre"},
                 {"validity_codes",{{"miss",0},{"opaque",1},{"invalid_lens",2},{"partial_coverage",3},{"transmissive",4}}}};
+            // Replace the callback's v1 artifacts with the versioned column records.
+            // The callback is used only for matching sampled optical endpoints.
+            truthRecord["path_chunks"]=Json::array();
+            for(size_t i=0;i<captured.value().paths.size();++i) {
+                const auto& chunk=captured.value().paths[i];
+                const String id=options.sampleId+"/"+c.id+"/paths/"+std::to_string(i);
+                const String path="ground_truth/"+c.id+"/paths_"+std::to_string(i)+".bin";
+                auto staged=session.StagingPath(path);if(!staged)throw std::runtime_error(staged.error());
+                std::ofstream stream(fs::path(*staged),std::ios::binary);
+                stream.write(reinterpret_cast<const char*>(chunk.bytes.data()),chunk.bytes.size());stream.close();
+                if(!stream)throw std::runtime_error("cannot write fusion column records");
+                const auto description=Json::parse(chunk.descriptionJson);
+                auto registered=session.RegisterFile(path,id,description.dump());
+                if(!registered)throw std::runtime_error(registered.error());
+                truthRecord["path_chunks"].push_back({{"product_id",id},{"path",path},{"description",description}});
+            }
+            const String measurementUnit=c.sensor.device.detector==camera::DetectorKind::Photon ? "e-/s" : "W";
+            truthRecord["contribution_products"]=Json::array();
+            for(u32 component=0;component<6;++component) {
+                const char* names[]={"contribution_direct","contribution_reflected","contribution_transmitted","contribution_residual","linear_reference","truncation_unknown"};
+                const auto& image=component<4 ? captured.value().contributions[component] : component==4 ? captured.value().linearReference : captured.value().truncationUnknown;
+                const String id=options.sampleId+"/"+c.id+"/"+names[component];
+                const String path="ground_truth/"+c.id+"/"+names[component]+".exr";
+                Json description={{"role","ground_truth"},{"signal",{{"kind",names[component]},
+                    {"unit",component==5 ? "mask" : measurementUnit},{"channels",image.channelNames},{"storage","float32"},{"transfer","linear"}}},
+                    {"stage","response_psf_exposure_before_detector_state_and_noise"},{"coverage","all_samples"},
+                    {"contribution_definition","first_camera_side_branch"},{"physical_tail","unknown_if_truncation_mask_is_set"},
+                    {"provenance",{{"geometry",geometry}}}};
+                auto written=session.WriteImage(path,id,image,description.dump());if(!written)throw std::runtime_error(written.error());
+                truthRecord["products"].push_back({{"product_id",id},{"path",path}});
+                if(component<4)truthRecord["contribution_products"].push_back(id);
+                if(component==4)truthRecord["linear_reference_product"]=id;
+                if(component==5)truthRecord["truncation_unknown_product"]=id;
+            }
             for(const auto& [image,name,unit]:geometryImages) {
                 const String id=options.sampleId+"/"+c.id+"/"+name;
                 const String path="ground_truth/"+c.id+"/"+name+".exr";
@@ -266,10 +284,15 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                 auto registered=session.RegisterFile(name,c.id+"/psf",R"({"role":"calibration_resource"})");
                 if(!registered) throw std::runtime_error(registered.error());
                 portableSensor.optics.knownPsfPath=name;
+                portableSensor.optics.knownPsfSourcePath=name;
             }
             Json observation={{"camera_id",c.id},{"acquisition_id",acquisition},{"acquisition_index",acquisitionIndex},
                 {"camera_to_rig",c.cameraToRig},{"rig_to_world",rig.rigToWorld},
                 {"products",Json::array()},{"sensor_config_toml",CameraConfigToToml(portableSensor)}};
+            observation["optical_assumptions"]={{"psf_spatial_model","shift_invariant_native_pixel_kernel"},
+                {"psf_source",c.sensor.optics.knownPsfPath.empty() ? "authored_or_diffraction_approximation" : "bundled_kernel"},
+                {"vignetting_model",c.sensor.optics.cosFourthVignetting ? "authored_perspective_cos_fourth" : "none"},
+                {"projection_does_not_establish_optical_response_calibration",true}};
             Image lensValidity(pathGeometry.width,pathGeometry.height,1);
             lensValidity.channelNames={"lens_valid_centre"};
             for(u32 y=0;y<lensValidity.height;++y)for(u32 x=0;x<lensValidity.width;++x)
@@ -282,15 +305,29 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                 {"role","observation"},{"signal",lensSignal},{"camera_id",c.id},{"acquisition_id",acquisition}}.dump());
             if(!lensWritten)throw std::runtime_error(lensWritten.error());
             observation["products"].push_back({{"product_id",lensId},{"path",lensPath},{"signal",lensSignal}});
+            for(const auto& [image,name]:std::vector<std::pair<const Image*,String>>{
+                {&captured.value().lensValidity,"lens_status"},{&captured.value().validSampleFraction,"valid_sample_fraction"}}) {
+                const String id=options.sampleId+"/"+c.id+"/"+name;
+                const String path="observations/"+c.id+"/"+name+".exr";
+                const Json signal={{"kind",name},{"unit",name=="lens_status" ? "enum" : "fraction"},
+                    {"storage","float32"},{"channels",image->channelNames},{"transfer","identity"}};
+                const Json description={{"role","observation"},{"signal",signal},{"camera_id",c.id},{"acquisition_id",acquisition},
+                    {"status_codes",{{"valid",0},{"outside_field",1},{"inverse_failed",2},{"outside_image",3}}}};
+                auto written=session.WriteImage(path,id,*image,description.dump());if(!written)throw std::runtime_error(written.error());
+                observation["products"].push_back({{"product_id",id},{"path",path},{"signal",signal}});
+            }
             for(const auto& [image,name]:products) if(*image) {
                 if(options.cancelled && options.cancelled()) throw std::runtime_error("fusion export cancelled");
                 const String id=options.sampleId+"/"+c.id+"/"+name;
                 const String path="observations/"+c.id+"/"+name+".exr";
+                const String productAcquisition=(*image)->signal.acquisitionIndex==acquisitionIndex ? acquisition :
+                    options.sampleId+"/"+c.id+"/"+std::to_string((*image)->signal.acquisitionIndex);
                 const Json description={{"role","observation"},{"signal",Signal(**image)},
-                    {"camera_id",c.id},{"acquisition_id",acquisition}};
+                    {"camera_id",c.id},{"acquisition_id",productAcquisition},
+                    {"acquisition_kind",productAcquisition==acquisition ? "sensor_capture" : "independent_observer_render"}};
                 const auto wrote=session.WriteImage(path,id,(*image)->image,description.dump());
                 if(!wrote) throw std::runtime_error(wrote.error());
-                observation["products"].push_back({{"product_id",id},{"path",path},{"signal",Signal(**image)}});
+                observation["products"].push_back({{"product_id",id},{"path",path},{"signal",Signal(**image)},{"acquisition_id",productAcquisition}});
                 // Prefer corrected device data, then raw/measurement; never default to display.
                 if(String(name)=="corrected" || (!primaryProducts.contains(c.id) && String(name)!="display"))
                     primaryProducts[c.id]=id;
@@ -315,7 +352,8 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
                     auto written=session.WriteImage("observations/"+c.id+"/"+name+"_rectified.exr",rectId,rectified,rectDescription.dump());
                     if(!written) throw std::runtime_error(written.error());
                     observation["products"].push_back({{"product_id",rectId},
-                        {"path","observations/"+c.id+"/"+name+"_rectified.exr"},{"signal",Signal(**image)},{"parent_product",id}});
+                        {"path","observations/"+c.id+"/"+name+"_rectified.exr"},{"signal",Signal(**image)},{"parent_product",id},
+                        {"acquisition_id",productAcquisition}});
                     if(!primaryProducts.contains(c.id+"/rectified")) {
                         primaryProducts[c.id+"/rectified"]=rectId;
                         for(const auto& [map,mapName]:std::vector<std::pair<Image*,String>>{
@@ -425,14 +463,41 @@ Result<FusionExportResult,String> FusionExportJob::Run(const Config& scene,
             }
             const String stem=p.sourceCamera+"_to_"+p.targetCamera+(variant ? "_rectified" : "");
             String opticalId;
-            if(!variant) {
+            {
+                if(options.cancelled && options.cancelled())throw std::runtime_error("fusion export cancelled");
                 const auto optical=MatchOpticalPaths(*verifier.value(),endpoints.at(p.sourceCamera),
-                    endpoints.at(p.targetCamera),target.geometry,options.maxOpticalSourcePaths);
+                    endpoints.at(p.targetCamera),geometries.at(p.targetCamera).geometry,options.maxOpticalSourcePaths,options.cancelled);
                 if(!optical)throw std::runtime_error(optical.error());
+                Json mapping=Json::parse(*optical);
+                if(variant) {
+                    mapping["coordinate_variant"]="rectified";
+                    mapping["native_parent_product"]=options.sampleId+"/pairs/"+p.sourceCamera+"_to_"+p.targetCamera+"/optical_paths";
+                    const auto convert=[&](const Json& pixel,const String& id)->Json {
+                        const auto ray=camera::UnprojectPixel(*geometries.at(id).geometry.nativeProjection,
+                            {pixel[0].get<f64>(),pixel[1].get<f64>()});
+                        if(!ray.valid)return nullptr;
+                        const auto projected=camera::ProjectDirection(*geometries.at(id+suffix).geometry.nativeProjection,ray.direction);
+                        if(!projected.valid || projected.pixel.x<0 || projected.pixel.y<0 ||
+                            projected.pixel.x>=geometries.at(id+suffix).geometry.width || projected.pixel.y>=geometries.at(id+suffix).geometry.height)return nullptr;
+                        const auto& np=*geometries.at(id).geometry.nativeProjection;
+                        const auto at=camera::ProjectDirection(np,ray.direction);
+                        if(!at.valid || !detail::HasRectificationSupport(np,at.pixel,
+                            geometries.at(id).geometry.width,geometries.at(id).geometry.height))return nullptr;
+                        return Json{projected.pixel.x,projected.pixel.y};
+                    };
+                    for(auto& row:mapping["rows"]) {
+                        row["source_rectified_pixel"]=convert(row["source_native_pixel"],p.sourceCamera);
+                        for(auto& match:row["matches"]) {
+                            match["target_native_pixel"]=match["target_pixel"];
+                            match["target_pixel"]=convert(match["target_native_pixel"],p.targetCamera);
+                            match["rectification_valid"]=!row["source_rectified_pixel"].is_null() && !match["target_pixel"].is_null();
+                        }
+                    }
+                } else mapping["coordinate_variant"]="native";
                 opticalId=options.sampleId+"/pairs/"+stem+"/optical_paths";
                 const String path="ground_truth/pairs/"+stem+"_optical.json";
                 auto staged=session.StagingPath(path);if(!staged)throw std::runtime_error(staged.error());
-                WriteText(*staged,*optical);
+                WriteText(*staged,mapping.dump());
                 const auto registered=session.RegisterFile(path,opticalId,R"({"role":"path_correspondence"})");
                 if(!registered)throw std::runtime_error(registered.error());
             }

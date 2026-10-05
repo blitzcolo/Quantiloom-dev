@@ -143,12 +143,27 @@ void main() {
     if (fusionRecords.Load(40)==0 && !orthographic && projectionConfig[0].x != 0) {
         float3 localDirection;
         if (!NativePixelDirection(pixelCenter, localDirection)) {
-            outputImage[launchID] = 0;
+            FusionAccumulate(launchID,launchSize,pushConsts.sampleIndex,0,0,0,8);
+            const uint root=pushConsts.sampleIndex*launchSize.x*launchSize.y+launchID.y*launchSize.x+launchID.x;
+            const uint stride=fusionRecords.Load(4);
+            if(fusionRecords.Load(0)!=0 && stride>0 && root%stride==0 && root/stride<fusionRecords.Load(8)) {
+                const uint row=root/stride;
+                fusionRecords.Store4(128+row*32+16,uint4(launchID.y*launchSize.x+launchID.x,pushConsts.sampleIndex,8,0));
+                if(fusionRecords.Load(60)!=0)fusionRecords.Store2(fusionRecords.Load(60)+row*12,asuint(pixelCenter));
+            }
+            const float retained = float(pushConsts.sampleIndex) / float(pushConsts.sampleIndex + 1u);
+            outputImage[launchID] = pushConsts.sampleIndex == 0u ? 0 : outputImage[launchID] * retained;
             uint dw,dh;
             depthImage.GetDimensions(dw,dh);
             if(launchID.x<dw && launchID.y<dh) depthImage[launchID]=-1;
             if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT) {
-                cameraMeasurementImage[uint3(launchID,pushConsts.timeStratum)]=0;
+                const uint3 coord=uint3(launchID,pushConsts.timeStratum);
+                float4 previous=pushConsts.sampleIndex == 0u ? 0 : cameraMeasurementImage[coord];
+                previous.rgb*=retained;
+                const uint2 physicalPixel=CameraPhysicalPixel(cameraResponseTable,launchID,launchSize);
+                previous.a=CameraHeaderWord(cameraResponseTable,3u)==CAMERA_CFA_MULTI ? 0 :
+                    float(CameraCfaChannel(cameraResponseTable,physicalPixel));
+                cameraMeasurementImage[coord]=previous;
                 cameraMeasurementDepthImage[uint3(launchID,pushConsts.timeStratum)]=-1;
             }
             return;
@@ -223,6 +238,8 @@ void main() {
         payload.heroLambda=probe.wavelength;payload.fusionForced=1;payload.fusionBranchMask=probe.branchMask;
     }
     payload.depth = 0;
+    if(payload.fusionPathId!=0xFFFFFFFFu && fusionRecords.Load(60)!=0)
+        fusionRecords.Store2(fusionRecords.Load(60)+payload.fusionPathId*12,asuint(pixelCenter));
 
     // Initialize RNG state from pixel seed for stochastic decisions
     payload.rngState = seed;
@@ -258,19 +275,30 @@ void main() {
     // strata carry their own depth in binding 31, and the interactive depth
     // blit must keep showing the anchor view.
     uint depthWidth, depthHeight;
+    if(!all(isfinite(payload.radiance)) && fusionRecords.Load(48)!=0) {
+        payload.fusionFlags|=16;uint unused;fusionRecords.InterlockedOr(28,16,unused);
+    }
     if(fusionRecords.Load(0)!=0 &&
        (SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
         uint unused;
         fusionRecords.InterlockedOr(28,payload.fusionFlags,unused);
         if(payload.fusionPathId!=0xFFFFFFFFu) {
             const uint address=128+payload.fusionPathId*32;
-            const float remainder=payload.radiance.x-dot(payload.fusionContributions,float3(1,1,1));
-            payload.fusionContributions+=FusionClassify(remainder,payload.fusionRoute);
+            if(fusionRecords.Load(60)!=0)fusionRecords.Store(fusionRecords.Load(60)+payload.fusionPathId*12+8,asuint(payload.fusionResidual));
             fusionRecords.Store4(address,asuint(float4(payload.fusionContributions,payload.radiance.x)));
             fusionRecords.Store4(address+16,uint4(launchID.y*launchSize.x+launchID.x,
                 pushConsts.sampleIndex,payload.fusionFlags,payload.fusionTerminalDepth|0x80000000u));
         }
     }
+    float scalarVignette=1;
+    if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE && projectionConfig[3].y!=0 && !orthographic) {
+        const float cosine=max(dot(direction,normalize(pushConsts.camera.forward)),0.0);
+        scalarVignette=cosine*cosine*cosine*cosine;
+    }
+    if(!all(isfinite(payload.radiance)) && fusionRecords.Load(48)!=0)payload.fusionFlags|=16;
+    FusionAccumulate(launchID,launchSize,pushConsts.sampleIndex,
+        float4(payload.fusionContributions,payload.fusionResidual)*scalarVignette,
+        payload.radiance.x*scalarVignette,1,payload.fusionFlags);
     depthImage.GetDimensions(depthWidth, depthHeight);
     if (launchID.x < depthWidth && launchID.y < depthHeight &&
         pushConsts.timeStratum == 0u)
@@ -364,6 +392,10 @@ void main() {
     // ========================================================================
 
     float3 linearHDR = payload.radiance.rgb;
+    if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE && projectionConfig[3].y!=0 && !orthographic) {
+        const float cosine=max(dot(direction,normalize(pushConsts.camera.forward)),0.0);
+        linearHDR*=cosine*cosine*cosine*cosine;
+    }
 
     // Clamp to a reasonable HDR range, so a firefly cannot dominate the
     // accumulation. SYMMETRIC on purpose -- the lower bound used to be 0.
@@ -382,7 +414,7 @@ void main() {
     // purpose as well as 0 did. Samples that reach here without a hero
     // wavelength were already clamped non-negative by the closest-hit and miss
     // shaders, so nothing else changes.
-    linearHDR = clamp(linearHDR, -10000.0, 10000.0);
+    if(fusionRecords.Load(48)==0)linearHDR = clamp(linearHDR, -10000.0, 10000.0);
 
     if (pushConsts.sampleIndex == 0) {
         // First sample: Initialize output with current radiance

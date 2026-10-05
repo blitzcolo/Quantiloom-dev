@@ -64,3 +64,21 @@ TEST(CameraProjectionTest, RejectsInvalidAndFoldingModels) {
     p.maxThetaRadians=1.2;
     EXPECT_FALSE(ValidateProjection(p,300,300));
 }
+
+TEST(CameraProjectionTest, RejectsFisheyeFoldBetweenFormerUniformChecks) {
+    CameraProjection p;p.model=ProjectionModel::Fisheye;p.explicitIntrinsics=true;
+    p.fx=p.fy=100;p.cx=p.cy=150;p.maxThetaRadians=1.2;
+    const double t=1.2*500.5/1024,a=t*t;
+    p.coefficients={-(2.000001)/(3*a),1/(5*a*a),0,0,0};
+    EXPECT_FALSE(ValidateProjection(p,300,300));
+}
+
+TEST(CameraProjectionTest, DetailedLensValidityDoesNotClamp) {
+    CameraProjection p;p.model=ProjectionModel::Fisheye;p.explicitIntrinsics=true;
+    p.fx=p.fy=10;p.cx=p.cy=4;p.maxThetaRadians=.3;
+    EXPECT_EQ(UnprojectPixelV2(p,{4,4},8,8).status,LensValidity::Valid);
+    EXPECT_EQ(UnprojectPixelV2(p,{.5,.5},8,8).status,LensValidity::OutsideField);
+    EXPECT_EQ(UnprojectPixelV2(p,{-1,4},8,8).status,LensValidity::OutsideImage);
+    p.fx=0;
+    EXPECT_EQ(UnprojectPixelV2(p,{4,4},8,8).status,LensValidity::InverseFailed);
+}

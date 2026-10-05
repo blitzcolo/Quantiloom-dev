@@ -19,6 +19,7 @@
 using namespace quantiloom;
 using namespace quantiloom::camera;
 
+
 namespace {
 
 constexpr double kH = 6.62607015e-34;
@@ -659,4 +660,18 @@ TEST(CpuCameraPipelineTest, RejectsWrappedSensorExtentBeforeAllocation) {
     // A scalar sensor may fit while its required three-channel preview cannot.
     config = PhotonConfig(65536u, 32768u);
     EXPECT_FALSE(ValidateCameraConfig(config));
+}
+
+TEST(CpuCameraPipelineTest, CalibratedPrincipalPointControlsVignettingBeforePsf) {
+    auto config=PhotonConfig(5,1);config.optics.cosFourthVignetting=true;
+    config.optics.psfSigmaPixelsOverride=0;
+    auto& p=config.optics.projection;p.explicitIntrinsics=true;
+    p.fx=p.fy=2;p.cx=.5;p.cy=.5;
+    CpuCameraPipeline pipeline(config);CaptureState state;
+    auto result=pipeline.Capture(state,0,UniformRadiance(5,1,1));ASSERT_TRUE(result)<<result.error();
+    const auto& pixels=result.value().bandMeasurement->image;
+    const double full=PhotonRatePerUnitRadiance(config);
+    EXPECT_NEAR(pixels(0,0,0),full,full*1e-6);
+    EXPECT_NEAR(pixels(4,0,0),full/25,full*1e-6);
+    EXPECT_GT(pixels(0,0,0),pixels(2,0,0));
 }

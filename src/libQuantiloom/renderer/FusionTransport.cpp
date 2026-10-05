@@ -12,7 +12,9 @@ Result<f32,String> ClosedOrientation(const Mesh& mesh) {
     std::map<std::array<f32,3>,u32> vertices;
     std::map<std::pair<u32,u32>,std::pair<u32,i32>> edges;
     f64 volume=0;
-    for(const auto& primitive:mesh.primitives) for(size_t i=0;i<primitive.indices.size();i+=3) {
+    for(const auto& primitive:mesh.primitives) {
+      if(primitive.indices.size()%3)return Result<f32,String>::Err("solid index count must be divisible by three");
+      for(size_t i=0;i<primitive.indices.size();i+=3) {
         glm::dvec3 p[3];u32 ids[3];
         for(u32 j=0;j<3;++j) {
             if(primitive.indices[i+j]>=primitive.positions.size()) return Result<f32,String>::Err("invalid solid triangle");
@@ -28,6 +30,7 @@ Result<f32,String> ClosedOrientation(const Mesh& mesh) {
             const u32 a=ids[j],b=ids[(j+1)%3];
             auto& e=edges[{std::min(a,b),std::max(a,b)}];++e.first;e.second+=a<b ? 1 : -1;
         }
+      }
     }
     if(edges.empty() || !std::isfinite(volume) || std::abs(volume)<1e-15)
         return Result<f32,String>::Err("solid has no enclosed volume");
@@ -106,6 +109,12 @@ Result<Vector<FusionTransportGpu>,String> ResolveFusionTransport(const Config& c
             (!material.emissiveCurveSource.empty() || glm::length(material.emissiveFactor)>0 || material.metallicFactor>1e-5)))
             return Result<Vector<FusionTransportGpu>,String>::Err("solid media cannot carry surface emission/metal lobes; fluorescent interfaces are unsupported");
         if(style.mode==2 && !entry.Has("fusion_absorption_m_inv")) style.flags|=1;
+        if(!std::isfinite(material.ior) || material.ior<=0 || !std::isfinite(material.irTemperature_K) || material.irTemperature_K<0)
+            return Result<Vector<FusionTransportGpu>,String>::Err("fusion medium requires a positive finite index and nonnegative temperature");
+        if(style.mode==1 && (((style.flags&2)==0 && material.spectralReflectanceCurveIndex<0 &&
+            material.irReflectanceCurve.empty() && !material.HasQuantiloomRef()) ||
+            ((style.flags&4)==0 && material.irTransmittanceCurve.empty())))
+            return Result<Vector<FusionTransportGpu>,String>::Err("thin sheet requires explicit reflectance and transmittance or covering spectral data");
         material.doubleSided=true;
     }
     Vector<FusionTransportGpu> records(1);

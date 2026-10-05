@@ -28,11 +28,25 @@
 
 #include "common.hlsli"
 #include "hit_common.hlsli"
+[[vk::binding(3,0)]] ByteAddressBuffer fusionVertices;
 
 [shader("anyhit")]
 void main(inout Payload payload, in HitAttributes attribs) {
     const InstanceGeometryInfo geoInfo = instanceGeometryInfo[InstanceIndex()];
     const MaterialData material = materials[geoInfo.materialId];
+    if(payload.fusionPreviousInstance==InstanceIndex()) {
+        const uint base=geoInfo.indexOffset+PrimitiveIndex()*3;
+        const float3 p0=asfloat(fusionVertices.Load3((geoInfo.vertexOffset+indexBuffer[base])*12));
+        const float3 p1=asfloat(fusionVertices.Load3((geoInfo.vertexOffset+indexBuffer[base+1])*12));
+        const float3 p2=asfloat(fusionVertices.Load3((geoInfo.vertexOffset+indexBuffer[base+2])*12));
+        const float3 normal=normalize(mul(cross(p1-p0,p2-p0),(float3x3)WorldToObject3x4()));
+        const float3 candidate=WorldRayOrigin()+WorldRayDirection()*RayTCurrent();
+        const float error=max(1e-5,128*1.192092896e-7*dot(abs(payload.fusionPreviousNormal),max(abs(payload.fusionPreviousPosition),1.0)));
+        if(all(abs(normal-payload.fusionPreviousNormal)<1e-6) &&
+            abs(dot(candidate-payload.fusionPreviousPosition,payload.fusionPreviousNormal))<=error) {
+            IgnoreHit();return;
+        }
+    }
 
     // Gated, and this gate is what keeps every physics gate in the suite
     // bit-identical: the furnace cavities and the open-sky scene are all

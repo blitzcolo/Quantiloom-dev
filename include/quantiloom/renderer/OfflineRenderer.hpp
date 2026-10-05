@@ -33,6 +33,7 @@
 
 #include "core/Types.hpp"
 #include "core/Platform.hpp"
+#include "dataset/FusionCapture.hpp"
 #include "core/Config.hpp"
 #include "core/Image.hpp"
 #include "renderer/TimelineControl.hpp"
@@ -262,6 +263,9 @@ public:
     /// fixed-band image. State advances only after a successful acquisition.
     [[nodiscard]] Result<camera::CameraOutput, String>
     CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds);
+    Result<dataset::FusionCaptureResultV2,String> CaptureFusionV2(
+        camera::CaptureState& state,f64 frameTimeSeconds,
+        const dataset::FusionCaptureOptionsV2& options={});
 
     /// Snapshot everything one acquisition mutates, so a sequence host can
     /// rewind and replay camera history (skipped-tick export, scrub back).

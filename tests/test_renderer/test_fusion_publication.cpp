@@ -23,12 +23,13 @@ TEST(FusionPublicationTest, CancellationDuringWorkAndBeforeCommitPreservesOldPac
     const auto read=[](const fs::path& p){std::ifstream in(p,std::ios::binary);return String(
         std::istreambuf_iterator<char>(in),std::istreambuf_iterator<char>());};
     const auto previous=read(first.value().recordPath);
-    for(const String phase:{"capture","ready_to_publish"}) {
+    for(const String phase:{"capture","correspondence","ready_to_publish"}) {
         String active;u32 polls=0;bool interrupted=false;
         options.onProgress=[&](const dataset::FusionExportProgress& p){active=p.phase;};
         options.cancelled=[&]{
-            // Cancel after work has started, or at the final publication check.
-            const u32 completedPolls=phase=="ready_to_publish" ? 0u : 2u;
+            // Capture has already integrated two wavelengths; matching has
+            // completed its first GPU probe batch before cancellation.
+            const u32 completedPolls=phase=="ready_to_publish" ? 0u : phase=="correspondence" ? 3u : 2u;
             const bool cancel=active==phase && ++polls>completedPolls;
             interrupted|=cancel;return cancel;
         };

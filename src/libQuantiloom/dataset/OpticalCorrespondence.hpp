@@ -17,5 +17,6 @@ Vector<OpticalEndpoint> DecodeOpticalEndpoints(const FusionPathChunk& chunk,
     const String& productId,const ProductGeometry& geometry);
 Result<String,String> MatchOpticalPaths(OfflineRenderer& target,
     const Vector<OpticalEndpoint>& source,const Vector<OpticalEndpoint>& targetSamples,
-    const ProductGeometry& targetGeometry,u32 sourceLimit=64);
+    const ProductGeometry& targetGeometry,u32 sourceLimit=64,
+    const std::function<bool()>& cancelled={});
 }

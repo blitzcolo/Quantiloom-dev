@@ -64,14 +64,35 @@ fixtures. Their shared measurement is two wavelengths around 10 micrometres.
 
 ## Truth and limits
 
-Path files have a 128-byte little-endian control header, 32-byte ray records, and
-80-byte vertex records, described in their JSON product metadata. They record
+New samples use fusion sample v2, path v2 and correspondence v2 inside the
+unchanged export transaction v2. Path files contain little-endian typed columns;
+the JSON description declares each column's name, scalar type, row count,
+width, byte offset and byte length. The verifier continues to read the original
+v1 interleaved records without inventing missing semantics. Path columns record
 actual camera-side paths and first-branch direct/reflected/transmitted radiance
 components before detector noise/display encoding. These components reconstruct
 the recorded path estimator; they are not calibrated causal attribution.
+Four full-sampling EXR contribution products (direct, reflected, transmitted,
+residual) reconstruct an independently computed linear reference after response,
+vignetting, PSF and exposure integration, before detector state and noise.
+Their channel units are the reference's e-/s or W. Residuals are explicitly
+tracked; a difference from the total is never redistributed to force equality.
+The separate truncation mask marks an unknown physical tail even when the
+finite-depth estimator reconstructs numerically. Detailed lens-centre status
+distinguishes valid, outside field, inverse failure and outside image; the
+sample-valid fraction records coverage of the actual jittered native samples.
 `fusion.max_recorded_rays` defaults to 4096; zero records all rays, subject to GPU
 buffer limits. Stride subsampling and finite-depth truncation are explicit, and
-unrecorded/truncated contributions are unknown.
+unrecorded path details are unknown, while contribution rasters include every
+sample regardless of that cap. Extra traced/CIE observer renders use the actual
+lens and separate acquisition identities. They are independent acquisitions.
+The native sensor measurement is always present to anchor the truth acquisition.
+The observer metadata declares its actual spectral quadrature and support.
+The vertex_radiance_terms column stores surface/terminal shading radiance,
+incoming-segment emission, Monte Carlo branch weight and local residual.
+Together with segment transmittance these reconstruct each independently
+recorded ray in reverse vertex order. An opaque terminal's shading radiance
+already includes its own lighting estimate; it is not solely self-emission.
 
 Opaque mappings are checked by a new target ray at continuous native coordinates.
 Optical correspondences use wavelength-specific branches and bounded multi-seed

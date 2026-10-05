@@ -427,7 +427,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[3].binding = 3;
     bindings[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     bindings[3].descriptorCount = 1;
-    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+    bindings[3].stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR;
     bindings[3].pImmutableSamplers = nullptr;
 
     // Binding 4: Index buffer (StructuredBuffer<uint>)
@@ -756,6 +756,7 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[35]=bindings[33];bindings[35].binding=35;
     bindings[35].stageFlags|=VK_SHADER_STAGE_RAYGEN_BIT_KHR|VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
     bindings[36]=bindings[35];bindings[36].binding=36;
+    bindings[36].stageFlags|=VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[37]=bindings[35];bindings[37].binding=37;
     for(auto& binding:bindings) binding.stageFlags|=VK_SHADER_STAGE_COMPUTE_BIT;
     std::vector<VkDescriptorBindingFlags> bindingFlags(38, 0);
@@ -1217,8 +1218,12 @@ void RayTracingPipeline::BindCameraMeasurementImage(const GpuImage& image) const
 void RayTracingPipeline::BindCameraResponseBuffer(const GpuBuffer& buffer) const {
     WriteStorageBuffer(m_context.GetDevice(), m_cameraDescriptorSet, 29u, buffer);
 }
+void RayTracingPipeline::BindCameraLightingBuffer(const GpuBuffer& buffer) const {
+    WriteStorageBuffer(m_context.GetDevice(),m_cameraDescriptorSet,2u,buffer);
+    WriteStorageBuffer(m_context.GetDevice(),m_observerDescriptorSet,2u,buffer);
+}
 
-void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, u32 set) {
+void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, u32 set,bool scalarVignetting) {
     if (set >= 3) throw std::invalid_argument("invalid projection descriptor set");
     std::array<f32,16> values{};
     if (p) {
@@ -1227,6 +1232,7 @@ void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, 
         values[4]=static_cast<f32>(p->fx); values[5]=static_cast<f32>(p->fy);
         values[6]=static_cast<f32>(p->cx); values[7]=static_cast<f32>(p->cy);
         for(size_t i=0;i<5;++i) values[8+i]=static_cast<f32>(p->coefficients[i]);
+        values[13]=scalarVignetting ? 1.0f : 0.0f;
     }
     m_projectionBuffers[set]->Upload(values.data(),sizeof(values));
     const VkDescriptorSet sets[]={m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet};
@@ -1244,19 +1250,24 @@ void RayTracingPipeline::SetFusionTransport(const Vector<rendercore::FusionTrans
     m_fusionTransportBuffer=std::move(replacement);
 }
 
-void RayTracingPipeline::BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays) {
+void RayTracingPipeline::BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays,bool aggregate,bool quantitative) {
     const u64 total=static_cast<u64>(width)*height*spp;
     if(total>std::numeric_limits<u32>::max()) throw std::runtime_error("fusion ray indexing exceeds UINT range");
     const u32 stride=total && maxRays ? static_cast<u32>((total+maxRays-1)/maxRays) : 1;
-    const u32 count=total ? static_cast<u32>((total+stride-1)/stride) : 0;
+    const u32 count=total && maxRays!=std::numeric_limits<u32>::max() ? static_cast<u32>((total+stride-1)/stride) : 0;
     constexpr u32 slots=9;
-    const size_t size=128+static_cast<size_t>(count)*(32+slots*80);
+    const size_t pathSize=128+static_cast<size_t>(count)*(32+slots*80);
+    const size_t coordinateOffset=pathSize+(aggregate ? static_cast<size_t>(width)*height*32 : 0);
+    const size_t termsOffset=coordinateOffset+(aggregate ? static_cast<size_t>(count)*12 : 0);
+    const size_t size=termsOffset+(aggregate ? static_cast<size_t>(count)*slots*16 : 0);
     if(size>m_context.GetDeviceProperties().limits.maxStorageBufferRange)
         throw std::runtime_error("fusion record buffer exceeds device storage range; lower fusionMaxRecordedRays");
     auto replacement=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
     Vector<u8> zero(size,0);
-    u32 header[32]={count ? 1u : 0u,stride,count,slots,width,height,spp,0};
+    u32 header[32]={count || aggregate ? 1u : 0u,stride,count,slots,width,height,spp,0};
+    if(aggregate){header[11]=static_cast<u32>(pathSize);header[14]=static_cast<u32>(termsOffset);header[15]=static_cast<u32>(coordinateOffset);}
+    header[12]=aggregate || quantitative ? 1u : 0u;
     header[8]=static_cast<u32>(m_initialFusionMedia.size());
     if(m_initialFusionMedia.size()>8)throw std::runtime_error("invalid initial medium count");
     for(size_t i=0;i<m_initialFusionMedia.size();++i)header[16+i]=m_initialFusionMedia[i];
@@ -1264,6 +1275,19 @@ void RayTracingPipeline::BeginFusionRecording(u32 width,u32 height,u32 spp,u32 m
     for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
         WriteStorageBuffer(m_context.GetDevice(),set,36u,*replacement);
     m_fusionRecordBuffer=std::move(replacement);
+}
+
+void RayTracingPipeline::SetFusionInitialMedia(const Vector<u32>& media) {
+    if(media.size()>8)throw std::invalid_argument("too many initial fusion media");
+    if(m_initialFusionMedia==media)return;
+    if(m_fusionRecordBuffer) {
+        vkDeviceWaitIdle(m_context.GetDevice());
+        const u32 count=static_cast<u32>(media.size());
+        std::array<u32,8> values{};std::copy(media.begin(),media.end(),values.begin());
+        m_fusionRecordBuffer->Upload(&count,4,32);
+        m_fusionRecordBuffer->Upload(values.data(),sizeof(values),64);
+    }
+    m_initialFusionMedia=media;
 }
 
 Vector<u8> RayTracingPipeline::ReadFusionRecording() {

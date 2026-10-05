@@ -111,6 +111,12 @@ bool EnvFlagEnabled(const char* name) {
 // ============================================================================
 
 struct OfflineRenderer::Impl {
+    dataset::FusionCaptureResultV2* fusionCapture=nullptr;
+    const dataset::FusionCaptureOptionsV2* fusionOptions=nullptr;
+    std::array<Image,4> fusionSample;
+    std::array<Image,5> fusionIntegrated;
+    u32 fusionStrata=0;
+    bool quantitativeObserver=false;
     // ------------------------------------------------------------------
     // Not GPU state; position among the members is free.
     // ------------------------------------------------------------------
@@ -155,7 +161,7 @@ struct OfflineRenderer::Impl {
                           {"sun_elevation_deg", std::asin(std::clamp(static_cast<f64>(sun.y),-1.0,1.0))*180.0/constants::PI},
                           {"sun_radiance_rgb", vector(lightingParams.sunRadiance_rgb)},
                           {"sky_radiance_rgb", vector(lightingParams.skyRadiance_rgb)},
-                          {"environment_map_enabled", lightingParams.enableEnvironmentMap != 0},
+                          {"environment_map_enabled", !physical && lightingParams.enableEnvironmentMap != 0},
                           {"solar_sky_lut_enabled", resolved.solarSunSky.has_value()}}},
             {"sampling", {{"requested_spp", params.spp}, {"mode", params.modeName},
                           {"wavelength_nm", params.wavelengthNm}}},
@@ -1331,6 +1337,46 @@ OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds
     return CaptureCameraInternal(state, frameTimeSeconds, /*suppressProducts=*/false);
 }
 
+Result<dataset::FusionCaptureResultV2,String> OfflineRenderer::CaptureFusionV2(
+    camera::CaptureState& state,f64 time,const dataset::FusionCaptureOptionsV2& options) {
+    try {
+    auto& host=*m_impl;
+    if(options.version!=2 || host.fusionCapture ||
+        (options.recordPaths && options.maxRecordedRays==std::numeric_limits<u32>::max()))
+        return Result<dataset::FusionCaptureResultV2,String>::Err("invalid or nested fusion capture");
+    for(size_t i=1;i<host.spectra.fusionTransport.size();++i) {
+        const auto& record=host.spectra.fusionTransport[i];
+        const auto& material=host.loadedScene.materials[record.materialId];
+        if(record.mode==0 && (material.transmission>0 ||
+            std::any_of(material.irTransmittanceCurve.begin(),material.irTransmittanceCurve.end(),[](const auto& v){return v.second>0;})))
+            return Result<dataset::FusionCaptureResultV2,String>::Err("fusion capture requires explicit optical transport for "+material.name);
+    }
+    dataset::FusionCaptureResultV2 result;
+    host.fusionCapture=&result;host.fusionOptions=&options;host.fusionStrata=0;
+    struct Reset {Impl& host;~Reset(){host.fusionCapture=nullptr;host.fusionOptions=nullptr;}} reset{host};
+    camera::CaptureState working=state;
+    auto captured=CaptureCameraInternal(working,time,false);
+    if(!captured)return Result<dataset::FusionCaptureResultV2,String>::Err(captured.error());
+    for(size_t i=0;i<4;++i)result.contributions[i]=std::move(host.fusionIntegrated[i]);
+    result.linearReference=std::move(host.fusionIntegrated[4]);
+    for(size_t i=0;i<result.linearReference.data.size();++i) {
+        f64 sum=0;for(const auto& c:result.contributions)sum+=c.data[i];
+        const f64 reference=result.linearReference.data[i];
+        if(!std::isfinite(reference) || reference<0 || !std::isfinite(sum) ||
+            std::abs(sum-reference)>1e-5*std::max(std::abs(reference),1e-20))
+            return Result<dataset::FusionCaptureResultV2,String>::Err("fusion contributions fail independent linear reconstruction");
+    }
+    const auto& optics=host.resolved.cameraConfig.optics;
+    auto p=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
+    if(!p)return Result<dataset::FusionCaptureResultV2,String>::Err(p.error());
+    result.lensValidity=Image(optics.sensorWidthPx,optics.sensorHeightPx,1);result.lensValidity.channelNames={"lens_status"};
+    for(u32 y=0;y<optics.sensorHeightPx;++y)for(u32 x=0;x<optics.sensorWidthPx;++x)
+        result.lensValidity(x,y,0)=static_cast<f32>(camera::UnprojectPixelV2(*p,{x+.5,y+.5},optics.sensorWidthPx,optics.sensorHeightPx).status);
+    result.products=std::move(*captured);state=std::move(working);
+    return result;
+    } catch(const std::exception& e) {return Result<dataset::FusionCaptureResultV2,String>::Err(e.what());}
+}
+
 Result<camera::CameraOutput, String>
 OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
                                        f64 frameTimeSeconds,
@@ -1395,7 +1441,9 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         config.products.apparentTemperature = false;
         config.products.display = false;
     }
-    camera::CpuCameraPipeline camera(std::move(config));
+    camera::CpuCameraPipeline camera(std::move(config),true,
+        impl.fusionCapture ? &impl.fusionSample : nullptr,
+        impl.fusionCapture ? &impl.fusionIntegrated : nullptr);
     camera::CaptureState nextState = state;
     const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm)
         -> Result<Image, String> {
@@ -1469,19 +1517,55 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
     if (!suppressProducts && (wantsObserver || wantsTraced)) {
         auto moved = SetTimelineTime(frameTimeSeconds);
         if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
-        const auto pose = impl.CameraDataAt(frameTimeSeconds, impl.params.mode,
-                                            impl.params.wavelengthNm, false);
-        if (!pose) return Result<camera::CameraOutput, String>::Err(pose.error());
-        impl.pipeline->SetCameraData(pose.value());
-        OfflineRenderOutput observer = impl.RenderSingleFrame();
-        if (!observer.error.empty())
-            return Result<camera::CameraOutput, String>::Err(observer.error);
+        const u64 observerAcquisition=state.acquisitionIndex | (u64(1)<<63);
+        auto* savedFusion=impl.fusionCapture;auto* savedOptions=impl.fusionOptions;
+        const bool savedVignette=impl.resolved.cameraConfig.optics.cosFourthVignetting;
+        const auto savedCallback=impl.init.onFusionPathChunk;
+        struct RestoreObserver {Impl& h;dataset::FusionCaptureResultV2* f;const dataset::FusionCaptureOptionsV2* o;
+            bool v;decltype(impl.init.onFusionPathChunk) cb;
+            ~RestoreObserver(){h.fusionCapture=f;h.fusionOptions=o;h.quantitativeObserver=false;h.resolved.cameraConfig.optics.cosFourthVignetting=v;h.init.onFusionPathChunk=cb;}
+        } observerRestore{impl,savedFusion,savedOptions,savedVignette,savedCallback};
+        impl.fusionCapture=nullptr;impl.fusionOptions=nullptr;impl.init.onFusionPathChunk={};
+        impl.quantitativeObserver=savedFusion!=nullptr;
+        impl.resolved.cameraConfig.optics.cosFourthVignetting=false;
+        OfflineRenderOutput observer;
+        if(wantsTraced) {
+            auto sampled=impl.RenderCameraWavelength(impl.params.wavelengthNm,observerAcquisition,impl.resolved.cameraConfig.randomSeed);
+            if(!sampled)return Result<camera::CameraOutput,String>::Err(sampled.error());
+            observer.radiance=Image(sampled.value().width,sampled.value().height,3);
+            for(size_t i=0;i<sampled.value().data.size();++i)for(size_t c=0;c<3;++c)observer.radiance.data[i*3+c]=sampled.value().data[i];
+        } else {
+            std::array<Image,32> bands;
+            for(u32 i=0;i<32;++i) {
+                auto sampled=impl.RenderCameraWavelength(400.0+380.0*i/31,observerAcquisition,impl.resolved.cameraConfig.randomSeed);
+                if(!sampled)return Result<camera::CameraOutput,String>::Err(sampled.error());
+                bands[i]=std::move(*sampled);
+            }
+            observer.radiance=Image(bands[0].width,bands[0].height,3);
+            for(size_t pixel=0;pixel<bands[0].data.size();++pixel) {
+                SpectralCurve curve;
+                curve.samples.emplace_back(399.999f,0);
+                for(u32 i=0;i<32;++i)curve.samples.emplace_back(static_cast<f32>(400.0+380.0*i/31),bands[i].data[pixel]);
+                curve.samples.emplace_back(780.001f,0);
+                const auto rgb=EmissionSpectrumToRenderedLinearSrgb(curve);
+                for(size_t c=0;c<3;++c)observer.radiance.data[pixel*3+c]=rgb[c];
+            }
+        }
+        auto observerProvenance=nlohmann::json::parse(impl.ProductSnapshot(frameTimeSeconds,observer.radiance.width,observer.radiance.height,true));
+        observerProvenance["sampling"]={{"requested_spp",impl.params.spp},
+            {"mode",wantsObserver ? "cie_piecewise_linear_32_wavelength_sweep" : "single"},
+            {"spectral_span_nm",wantsObserver ? nlohmann::json{400,780} : nlohmann::json{impl.params.wavelengthNm,impl.params.wavelengthNm}},
+            {"outside_observer_span","zero"},{"acquisition_kind","independent_observer_render"}};
+        observerProvenance["optical_response"]={{"projection","actual_native_lens"},
+            {"psf_applied",false},{"vignetting_applied",false},{"detector_applied",false},
+            {"calibration","independent_scene_radiance_not_device_calibration"}};
+        observer.radiance.metadata["quantiloom_provenance"]=observerProvenance.dump();
         if (wantsObserver) {
             camera::SignalDescriptor signal;
             signal.kind = camera::SignalKind::CieLinearSrgb;
             signal.unit = "linear_sRGB";
-            signal.calibration = impl.resolved.cameraConfig.device.calibration;
-            signal.acquisitionIndex = state.acquisitionIndex;
+            signal.calibration = camera::CalibrationStatus::GenericAssumption;
+            signal.acquisitionIndex = observerAcquisition;
             signal.exposureStartSeconds = frameTimeSeconds;
             signal.exposureEndSeconds = frameTimeSeconds;
             Image image(observer.radiance.width, observer.radiance.height, 3);
@@ -1503,8 +1587,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
             signal.kind = camera::SignalKind::SpectralRadiance;
             signal.unit = "W/m^2/sr/nm";
             signal.channelWavelengthNm = {impl.params.wavelengthNm};
-            signal.calibration = impl.resolved.cameraConfig.device.calibration;
-            signal.acquisitionIndex = state.acquisitionIndex;
+            signal.calibration = camera::CalibrationStatus::GenericAssumption;
+            signal.acquisitionIndex = observerAcquisition;
             signal.exposureStartSeconds = frameTimeSeconds;
             signal.exposureEndSeconds = frameTimeSeconds;
             Image image(observer.radiance.width, observer.radiance.height, 1);
@@ -1691,7 +1775,12 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
     struct RestoreBindings {
         Impl& host;
         CameraData original;
+        u32 environment;
         ~RestoreBindings() {
+            if(host.lightingParams.enableEnvironmentMap!=environment) {
+                host.lightingParams.enableEnvironmentMap=environment;
+                host.lightingParamsBuffer->Upload(&host.lightingParams,sizeof(LightingParams));
+            }
             host.pipeline->BindOutputImage(*host.outputImage);
             host.pipeline->SetCameraData(original);
             host.pipeline->SetCameraProjection(nullptr);
@@ -1700,7 +1789,11 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
             host.pipeline->BindAtmosphereNN(host.atmosHeaderBuffer.get(),
                                             host.atmosDataBuffer.get());
         }
-    } restore{*this, original};
+    } restore{*this, original,lightingParams.enableEnvironmentMap};
+    if(lightingParams.enableEnvironmentMap!=0) {
+        lightingParams.enableEnvironmentMap=0;
+        lightingParamsBuffer->Upload(&lightingParams,sizeof(LightingParams));
+    }
     if (resolved.atmosphere.enabled) {
         const auto grid = RenderBandLambdaGrid(SpectralMode::Single, wavelengthNm);
         if (!grid.error.empty() || grid.band.empty())
@@ -1750,15 +1843,18 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
     const auto projection=camera::ResolveProjection(optics.projection,
         sample.outputWidth,sample.outputHeight,optics.focalLengthMm,optics.pixelPitchUm);
     if(!projection) return Result<Image,String>::Err(projection.error());
-    pipeline->SetCameraProjection(&*projection);
-    const bool recordFusion=static_cast<bool>(init.onFusionPathChunk) ||
+    pipeline->SetCameraProjection(&*projection,0,optics.cosFourthVignetting);
+    if(fusionOptions && fusionOptions->cancelled && fusionOptions->cancelled())
+        return Result<Image,String>::Err("fusion export cancelled");
+    const bool recordFusion=fusionCapture || quantitativeObserver || static_cast<bool>(init.onFusionPathChunk) ||
         (!spectra.fusionTransport.empty() && spectra.fusionTransport[0].mode!=0);
     if(recordFusion) {
         const auto initial=rendercore::InitialFusionMedia(loadedScene,spectra.fusionTransport,cameraData.origin);
         if(!initial)return Result<Image,String>::Err(initial.error());
         pipeline->SetFusionInitialMedia(*initial);
         pipeline->BeginFusionRecording(sample.outputWidth,sample.outputHeight,sample.spp,
-            init.onFusionPathChunk ? init.fusionMaxRecordedRays : 1u);
+            fusionOptions ? (fusionOptions->recordPaths ? fusionOptions->maxRecordedRays : std::numeric_limits<u32>::max()) :
+                init.onFusionPathChunk ? init.fusionMaxRecordedRays : 1u, fusionCapture!=nullptr,quantitativeObserver);
     }
     Image image;
     if (!cameraBatchRenderer->RenderSingleBand(
@@ -1775,6 +1871,66 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
         chunk.diagnosticFlags=header[7];chunk.wavelengthNm=wavelengthNm;
         chunk.referenceTimeSeconds=timeline.Current_s();
         chunk.acquisitionIndex=acquisitionIndex;
+        if((fusionCapture || quantitativeObserver) && (chunk.diagnosticFlags&16u))
+            return Result<Image,String>::Err("nonfinite quantitative fusion radiance");
+        if(fusionCapture) {
+            if(chunk.diagnosticFlags&16u)return Result<Image,String>::Err("nonfinite quantitative fusion radiance");
+            for(auto& c:fusionSample)c=Image(chunk.width,chunk.height,1);
+            if(fusionStrata==0) {
+                fusionCapture->validSampleFraction=Image(chunk.width,chunk.height,1);
+                fusionCapture->validSampleFraction.channelNames={"valid_sample_fraction"};
+                fusionCapture->truncationUnknown=Image(chunk.width,chunk.height,1);
+                fusionCapture->truncationUnknown.channelNames={"unknown_tail"};
+            }
+            const auto scalar=[&](size_t offset){f32 value;std::memcpy(&value,chunk.bytes.data()+offset,4);return value;};
+            const auto word=[&](size_t offset){u32 value;std::memcpy(&value,chunk.bytes.data()+offset,4);return value;};
+            ++fusionStrata;
+            for(size_t i=0;i<image.data.size();++i) {
+                const size_t base=header[11]+i*32;
+                for(size_t c=0;c<4;++c)fusionSample[c].data[i]=scalar(base+c*4);
+                auto& fraction=fusionCapture->validSampleFraction.data[i];
+                fraction+=(scalar(base+20)-fraction)/fusionStrata;
+                if(word(base+24)&1u)fusionCapture->truncationUnknown.data[i]=1;
+            }
+            if(header[2]) {
+                using Json=nlohmann::json;
+                dataset::FusionPathColumnsV2 columns;
+                Json fields=Json::array();
+                const auto column=[&](const char* name,const char* type,u32 rows,u32 width,const auto& read) {
+                    const size_t offset=columns.bytes.size();
+                    columns.bytes.resize(offset+static_cast<size_t>(rows)*width*4);
+                    for(u32 row=0;row<rows;++row)for(u32 c=0;c<width;++c) {
+                        const u32 value=read(row,c);std::memcpy(columns.bytes.data()+offset+(static_cast<size_t>(row)*width+c)*4,&value,4);
+                    }
+                    fields.push_back({{"name",name},{"type",type},{"rows",rows},{"width",width},{"offset_bytes",offset},{"size_bytes",columns.bytes.size()-offset}});
+                };
+                column("components","float32",header[2],4,[&](u32 r,u32 c){return c<3 ? word(128+r*32+c*4) : word(header[15]+r*12+8);});
+                column("radiance","float32",header[2],1,[&](u32 r,u32){return word(128+r*32+12);});
+                column("ray_identity","uint32",header[2],4,[&](u32 r,u32 c){return word(128+r*32+16+c*4);});
+                column("native_pixel","float32",header[2],2,[&](u32 r,u32 c){return word(header[15]+r*12+c*4);});
+                const size_t vertex=128+static_cast<size_t>(header[2])*32;
+                for(u32 group=0;group<5;++group) {
+                    const char* names[]={"position_wavelength","normal_distance","vertex_identity","outgoing_coefficient","medium_segment"};
+                    column(names[group],group==2 ? "uint32" : "float32",header[2]*header[3],4,
+                        [&](u32 r,u32 c){return word(vertex+static_cast<size_t>(r)*80+group*16+c*4);});
+                }
+                column("vertex_radiance_terms","float32",header[2]*header[3],4,
+                    [&](u32 r,u32 c){return word(header[14]+static_cast<size_t>(r)*16+c*4);});
+                columns.descriptionJson=Json{{"schema","quantiloom.fusion.paths"},{"schema_version",2},{"role","path_truth"},
+                    {"byte_order","little_endian"},{"columns",fields},{"stored_rays",header[2]},{"slots_per_ray",header[3]},
+                    {"ray_stride",header[1]},{"native_width",chunk.width},{"native_height",chunk.height},{"spp",chunk.spp},
+                    {"wavelength_nm",wavelengthNm},{"reference_time_s",chunk.referenceTimeSeconds},{"acquisition_index",acquisitionIndex},
+                    {"diagnostic_flags",chunk.diagnosticFlags},{"complete_physical_paths",false},
+                    {"finite_depth_estimator",true},{"unknown_tail_present",(chunk.diagnosticFlags&1u)!=0},
+                    {"vertex_radiance_terms_definition",{"surface_or_terminal_shading","incoming_segment_emission","branch_estimator_weight","local_residual"}},
+                    {"coverage",header[1]==1 ? "all_rays" : "stride_subset"},{"truncated_tail","unknown"},
+                    {"contribution_definition","first_camera_side_branch"},{"contribution_unit","W/m^2/sr/nm"}}.dump();
+                fusionCapture->paths.push_back(std::move(columns));
+            }
+            // The original callback keeps its original byte layout.
+            chunk.bytes.resize(128+static_cast<size_t>(header[2])*(32+header[3]*80));
+            std::fill(chunk.bytes.begin()+44,chunk.bytes.begin()+64,0);
+        }
         pipeline->SetFusionInitialMedia({});pipeline->BeginFusionRecording(0,0,0,0);
         if(init.onFusionPathChunk) init.onFusionPathChunk(chunk);
         if((chunk.diagnosticFlags&2u)!=0)

@@ -30,6 +30,14 @@ struct UnprojectionResult {
     glm::dvec3 direction{};
 };
 
+enum class LensValidity : u32 { Valid=0, OutsideField=1, InverseFailed=2, OutsideImage=3 };
+struct LensResultV2 {
+    LensValidity status=LensValidity::InverseFailed;
+    glm::dvec3 direction{};
+};
+QL_API LensResultV2 UnprojectPixelV2(const CameraProjection& projection,
+    const glm::dvec2& pixel, u32 width, u32 height);
+
 QL_API Result<CameraProjection, String> ResolveProjection(
     const CameraProjection& authored, u32 width, u32 height,
     f64 focalLengthMm, f64 pixelPitchUm);

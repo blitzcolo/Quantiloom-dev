@@ -1,4 +1,4 @@
-﻿// ============================================================================
+// ============================================================================
 // Quantiloom M1 - Miss Shader (Spectral Rendering)
 // ============================================================================
 // Returns sky background radiance when ray misses all geometry
@@ -12,6 +12,7 @@
 #include "atmosphere_nn.hlsli"
 #include "SpectralConversion.hlsli"
 #include "blackbody.hlsli"
+#include "fusion_records.hlsli"
 
 // ============================================================================
 // Bindings
@@ -214,11 +215,11 @@ void main(inout Payload payload) {
         }
 
         // Validation
-        if (any(!isfinite(payload.radiance))) {
+        if (any(!isfinite(payload.radiance))) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
             payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
         }
-        payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
+        if(fusionRecords.Load(48)==0) payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
 
     } else if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
@@ -319,10 +320,10 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) {
+        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
@@ -386,10 +387,10 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) {
+        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
@@ -494,10 +495,10 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) {
+        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
             radiance_avg = 0.0;
         }
-        radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
@@ -510,4 +511,5 @@ void main(inout Payload payload) {
         payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
     }
+    FusionRecordSky(payload);
 }

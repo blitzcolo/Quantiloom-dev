@@ -25,11 +25,13 @@ void FusionAttenuateSegment(inout Payload p,float distance) {
     if((medium.flags&1)!=0 && material.complexRefractiveIndexIndex>=0)
         sigma=4*PI*SampleComplexRefractiveIndex(complexRefractiveIndices,
             material.complexRefractiveIndexIndex,lambda).y/(lambda*1e-9);
-    const float transmittance=exp(-sigma*distance*lightingParams[0].worldUnitsToMeters);
+    const float transmittance=exp(-sigma*(distance+p.fusionSegmentOffset)*lightingParams[0].worldUnitsToMeters);
     FusionRecordSegment(p,sigma,transmittance);
     const float emission=(1-transmittance)*n*n*IRPlanckRadiance(material.irTemperature_K,lambda);
+    FusionRecordRadianceTerm(p,1,emission);
     p.radiance=p.radiance*transmittance+float4(emission,emission,emission,0);
     p.fusionContributions=p.fusionContributions*transmittance+FusionClassify(emission,p.fusionRoute);
+    p.fusionResidual*=transmittance;
 }
 bool TraceFusionInterface(inout Payload p,MaterialData material,uint recordIndex,
     float3 hit,float3 faceNormal,bool backFace,float temperature) {
@@ -44,7 +46,7 @@ bool TraceFusionInterface(inout Payload p,MaterialData material,uint recordIndex
     if(p.fusionMediumCount>0) n1=RefractionIOR(materials[
         fusionTransport[p.fusionMedia[p.fusionMediumCount-1]].materialId],lambda);
     Payload child=p;
-    child.radiance=0;child.fusionContributions=0;child.primaryMaterialFlags=0;
+    child.radiance=0;child.fusionContributions=0;child.fusionResidual=0;child.primaryMaterialFlags=0;
     child.depth=p.depth+1;child.bsdfPdf=0;
     float3 transmitted=WorldRayDirection();
     const bool entering=interfaceData.orientation>0 ? !backFace : backFace;
@@ -75,6 +77,8 @@ bool TraceFusionInterface(inout Payload p,MaterialData material,uint recordIndex
             BoundEmissionRadiance(spectralCurves,material,material.emissiveFactor,1,lambda);
     }
     const float total=rho+tau;
+    FusionRecordInterface(p,0,0,n1,n2);
+    FusionRecordRadianceTerm(p,0,selfEmission);
     if(total>0 && p.depth<MAX_PATH_DEPTH) {
         p.rngState=p.rngState*747796405u+2891336453u;
         uint word=((p.rngState>>((p.rngState>>28u)+4u))^p.rngState)*277803737u;
@@ -92,16 +96,25 @@ bool TraceFusionInterface(inout Payload p,MaterialData material,uint recordIndex
         child.rngState=p.rngState;
         RayDesc ray;
         ray.Direction=reflected ? reflect(WorldRayDirection(),faceNormal) : transmitted;
-        ray.Origin=hit;ray.TMin=max(1e-6,4*1.192092896e-7*max(abs(hit.x),max(abs(hit.y),abs(hit.z))));ray.TMax=10000;
+        // Keep the actual interface origin and travel length. Any-hit rejects
+        // only numerical re-hits on this same oriented boundary, so grazing
+        // rays cannot jump across another nearby interface.
+        ray.Origin=hit;ray.TMin=0;ray.TMax=10000;
+        child.fusionSegmentOffset=0;
+        child.fusionPreviousPosition=hit;
+        child.fusionPreviousNormal=backFace ? -faceNormal : faceNormal;
+        child.fusionPreviousInstance=InstanceIndex();
         const FusionMediumContext context=SaveFusionMedium();
-        TraceRay(scene,RAY_FLAG_NONE,0xFF,0,0,0,ray,child);
+        TraceRay(scene,RAY_FLAG_FORCE_NON_OPAQUE,0xFF,0,0,0,ray,child);
         RestoreFusionMedium(context);
         const float weight=(p.fusionForced!=0 ? (reflected ? rho : tau) : total)*
             (interfaceData.mode==2 && !reflected ? n1*n1/(n2*n2) : 1);
         const float coefficient=(reflected ? rho : tau)*(interfaceData.mode==2 && !reflected ? n1*n1/(n2*n2) : 1);
+        FusionRecordRadianceTerm(p,2,weight);
         FusionRecordInterface(p,ray.Direction,coefficient,n1,n2);
         p.radiance=child.radiance*weight+float4(selfEmission,selfEmission,selfEmission,0);
         p.fusionContributions=child.fusionContributions*weight+FusionClassify(selfEmission,p.fusionRoute);
+        p.fusionResidual=child.fusionResidual*weight;
         p.fusionFlags|=child.fusionFlags;p.rngState=child.rngState;
         p.fusionTerminalDepth=child.fusionTerminalDepth;
     } else {

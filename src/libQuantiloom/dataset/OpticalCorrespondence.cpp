@@ -43,12 +43,12 @@ Vector<OpticalEndpoint> DecodeOpticalEndpoints(const FusionPathChunk& chunk,
 
 Result<String,String> MatchOpticalPaths(OfflineRenderer& target,
     const Vector<OpticalEndpoint>& source,const Vector<OpticalEndpoint>& samples,
-    const ProductGeometry& geometry,u32 limit) {
+    const ProductGeometry& geometry,u32 limit,const std::function<bool()>& cancelled) {
     using Json=nlohmann::json;
     struct Trial {size_t source;f64 lambda;u32 mask;glm::dvec2 pixel;bool active=true;};
     const bool optical=std::any_of(source.begin(),source.end(),[](const auto& e){return e.throughOptics;}) ||
         std::any_of(samples.begin(),samples.end(),[](const auto& e){return e.throughOptics;});
-    Json out={{"schema","quantiloom.fusion.path_correspondence"},{"schema_version",1},
+    Json out={{"schema","quantiloom.fusion.path_correspondence"},{"schema_version",2},
         {"complete_solution_set",false},{"unmatched_is_unresolved",true},
         {"meaning","geometric_path_pair_not_detectability"},{"rows",Json::array()},
         {"source_recorded_paths",source.size()},{"source_limit",limit},
@@ -64,7 +64,9 @@ Result<String,String> MatchOpticalPaths(OfflineRenderer& target,
     for(auto i:selected) {
         rowForSource[i]=out["rows"].size();
         out["rows"].push_back({{"source_path_product",source[i].productId},{"source_ray_row",source[i].row},
-            {"source_pixel",source[i].pixel},{"source_wavelength_nm",source[i].wavelengthNm},
+             {"source_pixel",source[i].pixel},{"source_wavelength_nm",source[i].wavelengthNm},
+             {"source_native_pixel",{source[i].nativePixel.x,source[i].nativePixel.y}},
+             {"source_branch_mask",source[i].branchMask},{"unique_solution_proven",false},
             {"node_id",source[i].nodeId},{"primitive_id",source[i].primitiveId},
             {"status","unresolved"},{"matches",Json::array()}});
         for(auto lambda:wavelengths) {
@@ -75,12 +77,16 @@ Result<String,String> MatchOpticalPaths(OfflineRenderer& target,
             Vector<std::pair<f64,const OpticalEndpoint*>> near;
             for(const auto& s:samples) if(s.wavelengthNm==lambda && s.nodeId==source[i].nodeId && s.primitiveId==source[i].primitiveId)
                 near.push_back({glm::dot(s.position-source[i].position,s.position-source[i].position),&s});
-            const size_t count=std::min<size_t>(3,near.size());
-            std::partial_sort(near.begin(),near.begin()+count,near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
-            for(size_t n=0;n<count;++n)trials.push_back({i,lambda,near[n].second->branchMask,near[n].second->nativePixel});
+            std::sort(near.begin(),near.end(),[](const auto& a,const auto& b){return a.first<b.first;});
+            std::set<u32> masks;
+            for(const auto& [distance,endpoint]:near)if(masks.insert(endpoint->branchMask).second) {
+                trials.push_back({i,lambda,endpoint->branchMask,endpoint->nativePixel});
+                if(masks.size()==3)break;
+            }
         }
     }
     for(u32 iteration=0;iteration<12;++iteration) {
+        if(cancelled && cancelled())return Result<String,String>::Err("fusion export cancelled");
         Vector<OpticalProbe> probes;Vector<size_t> active;
         constexpr f64 step=.05;
         for(size_t i=0;i<trials.size();++i)if(trials[i].active) {
@@ -103,7 +109,7 @@ Result<String,String> MatchOpticalPaths(OfflineRenderer& target,
                 auto& row=out["rows"][rowForSource.at(t.source)];bool duplicate=false;
                 for(const auto& m:row["matches"]) {
                     const glm::dvec2 old(m["target_pixel"][0].get<f64>(),m["target_pixel"][1].get<f64>());
-                    if(m["target_wavelength_nm"]==t.lambda && glm::length(old-t.pixel)<.01)duplicate=true;
+                    if(m["target_wavelength_nm"]==t.lambda && m["target_branch_mask"]==t.mask && glm::length(old-t.pixel)<.01)duplicate=true;
                 }
                 if(!duplicate)row["matches"].push_back({{"target_pixel",{t.pixel.x,t.pixel.y}},
                     {"target_wavelength_nm",t.lambda},{"target_branch_mask",t.mask},

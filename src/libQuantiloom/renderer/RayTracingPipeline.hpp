@@ -356,6 +356,7 @@ public:
     // header are bound by the pipeline itself until a host supplies these.
     void BindCameraMeasurementImage(const GpuImage& image) const;  // binding 28
     void BindCameraResponseBuffer(const GpuBuffer& buffer) const;   // binding 29
+    void BindCameraLightingBuffer(const GpuBuffer& buffer) const;
     /// 4 x u32 atomic counters (transparent/specular primary hits) accumulated
     /// by raygen in camera-measurement mode; the host zeroes it per
     /// acquisition. Binding 30, camera set only -- PARTIALLY_BOUND so the
@@ -388,11 +389,13 @@ public:
     void SetCameraData(const struct CameraData& cameraData);
     /// Projection lives outside the frozen CameraData/push-constant ABI.
     /// Set 0 is ordinary/CPU spectral capture, 1 is GPU measurement, 2 observer.
-    void SetCameraProjection(const camera::CameraProjection* projection, u32 set = 0);
+    void SetCameraProjection(const camera::CameraProjection* projection, u32 set = 0,
+        bool scalarVignetting=false);
     void SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records);
-    void BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays);
+    void BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays,bool aggregate=false,
+        bool quantitative=false);
     Vector<u8> ReadFusionRecording();
-    void SetFusionInitialMedia(const Vector<u32>& media) { m_initialFusionMedia=media; }
+    void SetFusionInitialMedia(const Vector<u32>& media);
     struct ProbeRay {glm::vec3 origin;f32 wavelength;glm::vec3 direction;u32 branchMask;};
     void SetFusionProbes(const Vector<ProbeRay>& probes);
     struct GeometryHit {

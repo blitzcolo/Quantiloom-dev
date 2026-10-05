@@ -304,7 +304,10 @@ Result<f64, String> ApparentTemperature(f64 measurement, const CameraConfig& con
 
 } // namespace
 
-CpuCameraPipeline::CpuCameraPipeline(CameraConfig config) : m_config(std::move(config)) {}
+CpuCameraPipeline::CpuCameraPipeline(CameraConfig config,bool samplerAppliesVignetting,
+    const std::array<Image,4>* sampled,std::array<Image,5>* integrated)
+    : m_config(std::move(config)),m_samplerAppliesVignetting(samplerAppliesVignetting),
+      m_sampledContributions(sampled),m_integratedContributions(integrated) {}
 
 CameraConfig CpuCameraPipeline::EffectiveConfig(const CaptureState& state,
                                                 bool commitState) const {
@@ -376,19 +379,20 @@ CpuCameraPipeline::CaptureImpl(CaptureState& state, f64 firstRowMidpointSeconds,
         if (!knownPsf) return Fail<CameraOutput>("could not load known PSF image");
     }
     std::vector<f64> vignette(pixelCount, 1.0);
-    if (captureConfig.optics.cosFourthVignetting) {
-        const f64 pitchM = captureConfig.optics.pixelPitchUm * 1e-6;
-        const f64 focalM = captureConfig.optics.focalLengthMm * 1e-3;
+    if (captureConfig.optics.cosFourthVignetting && !m_samplerAppliesVignetting) {
+        const auto projection=ResolveProjection(captureConfig.optics.projection,width,height,
+            captureConfig.optics.focalLengthMm,captureConfig.optics.pixelPitchUm);
+        if(!projection)return Fail<CameraOutput>(projection.error());
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
-                const f64 dx = (x + 0.5 - width * 0.5) * pitchM;
-                const f64 dy = (y + 0.5 - height * 0.5) * pitchM;
-                const f64 cosine = 1.0 / std::sqrt(1.0 + (dx * dx + dy * dy) /
-                                                            (focalM * focalM));
+                const auto ray=UnprojectPixel(*projection,{x+.5,y+.5});
+                const f64 cosine=ray.valid ? ray.direction.z : 0;
                 vignette[static_cast<size_t>(y) * width + x] = std::pow(cosine, 4.0);
             }
     }
     std::vector<f64> expected(elementCount, 0.0);
+    std::array<std::vector<f64>,4> components;
+    if(m_integratedContributions)for(auto& v:components)v.resize(elementCount,0);
     const bool rolling = captureConfig.readout.shutter == ShutterKind::Rolling;
     const u32 rowGroups = rolling ? height : 1u;
     struct ExposureEvent { f64 time; u32 firstY; u32 lastY; };
@@ -423,24 +427,49 @@ CpuCameraPipeline::CaptureImpl(CaptureState& state, f64 firstRowMidpointSeconds,
                         return Fail<CameraOutput>("spectral sampler returned nonfinite radiance");
                 const auto kernel = BuildKernel(captureConfig, wavelengths[wavelengthIndex], knownPsf);
                 if (!kernel) return Fail<CameraOutput>(kernel.error());
-                const Image blurred = Convolve(radiance, kernel.value());
+                Image irradianceInput=radiance;
+                for(size_t i=0;i<pixelCount;++i)irradianceInput.data[i]*=static_cast<f32>(vignette[i]);
+                const Image blurred = Convolve(irradianceInput, kernel.value());
+                std::array<Image,4> blurredComponents;
+                if(m_integratedContributions) {
+                    if(!m_sampledContributions)return Fail<CameraOutput>("missing fusion components");
+                    for(size_t c=0;c<4;++c) {
+                        auto input=(*m_sampledContributions)[c];
+                        if(input.width!=width || input.height!=height || input.channels!=1)
+                            return Fail<CameraOutput>("fusion component grid mismatch");
+                        for(size_t i=0;i<pixelCount;++i)input.data[i]*=static_cast<f32>(vignette[i]);
+                        blurredComponents[c]=Convolve(input,kernel.value());
+                    }
+                }
                 for (u32 y = event.firstY; y < event.lastY; ++y)
                     for (u32 x = 0; x < width; ++x) {
                         const size_t pixel = static_cast<size_t>(y) * width + x;
-                        const f64 irradiance = blurred(x, y, 0) * omega.value() * vignette[pixel];
+                        const f64 irradiance = blurred(x, y, 0) * omega.value();
                         if (captureConfig.device.cfa == CfaPattern::MultiChannel) {
                             for (u32 channel = 0; channel < channels; ++channel)
                                 expected[pixel * channels + channel] += irradiance *
                                     weights.value()[channel][wavelengthIndex] /
                                     captureConfig.quality.timeSamples;
+                            if(m_integratedContributions)for(u32 channel=0;channel<channels;++channel)
+                                for(size_t c=0;c<4;++c)components[c][pixel*channels+channel]+=
+                                    blurredComponents[c](x,y,0)*omega.value()*weights.value()[channel][wavelengthIndex]/captureConfig.quality.timeSamples;
                         } else {
                             const u32 channel = ChannelAt(captureConfig.device.cfa, x, y);
                             expected[pixel] += irradiance *
                                 weights.value()[channel][wavelengthIndex] /
                                 captureConfig.quality.timeSamples;
+                            if(m_integratedContributions)for(size_t c=0;c<4;++c)components[c][pixel]+=
+                                blurredComponents[c](x,y,0)*omega.value()*weights.value()[channel][wavelengthIndex]/captureConfig.quality.timeSamples;
                         }
                     }
             }
+    }
+    if(m_integratedContributions) {
+        for(size_t c=0;c<5;++c) {
+            auto& image=(*m_integratedContributions)[c];image=Image(width,height,channels);
+            for(u32 channel=0;channel<channels;++channel)image.channelNames[channel]=channels==1 ? "Measurement" : captureConfig.device.channels[channel].name;
+            for(size_t i=0;i<elementCount;++i)image.data[i]=static_cast<f32>(c==4 ? expected[i] : components[c][i]);
+        }
     }
     return Readout(state, firstRowMidpointSeconds, std::move(expected),
                    false, true, commitState, captureConfig);
