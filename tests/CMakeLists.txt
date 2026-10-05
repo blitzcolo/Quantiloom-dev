@@ -51,7 +51,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 
     # Define project only for standalone builds
     project(libQuantiloomTests
-        VERSION 0.6.0
+        VERSION 0.7.0
         DESCRIPTION "libQuantiloom Unit Tests"
         LANGUAGES CXX
     )
