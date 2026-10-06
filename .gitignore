@@ -142,3 +142,10 @@ evidence/
 # assets/configs/gallery/kv2_desert_lwir.toml. 26 MB of merge output whose
 # inputs are both tracked.
 assets/models/desert/desert_kv2.*
+
+# Independent local repositories (formerly submodules)
+/assets/models/glTF-Sample-Assets/
+/assets/refractiveindex/
+/docs/doxygen-awesome-css/
+/reference-only/vk_gltf_renderer/
+/reference-only/vk_raytracing_tutorial_KHR/

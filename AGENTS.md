@@ -25,7 +25,7 @@ never interrupt it mid-install.
 Four gates run before the install, so nothing red reaches the SDK: the test
 suite, `scripts/check_exports.sh` against `docs/abi/*.golden`, the furnace
 cavities, and the illumination suite. The export gate prints what to do when it
-trips; `src/libQuantiloom/CLAUDE.md` has the rule it enforces.
+trips; `src/libQuantiloom/AGENTS.md` has the rule it enforces.
 
 The illumination suite has seven arms: `nir`/`swir`/`mwir` occlusion, `open`
 (SWIR open sky against a closed form), `open:vis` (the same ground in the
@@ -849,8 +849,8 @@ got before.
 ## Conventions
 
 - Commits: Conventional Commits — `feat:`, `fix(shaders):`, `chore:`.
-- **No Claude Code session link in a commit message.** No `Claude-Session:` trailer,
-  no `https://claude.ai/code/...` URL, in the subject, the body or a trailer. Same for
+- **No Codex session link in a commit message.** No `Codex-Session:` trailer,
+  no `https://Codex.ai/code/...` URL, in the subject, the body or a trailer. Same for
   PR descriptions.
 - clang-tidy runs through clangd via `.clang-tidy` — warnings surface as you edit,
   there is no separate lint command. No formatter is configured; match nearby style.
