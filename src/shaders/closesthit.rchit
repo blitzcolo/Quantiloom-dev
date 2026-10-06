@@ -1186,7 +1186,8 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
                               inout Payload payload)
 {
     if (payload.depth >= MAX_PATH_DEPTH || rrSurvive <= 0.0) {
-        if(payload.depth>=MAX_PATH_DEPTH && rrSurvive>0)FusionMarkUnknownTail();
+        if (payload.depth >= MAX_PATH_DEPTH && rrSurvive > 0)
+            FusionMarkUnknownTail();
         return 0.0;
     }
     // The same floor BsdfMixturePdf and EvalBounceBrdf apply; all three must
@@ -1323,8 +1324,10 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
-    fusionActiveMediumCount=payload.fusionMediumCount;
-    [unroll] for(uint medium=0;medium<8;++medium) fusionActiveMedia[medium]=payload.fusionMedia[medium];
+    fusionActiveMediumCount = payload.fusionMediumCount;
+    [unroll]
+    for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
+        fusionActiveMedia[medium] = payload.fusionMedia[medium];
     // Record this ray's hit distance for the depth AOV. Only the depth-0
     // (primary) value survives: raygen snapshots its own payload right after
     // the primary trace, and recursive rays carry separate Payload instances.
@@ -1466,17 +1469,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
     float2 uv1 = uvBuffer[geoInfo.uvOffset + idx1];
     float2 uv2 = uvBuffer[geoInfo.uvOffset + idx2];
     float2 uv = uv0 * (1.0 - attribs.bary.x - attribs.bary.y) + uv1 * attribs.bary.x + uv2 * attribs.bary.y;
-    if(payload.fusionPathId!=0xFFFFFFFFu) {
-        const FusionTransportData data=fusionTransport[1+InstanceIndex()];
-        FusionRecordVertex(payload,WorldRayOrigin()+WorldRayDirection()*RayTCurrent(),
-            worldGeometricNormal,data.nodeId,PrimitiveIndex(),data.mode==0 ? 3 : data.mode);
+    if (payload.fusionPathId != kFusionNoPath) {
+        const FusionTransportData data = fusionTransport[1 + InstanceIndex()];
+        FusionRecordVertex(payload, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
+                           worldGeometricNormal, data.nodeId, PrimitiveIndex(),
+                           data.mode == 0 ? 3 : data.mode);
     }
-    if(FusionScalarTransport()) {
-      if(fusionTransport[1+InstanceIndex()].mode!=0) {
-        const float3 hit=WorldRayOrigin()+WorldRayDirection()*RayTCurrent();
-        const float temperature=GetSurfaceTemperatureK(material,geoInfo,PrimitiveIndex(),uv,hit,payload);
-        if(TraceFusionInterface(payload,material,1+InstanceIndex(),hit,worldGeometricNormal,hitBackFace,temperature)) return;
-      }
+    if (FusionScalarTransport()) {
+        if (fusionTransport[1 + InstanceIndex()].mode != 0) {
+            const float3 hit = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+            const float temperature =
+                GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv, hit, payload);
+            if (TraceFusionInterface(payload, material, 1 + InstanceIndex(), hit,
+                                     worldGeometricNormal, hitBackFace, temperature))
+                return;
+        }
     }
 
     // Per-slot UV, from KHR_texture_transform. `uv` itself stays untransformed:
@@ -2360,7 +2367,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (!isfinite(output_radiance.r) || !isfinite(output_radiance.g) || !isfinite(output_radiance.b)) {
             output_radiance = float4(0.0, 0.0, 0.0, 0.0);
         }
-        if(fusionRecords.Load(48)==0) output_radiance = clamp(output_radiance, 0.0, 1000.0);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            output_radiance = clamp(output_radiance, 0.0, 1000.0);
 
     } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
         // ====================================================================
@@ -3095,7 +3103,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // No need to add iblSpecular separately
 
         // Validation: clamp and sanitize to prevent NaN/Inf
-        if (any(!isfinite(output_radiance))) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (any(!isfinite(output_radiance))) {
+                FusionFlagNonFinite();
             output_radiance = float4(0.0, 0.0, 0.0, 0.0);  // Fallback to black
         }
         // SYMMETRIC, for the reason raygen.rgen gives at its own clamp, plus a
@@ -3117,7 +3126,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // the darker they are. Neither the furnace suite nor check_sky_equiv
         // can see it -- both are built on scenes where the correction is
         // identically zero.
-        if(fusionRecords.Load(48)==0) output_radiance = clamp(output_radiance, -1000.0, 1000.0);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            output_radiance = clamp(output_radiance, -1000.0, 1000.0);
 
     } else if (IsSingleWavelengthMode() &&
                RoutesToVisibleSingle(SingleModeWavelength(payload.heroLambda))) {
@@ -3446,10 +3456,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Validation. Symmetric: the bounce above is a residual and goes
         // negative under occlusion; see the note at the VIS_FUSED clamp.
-        if (!isfinite(radiance_spectral)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_spectral)) {
+                FusionFlagNonFinite();
             radiance_spectral = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_spectral = clamp(radiance_spectral, -1000.0, 1000.0);
 
         // Output as grayscale (replicate scalar to RGB for display)
         output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
@@ -3755,10 +3767,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         // Validation. Symmetric: bounceCorr is a residual and goes negative
         // under occlusion; see the note at the VIS_FUSED clamp.
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, -1e6, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
@@ -4011,12 +4025,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         radiance_avg += bounceCorr;
 
         // Validation
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
         // Symmetric: bounceCorr is a residual and goes negative under
         // occlusion; see the note at the VIS_FUSED clamp.
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, -1e6, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
 
@@ -4385,13 +4401,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         radiance_avg += bounceCorr;
 
         // Validation
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
         // Symmetric, and wide for IR's dynamic range: bounceCorr is a residual
         // and goes negative under occlusion; see the note at the VIS_FUSED
         // clamp.
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, -1e6, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, -1e6, 1e6);
 
         // Output as grayscale (IR images are single-channel)
         output_radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
@@ -4403,10 +4421,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
         float radiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0;
 
-        if (!isfinite(radiance_spectral)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_spectral)) {
+                FusionFlagNonFinite();
             radiance_spectral = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_spectral = clamp(radiance_spectral, 0.0, 1000.0);
 
         output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
     }
@@ -5049,11 +5069,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 float lo = SPECTRAL_NIR_LAMBDA_MIN;
                 float hi = SPECTRAL_NIR_LAMBDA_MAX;
                 if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED) {
-                    lo = SPECTRAL_SWIR_LAMBDA_MIN; hi = SPECTRAL_SWIR_LAMBDA_MAX;
+                    lo = SPECTRAL_SWIR_LAMBDA_MIN;
+                    hi = SPECTRAL_SWIR_LAMBDA_MAX;
                 } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) {
-                    lo = SPECTRAL_MWIR_LAMBDA_MIN; hi = SPECTRAL_MWIR_LAMBDA_MAX;
+                    lo = SPECTRAL_MWIR_LAMBDA_MIN;
+                    hi = SPECTRAL_MWIR_LAMBDA_MAX;
                 } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED) {
-                    lo = SPECTRAL_LWIR_LAMBDA_MIN; hi = SPECTRAL_LWIR_LAMBDA_MAX;
+                    lo = SPECTRAL_LWIR_LAMBDA_MIN;
+                    hi = SPECTRAL_LWIR_LAMBDA_MAX;
                 }
                 const float step = (hi - lo) / 15.0;
                 [loop]
@@ -5584,10 +5607,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // Every mode but a quartet carrier writes zero into the fourth component
     // and reads it nowhere, so this one assignment serves all of them.
     payload.radiance = output_radiance;
-    payload.fusionTerminalDepth=payload.depth;
-    if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT) {
-        payload.fusionContributions=FusionClassify(output_radiance.x,payload.fusionRoute);
-        FusionRecordRadianceTerm(payload,0,output_radiance.x);
-        FusionAttenuateSegment(payload,RayTCurrent());
+    payload.fusionTerminalDepth = payload.depth;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+        payload.fusionContributions = FusionClassify(output_radiance.x, payload.fusionRoute);
+        FusionRecordRadianceTerm(payload, 0, output_radiance.x);
+        FusionAttenuateSegment(payload, RayTCurrent());
     }
 }

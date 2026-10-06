@@ -199,6 +199,12 @@ bool IsVisMode(uint mode) {
 // - NVIDIA RTX Best Practices: "Keep ray payloads small" (<32 bytes ideal)
 // ============================================================================
 
+// Medium-stack depth: the same bound as the record header's media-word
+// capacity. Part of the FusionRecordLayout.hpp contract along with
+// kFusionNoPath; the buffer offsets live in fusion_records.hlsli.
+static const uint kFusionMaxInitialMedia = 8;
+static const uint kFusionNoPath = 0xFFFFFFFFu;
+
 struct Payload {
     // Accumulated radiance (W·sr⁻¹·m⁻²), read two ways today:
     //
@@ -313,7 +319,7 @@ struct Payload {
     // Misses and recursive payloads leave it 0, which counts as diffuse.
     uint primaryMaterialFlags;                                           // 4 bytes
     uint fusionMediumCount;
-    uint fusionMedia[8];
+    uint fusionMedia[kFusionMaxInitialMedia];
     uint fusionFlags;
     uint fusionRoute;
     float3 fusionContributions;
@@ -338,29 +344,44 @@ struct Payload {
     // "uninitialised reads as the safest class" property: 0 is diffuse.
 };
 
-static uint fusionActiveMediumCount=0;
-static uint fusionActiveMedia[8];
-struct FusionMediumContext {uint count;uint media[8];};
+static uint fusionActiveMediumCount = 0;
+static uint fusionActiveMedia[kFusionMaxInitialMedia];
+struct FusionMediumContext {
+    uint count;
+    uint media[kFusionMaxInitialMedia];
+};
 FusionMediumContext SaveFusionMedium() {
-    FusionMediumContext value;value.count=fusionActiveMediumCount;
-    [unroll] for(uint i=0;i<8;++i)value.media[i]=fusionActiveMedia[i];
+    FusionMediumContext value;
+    value.count = fusionActiveMediumCount;
+    [unroll]
+    for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
+        value.media[i] = fusionActiveMedia[i];
     return value;
 }
 void RestoreFusionMedium(FusionMediumContext value) {
-    fusionActiveMediumCount=value.count;
-    [unroll] for(uint i=0;i<8;++i)fusionActiveMedia[i]=value.media[i];
+    fusionActiveMediumCount = value.count;
+    [unroll]
+    for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
+        fusionActiveMedia[i] = value.media[i];
 }
-float3 FusionClassify(float value,uint route) {
-    return route==1 ? float3(0,value,0) : route==2 ? float3(0,0,value) : float3(value,0,0);
+float3 FusionClassify(float value, uint route) {
+    return route == 1   ? float3(0, value, 0)
+           : route == 2 ? float3(0, 0, value)
+                        : float3(value, 0, 0);
 }
 void InheritFusionMedium(inout Payload child) {
-    child.fusionSegmentOffset=0;
-    child.fusionPreviousInstance=0xFFFFFFFFu;
-    child.fusionMediumCount=fusionActiveMediumCount;
-    child.fusionFlags=0;child.fusionRoute=0;child.fusionContributions=0;
-    child.fusionPathId=0xFFFFFFFFu;
-    child.fusionForced=0;child.fusionBranchMask=0;
-    [unroll] for(uint i=0;i<8;++i) child.fusionMedia[i]=fusionActiveMedia[i];
+    child.fusionSegmentOffset = 0;
+    child.fusionPreviousInstance = kFusionNoPath;
+    child.fusionMediumCount = fusionActiveMediumCount;
+    child.fusionFlags = 0;
+    child.fusionRoute = 0;
+    child.fusionContributions = 0;
+    child.fusionPathId = kFusionNoPath;
+    child.fusionForced = 0;
+    child.fusionBranchMask = 0;
+    [unroll]
+    for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
+        child.fusionMedia[i] = fusionActiveMedia[i];
 }
 
 // ============================================================================
@@ -995,7 +1016,7 @@ struct PushConstantsRayGen {
     uint totalSamples;
     uint randomSeed;
     uint sequenceSeed;
-    // Temporal stratification of one camera exposure (M4-1). See the CPU-side
+    // Temporal stratification of one camera exposure. See the CPU-side
     // twin in include/quantiloom/scene/Camera.hpp; the two must stay identical.
     uint timeStratum;         // layer this dispatch writes, 0-based
     uint timeStratumCount;    // layers in the current exposure, 0/1 = plain

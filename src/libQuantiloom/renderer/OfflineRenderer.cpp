@@ -112,23 +112,28 @@ bool EnvFlagEnabled(const char* name) {
 // ============================================================================
 
 struct OfflineRenderer::Impl {
-    dataset::FusionCaptureResultV2* fusionCapture=nullptr;
-    const dataset::FusionCaptureOptionsV2* fusionOptions=nullptr;
-    std::array<Image,4> fusionSample;
-    std::array<Image,5> fusionIntegrated;
-    u32 fusionStrata=0;
-    bool quantitativeObserver=false;
+    dataset::FusionCaptureResultV2* fusionCapture = nullptr;
+    const dataset::FusionCaptureOptionsV2* fusionOptions = nullptr;
+    std::array<Image, 4> fusionSample;
+    std::array<Image, 5> fusionIntegrated;
+    u32 fusionStrata = 0;
+    bool quantitativeObserver = false;
     // ------------------------------------------------------------------
     // Not GPU state; position among the members is free.
     // ------------------------------------------------------------------
-    String ProductSnapshot(f64 timeSeconds, u32 width, u32 height, bool physical, bool staticSceneCamera = false, const CameraData* boundCamera = nullptr) const {
+    String ProductSnapshot(f64 timeSeconds, u32 width, u32 height, bool physical,
+                           bool staticSceneCamera = false,
+                           const CameraData* boundCamera = nullptr) const {
         using Json = nlohmann::json;
         CameraData actualCamera{};
-        if (boundCamera) actualCamera = *boundCamera;
-        else if (staticSceneCamera) actualCamera = loadedScene.camera.GetCameraData();
+        if (boundCamera)
+            actualCamera = *boundCamera;
+        else if (staticSceneCamera)
+            actualCamera = loadedScene.camera.GetCameraData();
         else {
             const auto pose = CameraDataAt(timeSeconds, params.mode, params.wavelengthNm, physical);
-            if (!pose) throw std::runtime_error(pose.error());
+            if (!pose)
+                throw std::runtime_error(pose.error());
             actualCamera = pose.value();
         }
         dataset::ProductGeometry productGeometry;
@@ -138,51 +143,69 @@ struct OfflineRenderer::Impl {
         productGeometry.worldUnitsToMeters = lightingParams.worldUnitsToMeters;
         productGeometry.camera = actualCamera;
         if (physical) {
-            const auto& optics=resolved.cameraConfig.optics;
-            const auto p=camera::ResolveProjection(optics.projection,width,height,
-                optics.focalLengthMm,optics.pixelPitchUm);
-            if (!p) throw std::runtime_error(p.error());
-            productGeometry.nativeProjection=*p;
+            const auto& optics = resolved.cameraConfig.optics;
+            const auto p = camera::ResolveProjection(optics.projection, width, height,
+                                                     optics.focalLengthMm, optics.pixelPitchUm);
+            if (!p)
+                throw std::runtime_error(p.error());
+            productGeometry.nativeProjection = *p;
         }
         const auto calibration = productGeometry.ToJson();
-        if (!calibration) throw std::runtime_error(calibration.error());
+        if (!calibration)
+            throw std::runtime_error(calibration.error());
         const auto& gpu = contextRef->GetDeviceProperties();
-        const auto vector = [](const glm::vec3& v) { return Json::array({v.x,v.y,v.z}); };
+        const auto vector = [](const glm::vec3& v) { return Json::array({v.x, v.y, v.z}); };
         const auto& sun = lightingParams.sunDirection;
         f64 azimuth = std::atan2(sun.x, sun.z) * 180.0 / constants::PI;
-        if (azimuth < 0.0) azimuth += 360.0;
+        if (azimuth < 0.0)
+            azimuth += 360.0;
         Json snapshot = {
-            {"version", 1}, {"geometry", Json::parse(calibration.value())},
+            {"version", 1},
+            {"geometry", Json::parse(calibration.value())},
             {"software", {{"sdk_version", version::LibVersionString}}},
-            {"device", {{"name", gpu.deviceName}, {"vendor_id", gpu.vendorID},
-                        {"device_id", gpu.deviceID}, {"driver_version", gpu.driverVersion},
-                        {"vulkan_api_version", gpu.apiVersion}}},
-            {"lighting", {{"sun_direction_to_sun", vector(sun)},
-                          {"sun_azimuth_deg", azimuth},
-                          {"sun_elevation_deg", std::asin(std::clamp(static_cast<f64>(sun.y),-1.0,1.0))*180.0/constants::PI},
-                          {"sun_radiance_rgb", vector(lightingParams.sunRadiance_rgb)},
-                          {"sky_radiance_rgb", vector(lightingParams.skyRadiance_rgb)},
-                          {"environment_map_enabled", !physical && lightingParams.enableEnvironmentMap != 0},
-                          {"solar_sky_lut_enabled", resolved.solarSunSky.has_value()}}},
-            {"sampling", {{"requested_spp", params.spp}, {"mode", params.modeName},
-                          {"wavelength_nm", params.wavelengthNm}}},
-            {"reproducibility", {{"verified", false},
-                {"reason", "Resource-load and execution-binary fingerprints are not yet captured"}}}
-        };
+            {"device",
+             {{"name", gpu.deviceName},
+              {"vendor_id", gpu.vendorID},
+              {"device_id", gpu.deviceID},
+              {"driver_version", gpu.driverVersion},
+              {"vulkan_api_version", gpu.apiVersion}}},
+            {"lighting",
+             {{"sun_direction_to_sun", vector(sun)},
+              {"sun_azimuth_deg", azimuth},
+              {"sun_elevation_deg",
+               std::asin(std::clamp(static_cast<f64>(sun.y), -1.0, 1.0)) * 180.0 / constants::PI},
+              {"sun_radiance_rgb", vector(lightingParams.sunRadiance_rgb)},
+              {"sky_radiance_rgb", vector(lightingParams.skyRadiance_rgb)},
+              {"environment_map_enabled", !physical && lightingParams.enableEnvironmentMap != 0},
+              {"solar_sky_lut_enabled", resolved.solarSunSky.has_value()}}},
+            {"sampling",
+             {{"requested_spp", params.spp},
+              {"mode", params.modeName},
+              {"wavelength_nm", params.wavelengthNm}}},
+            {"reproducibility",
+             {{"verified", false},
+              {"reason", "Resource-load and execution-binary fingerprints are not yet captured"}}}};
         const auto clock = timeline.Info();
-        snapshot["timeline"] = {{"present", clock.present}, {"start_s", clock.start_s},
-            {"end_s", clock.end_s}, {"current_s", timeline.Current_s()},
-            {"ticks_per_second", clock.ticksPerSecond}};
-        snapshot["thermal"] = {{"hour", ThermalHourNow()},
+        snapshot["timeline"] = {{"present", clock.present},
+                                {"start_s", clock.start_s},
+                                {"end_s", clock.end_s},
+                                {"current_s", timeline.Current_s()},
+                                {"ticks_per_second", clock.ticksPerSecond}};
+        snapshot["thermal"] = {
+            {"hour", ThermalHourNow()},
             {"epoch_count", thermalSession ? thermalSession->EpochCount() : 0u},
             {"epoch_index", thermalSession ? thermalSession->EpochAt(ThermalHourNow()) : 0u}};
         snapshot["state_snapshot_time_s"] = timeline.Current_s();
         snapshot["input_base_dir"] = init.baseDir;
         snapshot["diagnostics"] = Json::array();
         for (const auto& message : configReport.messages)
-            snapshot["diagnostics"].push_back({{"key", message.key}, {"text", message.text},
-                {"severity", message.severity == ConfigApplyMessage::Severity::Error ? "error" :
-                    message.severity == ConfigApplyMessage::Severity::Warning ? "warning" : "info"}});
+            snapshot["diagnostics"].push_back(
+                {{"key", message.key},
+                 {"text", message.text},
+                 {"severity", message.severity == ConfigApplyMessage::Severity::Error ? "error"
+                              : message.severity == ConfigApplyMessage::Severity::Warning
+                                  ? "warning"
+                                  : "info"}});
         return snapshot.dump();
     }
     Config config;
@@ -334,12 +357,9 @@ struct OfflineRenderer::Impl {
 
     OfflineRenderOutput RenderHyperspectral();
     OfflineRenderOutput RenderSingleFrame();
-    Result<Image, String> RenderCameraWavelength(f64 wavelengthNm,
-                                                 u64 acquisitionIndex,
-                                                 u32 seed);
-    Result<CameraData, String> CameraDataAt(f64 timeSeconds, SpectralMode mode,
-                                           f64 wavelengthNm,
-                                           bool physicalSensorProjection) const;
+    Result<Image, String> RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex, u32 seed);
+    Result<CameraData, String> CameraDataAt(f64 timeSeconds, SpectralMode mode, f64 wavelengthNm,
+                                            bool physicalSensorProjection) const;
 };
 
 // ============================================================================
@@ -1275,9 +1295,10 @@ Result<std::unique_ptr<OfflineRenderer>, String> OfflineRenderer::Create(
 // ============================================================================
 
 OfflineRenderOutput OfflineRenderer::Render() {
-    const auto pose = m_impl->CameraDataAt(m_impl->timeline.Current_s(),
-        m_impl->params.mode, m_impl->params.wavelengthNm, false);
-    if (!pose) return OfflineRenderOutput{{}, 1.0f, 0.0f, false, pose.error()};
+    const auto pose = m_impl->CameraDataAt(m_impl->timeline.Current_s(), m_impl->params.mode,
+                                           m_impl->params.wavelengthNm, false);
+    if (!pose)
+        return OfflineRenderOutput{{}, 1.0f, 0.0f, false, pose.error()};
     m_impl->pipeline->SetCameraData(pose.value());
     if (m_impl->params.mode == SpectralMode::Multispectral) {
         return m_impl->RenderHyperspectral();
@@ -1289,98 +1310,123 @@ const camera::CameraConfig& OfflineRenderer::GetCameraConfig() const {
     return m_impl->resolved.cameraConfig;
 }
 
-Result<CameraData, String> OfflineRenderer::Impl::CameraDataAt(
-    f64 timeSeconds, SpectralMode mode, f64 wavelengthNm,
-    bool physicalSensorProjection) const {
+Result<CameraData, String>
+OfflineRenderer::Impl::CameraDataAt(f64 timeSeconds, SpectralMode mode, f64 wavelengthNm,
+                                    bool physicalSensorProjection) const {
     Camera poseCamera = loadedScene.camera;
     const auto& motion = resolved.cameraConfig.motion;
     if (!motion.keys.empty()) {
         const auto pose = camera::CameraPoseAt(motion, timeSeconds);
-        if (!pose) return Result<CameraData, String>::Err(pose.error());
-        const auto position = glm::vec3(
-            static_cast<f32>(pose.value().position[0]),
-            static_cast<f32>(pose.value().position[1]),
-            static_cast<f32>(pose.value().position[2]));
-        const auto lookAt = glm::vec3(
-            static_cast<f32>(pose.value().lookAt[0]),
-            static_cast<f32>(pose.value().lookAt[1]),
-            static_cast<f32>(pose.value().lookAt[2]));
+        if (!pose)
+            return Result<CameraData, String>::Err(pose.error());
+        const auto position = glm::vec3(static_cast<f32>(pose.value().position[0]),
+                                        static_cast<f32>(pose.value().position[1]),
+                                        static_cast<f32>(pose.value().position[2]));
+        const auto lookAt = glm::vec3(static_cast<f32>(pose.value().lookAt[0]),
+                                      static_cast<f32>(pose.value().lookAt[1]),
+                                      static_cast<f32>(pose.value().lookAt[2]));
         poseCamera = Camera(position, lookAt, loadedScene.camera.GetUpReference(),
-                            loadedScene.camera.GetFovY(),
-                            loadedScene.camera.GetAspectRatio());
+                            loadedScene.camera.GetFovY(), loadedScene.camera.GetAspectRatio());
         poseCamera.SetProjection(loadedScene.camera.GetProjection());
         poseCamera.SetOrthoHeight(loadedScene.camera.GetOrthoHeight());
     }
     CameraData data = poseCamera.GetCameraData();
     data.wavelength_nm = static_cast<f32>(wavelengthNm);
     data.spectral_mode = static_cast<u32>(mode);
-    data.debug_mode = physicalSensorProjection ? 0u :
-                      static_cast<u32>(resolved.debugMode);
+    data.debug_mode = physicalSensorProjection ? 0u : static_cast<u32>(resolved.debugMode);
     data.debugParam = 0u;
     if (physicalSensorProjection) {
         if (poseCamera.GetProjection() != Camera::Projection::Perspective)
             return Result<CameraData, String>::Err(
                 "physical camera capture requires a perspective projection");
         const auto& optics = resolved.cameraConfig.optics;
-        const auto fovX = camera::HorizontalFovRadians(
-            optics.focalLengthMm, optics.pixelPitchUm, optics.sensorWidthPx);
-        if (!fovX) return Result<CameraData, String>::Err(fovX.error());
-        const f64 aspect = static_cast<f64>(optics.sensorWidthPx) /
-                           optics.sensorHeightPx;
+        const auto fovX = camera::HorizontalFovRadians(optics.focalLengthMm, optics.pixelPitchUm,
+                                                       optics.sensorWidthPx);
+        if (!fovX)
+            return Result<CameraData, String>::Err(fovX.error());
+        const f64 aspect = static_cast<f64>(optics.sensorWidthPx) / optics.sensorHeightPx;
         data.aspectRatio = static_cast<f32>(aspect);
         data.fovScale = static_cast<f32>(std::tan(fovX.value() / 2.0) / aspect);
     }
     return data;
 }
 
-Result<camera::CameraOutput, String>
-OfflineRenderer::CaptureCamera(camera::CaptureState& state, f64 frameTimeSeconds) {
+Result<camera::CameraOutput, String> OfflineRenderer::CaptureCamera(camera::CaptureState& state,
+                                                                    f64 frameTimeSeconds) {
     return CaptureCameraInternal(state, frameTimeSeconds, /*suppressProducts=*/false);
 }
 
-Result<dataset::FusionCaptureResultV2,String> OfflineRenderer::CaptureFusionV2(
-    camera::CaptureState& state,f64 time,const dataset::FusionCaptureOptionsV2& options) {
+Result<dataset::FusionCaptureResultV2, String>
+OfflineRenderer::CaptureFusionV2(camera::CaptureState& state, f64 time,
+                                 const dataset::FusionCaptureOptionsV2& options) {
     try {
-    auto& host=*m_impl;
-    if(options.version!=2 || host.fusionCapture ||
-        (options.recordPaths && options.maxRecordedRays==std::numeric_limits<u32>::max()))
-        return Result<dataset::FusionCaptureResultV2,String>::Err("invalid or nested fusion capture");
-    for(size_t i=1;i<host.spectra.fusionTransport.size();++i) {
-        const auto& record=host.spectra.fusionTransport[i];
-        const auto& material=host.loadedScene.materials[record.materialId];
-        if(record.mode==0 && (material.transmission>0 ||
-            std::any_of(material.irTransmittanceCurve.begin(),material.irTransmittanceCurve.end(),[](const auto& v){return v.second>0;})))
-            return Result<dataset::FusionCaptureResultV2,String>::Err("fusion capture requires explicit optical transport for "+material.name);
+        auto& host = *m_impl;
+        if (options.version != 2 || host.fusionCapture ||
+            (options.recordPaths && options.maxRecordedRays == std::numeric_limits<u32>::max()))
+            return Result<dataset::FusionCaptureResultV2, String>::Err(
+                "invalid or nested fusion capture");
+        for (size_t i = 1; i < host.spectra.fusionTransport.size(); ++i) {
+            const auto& record = host.spectra.fusionTransport[i];
+            const auto& material = host.loadedScene.materials[record.materialId];
+            if (record.mode == 0 && (material.transmission > 0 ||
+                                     std::any_of(material.irTransmittanceCurve.begin(),
+                                                 material.irTransmittanceCurve.end(),
+                                                 [](const auto& v) { return v.second > 0; })))
+                return Result<dataset::FusionCaptureResultV2, String>::Err(
+                    "fusion capture requires explicit optical transport for " + material.name);
+        }
+        dataset::FusionCaptureResultV2 result;
+        host.fusionCapture = &result;
+        host.fusionOptions = &options;
+        host.fusionStrata = 0;
+        struct Reset {
+            Impl& host;
+            ~Reset() {
+                host.fusionCapture = nullptr;
+                host.fusionOptions = nullptr;
+            }
+        } reset{host};
+        camera::CaptureState working = state;
+        auto captured = CaptureCameraInternal(working, time, false);
+        if (!captured)
+            return Result<dataset::FusionCaptureResultV2, String>::Err(captured.error());
+        for (size_t i = 0; i < 4; ++i)
+            result.contributions[i] = std::move(host.fusionIntegrated[i]);
+        result.linearReference = std::move(host.fusionIntegrated[4]);
+        for (size_t i = 0; i < result.linearReference.data.size(); ++i) {
+            f64 sum = 0;
+            for (const auto& c : result.contributions)
+                sum += c.data[i];
+            const f64 reference = result.linearReference.data[i];
+            if (!std::isfinite(reference) || reference < 0 || !std::isfinite(sum) ||
+                std::abs(sum - reference) > 1e-5 * std::max(std::abs(reference), 1e-20))
+                return Result<dataset::FusionCaptureResultV2, String>::Err(
+                    "fusion contributions fail independent linear reconstruction");
+        }
+        const auto& optics = host.resolved.cameraConfig.optics;
+        auto p = camera::ResolveProjection(optics.projection, optics.sensorWidthPx,
+                                           optics.sensorHeightPx, optics.focalLengthMm,
+                                           optics.pixelPitchUm);
+        if (!p)
+            return Result<dataset::FusionCaptureResultV2, String>::Err(p.error());
+        result.lensValidity = Image(optics.sensorWidthPx, optics.sensorHeightPx, 1);
+        result.lensValidity.channelNames = {"lens_status"};
+        for (u32 y = 0; y < optics.sensorHeightPx; ++y)
+            for (u32 x = 0; x < optics.sensorWidthPx; ++x)
+                result.lensValidity(x, y, 0) = static_cast<f32>(
+                    camera::UnprojectPixelV2(*p, {x + .5, y + .5}, optics.sensorWidthPx,
+                                             optics.sensorHeightPx)
+                        .status);
+        result.products = std::move(*captured);
+        state = std::move(working);
+        return result;
+    } catch (const std::exception& e) {
+        return Result<dataset::FusionCaptureResultV2, String>::Err(e.what());
     }
-    dataset::FusionCaptureResultV2 result;
-    host.fusionCapture=&result;host.fusionOptions=&options;host.fusionStrata=0;
-    struct Reset {Impl& host;~Reset(){host.fusionCapture=nullptr;host.fusionOptions=nullptr;}} reset{host};
-    camera::CaptureState working=state;
-    auto captured=CaptureCameraInternal(working,time,false);
-    if(!captured)return Result<dataset::FusionCaptureResultV2,String>::Err(captured.error());
-    for(size_t i=0;i<4;++i)result.contributions[i]=std::move(host.fusionIntegrated[i]);
-    result.linearReference=std::move(host.fusionIntegrated[4]);
-    for(size_t i=0;i<result.linearReference.data.size();++i) {
-        f64 sum=0;for(const auto& c:result.contributions)sum+=c.data[i];
-        const f64 reference=result.linearReference.data[i];
-        if(!std::isfinite(reference) || reference<0 || !std::isfinite(sum) ||
-            std::abs(sum-reference)>1e-5*std::max(std::abs(reference),1e-20))
-            return Result<dataset::FusionCaptureResultV2,String>::Err("fusion contributions fail independent linear reconstruction");
-    }
-    const auto& optics=host.resolved.cameraConfig.optics;
-    auto p=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
-    if(!p)return Result<dataset::FusionCaptureResultV2,String>::Err(p.error());
-    result.lensValidity=Image(optics.sensorWidthPx,optics.sensorHeightPx,1);result.lensValidity.channelNames={"lens_status"};
-    for(u32 y=0;y<optics.sensorHeightPx;++y)for(u32 x=0;x<optics.sensorWidthPx;++x)
-        result.lensValidity(x,y,0)=static_cast<f32>(camera::UnprojectPixelV2(*p,{x+.5,y+.5},optics.sensorWidthPx,optics.sensorHeightPx).status);
-    result.products=std::move(*captured);state=std::move(working);
-    return result;
-    } catch(const std::exception& e) {return Result<dataset::FusionCaptureResultV2,String>::Err(e.what());}
 }
 
 Result<camera::CameraOutput, String>
-OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
-                                       f64 frameTimeSeconds,
+OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state, f64 frameTimeSeconds,
                                        bool suppressProducts) {
     Impl& impl = *m_impl;
     const f64 enteredTime = impl.timeline.Current_s();
@@ -1390,9 +1436,10 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         f64 timeSeconds;
         ~RestoreSceneTime() {
             (void)renderer.SetTimelineTime(timeSeconds);
-            const auto cameraData = impl.CameraDataAt(
-                timeSeconds, impl.params.mode, impl.params.wavelengthNm, false);
-            if (cameraData && impl.pipeline) impl.pipeline->SetCameraData(cameraData.value());
+            const auto cameraData =
+                impl.CameraDataAt(timeSeconds, impl.params.mode, impl.params.wavelengthNm, false);
+            if (cameraData && impl.pipeline)
+                impl.pipeline->SetCameraData(cameraData.value());
         }
     } restoreTime{*this, impl, enteredTime};
     camera::CameraConfig config = impl.resolved.cameraConfig;
@@ -1408,14 +1455,15 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         const auto& [sun, sky] = *impl.resolved.solarSunSky;
         for (const auto& channel : config.device.channels) {
             const auto& response = channel.response;
-            const auto& base = response.systemResponse ? *response.systemResponse :
-                (config.device.detector == camera::DetectorKind::Photon ?
-                 *response.quantumEfficiency : *response.thermalAbsorptance);
+            const auto& base = response.systemResponse
+                                   ? *response.systemResponse
+                                   : (config.device.detector == camera::DetectorKind::Photon
+                                          ? *response.quantumEfficiency
+                                          : *response.thermalAbsorptance);
             if (sun.samples.empty() || sky.samples.empty() ||
                 sun.samples.front().first > base.MinNm() ||
                 sun.samples.back().first < base.MaxNm() ||
-                sky.samples.front().first > base.MinNm() ||
-                sky.samples.back().first < base.MaxNm())
+                sky.samples.front().first > base.MinNm() || sky.samples.back().first < base.MaxNm())
                 return Result<camera::CameraOutput, String>::Err(
                     "camera response exceeds solar/sky LUT coverage");
         }
@@ -1442,26 +1490,27 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         config.products.apparentTemperature = false;
         config.products.display = false;
     }
-    camera::CpuCameraPipeline camera(std::move(config),true,
-        impl.fusionCapture ? &impl.fusionSample : nullptr,
-        impl.fusionCapture ? &impl.fusionIntegrated : nullptr);
+    camera::CpuCameraPipeline camera(std::move(config), true,
+                                     impl.fusionCapture ? &impl.fusionSample : nullptr,
+                                     impl.fusionCapture ? &impl.fusionIntegrated : nullptr);
     camera::CaptureState nextState = state;
-    const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm)
-        -> Result<Image, String> {
+    const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm) -> Result<Image, String> {
         auto moved = SetTimelineTime(timeSeconds);
-        if (!moved) return Result<Image, String>::Err(moved.error());
+        if (!moved)
+            return Result<Image, String>::Err(moved.error());
         return impl.RenderCameraWavelength(wavelengthNm, state.acquisitionIndex,
                                            impl.resolved.cameraConfig.randomSeed);
     };
     Result<camera::CameraOutput, String> captured =
         Result<camera::CameraOutput, String>::Err("camera capture did not run");
-    if (impl.resolved.cameraConfig.inputKind ==
-        camera::CameraInputKind::FastRgbApproximation) {
+    if (impl.resolved.cameraConfig.inputKind == camera::CameraInputKind::FastRgbApproximation) {
         auto moved = SetTimelineTime(frameTimeSeconds);
-        if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
-        const auto pose = impl.CameraDataAt(frameTimeSeconds, SpectralMode::RGB,
-                                            impl.params.wavelengthNm, false);
-        if (!pose) return Result<camera::CameraOutput, String>::Err(pose.error());
+        if (!moved)
+            return Result<camera::CameraOutput, String>::Err(moved.error());
+        const auto pose =
+            impl.CameraDataAt(frameTimeSeconds, SpectralMode::RGB, impl.params.wavelengthNm, false);
+        if (!pose)
+            return Result<camera::CameraOutput, String>::Err(pose.error());
         impl.pipeline->SetCameraData(pose.value());
         OfflineRenderOutput fast = impl.RenderSingleFrame();
         if (!fast.error.empty())
@@ -1486,10 +1535,10 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
                 const f64 fx = std::clamp(sourceX - x0, 0.0, 1.0);
                 const f64 fy = std::clamp(sourceY - y0, 0.0, 1.0);
                 for (u32 c = 0; c < 3; ++c) {
-                    const f64 top = (1.0 - fx) * fast.radiance(x0, y0, c) +
-                                    fx * fast.radiance(x1, y0, c);
-                    const f64 bottom = (1.0 - fx) * fast.radiance(x0, y1, c) +
-                                       fx * fast.radiance(x1, y1, c);
+                    const f64 top =
+                        (1.0 - fx) * fast.radiance(x0, y0, c) + fx * fast.radiance(x1, y0, c);
+                    const f64 bottom =
+                        (1.0 - fx) * fast.radiance(x0, y1, c) + fx * fast.radiance(x1, y1, c);
                     rgb(x, y, c) = static_cast<f32>((1.0 - fy) * top + fy * bottom);
                 }
             }
@@ -1497,17 +1546,19 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
     } else {
         captured = camera.Capture(nextState, frameTimeSeconds, sampler);
     }
-    if (!captured) return captured;
+    if (!captured)
+        return captured;
     // Freeze sensor-product state before an optional observer render moves the
     // clock again. Asking for a CIE/traced product must not rewrite the capture
     // description of a sensor image that has already been generated.
     if (!suppressProducts && impl.config.GetBool("dataset.metadata", true)) {
-        const bool physicalProjection = impl.resolved.cameraConfig.inputKind !=
-            camera::CameraInputKind::FastRgbApproximation;
+        const bool physicalProjection =
+            impl.resolved.cameraConfig.inputKind != camera::CameraInputKind::FastRgbApproximation;
         const auto freeze = [&](std::optional<camera::CameraProduct>& product) {
-            if (product) product->image.metadata["quantiloom_provenance"] =
-                impl.ProductSnapshot(frameTimeSeconds, product->image.width,
-                    product->image.height, physicalProjection);
+            if (product)
+                product->image.metadata["quantiloom_provenance"] =
+                    impl.ProductSnapshot(frameTimeSeconds, product->image.width,
+                                         product->image.height, physicalProjection);
         };
         freeze(captured.value().bandMeasurement);
         freeze(captured.value().rawDn);
@@ -1517,50 +1568,83 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
     }
     if (!suppressProducts && (wantsObserver || wantsTraced)) {
         auto moved = SetTimelineTime(frameTimeSeconds);
-        if (!moved) return Result<camera::CameraOutput, String>::Err(moved.error());
-        const u64 observerAcquisition=state.acquisitionIndex | (u64(1)<<63);
-        auto* savedFusion=impl.fusionCapture;auto* savedOptions=impl.fusionOptions;
-        const bool savedVignette=impl.resolved.cameraConfig.optics.cosFourthVignetting;
-        const auto savedCallback=impl.init.onFusionPathChunk;
-        struct RestoreObserver {Impl& h;dataset::FusionCaptureResultV2* f;const dataset::FusionCaptureOptionsV2* o;
-            bool v;decltype(impl.init.onFusionPathChunk) cb;
-            ~RestoreObserver(){h.fusionCapture=f;h.fusionOptions=o;h.quantitativeObserver=false;h.resolved.cameraConfig.optics.cosFourthVignetting=v;h.init.onFusionPathChunk=cb;}
-        } observerRestore{impl,savedFusion,savedOptions,savedVignette,savedCallback};
-        impl.fusionCapture=nullptr;impl.fusionOptions=nullptr;impl.init.onFusionPathChunk={};
-        impl.quantitativeObserver=savedFusion!=nullptr;
-        impl.resolved.cameraConfig.optics.cosFourthVignetting=false;
-        OfflineRenderOutput observer;
-        if(wantsTraced) {
-            auto sampled=impl.RenderCameraWavelength(impl.params.wavelengthNm,observerAcquisition,impl.resolved.cameraConfig.randomSeed);
-            if(!sampled)return Result<camera::CameraOutput,String>::Err(sampled.error());
-            observer.radiance=Image(sampled.value().width,sampled.value().height,3);
-            for(size_t i=0;i<sampled.value().data.size();++i)for(size_t c=0;c<3;++c)observer.radiance.data[i*3+c]=sampled.value().data[i];
-        } else {
-            std::array<Image,32> bands;
-            for(u32 i=0;i<32;++i) {
-                auto sampled=impl.RenderCameraWavelength(400.0+380.0*i/31,observerAcquisition,impl.resolved.cameraConfig.randomSeed);
-                if(!sampled)return Result<camera::CameraOutput,String>::Err(sampled.error());
-                bands[i]=std::move(*sampled);
+        if (!moved)
+            return Result<camera::CameraOutput, String>::Err(moved.error());
+        const u64 observerAcquisition = state.acquisitionIndex | (u64(1) << 63);
+        auto* savedFusion = impl.fusionCapture;
+        auto* savedOptions = impl.fusionOptions;
+        const bool savedVignette = impl.resolved.cameraConfig.optics.cosFourthVignetting;
+        const auto savedCallback = impl.init.onFusionPathChunk;
+        struct RestoreObserver {
+            Impl& h;
+            dataset::FusionCaptureResultV2* f;
+            const dataset::FusionCaptureOptionsV2* o;
+            bool v;
+            decltype(impl.init.onFusionPathChunk) cb;
+            ~RestoreObserver() {
+                h.fusionCapture = f;
+                h.fusionOptions = o;
+                h.quantitativeObserver = false;
+                h.resolved.cameraConfig.optics.cosFourthVignetting = v;
+                h.init.onFusionPathChunk = cb;
             }
-            observer.radiance=Image(bands[0].width,bands[0].height,3);
-            for(size_t pixel=0;pixel<bands[0].data.size();++pixel) {
+        } observerRestore{impl, savedFusion, savedOptions, savedVignette, savedCallback};
+        impl.fusionCapture = nullptr;
+        impl.fusionOptions = nullptr;
+        impl.init.onFusionPathChunk = {};
+        impl.quantitativeObserver = savedFusion != nullptr;
+        impl.resolved.cameraConfig.optics.cosFourthVignetting = false;
+        OfflineRenderOutput observer;
+        if (wantsTraced) {
+            auto sampled =
+                impl.RenderCameraWavelength(impl.params.wavelengthNm, observerAcquisition,
+                                            impl.resolved.cameraConfig.randomSeed);
+            if (!sampled)
+                return Result<camera::CameraOutput, String>::Err(sampled.error());
+            observer.radiance = Image(sampled.value().width, sampled.value().height, 3);
+            for (size_t i = 0; i < sampled.value().data.size(); ++i)
+                for (size_t c = 0; c < 3; ++c)
+                    observer.radiance.data[i * 3 + c] = sampled.value().data[i];
+        } else {
+            std::array<Image, 32> bands;
+            for (u32 i = 0; i < 32; ++i) {
+                auto sampled =
+                    impl.RenderCameraWavelength(400.0 + 380.0 * i / 31, observerAcquisition,
+                                                impl.resolved.cameraConfig.randomSeed);
+                if (!sampled)
+                    return Result<camera::CameraOutput, String>::Err(sampled.error());
+                bands[i] = std::move(*sampled);
+            }
+            observer.radiance = Image(bands[0].width, bands[0].height, 3);
+            for (size_t pixel = 0; pixel < bands[0].data.size(); ++pixel) {
                 SpectralCurve curve;
-                curve.samples.emplace_back(399.999f,0);
-                for(u32 i=0;i<32;++i)curve.samples.emplace_back(static_cast<f32>(400.0+380.0*i/31),bands[i].data[pixel]);
-                curve.samples.emplace_back(780.001f,0);
-                const auto rgb=EmissionSpectrumToRenderedLinearSrgb(curve);
-                for(size_t c=0;c<3;++c)observer.radiance.data[pixel*3+c]=rgb[c];
+                curve.samples.emplace_back(399.999f, 0);
+                for (u32 i = 0; i < 32; ++i)
+                    curve.samples.emplace_back(static_cast<f32>(400.0 + 380.0 * i / 31),
+                                               bands[i].data[pixel]);
+                curve.samples.emplace_back(780.001f, 0);
+                const auto rgb = EmissionSpectrumToRenderedLinearSrgb(curve);
+                for (size_t c = 0; c < 3; ++c)
+                    observer.radiance.data[pixel * 3 + c] = rgb[c];
             }
         }
-        auto observerProvenance=nlohmann::json::parse(impl.ProductSnapshot(frameTimeSeconds,observer.radiance.width,observer.radiance.height,true));
-        observerProvenance["sampling"]={{"requested_spp",impl.params.spp},
-            {"mode",wantsObserver ? "cie_piecewise_linear_32_wavelength_sweep" : "single"},
-            {"spectral_span_nm",wantsObserver ? nlohmann::json{400,780} : nlohmann::json{impl.params.wavelengthNm,impl.params.wavelengthNm}},
-            {"outside_observer_span","zero"},{"acquisition_kind","independent_observer_render"}};
-        observerProvenance["optical_response"]={{"projection","actual_native_lens"},
-            {"psf_applied",false},{"vignetting_applied",false},{"detector_applied",false},
-            {"calibration","independent_scene_radiance_not_device_calibration"}};
-        observer.radiance.metadata["quantiloom_provenance"]=observerProvenance.dump();
+        auto observerProvenance = nlohmann::json::parse(impl.ProductSnapshot(
+            frameTimeSeconds, observer.radiance.width, observer.radiance.height, true));
+        observerProvenance["sampling"] = {
+            {"requested_spp", impl.params.spp},
+            {"mode", wantsObserver ? "cie_piecewise_linear_32_wavelength_sweep" : "single"},
+            {"spectral_span_nm",
+             wantsObserver ? nlohmann::json{400, 780}
+                           : nlohmann::json{impl.params.wavelengthNm, impl.params.wavelengthNm}},
+            {"outside_observer_span", "zero"},
+            {"acquisition_kind", "independent_observer_render"}};
+        observerProvenance["optical_response"] = {
+            {"projection", "actual_native_lens"},
+            {"psf_applied", false},
+            {"vignetting_applied", false},
+            {"detector_applied", false},
+            {"calibration", "independent_scene_radiance_not_device_calibration"}};
+        observer.radiance.metadata["quantiloom_provenance"] = observerProvenance.dump();
         if (wantsObserver) {
             camera::SignalDescriptor signal;
             signal.kind = camera::SignalKind::CieLinearSrgb;
@@ -1575,7 +1659,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
                 for (u32 x = 0; x < image.width; ++x)
                     for (u32 c = 0; c < 3; ++c)
                         image(x, y, c) = observer.radiance(x, y, c);
-            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance"); frozen != observer.radiance.metadata.end())
+            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance");
+                frozen != observer.radiance.metadata.end())
                 image.metadata["quantiloom_provenance"] = frozen->second;
             camera::CameraProduct product{std::move(image), std::move(signal)};
             auto annotated = camera::AnnotateProductMetadata(product);
@@ -1597,7 +1682,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
             for (u32 y = 0; y < image.height; ++y)
                 for (u32 x = 0; x < image.width; ++x)
                     image(x, y, 0) = observer.radiance(x, y, 0);
-            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance"); frozen != observer.radiance.metadata.end())
+            if (const auto frozen = observer.radiance.metadata.find("quantiloom_provenance");
+                frozen != observer.radiance.metadata.end())
                 image.metadata["quantiloom_provenance"] = frozen->second;
             camera::CameraProduct product{std::move(image), std::move(signal)};
             auto annotated = camera::AnnotateProductMetadata(product);
@@ -1606,11 +1692,11 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
             captured.value().tracedRadiance = std::move(product);
         }
     }
-    const bool volumeRgbAssumption = std::any_of(
-        impl.loadedScene.materials.begin(), impl.loadedScene.materials.end(),
-        [](const Material& material) {
-            return material.volumeDensity > 0.0f && material.scatteringCoeff > 0.0f;
-        });
+    const bool volumeRgbAssumption =
+        std::any_of(impl.loadedScene.materials.begin(), impl.loadedScene.materials.end(),
+                    [](const Material& material) {
+                        return material.volumeDensity > 0.0f && material.scatteringCoeff > 0.0f;
+                    });
     if (!impl.resolved.solarSunSky || impl.spectra.rgbUpsampledMaterials > 0 ||
         volumeRgbAssumption ||
         (impl.timeline.Present() &&
@@ -1620,23 +1706,28 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         if (!impl.resolved.solarSunSky)
             assumptions = "no_measured_solar_sky_lut";
         if (impl.spectra.rgbUpsampledMaterials > 0) {
-            if (!assumptions.empty()) assumptions += ",";
-            assumptions += "rgb_upsampled_materials:" +
-                std::to_string(impl.spectra.rgbUpsampledMaterials);
+            if (!assumptions.empty())
+                assumptions += ",";
+            assumptions +=
+                "rgb_upsampled_materials:" + std::to_string(impl.spectra.rgbUpsampledMaterials);
         }
         if (volumeRgbAssumption) {
-            if (!assumptions.empty()) assumptions += ",";
+            if (!assumptions.empty())
+                assumptions += ",";
             assumptions += "volume_extinction_rgb_mean";
         }
-        const bool preTimeline = impl.timeline.Present() &&
+        const bool preTimeline =
+            impl.timeline.Present() &&
             frameTimeSeconds - impl.resolved.cameraConfig.readout.exposureSeconds / 2.0 <
                 impl.timeline.Info().start_s;
         if (preTimeline) {
-            if (!assumptions.empty()) assumptions += ",";
+            if (!assumptions.empty())
+                assumptions += ",";
             assumptions += "pre_timeline_initial_hold";
         }
         const auto annotate = [&assumptions](std::optional<camera::CameraProduct>& product) {
-            if (product) product->image.metadata["camera_scene_assumptions"] = assumptions;
+            if (product)
+                product->image.metadata["camera_scene_assumptions"] = assumptions;
         };
         annotate(captured.value().tracedRadiance);
         annotate(captured.value().cieLinearSrgb);
@@ -1647,8 +1738,8 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
         annotate(captured.value().display);
         if (preTimeline) {
             const auto mark = [](std::optional<camera::CameraProduct>& product) {
-                if (product) product->image.metadata["camera_pre_timeline_policy"] =
-                    "initial_scene_hold";
+                if (product)
+                    product->image.metadata["camera_pre_timeline_policy"] = "initial_scene_hold";
             };
             mark(captured.value().tracedRadiance);
             mark(captured.value().cieLinearSrgb);
@@ -1663,10 +1754,10 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
     // grid. This is separate from the CPU camera's convergent wavelength
     // integration and from the exact source-knot chains for lamps/fluorescence.
     const auto markSceneGrid = [](std::optional<camera::CameraProduct>& product) {
-        if (!product) return;
+        if (!product)
+            return;
         product->image.metadata["camera_scene_reflectance_nk_grid_samples"] = "64";
-        product->image.metadata["camera_scene_reflectance_nk_resampling"] =
-            "uniform_gpu_grid";
+        product->image.metadata["camera_scene_reflectance_nk_resampling"] = "uniform_gpu_grid";
     };
     markSceneGrid(captured.value().tracedRadiance);
     markSceneGrid(captured.value().cieLinearSrgb);
@@ -1684,33 +1775,46 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state,
             hash.UpdateF64(value.frameTimeSeconds);
             hash.UpdateF64(value.nextExposureSeconds);
             hash.UpdateF64(value.nextAnalogGain);
-            for (f64 channel : value.nextWhiteBalance) hash.UpdateF64(channel);
+            for (f64 channel : value.nextWhiteBalance)
+                hash.UpdateF64(channel);
             hash.UpdateU64(value.thermalPixelStateW.size());
-            for (f64 pixel : value.thermalPixelStateW) hash.UpdateF64(pixel);
+            for (f64 pixel : value.thermalPixelStateW)
+                hash.UpdateF64(pixel);
             hash.UpdateU64(value.historyEpoch);
-            return Json{{"sha256", hash.FinalizeHex()}, {"acquisition_index", value.acquisitionIndex},
-                        {"frame_time_s", value.frameTimeSeconds}, {"history_epoch", value.historyEpoch}};
+            return Json{{"sha256", hash.FinalizeHex()},
+                        {"acquisition_index", value.acquisitionIndex},
+                        {"frame_time_s", value.frameTimeSeconds},
+                        {"history_epoch", value.historyEpoch}};
         };
         const auto before = summarizeState(state), after = summarizeState(nextState);
         const auto annotate = [&](std::optional<camera::CameraProduct>& product, bool physical) {
-            if (!product) return;
-            const bool fastRgb = impl.resolved.cameraConfig.inputKind == camera::CameraInputKind::FastRgbApproximation;
+            if (!product)
+                return;
+            const bool fastRgb = impl.resolved.cameraConfig.inputKind ==
+                                 camera::CameraInputKind::FastRgbApproximation;
             const auto frozen = product->image.metadata.find("quantiloom_provenance");
             auto snapshot = frozen != product->image.metadata.end()
-                ? Json::parse(frozen->second)
-                : Json::parse(impl.ProductSnapshot(frameTimeSeconds,
-                    product->image.width, product->image.height, physical && !fastRgb));
-            if (physical && fastRgb) snapshot["processing"] = "fast_rgb_bilinear_resample_to_sensor_grid";
-            snapshot["capture"] = {{"acquisition_index", product->signal.acquisitionIndex},
+                                ? Json::parse(frozen->second)
+                                : Json::parse(impl.ProductSnapshot(
+                                      frameTimeSeconds, product->image.width, product->image.height,
+                                      physical && !fastRgb));
+            if (physical && fastRgb)
+                snapshot["processing"] = "fast_rgb_bilinear_resample_to_sensor_grid";
+            snapshot["capture"] = {
+                {"acquisition_index", product->signal.acquisitionIndex},
                 {"reference_time_s", frameTimeSeconds},
                 {"reference_time_definition", "first_row_exposure_midpoint"},
                 {"exposure_start_s", product->signal.exposureStartSeconds},
                 {"exposure_end_s", product->signal.exposureEndSeconds},
-                {"row_delay_s", physical && impl.resolved.cameraConfig.readout.shutter == camera::ShutterKind::Rolling ?
-                    impl.resolved.cameraConfig.readout.rowDelaySeconds : 0.0},
-                {"first_row_exposure_s", physical ? 2.0 * (frameTimeSeconds - product->signal.exposureStartSeconds) : 0.0},
+                {"row_delay_s", physical && impl.resolved.cameraConfig.readout.shutter ==
+                                                camera::ShutterKind::Rolling
+                                    ? impl.resolved.cameraConfig.readout.rowDelaySeconds
+                                    : 0.0},
+                {"first_row_exposure_s",
+                 physical ? 2.0 * (frameTimeSeconds - product->signal.exposureStartSeconds) : 0.0},
                 {"row_midpoint_formula", "reference_time_s + row_index * row_delay_s"},
-                {"state_before", before}, {"state_after", after}};
+                {"state_before", before},
+                {"state_after", after}};
             snapshot["units"] = product->signal.unit;
             snapshot["channel_wavelength_nm"] = product->signal.channelWavelengthNm;
             snapshot["camera_config_toml"] = CameraConfigToToml(impl.resolved.cameraConfig);
@@ -1733,16 +1837,14 @@ OfflineRenderer::CheckpointCamera(const camera::CaptureState& state) {
     return camera::CheckpointCamera(state);
 }
 
-Result<void, String>
-OfflineRenderer::RestoreCamera(camera::CaptureState& state,
-                               const camera::CaptureCheckpoint& checkpoint) {
+Result<void, String> OfflineRenderer::RestoreCamera(camera::CaptureState& state,
+                                                    const camera::CaptureCheckpoint& checkpoint) {
     return camera::RestoreCamera(state, checkpoint);
 }
 
-Result<void, String>
-OfflineRenderer::AdvanceCameraState(camera::CaptureState& state, f64 timeSeconds) {
-    const auto advance = [this](camera::CaptureState& working,
-                                f64 t) -> Result<void, String> {
+Result<void, String> OfflineRenderer::AdvanceCameraState(camera::CaptureState& state,
+                                                         f64 timeSeconds) {
+    const auto advance = [this](camera::CaptureState& working, f64 t) -> Result<void, String> {
         auto captured = CaptureCameraInternal(working, t, /*suppressProducts=*/true);
         if (!captured)
             return Result<void, String>::Err(captured.error());
@@ -1751,11 +1853,9 @@ OfflineRenderer::AdvanceCameraState(camera::CaptureState& state, f64 timeSeconds
     return camera::AdvanceCameraState(state, timeSeconds, advance);
 }
 
-Result<void, String>
-OfflineRenderer::WarmUpCamera(camera::CaptureState& state, f64 seconds,
-                              f64 framePeriodSeconds) {
-    const auto advance = [this](camera::CaptureState& working,
-                                f64 t) -> Result<void, String> {
+Result<void, String> OfflineRenderer::WarmUpCamera(camera::CaptureState& state, f64 seconds,
+                                                   f64 framePeriodSeconds) {
+    const auto advance = [this](camera::CaptureState& working, f64 t) -> Result<void, String> {
         auto captured = CaptureCameraInternal(working, t, /*suppressProducts=*/true);
         if (!captured)
             return Result<void, String>::Err(captured.error());
@@ -1764,23 +1864,24 @@ OfflineRenderer::WarmUpCamera(camera::CaptureState& state, f64 seconds,
     return camera::WarmUpCamera(state, seconds, framePeriodSeconds, advance);
 }
 
-Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
-    f64 wavelengthNm, u64 acquisitionIndex, u32 seed) {
+Result<Image, String>
+OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex, u32 seed) {
     if (!std::isfinite(wavelengthNm) || wavelengthNm <= 0.0 ||
         wavelengthNm > std::numeric_limits<f32>::max())
         return Result<Image, String>::Err("invalid camera spectral sample wavelength");
-    const auto originalPose = CameraDataAt(
-        timeline.Current_s(), params.mode, params.wavelengthNm, false);
-    if (!originalPose) return Result<Image, String>::Err(originalPose.error());
+    const auto originalPose =
+        CameraDataAt(timeline.Current_s(), params.mode, params.wavelengthNm, false);
+    if (!originalPose)
+        return Result<Image, String>::Err(originalPose.error());
     CameraData original = originalPose.value();
     struct RestoreBindings {
         Impl& host;
         CameraData original;
         u32 environment;
         ~RestoreBindings() {
-            if(host.lightingParams.enableEnvironmentMap!=environment) {
-                host.lightingParams.enableEnvironmentMap=environment;
-                host.lightingParamsBuffer->Upload(&host.lightingParams,sizeof(LightingParams));
+            if (host.lightingParams.enableEnvironmentMap != environment) {
+                host.lightingParams.enableEnvironmentMap = environment;
+                host.lightingParamsBuffer->Upload(&host.lightingParams, sizeof(LightingParams));
             }
             host.pipeline->BindOutputImage(*host.outputImage);
             host.pipeline->SetCameraData(original);
@@ -1790,21 +1891,22 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
             host.pipeline->BindAtmosphereNN(host.atmosHeaderBuffer.get(),
                                             host.atmosDataBuffer.get());
         }
-    } restore{*this, original,lightingParams.enableEnvironmentMap};
-    if(lightingParams.enableEnvironmentMap!=0) {
-        lightingParams.enableEnvironmentMap=0;
-        lightingParamsBuffer->Upload(&lightingParams,sizeof(LightingParams));
+    } restore{*this, original, lightingParams.enableEnvironmentMap};
+    if (lightingParams.enableEnvironmentMap != 0) {
+        lightingParams.enableEnvironmentMap = 0;
+        lightingParamsBuffer->Upload(&lightingParams, sizeof(LightingParams));
     }
     if (resolved.atmosphere.enabled) {
         const auto grid = RenderBandLambdaGrid(SpectralMode::Single, wavelengthNm);
         if (!grid.error.empty() || grid.band.empty())
-            return Result<Image, String>::Err("camera wavelength lacks atmosphere coverage: " +
+            return Result<Image, String>::Err(
+                "camera wavelength lacks atmosphere coverage: " +
                 (grid.error.empty() ? std::to_string(wavelengthNm) : grid.error));
         try {
             AtmosModelPack pack(resolved.atmosphere.modelPackDir);
             AtmosphereBaker baker(pack);
-            auto baked = baker.Bake(resolved.atmosphere, grid.band, grid.lambdasNm,
-                                    grid.windowHalfWidthNm);
+            auto baked =
+                baker.Bake(resolved.atmosphere, grid.band, grid.lambdasNm, grid.windowHalfWidthNm);
             const glm::vec3& sunDir = resolved.lighting.sunDirection;
             baked.header.sunDirWorld[0] = sunDir.x;
             baked.header.sunDirWorld[1] = sunDir.y;
@@ -1817,18 +1919,14 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
             cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
                 contextRef->GetAllocator(), baked.data.size() * sizeof(f32),
                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-            cameraAtmosDataBuffer->Upload(baked.data.data(),
-                                           baked.data.size() * sizeof(f32));
-            pipeline->BindAtmosphereNN(cameraAtmosHeaderBuffer.get(),
-                                        cameraAtmosDataBuffer.get());
+            cameraAtmosDataBuffer->Upload(baked.data.data(), baked.data.size() * sizeof(f32));
+            pipeline->BindAtmosphereNN(cameraAtmosHeaderBuffer.get(), cameraAtmosDataBuffer.get());
         } catch (const std::exception& e) {
-            return Result<Image, String>::Err(
-                String("camera atmosphere bake failed: ") + e.what());
+            return Result<Image, String>::Err(String("camera atmosphere bake failed: ") + e.what());
         }
     }
     if (!cameraBatchRenderer)
-        cameraBatchRenderer =
-            std::make_unique<BatchRenderer>(*contextRef, *pipeline, loadedScene);
+        cameraBatchRenderer = std::make_unique<BatchRenderer>(*contextRef, *pipeline, loadedScene);
     BatchRenderParams sample;
     sample.spp = params.spp;
     sample.frameIndex = static_cast<u32>(acquisitionIndex);
@@ -1836,105 +1934,204 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
     sample.renderSeed = seed;
     sample.outputWidth = resolved.cameraConfig.optics.sensorWidthPx;
     sample.outputHeight = resolved.cameraConfig.optics.sensorHeightPx;
-    const auto cameraPose = CameraDataAt(
-        timeline.Current_s(), SpectralMode::Single, wavelengthNm, true);
-    if (!cameraPose) return Result<Image, String>::Err(cameraPose.error());
+    const auto cameraPose =
+        CameraDataAt(timeline.Current_s(), SpectralMode::Single, wavelengthNm, true);
+    if (!cameraPose)
+        return Result<Image, String>::Err(cameraPose.error());
     CameraData cameraData = cameraPose.value();
-    const auto& optics=resolved.cameraConfig.optics;
-    const auto projection=camera::ResolveProjection(optics.projection,
-        sample.outputWidth,sample.outputHeight,optics.focalLengthMm,optics.pixelPitchUm);
-    if(!projection) return Result<Image,String>::Err(projection.error());
-    pipeline->SetCameraProjection(&*projection,0,optics.cosFourthVignetting);
-    if(fusionOptions && fusionOptions->cancelled && fusionOptions->cancelled())
-        return Result<Image,String>::Err("fusion export cancelled");
-    const bool recordFusion=fusionCapture || quantitativeObserver || static_cast<bool>(init.onFusionPathChunk) ||
-        rendercore::FusionOpticsActive(spectra.fusionTransport);
-    if(recordFusion) {
-        const auto initial=rendercore::InitialFusionMedia(loadedScene,spectra.fusionTransport,cameraData.origin);
-        if(!initial)return Result<Image,String>::Err(initial.error());
+    const auto& optics = resolved.cameraConfig.optics;
+    const auto projection =
+        camera::ResolveProjection(optics.projection, sample.outputWidth, sample.outputHeight,
+                                  optics.focalLengthMm, optics.pixelPitchUm);
+    if (!projection)
+        return Result<Image, String>::Err(projection.error());
+    pipeline->SetCameraProjection(&*projection, RayTracingPipeline::kProjectionSetOrdinary,
+                                  optics.cosFourthVignetting);
+    if (fusionOptions && fusionOptions->cancelled && fusionOptions->cancelled())
+        return Result<Image, String>::Err("fusion export cancelled");
+    const bool recordFusion = fusionCapture || quantitativeObserver ||
+                              static_cast<bool>(init.onFusionPathChunk) ||
+                              rendercore::FusionOpticsActive(spectra.fusionTransport);
+    if (recordFusion) {
+        const auto initial =
+            rendercore::InitialFusionMedia(loadedScene, spectra.fusionTransport, cameraData.origin);
+        if (!initial)
+            return Result<Image, String>::Err(initial.error());
         pipeline->SetFusionInitialMedia(*initial);
-        pipeline->BeginFusionRecording(sample.outputWidth,sample.outputHeight,sample.spp,
-            fusionOptions ? (fusionOptions->recordPaths ? fusionOptions->maxRecordedRays : std::numeric_limits<u32>::max()) :
-                init.onFusionPathChunk ? init.fusionMaxRecordedRays : 1u, fusionCapture!=nullptr,quantitativeObserver);
+        pipeline->BeginFusionRecording(sample.outputWidth, sample.outputHeight, sample.spp,
+                                       fusionOptions            ? (fusionOptions->recordPaths
+                                                                       ? fusionOptions->maxRecordedRays
+                                                                       : std::numeric_limits<u32>::max())
+                                       : init.onFusionPathChunk ? init.fusionMaxRecordedRays
+                                                                : 1u,
+                                       fusionCapture != nullptr, quantitativeObserver);
     }
     Image image;
-    if (!cameraBatchRenderer->RenderSingleBand(
-            static_cast<f32>(wavelengthNm), sample, cameraData, image))
+    if (!cameraBatchRenderer->RenderSingleBand(static_cast<f32>(wavelengthNm), sample, cameraData,
+                                               image))
         return Result<Image, String>::Err("single-wavelength camera render failed");
-    if(recordFusion) {
+    if (recordFusion) {
         dataset::FusionPathChunk chunk;
-        chunk.bytes=pipeline->ReadFusionRecording();
-        u32 header[32]{};
-        if(chunk.bytes.size()<sizeof(header)) return Result<Image,String>::Err("truncated fusion records");
-        std::memcpy(header,chunk.bytes.data(),sizeof(header));
-        chunk.width=header[4];chunk.height=header[5];chunk.spp=header[6];
-        chunk.rayStride=header[1];chunk.storedRays=header[2];chunk.slotsPerRay=header[3];
-        chunk.diagnosticFlags=header[7];chunk.wavelengthNm=wavelengthNm;
-        chunk.referenceTimeSeconds=timeline.Current_s();
-        chunk.acquisitionIndex=acquisitionIndex;
-        if((fusionCapture || quantitativeObserver) && (chunk.diagnosticFlags&16u))
-            return Result<Image,String>::Err("nonfinite quantitative fusion radiance");
-        if(fusionCapture) {
-            for(auto& c:fusionSample)c=Image(chunk.width,chunk.height,1);
-            if(fusionStrata==0) {
-                fusionCapture->validSampleFraction=Image(chunk.width,chunk.height,1);
-                fusionCapture->validSampleFraction.channelNames={"valid_sample_fraction"};
-                fusionCapture->truncationUnknown=Image(chunk.width,chunk.height,1);
-                fusionCapture->truncationUnknown.channelNames={"unknown_tail"};
+        chunk.bytes = pipeline->ReadFusionRecording();
+        u32 header[rendercore::kFusionHeaderWords]{};
+        if (chunk.bytes.size() < sizeof(header))
+            return Result<Image, String>::Err("truncated fusion records");
+        std::memcpy(header, chunk.bytes.data(), sizeof(header));
+        chunk.width = header[rendercore::kFusionWidthWord];
+        chunk.height = header[rendercore::kFusionHeightWord];
+        chunk.spp = header[rendercore::kFusionSppWord];
+        chunk.rayStride = header[rendercore::kFusionRayStrideWord];
+        chunk.storedRays = header[rendercore::kFusionStoredRaysWord];
+        chunk.slotsPerRay = header[rendercore::kFusionSlotsPerRayWord];
+        chunk.diagnosticFlags = header[rendercore::kFusionDiagnosticFlagsWord];
+        chunk.wavelengthNm = wavelengthNm;
+        chunk.referenceTimeSeconds = timeline.Current_s();
+        chunk.acquisitionIndex = acquisitionIndex;
+        if ((fusionCapture || quantitativeObserver) &&
+            (chunk.diagnosticFlags & rendercore::kFusionFlagNonFinite))
+            return Result<Image, String>::Err("nonfinite quantitative fusion radiance");
+        if (fusionCapture) {
+            for (auto& c : fusionSample)
+                c = Image(chunk.width, chunk.height, 1);
+            if (fusionStrata == 0) {
+                fusionCapture->validSampleFraction = Image(chunk.width, chunk.height, 1);
+                fusionCapture->validSampleFraction.channelNames = {"valid_sample_fraction"};
+                fusionCapture->truncationUnknown = Image(chunk.width, chunk.height, 1);
+                fusionCapture->truncationUnknown.channelNames = {"unknown_tail"};
             }
-            const auto scalar=[&](size_t offset){f32 value;std::memcpy(&value,chunk.bytes.data()+offset,4);return value;};
-            const auto word=[&](size_t offset){u32 value;std::memcpy(&value,chunk.bytes.data()+offset,4);return value;};
+            const auto scalar = [&](size_t offset) {
+                f32 value;
+                std::memcpy(&value, chunk.bytes.data() + offset, 4);
+                return value;
+            };
+            const auto word = [&](size_t offset) {
+                u32 value;
+                std::memcpy(&value, chunk.bytes.data() + offset, 4);
+                return value;
+            };
+            const u32 storedRays = header[rendercore::kFusionStoredRaysWord];
+            const u32 slotsPerRay = header[rendercore::kFusionSlotsPerRayWord];
             ++fusionStrata;
-            for(size_t i=0;i<image.data.size();++i) {
-                const size_t base=header[11]+i*32;
-                for(size_t c=0;c<4;++c)fusionSample[c].data[i]=scalar(base+c*4);
-                auto& fraction=fusionCapture->validSampleFraction.data[i];
-                fraction+=(scalar(base+20)-fraction)/fusionStrata;
-                if(word(base+24)&1u)fusionCapture->truncationUnknown.data[i]=1;
+            for (size_t i = 0; i < image.data.size(); ++i) {
+                const size_t base = header[rendercore::kFusionPixelSectionWord] +
+                                    i * rendercore::kFusionPixelRecordBytes;
+                for (size_t c = 0; c < 4; ++c)
+                    fusionSample[c].data[i] = scalar(base + c * 4);
+                auto& fraction = fusionCapture->validSampleFraction.data[i];
+                fraction +=
+                    (scalar(base + rendercore::kFusionPixelValidOffset) - fraction) / fusionStrata;
+                if (word(base + rendercore::kFusionPixelFlagsOffset) &
+                    rendercore::kFusionFlagUnknownTail)
+                    fusionCapture->truncationUnknown.data[i] = 1;
             }
-            if(header[2]) {
-                using Json=nlohmann::json;
+            if (storedRays) {
+                using Json = nlohmann::json;
                 dataset::FusionPathColumnsV2 columns;
-                Json fields=Json::array();
-                const auto column=[&](const char* name,const char* type,u32 rows,u32 width,const auto& read) {
-                    const size_t offset=columns.bytes.size();
-                    columns.bytes.resize(offset+static_cast<size_t>(rows)*width*4);
-                    for(u32 row=0;row<rows;++row)for(u32 c=0;c<width;++c) {
-                        const u32 value=read(row,c);std::memcpy(columns.bytes.data()+offset+(static_cast<size_t>(row)*width+c)*4,&value,4);
-                    }
-                    fields.push_back({{"name",name},{"type",type},{"rows",rows},{"width",width},{"offset_bytes",offset},{"size_bytes",columns.bytes.size()-offset}});
+                Json fields = Json::array();
+                const auto column = [&](const char* name, const char* type, u32 rows, u32 width,
+                                        const auto& read) {
+                    const size_t offset = columns.bytes.size();
+                    columns.bytes.resize(offset + static_cast<size_t>(rows) * width * 4);
+                    for (u32 row = 0; row < rows; ++row)
+                        for (u32 c = 0; c < width; ++c) {
+                            const u32 value = read(row, c);
+                            std::memcpy(columns.bytes.data() + offset +
+                                            (static_cast<size_t>(row) * width + c) * 4,
+                                        &value, 4);
+                        }
+                    fields.push_back({{"name", name},
+                                      {"type", type},
+                                      {"rows", rows},
+                                      {"width", width},
+                                      {"offset_bytes", offset},
+                                      {"size_bytes", columns.bytes.size() - offset}});
                 };
-                column("components","float32",header[2],4,[&](u32 r,u32 c){return c<3 ? word(128+r*32+c*4) : word(header[15]+r*12+8);});
-                column("radiance","float32",header[2],1,[&](u32 r,u32){return word(128+r*32+12);});
-                column("ray_identity","uint32",header[2],4,[&](u32 r,u32 c){return word(128+r*32+16+c*4);});
-                column("native_pixel","float32",header[2],2,[&](u32 r,u32 c){return word(header[15]+r*12+c*4);});
-                const size_t vertex=128+static_cast<size_t>(header[2])*32;
-                for(u32 group=0;group<5;++group) {
-                    const char* names[]={"position_wavelength","normal_distance","vertex_identity","outgoing_coefficient","medium_segment"};
-                    column(names[group],group==2 ? "uint32" : "float32",header[2]*header[3],4,
-                        [&](u32 r,u32 c){return word(vertex+static_cast<size_t>(r)*80+group*16+c*4);});
+                const size_t raysBase = rendercore::kFusionHeaderBytes;
+                const size_t coordsBase = header[rendercore::kFusionCoordSectionWord];
+                const size_t termsBase = header[rendercore::kFusionTermsSectionWord];
+                column("components", "float32", storedRays, 4, [&](u32 r, u32 c) {
+                    return c < 3 ? word(raysBase + r * rendercore::kFusionRayRecordBytes + c * 4)
+                                 : word(coordsBase + r * rendercore::kFusionCoordColumnBytes +
+                                        rendercore::kFusionCoordResidualOffset);
+                });
+                column("radiance", "float32", storedRays, 1, [&](u32 r, u32) {
+                    return word(raysBase + r * rendercore::kFusionRayRecordBytes +
+                                rendercore::kFusionRayRadianceOffset);
+                });
+                column("ray_identity", "uint32", storedRays, 4, [&](u32 r, u32 c) {
+                    return word(raysBase + r * rendercore::kFusionRayRecordBytes +
+                                rendercore::kFusionRayIdentityOffset + c * 4);
+                });
+                column("native_pixel", "float32", storedRays, 2, [&](u32 r, u32 c) {
+                    return word(coordsBase + r * rendercore::kFusionCoordColumnBytes + c * 4);
+                });
+                const size_t vertex =
+                    raysBase + static_cast<size_t>(storedRays) * rendercore::kFusionRayRecordBytes;
+                for (u32 group = 0; group < 5; ++group) {
+                    const char* names[] = {"position_wavelength", "normal_distance",
+                                           "vertex_identity", "outgoing_coefficient",
+                                           "medium_segment"};
+                    column(names[group], group == 2 ? "uint32" : "float32",
+                           storedRays * slotsPerRay, 4, [&](u32 r, u32 c) {
+                               return word(vertex +
+                                           static_cast<size_t>(r) *
+                                               rendercore::kFusionVertexRecordBytes +
+                                           group * 16 + c * 4);
+                           });
                 }
-                column("vertex_radiance_terms","float32",header[2]*header[3],4,
-                    [&](u32 r,u32 c){return word(header[14]+static_cast<size_t>(r)*16+c*4);});
-                columns.descriptionJson=Json{{"schema","quantiloom.fusion.paths"},{"schema_version",2},{"role","path_truth"},
-                    {"byte_order","little_endian"},{"columns",fields},{"stored_rays",header[2]},{"slots_per_ray",header[3]},
-                    {"ray_stride",header[1]},{"native_width",chunk.width},{"native_height",chunk.height},{"spp",chunk.spp},
-                    {"wavelength_nm",wavelengthNm},{"reference_time_s",chunk.referenceTimeSeconds},{"acquisition_index",acquisitionIndex},
-                    {"diagnostic_flags",chunk.diagnosticFlags},{"complete_physical_paths",false},
-                    {"finite_depth_estimator",true},{"unknown_tail_present",(chunk.diagnosticFlags&1u)!=0},
-                    {"vertex_radiance_terms_definition",{"surface_or_terminal_shading","incoming_segment_emission","branch_estimator_weight","local_residual"}},
-                    {"coverage",header[1]==1 ? "all_rays" : "stride_subset"},{"truncated_tail","unknown"},
-                    {"contribution_definition","first_camera_side_branch"},{"contribution_unit","W/m^2/sr/nm"}}.dump();
+                column("vertex_radiance_terms", "float32", storedRays * slotsPerRay, 4,
+                       [&](u32 r, u32 c) {
+                           return word(termsBase +
+                                       static_cast<size_t>(r) * rendercore::kFusionTermColumnBytes +
+                                       c * 4);
+                       });
+                columns.descriptionJson =
+                    Json{{"schema", "quantiloom.fusion.paths"},
+                         {"schema_version", 2},
+                         {"role", "path_truth"},
+                         {"byte_order", "little_endian"},
+                         {"columns", fields},
+                         {"stored_rays", storedRays},
+                         {"slots_per_ray", slotsPerRay},
+                         {"ray_stride", header[rendercore::kFusionRayStrideWord]},
+                         {"native_width", chunk.width},
+                         {"native_height", chunk.height},
+                         {"spp", chunk.spp},
+                         {"wavelength_nm", wavelengthNm},
+                         {"reference_time_s", chunk.referenceTimeSeconds},
+                         {"acquisition_index", acquisitionIndex},
+                         {"diagnostic_flags", chunk.diagnosticFlags},
+                         {"complete_physical_paths", false},
+                         {"finite_depth_estimator", true},
+                         {"unknown_tail_present",
+                          (chunk.diagnosticFlags & rendercore::kFusionFlagUnknownTail) != 0},
+                         {"vertex_radiance_terms_definition",
+                          {"surface_or_terminal_shading", "incoming_segment_emission",
+                           "branch_estimator_weight", "local_residual"}},
+                         {"coverage", header[rendercore::kFusionRayStrideWord] == 1
+                                          ? "all_rays"
+                                          : "stride_subset"},
+                         {"truncated_tail", "unknown"},
+                         {"contribution_definition", "first_camera_side_branch"},
+                         {"contribution_unit", "W/m^2/sr/nm"}}
+                        .dump();
                 fusionCapture->paths.push_back(std::move(columns));
             }
             // The original callback keeps its original byte layout.
-            chunk.bytes.resize(128+static_cast<size_t>(header[2])*(32+header[3]*80));
-            std::fill(chunk.bytes.begin()+44,chunk.bytes.begin()+64,0);
+            chunk.bytes.resize(rendercore::kFusionHeaderBytes +
+                               static_cast<size_t>(storedRays) *
+                                   (rendercore::kFusionRayRecordBytes +
+                                    slotsPerRay * rendercore::kFusionVertexRecordBytes));
+            std::fill(chunk.bytes.begin() + rendercore::kFusionPixelSectionWord * 4,
+                      chunk.bytes.begin() + rendercore::kFusionInitialMediaWords * 4, 0);
         }
-        pipeline->SetFusionInitialMedia({});pipeline->BeginFusionRecording(0,0,0,0);
-        if(init.onFusionPathChunk) init.onFusionPathChunk(chunk);
-        if((chunk.diagnosticFlags&2u)!=0)
-            return Result<Image,String>::Err("fusion medium boundary is ambiguous or camera begins inside an uninitialized medium");
+        pipeline->SetFusionInitialMedia({});
+        pipeline->BeginFusionRecording(0, 0, 0, 0);
+        if (init.onFusionPathChunk)
+            init.onFusionPathChunk(chunk);
+        if ((chunk.diagnosticFlags & rendercore::kFusionFlagAmbiguousMedium) != 0)
+            return Result<Image, String>::Err("fusion medium boundary is ambiguous or camera "
+                                              "begins inside an uninitialized medium");
     }
     image.channelNames = {"L_" + std::to_string(wavelengthNm)};
     image.metadata["wavelength_nm"] = std::to_string(wavelengthNm);
@@ -1999,177 +2196,283 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
     return Result<void, String>::Ok();
 }
 
-Result<Vector<dataset::OpticalProbeResult>,String> OfflineRenderer::QueryOpticalPaths(
-    const Vector<dataset::OpticalProbe>& probes,f64 time) {
+Result<Vector<dataset::OpticalProbeResult>, String>
+OfflineRenderer::QueryOpticalPaths(const Vector<dataset::OpticalProbe>& probes, f64 time) {
     try {
-        if(probes.empty())return Vector<dataset::OpticalProbeResult>{};
-        Impl& host=*m_impl;
-        auto moved=SetTimelineTime(time);if(!moved)throw std::runtime_error(moved.error());
-        const auto& optics=host.resolved.cameraConfig.optics;
-        const auto projection=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,
-            optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
-        if(!projection)throw std::runtime_error(projection.error());
-        const auto pose=host.CameraDataAt(time,SpectralMode::Single,probes.front().wavelengthNm,true);
-        if(!pose)throw std::runtime_error(pose.error());
-        const auto initial=rendercore::InitialFusionMedia(host.loadedScene,host.spectra.fusionTransport,pose.value().origin);
-        if(!initial)throw std::runtime_error(initial.error());
-        const auto saved=host.pipeline->GetCameraData();
-        struct Restore { Impl& host;CameraData saved;~Restore(){host.pipeline->SetFusionInitialMedia({});host.pipeline->BeginFusionRecording(0,0,0,0);
-            host.pipeline->SetCameraProjection(nullptr);host.pipeline->SetCameraData(saved);host.pipeline->BindOutputImage(*host.outputImage);
-            host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),saved.debug_mode!=0);} } restore{host,saved};
+        if (probes.empty())
+            return Vector<dataset::OpticalProbeResult>{};
+        Impl& host = *m_impl;
+        auto moved = SetTimelineTime(time);
+        if (!moved)
+            throw std::runtime_error(moved.error());
+        const auto& optics = host.resolved.cameraConfig.optics;
+        const auto projection = camera::ResolveProjection(
+            optics.projection, optics.sensorWidthPx, optics.sensorHeightPx, optics.focalLengthMm,
+            optics.pixelPitchUm);
+        if (!projection)
+            throw std::runtime_error(projection.error());
+        const auto pose =
+            host.CameraDataAt(time, SpectralMode::Single, probes.front().wavelengthNm, true);
+        if (!pose)
+            throw std::runtime_error(pose.error());
+        const auto initial = rendercore::InitialFusionMedia(
+            host.loadedScene, host.spectra.fusionTransport, pose.value().origin);
+        if (!initial)
+            throw std::runtime_error(initial.error());
+        const auto saved = host.pipeline->GetCameraData();
+        struct Restore {
+            Impl& host;
+            CameraData saved;
+            ~Restore() {
+                host.pipeline->SetFusionInitialMedia({});
+                host.pipeline->BeginFusionRecording(0, 0, 0, 0);
+                host.pipeline->SetCameraProjection(nullptr);
+                host.pipeline->SetCameraData(saved);
+                host.pipeline->BindOutputImage(*host.outputImage);
+                host.pipeline->SetSpecConstants(static_cast<u32>(host.params.mode),
+                                                saved.debug_mode != 0);
+            }
+        } restore{host, saved};
         Vector<dataset::OpticalProbeResult> results(probes.size());
-        constexpr size_t batchSize=4096;
-        for(size_t offset=0;offset<probes.size();offset+=batchSize) {
-            const u32 count=static_cast<u32>(std::min(batchSize,probes.size()-offset));
+        constexpr size_t batchSize = 4096;
+        for (size_t offset = 0; offset < probes.size(); offset += batchSize) {
+            const u32 count = static_cast<u32>(std::min(batchSize, probes.size() - offset));
             Vector<RayTracingPipeline::ProbeRay> rays(count);
-            for(u32 i=0;i<count;++i) {
-                const auto& probe=probes[offset+i];
-                if(!std::isfinite(probe.wavelengthNm)||probe.wavelengthNm<=0 ||
-                    probe.wavelengthNm<host.resolved.cameraConfig.device.effectiveMinNm ||
-                    probe.wavelengthNm>host.resolved.cameraConfig.device.effectiveMaxNm)
+            for (u32 i = 0; i < count; ++i) {
+                const auto& probe = probes[offset + i];
+                if (!std::isfinite(probe.wavelengthNm) || probe.wavelengthNm <= 0 ||
+                    probe.wavelengthNm < host.resolved.cameraConfig.device.effectiveMinNm ||
+                    probe.wavelengthNm > host.resolved.cameraConfig.device.effectiveMaxNm)
                     throw std::runtime_error("optical probe wavelength outside device support");
-                const auto local=camera::UnprojectPixel(*projection,glm::dvec2(probe.nativePixel));
-                if(!local.valid || probe.nativePixel.x<0 || probe.nativePixel.y<0 ||
-                    probe.nativePixel.x>=optics.sensorWidthPx || probe.nativePixel.y>=optics.sensorHeightPx) {
-                    results[offset+i].flags=8;
-                    rays[i]={pose.value().origin,static_cast<f32>(probe.wavelengthNm),pose.value().forward,probe.branchMask};
+                const auto local =
+                    camera::UnprojectPixel(*projection, glm::dvec2(probe.nativePixel));
+                if (!local.valid || probe.nativePixel.x < 0 || probe.nativePixel.y < 0 ||
+                    probe.nativePixel.x >= optics.sensorWidthPx ||
+                    probe.nativePixel.y >= optics.sensorHeightPx) {
+                    results[offset + i].flags = rendercore::kFusionFlagUnprojectable;
+                    rays[i] = {pose.value().origin, static_cast<f32>(probe.wavelengthNm),
+                               pose.value().forward, probe.branchMask};
                     continue;
                 }
-                const auto& c=pose.value();
-                const auto d=local.direction;
-                const auto direction=glm::normalize(static_cast<f32>(d.x)*c.right-static_cast<f32>(d.y)*c.up+static_cast<f32>(d.z)*c.forward);
-                rays[i]={c.origin,static_cast<f32>(probe.wavelengthNm),direction,probe.branchMask};
+                const auto& c = pose.value();
+                const auto d = local.direction;
+                const auto direction =
+                    glm::normalize(static_cast<f32>(d.x) * c.right - static_cast<f32>(d.y) * c.up +
+                                   static_cast<f32>(d.z) * c.forward);
+                rays[i] = {c.origin, static_cast<f32>(probe.wavelengthNm), direction,
+                           probe.branchMask};
             }
-            auto image=rendercore::CreateRenderTarget(*host.contextRef,count,1);
-            host.pipeline->BindOutputImage(*image);host.pipeline->SetCameraData(*pose);
-            host.pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single),false);
-            host.pipeline->SetSamplingParams(0,0,1,17,17);
+            auto image = rendercore::CreateRenderTarget(*host.contextRef, count, 1);
+            host.pipeline->BindOutputImage(*image);
+            host.pipeline->SetCameraData(*pose);
+            host.pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
+            host.pipeline->SetSamplingParams(0, 0, 1, 17, 17);
             host.pipeline->SetFusionInitialMedia(*initial);
-            host.pipeline->BeginFusionRecording(count,1,1,0);host.pipeline->SetFusionProbes(rays);
-            CommandHelper::ExecuteImmediate(*host.contextRef,[&](VkCommandBuffer cmd){host.pipeline->TraceRays(cmd,count,1);});
-            const auto bytes=host.pipeline->ReadFusionRecording();
-            const auto word=[&](size_t position){u32 value;std::memcpy(&value,bytes.data()+position,4);return value;};
-            const auto scalar=[&](size_t position){f32 value;std::memcpy(&value,bytes.data()+position,4);return value;};
-            const u32 slots=word(12);
-            for(u32 i=0;i<count;++i) {
-                auto& result=results[offset+i];if(result.flags)continue;
-                const size_t ray=128+i*32;
-                result.flags=word(ray+24);
-                const u32 terminal=word(ray+28)&0x7FFFFFFFu;
-                if(terminal>=slots || result.flags)continue;
-                const size_t vertex=128+static_cast<size_t>(count)*32+(i*slots+terminal)*80;
-                if(word(vertex+32)!=3)continue;
-                result.surface={word(vertex+36),1,{scalar(vertex),scalar(vertex+4),scalar(vertex+8)}};
-                result.primitiveId=word(vertex+40);result.throughput=1;
-                for(u32 depth=0;depth<=terminal;++depth) {
-                    const size_t address=128+static_cast<size_t>(count)*32+(i*slots+depth)*80;
-                    if(depth<terminal)result.throughput*=scalar(address+60);
-                    result.throughput*=scalar(address+76);
+            host.pipeline->BeginFusionRecording(count, 1, 1, 0);
+            host.pipeline->SetFusionProbes(rays);
+            CommandHelper::ExecuteImmediate(*host.contextRef, [&](VkCommandBuffer cmd) {
+                host.pipeline->TraceRays(cmd, count, 1);
+            });
+            const auto bytes = host.pipeline->ReadFusionRecording();
+            const auto word = [&](size_t position) {
+                u32 value;
+                std::memcpy(&value, bytes.data() + position, 4);
+                return value;
+            };
+            const auto scalar = [&](size_t position) {
+                f32 value;
+                std::memcpy(&value, bytes.data() + position, 4);
+                return value;
+            };
+            const u32 slots = word(rendercore::kFusionSlotsPerRayWord * 4);
+            const size_t raysBase = rendercore::kFusionHeaderBytes;
+            const size_t verticesBase =
+                raysBase + static_cast<size_t>(count) * rendercore::kFusionRayRecordBytes;
+            for (u32 i = 0; i < count; ++i) {
+                auto& result = results[offset + i];
+                if (result.flags)
+                    continue;
+                const size_t ray = raysBase + i * rendercore::kFusionRayRecordBytes;
+                result.flags = word(ray + rendercore::kFusionRayFlagsOffset);
+                const u32 terminal =
+                    word(ray + rendercore::kFusionRayTerminalOffset) &
+                    rendercore::kFusionTerminalDepthMask;
+                if (terminal >= slots || result.flags)
+                    continue;
+                const size_t vertex =
+                    verticesBase + (i * slots + terminal) * rendercore::kFusionVertexRecordBytes;
+                if (word(vertex + rendercore::kFusionVertexIdentityOffset) != 3)
+                    continue;
+                result.surface = {word(vertex + rendercore::kFusionVertexNodeIdOffset),
+                                  1,
+                                  {scalar(vertex), scalar(vertex + 4), scalar(vertex + 8)}};
+                result.primitiveId = word(vertex + rendercore::kFusionVertexPrimitiveIdOffset);
+                result.throughput = 1;
+                for (u32 depth = 0; depth <= terminal; ++depth) {
+                    const size_t address =
+                        verticesBase + (i * slots + depth) * rendercore::kFusionVertexRecordBytes;
+                    if (depth < terminal)
+                        result.throughput *=
+                            scalar(address + rendercore::kFusionVertexCoefficientOffset);
+                    result.throughput *=
+                        scalar(address + rendercore::kFusionVertexTransmittanceOffset);
                 }
             }
         }
         return results;
-    } catch(const std::exception& e) {return Result<Vector<dataset::OpticalProbeResult>,String>::Err(e.what());}
+    } catch (const std::exception& e) {
+        return Result<Vector<dataset::OpticalProbeResult>, String>::Err(e.what());
+    }
 }
 
-Result<Vector<dataset::SurfaceQuery>,String> OfflineRenderer::QuerySurfaces(
-    const Vector<glm::vec2>& pixels,f64 time) {
+Result<Vector<dataset::SurfaceQuery>, String>
+OfflineRenderer::QuerySurfaces(const Vector<glm::vec2>& pixels, f64 time) {
     try {
-        if(pixels.empty()) return Vector<dataset::SurfaceQuery>{};
-        if(pixels.size()>std::numeric_limits<u32>::max()) throw std::runtime_error("too many geometry queries");
-        Impl& host=*m_impl;
-        const auto moved=SetTimelineTime(time);
-        if(!moved) throw std::runtime_error(moved.error());
-        if(!host.resolved.cameraConfig.enabled) throw std::runtime_error("surface queries require a native physical camera");
-        const auto pose=host.CameraDataAt(time,host.params.mode,host.params.wavelengthNm,true);
-        if(!pose) throw std::runtime_error(pose.error());
-        const auto& optics=host.resolved.cameraConfig.optics;
-        const auto projection=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,
-            optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
-        if(!projection) throw std::runtime_error(projection.error());
-        const auto saved=host.pipeline->GetCameraData();
-        struct Restore { Impl& host;CameraData camera;~Restore(){host.pipeline->SetCameraData(camera);host.pipeline->SetCameraProjection(nullptr);} } restore{host,saved};
-        host.pipeline->SetCameraData(*pose);host.pipeline->SetCameraProjection(&*projection);
+        if (pixels.empty())
+            return Vector<dataset::SurfaceQuery>{};
+        if (pixels.size() > std::numeric_limits<u32>::max())
+            throw std::runtime_error("too many geometry queries");
+        Impl& host = *m_impl;
+        const auto moved = SetTimelineTime(time);
+        if (!moved)
+            throw std::runtime_error(moved.error());
+        if (!host.resolved.cameraConfig.enabled)
+            throw std::runtime_error("surface queries require a native physical camera");
+        const auto pose = host.CameraDataAt(time, host.params.mode, host.params.wavelengthNm, true);
+        if (!pose)
+            throw std::runtime_error(pose.error());
+        const auto& optics = host.resolved.cameraConfig.optics;
+        const auto projection = camera::ResolveProjection(
+            optics.projection, optics.sensorWidthPx, optics.sensorHeightPx, optics.focalLengthMm,
+            optics.pixelPitchUm);
+        if (!projection)
+            throw std::runtime_error(projection.error());
+        const auto saved = host.pipeline->GetCameraData();
+        struct Restore {
+            Impl& host;
+            CameraData camera;
+            ~Restore() {
+                host.pipeline->SetCameraData(camera);
+                host.pipeline->SetCameraProjection(nullptr);
+            }
+        } restore{host, saved};
+        host.pipeline->SetCameraData(*pose);
+        host.pipeline->SetCameraProjection(&*projection);
         Vector<RayTracingPipeline::GeometryHit> hits;
         hits.reserve(pixels.size());
-        constexpr size_t batchSize=262144;
-        for(size_t offset=0;offset<pixels.size();offset+=batchSize) {
-            const size_t count=std::min(batchSize,pixels.size()-offset);
-            Vector<glm::vec2> batch(pixels.begin()+offset,pixels.begin()+offset+count);
-            const auto part=host.pipeline->CapturePrimaryGeometry(static_cast<u32>(count),1,&batch);
-            hits.insert(hits.end(),part.begin(),part.end());
+        constexpr size_t batchSize = 262144;
+        for (size_t offset = 0; offset < pixels.size(); offset += batchSize) {
+            const size_t count = std::min(batchSize, pixels.size() - offset);
+            Vector<glm::vec2> batch(pixels.begin() + offset, pixels.begin() + offset + count);
+            const auto part =
+                host.pipeline->CapturePrimaryGeometry(static_cast<u32>(count), 1, &batch);
+            hits.insert(hits.end(), part.begin(), part.end());
         }
         Vector<dataset::SurfaceQuery> output(hits.size());
-        const auto& mapping=host.geometry.InstanceToNode();
-        for(size_t i=0;i<hits.size();++i) {
-            const auto& hit=hits[i];
-            if(hit.hit && hit.instanceIndex>=mapping.size()) throw std::runtime_error("invalid surface query instance");
-            output[i]={hit.hit ? mapping[hit.instanceIndex]+1 : 0,hit.validity,hit.position};
+        const auto& mapping = host.geometry.InstanceToNode();
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const auto& hit = hits[i];
+            if (hit.hit && hit.instanceIndex >= mapping.size())
+                throw std::runtime_error("invalid surface query instance");
+            output[i] = {hit.hit ? mapping[hit.instanceIndex] + 1 : 0, hit.validity, hit.position};
         }
         return output;
-    } catch(const std::exception& e) { return Result<Vector<dataset::SurfaceQuery>,String>::Err(e.what()); }
+    } catch (const std::exception& e) {
+        return Result<Vector<dataset::SurfaceQuery>, String>::Err(e.what());
+    }
 }
 
-Result<dataset::GeometryTruth,String> OfflineRenderer::CaptureGeometry(f64 time,
-    const camera::CameraProjection* projectionOverride) {
+Result<dataset::GeometryTruth, String>
+OfflineRenderer::CaptureGeometry(f64 time, const camera::CameraProjection* projectionOverride) {
     try {
-        Impl& host=*m_impl;
-        const auto moved=SetTimelineTime(time);
-        if(!moved) return Result<dataset::GeometryTruth,String>::Err(moved.error());
-        const bool physical=host.resolved.cameraConfig.enabled;
-        const auto camera=host.CameraDataAt(time,host.params.mode,host.params.wavelengthNm,physical);
-        if(!camera) return Result<dataset::GeometryTruth,String>::Err(camera.error());
-        const auto& optics=host.resolved.cameraConfig.optics;
-        const u32 w=physical ? optics.sensorWidthPx : host.params.width;
-        const u32 h=physical ? optics.sensorHeightPx : host.params.height;
-        const auto saved=host.pipeline->GetCameraData();
-        struct Restore { Impl& host;CameraData camera;~Restore(){host.pipeline->SetCameraData(camera);host.pipeline->SetCameraProjection(nullptr);} } restore{host,saved};
+        Impl& host = *m_impl;
+        const auto moved = SetTimelineTime(time);
+        if (!moved)
+            return Result<dataset::GeometryTruth, String>::Err(moved.error());
+        const bool physical = host.resolved.cameraConfig.enabled;
+        const auto camera =
+            host.CameraDataAt(time, host.params.mode, host.params.wavelengthNm, physical);
+        if (!camera)
+            return Result<dataset::GeometryTruth, String>::Err(camera.error());
+        const auto& optics = host.resolved.cameraConfig.optics;
+        const u32 w = physical ? optics.sensorWidthPx : host.params.width;
+        const u32 h = physical ? optics.sensorHeightPx : host.params.height;
+        const auto saved = host.pipeline->GetCameraData();
+        struct Restore {
+            Impl& host;
+            CameraData camera;
+            ~Restore() {
+                host.pipeline->SetCameraData(camera);
+                host.pipeline->SetCameraProjection(nullptr);
+            }
+        } restore{host, saved};
         host.pipeline->SetCameraData(*camera);
         std::optional<camera::CameraProjection> projection;
-        if(physical) {
-            const auto resolved=camera::ResolveProjection(optics.projection,w,h,optics.focalLengthMm,optics.pixelPitchUm);
-            if(!resolved) return Result<dataset::GeometryTruth,String>::Err(resolved.error());
-            projection=*resolved;
+        if (physical) {
+            const auto resolved = camera::ResolveProjection(
+                optics.projection, w, h, optics.focalLengthMm, optics.pixelPitchUm);
+            if (!resolved)
+                return Result<dataset::GeometryTruth, String>::Err(resolved.error());
+            projection = *resolved;
         }
-        if(projectionOverride) {
-            const auto valid=camera::ValidateProjection(*projectionOverride,w,h);
-            if(!valid) throw std::runtime_error(valid.error());
-            projection=*projectionOverride;
+        if (projectionOverride) {
+            const auto valid = camera::ValidateProjection(*projectionOverride, w, h);
+            if (!valid)
+                throw std::runtime_error(valid.error());
+            projection = *projectionOverride;
         }
         host.pipeline->SetCameraProjection(projection ? &*projection : nullptr);
-        const auto hits=host.pipeline->CapturePrimaryGeometry(w,h);
+        const auto hits = host.pipeline->CapturePrimaryGeometry(w, h);
         dataset::GeometryTruth out;
-        out.rayDistanceMeters=Image(w,h,1);out.rayDistanceMeters.channelNames={"ray_distance_m"};
-        out.cameraDepthMeters=Image(w,h,1);out.cameraDepthMeters.channelNames={"camera_z_m"};
-        out.worldPosition=Image(w,h,3);out.worldPosition.channelNames={"X","Y","Z"};
-        out.worldNormal=Image(w,h,3);out.worldNormal.channelNames={"Nx","Ny","Nz"};
-        out.validity=Image(w,h,1);out.validity.channelNames={"validity"};
-        out.instanceId.width=w;out.instanceId.height=h;out.instanceId.pixels.resize(hits.size());
-        out.geometry.width=w;out.geometry.height=h;out.geometry.referenceTimeSeconds=time;
-        out.geometry.worldUnitsToMeters=host.lightingParams.worldUnitsToMeters;
-        out.geometry.camera=*camera;out.geometry.nativeProjection=projection;
-        const auto& mapping=host.geometry.InstanceToNode();
-        using Json=nlohmann::json;
-        Json instances=Json::array();
-        for(size_t i=0;i<host.loadedScene.nodes.size();++i)
-            instances.push_back({{"instance_id",i+1},{"node_index",i},{"name",host.loadedScene.nodes[i].name}});
-        out.instancesJson=instances.dump();
-        for(size_t i=0;i<hits.size();++i) {
-            const auto& hit=hits[i];
-            out.rayDistanceMeters.data[i]=hit.distance<0 ? -1 : static_cast<f32>(hit.distance*out.geometry.worldUnitsToMeters);
-            out.cameraDepthMeters.data[i]=hit.depth<0 ? -1 : static_cast<f32>(hit.depth*out.geometry.worldUnitsToMeters);
-            out.validity.data[i]=static_cast<f32>(hit.validity);
-            if(hit.hit) {
-                if(hit.instanceIndex>=mapping.size()) throw std::runtime_error("geometry hit references unknown instance");
-                out.instanceId.pixels[i]=mapping[hit.instanceIndex]+1;
-                for(u32 c=0;c<3;++c) {
-                    out.worldPosition.data[i*3+c]=hit.position[c];
-                    out.worldNormal.data[i*3+c]=hit.normal[c];
+        out.rayDistanceMeters = Image(w, h, 1);
+        out.rayDistanceMeters.channelNames = {"ray_distance_m"};
+        out.cameraDepthMeters = Image(w, h, 1);
+        out.cameraDepthMeters.channelNames = {"camera_z_m"};
+        out.worldPosition = Image(w, h, 3);
+        out.worldPosition.channelNames = {"X", "Y", "Z"};
+        out.worldNormal = Image(w, h, 3);
+        out.worldNormal.channelNames = {"Nx", "Ny", "Nz"};
+        out.validity = Image(w, h, 1);
+        out.validity.channelNames = {"validity"};
+        out.instanceId.width = w;
+        out.instanceId.height = h;
+        out.instanceId.pixels.resize(hits.size());
+        out.geometry.width = w;
+        out.geometry.height = h;
+        out.geometry.referenceTimeSeconds = time;
+        out.geometry.worldUnitsToMeters = host.lightingParams.worldUnitsToMeters;
+        out.geometry.camera = *camera;
+        out.geometry.nativeProjection = projection;
+        const auto& mapping = host.geometry.InstanceToNode();
+        using Json = nlohmann::json;
+        Json instances = Json::array();
+        for (size_t i = 0; i < host.loadedScene.nodes.size(); ++i)
+            instances.push_back({{"instance_id", i + 1},
+                                 {"node_index", i},
+                                 {"name", host.loadedScene.nodes[i].name}});
+        out.instancesJson = instances.dump();
+        for (size_t i = 0; i < hits.size(); ++i) {
+            const auto& hit = hits[i];
+            out.rayDistanceMeters.data[i] =
+                hit.distance < 0 ? -1
+                                 : static_cast<f32>(hit.distance * out.geometry.worldUnitsToMeters);
+            out.cameraDepthMeters.data[i] =
+                hit.depth < 0 ? -1 : static_cast<f32>(hit.depth * out.geometry.worldUnitsToMeters);
+            out.validity.data[i] = static_cast<f32>(hit.validity);
+            if (hit.hit) {
+                if (hit.instanceIndex >= mapping.size())
+                    throw std::runtime_error("geometry hit references unknown instance");
+                out.instanceId.pixels[i] = mapping[hit.instanceIndex] + 1;
+                for (u32 c = 0; c < 3; ++c) {
+                    out.worldPosition.data[i * 3 + c] = hit.position[c];
+                    out.worldNormal.data[i * 3 + c] = hit.normal[c];
                 }
             }
         }
         return out;
-    } catch(const std::exception& e) { return Result<dataset::GeometryTruth,String>::Err(e.what()); }
+    } catch (const std::exception& e) {
+        return Result<dataset::GeometryTruth, String>::Err(e.what());
+    }
 }
 
 TimelineInfo OfflineRenderer::GetTimelineInfo() const {
@@ -2191,17 +2494,23 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
     struct RestoreCamera {
         Camera& target;
         Camera original;
-        ~RestoreCamera() { target = original; }
+        ~RestoreCamera() {
+            target = original;
+        }
     } restore{loadedScene.camera, loadedScene.camera};
     if (!resolved.cameraConfig.motion.keys.empty()) {
         const auto pose = camera::CameraPoseAt(resolved.cameraConfig.motion, timeline.Current_s());
-        if (!pose) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, pose.error()};
+        if (!pose)
+            return OfflineRenderOutput{{}, 1.0f, 0.0f, true, pose.error()};
         const auto& position = pose.value().position;
         const auto& lookAt = pose.value().lookAt;
-        loadedScene.camera = Camera(
-            glm::vec3(static_cast<f32>(position[0]), static_cast<f32>(position[1]), static_cast<f32>(position[2])),
-            glm::vec3(static_cast<f32>(lookAt[0]), static_cast<f32>(lookAt[1]), static_cast<f32>(lookAt[2])),
-            restore.original.GetUpReference(), restore.original.GetFovY(), restore.original.GetAspectRatio());
+        loadedScene.camera =
+            Camera(glm::vec3(static_cast<f32>(position[0]), static_cast<f32>(position[1]),
+                             static_cast<f32>(position[2])),
+                   glm::vec3(static_cast<f32>(lookAt[0]), static_cast<f32>(lookAt[1]),
+                             static_cast<f32>(lookAt[2])),
+                   restore.original.GetUpReference(), restore.original.GetFovY(),
+                   restore.original.GetAspectRatio());
         loadedScene.camera.SetProjection(restore.original.GetProjection());
         loadedScene.camera.SetOrthoHeight(restore.original.GetOrthoHeight());
     }
@@ -2254,12 +2563,16 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
 
     std::unique_ptr<dataset::ExportSession> exportSession;
     if (config.GetBool("dataset.metadata", true)) {
-        hsConfig.exportProvenance = ProductSnapshot(timeline.Current_s(), params.width, params.height, false, true);
-        auto created = dataset::ExportSession::Create(params.outputPath, config, {hsConfig.exportProvenance});
-        if (!created) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, created.error()};
+        hsConfig.exportProvenance =
+            ProductSnapshot(timeline.Current_s(), params.width, params.height, false, true);
+        auto created =
+            dataset::ExportSession::Create(params.outputPath, config, {hsConfig.exportProvenance});
+        if (!created)
+            return OfflineRenderOutput{{}, 1.0f, 0.0f, true, created.error()};
         exportSession = std::move(created.value());
         const auto staged = exportSession->StagingPath(outPath.stem().string());
-        if (!staged) return OfflineRenderOutput{{}, 1.0f, 0.0f, true, staged.error()};
+        if (!staged)
+            return OfflineRenderOutput{{}, 1.0f, 0.0f, true, staged.error()};
         hsConfig.outputPath = staged.value();
         hsConfig.exportRecordId = exportSession->RecordId();
         hsConfig.exportSidecar = exportSession->SidecarName();
@@ -2313,18 +2626,31 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderHyperspectral() {
             const auto& cube = hsRenderer.GetResult();
             const fs::path stagedRoot = fs::path(hsConfig.outputPath).parent_path();
             for (const auto& file : fs::recursive_directory_iterator(stagedRoot)) {
-                if (!file.is_regular_file()) continue;
+                if (!file.is_regular_file())
+                    continue;
                 const auto name = file.path().lexically_relative(stagedRoot).generic_string();
-                if (name.starts_with(".internal/") || name.ends_with(".replay.toml")) continue;
-                nlohmann::json description{{"width", cube.width}, {"height", cube.height},
-                    {"channels", cube.nbands}, {"provenance", nlohmann::json::parse(hsConfig.exportProvenance)},
-                    {"spectral", nlohmann::json::parse(cube.metadata.at("quantiloom_spectral_provenance"))}};
-                if (name.find("_bands/") != String::npos) description["channels"] = 1;
+                if (name.starts_with(".internal/") || name.ends_with(".replay.toml"))
+                    continue;
+                nlohmann::json description{
+                    {"width", cube.width},
+                    {"height", cube.height},
+                    {"channels", cube.nbands},
+                    {"provenance", nlohmann::json::parse(hsConfig.exportProvenance)},
+                    {"spectral",
+                     nlohmann::json::parse(cube.metadata.at("quantiloom_spectral_provenance"))}};
+                if (name.find("_bands/") != String::npos)
+                    description["channels"] = 1;
                 const auto added = exportSession->RegisterFile(name, name, description.dump());
-                if (!added) { output.error = added.error(); return output; }
+                if (!added) {
+                    output.error = added.error();
+                    return output;
+                }
             }
             const auto committed = exportSession->Commit();
-            if (!committed) { output.error = committed.error(); return output; }
+            if (!committed) {
+                output.error = committed.error();
+                return output;
+            }
         }
         QL_LOG_INFO("  Hyperspectral rendering complete!");
         QL_LOG_INFO("  Total render time: {:.2f} seconds", hsRenderer.GetLastRenderTime());
@@ -2355,7 +2681,9 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     const u32 spp = params.spp;
     const bool recordMetadata = config.GetBool("dataset.metadata", true);
     String productSnapshot;
-    if (recordMetadata) productSnapshot = ProductSnapshot(timeline.Current_s(), width, height, false, false, &pipeline->GetCameraData());
+    if (recordMetadata)
+        productSnapshot = ProductSnapshot(timeline.Current_s(), width, height, false, false,
+                                          &pipeline->GetCameraData());
 
     // No preview warning here. Whether a render is quantitative is a property
     // of its materials, not of its mode, and ResolveMaterialSpectra already
@@ -2508,8 +2836,7 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
 
         QL_LOG_INFO("  All samples completed!");
-        QL_LOG_INFO("  GPU submits: {} (largest batch: {} samples)",
-                    submitCount, largestBatch);
+        QL_LOG_INFO("  GPU submits: {} (largest batch: {} samples)", submitCount, largestBatch);
         QL_LOG_INFO("  Total GPU time: {:.2f} ms ({:.2f} ms/sample)",
                     totalGpuMs, totalGpuMs / spp);
 
@@ -2552,19 +2879,22 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
     img.channelNames = {"R", "G", "B", "A"};
     img.metadata["renderer"] = "Quantiloom Spectral";
     img.metadata["mode"] = params.modeName;
-    const bool rgbSignal=params.mode==SpectralMode::RGB || IsVisMode(params.mode);
-    img.metadata["signal_kind"]=rgbSignal ? "cie_linear_srgb" :
-        IsIRFusedMode(params.mode) ? "band_average_spectral_radiance" : "spectral_radiance";
-    img.metadata["unit"]=rgbSignal ? "linear_sRGB" : "W/m^2/sr/nm";
-    img.metadata["colour_space"]=rgbSignal ? "sRGB" : "scalar";
-    img.metadata["transfer"]="linear";
-    img.metadata["integration"]=rgbSignal ? "renderer_rgb_or_cie_normalized" :
-        IsIRFusedMode(params.mode) ? "uniform_band_average" : "per_wavelength";
-    img.metadata["data_channels"]=rgbSignal ? "R,G,B" : "R";
-    img.metadata["channel_aliases"]=rgbSignal ? "" : "G=R,B=R";
-    img.metadata["auxiliary_channels"]="A";
-    if(const auto band=GetFusedBandInfo(params.mode);band)
-        img.metadata["band_nm"]=std::to_string(band->lambdaMinNm)+","+std::to_string(band->lambdaMaxNm);
+    const bool rgbSignal = params.mode == SpectralMode::RGB || IsVisMode(params.mode);
+    img.metadata["signal_kind"] = rgbSignal                    ? "cie_linear_srgb"
+                                  : IsIRFusedMode(params.mode) ? "band_average_spectral_radiance"
+                                                               : "spectral_radiance";
+    img.metadata["unit"] = rgbSignal ? "linear_sRGB" : "W/m^2/sr/nm";
+    img.metadata["colour_space"] = rgbSignal ? "sRGB" : "scalar";
+    img.metadata["transfer"] = "linear";
+    img.metadata["integration"] = rgbSignal                    ? "renderer_rgb_or_cie_normalized"
+                                  : IsIRFusedMode(params.mode) ? "uniform_band_average"
+                                                               : "per_wavelength";
+    img.metadata["data_channels"] = rgbSignal ? "R,G,B" : "R";
+    img.metadata["channel_aliases"] = rgbSignal ? "" : "G=R,B=R";
+    img.metadata["auxiliary_channels"] = "A";
+    if (const auto band = GetFusedBandInfo(params.mode); band)
+        img.metadata["band_nm"] =
+            std::to_string(band->lambdaMinNm) + "," + std::to_string(band->lambdaMaxNm);
     if (params.mode == SpectralMode::Single ||
         params.mode == SpectralMode::MWIR_Fused ||
         params.mode == SpectralMode::LWIR_Fused ||

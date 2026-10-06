@@ -45,6 +45,16 @@ CASES_FILE="scripts/render-tests/furnace_cases.txt"
 [ -f "$CASES_FILE" ] || { echo "no cavity list at $CASES_FILE" >&2; exit 2; }
 
 fail=0
+
+# Every render writes <stem>.metadata.json and <stem>.replay.toml next to the
+# output EXR. The EXR is a gitignored scratch file but the sidecars are not,
+# so they go once the checker has read the image.
+drop_sidecars() {
+    for stem in "$@"; do
+        rm -f "${stem%.exr}.metadata.json" "${stem%.exr}.replay.toml"
+    done
+}
+
 # Read on fd 3, not stdin. The CLI inside this loop reads stdin and would
 # swallow the rest of the list: the first version of this loop rendered
 # lwir_e1, was handed EOF, and reported "all cavities within tolerance" having
@@ -80,6 +90,7 @@ while read -r band case <&3; do
         echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
         fail=1
     fi
+    drop_sidecars "$out"
 done 3< <(grep -vE '^[[:space:]]*(#|$)' "$CASES_FILE")
 
 if [ "$fail" = 0 ]; then

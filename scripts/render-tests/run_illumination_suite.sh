@@ -74,6 +74,15 @@ CLI="${CLI:-./build/src/app/Release/Quantiloom.exe}"
 # The default is unchanged, so the WSL path runs exactly as before.
 PY="${PYTHON:-python3}"
 
+# Every render writes <stem>.metadata.json and <stem>.replay.toml next to the
+# output EXR. The EXR is a gitignored scratch file but the sidecars are not,
+# so they go once the checker has read the image.
+drop_sidecars() {
+    for stem in "$@"; do
+        rm -f "${stem%.exr}.metadata.json" "${stem%.exr}.replay.toml"
+    done
+}
+
 fail=0
 for band in nir swir mwir; do
     for variant in sun nosun; do
@@ -104,6 +113,7 @@ for band in nir swir mwir; do
         echo "$report" | grep -E 'Shadowed fraction|FAIL' | tr '\n' ' '; echo
         fail=1
     fi
+    drop_sidecars "shadow_${band}_sun_output.exr" "shadow_${band}_nosun_output.exr"
 done
 
 # The complement of the shadow checks: the same ground with nothing above it,
@@ -124,6 +134,7 @@ else
         echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
         fail=1
     fi
+    drop_sidecars skyequiv_swir_output.exr
 fi
 
 # The same open ground in the visible band, where the reflectance is an
@@ -151,6 +162,7 @@ else
     echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
     fail=1
 fi
+drop_sidecars skyequiv_vis_hero_output.exr skyequiv_vis_fused_output.exr
 
 # Indirect light in the visible band. The only emitter is the ceiling panel and
 # the camera cannot see it, so every lit pixel here arrived by bouncing. This
@@ -169,6 +181,7 @@ else
         echo "$report" | grep -E 'Lit fraction|R/G|FAIL' | tr '\n' ' '; echo
         fail=1
     fi
+    drop_sidecars cornell_box_vis_bleed_output.exr
 fi
 
 
@@ -293,6 +306,9 @@ for pair in "reflective:skyequiv_swir_output.exr:viewangle_swir_oblique_output.e
 ' ' '; echo
         fail=1
     fi
+    # `a` was rendered by the open-sky arm above and already dropped there;
+    # passing it again is harmless.
+    drop_sidecars "$a" "$b"
 done
 
 if [ "$fail" = 0 ]; then

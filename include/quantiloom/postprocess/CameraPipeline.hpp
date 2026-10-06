@@ -173,7 +173,7 @@ struct HsvConfig {
     f64 temporalDriftSigma = 0.02;
 };
 
-// Closed-loop acquisition control (M4-4). The controller is a photon-chain
+// Closed-loop acquisition control (the AE/AWB feedback loop). The controller is a photon-chain
 // feature: a thermal detector responds to absorbed power, not scene luminance,
 // so AE has no physical meaning there and the whole block is treated as off.
 // Fields are appended only; never reorder (public header).

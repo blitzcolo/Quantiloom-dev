@@ -5,19 +5,19 @@
 
 namespace quantiloom::dataset {
 struct SurfaceQuery {
-    u32 instanceId=0;
-    u32 validity=0;
+    u32 instanceId = 0;
+    u32 validity = 0;
     glm::vec3 worldPosition{};
 };
 struct OpticalProbe {
     glm::vec2 nativePixel{};
-    f64 wavelengthNm=550;
-    u32 branchMask=0; // bit per interface depth: 1 reflection, 0 transmission
+    f64 wavelengthNm = 550;
+    u32 branchMask = 0; // bit per interface depth: 1 reflection, 0 transmission
 };
 struct OpticalProbeResult {
     SurfaceQuery surface;
-    u32 primitiveId=0,flags=0;
-    f32 throughput=0;
+    u32 primitiveId = 0, flags = 0;
+    f32 throughput = 0;
 };
 struct GeometryTruth {
     Image rayDistanceMeters;

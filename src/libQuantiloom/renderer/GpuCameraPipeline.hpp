@@ -16,7 +16,7 @@ class VulkanContext;
 
 namespace quantiloom::rendercore {
 
-/// Maximum time strata the measurement image is allocated for (M4-1). The
+/// Maximum time strata the measurement image is allocated for. The
 /// runtime stratum count is min(gpu_time_positions, spp) and travels in the
 /// push constants; the layers exist regardless so the image view is stable.
 inline constexpr u32 kCameraTimeStrataMax = 8;
@@ -33,7 +33,7 @@ struct DynamicLayerCamera {
     std::array<f32, 4> params{};  // fovScale, aspect, timeSeconds, unused
 };
 
-/// Inputs for the M4-1 dynamic-exposure pass: the time-stratified measurement
+/// Inputs for the dynamic-exposure pass: the time-stratified measurement
 /// layers plus the camera frame and timing of each stratum. With
 /// `strataCount <= 1` the pass degenerates to a copy of layer 0.
 struct DynamicExposureInput {

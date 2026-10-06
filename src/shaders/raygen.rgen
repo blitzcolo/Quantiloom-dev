@@ -18,7 +18,7 @@
 // ============================================================================
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> outputImage;
-// Measurement rate map, one layer per time stratum (M4-1). Layer 0 is the
+// Measurement rate map, one layer per time stratum. Layer 0 is the
 // anchor: it alone feeds the primary-hit depth AOV and the interactive
 // depth blit. The runtime layer count arrives in the push constants; the
 // image is allocated with kCameraTimeStrataMax layers regardless.
@@ -39,7 +39,12 @@
 // miss. Overwritten every frame (never accumulated) so it always reflects the
 // current scene; consumed by ExternalRenderContext::BlitDepthTo.
 [[vk::binding(22, 0)]] RWTexture2D<float> depthImage;
-struct FusionProbeRay {float3 origin;float wavelength;float3 direction;uint branchMask;};
+struct FusionProbeRay {
+    float3 origin;
+    float wavelength;
+    float3 direction;
+    uint branchMask;
+};
 [[vk::binding(37,0)]] StructuredBuffer<FusionProbeRay> fusionProbeRays;
 
 // The push-constant block lives in common.hlsli, shared with the closest-hit
@@ -140,37 +145,50 @@ void main() {
     }
 
     // Native lens geometry applies before tracing, including subpixel jitter.
-    if (fusionRecords.Load(40)==0 && !orthographic && projectionConfig[0].x != 0) {
+    if (fusionRecords.Load(kFusionProbeCountWord * 4) == 0 && !orthographic &&
+        projectionConfig[0].x != 0) {
         float3 localDirection;
         if (!NativePixelDirection(pixelCenter, localDirection)) {
-            FusionAccumulate(launchID,launchSize,pushConsts.sampleIndex,0,0,0,8);
-            const uint root=pushConsts.sampleIndex*launchSize.x*launchSize.y+launchID.y*launchSize.x+launchID.x;
-            const uint stride=fusionRecords.Load(4);
-            if(fusionRecords.Load(0)!=0 && stride>0 && root%stride==0 && root/stride<fusionRecords.Load(8)) {
-                const uint row=root/stride;
-                fusionRecords.Store4(128+row*32+16,uint4(launchID.y*launchSize.x+launchID.x,pushConsts.sampleIndex,8,0));
-                if(fusionRecords.Load(60)!=0)fusionRecords.Store2(fusionRecords.Load(60)+row*12,asuint(pixelCenter));
+            FusionAccumulate(launchID, launchSize, pushConsts.sampleIndex, 0, 0, 0,
+                             kFusionFlagUnprojectable);
+            const uint root = pushConsts.sampleIndex * launchSize.x * launchSize.y +
+                              launchID.y * launchSize.x + launchID.x;
+            const uint stride = fusionRecords.Load(kFusionRayStrideWord * 4);
+            if (fusionRecords.Load(kFusionEnabledWord * 4) != 0 && stride > 0 &&
+                root % stride == 0 && root / stride < fusionRecords.Load(kFusionStoredRaysWord * 4)) {
+                const uint row = root / stride;
+                fusionRecords.Store4(kFusionHeaderBytes + row * kFusionRayRecordBytes +
+                                         kFusionRayIdentityOffset,
+                                     uint4(launchID.y * launchSize.x + launchID.x,
+                                           pushConsts.sampleIndex, kFusionFlagUnprojectable, 0));
+                if (fusionRecords.Load(kFusionCoordSectionWord * 4) != 0)
+                    fusionRecords.Store2(fusionRecords.Load(kFusionCoordSectionWord * 4) +
+                                             row * kFusionCoordColumnBytes,
+                                         asuint(pixelCenter));
             }
             const float retained = float(pushConsts.sampleIndex) / float(pushConsts.sampleIndex + 1u);
             outputImage[launchID] = pushConsts.sampleIndex == 0u ? 0 : outputImage[launchID] * retained;
-            uint dw,dh;
-            depthImage.GetDimensions(dw,dh);
-            if(launchID.x<dw && launchID.y<dh) depthImage[launchID]=-1;
-            if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT) {
-                const uint3 coord=uint3(launchID,pushConsts.timeStratum);
-                float4 previous=pushConsts.sampleIndex == 0u ? 0 : cameraMeasurementImage[coord];
-                previous.rgb*=retained;
-                const uint2 physicalPixel=CameraPhysicalPixel(cameraResponseTable,launchID,launchSize);
-                previous.a=CameraHeaderWord(cameraResponseTable,3u)==CAMERA_CFA_MULTI ? 0 :
-                    float(CameraCfaChannel(cameraResponseTable,physicalPixel));
-                cameraMeasurementImage[coord]=previous;
-                cameraMeasurementDepthImage[uint3(launchID,pushConsts.timeStratum)]=-1;
+            uint dw, dh;
+            depthImage.GetDimensions(dw, dh);
+            if (launchID.x < dw && launchID.y < dh)
+                depthImage[launchID] = -1;
+            if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) {
+                const uint3 coord = uint3(launchID, pushConsts.timeStratum);
+                float4 previous = pushConsts.sampleIndex == 0u ? 0 : cameraMeasurementImage[coord];
+                previous.rgb *= retained;
+                const uint2 physicalPixel =
+                    CameraPhysicalPixel(cameraResponseTable, launchID, launchSize);
+                previous.a = CameraHeaderWord(cameraResponseTable, 3u) == CAMERA_CFA_MULTI
+                                 ? 0
+                                 : float(CameraCfaChannel(cameraResponseTable, physicalPixel));
+                cameraMeasurementImage[coord] = previous;
+                cameraMeasurementDepthImage[uint3(launchID, pushConsts.timeStratum)] = -1;
             }
             return;
         }
-        direction=normalize(localDirection.x*pushConsts.camera.right-
-                            localDirection.y*pushConsts.camera.up+
-                            localDirection.z*pushConsts.camera.forward);
+        direction = normalize(localDirection.x * pushConsts.camera.right -
+                              localDirection.y * pushConsts.camera.up +
+                              localDirection.z * pushConsts.camera.forward);
     }
 
     // Setup ray
@@ -184,15 +202,20 @@ void main() {
     // Trace the primary ray
     // ========================================================================
     // Initialize payload
-    Payload payload=(Payload)0;
-    payload.fusionPathId=0xFFFFFFFFu;
-    payload.fusionMediumCount=fusionRecords.Load(32);
-    [unroll] for(uint medium=0;medium<8;++medium) payload.fusionMedia[medium]=fusionRecords.Load(64+medium*4);
-    if(fusionRecords.Load(0)!=0 &&
-       (SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
-        const uint stride=fusionRecords.Load(4);
-        const uint root=pushConsts.sampleIndex*launchSize.x*launchSize.y+launchID.y*launchSize.x+launchID.x;
-        if(root%stride==0 && root/stride<fusionRecords.Load(8)) payload.fusionPathId=root/stride;
+    Payload payload = (Payload)0;
+    payload.fusionPathId = kFusionNoPath;
+    payload.fusionMediumCount = fusionRecords.Load(kFusionInitialMediumCountWord * 4);
+    [unroll] for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
+        payload.fusionMedia[medium] =
+            fusionRecords.Load((kFusionInitialMediaWords + medium) * 4);
+    if (fusionRecords.Load(kFusionEnabledWord * 4) != 0 &&
+        (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
+        const uint stride = fusionRecords.Load(kFusionRayStrideWord * 4);
+        const uint root = pushConsts.sampleIndex * launchSize.x * launchSize.y +
+                          launchID.y * launchSize.x + launchID.x;
+        if (root % stride == 0 && root / stride < fusionRecords.Load(kFusionStoredRaysWord * 4))
+            payload.fusionPathId = root / stride;
     }
     payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
 
@@ -232,14 +255,20 @@ void main() {
     }
 
     // Initialize recursion depth (0 = primary ray)
-    if(fusionRecords.Load(40)!=0) {
-        const FusionProbeRay probe=fusionProbeRays[launchID.x];
-        ray.Origin=probe.origin;ray.Direction=probe.direction;
-        payload.heroLambda=probe.wavelength;payload.fusionForced=1;payload.fusionBranchMask=probe.branchMask;
+    if (fusionRecords.Load(kFusionProbeCountWord * 4) != 0) {
+        const FusionProbeRay probe = fusionProbeRays[launchID.x];
+        ray.Origin = probe.origin;
+        ray.Direction = probe.direction;
+        payload.heroLambda = probe.wavelength;
+        payload.fusionForced = 1;
+        payload.fusionBranchMask = probe.branchMask;
     }
     payload.depth = 0;
-    if(payload.fusionPathId!=0xFFFFFFFFu && fusionRecords.Load(60)!=0)
-        fusionRecords.Store2(fusionRecords.Load(60)+payload.fusionPathId*12,asuint(pixelCenter));
+    if (payload.fusionPathId != kFusionNoPath &&
+        fusionRecords.Load(kFusionCoordSectionWord * 4) != 0)
+        fusionRecords.Store2(fusionRecords.Load(kFusionCoordSectionWord * 4) +
+                                 payload.fusionPathId * kFusionCoordColumnBytes,
+                             asuint(pixelCenter));
 
     // Initialize RNG state from pixel seed for stochastic decisions
     payload.rngState = seed;
@@ -275,30 +304,43 @@ void main() {
     // strata carry their own depth in binding 31, and the interactive depth
     // blit must keep showing the anchor view.
     uint depthWidth, depthHeight;
-    if(!all(isfinite(payload.radiance)) && fusionRecords.Load(48)!=0) {
-        payload.fusionFlags|=16;uint unused;fusionRecords.InterlockedOr(28,16,unused);
-    }
-    if(fusionRecords.Load(0)!=0 &&
-       (SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE || SPEC_SPECTRAL_MODE==SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
+    if (!all(isfinite(payload.radiance)) &&
+        fusionRecords.Load(kFusionQuantitativeWord * 4) != 0) {
+        payload.fusionFlags |= kFusionFlagNonFinite;
         uint unused;
-        fusionRecords.InterlockedOr(28,payload.fusionFlags,unused);
-        if(payload.fusionPathId!=0xFFFFFFFFu) {
-            const uint address=128+payload.fusionPathId*32;
-            if(fusionRecords.Load(60)!=0)fusionRecords.Store(fusionRecords.Load(60)+payload.fusionPathId*12+8,asuint(payload.fusionResidual));
-            fusionRecords.Store4(address,asuint(float4(payload.fusionContributions,payload.radiance.x)));
-            fusionRecords.Store4(address+16,uint4(launchID.y*launchSize.x+launchID.x,
-                pushConsts.sampleIndex,payload.fusionFlags,payload.fusionTerminalDepth|0x80000000u));
+        fusionRecords.InterlockedOr(kFusionDiagnosticFlagsWord * 4, kFusionFlagNonFinite, unused);
+    }
+    if (fusionRecords.Load(kFusionEnabledWord * 4) != 0 &&
+        (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
+         SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT)) {
+        uint unused;
+        fusionRecords.InterlockedOr(kFusionDiagnosticFlagsWord * 4, payload.fusionFlags, unused);
+        if (payload.fusionPathId != kFusionNoPath) {
+            const uint address = kFusionHeaderBytes + payload.fusionPathId * kFusionRayRecordBytes;
+            if (fusionRecords.Load(kFusionCoordSectionWord * 4) != 0)
+                fusionRecords.Store(fusionRecords.Load(kFusionCoordSectionWord * 4) +
+                                        payload.fusionPathId * kFusionCoordColumnBytes +
+                                        kFusionCoordResidualOffset,
+                                    asuint(payload.fusionResidual));
+            fusionRecords.Store4(
+                address, asuint(float4(payload.fusionContributions, payload.radiance.x)));
+            fusionRecords.Store4(address + kFusionRayIdentityOffset,
+                                 uint4(launchID.y * launchSize.x + launchID.x,
+                                       pushConsts.sampleIndex, payload.fusionFlags,
+                                       payload.fusionTerminalDepth | kFusionTerminalBit));
         }
     }
-    float scalarVignette=1;
-    if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE && projectionConfig[3].y!=0 && !orthographic) {
-        const float cosine=max(dot(direction,normalize(pushConsts.camera.forward)),0.0);
-        scalarVignette=cosine*cosine*cosine*cosine;
+    float scalarVignette = 1;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE && projectionConfig[3].y != 0 && !orthographic) {
+        const float cosine = max(dot(direction, normalize(pushConsts.camera.forward)), 0.0);
+        scalarVignette = cosine * cosine * cosine * cosine;
     }
-    if(!all(isfinite(payload.radiance)) && fusionRecords.Load(48)!=0)payload.fusionFlags|=16;
-    FusionAccumulate(launchID,launchSize,pushConsts.sampleIndex,
-        float4(payload.fusionContributions,payload.fusionResidual)*scalarVignette,
-        payload.radiance.x*scalarVignette,1,payload.fusionFlags);
+    if (!all(isfinite(payload.radiance)) &&
+        fusionRecords.Load(kFusionQuantitativeWord * 4) != 0)
+        payload.fusionFlags |= kFusionFlagNonFinite;
+    FusionAccumulate(launchID, launchSize, pushConsts.sampleIndex,
+                     float4(payload.fusionContributions, payload.fusionResidual) * scalarVignette,
+                     payload.radiance.x * scalarVignette, 1, payload.fusionFlags);
     depthImage.GetDimensions(depthWidth, depthHeight);
     if (launchID.x < depthWidth && launchID.y < depthHeight &&
         pushConsts.timeStratum == 0u)
@@ -392,9 +434,10 @@ void main() {
     // ========================================================================
 
     float3 linearHDR = payload.radiance.rgb;
-    if(SPEC_SPECTRAL_MODE==SPECTRAL_MODE_SINGLE && projectionConfig[3].y!=0 && !orthographic) {
-        const float cosine=max(dot(direction,normalize(pushConsts.camera.forward)),0.0);
-        linearHDR*=cosine*cosine*cosine*cosine;
+    if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE && projectionConfig[3].y != 0 &&
+        !orthographic) {
+        const float cosine = max(dot(direction, normalize(pushConsts.camera.forward)), 0.0);
+        linearHDR *= cosine * cosine * cosine * cosine;
     }
 
     // Clamp to a reasonable HDR range, so a firefly cannot dominate the
@@ -414,7 +457,8 @@ void main() {
     // purpose as well as 0 did. Samples that reach here without a hero
     // wavelength were already clamped non-negative by the closest-hit and miss
     // shaders, so nothing else changes.
-    if(fusionRecords.Load(48)==0)linearHDR = clamp(linearHDR, -10000.0, 10000.0);
+    if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+        linearHDR = clamp(linearHDR, -10000.0, 10000.0);
 
     if (pushConsts.sampleIndex == 0) {
         // First sample: Initialize output with current radiance

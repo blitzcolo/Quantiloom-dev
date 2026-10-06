@@ -1,5 +1,5 @@
 // ============================================================================
-// Quantiloom - Camera Dynamic Exposure Compositor (M4-1)
+// Quantiloom - Camera Dynamic Exposure Compositor (time-stratified exposure)
 // ============================================================================
 // Composites the time-stratified measurement layers (binding 28 of the ray
 // tracing pipeline, written by raygen.rgen) into the single device-rate image

@@ -1,5 +1,5 @@
 // ============================================================================
-// Quantiloom - Unit tests for the camera acquisition history (M4-2):
+// Quantiloom - Unit tests for the camera acquisition history:
 // checkpoints, deterministic replay, product-free advances and warmup.
 //
 // Everything here is CPU-side and synthetic: the spectral frame samplers are

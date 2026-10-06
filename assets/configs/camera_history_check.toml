@@ -1,4 +1,4 @@
-# Fixture for scripts/render-tests/check_camera_history.py (M4-5).
+# Fixture for scripts/render-tests/check_camera_history.py (acquisition history).
 #
 # A hot block slides across a warm ground while a thermal-detector camera
 # watches from above. The detector integrates absorbed power with a first-

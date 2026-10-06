@@ -31,19 +31,20 @@ struct VerificationReport {
 /// private backups and claims are retained and their location is reported.
 class QL_API ExportSession {
 public:
-    static Result<std::unique_ptr<ExportSession>, String> Create(
-        const String& outputPath, const Config& replayConfig,
-        const RenderProvenance& provenance);
+    static Result<std::unique_ptr<ExportSession>, String>
+    Create(const String& outputPath, const Config& replayConfig,
+           const RenderProvenance& provenance);
     ~ExportSession();
     ExportSession(const ExportSession&) = delete;
     ExportSession& operator=(const ExportSession&) = delete;
 
-    /// Name is a relative artifact path; traversal and symlink parents are rejected. Products must have unique IDs and names.
-    /// Description is frozen product metadata, not the current renderer state.
-    Result<void, String> WriteImage(const String& name, const String& productId,
-                                  const Image& image, const String& descriptionJson);
-    Result<void,String> WriteUIntImage(const String& name,const String& productId,
-                                      const UIntImage& image,const String& descriptionJson);
+    /// Name is a relative artifact path; traversal and symlink parents are rejected. Products must
+    /// have unique IDs and names. Description is frozen product metadata, not the current renderer
+    /// state.
+    Result<void, String> WriteImage(const String& name, const String& productId, const Image& image,
+                                    const String& descriptionJson);
+    Result<void, String> WriteUIntImage(const String& name, const String& productId,
+                                        const UIntImage& image, const String& descriptionJson);
     /// Reserve a staged path for a streaming writer, then register it only after
     /// that writer closes successfully. Unregistered files are never published.
     /// The path is valid only for this session's lifetime. On Linux it uses a
@@ -51,7 +52,7 @@ public:
     /// to another process. Windows holds non-deletable, non-reparse ancestors.
     Result<String, String> StagingPath(const String& name) const;
     Result<void, String> RegisterFile(const String& name, const String& productId,
-                                    const String& descriptionJson);
+                                      const String& descriptionJson);
     Result<void, String> Commit();
     [[nodiscard]] const String& RecordId() const;
     [[nodiscard]] const String& SidecarName() const;

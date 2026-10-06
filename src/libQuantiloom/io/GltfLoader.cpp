@@ -113,7 +113,9 @@ static void ValidateAccessor(const tinygltf::Model& model, int index, int expect
         throw std::invalid_argument("Invalid glTF accessor reference");
     }
     const auto& a = model.accessors[index];
-    if (a.sparse.isSparse) { throw std::invalid_argument("Sparse glTF accessors are unsupported"); }
+    if (a.sparse.isSparse) {
+        throw std::invalid_argument("Sparse glTF accessors are unsupported");
+    }
     if (expectedType >= 0 && a.type != expectedType) {
         throw std::invalid_argument("Invalid glTF accessor shape");
     }
@@ -129,7 +131,9 @@ static void ValidateAccessor(const tinygltf::Model& model, int index, int expect
         throw std::invalid_argument("glTF bufferView exceeds buffer");
     }
     const int components = tinygltf::GetNumComponentsInType(a.type);
-    if (components <= 0) { throw std::invalid_argument("Invalid glTF accessor type"); }
+    if (components <= 0) {
+        throw std::invalid_argument("Invalid glTF accessor type");
+    }
     if (a.componentType == TINYGLTF_COMPONENT_TYPE_INT) {
         throw std::invalid_argument("Unsupported glTF signed int accessor");
     }
@@ -139,8 +143,7 @@ static void ValidateAccessor(const tinygltf::Model& model, int index, int expect
     const size_t stride = v.byteStride ? v.byteStride : element;
     if (stride < element || stride % component != 0 ||
         (v.byteStride && (v.byteStride > 252 || v.byteStride % 4 != 0)) ||
-        a.byteOffset > v.byteLength || a.count == 0 ||
-        element > v.byteLength - a.byteOffset ||
+        a.byteOffset > v.byteLength || a.count == 0 || element > v.byteLength - a.byteOffset ||
         a.count - 1 > (v.byteLength - a.byteOffset - element) / stride ||
         a.count > std::numeric_limits<u32>::max()) {
         throw std::invalid_argument("Invalid glTF accessor byte range or stride");
@@ -159,8 +162,9 @@ static void ValidateModel(const tinygltf::Model& model) {
         model.meshes.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
         throw std::invalid_argument("glTF model exceeds index representation");
     }
-    const bool quantized = std::find(model.extensionsRequired.begin(), model.extensionsRequired.end(),
-                                    "KHR_mesh_quantization") != model.extensionsRequired.end();
+    const bool quantized =
+        std::find(model.extensionsRequired.begin(), model.extensionsRequired.end(),
+                  "KHR_mesh_quantization") != model.extensionsRequired.end();
     for (const auto& v : model.bufferViews) {
         if (v.buffer < 0 || static_cast<size_t>(v.buffer) >= model.buffers.size() ||
             v.byteOffset > model.buffers[v.buffer].data.size() ||
@@ -168,10 +172,13 @@ static void ValidateModel(const tinygltf::Model& model) {
             throw std::invalid_argument("Invalid glTF bufferView");
         }
     }
-    for (size_t i = 0; i < model.accessors.size(); ++i) { ValidateAccessor(model, static_cast<int>(i)); }
+    for (size_t i = 0; i < model.accessors.size(); ++i) {
+        ValidateAccessor(model, static_cast<int>(i));
+    }
     for (const auto& t : model.textures) {
         if (t.source < 0 || static_cast<size_t>(t.source) >= model.images.size() ||
-            t.sampler < -1 || (t.sampler >= 0 && static_cast<size_t>(t.sampler) >= model.samplers.size())) {
+            t.sampler < -1 ||
+            (t.sampler >= 0 && static_cast<size_t>(t.sampler) >= model.samplers.size())) {
             throw std::invalid_argument("Invalid glTF texture source or sampler");
         }
     }
@@ -184,14 +191,18 @@ static void ValidateModel(const tinygltf::Model& model) {
         // Every texture slot consumed by extension material parsers lives in an
         // extension's top-level object and has a textureInfo with an index.
         for (const auto& [name, extension] : m.extensions) {
-            if (!extension.IsObject()) { continue; }
+            if (!extension.IsObject()) {
+                continue;
+            }
             for (const auto& [key, value] : extension.Get<tinygltf::Value::Object>()) {
                 if (key.size() >= 7 && key.compare(key.size() - 7, 7, "Texture") == 0) {
                     if (!value.IsObject() || !value.Has("index") || !value.Get("index").IsInt()) {
                         throw std::invalid_argument("Invalid glTF extension textureInfo");
                     }
                     const int index = value.Get("index").GetNumberAsInt();
-                    if (index < 0) { throw std::invalid_argument("Invalid glTF extension texture reference"); }
+                    if (index < 0) {
+                        throw std::invalid_argument("Invalid glTF extension texture reference");
+                    }
                     ValidateTextureReference(model, index);
                 }
             }
@@ -208,37 +219,50 @@ static void ValidateModel(const tinygltf::Model& model) {
                 ValidateAccessor(model, index);
                 const auto& a = model.accessors[index];
                 if (semantic == "POSITION" || semantic == "NORMAL" || semantic == "TANGENT") {
-                    const int shape = semantic == "TANGENT" ? TINYGLTF_TYPE_VEC4 : TINYGLTF_TYPE_VEC3;
-                    const bool floatType = a.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && !a.normalized;
+                    const int shape =
+                        semantic == "TANGENT" ? TINYGLTF_TYPE_VEC4 : TINYGLTF_TYPE_VEC3;
+                    const bool floatType =
+                        a.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT && !a.normalized;
                     const bool signedQuantized = quantized && a.normalized &&
-                        (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE || a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT);
-                    const bool quantizedPosition = quantized && semantic == "POSITION" &&
-                        (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE || a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
-                         a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT || a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT);
+                                                 (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE ||
+                                                  a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT);
+                    const bool quantizedPosition =
+                        quantized && semantic == "POSITION" &&
+                        (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE ||
+                         a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
+                         a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT ||
+                         a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT);
                     if (a.type != shape || !(floatType || signedQuantized || quantizedPosition)) {
-                        throw std::invalid_argument("Invalid glTF position/normal/tangent component type");
+                        throw std::invalid_argument(
+                            "Invalid glTF position/normal/tangent component type");
                     }
                 } else if (semantic == "TEXCOORD_0") {
                     if (a.type != TINYGLTF_TYPE_VEC2 ||
                         !(a.componentType == TINYGLTF_COMPONENT_TYPE_FLOAT ||
                           ((a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
-                            a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) && a.normalized) ||
-                          (quantized && (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE ||
-                           a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
-                           a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT ||
-                           a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)))) {
+                            a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT) &&
+                           a.normalized) ||
+                          (quantized &&
+                           (a.componentType == TINYGLTF_COMPONENT_TYPE_BYTE ||
+                            a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
+                            a.componentType == TINYGLTF_COMPONENT_TYPE_SHORT ||
+                            a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT)))) {
                         throw std::invalid_argument("Invalid glTF UV component type");
                     }
                 }
-                if (vertices && a.count != vertices) { throw std::invalid_argument("glTF attribute count mismatch"); }
+                if (vertices && a.count != vertices) {
+                    throw std::invalid_argument("glTF attribute count mismatch");
+                }
             }
-            if (p.indices < -1) { throw std::invalid_argument("Invalid glTF index accessor"); }
+            if (p.indices < -1) {
+                throw std::invalid_argument("Invalid glTF index accessor");
+            }
             if (p.indices >= 0) {
                 ValidateAccessor(model, p.indices, TINYGLTF_TYPE_SCALAR);
                 const auto& a = model.accessors[p.indices];
                 if (a.normalized || !(a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE ||
-                    a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ||
-                    a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)) {
+                                      a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT ||
+                                      a.componentType == TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT)) {
                     throw std::invalid_argument("Invalid glTF index component type");
                 }
             }
@@ -252,7 +276,8 @@ static void ValidateModel(const tinygltf::Model& model) {
             throw std::invalid_argument("Invalid glTF node mesh reference");
         }
         for (int child : n.children) {
-            if (child < 0 || static_cast<size_t>(child) >= model.nodes.size() || ++parents[child] != 1) {
+            if (child < 0 || static_cast<size_t>(child) >= model.nodes.size() ||
+                ++parents[child] != 1) {
                 throw std::invalid_argument("Invalid glTF child reference or multiple parents");
             }
         }
@@ -260,26 +285,37 @@ static void ValidateModel(const tinygltf::Model& model) {
     for (const auto& scene : model.scenes) {
         std::vector<bool> roots(model.nodes.size(), false);
         for (int root : scene.nodes) {
-            if (root < 0 || static_cast<size_t>(root) >= model.nodes.size() || parents[root] || roots[root]) {
+            if (root < 0 || static_cast<size_t>(root) >= model.nodes.size() || parents[root] ||
+                roots[root]) {
                 throw std::invalid_argument("Invalid glTF scene root");
             }
             roots[root] = true;
         }
     }
-    if (model.defaultScene < -1 || (model.defaultScene >= 0 &&
-        static_cast<size_t>(model.defaultScene) >= model.scenes.size())) {
+    if (model.defaultScene < -1 ||
+        (model.defaultScene >= 0 &&
+         static_cast<size_t>(model.defaultScene) >= model.scenes.size())) {
         throw std::invalid_argument("Invalid glTF default scene");
     }
     std::vector<size_t> ready;
-    for (size_t i = 0; i < parents.size(); ++i) { if (!parents[i]) { ready.push_back(i); } }
-    for (size_t i = 0; i < ready.size(); ++i) {
-        for (int child : model.nodes[ready[i]].children) { if (--parents[child] == 0) { ready.push_back(child); } }
+    for (size_t i = 0; i < parents.size(); ++i) {
+        if (!parents[i]) {
+            ready.push_back(i);
+        }
     }
-    if (ready.size() != model.nodes.size()) { throw std::invalid_argument("Cyclic glTF scene graph"); }
+    for (size_t i = 0; i < ready.size(); ++i) {
+        for (int child : model.nodes[ready[i]].children) {
+            if (--parents[child] == 0) {
+                ready.push_back(child);
+            }
+        }
+    }
+    if (ready.size() != model.nodes.size()) {
+        throw std::invalid_argument("Cyclic glTF scene graph");
+    }
 }
 
-template<typename T>
-static T ReadUnaligned(const u8* ptr) {
+template<typename T> static T ReadUnaligned(const u8* ptr) {
     T value;
     std::memcpy(&value, ptr, sizeof(value));
     return value;
@@ -461,10 +497,17 @@ std::vector<u32> GltfLoader::ReadIndices(const void* gltfModelPtr, int accessorI
     for (size_t i = 0; i < accessor.count; ++i) {
         const u8* ptr = dataPtr + i * stride;
         switch (accessor.componentType) {
-            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE: result.push_back(*ptr); break;
-            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: result.push_back(ReadUnaligned<u16>(ptr)); break;
-            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT: result.push_back(ReadUnaligned<u32>(ptr)); break;
-            default: throw std::invalid_argument("Invalid glTF index component type");
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+            result.push_back(*ptr);
+            break;
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+            result.push_back(ReadUnaligned<u16>(ptr));
+            break;
+        case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+            result.push_back(ReadUnaligned<u32>(ptr));
+            break;
+        default:
+            throw std::invalid_argument("Invalid glTF index component type");
         }
     }
 
@@ -1630,7 +1673,8 @@ Mesh GltfLoader::ParseMesh(const void* gltfModelPtr, int meshIndex, int activeVa
                 "KHR_materials_anisotropy") > 0) {
             QL_LOG_WARN("    Primitive {} of mesh '{}' uses an anisotropic material but has "
                         "neither a TANGENT attribute nor UVs to derive one from; the "
-                        "highlight direction will be arbitrary", primIdx, mesh.name);
+                        "highlight direction will be arbitrary",
+                        primIdx, mesh.name);
         }
 
         // Indices (required for indexed geometry)
@@ -1727,7 +1771,10 @@ std::vector<SceneNode> GltfLoader::FlattenSceneGraph(const void* gltfModelPtr) {
 
     const auto& scene = model.scenes[sceneIndex];
 
-    struct PendingNode { int index; glm::mat4 parent; };
+    struct PendingNode {
+        int index;
+        glm::mat4 parent;
+    };
     std::vector<PendingNode> pending;
     for (auto it = scene.nodes.rbegin(); it != scene.nodes.rend(); ++it) {
         pending.push_back({*it, glm::mat4(1.0f)});

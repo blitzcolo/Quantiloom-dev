@@ -129,6 +129,10 @@ def render(lambda_nm, index):
         px = ch[next(iter(ch))].pixels.astype(np.float64)
     produced.unlink(missing_ok=True)
     (ROOT / f"_sweep_{index:02d}.png").unlink(missing_ok=True)
+    # Sidecars the render writes next to the output; .exr/.png are
+    # gitignored, these are not.
+    (ROOT / f"_sweep_{index:02d}.metadata.json").unlink(missing_ok=True)
+    (ROOT / f"_sweep_{index:02d}.replay.toml").unlink(missing_ok=True)
     # SINGLE mode replicates its scalar spectral radiance across RGB.
     return px[..., 0]
 

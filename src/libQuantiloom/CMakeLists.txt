@@ -146,6 +146,7 @@ add_library(quantiloom_core OBJECT
     renderer/RenderCore.cpp
     renderer/FusionTransport.cpp
     renderer/FusionTransport.hpp
+    renderer/FusionRecordLayout.hpp
     renderer/RenderCore.hpp
     renderer/ConfigResolve.cpp
     renderer/ConfigResolve.hpp

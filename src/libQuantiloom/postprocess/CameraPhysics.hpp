@@ -14,7 +14,7 @@ inline constexpr f64 kBoltzmannJPerK = 1.380649e-23;
 enum class NoiseClass : u32 {
     PhotonShot, DarkShot, Read, Bias, FixedPrnu, FixedDsnu,
     ThermalRead, ThermalDrift, EmpiricalEffect,
-    // Display-only empirical effects (M4-4 HSV stage). Independent streams, so
+    // Display-only empirical effects (the HSV display-grading stage). Independent streams, so
     // enabling one never perturbs the trace-seed stream above.
     EmpiricalNoise, EmpiricalDrift
 };
@@ -88,7 +88,7 @@ BlackbodyThermalDerivativeWPerK(f64 temperatureK, const ResponseStack& response,
                                    u64 acquisitionIndex, NoiseClass noiseClass,
                                    u32 counter);
 
-// Temporal stratification of one exposure window (M4-1), shared by the GPU
+// Temporal stratification of one exposure window of one exposure window, shared by the GPU
 // time-stratified trace and any CPU-side scheduling of the same physics.
 // `firstRowMidpointSeconds` is t0, the midpoint of row 0's exposure; the
 // window it integrates is [t0 - E/2, t0 + E/2]. Stratum k integrates the

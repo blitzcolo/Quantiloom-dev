@@ -64,6 +64,7 @@
 
 #pragma once
 #include "scene/CameraProjection.hpp"
+#include "renderer/FusionRecordLayout.hpp"
 #include "renderer/FusionTransport.hpp"
 #include <array>
 
@@ -376,7 +377,7 @@ public:
                                         const GpuBuffer* data) const; // observer 17,20
     void SetUseCameraObserverSet(bool enabled) { m_useObserverDescriptorSet = enabled; }
 
-    /// Temporal stratum routing for the next TraceRays (M4-1). Stratum count
+    /// Temporal stratum routing for the next TraceRays. Stratum count
     /// 0/1 writes layer 0, exactly like an unstratified exposure.
     void SetTimeStratum(u32 stratum, u32 count);
 
@@ -389,13 +390,20 @@ public:
 
     // Set camera parameters (call before TraceRays)
     void SetCameraData(const struct CameraData& cameraData);
+    /// Projection descriptor sets -- one buffer + binding-32 write each, so a
+    /// measurement trace and an observer capture can carry different optics at
+    /// once.
+    static constexpr u32 kProjectionSetOrdinary = 0;     // ordinary/CPU spectral capture
+    static constexpr u32 kProjectionSetMeasurement = 1;  // GPU camera measurement
+    static constexpr u32 kProjectionSetObserver = 2;     // observer/quantitative capture
+    static constexpr u32 kProjectionSetCount = 3;
     /// Projection lives outside the frozen CameraData/push-constant ABI.
-    /// Set 0 is ordinary/CPU spectral capture, 1 is GPU measurement, 2 observer.
     /// When an upload queue is attached the write is recorded into the next
     /// submitted frame instead of landing through the mapping behind a host
     /// wait -- a frame may still be reading the previous projection.
-    void SetCameraProjection(const camera::CameraProjection* projection, u32 set = 0,
-        bool scalarVignetting=false);
+    void SetCameraProjection(const camera::CameraProjection* projection,
+                             u32 set = kProjectionSetOrdinary,
+                             bool scalarVignetting = false);
     /// Attach the queue deferred buffer writes go through. Owned by the
     /// caller (ExternalRenderContext::Impl); stays null for hosts that upload
     /// synchronously.
@@ -408,22 +416,29 @@ public:
     /// not pay a host memset + upload per band. (0,0,0,0) disarms; it
     /// allocates nothing unless no record buffer exists yet, in which case a
     /// minimal one is created so the descriptor stays valid.
-    void BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays,bool aggregate=false,
-        bool quantitative=false);
+    void BeginFusionRecording(u32 width, u32 height, u32 spp, u32 maxRays,
+                              bool aggregate = false, bool quantitative = false);
     Vector<u8> ReadFusionRecording();
     void SetFusionInitialMedia(const Vector<u32>& media);
-    struct ProbeRay {glm::vec3 origin;f32 wavelength;glm::vec3 direction;u32 branchMask;};
+    struct ProbeRay {
+        glm::vec3 origin;
+        f32 wavelength;
+        glm::vec3 direction;
+        u32 branchMask;
+    };
     void SetFusionProbes(const Vector<ProbeRay>& probes);
     struct GeometryHit {
-        u32 hit=0,instanceIndex=0,primitiveIndex=0;
-        f32 distance=-1;
-        glm::vec3 position{}; f32 depth=-1;
-        glm::vec3 normal{}; u32 validity=0;
-        glm::vec2 bary{},padding{};
+        u32 hit = 0, instanceIndex = 0, primitiveIndex = 0;
+        f32 distance = -1;
+        glm::vec3 position{};
+        f32 depth = -1;
+        glm::vec3 normal{};
+        u32 validity = 0;
+        glm::vec2 bary{}, padding{};
     };
-    static_assert(sizeof(GeometryHit)==64);
-    Vector<GeometryHit> CapturePrimaryGeometry(u32 width,u32 height,
-        const Vector<glm::vec2>* queryPixels=nullptr);
+    static_assert(sizeof(GeometryHit) == 64);
+    Vector<GeometryHit> CapturePrimaryGeometry(u32 width, u32 height,
+                                               const Vector<glm::vec2>* queryPixels = nullptr);
     [[nodiscard]] const CameraData& GetCameraData() const { return m_pushConstants.cameraAndSampling.camera; }
 
     // Set accumulation sampling parameters (call before TraceRays).
@@ -508,7 +523,7 @@ private:
     std::unique_ptr<GpuImage> m_cameraFallbackImage;
     std::unique_ptr<GpuImage> m_cameraFallbackDepth;
     std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;
-    std::array<std::unique_ptr<GpuBuffer>, 3> m_projectionBuffers;
+    std::array<std::unique_ptr<GpuBuffer>, kProjectionSetCount> m_projectionBuffers;
     // Deferred-upload queue attached by the render context; null means
     // uploads write through the mapping directly.
     DeferredBufferUploads* m_uploadQueue = nullptr;
@@ -521,7 +536,7 @@ private:
     /// The 32-word record header the shader should see. Begin builds it and
     /// the SetFusion* calls patch single fields; it lands on the device with
     /// the next trace.
-    std::array<u32, 32> m_fusionHeader{};
+    std::array<u32, rendercore::kFusionHeaderWords> m_fusionHeader{};
     mutable VkDeviceSize m_pendingFusionZero = 0;
     mutable bool m_fusionInitPending = false;
     Vector<u32> m_initialFusionMedia;

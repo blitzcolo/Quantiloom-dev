@@ -178,7 +178,7 @@ struct CameraGpuTimings {
     bool valid = false;
 };
 
-/// Error decomposition of the M4-1 GPU dynamic-exposure approximation, per
+/// Error decomposition of the GPU dynamic-exposure approximation, per
 /// committed acquisition. The GPU preview integrates a moving exposure by
 /// tracing T time strata and reprojecting them through the anchor depth;
 /// these numbers say how much of the frame that approximation had to guess

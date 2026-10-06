@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render-level check of the M4-4 AE/AWB closed loop on the CPU reference chain.
+"""Render-level check of the AE/AWB closed loop on the CPU reference chain.
 
 Two sequence renders of one static, deliberately dim scene exercise the
 feedback the controller writes into CaptureState:

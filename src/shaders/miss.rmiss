@@ -73,8 +73,9 @@
 
 [shader("miss")]
 void main(inout Payload payload) {
-    payload.fusionTerminalDepth=payload.depth;
-    if(payload.fusionMediumCount!=0) payload.fusionFlags|=2;
+    payload.fusionTerminalDepth = payload.depth;
+    if (payload.fusionMediumCount != 0)
+        payload.fusionFlags |= kFusionFlagAmbiguousMedium;
     // Fetch lighting parameters and NN atmosphere header
     LightingParams lut = lightingParams[0];
     AtmosNNHeader atmos = atmosNNHeader[0];
@@ -95,7 +96,7 @@ void main(inout Payload payload) {
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
         payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
         // ================================================================
@@ -198,7 +199,7 @@ void main(inout Payload payload) {
 
         // XYZ → Linear RGB (sRGB D65)
         payload.radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
         // Apply chromaticity correction (consistent with closesthit)
         payload.radiance.r *= lut.chromaR_correction;
@@ -208,20 +209,22 @@ void main(inout Payload payload) {
         // scales R and B against G and would turn one scalar into three.
         if (heroRay) {
             payload.radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+            payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
         }
         if (carriesQuartet) {
             payload.radiance = quadRadiance;
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+            payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
         }
 
         // Validation
-        if (any(!isfinite(payload.radiance))) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (any(!isfinite(payload.radiance))) {
+            FusionFlagNonFinite();
             payload.radiance = float4(0.0, 0.0, 0.0, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+            payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
         }
-        if(fusionRecords.Load(48)==0) payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            payload.radiance = clamp(payload.radiance, 0.0, 1000.0);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else if (IsSingleWavelengthMode() &&
                RoutesToVisibleSingle(SingleModeWavelength(payload.heroLambda))) {
@@ -244,7 +247,7 @@ void main(inout Payload payload) {
         }
 
         payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
                (IsSingleWavelengthMode() &&
                 RoutesToSwirBranch(SingleModeWavelength(payload.heroLambda)))) {
@@ -313,13 +316,15 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_NIR_FUSED) {
         // ================================================================
@@ -380,13 +385,15 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
@@ -487,13 +494,15 @@ void main(inout Payload payload) {
         float radiance_avg = heroRay ? heroRadiance : (radiance_accum / band_width);
 
         // Validation
-        if (!isfinite(radiance_avg)) { if(fusionRecords.Load(48)!=0){uint unused;fusionRecords.InterlockedOr(28,16,unused);}
+        if (!isfinite(radiance_avg)) {
+                FusionFlagNonFinite();
             radiance_avg = 0.0;
         }
-        if(fusionRecords.Load(48)==0) radiance_avg = clamp(radiance_avg, 0.0, 1e6);
+        if (fusionRecords.Load(kFusionQuantitativeWord * 4) == 0)
+            radiance_avg = clamp(radiance_avg, 0.0, 1e6);
 
         payload.radiance = float4(radiance_avg, radiance_avg, radiance_avg, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else {
         // ================================================================
@@ -501,7 +510,7 @@ void main(inout Payload payload) {
         // ================================================================
         float radiance_spectral = lut.skyRadiance_spectral;
         payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
-    payload.fusionContributions=FusionClassify(payload.radiance.x,payload.fusionRoute);
+        payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
     }
     FusionRecordSky(payload);
 }

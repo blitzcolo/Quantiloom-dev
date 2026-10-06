@@ -378,11 +378,12 @@ struct ExternalRenderContext::Impl {
     bool cameraCaptureCompleted = false;
     u64 cameraAcquisitionIndex = 0;
     f64 cameraAcquisitionTimeSeconds = 0.0;
-    std::unique_ptr<GpuImage> cameraMeasurementImage; // Binding 28, physical pixels, one layer per time stratum.
+    std::unique_ptr<GpuImage>
+        cameraMeasurementImage; // Binding 28, physical pixels, one layer per time stratum.
     std::unique_ptr<GpuImage> cameraMeasurementDepthImage; // Binding 31, per-stratum primary depth.
     std::unique_ptr<GpuImage> cameraBaselineImage;
     std::unique_ptr<GpuImage> cameraDepthImage;
-    std::unique_ptr<GpuBuffer> cameraResponseBuffer; // Binding 29, knot/CDF table.
+    std::unique_ptr<GpuBuffer> cameraResponseBuffer;       // Binding 29, knot/CDF table.
     std::unique_ptr<GpuBuffer> cameraDynamicCounterBuffer; // Binding 30, 4 x u32 raygen counters.
     /// 32 bytes of GPU_TO_CPU: the raygen counters then the camera pipeline's
     /// dynamic counters, copied at the end of a measurement recording so
@@ -429,10 +430,10 @@ struct ExternalRenderContext::Impl {
     };
     CameraScheduler cameraScheduler;
 
-    // M4-2 acquisition history. One checkpoint deep is all the interactive
+    // Acquisition history. One checkpoint deep is all the interactive
     // hosts need (rewind to the marked tick). The GPU half of a record holds
     // the device state; the host half carries the CaptureState feedback
-    // fields that the M4-4 closed loop fills in.
+    // fields that the AE/AWB closed loop fills in.
     struct CameraHistoryRecord {
         rendercore::GpuCameraPipeline::GpuCheckpoint gpu;
         camera::CaptureState host;
@@ -440,7 +441,7 @@ struct ExternalRenderContext::Impl {
     std::vector<CameraHistoryRecord> cameraHistoryStack;
     camera::CaptureState cameraHostState;
 
-    // M4-4 AE/AWB closed loop. The feedback (cameraHostState.next*) is
+    // AE/AWB closed loop. The feedback (cameraHostState.next*) is
     // computed lazily once per committed tick from the statistics the last
     // submitted frame left on the device: RunCameraAutoControl runs at the
     // top of RecordCameraMeasurement (before the new tick is recorded, so
@@ -457,14 +458,13 @@ struct ExternalRenderContext::Impl {
     u64 cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
     bool cameraAutoThermalNoted = false;
 
-    // M4-1 temporal stratification state. `cameraStratumSampleCounts` carries
+    // Temporal stratification state. `cameraStratumSampleCounts` carries
     // each layer's running sample count across same-tick re-records so a
     // redraw continues the progressive average instead of restarting it;
     // it resets whenever the acquisition index moves. The remaining fields
     // describe the last committed acquisition for DynamicExposureReport.
     std::array<u32, 8> cameraStratumSampleCounts{};
-    u64 cameraStratumRecordedAcquisition =
-        std::numeric_limits<u64>::max();
+    u64 cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
     u32 cameraLastAcquisitionSamples = 0;
     u32 cameraLastStrataCount = 1;
     f64 cameraLastObjectMotion = 0.0;
@@ -508,8 +508,7 @@ struct ExternalRenderContext::Impl {
         cameraResponseBuffer.reset();
         cameraDynamicCounterBuffer.reset();
         cameraDynamicReadback.reset();
-        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE &&
-            device != VK_NULL_HANDLE) {
+        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE && device != VK_NULL_HANDLE) {
             vkDestroyEvent(device, cameraDynamicReadbackEvent, nullptr);
             cameraDynamicReadbackEvent = VK_NULL_HANDLE;
         }
@@ -668,8 +667,7 @@ struct ExternalRenderContext::Impl {
     // structures, geometry buffers, materials, pipeline. Waits for the device
     // first -- see the comment on the definition. Both scene loaders go through
     // this rather than repeating the sequence.
-    void AdoptScene(Scene&& loaded,
-                    Vector<rendercore::MaterialGpuIndices> indices = {});
+    void AdoptScene(Scene&& loaded, Vector<rendercore::MaterialGpuIndices> indices = {});
 
     rendercore::MaterialResourceCounts ResourceCounts() const {
         return {textureManager ? textureManager->GetTextureCount() : 0u,
@@ -678,30 +676,34 @@ struct ExternalRenderContext::Impl {
 
     template<class Entry>
     std::unique_ptr<GpuBuffer> PrepareLookupTable(const Vector<Entry>& entries) {
-        if (entries.empty()) return nullptr;
+        if (entries.empty())
+            return nullptr;
         const auto bytes = entries.size() * sizeof(Entry);
         auto buffer = std::make_unique<GpuBuffer>(contextAdapter->GetAllocator(), bytes,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                  VMA_MEMORY_USAGE_CPU_TO_GPU);
         buffer->Upload(entries.data(), bytes);
         return buffer;
     }
 
     bool CompleteLookupReaders() {
-        if (vkDeviceWaitIdle(device) == VK_SUCCESS) return true;
+        if (vkDeviceWaitIdle(device) == VK_SUCCESS)
+            return true;
         QL_LOG_ERROR("Cannot replace lookup table: previous GPU readers did not complete");
         return false;
     }
 
-    template<class Entry>
-    bool ReplaceLookupTable(Vector<Entry> entries, Vector<Entry>& current,
-                            std::unique_ptr<GpuBuffer>& buffer) {
+    template<class Entry> bool ReplaceLookupTable(Vector<Entry> entries, Vector<Entry>& current,
+                                                  std::unique_ptr<GpuBuffer>& buffer) {
         // Prepare before waiting; failed synchronization leaves all published state intact.
         auto replacement = PrepareLookupTable(entries);
-        if (!CompleteLookupReaders()) return false;
+        if (!CompleteLookupReaders())
+            return false;
         if (pipeline) {
             if constexpr (std::is_same_v<Entry, SpectralCurveGPU>)
                 pipeline->BindSpectralCurvesBuffer(replacement.get());
-            else pipeline->BindComplexRefractiveIndexBuffer(replacement.get());
+            else
+                pipeline->BindComplexRefractiveIndexBuffer(replacement.get());
         }
         buffer = std::move(replacement);
         current = std::move(entries);
@@ -751,8 +753,7 @@ struct ExternalRenderContext::Impl {
     /// drain the queue, write through the mapping, and on a failed wait log
     /// rather than throw -- the device is already lost at that point, and a
     /// setter has no error channel.
-    void UploadDeferred(GpuBuffer& dst, VkDeviceSize offset, const void* data,
-                        VkDeviceSize bytes);
+    void UploadDeferred(GpuBuffer& dst, VkDeviceSize offset, const void* data, VkDeviceSize bytes);
     // Config's renderer.enable_light_sampling. Held here rather than in
     // LightingParams, which has no bits left: turning it off is expressed by
     // publishing an emitter count of zero, which is the same thing the shader
@@ -777,11 +778,11 @@ struct ExternalRenderContext::Impl {
     Result<bool, String> StepCameraAcquisition(VkCommandBuffer cmd);
     Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd);
     Result<void, String> RecordCameraBaseline(VkCommandBuffer cmd);
-    Result<CameraData, String> CameraDataForCapture(
-        SpectralMode mode, f64 wavelengthNm,
-        f64 timeSeconds = std::numeric_limits<f64>::quiet_NaN()) const;
+    Result<CameraData, String>
+    CameraDataForCapture(SpectralMode mode, f64 wavelengthNm,
+                         f64 timeSeconds = std::numeric_limits<f64>::quiet_NaN()) const;
 
-    // M4-4 AE/AWB closed loop. EffectiveCameraConfig mirrors
+    // AE/AWB closed loop. EffectiveCameraConfig mirrors
     // CpuCameraPipeline::EffectiveConfig: a committed acquisition consumes
     // the feedback the previous tick wrote into cameraHostState.next*; a
     // fresh state (nextExposure <= 0, i.e. nothing committed since the last
@@ -795,8 +796,7 @@ struct ExternalRenderContext::Impl {
     /// Record the display-half reprocess (demosaic -> color -> display ->
     /// HSV) over the last acquisition on `cmd`. No trace, no statistics, no
     /// state advance; see ReprocessCameraDisplay.
-    [[nodiscard]] Result<void, String> RecordCameraDisplayReprocess(
-        VkCommandBuffer cmd);
+    [[nodiscard]] Result<void, String> RecordCameraDisplayReprocess(VkCommandBuffer cmd);
 
     /// Which image the swapchain blit should read, and the extent to blit
     /// from: CLAHE's output if the viewport override is on, then the camera
@@ -829,8 +829,10 @@ struct ExternalRenderContext::Impl {
     /// there is nothing to enhance and the display falls through to the
     /// camera display (or the raw accumulation).
     [[nodiscard]] bool ClaheInputReady() const {
-        if (!cameraConfig.enabled) return true;
-        if (!cameraGpuPipeline || !cameraCaptureCompleted) return false;
+        if (!cameraConfig.enabled)
+            return true;
+        if (!cameraGpuPipeline || !cameraCaptureCompleted)
+            return false;
         const auto outputs = cameraGpuPipeline->GetOutputs();
         return cameraConfig.device.detector == camera::DetectorKind::Thermal
                    ? outputs.agcSource != nullptr
@@ -843,10 +845,10 @@ struct ExternalRenderContext::Impl {
     [[nodiscard]] const GpuImage* ClaheInputImage() const {
         if (cameraConfig.enabled && cameraGpuPipeline) {
             const auto outputs = cameraGpuPipeline->GetOutputs();
-            if (cameraConfig.device.detector == camera::DetectorKind::Thermal &&
-                outputs.agcSource)
+            if (cameraConfig.device.detector == camera::DetectorKind::Thermal && outputs.agcSource)
                 return outputs.agcSource;
-            if (outputs.corrected) return outputs.corrected;
+            if (outputs.corrected)
+                return outputs.corrected;
         }
         return outputImage.get();
     }
@@ -867,8 +869,7 @@ struct ExternalRenderContext::Impl {
     /// extent.
     [[nodiscard]] ImageExtent ClaheInputExtent() const {
         if (cameraConfig.enabled) {
-            return {cameraConfig.optics.sensorWidthPx,
-                    cameraConfig.optics.sensorHeightPx};
+            return {cameraConfig.optics.sensorWidthPx, cameraConfig.optics.sensorHeightPx};
         }
         return {width, height};
     }
@@ -949,12 +950,13 @@ ExternalRenderContext::~ExternalRenderContext() = default;
 // The Impl back-points at its facade; a move has to re-point it.
 ExternalRenderContext::ExternalRenderContext(ExternalRenderContext&& other) noexcept
     : m_impl(std::move(other.m_impl)) {
-    if (m_impl) m_impl->owner = this;
+    if (m_impl)
+        m_impl->owner = this;
 }
-ExternalRenderContext& ExternalRenderContext::operator=(
-    ExternalRenderContext&& other) noexcept {
+ExternalRenderContext& ExternalRenderContext::operator=(ExternalRenderContext&& other) noexcept {
     m_impl = std::move(other.m_impl);
-    if (m_impl) m_impl->owner = this;
+    if (m_impl)
+        m_impl->owner = this;
     return *this;
 }
 
@@ -1285,20 +1287,22 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         auto slots = rendercore::IndicesFromMaterial(mat);
         if (auto it = spectra.materialNameToIrEmissivityCurve.find(mat.name);
             it != spectra.materialNameToIrEmissivityCurve.end()) {
-            if (it->second < 0 || static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
-                report.messages.push_back({ConfigApplyMessage::Severity::Error,
-                                           "materials", "IR emissivity curve index is invalid for '" +
-                                               mat.name + "'"});
+            if (it->second < 0 ||
+                static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
+                report.messages.push_back(
+                    {ConfigApplyMessage::Severity::Error, "materials",
+                     "IR emissivity curve index is invalid for '" + mat.name + "'"});
                 return report;
             }
             slots.irEmissivityCurve = it->second;
         }
         if (auto it = spectra.materialNameToIrTransmittanceCurve.find(mat.name);
             it != spectra.materialNameToIrTransmittanceCurve.end()) {
-            if (it->second < 0 || static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
-                report.messages.push_back({ConfigApplyMessage::Severity::Error,
-                                           "materials", "IR transmittance curve index is invalid for '" +
-                                               mat.name + "'"});
+            if (it->second < 0 ||
+                static_cast<usize>(it->second) >= m_impl->spectralCurveEntries.size()) {
+                report.messages.push_back(
+                    {ConfigApplyMessage::Severity::Error, "materials",
+                     "IR transmittance curve index is invalid for '" + mat.name + "'"});
                 return report;
             }
             slots.irTransmittanceCurve = it->second;
@@ -1379,10 +1383,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     }
 
     m_impl->gpuSensorParams = resolved.sensor; // Legacy getter remains readable.
-    if (auto cameraApplied = SetCameraConfig(resolved.cameraConfig);
-        !cameraApplied.has_value()) {
-        report.messages.push_back({ConfigApplyMessage::Severity::Error,
-                                   "sensor", cameraApplied.error()});
+    if (auto cameraApplied = SetCameraConfig(resolved.cameraConfig); !cameraApplied.has_value()) {
+        report.messages.push_back(
+            {ConfigApplyMessage::Severity::Error, "sensor", cameraApplied.error()});
         return report;
     }
 
@@ -1536,8 +1539,9 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
                 report.spectralCurvesLoaded, report.refractiveIndicesLoaded,
                 report.materialsTemperatureBackfilled, report.materialsOverridden,
                 report.atmosphereEnabled ? "on" : "off");
-    m_impl->fusionTransport=spectra.fusionTransport;
-    if(m_impl->pipeline) m_impl->pipeline->SetFusionTransport(m_impl->fusionTransport);
+    m_impl->fusionTransport = spectra.fusionTransport;
+    if (m_impl->pipeline)
+        m_impl->pipeline->SetFusionTransport(m_impl->fusionTransport);
     return report;
 }
 
@@ -1554,8 +1558,8 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
 // instrument -- there is no per-frame cost to protect here.
 // Take ownership of a freshly loaded scene and rebuild everything derived from it.
 // Shared by the three loaders, which had identical tails.
-void ExternalRenderContext::Impl::AdoptScene(
-    Scene&& loaded, Vector<rendercore::MaterialGpuIndices> indices) {
+void ExternalRenderContext::Impl::AdoptScene(Scene&& loaded,
+                                             Vector<rendercore::MaterialGpuIndices> indices) {
     fusionTransport.clear();
     scene = std::make_unique<Scene>(std::move(loaded));
     materialGpuIndices = std::move(indices);
@@ -1779,8 +1783,7 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
     }
     if (cameraConfig.inputKind != camera::CameraInputKind::FastRgbApproximation)
         effective.enableEnvironmentMap = 0;
-    UploadDeferred(*cameraLightingParamsBuffer, 0, &effective,
-                   sizeof(LightingParams));
+    UploadDeferred(*cameraLightingParamsBuffer, 0, &effective, sizeof(LightingParams));
 }
 
 // Lazily (re)bakes the NN atmosphere LUT when the bake key changed and
@@ -1791,15 +1794,15 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
 
     auto uploadDisabled = [this](uint64_t completedKey) {
         AtmosNNHeaderGPU disabledHeader{};
-        UploadDeferred(*atmosHeaderBuffer, 0, &disabledHeader,
-                       sizeof(disabledHeader));
+        UploadDeferred(*atmosHeaderBuffer, 0, &disabledHeader, sizeof(disabledHeader));
         atmosBakeKey = completedKey;
         atmosphereActive = false;
         UploadLightingParams();  // Hand the fallback temperature back to the host
     };
 
     if (!atmosphereConfig.enabled || !atmosModelPack) {
-        if (atmosBakeKey != kDisabledKey) uploadDisabled(kDisabledKey);
+        if (atmosBakeKey != kDisabledKey)
+            uploadDisabled(kDisabledKey);
         return;
     }
 
@@ -1858,10 +1861,8 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
         // Data before header: the header's enabled flag is what lets a shader
         // read the blob, so landing last keeps a frame from seeing a fresh
         // header over a stale LUT.
-        UploadDeferred(*atmosDataBuffer, 0, baked.data.data(),
-                       baked.data.size() * sizeof(f32));
-        UploadDeferred(*atmosHeaderBuffer, 0, &baked.header,
-                       sizeof(baked.header));
+        UploadDeferred(*atmosDataBuffer, 0, baked.data.data(), baked.data.size() * sizeof(f32));
+        UploadDeferred(*atmosHeaderBuffer, 0, &baked.header, sizeof(baked.header));
         atmosBakeKey = key;
         atmosphereActive = true;
         UploadLightingParams();  // T_air must match what this LUT was baked at
@@ -1871,7 +1872,6 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
         uploadDisabled(key);
     }
 }
-
 
 void ExternalRenderContext::RenderFrame(
     VkCommandBuffer cmd,
@@ -1978,13 +1978,8 @@ void ExternalRenderContext::RenderFrame(
         // sample-to-sample variation it was there to provide already comes from
         // sampleIndex below.
         constexpr u32 kShaderFrameIndex = 0;
-        m_impl->pipeline->SetSamplingParams(
-            kShaderFrameIndex,
-            m_impl->accumulatedSamples,
-            m_impl->spp,
-            randomSeed,
-            m_impl->sequenceSeed
-        );
+        m_impl->pipeline->SetSamplingParams(kShaderFrameIndex, m_impl->accumulatedSamples,
+                                            m_impl->spp, randomSeed, m_impl->sequenceSeed);
 
         if (m_impl->cameraConfig.enabled) {
             // The camera chain owns the frame: it traces at the physical sensor
@@ -2001,10 +1996,11 @@ void ExternalRenderContext::RenderFrame(
             // blit -- so what gets measured is the cost of one sample of *this
             // scene*. The camera trace is bracketed by the camera perf queries
             // inside RecordCameraMeasurement.
-            if (m_impl->perfLogger) m_impl->perfLogger->BeginFrame(cmd);
-            m_impl->pipeline->TraceRays(cmd, renderW, renderH,
-                    sample + 1 == samplesToRender);
-            if (m_impl->perfLogger) m_impl->perfLogger->EndFrame(cmd);
+            if (m_impl->perfLogger)
+                m_impl->perfLogger->BeginFrame(cmd);
+            m_impl->pipeline->TraceRays(cmd, renderW, renderH, sample + 1 == samplesToRender);
+            if (m_impl->perfLogger)
+                m_impl->perfLogger->EndFrame(cmd);
             m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
             m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
         }
@@ -2016,21 +2012,18 @@ void ExternalRenderContext::RenderFrame(
     // at the render extent, before the magnifying blit, so a reduced scale
     // makes them cheaper too -- and CLAHE never sees an upsampled image.
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage &&
-        m_impl->ClaheInputReady()) {
+        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
         const auto claheExtent = m_impl->ClaheInputExtent();
         m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
     }
 
     const auto blitSource = m_impl->CurrentDisplaySource();
     // Whichever pass wrote it last is what the barrier has to wait on.
-    const VkPipelineStageFlags srcStage =
-        (blitSource.image == m_impl->outputImage->GetImage())
-            ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-            : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout,
-                         blitSource.width, blitSource.height, width, height,
-                         srcStage);
+    const VkPipelineStageFlags srcStage = (blitSource.image == m_impl->outputImage->GetImage())
+                                              ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+                                              : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+    m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, blitSource.width,
+                         blitSource.height, width, height, srcStage);
 
     m_impl->frameIndex++;
 }
@@ -2221,8 +2214,7 @@ bool ExternalRenderContext::ReprocessAccumulated(
     // prompted the reprocess. Only a cache that has never been filled needs
     // computing: CLAHE enabled for the first time after the trace stopped.
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && !m_impl->hasCachedMinMax &&
-        m_impl->ClaheInputReady()) {
+        m_impl->claheInitialized && !m_impl->hasCachedMinMax && m_impl->ClaheInputReady()) {
         m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
         m_impl->hasCachedMinMax = true;
     }
@@ -2234,14 +2226,12 @@ bool ExternalRenderContext::ReprocessAccumulated(
     // window keeps riding in the statistics buffer.
     if (m_impl->cameraConfig.enabled && m_impl->cameraCaptureCompleted &&
         !m_impl->cameraCapturePending && !m_impl->cameraCaptureRecorded) {
-        if (auto reprocessed = m_impl->RecordCameraDisplayReprocess(cmd);
-            !reprocessed)
+        if (auto reprocessed = m_impl->RecordCameraDisplayReprocess(cmd); !reprocessed)
             QL_LOG_WARN("Camera display reprocess: {}", reprocessed.error());
     }
 
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage &&
-        m_impl->ClaheInputReady()) {
+        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
         const auto claheExtent = m_impl->ClaheInputExtent();
         m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
     }
@@ -2269,8 +2259,7 @@ Result<void, String> ExternalRenderContext::ReprocessCameraDisplay() {
         return Result<void, String>::Err(
             "complete the queued camera acquisition before reprocessing");
     Result<void, String> status = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                    [&](VkCommandBuffer cmd) {
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
         status = m_impl->RecordCameraDisplayReprocess(cmd);
     });
     return status;
@@ -2557,7 +2546,6 @@ void ExternalRenderContext::SetViewportSampleBatch(u32 sampleCount) {
     m_impl->viewportSampleBatch = std::clamp(sampleCount, 1u, 16u);
 }
 
-
 SpectralMode ExternalRenderContext::GetSpectralMode() const {
     return m_impl->spectralMode;
 }
@@ -2618,7 +2606,8 @@ void ExternalRenderContext::SetLightingParams(const LightingParams& params) {
         m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
     }
     m_impl->cameraResourcesDirty = true; // NN camera LUT tracks sun geometry.
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2629,7 +2618,8 @@ void ExternalRenderContext::SetSunDirection(const glm::vec3& direction) {
         m_impl->thermalPreview->SetFallbackSunDirection(m_impl->lightingParams.sunDirection);
     }
     m_impl->cameraResourcesDirty = true;
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2637,7 +2627,8 @@ void ExternalRenderContext::SetSunRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.sunRadiance_rgb = radiance;
     m_impl->lightingParams.sunRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
     m_impl->UploadLightingParams();
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2645,7 +2636,8 @@ void ExternalRenderContext::SetSkyRadiance(const glm::vec3& radiance) {
     m_impl->lightingParams.skyRadiance_rgb = radiance;
     m_impl->lightingParams.skyRadiance_spectral = (radiance.r + radiance.g + radiance.b) / 3.0f;
     m_impl->UploadLightingParams();
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
     ResetAccumulation();
 }
 
@@ -2734,8 +2726,7 @@ void ExternalRenderContext::SetNodeTransform(u32 nodeIndex, const glm::mat4& tra
     }
 
     const auto& node = m_impl->scene->nodes[nodeIndex];
-    if (node.transform != transform &&
-        rendercore::NodeHasSampledEmission(*m_impl->scene, node))
+    if (node.transform != transform && rendercore::NodeHasSampledEmission(*m_impl->scene, node))
         m_impl->emissiveTransformDirty = true;
 
     // Invalidate delayed readings as soon as the host changes the pose.
@@ -2757,7 +2748,7 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
 }
 
 void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Material& material,
-                                                ExternalRenderContext& owner) {
+                                                 ExternalRenderContext& owner) {
     if (!scene) {
         QL_LOG_WARN("UpdateMaterial: No scene loaded");
         return;
@@ -2791,18 +2782,20 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
     auto indices = rendercore::IndicesFromMaterial(material);
     if (materialGpuIndices.size() == scene->materials.size()) {
         const auto& oldSlots = materialGpuIndices[materialIndex];
-        indices.irEmissivityCurve =
-            material.irEmissivityCurve == previous.irEmissivityCurve
-                ? oldSlots.irEmissivityCurve : -1;
+        indices.irEmissivityCurve = material.irEmissivityCurve == previous.irEmissivityCurve
+                                        ? oldSlots.irEmissivityCurve
+                                        : -1;
         indices.irTransmittanceCurve =
             material.irTransmittanceCurve == previous.irTransmittanceCurve
-                ? oldSlots.irTransmittanceCurve : -1;
+                ? oldSlots.irTransmittanceCurve
+                : -1;
         const auto validIndex = [&](i32 curve) {
-            return curve < 0 ||
-                static_cast<usize>(curve) < spectralCurveEntries.size();
+            return curve < 0 || static_cast<usize>(curve) < spectralCurveEntries.size();
         };
-        if (!validIndex(indices.irEmissivityCurve)) indices.irEmissivityCurve = -1;
-        if (!validIndex(indices.irTransmittanceCurve)) indices.irTransmittanceCurve = -1;
+        if (!validIndex(indices.irEmissivityCurve))
+            indices.irEmissivityCurve = -1;
+        if (!validIndex(indices.irTransmittanceCurve))
+            indices.irTransmittanceCurve = -1;
         materialGpuIndices[materialIndex] = indices;
     }
     scene->materials[materialIndex] = material;
@@ -2824,9 +2817,7 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         // A frame the host submitted may still be tracing the structures being
         // replaced, as RebuildAccelerationStructure has to assume too.
         vkDeviceWaitIdle(device);
-        if (geometry.RefreshMaterialOpacity(*contextAdapter,
-                                                    *scene) &&
-            pipeline) {
+        if (geometry.RefreshMaterialOpacity(*contextAdapter, *scene) && pipeline) {
             pipeline->BindAccelerationStructure(geometry.Tlas().GetHandle());
             if (geometry.InstanceCount() > 0) {
                 pipeline->BindInstanceGeometryBuffer(geometry.InstanceInfo());
@@ -2834,12 +2825,14 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
         }
     }
 
-    if (emissionChanged) RebuildEmissiveGeometry();
+    if (emissionChanged)
+        RebuildEmissiveGeometry();
 
     // 5. Reset accumulation (visual feedback)
     owner.ResetAccumulation();
 
-    if (thermalPreview) thermalPreview->InvalidateMaterialEmissivity();
+    if (thermalPreview)
+        thermalPreview->InvalidateMaterialEmissivity();
 
     QL_LOG_DEBUG("UpdateMaterial: Updated material {} ('{}')", materialIndex, material.name);
 }
@@ -2922,8 +2915,9 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
     auto entries = m_impl->spectralCurveEntries;
     entries.push_back(resolved.curve);
     if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
-                                   m_impl->spectralCurvesBuffer))
-        return EmissionResult::Err("SetMaterialEmissionSpectrum: previous GPU readers did not complete");
+                                    m_impl->spectralCurvesBuffer))
+        return EmissionResult::Err(
+            "SetMaterialEmissionSpectrum: previous GPU readers did not complete");
 
     material.emissiveRadianceCurveIndex = index;
     material.emissiveCurveSource = sourceOrEmpty;
@@ -2953,7 +2947,7 @@ i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
     auto entries = m_impl->spectralCurveEntries;
     entries.push_back(SpectralCurveGPU::FromCPU(curve));
     if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
-                                   m_impl->spectralCurvesBuffer))
+                                    m_impl->spectralCurvesBuffer))
         return -1;
 
     QL_LOG_INFO("AddSpectralCurve: Added curve at index {} ({} curves total)",
@@ -3064,7 +3058,8 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
     if (m_impl->pipeline) {
         m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
     }
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
     ResetAccumulation();
 
     QL_LOG_INFO("SetSolarSpectralLUT: sun {} samples, sky {} samples",
@@ -3228,8 +3223,7 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
             const f32 zero = 0.0f;
             m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
                 m_impl->contextAdapter->GetAllocator(), sizeof(f32),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                 VMA_MEMORY_USAGE_CPU_TO_GPU);
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
             m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
@@ -3332,16 +3326,15 @@ void ExternalRenderContext::Impl::FlushPendingGpuWork() {
     if (!contextAdapter || (!pendingTlasRefit && pendingUploads.Empty()))
         return;
     CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
-        if (pendingTlasRefit) geometry.RecordPreparedTlasRefit(cmd);
+        if (pendingTlasRefit)
+            geometry.RecordPreparedTlasRefit(cmd);
         pendingUploads.Record(cmd);
     });
     pendingTlasRefit = false;
 }
 
-void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst,
-                                                 VkDeviceSize offset,
-                                                 const void* data,
-                                                 VkDeviceSize bytes) {
+void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst, VkDeviceSize offset,
+                                                 const void* data, VkDeviceSize bytes) {
     if (bytes <= DeferredBufferUploads::kMaxPayloadBytes) {
         pendingUploads.Enqueue(dst, offset, data, bytes);
         return;
@@ -3359,16 +3352,16 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
 
     Vector<u32> moved = timeline.Apply(*scene, t_s);
     if (moved.empty()) {
-        if (!deferRefit) FlushPendingGpuWork();
+        if (!deferRefit)
+            FlushPendingGpuWork();
         return moved;
     }
 
     if (geometry.IsValid()) {
         // Same handle, updated in place -- no rebind, no device idle. The
         // refit's own barriers order it against tracing already in flight.
-        const bool refitted = deferRefit
-            ? geometry.PrepareTlasRefit(*scene)
-            : geometry.RefitTlas(*contextAdapter, *scene);
+        const bool refitted = deferRefit ? geometry.PrepareTlasRefit(*scene)
+                                         : geometry.RefitTlas(*contextAdapter, *scene);
         pendingTlasRefit = deferRefit && refitted;
         if (!refitted) {
             // A refit is refused only when the instance count moved, which a
@@ -3403,9 +3396,10 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
     return moved;
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(
-    VkCommandBuffer cmd, const f64 t_s) {
-    if (!scene) return Result<void, String>::Ok();
+Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(VkCommandBuffer cmd,
+                                                                     const f64 t_s) {
+    if (!scene)
+        return Result<void, String>::Ok();
 
     const Vector<u32> moved = timeline.Apply(*scene, t_s);
     if (!moved.empty()) {
@@ -3420,12 +3414,10 @@ Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(
 
         // Same sampled-emitter rule as ApplyTimelinePose: the list holds
         // world-space triangles, so it is rewritten only when a lamp moved.
-        const bool emitterMoved =
-            std::any_of(moved.begin(), moved.end(), [this](u32 node) {
-                return node < scene->nodes.size() &&
-                       rendercore::NodeHasSampledEmission(*scene,
-                                                        scene->nodes[node]);
-            });
+        const bool emitterMoved = std::any_of(moved.begin(), moved.end(), [this](u32 node) {
+            return node < scene->nodes.size() &&
+                   rendercore::NodeHasSampledEmission(*scene, scene->nodes[node]);
+        });
         if (emitterMoved) {
             if (const auto rebuilt = RebuildEmissiveGeometry(false); !rebuilt)
                 return rebuilt;
@@ -3521,15 +3513,13 @@ Result<void, String> ExternalRenderContext::SetTimelineTime(const f64 t_s) {
     // detector's temporal history (thermal detector state, acquisition-keyed
     // noise). The scheduler applies a reset on the next RenderFrame, which
     // then records no acquisition; forward moves never reset.
-    if (m_impl->cameraConfig.enabled &&
-        m_impl->cameraScheduler.hasCommittedAcquisition &&
+    if (m_impl->cameraConfig.enabled && m_impl->cameraScheduler.hasCommittedAcquisition &&
         t_s < m_impl->cameraScheduler.lastCommittedAcquisitionTime - 1e-9) {
         auto& s = m_impl->cameraScheduler;
         s.historyResetPending = true;
-        s.historyResetReason =
-            String("timeline scrubbed back before the committed camera ") +
-            "acquisition at t=" +
-            std::to_string(m_impl->cameraScheduler.lastCommittedAcquisitionTime);
+        s.historyResetReason = String("timeline scrubbed back before the committed camera ") +
+                               "acquisition at t=" +
+                               std::to_string(m_impl->cameraScheduler.lastCommittedAcquisitionTime);
     }
     if (!m_impl->timeline.Present()) {
         // Legal and quiet: a static scene has a clock that does nothing, and a
@@ -3829,14 +3819,13 @@ Result<glm::vec4, String> ExternalRenderContext::ReadPixelValue(u32 x, u32 y) {
 Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 requestId) {
     if (x >= m_impl->targetWidth || y >= m_impl->targetHeight)
         return Result<bool, String>::Err("Pixel coordinates out of bounds");
-    if (!m_impl->isReady || !m_impl->outputImage ||
-        m_impl->cameraConfig.enabled || m_impl->rawPixelSamples == 0 ||
-        m_impl->rawPixelGeneration != m_impl->pixelImageGeneration)
+    if (!m_impl->isReady || !m_impl->outputImage || m_impl->cameraConfig.enabled ||
+        m_impl->rawPixelSamples == 0 || m_impl->rawPixelGeneration != m_impl->pixelImageGeneration)
         return Result<bool, String>::Err("No current raw accumulation pixel is available");
     try {
         if (!m_impl->asyncPixelReadback)
-            m_impl->asyncPixelReadback = std::make_unique<rendercore::AsyncPixelReadback>(
-                *m_impl->contextAdapter);
+            m_impl->asyncPixelReadback =
+                std::make_unique<rendercore::AsyncPixelReadback>(*m_impl->contextAdapter);
         PixelReading reading;
         reading.requestId = requestId;
         reading.imageGeneration = m_impl->pixelImageGeneration;
@@ -3845,7 +3834,8 @@ Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 
         reading.accumulatedSamples = m_impl->rawPixelSamples;
         reading.x = x;
         reading.y = y;
-        return m_impl->asyncPixelReadback->Submit(m_impl->outputImage->GetImage(),
+        return m_impl->asyncPixelReadback->Submit(
+            m_impl->outputImage->GetImage(),
             Impl::MapToRender(x, m_impl->targetWidth, m_impl->width),
             Impl::MapToRender(y, m_impl->targetHeight, m_impl->height), reading);
     } catch (const std::exception& e) {
@@ -3854,10 +3844,11 @@ Result<bool, String> ExternalRenderContext::RequestPixelValue(u32 x, u32 y, u64 
 }
 
 Result<Optional<PixelReading>, String> ExternalRenderContext::PollPixelValue() {
-    if (!m_impl->asyncPixelReadback) return Optional<PixelReading>{};
+    if (!m_impl->asyncPixelReadback)
+        return Optional<PixelReading>{};
     try {
         return m_impl->asyncPixelReadback->Poll(m_impl->pixelImageGeneration,
-                                              m_impl->cameraAcquisitionIndex);
+                                                m_impl->cameraAcquisitionIndex);
     } catch (const std::exception& e) {
         return Result<Optional<PixelReading>, String>::Err(e.what());
     }
@@ -3901,8 +3892,7 @@ static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch"
 struct ObserverSetScope {
     RayTracingPipeline& pipeline;
     const bool armed;
-    ObserverSetScope(RayTracingPipeline& target, bool enable)
-        : pipeline(target), armed(enable) {
+    ObserverSetScope(RayTracingPipeline& target, bool enable) : pipeline(target), armed(enable) {
         if (armed) {
             pipeline.SetUseCameraObserverSet(true);
         }
@@ -3928,7 +3918,7 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     }
     // Target-extent coordinates, like ReadPixelValue's -- the pick ray is
     // reconstructed from the render grid, so map into it first.
-    const u32 targetPixelX=x,targetPixelY=y;
+    const u32 targetPixelX = x, targetPixelY = y;
     if (x >= m_impl->targetWidth || y >= m_impl->targetHeight) {
         return Result<PickResult, String>::Err("Pick: pixel out of bounds");
     }
@@ -3985,22 +3975,31 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     // about which projection is in use.
     pc.projection = cameraData.projection;
     pc.orthoHeight = cameraData.orthoHeight;
-    if(m_impl->cameraConfig.enabled) {
-        const auto& optics=m_impl->cameraConfig.optics;
-        const auto projection=camera::ResolveProjection(optics.projection,optics.sensorWidthPx,
-            optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
-        if(!projection) return Result<PickResult,String>::Err(projection.error());
-        const auto pose=m_impl->CameraDataForCapture(SpectralMode::Single,550.0,m_impl->timeline.Current_s());
-        if(!pose) return Result<PickResult,String>::Err(pose.error());
-        const glm::dvec2 pixel((targetPixelX+0.5)*optics.sensorWidthPx/m_impl->targetWidth,
-            (targetPixelY+0.5)*optics.sensorHeightPx/m_impl->targetHeight);
-        const auto ray=camera::UnprojectPixel(*projection,pixel);
-        if(!ray.valid) return PickResult{};
-        const auto& c=pose.value();
-        pc.origin=c.origin;
-        pc.forward=glm::normalize(static_cast<f32>(ray.direction.x)*c.right-
-            static_cast<f32>(ray.direction.y)*c.up+static_cast<f32>(ray.direction.z)*c.forward);
-        pc.fovScale=0;pc.pixelX=pc.pixelY=0;pc.width=pc.height=1;pc.projection=0;
+    if (m_impl->cameraConfig.enabled) {
+        const auto& optics = m_impl->cameraConfig.optics;
+        const auto projection = camera::ResolveProjection(
+            optics.projection, optics.sensorWidthPx, optics.sensorHeightPx, optics.focalLengthMm,
+            optics.pixelPitchUm);
+        if (!projection)
+            return Result<PickResult, String>::Err(projection.error());
+        const auto pose =
+            m_impl->CameraDataForCapture(SpectralMode::Single, 550.0, m_impl->timeline.Current_s());
+        if (!pose)
+            return Result<PickResult, String>::Err(pose.error());
+        const glm::dvec2 pixel((targetPixelX + 0.5) * optics.sensorWidthPx / m_impl->targetWidth,
+                               (targetPixelY + 0.5) * optics.sensorHeightPx / m_impl->targetHeight);
+        const auto ray = camera::UnprojectPixel(*projection, pixel);
+        if (!ray.valid)
+            return PickResult{};
+        const auto& c = pose.value();
+        pc.origin = c.origin;
+        pc.forward = glm::normalize(static_cast<f32>(ray.direction.x) * c.right -
+                                    static_cast<f32>(ray.direction.y) * c.up +
+                                    static_cast<f32>(ray.direction.z) * c.forward);
+        pc.fovScale = 0;
+        pc.pixelX = pc.pixelY = 0;
+        pc.width = pc.height = 1;
+        pc.projection = 0;
     }
 
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
@@ -4028,7 +4027,8 @@ Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
 
     PickResultGpu gpu{};
     const void* mapped = m_impl->pickOutputBuffer->MapRead();
-    if (!mapped) return Result<PickResult, String>::Err("Pick: cannot map readback memory");
+    if (!mapped)
+        return Result<PickResult, String>::Err("Pick: cannot map readback memory");
     std::memcpy(&gpu, mapped, sizeof(gpu));
     m_impl->pickOutputBuffer->Unmap();
 
@@ -4114,22 +4114,22 @@ const DisplayEnhancementParams& ExternalRenderContext::GetDisplayEnhancementPara
 // GPU Sensor Simulation API
 // ============================================================================
 
-Result<void, String> ExternalRenderContext::SetCameraConfig(
-    const camera::CameraConfig& config) {
+Result<void, String> ExternalRenderContext::SetCameraConfig(const camera::CameraConfig& config) {
     camera::CameraConfig normalized = config;
     if (config.enabled) {
         const auto valid = camera::ValidateCameraConfig(config);
-        if (!valid) return Result<void, String>::Err(valid.error());
+        if (!valid)
+            return Result<void, String>::Err(valid.error());
         if (config.device.channels.size() > camera::kCameraResponseMaxChannels)
-            return Result<void, String>::Err(
-                "GPU camera supports at most three response channels");
+            return Result<void, String>::Err("GPU camera supports at most three response channels");
         if (m_impl->cameraSolarSources) {
             const auto& [sun, sky] = *m_impl->cameraSolarSources;
             for (const auto& channel : config.device.channels) {
                 const auto& stack = channel.response;
-                const auto& base = stack.systemResponse ? *stack.systemResponse :
-                    config.device.detector == camera::DetectorKind::Photon ?
-                    *stack.quantumEfficiency : *stack.thermalAbsorptance;
+                const auto& base = stack.systemResponse ? *stack.systemResponse
+                                   : config.device.detector == camera::DetectorKind::Photon
+                                       ? *stack.quantumEfficiency
+                                       : *stack.thermalAbsorptance;
                 if (sun.samples.empty() || sky.samples.empty() ||
                     sun.samples.front().first > base.MinNm() ||
                     sun.samples.back().first < base.MaxNm() ||
@@ -4139,14 +4139,14 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(
                         "GPU camera response exceeds solar/sky LUT coverage");
             }
         }
-        if (normalized.device.effectiveMinNm == 0.0 &&
-            normalized.device.effectiveMaxNm == 0.0) {
+        if (normalized.device.effectiveMinNm == 0.0 && normalized.device.effectiveMaxNm == 0.0) {
             normalized.device.effectiveMinNm = std::numeric_limits<f64>::infinity();
             for (const auto& channel : normalized.device.channels) {
                 const auto& stack = channel.response;
-                const auto& base = stack.systemResponse ? *stack.systemResponse :
-                    normalized.device.detector == camera::DetectorKind::Photon ?
-                    *stack.quantumEfficiency : *stack.thermalAbsorptance;
+                const auto& base = stack.systemResponse ? *stack.systemResponse
+                                   : normalized.device.detector == camera::DetectorKind::Photon
+                                       ? *stack.quantumEfficiency
+                                       : *stack.thermalAbsorptance;
                 normalized.device.effectiveMinNm =
                     std::min(normalized.device.effectiveMinNm, base.MinNm());
                 normalized.device.effectiveMaxNm =
@@ -4167,8 +4167,7 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(
     // again and the first acquisition lands at the current clock time.
     m_impl->cameraScheduler.drivesAcquisition = false;
     m_impl->cameraScheduler.nextAcquisitionIndex = 0;
-    m_impl->cameraScheduler.nextAcquisitionTimeSeconds =
-        m_impl->timeline.Current_s();
+    m_impl->cameraScheduler.nextAcquisitionTimeSeconds = m_impl->timeline.Current_s();
     // The CLAHE input extent may have changed (camera on/off, sensor size);
     // its display image follows it.
     m_impl->hasCachedMinMax = false;
@@ -4186,8 +4185,8 @@ const camera::CameraConfig& ExternalRenderContext::GetCameraConfig() const {
     return m_impl->cameraConfig;
 }
 
-Result<void, String> ExternalRenderContext::UpdateCameraDisplayConfig(
-    const camera::CameraConfig& config) {
+Result<void, String>
+ExternalRenderContext::UpdateCameraDisplayConfig(const camera::CameraConfig& config) {
     if (!m_impl->cameraConfig.enabled || !config.enabled)
         return Result<void, String>::Err("camera capture is disabled");
     if (m_impl->cameraCaptureRecorded)
@@ -4216,8 +4215,7 @@ Result<void, String> ExternalRenderContext::UpdateCameraDisplayConfig(
     // SetCameraConfig normalizes a missing effective span from the channel
     // curves. Studio keeps its authored config, which may still have zeros.
     camera::CameraConfig authored = config;
-    if (authored.device.effectiveMinNm == 0.0 &&
-        authored.device.effectiveMaxNm == 0.0) {
+    if (authored.device.effectiveMinNm == 0.0 && authored.device.effectiveMaxNm == 0.0) {
         authored.device.effectiveMinNm = expected.device.effectiveMinNm;
         authored.device.effectiveMaxNm = expected.device.effectiveMaxNm;
     }
@@ -4232,10 +4230,9 @@ Result<void, String> ExternalRenderContext::UpdateCameraDisplayConfig(
     return Result<void, String>::Ok();
 }
 
-Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
-    const camera::CameraConfig& config) {
-    if (!m_impl->cameraConfig.enabled || !config.enabled ||
-        m_impl->cameraCaptureRecorded)
+Result<bool, String>
+ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& config) {
+    if (!m_impl->cameraConfig.enabled || !config.enabled || m_impl->cameraCaptureRecorded)
         return false;
     if (const auto valid = camera::ValidateCameraConfig(config); !valid)
         return Result<bool, String>::Err(valid.error());
@@ -4249,13 +4246,11 @@ Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
     // These parameters act after the measured optical rate. Calibration
     // maps and response curves are excluded: they need resource uploads.
     expected.photon.fullWellElectrons = config.photon.fullWellElectrons;
-    expected.photon.darkCurrentElectronsPerSecond =
-        config.photon.darkCurrentElectronsPerSecond;
+    expected.photon.darkCurrentElectronsPerSecond = config.photon.darkCurrentElectronsPerSecond;
     expected.photon.readNoiseElectronsRms = config.photon.readNoiseElectronsRms;
     expected.photon.prnuSigma = config.photon.prnuSigma;
     expected.photon.dsnuElectronsRms = config.photon.dsnuElectronsRms;
-    expected.photon.dsnuReferenceExposureSeconds =
-        config.photon.dsnuReferenceExposureSeconds;
+    expected.photon.dsnuReferenceExposureSeconds = config.photon.dsnuReferenceExposureSeconds;
     expected.photon.biasDnRms = config.photon.biasDnRms;
     expected.photon.nucResidualFraction = config.photon.nucResidualFraction;
     expected.photon.enableShotNoise = config.photon.enableShotNoise;
@@ -4268,16 +4263,14 @@ Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
     expected.thermal.readNoiseDnRms = config.thermal.readNoiseDnRms;
     expected.thermal.driftDnPerSecond = config.thermal.driftDnPerSecond;
     expected.thermal.netdKelvin = config.thermal.netdKelvin;
-    expected.thermal.netdReferenceTemperatureK =
-        config.thermal.netdReferenceTemperatureK;
+    expected.thermal.netdReferenceTemperatureK = config.thermal.netdReferenceTemperatureK;
     expected.thermal.netdNoiseBandwidthHz = config.thermal.netdNoiseBandwidthHz;
     expected.thermal.readoutWindowSeconds = config.thermal.readoutWindowSeconds;
     expected.thermal.netdOpticalCondition = config.thermal.netdOpticalCondition;
     expected.products = config.products;
 
     camera::CameraConfig authored = config;
-    if (authored.device.effectiveMinNm == 0.0 &&
-        authored.device.effectiveMaxNm == 0.0) {
+    if (authored.device.effectiveMinNm == 0.0 && authored.device.effectiveMaxNm == 0.0) {
         authored.device.effectiveMinNm = expected.device.effectiveMinNm;
         authored.device.effectiveMaxNm = expected.device.effectiveMaxNm;
     }
@@ -4290,8 +4283,7 @@ Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
         // A deferred upload must land before this submission, not race it.
         m_impl->FlushPendingGpuWork();
         Result<void, String> status = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                        [&](VkCommandBuffer cmd) {
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
             status = m_impl->cameraGpuPipeline->RecordReadoutReprocess(
                 cmd, m_impl->EffectiveCameraConfig());
         });
@@ -4303,8 +4295,8 @@ Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
     return true;
 }
 
-Result<void, String> ExternalRenderContext::QueueCameraAcquisition(
-    u64 acquisitionIndex, f64 firstRowMidpointSeconds) {
+Result<void, String> ExternalRenderContext::QueueCameraAcquisition(u64 acquisitionIndex,
+                                                                   f64 firstRowMidpointSeconds) {
     if (!m_impl->cameraConfig.enabled)
         return Result<void, String>::Err("camera capture is disabled");
     if (!std::isfinite(firstRowMidpointSeconds))
@@ -4313,8 +4305,7 @@ Result<void, String> ExternalRenderContext::QueueCameraAcquisition(
         return Result<void, String>::Err(
             "complete or re-record the queued camera acquisition before "
             "queuing another one");
-    if (m_impl->cameraCaptureCompleted &&
-        acquisitionIndex < m_impl->cameraAcquisitionIndex)
+    if (m_impl->cameraCaptureCompleted && acquisitionIndex < m_impl->cameraAcquisitionIndex)
         return Result<void, String>::Err(
             "camera acquisition cannot move backwards without resetting state");
     m_impl->cameraAcquisitionIndex = acquisitionIndex;
@@ -4324,8 +4315,7 @@ Result<void, String> ExternalRenderContext::QueueCameraAcquisition(
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(
-    VkCommandBuffer cmd) {
+Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(VkCommandBuffer cmd) {
     if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err(
             "camera acquisition needs a ready context and command buffer");
@@ -4338,8 +4328,7 @@ Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(
 
 Result<void, String> ExternalRenderContext::CompleteQueuedCameraAcquisition() {
     if (!m_impl->cameraCaptureRecorded)
-        return Result<void, String>::Err(
-            "no recorded camera acquisition is awaiting completion");
+        return Result<void, String>::Err("no recorded camera acquisition is awaiting completion");
     m_impl->cameraCaptureRecorded = false;
     m_impl->cameraCapturePending = false;
     m_impl->cameraCaptureCompleted = true;
@@ -4355,10 +4344,10 @@ Result<void, String> ExternalRenderContext::ResetCameraHistory() {
     // scheduler at acquisition 0 of a new epoch. Safe to call between frames;
     // the explicit Queue/Record/Complete path is unaffected apart from the
     // GpuCameraPipeline counter restart.
-    if (m_impl->cameraGpuPipeline) m_impl->cameraGpuPipeline->ResetState();
+    if (m_impl->cameraGpuPipeline)
+        m_impl->cameraGpuPipeline->ResetState();
     m_impl->cameraStratumSampleCounts.fill(0);
-    m_impl->cameraStratumRecordedAcquisition =
-        std::numeric_limits<u64>::max();
+    m_impl->cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
     auto& s = m_impl->cameraScheduler;
     s.historyResetPending = false;
     s.historyResetReason = "camera history reset requested by host";
@@ -4401,17 +4390,18 @@ CameraHistoryStatus ExternalRenderContext::GetCameraHistoryStatus() const {
 Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
     if (!m_impl->cameraConfig.enabled)
         return Result<void, String>::Err("camera capture is disabled");
-    if (auto ready = m_impl->EnsureCameraResources(); !ready) return ready;
+    if (auto ready = m_impl->EnsureCameraResources(); !ready)
+        return ready;
 
     Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String> recorded =
         Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String>::Err(
             "camera history checkpoint was not recorded");
     m_impl->FlushPendingGpuWork();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                    [&](VkCommandBuffer cmd) {
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
         recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(cmd);
     });
-    if (!recorded) return Result<void, String>::Err(recorded.error());
+    if (!recorded)
+        return Result<void, String>::Err(recorded.error());
 
     auto& s = m_impl->cameraScheduler;
     // The host half of the record is the feedback carrier: the AE/AWB next*
@@ -4419,8 +4409,7 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
     // rewinds the closed loop and a replayed tick sequence reproduces the
     // original feedback bit for bit.
     m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
-    m_impl->cameraHostState.frameTimeSeconds =
-        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.frameTimeSeconds = m_impl->cameraAcquisitionTimeSeconds;
     m_impl->cameraHostState.historyEpoch = s.historyEpoch;
 
     ExternalRenderContext::Impl::CameraHistoryRecord record;
@@ -4435,8 +4424,7 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
 
 Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
     if (m_impl->cameraHistoryStack.empty())
-        return Result<void, String>::Err(
-            "no camera history checkpoint has been recorded");
+        return Result<void, String>::Err("no camera history checkpoint has been recorded");
     ExternalRenderContext::Impl::CameraHistoryRecord record =
         std::move(m_impl->cameraHistoryStack.back());
     m_impl->cameraHistoryStack.pop_back();
@@ -4447,12 +4435,11 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
 
     Result<void, String> restored = Result<void, String>::Ok();
     m_impl->FlushPendingGpuWork();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                    [&](VkCommandBuffer cmd) {
-        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(
-            record.gpu, cmd);
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, cmd);
     });
-    if (!restored) return restored;
+    if (!restored)
+        return restored;
     m_impl->cameraHostState = record.host;
     // The replayed ticks re-run the controller from the restored feedback,
     // consuming the restored statistics buffer, and the effective config is
@@ -4487,15 +4474,13 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
     m_impl->cameraCaptureRecorded = false;
     m_impl->cameraCaptureCompleted = true;
     m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
-    m_impl->cameraHostState.frameTimeSeconds =
-        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.frameTimeSeconds = m_impl->cameraAcquisitionTimeSeconds;
     m_impl->cameraHostState.historyEpoch = s.historyEpoch;
     // Per-tick progressive accumulation starts over on replay: sampleIndex
     // 0 overwrites the measurement image, so a replayed tick converges to
     // the identical average rather than continuing the discarded run's.
     m_impl->cameraStratumSampleCounts.fill(0);
-    m_impl->cameraStratumRecordedAcquisition =
-        std::numeric_limits<u64>::max();
+    m_impl->cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
     return Result<void, String>::Ok();
 }
 
@@ -4504,15 +4489,12 @@ Result<void, String> ExternalRenderContext::WarmUpCamera(f64 seconds) {
         return Result<void, String>::Err("camera capture is disabled");
     const f64 period = m_impl->cameraConfig.readout.framePeriodSeconds;
     if (!std::isfinite(seconds) || seconds < 0.0)
-        return Result<void, String>::Err(
-            "camera warmup seconds must be finite and nonnegative");
+        return Result<void, String>::Err("camera warmup seconds must be finite and nonnegative");
     if (!std::isfinite(period) || period <= 0.0)
-        return Result<void, String>::Err(
-            "camera warmup frame period must be finite and positive");
+        return Result<void, String>::Err("camera warmup frame period must be finite and positive");
     const f64 now = m_impl->cameraAcquisitionTimeSeconds;
     if (!std::isfinite(now))
-        return Result<void, String>::Err(
-            "camera warmup needs a finite current frame time");
+        return Result<void, String>::Err("camera warmup needs a finite current frame time");
     // Same grid as the offline CPU reference (camera::WarmUpCamera): the
     // synthetic acquisitions sit on the frame grid that ends one period
     // below `now`, so the first real acquisition afterwards measures a full
@@ -4520,30 +4502,30 @@ Result<void, String> ExternalRenderContext::WarmUpCamera(f64 seconds) {
     // its predecessor: it moves the index and the noise streams, not the
     // thermal state.
     const u64 steps = static_cast<u64>(std::llround(seconds / period));
-    if (steps == 0) return Result<void, String>::Ok();
+    if (steps == 0)
+        return Result<void, String>::Ok();
     const f64 start = std::max(now - static_cast<f64>(steps) * period, 0.0);
     for (u64 i = 0; i < steps; ++i) {
-        const f64 nominal = now - static_cast<f64>(steps) * period +
-                            static_cast<f64>(i) * period;
+        const f64 nominal = now - static_cast<f64>(steps) * period + static_cast<f64>(i) * period;
         const f64 time = std::max(nominal, start);
-        const bool havePrior = m_impl->cameraCaptureCompleted ||
-                               m_impl->cameraCaptureRecorded;
-        const u64 index = havePrior ? m_impl->cameraAcquisitionIndex + 1
-                                    : m_impl->cameraAcquisitionIndex;
+        const bool havePrior = m_impl->cameraCaptureCompleted || m_impl->cameraCaptureRecorded;
+        const u64 index =
+            havePrior ? m_impl->cameraAcquisitionIndex + 1 : m_impl->cameraAcquisitionIndex;
         auto queued = QueueCameraAcquisition(index, time);
-        if (!queued) return queued;
+        if (!queued)
+            return queued;
         Result<void, String> recorded = Result<void, String>::Ok();
-        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                        [&](VkCommandBuffer cmd) {
+        CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
             recorded = RecordQueuedCameraAcquisition(cmd);
         });
-        if (!recorded) return recorded;
+        if (!recorded)
+            return recorded;
         auto completed = CompleteQueuedCameraAcquisition();
-        if (!completed) return completed;
+        if (!completed)
+            return completed;
     }
     m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
-    m_impl->cameraHostState.frameTimeSeconds =
-        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.frameTimeSeconds = m_impl->cameraAcquisitionTimeSeconds;
     return Result<void, String>::Ok();
 }
 
@@ -4551,30 +4533,28 @@ Result<void, String> ExternalRenderContext::AdvanceCameraTo(f64 timeSeconds) {
     if (!m_impl->cameraConfig.enabled)
         return Result<void, String>::Err("camera capture is disabled");
     if (!std::isfinite(timeSeconds))
-        return Result<void, String>::Err(
-            "camera advance needs a finite frame time");
-    const bool havePrior = m_impl->cameraCaptureCompleted ||
-                           m_impl->cameraCaptureRecorded;
-    const u64 index = havePrior ? m_impl->cameraAcquisitionIndex + 1
-                                : m_impl->cameraAcquisitionIndex;
+        return Result<void, String>::Err("camera advance needs a finite frame time");
+    const bool havePrior = m_impl->cameraCaptureCompleted || m_impl->cameraCaptureRecorded;
+    const u64 index =
+        havePrior ? m_impl->cameraAcquisitionIndex + 1 : m_impl->cameraAcquisitionIndex;
     auto queued = QueueCameraAcquisition(index, timeSeconds);
-    if (!queued) return queued;
+    if (!queued)
+        return queued;
     Result<void, String> recorded = Result<void, String>::Ok();
-    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                    [&](VkCommandBuffer cmd) {
+    CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
         recorded = RecordQueuedCameraAcquisition(cmd);
     });
-    if (!recorded) return recorded;
+    if (!recorded)
+        return recorded;
     auto completed = CompleteQueuedCameraAcquisition();
-    if (!completed) return completed;
+    if (!completed)
+        return completed;
     m_impl->cameraHostState.acquisitionIndex = m_impl->cameraAcquisitionIndex;
-    m_impl->cameraHostState.frameTimeSeconds =
-        m_impl->cameraAcquisitionTimeSeconds;
+    m_impl->cameraHostState.frameTimeSeconds = m_impl->cameraAcquisitionTimeSeconds;
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::RecordCameraBaseline(
-    VkCommandBuffer cmd) {
+Result<void, String> ExternalRenderContext::RecordCameraBaseline(VkCommandBuffer cmd) {
     if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err(
             "camera baseline needs a ready context and command buffer");
@@ -4584,10 +4564,8 @@ Result<void, String> ExternalRenderContext::RecordCameraBaseline(
 }
 
 CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
-    const bool traceReady = m_impl->cameraTracePerf &&
-                            m_impl->cameraTracePerf->TryResolvePending();
-    const bool fullReady = m_impl->cameraFullPerf &&
-                           m_impl->cameraFullPerf->TryResolvePending();
+    const bool traceReady = m_impl->cameraTracePerf && m_impl->cameraTracePerf->TryResolvePending();
+    const bool fullReady = m_impl->cameraFullPerf && m_impl->cameraFullPerf->TryResolvePending();
     if (traceReady && fullReady) {
         auto& timing = m_impl->lastCameraGpuTimings;
         timing.traceMs = m_impl->cameraTracePerf->GetLastFrameGpuMs();
@@ -4599,11 +4577,11 @@ CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
     // blocks: a frame still in flight leaves the previous values standing.
     if (m_impl->cameraTimingPool != VK_NULL_HANDLE) {
         std::array<u64, 14> results{};
-        const VkResult resolved = vkGetQueryPoolResults(
-            m_impl->device, m_impl->cameraTimingPool, 0,
-            rendercore::GpuCameraPipeline::kTimingQueryCount,
-            results.size() * sizeof(u64), results.data(), 2 * sizeof(u64),
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        const VkResult resolved =
+            vkGetQueryPoolResults(m_impl->device, m_impl->cameraTimingPool, 0,
+                                  rendercore::GpuCameraPipeline::kTimingQueryCount,
+                                  results.size() * sizeof(u64), results.data(), 2 * sizeof(u64),
+                                  VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
         bool available = resolved == VK_SUCCESS;
         for (u32 i = 0; available && i < 7; ++i)
             available = results[2 * i + 1] != 0;
@@ -4611,14 +4589,13 @@ CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
             const f64 period = m_impl->cameraTimestampPeriodNs;
             auto& timing = m_impl->lastCameraGpuTimings;
             const auto span = [&](u32 from, u32 to) {
-                return static_cast<f32>(
-                    (results[2 * to] - results[2 * from]) * period / 1e6);
+                return static_cast<f32>((results[2 * to] - results[2 * from]) * period / 1e6);
             };
             timing.dynamicMs = std::max(0.0f, span(0, 1));
             timing.psfMs = std::max(0.0f, span(1, 2));
             timing.detectorMs = std::max(0.0f, span(2, 3));
-            // Stamps 3..4 bracket the full M4-3 ISP (statistics, CDF,
-            // demosaic, color, display); stamps 4..5 bracket the M4-4 HSV
+            // Stamps 3..4 bracket the full ISP (statistics, CDF,
+            // demosaic, color, display); stamps 4..5 bracket the HSV
             // pass (back to back when HSV is off, so hsvMs reads ~0).
             timing.ispMs = std::max(0.0f, span(3, 4));
             timing.hsvMs = std::max(0.0f, span(4, 5));
@@ -4631,15 +4608,14 @@ DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() cons
     // Never blocks: the counters were copied at the end of the acquisition's
     // own submission and the event marks when they landed. A frame still in
     // flight leaves the previous report standing.
-    if (!m_impl->cameraDynamicReadback ||
-        m_impl->cameraDynamicReadbackEvent == VK_NULL_HANDLE ||
-        vkGetEventStatus(m_impl->device, m_impl->cameraDynamicReadbackEvent) !=
-            VK_EVENT_SET)
+    if (!m_impl->cameraDynamicReadback || m_impl->cameraDynamicReadbackEvent == VK_NULL_HANDLE ||
+        vkGetEventStatus(m_impl->device, m_impl->cameraDynamicReadbackEvent) != VK_EVENT_SET)
         return m_impl->lastDynamicReport;
 
     std::array<u32, 8> counters{};
     const void* data = m_impl->cameraDynamicReadback->MapRead();
-    if (!data) return m_impl->lastDynamicReport;
+    if (!data)
+        return m_impl->lastDynamicReport;
     std::memcpy(counters.data(), data, sizeof(counters));
     m_impl->cameraDynamicReadback->Unmap();
     const u32* raygenCounts = counters.data();
@@ -4647,34 +4623,28 @@ DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() cons
 
     auto& report = m_impl->lastDynamicReport;
     report = DynamicExposureReport{};
-    const f64 pixels = static_cast<f64>(m_impl->cameraDynamicSensorWidth) *
-                       m_impl->cameraDynamicSensorHeight;
-    const f64 samples = static_cast<f64>(
-        std::max(1u, m_impl->cameraLastAcquisitionSamples));
+    const f64 pixels =
+        static_cast<f64>(m_impl->cameraDynamicSensorWidth) * m_impl->cameraDynamicSensorHeight;
+    const f64 samples = static_cast<f64>(std::max(1u, m_impl->cameraLastAcquisitionSamples));
     const f64 perPixelSample = pixels * samples;
-    report.transparentFraction =
-        std::min(1.0, static_cast<f64>(raygenCounts[0]) / perPixelSample);
-    const f64 specular =
-        std::min(1.0, static_cast<f64>(raygenCounts[1]) / perPixelSample);
+    report.transparentFraction = std::min(1.0, static_cast<f64>(raygenCounts[0]) / perPixelSample);
+    const f64 specular = std::min(1.0, static_cast<f64>(raygenCounts[1]) / perPixelSample);
     // View-dependent pixels are the ones a depth reprojection between strata
     // cannot vouch for: disoccluded, specular, or transparent.
-    const f64 disoccluded =
-        static_cast<f64>(dynamicCounts[0]) / pixels;
-    report.viewDependentFraction = std::min(
-        1.0, disoccluded + specular + report.transparentFraction);
+    const f64 disoccluded = static_cast<f64>(dynamicCounts[0]) / pixels;
+    report.viewDependentFraction =
+        std::min(1.0, disoccluded + specular + report.transparentFraction);
     report.disoccludedFraction = std::min(1.0, disoccluded);
-    report.timeSampleCoverage =
-        static_cast<f64>(m_impl->cameraLastStrataCount) /
-        std::clamp<u32>(m_impl->cameraDynamicGpuTimePositions, 1u,
-                        rendercore::kCameraTimeStrataMax);
+    report.timeSampleCoverage = static_cast<f64>(m_impl->cameraLastStrataCount) /
+                                std::clamp<u32>(m_impl->cameraDynamicGpuTimePositions, 1u,
+                                                rendercore::kCameraTimeStrataMax);
     report.objectMotionApproximation = m_impl->cameraLastObjectMotion;
     report.strataCount = m_impl->cameraLastStrataCount;
     report.valid = true;
     return report;
 }
 
-Result<camera::CameraOutput, String>
-ExternalRenderContext::CaptureCameraProducts() {
+Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProducts() {
     if (!m_impl->cameraCaptureCompleted || !m_impl->cameraGpuPipeline)
         return Result<camera::CameraOutput, String>::Err(
             "camera products require a completed submitted acquisition");
@@ -4687,23 +4657,21 @@ ExternalRenderContext::CaptureCameraProducts() {
     const u32 width = config.optics.sensorWidthPx;
     const u32 height = config.optics.sensorHeightPx;
     const u32 channels = config.device.cfa == camera::CfaPattern::MultiChannel
-        ? static_cast<u32>(config.device.channels.size()) : 1u;
+                             ? static_cast<u32>(config.device.channels.size())
+                             : 1u;
     const auto outputs = m_impl->cameraGpuPipeline->GetOutputs();
 
-    const auto readProductImage = [&](const GpuImage* source)
-        -> Result<Image, String> {
-        if (!source) return Result<Image, String>::Err(
-            "GPU camera product image is unavailable");
-        const auto rgba = CommandHelper::ReadbackImage(
-            *m_impl->contextAdapter, source->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
+    const auto readProductImage = [&](const GpuImage* source) -> Result<Image, String> {
+        if (!source)
+            return Result<Image, String>::Err("GPU camera product image is unavailable");
+        const auto rgba =
+            CommandHelper::ReadbackImage(*m_impl->contextAdapter, source->GetImage(),
+                                         VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
         if (rgba.size() != static_cast<size_t>(width) * height * 4u)
-            return Result<Image, String>::Err(
-                "GPU camera product readback has the wrong size");
+            return Result<Image, String>::Err("GPU camera product readback has the wrong size");
         Image image(width, height, channels);
-        image.channelNames = channels == 1u
-            ? std::vector<String>{"Y"}
-            : std::vector<String>{"R", "G", "B"};
+        image.channelNames =
+            channels == 1u ? std::vector<String>{"Y"} : std::vector<String>{"R", "G", "B"};
         for (size_t pixel = 0; pixel < static_cast<size_t>(width) * height; ++pixel)
             for (u32 channel = 0; channel < channels; ++channel)
                 image.data[pixel * channels + channel] = rgba[pixel * 4u + channel];
@@ -4713,48 +4681,49 @@ ExternalRenderContext::CaptureCameraProducts() {
         camera::SignalDescriptor signal;
         signal.kind = kind;
         signal.unit = std::move(unit);
-        signal.responseProfileId = config.device.id.empty()
-            ? "generic" : config.device.id;
+        signal.responseProfileId = config.device.id.empty() ? "generic" : config.device.id;
         signal.calibration = config.device.calibration;
         signal.acquisitionIndex = m_impl->cameraAcquisitionIndex;
-        signal.exposureStartSeconds = m_impl->cameraAcquisitionTimeSeconds -
-            config.readout.exposureSeconds * 0.5;
+        signal.exposureStartSeconds =
+            m_impl->cameraAcquisitionTimeSeconds - config.readout.exposureSeconds * 0.5;
         signal.exposureEndSeconds = m_impl->cameraAcquisitionTimeSeconds +
-            config.readout.exposureSeconds * 0.5 +
-            (config.readout.shutter == camera::ShutterKind::Rolling
-                ? (height - 1u) * config.readout.rowDelaySeconds : 0.0);
+                                    config.readout.exposureSeconds * 0.5 +
+                                    (config.readout.shutter == camera::ShutterKind::Rolling
+                                         ? (height - 1u) * config.readout.rowDelaySeconds
+                                         : 0.0);
         signal.cfa = config.device.cfa;
         signal.channelsPerPixel = channels;
         signal.responseMinNm = std::numeric_limits<f64>::infinity();
         signal.responseMaxNm = 0.0;
         for (const auto& channel : config.device.channels) {
             const auto& stack = channel.response;
-            const auto& response = stack.systemResponse ? *stack.systemResponse :
-                config.device.detector == camera::DetectorKind::Photon
-                    ? *stack.quantumEfficiency : *stack.thermalAbsorptance;
+            const auto& response = stack.systemResponse ? *stack.systemResponse
+                                   : config.device.detector == camera::DetectorKind::Photon
+                                       ? *stack.quantumEfficiency
+                                       : *stack.thermalAbsorptance;
             signal.responseMinNm = std::min(signal.responseMinNm, response.MinNm());
             signal.responseMaxNm = std::max(signal.responseMaxNm, response.MaxNm());
             if (config.device.cfa == camera::CfaPattern::MultiChannel) {
                 signal.channelResponseIds.push_back(channel.name);
-                signal.channelResponseSpanNm.push_back(
-                    {response.MinNm(), response.MaxNm()});
+                signal.channelResponseSpanNm.push_back({response.MinNm(), response.MaxNm()});
             }
         }
         return signal;
     };
-    const auto makeProduct = [&](const GpuImage* source,
-                                 camera::SignalDescriptor signal)
-        -> Result<camera::CameraProduct, String> {
+    const auto makeProduct =
+        [&](const GpuImage* source,
+            camera::SignalDescriptor signal) -> Result<camera::CameraProduct, String> {
         auto image = readProductImage(source);
-        if (!image) return Result<camera::CameraProduct, String>::Err(image.error());
+        if (!image)
+            return Result<camera::CameraProduct, String>::Err(image.error());
         camera::CameraProduct product{std::move(image.value()), std::move(signal)};
         if (auto annotated = camera::AnnotateProductMetadata(product); !annotated)
             return Result<camera::CameraProduct, String>::Err(annotated.error());
         product.image.metadata["camera_input_kind"] =
             config.inputKind == camera::CameraInputKind::FastRgbApproximation
-                ? "fast_rgb_approximation" : "spectral_measurement";
-        product.image.metadata["camera_random_seed"] =
-            std::to_string(config.randomSeed);
+                ? "fast_rgb_approximation"
+                : "spectral_measurement";
+        product.image.metadata["camera_random_seed"] = std::to_string(config.randomSeed);
         product.image.metadata["camera_effective_random_seed"] =
             std::to_string(camera::DeviceRandomSeed(config));
         if (m_impl->cameraLastStrataCount > 1) {
@@ -4762,8 +4731,7 @@ ExternalRenderContext::CaptureCameraProducts() {
             // strata reprojected through the anchor depth: a preview
             // approximation, not the CPU reference's continuous integral.
             product.image.metadata["camera_dynamic_approximation"] =
-                "time_strata=" +
-                std::to_string(m_impl->cameraLastStrataCount);
+                "time_strata=" + std::to_string(m_impl->cameraLastStrataCount);
         }
         return product;
     };
@@ -4773,24 +4741,27 @@ ExternalRenderContext::CaptureCameraProducts() {
         auto measured = makeProduct(
             outputs.expectedElectrons,
             descriptor(camera::SignalKind::BandMeasurement,
-                config.device.detector == camera::DetectorKind::Photon ? "e-/s" : "W"));
-        if (!measured) return Result<camera::CameraOutput, String>::Err(measured.error());
+                       config.device.detector == camera::DetectorKind::Photon ? "e-/s" : "W"));
+        if (!measured)
+            return Result<camera::CameraOutput, String>::Err(measured.error());
         if (config.device.detector == camera::DetectorKind::Photon) {
             const f32 exposure = static_cast<f32>(config.readout.exposureSeconds);
-            for (auto& value : measured.value().image.data) value /= exposure;
+            for (auto& value : measured.value().image.data)
+                value /= exposure;
         }
         result.bandMeasurement = std::move(measured.value());
     }
     if (config.products.rawDn) {
-        auto raw = makeProduct(outputs.rawDn,
-            descriptor(camera::SignalKind::RawDN, "DN"));
-        if (!raw) return Result<camera::CameraOutput, String>::Err(raw.error());
+        auto raw = makeProduct(outputs.rawDn, descriptor(camera::SignalKind::RawDN, "DN"));
+        if (!raw)
+            return Result<camera::CameraOutput, String>::Err(raw.error());
         result.rawDn = std::move(raw.value());
     }
     if (config.products.correctedDeviceSignal) {
-        auto corrected = makeProduct(outputs.corrected,
+        auto corrected = makeProduct(
+            outputs.corrected,
             descriptor(camera::SignalKind::DeviceLinear,
-                config.device.detector == camera::DetectorKind::Photon ? "e-" : "W"));
+                       config.device.detector == camera::DetectorKind::Photon ? "e-" : "W"));
         if (!corrected)
             return Result<camera::CameraOutput, String>::Err(corrected.error());
         result.correctedDeviceSignal = std::move(corrected.value());
@@ -4799,13 +4770,13 @@ ExternalRenderContext::CaptureCameraProducts() {
         // In the persistent-Clahe mode the on-screen display is the CLAHE
         // pipeline's output, not the camera chain's grey scalar; export what
         // the viewer sees.
-        const GpuImage* displaySource =
-            (m_impl->CameraClahePersistent() && m_impl->displayImage)
-                ? m_impl->displayImage.get()
-                : outputs.display;
-        auto display = makeProduct(displaySource,
-            descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
-        if (!display) return Result<camera::CameraOutput, String>::Err(display.error());
+        const GpuImage* displaySource = (m_impl->CameraClahePersistent() && m_impl->displayImage)
+                                            ? m_impl->displayImage.get()
+                                            : outputs.display;
+        auto display =
+            makeProduct(displaySource, descriptor(camera::SignalKind::DisplaySrgb, "encoded sRGB"));
+        if (!display)
+            return Result<camera::CameraOutput, String>::Err(display.error());
         result.display = std::move(display.value());
     }
     return result;
@@ -4825,14 +4796,13 @@ void ExternalRenderContext::SetGPUSensorParams(const SensorParams& params) {
     // asked for one. There is no "was it set" bit on SensorParams, so anything
     // other than the default counts as deliberate -- which is the same reading the
     // CLI takes from the config naming spectral.wavelength_nm or not.
-    m_impl->gpuSensorWavelengthFromHost =
-        params.wavelength_nm != SensorParams{}.wavelength_nm;
+    m_impl->gpuSensorWavelengthFromHost = params.wavelength_nm != SensorParams{}.wavelength_nm;
 
     // Translate the compatibility facade through the same migration as old
     // TOML, then run the one GPU camera implementation.
-    const auto converted = CameraConfigFromSensorParams(
-        params, m_impl->spectralMode, m_impl->width, m_impl->height,
-        m_impl->camera.GetFovY(), m_impl->wavelength_nm);
+    const auto converted =
+        CameraConfigFromSensorParams(params, m_impl->spectralMode, m_impl->width, m_impl->height,
+                                     m_impl->camera.GetFovY(), m_impl->wavelength_nm);
     if (!converted) {
         QL_LOG_ERROR("GPU sensor parameter migration failed: {}", converted.error());
         return;
@@ -4868,8 +4838,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
 
     // Priority 1: CLAHE output (includes all effects)
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage &&
-        m_impl->ClaheInputReady()) {
+        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
         sourceImage = m_impl->displayImage.get();
         const auto extent = m_impl->ClaheInputExtent();
         sourceWidth = extent.width;
@@ -4898,7 +4867,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     );
 
     // Create Image from pixel data
-    Image displayImage(sourceWidth, sourceHeight, 4);  // RGBA
+    Image displayImage(sourceWidth, sourceHeight, 4); // RGBA
     displayImage.data = std::move(pixels);
     displayImage.channelNames = {"R", "G", "B", "A"};
 
@@ -4955,9 +4924,10 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     FlushPendingGpuWork();
     QL_LOG_INFO("Updating GPU resources...");
     const auto resources = ResourceCounts();
-    materialBuffer = rendercore::BuildMaterialBuffer(
-        *contextAdapter, *scene, wavelength_nm, materialGpuIndices, &resources);
-    if (rebuildEmitters) RebuildEmissiveGeometry();
+    materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm,
+                                                     materialGpuIndices, &resources);
+    if (rebuildEmitters)
+        RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
 }
 
@@ -4970,15 +4940,16 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
 // calls UpdateGpuResources to refresh the material buffer and then rebinds only
 // that. Allocating a new buffer here and returning would leave binding 23
 // pointing at the freed one.
-Result<void, String> ExternalRenderContext::Impl::RebuildEmissiveGeometry(
-    const bool mayReallocate) {
-    if (!scene) return Result<void, String>::Ok();
+Result<void, String>
+ExternalRenderContext::Impl::RebuildEmissiveGeometry(const bool mayReallocate) {
+    if (!scene)
+        return Result<void, String>::Ok();
 
     const auto triangles = enableLightSampling
         ? rendercore::CollectEmissiveTriangles(*scene)
         : Vector<rendercore::EmissiveTriangleGPU>{};
-    const size_t bytes = std::max(size_t{1}, triangles.size()) *
-                         sizeof(rendercore::EmissiveTriangleGPU);
+    const size_t bytes =
+        std::max(size_t{1}, triangles.size()) * sizeof(rendercore::EmissiveTriangleGPU);
     const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->GetSize() < bytes;
     if (moved) {
         if (!mayReallocate)
@@ -5142,7 +5113,8 @@ void ExternalRenderContext::Impl::CreatePipeline() {
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);
     pipeline->SetUploadQueue(&pendingUploads);
-    if(cameraLightingParamsBuffer)pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
+    if (cameraLightingParamsBuffer)
+        pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
 }
 
 Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
@@ -5162,9 +5134,10 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
     f64 lo = std::numeric_limits<f64>::infinity(), hi = 0.0;
     for (const auto& channel : cameraConfig.device.channels) {
         const auto& stack = channel.response;
-        const auto& curve = stack.systemResponse ? *stack.systemResponse :
-            cameraConfig.device.detector == camera::DetectorKind::Photon ?
-            *stack.quantumEfficiency : *stack.thermalAbsorptance;
+        const auto& curve = stack.systemResponse ? *stack.systemResponse
+                            : cameraConfig.device.detector == camera::DetectorKind::Photon
+                                ? *stack.quantumEfficiency
+                                : *stack.thermalAbsorptance;
         lo = std::min(lo, curve.MinNm());
         hi = std::max(hi, curve.MaxNm());
     }
@@ -5181,8 +5154,7 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
     // the nearest baked bin mean, never interpolates those means.
     for (f64 nm : wavelengths)
         if (RenderBandLambdaGrid(SpectralMode::Single, nm).band != firstBand.band)
-            return Result<void, String>::Err(
-                "GPU camera atmosphere has a wavelength coverage gap");
+            return Result<void, String>::Err("GPU camera atmosphere has a wavelength coverage gap");
     AtmosphereNNConfig effective = atmosphereConfig;
     const glm::vec3 sunDir = lightingParams.sunDirection;
     if (effective.sunFromLighting && glm::length(sunDir) > 1e-6f) {
@@ -5191,29 +5163,28 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
         effective.sunAzimuthDeg = glm::degrees(std::atan2(sun.x, sun.z));
     }
     if (effective.h1FromCamera) {
-        const f32 metersPerUnit = lightingParams.worldUnitsToMeters > 0.0f ?
-                                  lightingParams.worldUnitsToMeters : 1.0f;
+        const f32 metersPerUnit =
+            lightingParams.worldUnitsToMeters > 0.0f ? lightingParams.worldUnitsToMeters : 1.0f;
         f64 cameraHeightWorld = camera.GetPosition().y;
         if (!cameraConfig.motion.keys.empty()) {
-            const auto pose = camera::CameraPoseAt(
-                cameraConfig.motion, cameraAcquisitionTimeSeconds);
-            if (!pose) return Result<void, String>::Err(pose.error());
+            const auto pose =
+                camera::CameraPoseAt(cameraConfig.motion, cameraAcquisitionTimeSeconds);
+            if (!pose)
+                return Result<void, String>::Err(pose.error());
             cameraHeightWorld = pose.value().position[1];
         }
-        effective.h1Km = std::max(
-            cameraHeightWorld * metersPerUnit / 1000.0, 0.0);
+        effective.h1Km = std::max(cameraHeightWorld * metersPerUnit / 1000.0, 0.0);
     }
     try {
         AtmosphereBaker baker(*atmosModelPack);
         auto baked = baker.Bake(effective, firstBand.band, wavelengths, 0.0);
-        const glm::vec3 normalizedSun = glm::length(sunDir) > 1e-6f ?
-                                        glm::normalize(sunDir) : glm::vec3(0, 1, 0);
+        const glm::vec3 normalizedSun =
+            glm::length(sunDir) > 1e-6f ? glm::normalize(sunDir) : glm::vec3(0, 1, 0);
         baked.header.sunDirWorld[0] = normalizedSun.x;
         baked.header.sunDirWorld[1] = normalizedSun.y;
         baked.header.sunDirWorld[2] = normalizedSun.z;
         baked.header.worldUnitsToMeters =
-            lightingParams.worldUnitsToMeters > 0.0f ?
-            lightingParams.worldUnitsToMeters : 1.0f;
+            lightingParams.worldUnitsToMeters > 0.0f ? lightingParams.worldUnitsToMeters : 1.0f;
         cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -5221,18 +5192,14 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
         cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), baked.data.size() * sizeof(f32),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        cameraAtmosDataBuffer->Upload(
-            baked.data.data(), baked.data.size() * sizeof(f32));
+        cameraAtmosDataBuffer->Upload(baked.data.data(), baked.data.size() * sizeof(f32));
         cameraAtmosMinNm = static_cast<f32>(lo);
-        cameraAtmosStepNm = static_cast<f32>(
-            (hi - lo) / (kCameraAtmosSamples - 1));
+        cameraAtmosStepNm = static_cast<f32>((hi - lo) / (kCameraAtmosSamples - 1));
         cameraAtmosCount = kCameraAtmosSamples;
         const f64 middleNm = 0.5 * (lo + hi);
-        const auto middleGrid = RenderBandLambdaGrid(
-            SpectralMode::Single, middleNm);
-        auto baseline = baker.Bake(
-            effective, middleGrid.band, middleGrid.lambdasNm,
-            middleGrid.windowHalfWidthNm);
+        const auto middleGrid = RenderBandLambdaGrid(SpectralMode::Single, middleNm);
+        auto baseline = baker.Bake(effective, middleGrid.band, middleGrid.lambdasNm,
+                                   middleGrid.windowHalfWidthNm);
         baseline.header.sunDirWorld[0] = normalizedSun.x;
         baseline.header.sunDirWorld[1] = normalizedSun.y;
         baseline.header.sunDirWorld[2] = normalizedSun.z;
@@ -5240,17 +5207,15 @@ Result<void, String> ExternalRenderContext::Impl::UpdateCameraAtmosphere() {
         cameraBaselineAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), sizeof(AtmosNNHeaderGPU),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        cameraBaselineAtmosHeaderBuffer->Upload(
-            &baseline.header, sizeof(baseline.header));
+        cameraBaselineAtmosHeaderBuffer->Upload(&baseline.header, sizeof(baseline.header));
         cameraBaselineAtmosDataBuffer = std::make_unique<GpuBuffer>(
             contextAdapter->GetAllocator(), baseline.data.size() * sizeof(f32),
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-        cameraBaselineAtmosDataBuffer->Upload(
-            baseline.data.data(), baseline.data.size() * sizeof(f32));
+        cameraBaselineAtmosDataBuffer->Upload(baseline.data.data(),
+                                              baseline.data.size() * sizeof(f32));
         return Result<void, String>::Ok();
     } catch (const std::exception& e) {
-        return Result<void, String>::Err(
-            String("camera atmosphere bake failed: ") + e.what());
+        return Result<void, String>::Err(String("camera atmosphere bake failed: ") + e.what());
     }
 }
 
@@ -5262,125 +5227,120 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     if (!cameraResourcesDirty && cameraMeasurementImage && cameraGpuPipeline)
         return Result<void, String>::Ok();
     const auto valid = camera::ValidateCameraConfig(cameraConfig);
-    if (!valid) return Result<void, String>::Err(valid.error());
+    if (!valid)
+        return Result<void, String>::Err(valid.error());
     UploadLightingParams();
     // Configuration changes happen between frames; wait before replacing
     // descriptor-backed images/buffers that a submitted frame may still use.
     vkDeviceWaitIdle(device);
     const u32 physicalW = cameraConfig.optics.sensorWidthPx;
     const u32 physicalH = cameraConfig.optics.sensorHeightPx;
-    const auto nativeProjection=camera::ResolveProjection(cameraConfig.optics.projection,
-        physicalW,physicalH,cameraConfig.optics.focalLengthMm,cameraConfig.optics.pixelPitchUm);
-    if(!nativeProjection) return Result<void,String>::Err(nativeProjection.error());
-    if((nativeProjection.value().model!=camera::ProjectionModel::Pinhole ||
-        cameraConfig.optics.projection.explicitIntrinsics) &&
-       (!cameraConfig.motion.keys.empty() || timeline.HasMotion()))
-        return Result<void,String>::Err("distorted GPU capture currently requires a static scene and camera");
+    const auto nativeProjection = camera::ResolveProjection(
+        cameraConfig.optics.projection, physicalW, physicalH, cameraConfig.optics.focalLengthMm,
+        cameraConfig.optics.pixelPitchUm);
+    if (!nativeProjection)
+        return Result<void, String>::Err(nativeProjection.error());
+    if ((nativeProjection.value().model != camera::ProjectionModel::Pinhole ||
+         cameraConfig.optics.projection.explicitIntrinsics) &&
+        (!cameraConfig.motion.keys.empty() || timeline.HasMotion()))
+        return Result<void, String>::Err(
+            "distorted GPU capture currently requires a static scene and camera");
     pipeline->SetCameraProjection(&*nativeProjection,
-        cameraConfig.inputKind==camera::CameraInputKind::FastRgbApproximation ? 0u : 1u);
+                                  cameraConfig.inputKind ==
+                                          camera::CameraInputKind::FastRgbApproximation
+                                      ? RayTracingPipeline::kProjectionSetOrdinary
+                                      : RayTracingPipeline::kProjectionSetMeasurement);
     const auto allocator = contextAdapter->GetAllocator();
     const auto makeImage = [&](VkFormat format) {
-        auto image = std::make_unique<GpuImage>(
-            allocator, device, physicalW, physicalH, format,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
-                VK_IMAGE_USAGE_SAMPLED_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY);
-        TransitionImageLayoutImmediate(
-            image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL);
+        auto image = std::make_unique<GpuImage>(allocator, device, physicalW, physicalH, format,
+                                                VK_IMAGE_USAGE_STORAGE_BIT |
+                                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                                    VK_IMAGE_USAGE_SAMPLED_BIT,
+                                                VMA_MEMORY_USAGE_GPU_ONLY);
+        TransitionImageLayoutImmediate(image->GetImage(), format, VK_IMAGE_LAYOUT_UNDEFINED,
+                                       VK_IMAGE_LAYOUT_GENERAL);
         return image;
     };
     try {
         cameraMeasurementImage = std::make_unique<GpuImage>(
-            allocator, device, physicalW, physicalH,
-            VK_FORMAT_R32G32B32A32_SFLOAT,
+            allocator, device, physicalW, physicalH, VK_FORMAT_R32G32B32A32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                 VK_IMAGE_USAGE_SAMPLED_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax,
-            0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax, 0,
+            VK_IMAGE_VIEW_TYPE_2D_ARRAY);
         cameraMeasurementDepthImage = std::make_unique<GpuImage>(
             allocator, device, physicalW, physicalH, VK_FORMAT_R32_SFLOAT,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-            VMA_MEMORY_USAGE_GPU_ONLY, 1u, rendercore::kCameraTimeStrataMax,
-            0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_GPU_ONLY,
+            1u, rendercore::kCameraTimeStrataMax, 0, VK_IMAGE_VIEW_TYPE_2D_ARRAY);
         CommandHelper::TransitionImageLayoutImmediate(
-            *contextAdapter, cameraMeasurementImage->GetImage(),
-            VK_FORMAT_R32G32B32A32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL, 1u, rendercore::kCameraTimeStrataMax);
+            *contextAdapter, cameraMeasurementImage->GetImage(), VK_FORMAT_R32G32B32A32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1u,
+            rendercore::kCameraTimeStrataMax);
         CommandHelper::TransitionImageLayoutImmediate(
-            *contextAdapter, cameraMeasurementDepthImage->GetImage(),
-            VK_FORMAT_R32_SFLOAT, VK_IMAGE_LAYOUT_UNDEFINED,
-            VK_IMAGE_LAYOUT_GENERAL, 1u, rendercore::kCameraTimeStrataMax);
+            *contextAdapter, cameraMeasurementDepthImage->GetImage(), VK_FORMAT_R32_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, 1u,
+            rendercore::kCameraTimeStrataMax);
         cameraBaselineImage = makeImage(VK_FORMAT_R32G32B32A32_SFLOAT);
         cameraDepthImage = makeImage(VK_FORMAT_R32_SFLOAT);
     } catch (const std::exception& e) {
-        return Result<void, String>::Err(
-            String("camera image allocation failed: ") + e.what());
+        return Result<void, String>::Err(String("camera image allocation failed: ") + e.what());
     }
-    if (!cameraMeasurementImage->IsValid() ||
-        !cameraMeasurementDepthImage->IsValid())
+    if (!cameraMeasurementImage->IsValid() || !cameraMeasurementDepthImage->IsValid())
         return Result<void, String>::Err("camera image allocation failed");
     if (auto baked = UpdateCameraAtmosphere(); !baked)
         return baked;
-    const auto encoded = camera::EncodeCameraResponseGpu(
-        cameraConfig, cameraAtmosMinNm, cameraAtmosStepNm, cameraAtmosCount);
-    if (!encoded) return Result<void, String>::Err(encoded.error());
+    const auto encoded = camera::EncodeCameraResponseGpu(cameraConfig, cameraAtmosMinNm,
+                                                         cameraAtmosStepNm, cameraAtmosCount);
+    if (!encoded)
+        return Result<void, String>::Err(encoded.error());
     const VkDeviceSize bytes = encoded.value().size() * sizeof(u32);
     cameraResponseBuffer = std::make_unique<GpuBuffer>(
-        allocator, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-        VMA_MEMORY_USAGE_CPU_TO_GPU);
+        allocator, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     cameraResponseBuffer->Upload(encoded.value().data(), bytes);
     pipeline->BindCameraMeasurementImage(*cameraMeasurementImage);
     pipeline->BindCameraResponseBuffer(*cameraResponseBuffer);
     pipeline->BindCameraMeasurementDepthImage(*cameraMeasurementDepthImage);
-    cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(
-        allocator, 4u * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VMA_MEMORY_USAGE_GPU_ONLY);
+    cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(allocator, 4u * sizeof(u32),
+                                                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                                 VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+                                                                 VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                                             VMA_MEMORY_USAGE_GPU_ONLY);
     if (!cameraDynamicCounterBuffer->IsValid())
-        return Result<void, String>::Err(
-            "camera dynamic counter allocation failed");
+        return Result<void, String>::Err("camera dynamic counter allocation failed");
     CommandHelper::ExecuteImmediate(*contextAdapter, [&](VkCommandBuffer cmd) {
-        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
     });
     pipeline->BindCameraDynamicCounterBuffer(*cameraDynamicCounterBuffer);
     // The DynamicExposureReport readback: both 4 x u32 counter blocks side
     // by side, plus the event a measurement recording sets once they have
     // landed. Neither depends on the sensor size, so they are made once.
     if (!cameraDynamicReadback) {
-        cameraDynamicReadback = std::make_unique<GpuBuffer>(
-            allocator, 8u * sizeof(u32), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VMA_MEMORY_USAGE_GPU_TO_CPU);
+        cameraDynamicReadback = std::make_unique<GpuBuffer>(allocator, 8u * sizeof(u32),
+                                                            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                                            VMA_MEMORY_USAGE_GPU_TO_CPU);
         if (!cameraDynamicReadback->IsValid())
-            return Result<void, String>::Err(
-                "camera dynamic readback allocation failed");
+            return Result<void, String>::Err("camera dynamic readback allocation failed");
     }
     if (cameraDynamicReadbackEvent == VK_NULL_HANDLE) {
         VkEventCreateInfo eventInfo{};
         eventInfo.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
-        if (vkCreateEvent(device, &eventInfo, nullptr,
-                          &cameraDynamicReadbackEvent) != VK_SUCCESS)
-            return Result<void, String>::Err(
-                "camera dynamic readback event creation failed");
+        if (vkCreateEvent(device, &eventInfo, nullptr, &cameraDynamicReadbackEvent) != VK_SUCCESS)
+            return Result<void, String>::Err("camera dynamic readback event creation failed");
     }
     pipeline->BindCameraDepthImage(*cameraDepthImage);
     pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
     pipeline->BindCameraObserverDepthImage(*cameraDepthImage);
     pipeline->BindCameraAtmosphereNN(
-        cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get() :
-                                  atmosHeaderBuffer.get(),
-        cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get() :
-                                atmosDataBuffer.get());
+        cameraAtmosHeaderBuffer ? cameraAtmosHeaderBuffer.get() : atmosHeaderBuffer.get(),
+        cameraAtmosDataBuffer ? cameraAtmosDataBuffer.get() : atmosDataBuffer.get());
     pipeline->BindCameraObserverAtmosphereNN(
-        cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get() :
-                                          atmosHeaderBuffer.get(),
-        cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get() :
-                                        atmosDataBuffer.get());
-    auto gpu = rendercore::GpuCameraPipeline::Create(
-        *contextAdapter, physicalW, physicalH);
-    if (!gpu) return Result<void, String>::Err(gpu.error());
+        cameraBaselineAtmosHeaderBuffer ? cameraBaselineAtmosHeaderBuffer.get()
+                                        : atmosHeaderBuffer.get(),
+        cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
+                                      : atmosDataBuffer.get());
+    auto gpu = rendercore::GpuCameraPipeline::Create(*contextAdapter, physicalW, physicalH);
+    if (!gpu)
+        return Result<void, String>::Err(gpu.error());
     if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
         return configured;
     cameraGpuPipeline = std::move(gpu.value());
@@ -5391,12 +5351,10 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     VkQueryPoolCreateInfo timingInfo{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     timingInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
     timingInfo.queryCount = rendercore::GpuCameraPipeline::kTimingQueryCount;
-    if (vkCreateQueryPool(device, &timingInfo, nullptr,
-                          &cameraTimingPool) != VK_SUCCESS)
+    if (vkCreateQueryPool(device, &timingInfo, nullptr, &cameraTimingPool) != VK_SUCCESS)
         return Result<void, String>::Err("cannot create camera timing pool");
     VkPhysicalDeviceProperties properties{};
-    vkGetPhysicalDeviceProperties(contextAdapter->GetPhysicalDevice(),
-                                  &properties);
+    vkGetPhysicalDeviceProperties(contextAdapter->GetPhysicalDevice(), &properties);
     cameraTimestampPeriodNs = static_cast<f64>(properties.limits.timestampPeriod);
     cameraStratumSampleCounts.fill(0);
     cameraStratumRecordedAcquisition = std::numeric_limits<u64>::max();
@@ -5405,27 +5363,25 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     return Result<void, String>::Ok();
 }
 
-Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
-    SpectralMode mode, f64 wavelengthNm, f64 timeSeconds) const {
+Result<CameraData, String>
+ExternalRenderContext::Impl::CameraDataForCapture(SpectralMode mode, f64 wavelengthNm,
+                                                  f64 timeSeconds) const {
     Camera poseCamera = camera;
     // NaN means "the committed acquisition time"; explicit times serve the
     // time-stratified trace, where each layer poses the camera at its own
     // instant inside the exposure window.
-    const f64 poseTime = std::isnan(timeSeconds)
-                             ? cameraAcquisitionTimeSeconds
-                             : timeSeconds;
+    const f64 poseTime = std::isnan(timeSeconds) ? cameraAcquisitionTimeSeconds : timeSeconds;
     if (!cameraConfig.motion.keys.empty()) {
-        const auto pose = camera::CameraPoseAt(
-            cameraConfig.motion, poseTime);
-        if (!pose) return Result<CameraData, String>::Err(pose.error());
-        poseCamera = Camera(
-            glm::vec3(static_cast<f32>(pose.value().position[0]),
-                      static_cast<f32>(pose.value().position[1]),
-                      static_cast<f32>(pose.value().position[2])),
-            glm::vec3(static_cast<f32>(pose.value().lookAt[0]),
-                      static_cast<f32>(pose.value().lookAt[1]),
-                      static_cast<f32>(pose.value().lookAt[2])),
-            camera.GetUpReference(), camera.GetFovY(), camera.GetAspectRatio());
+        const auto pose = camera::CameraPoseAt(cameraConfig.motion, poseTime);
+        if (!pose)
+            return Result<CameraData, String>::Err(pose.error());
+        poseCamera = Camera(glm::vec3(static_cast<f32>(pose.value().position[0]),
+                                      static_cast<f32>(pose.value().position[1]),
+                                      static_cast<f32>(pose.value().position[2])),
+                            glm::vec3(static_cast<f32>(pose.value().lookAt[0]),
+                                      static_cast<f32>(pose.value().lookAt[1]),
+                                      static_cast<f32>(pose.value().lookAt[2])),
+                            camera.GetUpReference(), camera.GetFovY(), camera.GetAspectRatio());
         poseCamera.SetProjection(camera.GetProjection());
         poseCamera.SetOrthoHeight(camera.GetOrthoHeight());
     }
@@ -5433,12 +5389,12 @@ Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
         return Result<CameraData, String>::Err(
             "physical camera capture requires a perspective projection");
     const auto& optics = cameraConfig.optics;
-    const auto fovX = camera::HorizontalFovRadians(
-        optics.focalLengthMm, optics.pixelPitchUm, optics.sensorWidthPx);
-    if (!fovX) return Result<CameraData, String>::Err(fovX.error());
+    const auto fovX = camera::HorizontalFovRadians(optics.focalLengthMm, optics.pixelPitchUm,
+                                                   optics.sensorWidthPx);
+    if (!fovX)
+        return Result<CameraData, String>::Err(fovX.error());
     CameraData data = poseCamera.GetCameraData();
-    const f64 aspect = static_cast<f64>(optics.sensorWidthPx) /
-                       optics.sensorHeightPx;
+    const f64 aspect = static_cast<f64>(optics.sensorWidthPx) / optics.sensorHeightPx;
     data.aspectRatio = static_cast<f32>(aspect);
     data.fovScale = static_cast<f32>(std::tan(fovX.value() / 2.0) / aspect);
     data.spectral_mode = static_cast<u32>(mode);
@@ -5448,8 +5404,7 @@ Result<CameraData, String> ExternalRenderContext::Impl::CameraDataForCapture(
     return data;
 }
 
-Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
-    VkCommandBuffer cmd) {
+Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkCommandBuffer cmd) {
     auto& s = cameraScheduler;
     if (!s.drivesAcquisition) {
         s.drivesAcquisition = true;
@@ -5464,7 +5419,8 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
         // Applied here, between frames: the reset discards GPU detector
         // history, which is only safe once submitted work has drained. The
         // reset frame records no acquisition.
-        if (cameraGpuPipeline) cameraGpuPipeline->ResetState();
+        if (cameraGpuPipeline)
+            cameraGpuPipeline->ResetState();
         s.historyResetPending = false;
         s.historyEpoch += 1;
         s.hasCommittedAcquisition = false;
@@ -5491,8 +5447,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
         // slot and commit one acquisition there.
         const f64 slot = s.nextAcquisitionTimeSeconds;
         if (auto moved = owner->SetTimelineTime(slot); !moved) {
-            return Result<bool, String>(
-                typename Result<bool, String>::Err(moved.error()));
+            return Result<bool, String>(typename Result<bool, String>::Err(moved.error()));
         }
         cameraAcquisitionIndex = s.nextAcquisitionIndex;
         cameraAcquisitionTimeSeconds = slot;
@@ -5500,8 +5455,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
         cameraCaptureRecorded = false;
         if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
             cameraCapturePending = false;
-            return Result<bool, String>(
-                typename Result<bool, String>::Err(recorded.error()));
+            return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
         }
         cameraCapturePending = false;
         cameraCaptureRecorded = false;
@@ -5523,8 +5477,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(
         cameraCaptureRecorded = false;
         if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
             cameraCapturePending = false;
-            return Result<bool, String>(
-                typename Result<bool, String>::Err(recorded.error()));
+            return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
         }
         cameraCapturePending = false;
         cameraCaptureRecorded = false;
@@ -5550,8 +5503,10 @@ camera::CameraConfig ExternalRenderContext::Impl::EffectiveCameraConfig() const 
 void ExternalRenderContext::Impl::MaybeRunCameraAutoControl() {
     if (!cameraConfig.isp.autoExposure && !cameraConfig.isp.autoWhiteBalance)
         return;
-    if (!cameraAutoControlDue || !cameraGpuPipeline) return;
-    if (cameraAcquisitionIndex == cameraAutoLastAcquisition) return;
+    if (!cameraAutoControlDue || !cameraGpuPipeline)
+        return;
+    if (cameraAcquisitionIndex == cameraAutoLastAcquisition)
+        return;
     cameraAutoControlDue = false;
     cameraAutoLastAcquisition = cameraAcquisitionIndex;
     RunCameraAutoControl();
@@ -5559,72 +5514,65 @@ void ExternalRenderContext::Impl::MaybeRunCameraAutoControl() {
 
 void ExternalRenderContext::Impl::RunCameraAutoControl() {
     const camera::IspConfig& isp = cameraConfig.isp;
-    const bool photon =
-        cameraConfig.device.detector == camera::DetectorKind::Photon;
+    const bool photon = cameraConfig.device.detector == camera::DetectorKind::Photon;
     if (!photon) {
         // A thermal detector responds to absorbed power, not scene luminance:
         // AE has no physical meaning there, exactly as on the CPU chain.
         if (!cameraAutoThermalNoted) {
             cameraAutoThermalNoted = true;
-            QL_LOG_WARN(
-                "camera auto_exposure/auto_white_balance ignored: the thermal "
-                "detector responds to absorbed power, not scene luminance");
+            QL_LOG_WARN("camera auto_exposure/auto_white_balance ignored: the thermal "
+                        "detector responds to absorbed power, not scene luminance");
         }
         return;
     }
     const auto stats = cameraGpuPipeline->ReadIspStats();
     if (!stats) {
-        QL_LOG_WARN("camera auto control cannot read statistics: {}",
-                    stats.error());
+        QL_LOG_WARN("camera auto control cannot read statistics: {}", stats.error());
         return;
     }
     const auto& measured = stats.value();
     camera::AutoControlState previous;
     const bool fresh = cameraHostState.nextExposureSeconds <= 0.0;
-    previous.exposure = fresh ? cameraConfig.readout.exposureSeconds
-                              : cameraHostState.nextExposureSeconds;
-    previous.analogGain = fresh ? cameraConfig.readout.analogGain
-                                : cameraHostState.nextAnalogGain;
-    previous.whiteBalance = fresh ? cameraConfig.isp.whiteBalance
-                                  : cameraHostState.nextWhiteBalance;
+    previous.exposure =
+        fresh ? cameraConfig.readout.exposureSeconds : cameraHostState.nextExposureSeconds;
+    previous.analogGain = fresh ? cameraConfig.readout.analogGain : cameraHostState.nextAnalogGain;
+    previous.whiteBalance =
+        fresh ? cameraConfig.isp.whiteBalance : cameraHostState.nextWhiteBalance;
     camera::AutoControlInput input;
     input.lumaMean = measured.meanValue;
-    const f64 total = static_cast<f64>(measured.saturatedCount) +
-                      static_cast<f64>(measured.unsaturatedCount);
-    input.saturatedFraction = total > 0.0
-        ? static_cast<f64>(measured.saturatedCount) / total : 0.0;
+    const f64 total =
+        static_cast<f64>(measured.saturatedCount) + static_cast<f64>(measured.unsaturatedCount);
+    input.saturatedFraction = total > 0.0 ? static_cast<f64>(measured.saturatedCount) / total : 0.0;
     for (u32 c = 0; c < 3u; ++c)
         input.channelMeans[c] = measured.channelCounts[c] > 0u
-            ? static_cast<f64>(measured.channelSums[c]) /
-                  static_cast<f64>(measured.channelCounts[c])
-            : 0.0;
-    const camera::AutoControlState next = camera::StepAutoControl(
-        isp, previous, input, isp.autoExposure, isp.autoWhiteBalance);
+                                    ? static_cast<f64>(measured.channelSums[c]) /
+                                          static_cast<f64>(measured.channelCounts[c])
+                                    : 0.0;
+    const camera::AutoControlState next =
+        camera::StepAutoControl(isp, previous, input, isp.autoExposure, isp.autoWhiteBalance);
     cameraHostState.nextExposureSeconds = next.exposure;
     cameraHostState.nextAnalogGain = next.analogGain;
     cameraHostState.nextWhiteBalance = next.whiteBalance;
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordCameraDisplayReprocess(
-    VkCommandBuffer cmd) {
+Result<void, String>
+ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
     if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
-        return Result<void, String>::Err(
-            "camera display reprocess needs the GPU camera pipeline");
+        return Result<void, String>::Err("camera display reprocess needs the GPU camera pipeline");
     pendingUploads.Record(cmd);
-    return cameraGpuPipeline->RecordDisplayReprocess(
-        cmd, EffectiveCameraConfig());
+    return cameraGpuPipeline->RecordDisplayReprocess(cmd, EffectiveCameraConfig());
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
-    VkCommandBuffer cmd) {
+Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd) {
     if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
     // Deferred host writes land first in this submission; anything enqueued
     // by EnsureCameraResources below is caught by the second Record before
     // the strata loop.
     pendingUploads.Record(cmd);
-    if (auto ready = EnsureCameraResources(); !ready) return ready;
-    // M4-4: settle the previous committed tick's AE/AWB feedback first. The
+    if (auto ready = EnsureCameraResources(); !ready)
+        return ready;
+    // Settle the previous committed tick's AE/AWB feedback first. The
     // statistics readback is queue-ordered after the last submitted frame,
     // so the feedback the new tick consumes always describes the tick that
     // came before it. A same-tick re-record finds the index already marked
@@ -5632,8 +5580,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     MaybeRunCameraAutoControl();
     const camera::CameraConfig captureConfig = EffectiveCameraConfig();
     if (cameraAcquisitionIndex != cameraAutoAppliedAcquisition) {
-        if (auto applied = cameraGpuPipeline->ApplyEffectiveConfig(captureConfig);
-            !applied)
+        if (auto applied = cameraGpuPipeline->ApplyEffectiveConfig(captureConfig); !applied)
             return applied;
         cameraAutoAppliedAcquisition = cameraAcquisitionIndex;
     }
@@ -5643,18 +5590,17 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     cameraHostState.nextExposureSeconds = captureConfig.readout.exposureSeconds;
     cameraHostState.nextAnalogGain = captureConfig.readout.analogGain;
     cameraHostState.nextWhiteBalance = captureConfig.isp.whiteBalance;
-    const bool fastRgb = captureConfig.inputKind ==
-        camera::CameraInputKind::FastRgbApproximation;
-    const SpectralMode captureMode = fastRgb
-        ? SpectralMode::RGB : SpectralMode::CameraMeasurement;
-    const f64 centerNm = 0.5 * (cameraConfig.device.effectiveMinNm +
-                                cameraConfig.device.effectiveMaxNm);
+    const bool fastRgb = captureConfig.inputKind == camera::CameraInputKind::FastRgbApproximation;
+    const SpectralMode captureMode = fastRgb ? SpectralMode::RGB : SpectralMode::CameraMeasurement;
+    const f64 centerNm =
+        0.5 * (cameraConfig.device.effectiveMinNm + cameraConfig.device.effectiveMaxNm);
     const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);
-    const u32 randomSeed = camera::CounterRandomU32(
-        effectiveSeed, 0u, cameraAcquisitionIndex,
-        camera::NoiseClass::EmpiricalEffect, 0u);
-    if (cameraFullPerf) cameraFullPerf->BeginFrame(cmd);
-    if (cameraTracePerf) cameraTracePerf->BeginFrame(cmd);
+    const u32 randomSeed = camera::CounterRandomU32(effectiveSeed, 0u, cameraAcquisitionIndex,
+                                                    camera::NoiseClass::EmpiricalEffect, 0u);
+    if (cameraFullPerf)
+        cameraFullPerf->BeginFrame(cmd);
+    if (cameraTracePerf)
+        cameraTracePerf->BeginFrame(cmd);
     const u32 physicalW = cameraConfig.optics.sensorWidthPx;
     const u32 physicalH = cameraConfig.optics.sensorHeightPx;
     // Raygen progressively averages the device rate in binding 28. These
@@ -5666,52 +5612,45 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     // would launch 32 full 1080p traces for one preview acquisition.
     const u32 spectralSamples = fastRgb ? 1u : std::max(spp, 1u);
 
-    // M4-1 temporal stratification: cut the exposure window into T strata and
+    // Temporal stratification: cut the exposure window into T strata and
     // trace each batch of samples at its own instant, the scene posed by the
     // timeline and the camera by the motion track at that instant. The
     // viewport pose is restored when the loop ends, on every exit path.
     u32 strataCount = 1;
     std::vector<f64> stratumTimes;
     if (!fastRgb) {
-        const u32 requested = std::clamp<u32>(
-            cameraConfig.quality.gpuTimePositions, 1u,
-            rendercore::kCameraTimeStrataMax);
-        const bool anythingMoves = !cameraConfig.motion.keys.empty() ||
-                                   timeline.HasMotion();
-        if(anythingMoves && rendercore::FusionOpticsActive(fusionTransport))
-            return Result<void,String>::Err("fusion optical preview requires a frozen scene and camera");
-        strataCount = anythingMoves
-                          ? std::min<u32>(requested, spectralSamples)
-                          : 1u;
+        const u32 requested = std::clamp<u32>(cameraConfig.quality.gpuTimePositions, 1u,
+                                              rendercore::kCameraTimeStrataMax);
+        const bool anythingMoves = !cameraConfig.motion.keys.empty() || timeline.HasMotion();
+        if (anythingMoves && rendercore::FusionOpticsActive(fusionTransport))
+            return Result<void, String>::Err(
+                "fusion optical preview requires a frozen scene and camera");
+        strataCount = anythingMoves ? std::min<u32>(requested, spectralSamples) : 1u;
         if (cameraStratumRecordedAcquisition != cameraAcquisitionIndex) {
             cameraStratumSampleCounts.fill(0);
             cameraStratumRecordedAcquisition = cameraAcquisitionIndex;
         }
         // Zero the transparent/specular counters for this acquisition.
-        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0,
-                        VK_WHOLE_SIZE, 0);
+        vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
         // This recording will publish fresh report counters at the end; the
         // reset keeps a getter mid-flight pointed at the previous report.
         if (cameraDynamicReadbackEvent != VK_NULL_HANDLE)
-            vkCmdResetEvent(cmd, cameraDynamicReadbackEvent,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT);
+            vkCmdResetEvent(cmd, cameraDynamicReadbackEvent, VK_PIPELINE_STAGE_TRANSFER_BIT);
         VkBufferMemoryBarrier zeroed{};
         zeroed.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         zeroed.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        zeroed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                               VK_ACCESS_SHADER_WRITE_BIT;
+        zeroed.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         zeroed.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         zeroed.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         zeroed.buffer = cameraDynamicCounterBuffer->GetHandle();
         zeroed.offset = 0;
         zeroed.size = VK_WHOLE_SIZE;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
-                             0, nullptr, 1, &zeroed, 0, nullptr);
+                             VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 0, nullptr, 1,
+                             &zeroed, 0, nullptr);
     }
-    stratumTimes = camera::ExposureStratumTimes(
-        cameraAcquisitionTimeSeconds, captureConfig.readout.exposureSeconds,
-        strataCount);
+    stratumTimes = camera::ExposureStratumTimes(cameraAcquisitionTimeSeconds,
+                                                captureConfig.readout.exposureSeconds, strataCount);
     const f64 restoreTime = timeline.Current_s();
     struct TimelineRestore {
         Impl* self;
@@ -5722,10 +5661,8 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         // synchronous refit here would leave the recorded strata tracing the
         // restore pose instead of their own.
         ~TimelineRestore() {
-            if (const auto restored = self->RecordTimelinePose(cmd, time);
-                !restored)
-                QL_LOG_ERROR("camera stratum pose restore failed: {}",
-                             restored.error());
+            if (const auto restored = self->RecordTimelinePose(cmd, time); !restored)
+                QL_LOG_ERROR("camera stratum pose restore failed: {}", restored.error());
         }
     } restoreGuard{this, cmd, restoreTime};
 
@@ -5734,8 +5671,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     // Writes enqueued while resources were ensured (camera lighting params,
     // the projection block) must reach the GPU before the first trace.
     pendingUploads.Record(cmd);
-    std::array<rendercore::DynamicLayerCamera,
-               rendercore::kCameraTimeStrataMax> layerCameras{};
+    std::array<rendercore::DynamicLayerCamera, rendercore::kCameraTimeStrataMax> layerCameras{};
     u32 totalTraced = 0;
     for (u32 stratum = 0; stratum < strataCount; ++stratum) {
         const f64 stratumTime = stratumTimes[stratum];
@@ -5752,27 +5688,26 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         // it between the traces of the strata around it.
         if (const auto posed = RecordTimelinePose(cmd, stratumTime); !posed)
             return posed;
-        const auto pose = CameraDataForCapture(captureMode, centerNm,
-                                               stratumTime);
-        if (!pose) return Result<void, String>::Err(pose.error());
+        const auto pose = CameraDataForCapture(captureMode, centerNm, stratumTime);
+        if (!pose)
+            return Result<void, String>::Err(pose.error());
         pipeline->SetCameraData(pose.value());
-        if(scene && rendercore::FusionOpticsActive(fusionTransport)) {
-            const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
-            if(!initial)return Result<void,String>::Err(initial.error());
+        if (scene && rendercore::FusionOpticsActive(fusionTransport)) {
+            const auto initial =
+                rendercore::InitialFusionMedia(*scene, fusionTransport, pose.value().origin);
+            if (!initial)
+                return Result<void, String>::Err(initial.error());
             pipeline->SetFusionInitialMedia(*initial);
         }
         pipeline->SetTimeStratum(stratum, strataCount);
         const auto& cameraData = pose.value();
         auto& frame = layerCameras[stratum];
-        frame.origin = {cameraData.origin.x, cameraData.origin.y,
-                        cameraData.origin.z, 0.0f};
-        frame.forward = {cameraData.forward.x, cameraData.forward.y,
-                         cameraData.forward.z, 0.0f};
-        frame.right = {cameraData.right.x, cameraData.right.y,
-                       cameraData.right.z, 0.0f};
+        frame.origin = {cameraData.origin.x, cameraData.origin.y, cameraData.origin.z, 0.0f};
+        frame.forward = {cameraData.forward.x, cameraData.forward.y, cameraData.forward.z, 0.0f};
+        frame.right = {cameraData.right.x, cameraData.right.y, cameraData.right.z, 0.0f};
         frame.up = {cameraData.up.x, cameraData.up.y, cameraData.up.z, 0.0f};
-        frame.params = {cameraData.fovScale, cameraData.aspectRatio,
-                        static_cast<f32>(stratumTime), 0.0f};
+        frame.params = {cameraData.fovScale, cameraData.aspectRatio, static_cast<f32>(stratumTime),
+                        0.0f};
 
         // Round-robin with the remainder to the earlier strata: each stratum
         // gets spectralSamples/T paths, one layer of the measurement array
@@ -5785,35 +5720,32 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         const u32 running = cameraStratumSampleCounts[stratum];
         for (u32 sample = 0; sample < stratumSamples; ++sample) {
             const u32 sampleIndex = running + sample;
-            pipeline->SetSamplingParams(
-                static_cast<u32>(cameraAcquisitionIndex), sampleIndex,
-                stratumSamples,
-                randomSeed ^ (sampleIndex * 0x9e3779b9u), effectiveSeed);
+            pipeline->SetSamplingParams(static_cast<u32>(cameraAcquisitionIndex), sampleIndex,
+                                        stratumSamples, randomSeed ^ (sampleIndex * 0x9e3779b9u),
+                                        effectiveSeed);
             pipeline->TraceRays(cmd, physicalW, physicalH);
             if (sample + 1u < stratumSamples || stratum + 1u < strataCount) {
                 VkMemoryBarrier accumulation{};
                 accumulation.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
                 accumulation.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
-                                             VK_ACCESS_SHADER_WRITE_BIT;
-                vkCmdPipelineBarrier(
-                    cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                    VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0,
-                    1, &accumulation, 0, nullptr, 0, nullptr);
+                accumulation.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+                vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, 0, 1,
+                                     &accumulation, 0, nullptr, 0, nullptr);
             }
         }
         cameraStratumSampleCounts[stratum] = running + stratumSamples;
         totalTraced += stratumSamples;
     }
-    if (cameraTracePerf) cameraTracePerf->EndFrame(cmd);
+    if (cameraTracePerf)
+        cameraTracePerf->EndFrame(cmd);
     VkMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(
-        cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-        1, &barrier, 0, nullptr, 0, nullptr);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &barrier, 0, nullptr, 0,
+                         nullptr);
 
     // Object-motion approximation for the report: the mean adjacent-stratum
     // displacement of the scene's animated nodes, measured on the trajectory
@@ -5825,21 +5757,19 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         u64 pairs = 0;
         for (const auto& animated : timeline.Animated()) {
             for (u32 k = 0; k + 1 < strataCount; ++k) {
-                const glm::vec3 a = glm::vec3(
-                    timeline.PoseAt(animated, stratumTimes[k])[3]);
-                const glm::vec3 b = glm::vec3(
-                    timeline.PoseAt(animated, stratumTimes[k + 1])[3]);
+                const glm::vec3 a = glm::vec3(timeline.PoseAt(animated, stratumTimes[k])[3]);
+                const glm::vec3 b = glm::vec3(timeline.PoseAt(animated, stratumTimes[k + 1])[3]);
                 accumulated += static_cast<f64>(glm::length(b - a));
                 ++pairs;
             }
         }
-        if (pairs > 0) cameraLastObjectMotion = accumulated / pairs;
+        if (pairs > 0)
+            cameraLastObjectMotion = accumulated / pairs;
     }
 
     rendercore::DynamicExposureInput dynamic;
     const auto& readoutConfig = captureConfig.readout;
-    const bool rolling = readoutConfig.shutter ==
-                         camera::ShutterKind::Rolling;
+    const bool rolling = readoutConfig.shutter == camera::ShutterKind::Rolling;
     dynamic.strataRate = cameraMeasurementImage.get();
     dynamic.strataDepth = cameraMeasurementDepthImage.get();
     dynamic.layerCameras = layerCameras.data();
@@ -5847,21 +5777,21 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     dynamic.firstRowMidSeconds = cameraAcquisitionTimeSeconds;
     dynamic.exposureSeconds = readoutConfig.exposureSeconds;
     dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
-    const rendercore::GpuCameraPipeline::TimingQueries timing{
-        cameraTimingPool, 0u};
-    const auto readout = fastRgb
-        ? cameraGpuPipeline->RecordFastRgbMeasurement(
-              cmd, *cameraBaselineImage, cameraAcquisitionIndex,
-              cameraAcquisitionTimeSeconds)
-        : cameraGpuPipeline->RecordMeasurement(
-              cmd, *cameraMeasurementImage, cameraAcquisitionIndex,
-              cameraAcquisitionTimeSeconds, timing, dynamic);
-    if (cameraFullPerf) cameraFullPerf->EndFrame(cmd);
-    if (!readout) return readout;
+    const rendercore::GpuCameraPipeline::TimingQueries timing{cameraTimingPool, 0u};
+    const auto readout =
+        fastRgb
+            ? cameraGpuPipeline->RecordFastRgbMeasurement(
+                  cmd, *cameraBaselineImage, cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
+            : cameraGpuPipeline->RecordMeasurement(cmd, *cameraMeasurementImage,
+                                                   cameraAcquisitionIndex,
+                                                   cameraAcquisitionTimeSeconds, timing, dynamic);
+    if (cameraFullPerf)
+        cameraFullPerf->EndFrame(cmd);
+    if (!readout)
+        return readout;
     cameraLastAcquisitionSamples = totalTraced;
     cameraLastStrataCount = strataCount;
-    if (!fastRgb && cameraDynamicReadback &&
-        cameraDynamicReadbackEvent != VK_NULL_HANDLE) {
+    if (!fastRgb && cameraDynamicReadback && cameraDynamicReadbackEvent != VK_NULL_HANDLE) {
         // Both counter sets ride one 32-byte readback, copied here -- after
         // the trace and the compositor have written them -- so the report
         // getter only checks the event instead of draining the queue.
@@ -5874,25 +5804,22 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         raygenReady.buffer = cameraDynamicCounterBuffer->GetHandle();
         raygenReady.offset = 0;
         raygenReady.size = VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(
-            cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-            0, nullptr, 1, &raygenReady, 0, nullptr);
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &raygenReady, 0,
+                             nullptr);
         VkBufferCopy copy{};
         copy.size = 4u * sizeof(u32);
         vkCmdCopyBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(),
                         cameraDynamicReadback->GetHandle(), 1, &copy);
-        cameraGpuPipeline->RecordDynamicCounterCopy(
-            cmd, cameraDynamicReadback->GetHandle(), 4u * sizeof(u32));
+        cameraGpuPipeline->RecordDynamicCounterCopy(cmd, cameraDynamicReadback->GetHandle(),
+                                                    4u * sizeof(u32));
         VkMemoryBarrier hostRead{};
         hostRead.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         hostRead.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_HOST_BIT, 0,
-                             1, &hostRead, 0, nullptr, 0, nullptr);
-        vkCmdSetEvent(cmd, cameraDynamicReadbackEvent,
-                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1,
+                             &hostRead, 0, nullptr, 0, nullptr);
+        vkCmdSetEvent(cmd, cameraDynamicReadbackEvent, VK_PIPELINE_STAGE_TRANSFER_BIT);
         cameraDynamicSensorWidth = cameraConfig.optics.sensorWidthPx;
         cameraDynamicSensorHeight = cameraConfig.optics.sensorHeightPx;
         cameraDynamicGpuTimePositions = cameraConfig.quality.gpuTimePositions;
@@ -5901,42 +5828,45 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
-    VkCommandBuffer cmd) {
+Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(VkCommandBuffer cmd) {
     pendingUploads.Record(cmd);
-    if (auto ready = EnsureCameraResources(); !ready) return ready;
-    const auto& optics=cameraConfig.optics;
-    const auto projection=camera::ResolveProjection(optics.projection,
-        optics.sensorWidthPx,optics.sensorHeightPx,optics.focalLengthMm,optics.pixelPitchUm);
-    if(!projection) return Result<void,String>::Err(projection.error());
-    pipeline->SetCameraProjection(&*projection,2u);
-    const f64 centerNm = 0.5 * (cameraConfig.device.effectiveMinNm +
-                                 cameraConfig.device.effectiveMaxNm);
+    if (auto ready = EnsureCameraResources(); !ready)
+        return ready;
+    const auto& optics = cameraConfig.optics;
+    const auto projection =
+        camera::ResolveProjection(optics.projection, optics.sensorWidthPx, optics.sensorHeightPx,
+                                  optics.focalLengthMm, optics.pixelPitchUm);
+    if (!projection)
+        return Result<void, String>::Err(projection.error());
+    pipeline->SetCameraProjection(&*projection, RayTracingPipeline::kProjectionSetObserver);
+    const f64 centerNm =
+        0.5 * (cameraConfig.device.effectiveMinNm + cameraConfig.device.effectiveMaxNm);
     const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);
-    if (!pose) return Result<void, String>::Err(pose.error());
+    if (!pose)
+        return Result<void, String>::Err(pose.error());
     const ObserverSetScope observerSet{*pipeline, true};
-    if(scene && rendercore::FusionOpticsActive(fusionTransport)) {
-        const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
-        if(!initial)return Result<void,String>::Err(initial.error());
+    if (scene && rendercore::FusionOpticsActive(fusionTransport)) {
+        const auto initial =
+            rendercore::InitialFusionMedia(*scene, fusionTransport, pose.value().origin);
+        if (!initial)
+            return Result<void, String>::Err(initial.error());
         pipeline->SetFusionInitialMedia(*initial);
     }
     pipeline->SetCameraData(pose.value());
     pipeline->SetSpecConstants(static_cast<u32>(SpectralMode::Single), false);
     const u32 effectiveSeed = camera::DeviceRandomSeed(cameraConfig);
-    const u32 randomSeed = camera::CounterRandomU32(
-        effectiveSeed, 0u, cameraAcquisitionIndex,
-        camera::NoiseClass::EmpiricalEffect, 0u);
-    pipeline->SetSamplingParams(
-        static_cast<u32>(cameraAcquisitionIndex), 0u, 1u,
-        randomSeed, effectiveSeed);
+    const u32 randomSeed = camera::CounterRandomU32(effectiveSeed, 0u, cameraAcquisitionIndex,
+                                                    camera::NoiseClass::EmpiricalEffect, 0u);
+    pipeline->SetSamplingParams(static_cast<u32>(cameraAcquisitionIndex), 0u, 1u, randomSeed,
+                                effectiveSeed);
     // Writes enqueued while resources were ensured (camera lighting params,
     // the projection block) must reach the GPU before the trace.
     pendingUploads.Record(cmd);
-    if (perfLogger) perfLogger->BeginFrame(cmd);
-    pipeline->TraceRays(cmd,
-        cameraConfig.optics.sensorWidthPx,
-        cameraConfig.optics.sensorHeightPx);
-    if (perfLogger) perfLogger->EndFrame(cmd);
+    if (perfLogger)
+        perfLogger->BeginFrame(cmd);
+    pipeline->TraceRays(cmd, cameraConfig.optics.sensorWidthPx, cameraConfig.optics.sensorHeightPx);
+    if (perfLogger)
+        perfLogger->EndFrame(cmd);
     return Result<void, String>::Ok();
 }
 
@@ -6078,8 +6008,7 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
     // SDK install beside a cdf from the source tree may not be the same
     // build. Search by candidate base, not by file.
     std::vector<u32> histogramCode, cdfCode, applyCode;
-    for (const auto& basePath :
-         rendercore::SpirvSearchPaths("clahe_histogram.spv")) {
+    for (const auto& basePath : rendercore::SpirvSearchPaths("clahe_histogram.spv")) {
         // Convert path to string and replace "histogram" with cdf/apply
         String histPath = basePath.string();
         String cdfPath = histPath;
@@ -6380,8 +6309,7 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
 }
 
 void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
-    if (!claheInitialized || claheDescriptorSet == VK_NULL_HANDLE ||
-        !contextAdapter) {
+    if (!claheInitialized || claheDescriptorSet == VK_NULL_HANDLE || !contextAdapter) {
         return;
     }
     // Replacing a descriptor-backed image a submitted frame may still read;
@@ -6432,16 +6360,15 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
         }
     }
     if (displayRange) {
-        auto range = displayRange->Compute(
-            *input, extent.width, extent.height,
-            displayParams.percentileLow, displayParams.percentileHigh);
+        auto range =
+            displayRange->Compute(*input, extent.width, extent.height, displayParams.percentileLow,
+                                  displayParams.percentileHigh);
         if (range) {
             outMin = range.value().min;
             outMax = range.value().max;
             return;
         }
-        QL_LOG_WARN("GPU display range failed; using full image readback: {}",
-                    range.error());
+        QL_LOG_WARN("GPU display range failed; using full image readback: {}", range.error());
     }
 
     // Read back the CLAHE input image -- the camera's corrected product when
@@ -6829,7 +6756,8 @@ void ExternalRenderContext::SetAtmosphere(const AtmosphereNNConfig& config) {
     m_impl->atmosModelPack.reset();
     m_impl->atmosBakeKey = 0;  // Force rebake (or disable-upload) next frame
     m_impl->cameraResourcesDirty = true;
-    if (m_impl->cameraConfig.enabled) m_impl->cameraCapturePending = true;
+    if (m_impl->cameraConfig.enabled)
+        m_impl->cameraCapturePending = true;
 
     if (config.enabled && !config.modelPackDir.empty()) {
         // Throws if the directory does not exist -- hard error, no fallback

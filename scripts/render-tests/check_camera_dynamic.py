@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the M4-1 GPU dynamic-exposure compositor against an independent twin.
+"""Check the GPU dynamic-exposure compositor against an independent twin.
 
 The GPU preview integrates a moving exposure by tracing T time strata
 (binding 28 layer array) and reprojecting them through the anchor depth

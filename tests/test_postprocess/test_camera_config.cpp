@@ -852,7 +852,7 @@ TEST(CameraConfigIOTest, NondefaultCameraSettingsSurviveTypedRoundTrip) {
     EXPECT_EQ(got.motion.keys, authored.motion.keys);
 }
 
-// Round-trip audit (M5-2): the fields NOT exercised by
+// Round-trip audit: the fields NOT exercised by
 // NondefaultCameraSettingsSurviveTypedRoundTrip, each set to a distinct
 // non-default value and compared field by field after serialize -> parse.
 // asymmetric finds from the audit get fixed in CameraConfigIO, not here.

@@ -157,7 +157,7 @@ void CopyThermalPair(VkCommandBuffer cmd,
 // count); row 4 gamma/denoise/sharpen; row 5 percentiles/tone/palette; row 6
 // the dynamic exposure/gain/well/ADC ceiling the statistics passes read;
 // row 7 the HSV grading (hue offset degrees, saturation scale, value gamma,
-// empirical-noise sigma); row 8.x the drift sigma. Configure and every M4-4
+// empirical-noise sigma); row 8.x the drift sigma. Configure and every AE/AWB
 // effective-config re-upload share this so the two paths cannot drift apart.
 void BuildIspRows(const camera::CameraConfig& config,
                   std::array<std::array<f32, 4>, 9>& rows, u32& flags) {
@@ -208,7 +208,7 @@ void BuildIspRows(const camera::CameraConfig& config,
 }
 
 // Copies the statistics buffer (previous-frame AGC window + histogram) in
-// the direction the M4-2 checkpoint needs, with the same access hand-off as
+// the direction the checkpoint needs, with the same access hand-off as
 // the image pair above.
 void CopyStatsBuffer(VkCommandBuffer cmd, const GpuBuffer& source,
                      const GpuBuffer& destination,
@@ -354,7 +354,7 @@ struct GpuCameraPipeline::Impl {
     std::unique_ptr<GpuImage> expectedElectrons, preAdcElectrons;
     std::unique_ptr<GpuImage> linearRgb, colorRgb, agcSource;  // ISP stage images
     std::array<std::unique_ptr<GpuImage>, 2> thermalState;
-    std::array<std::unique_ptr<GpuImage>, 2> thermalCheckpoint; // M4-2 history snapshot
+    std::array<std::unique_ptr<GpuImage>, 2> thermalCheckpoint; // acquisition-history snapshot
     std::unique_ptr<GpuImage> randomVectors;
     std::unique_ptr<GpuBuffer> configBuffer, nucGainBuffer, nucOffsetBuffer;
     std::unique_ptr<GpuBuffer> layerCameraBuffer;   // binding 10, per-stratum frames
@@ -364,7 +364,7 @@ struct GpuCameraPipeline::Impl {
     std::unique_ptr<GpuBuffer> ispStatsBuffer;      // binding 14, 264 x u32
     std::unique_ptr<GpuBuffer> cdfBuffer;           // binding 15, 256 x f32
     std::unique_ptr<GpuBuffer> tileStatsBuffer;     // binding 16, per-tile float4
-    std::unique_ptr<GpuBuffer> ispStatsCheckpoint;  // M4-2 previous-frame AGC window snapshot
+    std::unique_ptr<GpuBuffer> ispStatsCheckpoint;  // previous-frame AGC window snapshot (acquisition history)
 
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
@@ -608,7 +608,7 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         !tileStatsBuffer->IsValid())
         return Result<void, String>::Err(
             "cannot allocate GPU camera dynamic buffers");
-    // M4-2: the checkpoint twin of the statistics buffer. The previous
+    // Acquisition history: the checkpoint twin of the statistics buffer. The previous
     // frame's Linear-AGC window rides in the stats slots; without a snapshot
     // a replayed tick's display tone would read the discarded run's window
     // and the replay would not be bit-identical.
@@ -924,7 +924,7 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
 
     // The ISP configuration (binding 12) is one row of float4 per parameter
     // group; see BuildIspRows for the layout. The buffer is CPU_TO_GPU so the
-    // M4-4 AE/AWB loop can re-upload the dynamic rows (white balance, row 6
+    // AE/AWB loop can re-upload the dynamic rows (white balance, row 6
     // exposure/gain, HSV) per acquisition through ApplyEffectiveConfig. The
     // defect list (binding 13) is a uint2 array with a one-element
     // placeholder when empty, matching the NUC map convention.
@@ -1333,7 +1333,7 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     // for a single stratum: the PSF pair it feeds expects the compositor's
     // output image, and the caller's strata may be array views a 2D-typed PSF
     // set cannot bind. Without strata the unstratified path reads the caller's
-    // measured rate directly, exactly as before M4-1.
+    // measured rate directly, exactly as before temporal stratification.
     const bool stratified = dynamic.strataRate != nullptr &&
                             dynamic.strataDepth != nullptr &&
                             dynamic.layerCameras != nullptr;
@@ -1495,7 +1495,7 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
                             push);
     StorageBarrier(cmd);
     stamp(4);
-    // M4-4: display HSV grading and the empirical display effects, in place
+    // Display HSV grading and the empirical display effects, in place
     // on the display image. Skipped entirely when every HSV parameter sits at
     // its default (the kFlagHsv bit), so an untouched chain is bit-identical
     // to the pre-HSV pipeline.

@@ -1312,7 +1312,7 @@ String CameraConfigToToml(const camera::CameraConfig& camera) {
     out << "wavelength_samples = " << quality.wavelengthSamples << '\n';
     out << "time_samples = " << quality.timeSamples << '\n';
     out << "pixel_samples = " << quality.pixelSamples << '\n';
-    // M4-1: consumed by the GPU preview's time-stratified exposure trace
+    // Consumed by the GPU preview's time-stratified exposure trace
     // (min with spp layers); the CPU reference uses time_samples instead.
     out << "gpu_time_positions = " << quality.gpuTimePositions << '\n';
     out << "noise_free = " << (quality.noiseFree ? "true" : "false") << "\n\n";

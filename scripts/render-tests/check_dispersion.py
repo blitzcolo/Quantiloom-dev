@@ -82,6 +82,10 @@ def run(name, dispersion, cri):
     shutil.copy2(produced, dest)
     produced.unlink(missing_ok=True)
     (ROOT / f"_dispersion_{name}.png").unlink(missing_ok=True)
+    # Sidecars the render writes next to the output; .exr/.png are
+    # gitignored, these are not.
+    (ROOT / f"_dispersion_{name}.metadata.json").unlink(missing_ok=True)
+    (ROOT / f"_dispersion_{name}.replay.toml").unlink(missing_ok=True)
 
     with OpenEXR.File(str(dest)) as f:
         ch = f.channels()

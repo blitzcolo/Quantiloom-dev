@@ -21,7 +21,7 @@
  *     whole-image global atomics: the merge is a coalesced read with no
  *     contention.
  *
- * The per-channel rows serve the M4-4 AWB closed loop: the channel means are
+ * The per-channel rows serve the AWB closed loop: the channel means are
  * the unsaturated display-domain scalar gathered per CFA/device channel
  * BEFORE white balance, exactly CameraIsp::ComputeAcquisitionStats on the
  * CPU. The channel sums (float bits) and counts ride in stat slots 263-268.

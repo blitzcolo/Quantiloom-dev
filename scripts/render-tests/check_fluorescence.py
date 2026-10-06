@@ -130,6 +130,10 @@ def render(yield_, lut=FLAT_LUT, mode="vis_hero", excitation=DYE_EX, emission=DY
         pixels = ch[next(iter(ch))].pixels.astype(np.float64)
     out.unlink(missing_ok=True)
     (ROOT / "_fluor_tmp.png").unlink(missing_ok=True)
+    # Sidecars the render writes next to the output; .exr/.png are
+    # gitignored, these are not.
+    (ROOT / "_fluor_tmp.metadata.json").unlink(missing_ok=True)
+    (ROOT / "_fluor_tmp.replay.toml").unlink(missing_ok=True)
     return pixels[..., :3] if pixels.ndim == 3 else pixels
 
 

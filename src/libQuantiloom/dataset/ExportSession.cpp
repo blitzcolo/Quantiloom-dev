@@ -20,14 +20,14 @@
 #include <set>
 #include <stdexcept>
 #ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
 #else
-#include <sys/file.h>
-#include <fcntl.h>
-#include <unistd.h>
+#    include <sys/file.h>
+#    include <fcntl.h>
+#    include <unistd.h>
 #endif
 
 namespace quantiloom::dataset {
@@ -45,7 +45,8 @@ public:
     ReservationGate() {
 #ifdef _WIN32
         handle = CreateMutexW(nullptr, FALSE, L"Local\\QuantiloomExportReservationsV1");
-        if (!handle) throw std::runtime_error("cannot create export reservation gate");
+        if (!handle)
+            throw std::runtime_error("cannot create export reservation gate");
         const auto status = WaitForSingleObject(handle, INFINITE);
         if (status != WAIT_OBJECT_0 && status != WAIT_ABANDONED) {
             CloseHandle(handle);
@@ -54,7 +55,8 @@ public:
 #else
         const auto path = fs::temp_directory_path() / "quantiloom-export-reservations-v1";
         handle = ::open(path.c_str(), O_CREAT | O_RDWR, 0600);
-        if (handle < 0) throw std::runtime_error("cannot open export reservation gate");
+        if (handle < 0)
+            throw std::runtime_error("cannot open export reservation gate");
         if (flock(handle, LOCK_EX) != 0) {
             ::close(handle);
             throw std::runtime_error("cannot acquire export reservation gate");
@@ -72,6 +74,7 @@ public:
     }
     ReservationGate(const ReservationGate&) = delete;
     ReservationGate& operator=(const ReservationGate&) = delete;
+
 private:
 #ifdef _WIN32
     HANDLE handle = nullptr;
@@ -87,26 +90,37 @@ fs::path ClaimPath(const fs::path& path) {
 }
 
 String Fold(String name) {
-    for (auto& c : name) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+    for (auto& c : name)
+        if (c >= 'A' && c <= 'Z')
+            c = static_cast<char>(c + ('a' - 'A'));
     return name;
 }
 bool Basename(const String& name) {
-    if (name.empty()) return false;
-    for (unsigned char c : name) if (c < 32) return false;
+    if (name.empty())
+        return false;
+    for (unsigned char c : name)
+        if (c < 32)
+            return false;
     auto device = name.substr(0, name.find('.'));
-    for (auto& c : device) if (c >= 'a' && c <= 'z') c = static_cast<char>(c - ('a' - 'A'));
+    for (auto& c : device)
+        if (c >= 'a' && c <= 'z')
+            c = static_cast<char>(c - ('a' - 'A'));
     if (device == "CON" || device == "PRN" || device == "AUX" || device == "NUL" ||
         (device.size() == 4 && (device.starts_with("COM") || device.starts_with("LPT")) &&
-         device[3] >= '1' && device[3] <= '9')) return false;
+         device[3] >= '1' && device[3] <= '9'))
+        return false;
     return name != "." && name != ".." && name.find_first_of("<>\"|?*") == String::npos &&
-           name.find_first_of("/\\:") == String::npos &&
-           name.back() != '.' && name.back() != ' ';
+           name.find_first_of("/\\:") == String::npos && name.back() != '.' && name.back() != ' ';
 }
 bool RelativeArtifact(const String& name) {
-    if (name.empty() || name.front() == '/' || name.find('\\') != String::npos) return false;
-    if (fs::path(name).lexically_normal().generic_string() != name) return false;
+    if (name.empty() || name.front() == '/' || name.find('\\') != String::npos)
+        return false;
+    if (fs::path(name).lexically_normal().generic_string() != name)
+        return false;
     for (const auto& part : fs::path(name)) {
-        if (!Basename(part.string()) || Fold(part.string()) == ".internal" || Fold(part.string()).ends_with(lockSuffix)) return false;
+        if (!Basename(part.string()) || Fold(part.string()) == ".internal" ||
+            Fold(part.string()).ends_with(lockSuffix))
+            return false;
     }
     return true;
 }
@@ -120,28 +134,34 @@ void CheckParents(const fs::path& root, const fs::path& name) {
 }
 String Digest(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);
-    if (!file) throw std::runtime_error("cannot read " + path.string());
+    if (!file)
+        throw std::runtime_error("cannot read " + path.string());
     core::Sha256 hash;
     std::array<char, 65536> buffer;
     while (file) {
         file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
         hash.Update(buffer.data(), static_cast<usize>(file.gcount()));
     }
-    if (!file.eof()) throw std::runtime_error("read failed: " + path.string());
+    if (!file.eof())
+        throw std::runtime_error("read failed: " + path.string());
     return hash.FinalizeHex();
 }
 void WriteText(const fs::path& path, const String& text) {
     std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) throw std::runtime_error("cannot write " + path.string());
+    if (!file)
+        throw std::runtime_error("cannot write " + path.string());
     file.write(text.data(), static_cast<std::streamsize>(text.size()));
     file.close();
-    if (!file) throw std::runtime_error("write failed: " + path.string());
+    if (!file)
+        throw std::runtime_error("write failed: " + path.string());
 }
 String NewId() {
     std::random_device random;
     core::Sha256 hash;
-    for (int i = 0; i < 8; ++i) hash.UpdateU32(random());
-    hash.UpdateU64(static_cast<u64>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+    for (int i = 0; i < 8; ++i)
+        hash.UpdateU32(random());
+    hash.UpdateU64(
+        static_cast<u64>(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
     return hash.FinalizeHex();
 }
 std::map<String, String> ImageSummary(const fs::path& path, Json& dimensions) {
@@ -151,11 +171,16 @@ std::map<String, String> ImageSummary(const fs::path& path, Json& dimensions) {
         Imf::InputFile file(path.string().c_str());
         const auto window = file.header().dataWindow();
         u32 channels = 0;
-        for (auto it = file.header().channels().begin(); it != file.header().channels().end(); ++it) ++channels;
-        dimensions = {{"width", window.max.x-window.min.x+1}, {"height", window.max.y-window.min.y+1}, {"channels", channels}};
-        for (const char* key : {"quantiloom_record_id", "quantiloom_product_id", "quantiloom_sidecar"}) {
+        for (auto it = file.header().channels().begin(); it != file.header().channels().end(); ++it)
+            ++channels;
+        dimensions = {{"width", window.max.x - window.min.x + 1},
+                      {"height", window.max.y - window.min.y + 1},
+                      {"channels", channels}};
+        for (const char* key :
+             {"quantiloom_record_id", "quantiloom_product_id", "quantiloom_sidecar"}) {
             const auto* attribute = file.header().findTypedAttribute<Imf::StringAttribute>(key);
-            if (attribute) summary[key] = attribute->value();
+            if (attribute)
+                summary[key] = attribute->value();
         }
     } else if (extension == ".png") {
         std::ifstream input(path, std::ios::binary);
@@ -167,23 +192,34 @@ std::map<String, String> ImageSummary(const fs::path& path, Json& dimensions) {
         while (input && !ended) {
             unsigned char header[8]{};
             input.read(reinterpret_cast<char*>(header), 8);
-            if (!input) break;
+            if (!input)
+                break;
             const u32 size = (u32(header[0]) << 24) | (u32(header[1]) << 16) |
                              (u32(header[2]) << 8) | u32(header[3]);
             const String type(reinterpret_cast<char*>(header + 4), 4);
             if (type == "IHDR") {
-                if (size != 13 || !dimensions.is_null()) throw std::runtime_error("invalid PNG image header");
+                if (size != 13 || !dimensions.is_null())
+                    throw std::runtime_error("invalid PNG image header");
                 unsigned char data[13]{};
                 input.read(reinterpret_cast<char*>(data), 13);
-                const auto u32be = [](const unsigned char* p) { return (u32(p[0])<<24)|(u32(p[1])<<16)|(u32(p[2])<<8)|u32(p[3]); };
-                const u32 channels = data[9] == 0 || data[9] == 3 ? 1 : data[9] == 2 ? 3 : data[9] == 4 ? 2 : data[9] == 6 ? 4 : 0;
-                dimensions = {{"width", u32be(data)}, {"height", u32be(data+4)}, {"channels", channels}};
+                const auto u32be = [](const unsigned char* p) {
+                    return (u32(p[0]) << 24) | (u32(p[1]) << 16) | (u32(p[2]) << 8) | u32(p[3]);
+                };
+                const u32 channels = data[9] == 0 || data[9] == 3 ? 1
+                                     : data[9] == 2               ? 3
+                                     : data[9] == 4               ? 2
+                                     : data[9] == 6               ? 4
+                                                                  : 0;
+                dimensions = {
+                    {"width", u32be(data)}, {"height", u32be(data + 4)}, {"channels", channels}};
             } else if (type == "tEXt" || type == "iTXt") {
-                if (size > 1024 * 1024) throw std::runtime_error("oversized PNG summary");
+                if (size > 1024 * 1024)
+                    throw std::runtime_error("oversized PNG summary");
                 String data(size, '\0');
                 input.read(data.data(), size);
                 const auto separator = data.find('\0');
-                if (separator == String::npos) throw std::runtime_error("invalid PNG text");
+                if (separator == String::npos)
+                    throw std::runtime_error("invalid PNG text");
                 const String key = data.substr(0, separator);
                 usize start = separator + 1;
                 if (type == "iTXt") {
@@ -192,86 +228,110 @@ std::map<String, String> ImageSummary(const fs::path& path, Json& dimensions) {
                     start += 2;
                     for (int field = 0; field < 2; ++field) {
                         const auto end = data.find('\0', start);
-                        if (end == String::npos) throw std::runtime_error("invalid PNG international text");
+                        if (end == String::npos)
+                            throw std::runtime_error("invalid PNG international text");
                         start = end + 1;
                     }
                 }
                 if (!summary.emplace(key, data.substr(start)).second)
                     throw std::runtime_error("duplicate PNG summary key");
-            } else input.seekg(size, std::ios::cur);
-            char crc[4]{}; input.read(crc, 4); // CRC bytes are covered by the managed file hash.
+            } else
+                input.seekg(size, std::ios::cur);
+            char crc[4]{};
+            input.read(crc, 4); // CRC bytes are covered by the managed file hash.
             ended = type == "IEND";
         }
-        if (!input || !ended) throw std::runtime_error("truncated PNG");
+        if (!input || !ended)
+            throw std::runtime_error("truncated PNG");
     }
     return summary;
 }
 void Require(bool condition, const char* message) {
-    if (!condition) throw std::runtime_error(message);
+    if (!condition)
+        throw std::runtime_error(message);
 }
 bool NonnegativeInteger(const Json& value) {
     return value.is_number_unsigned() || (value.is_number_integer() && value.get<i64>() >= 0);
 }
 Json::parser_callback_t UniqueKeys() {
-    return [objects = Vector<std::set<String>>{}](int, Json::parse_event_t event, Json& value) mutable {
-        if (event == Json::parse_event_t::object_start) objects.emplace_back();
+    return [objects = Vector<std::set<String>>{}](int, Json::parse_event_t event,
+                                                  Json& value) mutable {
+        if (event == Json::parse_event_t::object_start)
+            objects.emplace_back();
         else if (event == Json::parse_event_t::key) {
             if (objects.empty() || !objects.back().insert(value.get<String>()).second)
                 throw std::runtime_error("duplicate JSON object key");
-        } else if (event == Json::parse_event_t::object_end) objects.pop_back();
+        } else if (event == Json::parse_event_t::object_end)
+            objects.pop_back();
         return true;
     };
 }
 void ValidateRecordShape(const Json& record) {
     Require(record.is_object(), "record must be an object");
-    const std::set<String> required{"schema", "schema_version", "record_id", "state",
-        "capture_status", "pairing_status", "provenance", "replay", "products"};
-    for (const auto& key : required) Require(record.contains(key), "missing required record field");
+    const std::set<String> required{"schema",     "schema_version", "record_id",
+                                    "state",      "capture_status", "pairing_status",
+                                    "provenance", "replay",         "products"};
+    for (const auto& key : required)
+        Require(record.contains(key), "missing required record field");
     for (auto it = record.begin(); it != record.end(); ++it)
         Require(required.contains(it.key()) || it.key() == "error", "unknown record field");
-    if (record.contains("error")) Require(record.at("error").is_string(), "error must be a string");
+    if (record.contains("error"))
+        Require(record.at("error").is_string(), "error must be a string");
     Require(record.at("provenance").is_object(), "provenance must be an object");
     const auto& pairing = record.at("pairing_status");
-    Require(pairing == "not_requested" || pairing == "pending" || pairing == "complete" || pairing == "failed",
+    Require(pairing == "not_requested" || pairing == "pending" || pairing == "complete" ||
+                pairing == "failed",
             "invalid pairing status");
     Require(record.at("replay").is_object(), "replay must be an object");
-    Require(record.at("products").is_array() && !record.at("products").empty(), "record has no products");
+    Require(record.at("products").is_array() && !record.at("products").empty(),
+            "record has no products");
     for (const auto& product : record.at("products")) {
-        Require(product.is_object() && product.contains("product_id") && product.at("product_id").is_string() &&
-                !product.at("product_id").get<String>().empty(), "missing or invalid product ID");
+        Require(product.is_object() && product.contains("product_id") &&
+                    product.at("product_id").is_string() &&
+                    !product.at("product_id").get<String>().empty(),
+                "missing or invalid product ID");
         Require(product.contains("size_bytes") && NonnegativeInteger(product.at("size_bytes")),
                 "missing or invalid product size");
         Require(product.contains("description") && product.at("description").is_object(),
                 "missing or invalid product description");
-        if(record.at("schema_version")==2) {
-            const auto& d=product.at("description");
-            Require(d.contains("role") && d.at("role").is_string(),"v2 product requires a role");
-            if(d.at("role")=="observation" || d.at("role")=="ground_truth") {
-                const auto& s=d.at("signal");
-                Require(s.is_object(),"v2 image requires a signal descriptor");
-                for(const char* key:{"kind","unit","storage","transfer"})
-                    Require(s.at(key).is_string() && !s.at(key).get<String>().empty(),"missing signal semantics");
-                Require(s.at("storage")=="float32" || s.at("storage")=="uint32","unsupported signal storage");
-                Require(s.at("channels")==d.at("channel_names"),"signal channel names disagree");
-                if(s.at("kind")=="instance_id") Require(s.at("storage")=="uint32","instance IDs require UINT storage");
+        if (record.at("schema_version") == 2) {
+            const auto& d = product.at("description");
+            Require(d.contains("role") && d.at("role").is_string(), "v2 product requires a role");
+            if (d.at("role") == "observation" || d.at("role") == "ground_truth") {
+                const auto& s = d.at("signal");
+                Require(s.is_object(), "v2 image requires a signal descriptor");
+                for (const char* key : {"kind", "unit", "storage", "transfer"})
+                    Require(s.at(key).is_string() && !s.at(key).get<String>().empty(),
+                            "missing signal semantics");
+                Require(s.at("storage") == "float32" || s.at("storage") == "uint32",
+                        "unsupported signal storage");
+                Require(s.at("channels") == d.at("channel_names"), "signal channel names disagree");
+                if (s.at("kind") == "instance_id")
+                    Require(s.at("storage") == "uint32", "instance IDs require UINT storage");
             }
         }
     }
 }
 void ValidateGeometry(const Json& description) {
-    if (!description.contains("provenance")) return;
+    if (!description.contains("provenance"))
+        return;
     const auto& provenance = description.at("provenance");
     Require(provenance.is_object(), "product provenance must be an object");
-    if (!provenance.contains("geometry")) return;
+    if (!provenance.contains("geometry"))
+        return;
     const auto& g = provenance.at("geometry");
-    Require(g.is_object() && (g.at("version") == 1 || g.at("version") == 2), "invalid geometry version");
+    Require(g.is_object() && (g.at("version") == 1 || g.at("version") == 2),
+            "invalid geometry version");
     for (const char* key : {"width", "height"}) {
-        Require(NonnegativeInteger(g.at(key)) && g.at(key).get<u64>() > 0 && g.at(key) == description.at(key),
+        Require(NonnegativeInteger(g.at(key)) && g.at(key).get<u64>() > 0 &&
+                    g.at(key) == description.at(key),
                 "geometry and product grid disagree");
     }
-    Require(g.at("kind") == "instantaneous_geometry" && g.at("camera_axes") == "right_down_forward" &&
-            g.at("pixel_origin") == "top_left" && g.at("matrix_order") == "row_major" &&
-            g.at("pixel_center_offset") == Json::array({0.5, 0.5}), "invalid geometry convention");
+    Require(g.at("kind") == "instantaneous_geometry" &&
+                g.at("camera_axes") == "right_down_forward" && g.at("pixel_origin") == "top_left" &&
+                g.at("matrix_order") == "row_major" &&
+                g.at("pixel_center_offset") == Json::array({0.5, 0.5}),
+            "invalid geometry convention");
     const auto scalar = [](const Json& j) {
         Require(j.is_number() && std::isfinite(j.get<f64>()), "non-finite geometry value");
         return j.get<f64>();
@@ -280,61 +340,83 @@ void ValidateGeometry(const Json& description) {
     Require(scalar(g.at("world_units_to_meters")) > 0, "invalid world scale");
     const auto array = [&](const Json& j, usize count) {
         Require(j.is_array() && j.size() == count, "invalid geometry array");
-        Vector<f64> out; out.reserve(count);
-        for (const auto& v : j) out.push_back(scalar(v));
+        Vector<f64> out;
+        out.reserve(count);
+        for (const auto& v : j)
+            out.push_back(scalar(v));
         return out;
     };
     const auto w = array(g.at("world_to_camera"), 16), c = array(g.at("camera_to_world"), 16);
-    for (usize i = 0; i < 4; ++i) for (usize j = 0; j < 4; ++j) {
-        f64 value = 0;
-        for (usize k = 0; k < 4; ++k) value += w[i*4+k] * c[k*4+j];
-        Require(std::abs(value - (i == j ? 1.0 : 0.0)) < 1e-5, "camera matrices are not inverses");
-    }
+    for (usize i = 0; i < 4; ++i)
+        for (usize j = 0; j < 4; ++j) {
+            f64 value = 0;
+            for (usize k = 0; k < 4; ++k)
+                value += w[i * 4 + k] * c[k * 4 + j];
+            Require(std::abs(value - (i == j ? 1.0 : 0.0)) < 1e-5,
+                    "camera matrices are not inverses");
+        }
     if (g.at("projection") == "perspective") {
         const auto k = array(g.at("intrinsics"), 9);
-        Require(k[0] > 0 && k[4] > 0 && k[8] == 1 && k[1] == 0 && k[3] == 0 && k[6] == 0 && k[7] == 0,
+        Require(k[0] > 0 && k[4] > 0 && k[8] == 1 && k[1] == 0 && k[3] == 0 && k[6] == 0 &&
+                    k[7] == 0,
                 "invalid intrinsics");
         if (g.at("version") == 1)
-            Require(k[2] == scalar(g.at("width"))/2 && k[5] == scalar(g.at("height"))/2,
+            Require(k[2] == scalar(g.at("width")) / 2 && k[5] == scalar(g.at("height")) / 2,
                     "legacy geometry requires centred intrinsics");
         else {
             camera::CameraProjection p;
-            p.explicitIntrinsics=true; p.fx=k[0]; p.fy=k[4]; p.cx=k[2]; p.cy=k[5];
-            const auto model=g.at("camera_model").get<String>();
-            if(model=="pinhole") p.model=camera::ProjectionModel::Pinhole;
-            else if(model=="brown_conrady") p.model=camera::ProjectionModel::BrownConrady;
-            else if(model=="fisheye") p.model=camera::ProjectionModel::Fisheye;
-            else throw std::runtime_error("unsupported camera model");
-            const auto& distortion=g.at("distortion");
-            Require(distortion.at("model")==model,"distortion model mismatch");
-            const auto coefficients=array(distortion.at("coefficients"),5);
-            std::copy(coefficients.begin(),coefficients.end(),p.coefficients.begin());
-            p.maxThetaRadians=scalar(distortion.at("max_theta_radians"));
-            const auto valid=camera::ValidateProjection(p,g.at("width").get<u32>(),g.at("height").get<u32>());
-            Require(valid.has_value(),"invalid native camera projection");
+            p.explicitIntrinsics = true;
+            p.fx = k[0];
+            p.fy = k[4];
+            p.cx = k[2];
+            p.cy = k[5];
+            const auto model = g.at("camera_model").get<String>();
+            if (model == "pinhole")
+                p.model = camera::ProjectionModel::Pinhole;
+            else if (model == "brown_conrady")
+                p.model = camera::ProjectionModel::BrownConrady;
+            else if (model == "fisheye")
+                p.model = camera::ProjectionModel::Fisheye;
+            else
+                throw std::runtime_error("unsupported camera model");
+            const auto& distortion = g.at("distortion");
+            Require(distortion.at("model") == model, "distortion model mismatch");
+            const auto coefficients = array(distortion.at("coefficients"), 5);
+            std::copy(coefficients.begin(), coefficients.end(), p.coefficients.begin());
+            p.maxThetaRadians = scalar(distortion.at("max_theta_radians"));
+            const auto valid =
+                camera::ValidateProjection(p, g.at("width").get<u32>(), g.at("height").get<u32>());
+            Require(valid.has_value(), "invalid native camera projection");
         }
     } else {
         Require(g.at("projection") == "orthographic" && g.at("intrinsics").is_null() &&
-                scalar(g.at("film_height_world_units")) > 0 && scalar(g.at("film_width_world_units")) > 0,
+                    scalar(g.at("film_height_world_units")) > 0 &&
+                    scalar(g.at("film_width_world_units")) > 0,
                 "invalid orthographic projection");
     }
 }
 void CheckProductImage(const fs::path& artifact, const fs::path& relativeName,
                        const fs::path& sidecarName, const String& recordId, const Json& product) {
     const auto extension = Fold(relativeName.extension().string());
-    if (extension != ".exr" && extension != ".png") return;
+    if (extension != ".exr" && extension != ".png")
+        return;
     Json dimensions;
     const auto summary = ImageSummary(artifact, dimensions);
     for (const char* key : {"width", "height", "channels"})
         Require(dimensions.contains(key) && dimensions.at(key).is_number_integer() &&
-            dimensions.at(key).get<i64>() > 0 && product.at("description").at(key) == dimensions.at(key),
-            "image dimensions/channels disagree with product description");
-    const auto expectedSidecar = sidecarName.lexically_relative(
-        relativeName.parent_path().empty() ? fs::path(".") : relativeName.parent_path()).generic_string();
+                    dimensions.at(key).get<i64>() > 0 &&
+                    product.at("description").at(key) == dimensions.at(key),
+                "image dimensions/channels disagree with product description");
+    const auto expectedSidecar =
+        sidecarName
+            .lexically_relative(relativeName.parent_path().empty() ? fs::path(".")
+                                                                   : relativeName.parent_path())
+            .generic_string();
     const auto matches = [&](const char* key, const String& expected) {
         const auto found = summary.find(key);
         if (found == summary.end() || found->second != expected)
-            throw std::runtime_error(String("image summary mismatch: ") + relativeName.generic_string() + ": " + key);
+            throw std::runtime_error(String("image summary mismatch: ") +
+                                     relativeName.generic_string() + ": " + key);
     };
     matches("quantiloom_record_id", recordId);
     matches("quantiloom_product_id", product.at("product_id").get<String>());
@@ -342,7 +424,8 @@ void CheckProductImage(const fs::path& artifact, const fs::path& relativeName,
 }
 Json ReadJson(const fs::path& path) {
     std::ifstream input(path, std::ios::binary);
-    if (!input) throw std::runtime_error("cannot read " + path.string());
+    if (!input)
+        throw std::runtime_error("cannot read " + path.string());
     return Json::parse(input, UniqueKeys());
 }
 }
@@ -362,13 +445,15 @@ struct ExportSession::Impl {
         const auto destination = directory / name;
         const auto claim = ClaimPath(destination);
         const ReservationGate gate;
-        if (std::find(claims.begin(), claims.end(), claim) != claims.end()) return;
+        if (std::find(claims.begin(), claims.end(), claim) != claims.end())
+            return;
         tree.Ensure(destination.parent_path(), true);
         for (auto parent = destination.parent_path();;) {
             if (tree.Exists(parent / lockSuffix) ||
                 (parent != parent.root_path() && tree.Exists(ClaimPath(parent))))
                 throw std::runtime_error("output ancestor is locked: " + parent.string());
-            if (parent == parent.root_path()) break;
+            if (parent == parent.root_path())
+                break;
             parent = parent.parent_path();
         }
         if (tree.Exists(destination) && !tree.Regular(destination))
@@ -390,23 +475,34 @@ struct ExportSession::Impl {
         tree.Replace(temporary, directory / sidecar);
     }
     void RequireOpen() const {
-        if (publishing || complete) throw std::runtime_error("export session is no longer writable");
+        if (publishing || complete)
+            throw std::runtime_error("export session is no longer writable");
     }
     ~Impl() {
         // A failed rollback must retain its recovery files and reservations.
-        if (recoveryRequired) return;
-        if (!staging.empty()) { try { tree.RemoveTree(staging); } catch (...) {} }
+        if (recoveryRequired)
+            return;
+        if (!staging.empty()) {
+            try {
+                tree.RemoveTree(staging);
+            } catch (...) {
+            }
+        }
         for (auto it = claims.rbegin(); it != claims.rend(); ++it) {
-            try { tree.Remove(*it); } catch (...) {}
+            try {
+                tree.Remove(*it);
+            } catch (...) {
+            }
         }
     }
 };
-ExportSession::ExportSession() : m_impl(std::make_unique<Impl>()) {}
+ExportSession::ExportSession() : m_impl(std::make_unique<Impl>()) {
+}
 ExportSession::~ExportSession() = default;
 
-Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
-    const String& outputPath, const Config& replayConfig,
-    const RenderProvenance& provenance) {
+Result<std::unique_ptr<ExportSession>, String>
+ExportSession::Create(const String& outputPath, const Config& replayConfig,
+                      const RenderProvenance& provenance) {
     try {
         auto session = std::unique_ptr<ExportSession>(new ExportSession);
         auto& impl = *session->m_impl;
@@ -416,7 +512,8 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         impl.directory = output.parent_path().lexically_normal();
         impl.sidecar = output.stem().string() + ".metadata.json";
         impl.replay = output.stem().string() + ".replay.toml";
-        if (!RelativeArtifact(output.filename().string())) throw std::runtime_error("reserved export basename");
+        if (!RelativeArtifact(output.filename().string()))
+            throw std::runtime_error("reserved export basename");
         impl.Reserve(output.filename());
         impl.Reserve(impl.sidecar);
         impl.Reserve(impl.replay);
@@ -426,21 +523,29 @@ Result<std::unique_ptr<ExportSession>, String> ExportSession::Create(
         impl.tree.Ensure(impl.staging / ".internal");
         impl.names.insert(".internal");
         const auto frozen = Json::parse(provenance.json, UniqueKeys());
-        if (!frozen.is_object()) throw std::runtime_error("provenance must be an object");
-        const u32 requestedVersion=frozen.value("export_schema_version",schemaVersion);
-        if(requestedVersion!=1 && requestedVersion!=2) throw std::runtime_error("unsupported export schema version");
+        if (!frozen.is_object())
+            throw std::runtime_error("provenance must be an object");
+        const u32 requestedVersion = frozen.value("export_schema_version", schemaVersion);
+        if (requestedVersion != 1 && requestedVersion != 2)
+            throw std::runtime_error("unsupported export schema version");
         impl.names.insert("record.tmp");
         impl.names.insert(Fold(impl.sidecar));
         impl.names.insert(Fold(impl.replay));
         WriteText(impl.tree.FilePath(impl.staging / impl.replay), replayConfig.ToToml());
         impl.record = {
-            {"schema", "quantiloom.dataset.export"}, {"schema_version", requestedVersion},
-            {"record_id", impl.id}, {"state", "staging"},
-            {"capture_status", "complete"}, {"pairing_status", "not_requested"},
-            {"provenance", frozen}, {"products", Json::array()},
-            {"replay", {{"path", impl.replay}, {"sha256", Digest(impl.tree.FilePath(impl.staging / impl.replay))},
-                        {"replayable", false}, {"reason", "Resource and execution history verification is not implemented"}}}
-        };
+            {"schema", "quantiloom.dataset.export"},
+            {"schema_version", requestedVersion},
+            {"record_id", impl.id},
+            {"state", "staging"},
+            {"capture_status", "complete"},
+            {"pairing_status", "not_requested"},
+            {"provenance", frozen},
+            {"products", Json::array()},
+            {"replay",
+             {{"path", impl.replay},
+              {"sha256", Digest(impl.tree.FilePath(impl.staging / impl.replay))},
+              {"replayable", false},
+              {"reason", "Resource and execution history verification is not implemented"}}}};
         return Result<std::unique_ptr<ExportSession>, String>(std::move(session));
     } catch (const std::exception& e) {
         return Result<std::unique_ptr<ExportSession>, String>::Err(e.what());
@@ -454,105 +559,147 @@ Result<String, String> ExportSession::StagingPath(const String& name) const {
         m_impl->Reserve(fs::path(name));
         m_impl->tree.Ensure((m_impl->staging / name).parent_path());
         return Result<String, String>(m_impl->tree.FilePath(m_impl->staging / name).string());
-    } catch (const std::exception& e) { return Result<String, String>::Err(e.what()); }
+    } catch (const std::exception& e) {
+        return Result<String, String>::Err(e.what());
+    }
 }
 Status ExportSession::RegisterFile(const String& name, const String& productId,
                                    const String& descriptionJson) {
     try {
         const auto path = StagingPath(name);
-        if (!path) return Status::Err(path.error());
+        if (!path)
+            return Status::Err(path.error());
         if (productId.empty() || m_impl->products.contains(productId))
             throw std::runtime_error("empty or duplicate product ID");
         const auto description = Json::parse(descriptionJson, UniqueKeys());
-        if (!description.is_object()) throw std::runtime_error("product description must be an object");
+        if (!description.is_object())
+            throw std::runtime_error("product description must be an object");
         const fs::path staged(path.value());
         if (!m_impl->tree.Regular(m_impl->staging / name))
             throw std::runtime_error("product is not a regular file: " + name);
-        m_impl->record["products"].push_back({
-            {"product_id", productId}, {"path", name},
-            {"sha256", Digest(staged)}, {"size_bytes", fs::file_size(staged)},
-            {"description", description}
-        });
+        m_impl->record["products"].push_back({{"product_id", productId},
+                                              {"path", name},
+                                              {"sha256", Digest(staged)},
+                                              {"size_bytes", fs::file_size(staged)},
+                                              {"description", description}});
         m_impl->names.insert(Fold(name));
         m_impl->products.insert(productId);
         return Status::Ok();
-    } catch (const std::exception& e) { return Status::Err(e.what()); }
+    } catch (const std::exception& e) {
+        return Status::Err(e.what());
+    }
 }
-Status ExportSession::WriteImage(const String& name, const String& productId,
-                                 const Image& image, const String& descriptionJson) {
+Status ExportSession::WriteImage(const String& name, const String& productId, const Image& image,
+                                 const String& descriptionJson) {
     try {
         const auto path = StagingPath(name);
-        if (!path) return Status::Err(path.error());
-        if (!image.IsValid()) return Status::Err("invalid image");
+        if (!path)
+            return Status::Err(path.error());
+        if (!image.IsValid())
+            return Status::Err("invalid image");
         Image product = image;
         product.metadata["quantiloom_record_id"] = m_impl->id;
         product.metadata["quantiloom_product_id"] = productId;
         product.metadata["quantiloom_sidecar"] =
-            fs::path(m_impl->sidecar).lexically_relative(fs::path(name).parent_path().empty() ?
-                fs::path(".") : fs::path(name).parent_path()).generic_string();
+            fs::path(m_impl->sidecar)
+                .lexically_relative(fs::path(name).parent_path().empty()
+                                        ? fs::path(".")
+                                        : fs::path(name).parent_path())
+                .generic_string();
         const auto extension = Fold(fs::path(name).extension().string());
         bool written = false;
-        if (extension == ".exr") written = ImageIO::WriteEXR(path.value(), product);
-        else if (extension == ".png") written = ImageIO::WritePNG(path.value(), product);
-        else return Status::Err("unsupported image extension: " + extension);
-        if (!written) return Status::Err("failed to write " + name);
+        if (extension == ".exr")
+            written = ImageIO::WriteEXR(path.value(), product);
+        else if (extension == ".png")
+            written = ImageIO::WritePNG(path.value(), product);
+        else
+            return Status::Err("unsupported image extension: " + extension);
+        if (!written)
+            return Status::Err("failed to write " + name);
         auto description = Json::parse(descriptionJson, UniqueKeys());
         description["width"] = image.width;
         description["height"] = image.height;
         description["channels"] = image.channels;
         description["channel_names"] = image.channelNames;
         description["image_metadata"] = image.metadata;
-        if(!description.contains("signal")) {
-            const auto value=[&](const char* key,const String& fallback=String{}) {
-                const auto it=image.metadata.find(key);return it==image.metadata.end() ? fallback : it->second;
+        if (!description.contains("signal")) {
+            const auto value = [&](const char* key, const String& fallback = String{}) {
+                const auto it = image.metadata.find(key);
+                return it == image.metadata.end() ? fallback : it->second;
             };
-            const String kind=value("signal_kind",value("camera_signal_kind"));
-            const String unit=value("unit",value("camera_unit"));
-            if(!kind.empty() && !unit.empty()) {
-                description["signal"]={{"kind",kind},{"unit",unit},{"channels",image.channelNames},
-                    {"storage","float32"},{"transfer",value("transfer",kind=="display_srgb" ? "sRGB" : "linear")},
-                    {"colour_space",value("colour_space",kind=="cie_linear_srgb" || kind=="display_srgb" ? "sRGB" : "device_native")},
-                    {"integration",value("integration","declared_camera_pipeline")}};
-                for(const char* key:{"data_channels","channel_aliases","auxiliary_channels","band_nm","camera_cfa"})
-                    if(image.metadata.contains(key))description["signal"][key]=image.metadata.at(key);
+            const String kind = value("signal_kind", value("camera_signal_kind"));
+            const String unit = value("unit", value("camera_unit"));
+            if (!kind.empty() && !unit.empty()) {
+                description["signal"] = {
+                    {"kind", kind},
+                    {"unit", unit},
+                    {"channels", image.channelNames},
+                    {"storage", "float32"},
+                    {"transfer", value("transfer", kind == "display_srgb" ? "sRGB" : "linear")},
+                    {"colour_space",
+                     value("colour_space", kind == "cie_linear_srgb" || kind == "display_srgb"
+                                               ? "sRGB"
+                                               : "device_native")},
+                    {"integration", value("integration", "declared_camera_pipeline")}};
+                for (const char* key : {"data_channels", "channel_aliases", "auxiliary_channels",
+                                        "band_nm", "camera_cfa"})
+                    if (image.metadata.contains(key))
+                        description["signal"][key] = image.metadata.at(key);
             }
         }
-        if (const auto found = image.metadata.find("quantiloom_provenance"); found != image.metadata.end()) {
+        if (const auto found = image.metadata.find("quantiloom_provenance");
+            found != image.metadata.end()) {
             description["provenance"] = Json::parse(found->second, UniqueKeys());
             description["image_metadata"].erase("quantiloom_provenance");
         }
         return RegisterFile(name, productId, description.dump());
-    } catch (const std::exception& e) { return Status::Err(e.what()); }
+    } catch (const std::exception& e) {
+        return Status::Err(e.what());
+    }
 }
 
-Status ExportSession::WriteUIntImage(const String& name,const String& productId,
-    const UIntImage& image,const String& descriptionJson) {
+Status ExportSession::WriteUIntImage(const String& name, const String& productId,
+                                     const UIntImage& image, const String& descriptionJson) {
     try {
-        const auto staged=StagingPath(name);
-        if(!staged) return Status::Err(staged.error());
-        UIntImage product=image;
-        product.metadata["quantiloom_record_id"]=m_impl->id;
-        product.metadata["quantiloom_product_id"]=productId;
-        product.metadata["quantiloom_sidecar"]=fs::path(m_impl->sidecar).lexically_relative(
-            fs::path(name).parent_path().empty() ? fs::path(".") : fs::path(name).parent_path()).generic_string();
-        const auto written=ImageIO::WriteUIntEXR(*staged,product);
-        if(!written) return Status::Err(written.error());
-        auto description=Json::parse(descriptionJson,UniqueKeys());
-        description["width"]=image.width;description["height"]=image.height;
-        description["channels"]=1;description["channel_names"]={"instance_id"};
-        description["storage"]="uint32";
-        return RegisterFile(name,productId,description.dump());
-    } catch(const std::exception& e) { return Status::Err(e.what()); }
+        const auto staged = StagingPath(name);
+        if (!staged)
+            return Status::Err(staged.error());
+        UIntImage product = image;
+        product.metadata["quantiloom_record_id"] = m_impl->id;
+        product.metadata["quantiloom_product_id"] = productId;
+        product.metadata["quantiloom_sidecar"] =
+            fs::path(m_impl->sidecar)
+                .lexically_relative(fs::path(name).parent_path().empty()
+                                        ? fs::path(".")
+                                        : fs::path(name).parent_path())
+                .generic_string();
+        const auto written = ImageIO::WriteUIntEXR(*staged, product);
+        if (!written)
+            return Status::Err(written.error());
+        auto description = Json::parse(descriptionJson, UniqueKeys());
+        description["width"] = image.width;
+        description["height"] = image.height;
+        description["channels"] = 1;
+        description["channel_names"] = {"instance_id"};
+        description["storage"] = "uint32";
+        return RegisterFile(name, productId, description.dump());
+    } catch (const std::exception& e) {
+        return Status::Err(e.what());
+    }
 }
 Status ExportSession::Commit() {
     auto& impl = *m_impl;
     if (impl.complete || impl.publishing)
         return Status::Err("export session has already finished or started publication");
-    struct Replacement { fs::path name, backup; bool saved = false, installed = false; };
+    struct Replacement {
+        fs::path name, backup;
+        bool saved = false, installed = false;
+    };
     Vector<Replacement> replacements;
     try {
         impl.RequireOpen();
-        if (impl.products.empty()) throw std::runtime_error("cannot publish an empty export");
+        if (impl.products.empty())
+            throw std::runtime_error("cannot publish an empty export");
         ValidateRecordShape(impl.record);
         // Validate every staged byte before touching the previous export.
         for (const auto& product : impl.record["products"]) {
@@ -560,21 +707,25 @@ Status ExportSession::Commit() {
             const fs::path stagedName(product.at("path").get<String>());
             if (!impl.tree.Regular(impl.staging / stagedName))
                 throw std::runtime_error("staged product is no longer a regular file");
-            if (Digest(impl.tree.FilePath(impl.staging / product.at("path").get<String>())) != product.at("sha256").get<String>())
+            if (Digest(impl.tree.FilePath(impl.staging / product.at("path").get<String>())) !=
+                product.at("sha256").get<String>())
                 throw std::runtime_error("staged product changed before publication");
-            CheckProductImage(impl.tree.FilePath(impl.staging / stagedName), stagedName, fs::path(impl.sidecar), impl.id, product);
+            CheckProductImage(impl.tree.FilePath(impl.staging / stagedName), stagedName,
+                              fs::path(impl.sidecar), impl.id, product);
         }
-        if (Digest(impl.tree.FilePath(impl.staging / impl.replay)) != impl.record["replay"]["sha256"].get<String>())
+        if (Digest(impl.tree.FilePath(impl.staging / impl.replay)) !=
+            impl.record["replay"]["sha256"].get<String>())
             throw std::runtime_error("staged replay configuration changed");
         impl.tree.Ensure(impl.staging / ".internal" / "previous");
         const auto add = [&](const fs::path& name) {
             replacements.push_back({name, impl.staging / ".internal" / "previous" /
-                std::to_string(replacements.size())});
+                                              std::to_string(replacements.size())});
         };
         // The record is installed last, after all products and their hashes.
         add(impl.sidecar);
         add(impl.replay);
-        for (const auto& product : impl.record["products"]) add(product.at("path").get<String>());
+        for (const auto& product : impl.record["products"])
+            add(product.at("path").get<String>());
         impl.publishing = true;
         // Keep the original files themselves, rather than copies whose write can
         // fail after destroying the old bytes. Reverse this journal on failure.
@@ -582,23 +733,27 @@ Status ExportSession::Commit() {
             const ReservationGate gate;
             const auto destination = impl.directory / replacement.name;
             if (impl.tree.Exists(destination)) {
-                if (!impl.tree.Regular(destination)) throw std::runtime_error("output is not a regular file");
+                if (!impl.tree.Regular(destination))
+                    throw std::runtime_error("output is not a regular file");
                 impl.tree.Replace(destination, replacement.backup);
                 replacement.saved = true;
             }
         }
         for (auto& replacement : replacements) {
-            if (replacement.name == impl.sidecar) continue;
+            if (replacement.name == impl.sidecar)
+                continue;
             const ReservationGate gate;
             impl.tree.Replace(impl.staging / replacement.name, impl.directory / replacement.name);
             replacement.installed = true;
         }
         for (const auto& product : impl.record["products"]) {
             const auto name = product.at("path").get<String>();
-            if (Digest(impl.tree.FilePath(impl.directory / name)) != product.at("sha256").get<String>())
+            if (Digest(impl.tree.FilePath(impl.directory / name)) !=
+                product.at("sha256").get<String>())
                 throw std::runtime_error("published product hash mismatch: " + name);
         }
-        if (Digest(impl.tree.FilePath(impl.directory / impl.replay)) != impl.record["replay"]["sha256"].get<String>())
+        if (Digest(impl.tree.FilePath(impl.directory / impl.replay)) !=
+            impl.record["replay"]["sha256"].get<String>())
             throw std::runtime_error("published replay hash mismatch");
         impl.record["state"] = "complete";
         impl.PublishRecord();
@@ -610,21 +765,29 @@ Status ExportSession::Commit() {
         for (auto it = replacements.rbegin(); it != replacements.rend(); ++it) {
             try {
                 // Never expose an old complete record over a partial recovery.
-                if (it->name == impl.sidecar && impl.recoveryRequired) continue;
+                if (it->name == impl.sidecar && impl.recoveryRequired)
+                    continue;
                 const ReservationGate gate;
-                if (it->installed) impl.tree.Replace(impl.directory / it->name, impl.staging / it->name);
-                if (it->saved) impl.tree.Replace(it->backup, impl.directory / it->name);
+                if (it->installed)
+                    impl.tree.Replace(impl.directory / it->name, impl.staging / it->name);
+                if (it->saved)
+                    impl.tree.Replace(it->backup, impl.directory / it->name);
             } catch (const std::exception& restore) {
                 impl.recoveryRequired = true;
                 recoveryError += String("; rollback failed: ") + restore.what();
             }
         }
-        if (impl.recoveryRequired) recoveryError += "; recovery files retained at " + impl.staging.string();
+        if (impl.recoveryRequired)
+            recoveryError += "; recovery files retained at " + impl.staging.string();
         return Status::Err(String(e.what()) + recoveryError);
     }
 }
-const String& ExportSession::RecordId() const { return m_impl->id; }
-const String& ExportSession::SidecarName() const { return m_impl->sidecar; }
+const String& ExportSession::RecordId() const {
+    return m_impl->id;
+}
+const String& ExportSession::SidecarName() const {
+    return m_impl->sidecar;
+}
 VerificationReport ExportSession::Verify(const String& recordPath) {
     Json errors = Json::array();
     Json provenance = nullptr;
@@ -640,11 +803,13 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
             !record.at("schema_version").is_number_integer() ||
             (record.at("schema_version") != 1 && record.at("schema_version") != 2))
             throw std::runtime_error("unsupported record schema");
-        if (record.at("state") != "complete") throw std::runtime_error("record is not complete");
+        if (record.at("state") != "complete")
+            throw std::runtime_error("record is not complete");
         const auto id = record.at("record_id").get<String>();
         if (id.size() != 64 || id.find_first_not_of("0123456789abcdef") != String::npos)
             throw std::runtime_error("invalid record ID");
-        if (record.at("capture_status") != "complete") throw std::runtime_error("capture is not complete");
+        if (record.at("capture_status") != "complete")
+            throw std::runtime_error("capture is not complete");
         if (!record.at("products").is_array() || record.at("products").empty())
             throw std::runtime_error("record has no products");
         std::set<String> names{Fold(path.filename().string())}, ids;
@@ -662,8 +827,10 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
 #endif
             if (!fs::is_regular_file(fs::symlink_status(artifact)))
                 throw std::runtime_error("missing or non-regular artifact: " + name);
-            if (Digest(artifact) != hash) errors.push_back("hash mismatch: " + name);
-            if (entry.contains("size_bytes") && entry.at("size_bytes").get<u64>() != fs::file_size(artifact))
+            if (Digest(artifact) != hash)
+                errors.push_back("hash mismatch: " + name);
+            if (entry.contains("size_bytes") &&
+                entry.at("size_bytes").get<u64>() != fs::file_size(artifact))
                 errors.push_back("size mismatch: " + name);
         };
         check(record.at("replay"));
@@ -671,22 +838,29 @@ VerificationReport ExportSession::Verify(const String& recordPath) {
             const auto productId = product.at("product_id").get<String>();
             if (productId.empty() || !ids.insert(productId).second)
                 throw std::runtime_error("empty or duplicate product ID");
-            if (!product.at("description").is_object()) throw std::runtime_error("invalid product description");
+            if (!product.at("description").is_object())
+                throw std::runtime_error("invalid product description");
             ValidateGeometry(product.at("description"));
             check(product);
             auto artifact = path.parent_path() / product.at("path").get<String>();
 #ifdef _WIN32
             artifact = detail::Win32Path(artifact);
 #endif
-            CheckProductImage(artifact,
-                fs::path(product.at("path").get<String>()), path.filename(), id, product);
-
+            CheckProductImage(artifact, fs::path(product.at("path").get<String>()), path.filename(),
+                              id, product);
         }
         provenance = record.at("provenance");
-        if (!provenance.is_object()) throw std::runtime_error("invalid provenance");
-    } catch (const std::exception& e) { errors.push_back(e.what()); }
+        if (!provenance.is_object())
+            throw std::runtime_error("invalid provenance");
+    } catch (const std::exception& e) {
+        errors.push_back(e.what());
+    }
     const bool valid = errors.empty();
-    return {valid, Json{{"valid", valid}, {"checks", "export_integrity"},
-        {"errors", errors}, {"reproducibility_verified", false}, {"provenance", provenance}}.dump(2)};
+    return {valid, Json{{"valid", valid},
+                        {"checks", "export_integrity"},
+                        {"errors", errors},
+                        {"reproducibility_verified", false},
+                        {"provenance", provenance}}
+                       .dump(2)};
 }
 } // namespace quantiloom::dataset

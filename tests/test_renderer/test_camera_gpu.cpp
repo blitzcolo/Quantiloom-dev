@@ -88,7 +88,7 @@ CameraConfig ThermalConfigFor(u32 width, u32 height) {
 }
 
 // Bayer RGB camera over the photon fixture's single QE curve: channel
-// separation comes from the CFA sampling, exactly as in the M4-3 ISP tests.
+// separation comes from the CFA sampling, exactly as in the ISP tests.
 CameraConfig BayerColorConfigFor(u32 width, u32 height) {
     auto config = CameraConfigFor(width, height);
     config.device.cfa = CfaPattern::RGGB;
@@ -965,7 +965,7 @@ TEST_F(CameraGpuTest, PreviewPixelCentersChoosePhysicalNucPixel) {
 }
 
 // ---------------------------------------------------------------------------
-// Interactive viewport scheduling (M4-0)
+// Interactive viewport scheduling
 //
 // With the camera enabled, RenderFrame drives acquisitions from the timeline
 // clock instead of tracing the visibility image: one committed acquisition
@@ -1251,7 +1251,7 @@ TEST_F(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
 }
 
 // ---------------------------------------------------------------------------
-// M4-2: acquisition history on the GPU. A RecordStateCheckpoint snapshot
+// Acquisition history on the GPU. A RecordStateCheckpoint snapshot
 // (thermal ping-pong pair + previous-frame AGC window + host advance scalars)
 // must rewind the device so that replaying the same tick sequence -- the
 // noise streams are keyed on the acquisition index -- is bit-identical to
@@ -1443,7 +1443,7 @@ TEST_F(CameraSchedulerGpuTest, WarmupAndAdvanceRunSyntheticAcquisitionsOnTheFram
 }
 
 // ---------------------------------------------------------------------------
-// M4-1: GPU dynamic exposure (time-stratified trace + reprojection composite)
+// GPU dynamic exposure (time-stratified trace + reprojection composite)
 //
 // The measurement image is a layer-per-time-stratum array; the dynamic
 // compositor reprojects the anchor depth into the strata bracketing each
@@ -1972,7 +1972,7 @@ TEST_F(CameraSchedulerGpuTest, StratifiedAcquisitionReportsDynamicExposure) {
     EXPECT_NE(metadata.find("camera_dynamic_approximation"), metadata.end());
 
     // Same-tick redraw: convergence continues, the report describes the same
-    // acquisition, and no state advances (M4-0 owns the scheduler invariants;
+    // acquisition, and no state advances (the scheduler owns the invariants;
     // here the report must simply stay valid and identical in structure).
     DrawFrame();
     const auto redrawReport = context->GetLastDynamicExposureReport();
@@ -2042,7 +2042,7 @@ TEST_F(CameraSchedulerGpuTest, StaticSceneDegeneratesToSingleStratum) {
 }
 
 // ---------------------------------------------------------------------------
-// M4-3: full classic ISP on the GPU (statistics, CDF, demosaic, color,
+// Full classic ISP on the GPU (statistics, CDF, demosaic, color,
 // display/AGC) against the CPU RunIsp reference, plus the CLAHE persistent
 // tone wiring.
 //
@@ -2399,7 +2399,7 @@ TEST_F(CameraSchedulerGpuTest, PersistentClaheToneDrivesTheViewportDisplay) {
 }
 
 // ---------------------------------------------------------------------------
-// M4-4: HSV display grading, AE/AWB closed loop, display reprocess, and the
+// HSV display grading, AE/AWB closed loop, display reprocess, and the
 // five-segment GPU timing breakdown.
 //
 // HSV identity is cross-checked against the CPU chain: with every HSV

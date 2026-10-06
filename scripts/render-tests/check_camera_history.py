@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render-level check of the M4-5 camera acquisition history across a sequence.
+"""Render-level check of the camera acquisition history across a sequence.
 
 `sequence --every N` exports every Nth scene tick. The device advances at its
 own frame period (thermal detector lag, AE/AWB feedback) through
@@ -33,7 +33,7 @@ Checks:
   d. warmup: a run with [sensor.warmup] seconds > 0 must succeed and its
      first frame must differ from the no-warmup first frame. A full
      warmup-vs-reference value check would need a second long reference
-     solve-style run; per the M4-5 scoping that comparison is degraded to
+     solve-style run; per the acquisition-history scoping that comparison is degraded to
      "warmup does not error and shifts the state", which the acquisition
      index (3 after a 0.3 s / 0.1 s warmup) plus the shifted noise draw
      already proves. See the comment at the warmup check below.
