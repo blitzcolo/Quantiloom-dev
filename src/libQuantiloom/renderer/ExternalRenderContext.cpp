@@ -717,7 +717,11 @@ struct ExternalRenderContext::Impl {
     void BuildAccelerationStructures();
     void UpdateGpuResources(bool rebuildEmitters = true);
     void UpdateMaterial(u32 index, const Material& material, ExternalRenderContext& owner);
-    void RebuildEmissiveGeometry();
+    /// @param mayReallocate false while a command buffer is still open: a
+    ///        reallocation would rebind a descriptor the recorded traces
+    ///        already captured. Timeline motion cannot change the triangle
+    ///        count, so needing a bigger buffer there is an error, not a grow.
+    Result<void, String> RebuildEmissiveGeometry(bool mayReallocate = true);
 
     /// Move the animated nodes to @p t_s and make the GPU agree.
     ///
@@ -730,6 +734,18 @@ struct ExternalRenderContext::Impl {
     ///
     /// @return the nodes that actually moved
     Vector<u32> ApplyTimelinePose(f64 t_s, bool deferRefit = false);
+    /// Same pose change, but every GPU write is recorded into @p cmd instead
+    /// of submitted immediately. RecordCameraMeasurement poses each stratum
+    /// while the host's command buffer is still open, and an immediate refit
+    /// there would run before any of the recorded traces -- leaving every
+    /// stratum with whichever pose was applied last. Recording keeps
+    /// [refit k][trace k][refit k+1][trace k+1] ordered inside one submission;
+    /// the refit's own barriers order it against the traces around it.
+    ///
+    /// Unlike ApplyTimelinePose a refused refit is an error, not a rebuild:
+    /// rebuilding mid-recording would rebind descriptors the recorded traces
+    /// already captured.
+    Result<void, String> RecordTimelinePose(VkCommandBuffer cmd, f64 t_s);
     /// Flush everything a synchronous consumer needs before it dispatches or
     /// replaces buffers: the deferred TLAS refit, then any queued buffer
     /// uploads, in one submission.
@@ -3385,6 +3401,41 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
     return moved;
 }
 
+Result<void, String> ExternalRenderContext::Impl::RecordTimelinePose(
+    VkCommandBuffer cmd, const f64 t_s) {
+    if (!scene) return Result<void, String>::Ok();
+
+    const Vector<u32> moved = timeline.Apply(*scene, t_s);
+    if (!moved.empty()) {
+        if (geometry.IsValid()) {
+            if (!geometry.PrepareTlasRefit(*scene))
+                return Result<void, String>::Err(
+                    "timeline pose changed the instance count while recording");
+            geometry.RecordPreparedTlasRefit(cmd);
+            // The recording consumed whatever a deferred refit had prepared.
+            pendingTlasRefit = false;
+        }
+
+        // Same sampled-emitter rule as ApplyTimelinePose: the list holds
+        // world-space triangles, so it is rewritten only when a lamp moved.
+        const bool emitterMoved =
+            std::any_of(moved.begin(), moved.end(), [this](u32 node) {
+                return node < scene->nodes.size() &&
+                       rendercore::NodeHasSampledEmission(*scene,
+                                                        scene->nodes[node]);
+            });
+        if (emitterMoved) {
+            if (const auto rebuilt = RebuildEmissiveGeometry(false); !rebuilt)
+                return rebuilt;
+        }
+    }
+
+    // The emitter and lighting writes enqueued above must land before the
+    // stratum's trace; an empty queue makes this a no-op.
+    pendingUploads.Record(cmd);
+    return Result<void, String>::Ok();
+}
+
 VkAccelerationStructureKHR ExternalRenderContext::Impl::TimelineEpochHost::ApplyEpoch(
     const f64 t_s) {
     if (!captured) {
@@ -4917,8 +4968,9 @@ void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
 // calls UpdateGpuResources to refresh the material buffer and then rebinds only
 // that. Allocating a new buffer here and returning would leave binding 23
 // pointing at the freed one.
-void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
-    if (!scene) return;
+Result<void, String> ExternalRenderContext::Impl::RebuildEmissiveGeometry(
+    const bool mayReallocate) {
+    if (!scene) return Result<void, String>::Ok();
 
     const auto triangles = enableLightSampling
         ? rendercore::CollectEmissiveTriangles(*scene)
@@ -4927,6 +4979,10 @@ void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
                          sizeof(rendercore::EmissiveTriangleGPU);
     const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->GetSize() < bytes;
     if (moved) {
+        if (!mayReallocate)
+            return Result<void, String>::Err(
+                "emissive triangle list outgrew its buffer while recording a "
+                "timeline pose");
         // A pending upload would still name the buffer being replaced.
         FlushPendingGpuWork();
         emissiveTriangleBuffer =
@@ -4950,6 +5006,7 @@ void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
         pipeline->BindEmissiveTriangleBuffer(*emissiveTriangleBuffer);
     }
     emissiveTransformDirty = false;
+    return Result<void, String>::Ok();
 }
 
 void ExternalRenderContext::Impl::CreateDummyBuffers() {
@@ -5651,9 +5708,19 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     const f64 restoreTime = timeline.Current_s();
     struct TimelineRestore {
         Impl* self;
+        VkCommandBuffer cmd;
         f64 time;
-        ~TimelineRestore() { self->ApplyTimelinePose(time); }
-    } restoreGuard{this, restoreTime};
+        // The restore refit rides in this same submission, so the TLAS the GPU
+        // holds afterwards matches the scene pose the CPU returns to -- a
+        // synchronous refit here would leave the recorded strata tracing the
+        // restore pose instead of their own.
+        ~TimelineRestore() {
+            if (const auto restored = self->RecordTimelinePose(cmd, time);
+                !restored)
+                QL_LOG_ERROR("camera stratum pose restore failed: {}",
+                             restored.error());
+        }
+    } restoreGuard{this, cmd, restoreTime};
 
     const ObserverSetScope observerSet{*pipeline, fastRgb};
     pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
@@ -5670,7 +5737,14 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         // which the public scrub path would read as a history-invalidating
         // rewind (and it would remap the thermal hour, which the trace must
         // not touch).
-        ApplyTimelinePose(stratumTime);
+        //
+        // The pose is recorded, not applied: this loop runs while the host's
+        // command buffer is still open, so a synchronous refit would execute
+        // before every recorded trace and leave all strata on the last-applied
+        // pose -- the restore. Recorded in order, each refit's barriers place
+        // it between the traces of the strata around it.
+        if (const auto posed = RecordTimelinePose(cmd, stratumTime); !posed)
+            return posed;
         const auto pose = CameraDataForCapture(captureMode, centerNm,
                                                stratumTime);
         if (!pose) return Result<void, String>::Err(pose.error());

@@ -1050,6 +1050,83 @@ protected:
         return context->SetCameraConfig(config);
     }
 
+    // A cube named "mover" standing in front of the camera inside the Cornell
+    // box, so a [timeline] trajectory can slide it between strata. Authored
+    // already at its world position; the motion keys carry the displacement.
+    std::filesystem::path WriteMoverGltf() {
+        const auto binary = testDir / "mover.bin";
+        {
+            // 8 vertices, x=[198,358] y=[194,354] z=[-330,-170]: centre
+            // (278,274,-250), dead centre of the fixture camera's view.
+            const std::array<f32, 24> positions{
+                198.0f, 194.0f, -330.0f, 358.0f, 194.0f, -330.0f,
+                358.0f, 354.0f, -330.0f, 198.0f, 354.0f, -330.0f,
+                198.0f, 194.0f, -170.0f, 358.0f, 194.0f, -170.0f,
+                358.0f, 354.0f, -170.0f, 198.0f, 354.0f, -170.0f};
+            const std::array<u32, 36> indices{
+                0, 1, 2, 0, 2, 3, 5, 4, 7, 5, 7, 6,
+                4, 0, 3, 4, 3, 7, 1, 5, 6, 1, 6, 2,
+                4, 5, 1, 4, 1, 0, 3, 2, 6, 3, 7, 6};
+            std::ofstream file(binary, std::ios::binary);
+            file.write(reinterpret_cast<const char*>(positions.data()),
+                       positions.size() * sizeof(f32));
+            file.write(reinterpret_cast<const char*>(indices.data()),
+                       indices.size() * sizeof(u32));
+        }
+        const auto file = testDir / "mover.gltf";
+        {
+            std::ofstream json(file);
+            json << R"({
+                "asset":{"version":"2.0"},
+                "buffers":[{"byteLength":240,"uri":"mover.bin"}],
+                "bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":96},
+                               {"buffer":0,"byteOffset":96,"byteLength":144}],
+                "accessors":[{"bufferView":0,"componentType":5126,"count":8,"type":"VEC3",
+                              "min":[198,194,-330],"max":[358,354,-170]},
+                             {"bufferView":1,"componentType":5125,"count":36,"type":"SCALAR"}],
+                "materials":[{"name":"moverMat","doubleSided":true}],
+                "meshes":[{"primitives":[{"attributes":{"POSITION":0},"indices":1,"material":0}]}],
+                "nodes":[{"name":"mover","mesh":0}],
+                "scenes":[{"nodes":[0]}],"scene":0
+            })";
+        }
+        return file;
+    }
+
+    // The Cornell box plus the mover on a one-second timeline: the model
+    // slides 300 world units over [0, 1] s and the clock stands mid-window,
+    // so a one-second exposure's strata span the whole sweep.
+    void ApplyMovingScene(const std::filesystem::path& mover) {
+        const std::filesystem::path root(QUANTILOOM_SOURCE_ROOT);
+        const auto gltf = root / "assets" / "models" / "cornell_box" / "cornell_box.gltf";
+        const auto path = testDir / "scene_moving.toml";
+        {
+            std::ofstream file(path);
+            file << "[renderer]\nresolution = [64, 64]\n"
+                 << "[camera]\n"
+                    "position = [278.0, 274.0, -800.0]\n"
+                    "look_at = [278.0, 274.0, 0.0]\n"
+                 << "[spectral]\n"
+                 << "[lighting]\nsun_direction = [0.0, 1.0, 0.0]\n"
+                    "sun_radiance = [1.0, 1.0, 1.0]\nsky_radiance = [0.1, 0.1, 0.1]\n"
+                 << "[scene]\ngltf = \"" << gltf.generic_string() << "\"\n"
+                 << "[timeline]\nstart_s = 0\nend_s = 1\n"
+                    "ticks_per_second = 20\ntime_s = 0.5\n"
+                 << "[[models]]\nfile = \"" << mover.generic_string() << "\"\n"
+                    "name = \"mover\"\n"
+                 << "[models.motion]\ninterpolation = \"linear\"\n"
+                    "extrapolate = \"hold\"\n"
+                 << "[[models.motion.keys]]\nt = 0.0\n"
+                    "position = [0.0, 0.0, 0.0]\n"
+                 << "[[models.motion.keys]]\nt = 1.0\n"
+                    "position = [300.0, 0.0, 0.0]\n";
+        }
+        auto loaded = Config::Load(path.string());
+        ASSERT_TRUE(loaded.has_value()) << "fixture TOML did not parse";
+        const auto report = context->ApplyConfig(loaded.value());
+        ASSERT_TRUE(report.ok()) << report.FirstError();
+    }
+
     void DrawFrame() {
         CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
             context->RenderFrame(cmd, target->GetImage(), VK_IMAGE_LAYOUT_UNDEFINED,
@@ -1901,6 +1978,43 @@ TEST_F(CameraSchedulerGpuTest, StratifiedAcquisitionReportsDynamicExposure) {
     const auto redrawReport = context->GetLastDynamicExposureReport();
     EXPECT_TRUE(redrawReport.valid);
     EXPECT_EQ(redrawReport.strataCount, report.strataCount);
+}
+
+// Object motion inside the exposure window must reach the strata: the
+// compositor counts a pixel disoccluded only when the layer it reprojects
+// into does not agree with the anchor's depth -- which requires each stratum
+// to have traced its own pose, not whatever pose the TLAS held when the
+// recorded commands finally ran.
+TEST_F(CameraSchedulerGpuTest, StrataTraceTheirOwnTimelinePose) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+    ApplyMovingScene(WriteMoverGltf());
+    auto config = CameraConfigFor(kSensorSize, kSensorSize);
+    config.quality.gpuTimePositions = 4;
+    // The camera itself does not move: a static camera isolates the object
+    // term, so any disocclusion is the mover's and nothing else's.
+    config.readout.exposureSeconds = 1.0;
+    const auto enabled = context->SetCameraConfig(config);
+    ASSERT_TRUE(enabled.has_value()) << enabled.error();
+    context->SetSPP(8);
+
+    DrawFrame();
+    const auto report = context->GetLastDynamicExposureReport();
+    ASSERT_TRUE(report.valid);
+    EXPECT_GT(report.strataCount, 1u);
+    // Sanity first: the analytic half of the report proves the trajectory
+    // actually reaches the measurement. If this is zero the fixture, not
+    // the renderer, is broken.
+    EXPECT_GT(report.objectMotionApproximation, 0.0)
+        << "the mover's motion never reached the report's host-side terms";
+    // The mover sweeps several pixels between strata; its silhouette cannot
+    // reproject consistently, so the compositor must count disocclusions.
+    EXPECT_GT(report.disoccludedFraction, 0.0)
+        << "every stratum traced the same pose -- the per-stratum TLAS refit "
+           "was applied on the host instead of recorded into the frame "
+           "(strata=" << report.strataCount
+           << ", objectMotion=" << report.objectMotionApproximation
+           << ", viewDependent=" << report.viewDependentFraction << ")";
+    EXPECT_LE(report.disoccludedFraction, 1.0);
 }
 
 TEST_F(CameraSchedulerGpuTest, StaticSceneDegeneratesToSingleStratum) {
