@@ -1,13 +1,24 @@
 """Reject correspondence into invalid derived texels in a fisheye boundary case."""
 import json
+import re
 import subprocess
 import OpenEXR
 import numpy as np
 
 
+def win_path(path):
+    """Convert /mnt/<drive>/... to <drive>:/... for the Windows child .exe --
+    WSL interop translates the child's cwd but not its argv."""
+    text = str(path)
+    match = re.match(r'^/mnt/([a-zA-Z])/(.*)$', text)
+    if match:
+        return f'{match[1].upper()}:/{match[2]}'
+    return text
+
+
 def check(root, cli):
     job = root / 'docs/dataset/fusion/rectification_edge_job.toml'
-    render = subprocess.run([str(cli), 'fusion-export', str(job)], cwd=root,
+    render = subprocess.run([str(cli), 'fusion-export', win_path(job)], cwd=root,
                             capture_output=True, text=True, errors='replace')
     if render.returncode:
         raise ValueError('rectification boundary render failed: ' + render.stderr[-1000:])

@@ -1874,7 +1874,6 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
         if((fusionCapture || quantitativeObserver) && (chunk.diagnosticFlags&16u))
             return Result<Image,String>::Err("nonfinite quantitative fusion radiance");
         if(fusionCapture) {
-            if(chunk.diagnosticFlags&16u)return Result<Image,String>::Err("nonfinite quantitative fusion radiance");
             for(auto& c:fusionSample)c=Image(chunk.width,chunk.height,1);
             if(fusionStrata==0) {
                 fusionCapture->validSampleFraction=Image(chunk.width,chunk.height,1);

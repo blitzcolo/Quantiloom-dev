@@ -3771,6 +3771,26 @@ struct PickPushConstants {
 };
 static_assert(sizeof(PickPushConstants) == 80, "PickPushConstants size mismatch");
 
+/// The observer descriptor set stays selected only while camera strata are
+/// traced. The manual reset used to sit after the loop, so every early return
+/// in between left the pipeline on the observer set for the next dispatch;
+/// the flag's scope is an object now rather than a pair of calls.
+struct ObserverSetScope {
+    RayTracingPipeline& pipeline;
+    const bool armed;
+    ObserverSetScope(RayTracingPipeline& target, bool enable)
+        : pipeline(target), armed(enable) {
+        if (armed) {
+            pipeline.SetUseCameraObserverSet(true);
+        }
+    }
+    ~ObserverSetScope() {
+        if (armed) {
+            pipeline.SetUseCameraObserverSet(false);
+        }
+    }
+};
+
 }  // namespace
 
 Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
@@ -5556,7 +5576,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         ~TimelineRestore() { self->ApplyTimelinePose(time); }
     } restoreGuard{this, restoreTime};
 
-    if (fastRgb) pipeline->SetUseCameraObserverSet(true);
+    const ObserverSetScope observerSet{*pipeline, fastRgb};
     pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
     std::array<rendercore::DynamicLayerCamera,
                rendercore::kCameraTimeStrataMax> layerCameras{};
@@ -5622,7 +5642,6 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         cameraStratumSampleCounts[stratum] = running + stratumSamples;
         totalTraced += stratumSamples;
     }
-    if (fastRgb) pipeline->SetUseCameraObserverSet(false);
     if (cameraTracePerf) cameraTracePerf->EndFrame(cmd);
     VkMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -5694,7 +5713,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
                                  cameraConfig.device.effectiveMaxNm);
     const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);
     if (!pose) return Result<void, String>::Err(pose.error());
-    pipeline->SetUseCameraObserverSet(true);
+    const ObserverSetScope observerSet{*pipeline, true};
     if(scene && !fusionTransport.empty() && fusionTransport[0].mode!=0) {
         const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
         if(!initial)return Result<void,String>::Err(initial.error());
@@ -5714,7 +5733,6 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
         cameraConfig.optics.sensorWidthPx,
         cameraConfig.optics.sensorHeightPx);
     if (perfLogger) perfLogger->EndFrame(cmd);
-    pipeline->SetUseCameraObserverSet(false);
     return Result<void, String>::Ok();
 }
 

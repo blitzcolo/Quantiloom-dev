@@ -55,6 +55,26 @@ glm::vec2 ApplyUv(const UvTransform& transform, glm::vec2 uv) {
 
 glm::vec2 FlipV(glm::vec2 uv) { return glm::vec2(uv.x, 1.0f - uv.y); }
 
+/// A solid image as encoded file bytes, without touching the filesystem.
+/// Uncompressed TGA is an 18-byte header plus raw BGRA and stb_image reads it
+/// back unchanged -- ImageIO::WritePNG would apply sRGB on the way out, so a
+/// known byte would come back different.
+std::vector<u8> SolidTga(u8 r, u8 g, u8 b, u8 a, u32 size = 2) {
+    std::vector<u8> bytes(18, 0);
+    bytes[2] = 2;                            // uncompressed true-colour
+    bytes[12] = static_cast<u8>(size & 0xFF);
+    bytes[13] = static_cast<u8>((size >> 8) & 0xFF);
+    bytes[14] = static_cast<u8>(size & 0xFF);
+    bytes[15] = static_cast<u8>((size >> 8) & 0xFF);
+    bytes[16] = 32;                          // bits per pixel
+    bytes[17] = 0x28;                        // 8 alpha bits, top-left origin
+    bytes.reserve(18 + static_cast<usize>(size) * size * 4);
+    for (u32 i = 0; i < size * size; ++i) {
+        bytes.insert(bytes.end(), {b, g, r, a});
+    }
+    return bytes;
+}
+
 }  // namespace
 
 TEST(UsdTextureBank, RecipeKeyDedupsIdenticalRepacks) {
@@ -356,4 +376,40 @@ TEST(UsdTextureBank, ABakedBiasIsLogged) {
         << log.Dump();
     // 0x80 / 255 * 0.5 + 0.25 = 0.5008 -> 128
     EXPECT_EQ(textures[index].pixels[1], 128);
+}
+
+// Preload used to launch one std::async per file while logging a cap of 8, so
+// the pool size was cosmetic. The worker pool is what a scene with more files
+// than workers actually exercises: every file still has to be there.
+TEST(UsdTextureBank, PreloadDecodesMoreFilesThanTheWorkerCap) {
+    UsdTextureBank bank;
+    constexpr u32 count = 20;  // past the 8-worker cap
+
+    std::unordered_set<String> paths;
+    for (u32 i = 0; i < count; ++i) {
+        const String name = "pool_" + std::to_string(i) + ".tga";
+        bank.AdoptEncoded(name, SolidTga(static_cast<u8>(i), 0, 0, 0xFF));
+        paths.insert(name);
+    }
+    bank.Preload(paths);
+
+    EXPECT_EQ(bank.SourceCount(), count);
+    for (const String& path : paths) {
+        EXPECT_TRUE(bank.HasSource(path)) << path << " did not decode";
+    }
+
+    // One identity recipe reads its source's pixels back, to prove a decode
+    // went to the right entry rather than just any entry.
+    SlotRecipe recipe;
+    recipe.dst[0] = SourceFrom("pool_7.tga", ChannelSel::R);
+    recipe.dst[1] = SourceFrom("pool_7.tga", ChannelSel::G);
+    recipe.dst[2] = SourceFrom("pool_7.tga", ChannelSel::B);
+    recipe.dst[3] = SourceFrom("pool_7.tga", ChannelSel::A);
+    ASSERT_TRUE(recipe.IsIdentityOf("pool_7.tga"));
+
+    std::vector<Texture> textures;
+    const i32 index = bank.Materialise(recipe, textures);
+    ASSERT_GE(index, 0);
+    EXPECT_EQ(textures[index].pixels[0], 7);
+    EXPECT_EQ(textures[index].pixels[3], 0xFF);
 }

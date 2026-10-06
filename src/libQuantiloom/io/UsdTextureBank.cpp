@@ -11,6 +11,7 @@
 #include <stb_image.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <filesystem>
 #include <future>
@@ -252,49 +253,63 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
     if (threads == 0) {
         threads = 4;
     }
-    QL_LOG_INFO("  Decoding {} texture files using up to {} threads",
-                absolutePaths.size(), threads);
 
-    std::vector<String> paths;
-    paths.reserve(absolutePaths.size());
+    struct Work {
+        String path;
+        const std::vector<u8>* encoded = nullptr;
+    };
+    std::vector<Work> work;
+    work.reserve(absolutePaths.size());
     for (const String& path : absolutePaths) {
-        if (m_sources.find(path) == m_sources.end()) {
-            paths.push_back(path);
+        if (m_sources.find(path) != m_sources.end()) {
+            continue;
         }
+        // Bytes that were handed over rather than read from disk -- a texture
+        // inside a .usdz -- decode here too, so they cost the same as any other.
+        Work item;
+        item.path = path;
+        if (const auto encoded = m_encoded.find(path); encoded != m_encoded.end()) {
+            item.encoded = &encoded->second;
+        }
+        work.push_back(std::move(item));
     }
+
+    const u32 workerCount =
+        std::min<u32>(threads, static_cast<u32>(work.size()));
+    QL_LOG_INFO("  Decoding {} texture files using up to {} threads",
+                work.size(), workerCount);
 
     struct Decoded {
         String path;
         Texture texture;
         u32 sourceChannels = 4;
     };
-    std::vector<std::future<Decoded>> pending;
-    pending.reserve(paths.size());
-    for (const String& path : paths) {
-        // Bytes that were handed over rather than read from disk -- a texture
-        // inside a .usdz -- decode here too, so they cost the same as any other.
-        if (const auto encoded = m_encoded.find(path); encoded != m_encoded.end()) {
-            const std::vector<u8>& bytes = encoded->second;
-            pending.push_back(std::async(std::launch::async, [path, &bytes]() {
-                Decoded out;
-                out.path = path;
-                out.texture = DecodeTextureBytes(path, bytes.data(), bytes.size(),
-                                                 &out.sourceChannels);
-                return out;
-            }));
-            continue;
-        }
-        pending.push_back(std::async(std::launch::async, [path]() {
-            Decoded out;
-            out.path = path;
-            out.texture = DecodeTextureFile(path, &out.sourceChannels);
-            return out;
+    std::vector<Decoded> results(work.size());
+    // A texture can be a 4K image and a scene can name hundreds; one thread
+    // per file made the cap cosmetic. Workers pull the next index instead, so
+    // the pool size above is the real bound, and a throwing decode still
+    // reaches the caller through future.get() exactly as before.
+    std::atomic<usize> next{0};
+    std::vector<std::future<void>> pending;
+    pending.reserve(workerCount);
+    for (u32 w = 0; w < workerCount; ++w) {
+        pending.push_back(std::async(std::launch::async, [this, &work, &results, &next]() {
+            for (usize i = next.fetch_add(1); i < work.size(); i = next.fetch_add(1)) {
+                Decoded& out = results[i];
+                out.path = work[i].path;
+                out.texture = work[i].encoded
+                    ? DecodeTextureBytes(work[i].path, work[i].encoded->data(),
+                                         work[i].encoded->size(), &out.sourceChannels)
+                    : DecodeTextureFile(work[i].path, &out.sourceChannels);
+            }
         }));
+    }
+    for (auto& future : pending) {
+        future.get();
     }
 
     usize decoded = 0;
-    for (auto& future : pending) {
-        Decoded out = future.get();
+    for (auto& out : results) {
         if (out.texture.width > 0) {
             ++decoded;
         }
@@ -302,7 +317,7 @@ void UsdTextureBank::Preload(const std::unordered_set<String>& absolutePaths) {
         m_sources.emplace(std::move(out.path), std::move(out.texture));
     }
 
-    QL_LOG_INFO("  Decoded {} of {} texture files", decoded, paths.size());
+    QL_LOG_INFO("  Decoded {} of {} texture files", decoded, work.size());
     m_encoded.clear();
 }
 

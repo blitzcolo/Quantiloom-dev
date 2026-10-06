@@ -7,6 +7,7 @@ interface weights and radiance are recomputed independently from source data.
 import base64
 import json
 import math
+import re
 from pathlib import Path
 import tomllib
 import numpy as np
@@ -14,6 +15,22 @@ import fusion_verify
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'physics-audit'))
 import harness
+
+
+def resolve_referenced_path(base, value):
+    """Resolve a path written into a generated TOML for the Windows exe.
+
+    Absolute POSIX paths are used as-is; an absolute drive-letter path
+    (H:/..., what win_path writes under WSL) maps back to /mnt/<drive>/... so
+    this host-side check can read the same file; relative paths join `base`.
+    """
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    match = re.match(r'^([a-zA-Z]):[/\\](.*)$', value)
+    if match:
+        return Path('/mnt') / match[1].lower() / match[2]
+    return base / path
 
 
 def triangles(path):
@@ -45,7 +62,8 @@ def triangles(path):
 
 def check_package(manifest_path,scene_path):
     manifest_path=Path(manifest_path);scene_path=Path(scene_path)
-    scene=tomllib.loads(scene_path.read_text());tri,ids,names=triangles(scene_path.parent/scene['scene']['gltf'])
+    scene=tomllib.loads(scene_path.read_text());tri,ids,names=triangles(
+        resolve_referenced_path(scene_path.parent,scene['scene']['gltf']))
     a=tri[:,0];e1=tri[:,1]-a;e2=tri[:,2]-a
     normals=np.cross(e1,e2);normals/=np.linalg.norm(normals,axis=1)[:,None]
     overrides=scene['material_overrides'];manifest=json.loads(manifest_path.read_text())
