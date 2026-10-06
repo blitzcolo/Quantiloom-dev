@@ -1,5 +1,4 @@
 #include "renderer/TimelineState.hpp"
-#include "renderer/EmissiveInvalidation.hpp"
 
 #include "core/Log.hpp"
 
@@ -116,7 +115,6 @@ TimelineState TimelineState::Build(const Scene& scene, const TimelineConfig& con
         // evaluating a pose never inverts a matrix.
         animated.nodeRest = glm::inverse(animated.modelRest) * scene.nodes[i].transform;
         animated.boundRadius_m = NodeBoundRadius(scene, scene.nodes[i], scene.nodes[i].transform);
-        animated.emissive = NodeHasSampledEmission(scene, scene.nodes[i]);
         state.m_animated.push_back(std::move(animated));
     }
 

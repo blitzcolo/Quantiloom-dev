@@ -3,6 +3,7 @@
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuImage.hpp"
+#include "renderer/ShaderBinary.hpp"
 #include "renderer/VulkanContext.hpp"
 
 #include <algorithm>
@@ -10,64 +11,14 @@
 #include <bit>
 #include <cmath>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <limits>
 #include <vector>
 
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__linux__)
-#include <climits>
-#include <unistd.h>
-#endif
 
 namespace quantiloom::rendercore {
 namespace {
 
 constexpr u32 kScratchWords = 4;
-
-std::filesystem::path ExecutableDirectory() {
-#if defined(_WIN32)
-    wchar_t buffer[MAX_PATH];
-    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    return std::filesystem::path(buffer).parent_path();
-#elif defined(__linux__)
-    char buffer[PATH_MAX];
-    const ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (length > 0) {
-        buffer[length] = '\0';
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#else
-    return std::filesystem::current_path();
-#endif
-}
-
-Vector<u32> LoadSpirv(StringView name) {
-    const auto exeDir = ExecutableDirectory();
-    const std::filesystem::path candidates[] = {
-        std::filesystem::path(name),
-        exeDir / name,
-        std::filesystem::path("shaders") / name,
-        exeDir / "shaders" / name,
-        std::filesystem::path("..") / "shaders" / name,
-        std::filesystem::path("src") / "shaders" / name,
-    };
-    for (const auto& path : candidates) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file) continue;
-        const auto bytes = static_cast<usize>(file.tellg());
-        if (bytes == 0 || bytes % sizeof(u32) != 0) continue;
-        Vector<u32> words(bytes / sizeof(u32));
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(words.data()),
-                  static_cast<std::streamsize>(bytes));
-        if (file) return words;
-    }
-    return {};
-}
 
 u32 FloatToOrdered(f32 value) {
     const u32 bits = std::bit_cast<u32>(value);

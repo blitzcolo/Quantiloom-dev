@@ -57,11 +57,6 @@ struct AnimatedNode {
     /// Radius of the node's bounding sphere in world units. Only the epoch
     /// planner reads it, to weigh a rotation against a translation.
     f32 boundRadius_m = 0.0f;
-
-    /// Whether any of this node's primitives emits. A moving emitter means the
-    /// emissive triangle list has to be rebuilt for the frame; a moving rock
-    /// does not.
-    bool emissive = false;
 };
 
 class TimelineState {

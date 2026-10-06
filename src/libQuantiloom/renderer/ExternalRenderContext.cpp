@@ -11,6 +11,7 @@
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/ShaderBinary.hpp"
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/RenderCore.hpp"
@@ -60,12 +61,6 @@
 #include <limits>
 #include <optional>
 #include <random>
-
-// Not for the cache directory -- that moved to core/CacheDirectory.hpp -- but
-// for GetModuleFileNameW, which resolves the DLL's own path further down.
-#if defined(_WIN32)
-    #include <windows.h>
-#endif
 
 namespace quantiloom {
 
@@ -315,9 +310,10 @@ struct ExternalRenderContext::Impl {
     u32 sequenceSeed = constants::DEFAULT_SAMPLING_SEED;
 
     // Restart the sampling sequence. Called from ResetAccumulation() so the
-    // sequence and the accumulation it feeds always begin together.
+    // sequence and the accumulation it feeds always begin together. Only
+    // reseeds: pixelImageGeneration moves at the caller, where "the image
+    // changed" is what is actually meant.
     void ReseedRng() {
-        ++pixelImageGeneration;
         rng.seed(samplingSeed != 0U ? samplingSeed : std::random_device{}());
         sequenceSeed = randDist(rng);
     }
@@ -2447,11 +2443,17 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
     // Nothing survives a change of extent. Same two steps as
     // ExternalRenderContext::ResetAccumulation.
     accumulatedSamples = 0;
+    // A new extent is a different image, so pixel copies outstanding against
+    // the old one must stop matching Poll().
+    ++pixelImageGeneration;
     ReseedRng();
 }
 
 void ExternalRenderContext::ResetAccumulation() {
     m_impl->accumulatedSamples = 0;
+    // A reset accumulation is a different image, so pixel copies outstanding
+    // against the old one must stop matching Poll().
+    ++m_impl->pixelImageGeneration;
     // Restart the sampling sequence with the accumulation it feeds, so an
     // accumulation pass always draws the same samples for the same seed
     // regardless of what was rendered before it.
@@ -4988,6 +4990,11 @@ Result<void, String> ExternalRenderContext::Impl::RebuildEmissiveGeometry(
         emissiveTriangleBuffer =
             rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
     } else {
+        if (!mayReallocate && bytes > DeferredBufferUploads::kMaxPayloadBytes)
+            // An oversized list would take UploadDeferred's queue-draining
+            // path, which cannot run while a command buffer is still open.
+            return Result<void, String>::Err(
+                "emissive triangle list is too large to upload mid-recording");
         const rendercore::EmissiveTriangleGPU empty{};
         const void* data = triangles.empty() ? static_cast<const void*>(&empty)
                                              : static_cast<const void*>(triangles.data());
@@ -5671,7 +5678,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
             rendercore::kCameraTimeStrataMax);
         const bool anythingMoves = !cameraConfig.motion.keys.empty() ||
                                    timeline.HasMotion();
-        if(anythingMoves && !fusionTransport.empty() && fusionTransport[0].mode!=0)
+        if(anythingMoves && rendercore::FusionOpticsActive(fusionTransport))
             return Result<void,String>::Err("fusion optical preview requires a frozen scene and camera");
         strataCount = anythingMoves
                           ? std::min<u32>(requested, spectralSamples)
@@ -5749,7 +5756,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
                                                stratumTime);
         if (!pose) return Result<void, String>::Err(pose.error());
         pipeline->SetCameraData(pose.value());
-        if(scene && !fusionTransport.empty() && fusionTransport[0].mode!=0) {
+        if(scene && rendercore::FusionOpticsActive(fusionTransport)) {
             const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
             if(!initial)return Result<void,String>::Err(initial.error());
             pipeline->SetFusionInitialMedia(*initial);
@@ -5908,7 +5915,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
     const auto pose = CameraDataForCapture(SpectralMode::Single, centerNm);
     if (!pose) return Result<void, String>::Err(pose.error());
     const ObserverSetScope observerSet{*pipeline, true};
-    if(scene && !fusionTransport.empty() && fusionTransport[0].mode!=0) {
+    if(scene && rendercore::FusionOpticsActive(fusionTransport)) {
         const auto initial=rendercore::InitialFusionMedia(*scene,fusionTransport,pose.value().origin);
         if(!initial)return Result<void,String>::Err(initial.error());
         pipeline->SetFusionInitialMedia(*initial);
@@ -5934,36 +5941,6 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
 }
 
 // ============================================================================
-// Helper: Get executable directory for shader loading
-// ============================================================================
-
-static std::filesystem::path GetExecutableDirectory() {
-#if defined(_WIN32)
-    wchar_t buffer[MAX_PATH];
-    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    std::filesystem::path exePath(buffer);
-    return exePath.parent_path();
-#elif defined(__linux__)
-    char buffer[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (len != -1) {
-        buffer[len] = '\0';
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#elif defined(__APPLE__)
-    char buffer[PATH_MAX];
-    uint32_t size = sizeof(buffer);
-    if (_NSGetExecutablePath(buffer, &size) == 0) {
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#else
-    return std::filesystem::current_path();
-#endif
-}
-
-// ============================================================================
 // Viewport pick pipeline (1x1 inline ray-query dispatch)
 // ============================================================================
 
@@ -5973,34 +5950,7 @@ void ExternalRenderContext::Impl::CreatePickPipeline() {
 
     QL_LOG_INFO("Creating pick compute pipeline...");
 
-    auto loadShaderFile = [](const String& path) -> std::vector<u32> {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) return {};
-        size_t fileSize = static_cast<size_t>(file.tellg());
-        if (fileSize == 0 || fileSize % 4 != 0) return {};
-        std::vector<u32> code(fileSize / 4);
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), fileSize);
-        return code;
-    };
-
-    auto exeDir = GetExecutableDirectory();
-    const std::vector<std::filesystem::path> shaderPaths = {
-        "pick.spv",
-        exeDir / "pick.spv",
-        "shaders/pick.spv",
-        exeDir / "shaders" / "pick.spv",
-        "../shaders/pick.spv",
-        "src/shaders/pick.spv",
-    };
-    std::vector<u32> code;
-    for (const auto& path : shaderPaths) {
-        code = loadShaderFile(path.string());
-        if (!code.empty()) {
-            QL_LOG_DEBUG("Pick: loaded shader from {}", path.string());
-            break;
-        }
-    }
+    const std::vector<u32> code = rendercore::LoadSpirv("pick.spv");
     if (code.empty()) {
         QL_LOG_WARN("Pick: could not load pick.spv, picking disabled");
         return;
@@ -6124,20 +6074,12 @@ void ExternalRenderContext::Impl::CreateCLAHEPipeline() {
         return code;
     };
 
-    // Try multiple paths for shader location
-    // Include executable directory for SDK installations
-    auto exeDir = GetExecutableDirectory();
-    std::vector<std::filesystem::path> shaderPaths = {
-        "clahe_histogram.spv",
-        exeDir / "clahe_histogram.spv",  // SDK installation directory
-        "shaders/clahe_histogram.spv",
-        exeDir / "shaders" / "clahe_histogram.spv",
-        "../shaders/clahe_histogram.spv",
-        "src/shaders/clahe_histogram.spv"
-    };
-
+    // The three shaders must come from one directory: a histogram from the
+    // SDK install beside a cdf from the source tree may not be the same
+    // build. Search by candidate base, not by file.
     std::vector<u32> histogramCode, cdfCode, applyCode;
-    for (const auto& basePath : shaderPaths) {
+    for (const auto& basePath :
+         rendercore::SpirvSearchPaths("clahe_histogram.spv")) {
         // Convert path to string and replace "histogram" with cdf/apply
         String histPath = basePath.string();
         String cdfPath = histPath;

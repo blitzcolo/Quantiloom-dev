@@ -248,7 +248,7 @@ void BindFluorescence(const String& name, Material& mat,
         out.curves.push_back(preview);
         for (const auto& segment : segments) {
             const i32 nextIndex = static_cast<i32>(out.curves.size());
-            out.curves.back()._padding = static_cast<u32>(nextIndex + 1);
+            out.curves.back().nextExactSegment = static_cast<u32>(nextIndex + 1);
             out.curves.push_back(segment);
         }
         return first;
@@ -2035,7 +2035,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                 out.curves.push_back(resolved.curve);
                 for (const auto& segment : resolved.exactSegments) {
                     const i32 nextIndex = static_cast<i32>(out.curves.size());
-                    out.curves.back()._padding = static_cast<u32>(nextIndex + 1);
+                    out.curves.back().nextExactSegment = static_cast<u32>(nextIndex + 1);
                     out.curves.push_back(segment);
                 }
                 out.materialNameToEmissiveCurve[name] = index;
@@ -3571,7 +3571,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
                    " records, exceeding the shader's 4096-record limit");
     }
     for (size_t i = 0; i < out.curves.size(); ++i) {
-        const u32 nextPlusOne = out.curves[i]._padding;
+        const u32 nextPlusOne = out.curves[i].nextExactSegment;
         if (nextPlusOne != 0 && nextPlusOne > out.curves.size()) {
             diag.Fatal("spectral_curves",
                        "exact source segment at index " + std::to_string(i) +

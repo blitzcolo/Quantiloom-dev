@@ -16,8 +16,6 @@ inline Result<std::array<Image, 3>, String> PrepareFusionInputs(
             return Result<std::array<Image, 3>, String>::Err("Invalid fusion input image");
         if (source->width != vis.width || source->height != vis.height)
             return Result<std::array<Image, 3>, String>::Err("Fusion image dimensions must match");
-        if (source->LuminanceChannelIndex() >= source->channels)
-            return Result<std::array<Image, 3>, String>::Err("Invalid fusion radiance channel");
     }
     std::array<Image, 3> bands;
     for (size_t i = 0; i < sources.size(); ++i) {

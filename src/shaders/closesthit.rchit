@@ -19,6 +19,7 @@
 // ============================================================================
 
 #include "common.hlsli"
+#include "band_routing.hlsli"
 #include "camera_response.hlsli"
 #include "pbr.hlsli"
 #include "SpectralConversion.hlsli"
@@ -3118,10 +3119,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // identically zero.
         if(fusionRecords.Load(48)==0) output_radiance = clamp(output_radiance, -1000.0, 1000.0);
 
-    } else if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                pushConsts.camera.wavelength_nm <= SPECTRAL_VIS_LAMBDA_MAX) ||
-               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
-                payload.heroLambda <= SPECTRAL_VIS_LAMBDA_MAX)) {
+    } else if (IsSingleWavelengthMode() &&
+               RoutesToVisibleSingle(SingleModeWavelength(payload.heroLambda))) {
         // ====================================================================
         // Single Wavelength Mode: True Spectral Rendering (Quantitative)
         // ====================================================================
@@ -3136,8 +3135,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 2. LightingParams.sunRadiance_spectral → Scalar fallback
         // ====================================================================
 
-        float lambda = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
-            ? payload.heroLambda : pushConsts.camera.wavelength_nm;
+        float lambda = SingleModeWavelength(payload.heroLambda);
 
         // ================================================================
         // Query Sun/Sky Spectral Radiance at Wavelength λ
@@ -3457,12 +3455,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         output_radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
-               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                pushConsts.camera.wavelength_nm > SPECTRAL_VIS_LAMBDA_MAX &&
-                pushConsts.camera.wavelength_nm < SPECTRAL_MWIR_LAMBDA_MIN) ||
-               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
-                payload.heroLambda > SPECTRAL_VIS_LAMBDA_MAX &&
-                payload.heroLambda < SPECTRAL_MWIR_LAMBDA_MIN)) {
+               (IsSingleWavelengthMode() &&
+                RoutesToSwirBranch(SingleModeWavelength(payload.heroLambda)))) {
         // ====================================================================
         // SWIR Fused Mode: Short-Wave IR Band Integration (1000-2500nm)
         // ====================================================================
@@ -3522,9 +3516,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
         const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
-        const float carriedLambda = cameraRay ? payload.heroLambda :
-            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
+        const bool singleRay = IsSingleWavelengthMode();
+        const float carriedLambda = SingleModeWavelength(payload.heroLambda);
         const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
         float heroRadiance = 0.0;
@@ -4029,10 +4022,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
-               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE &&
-                pushConsts.camera.wavelength_nm >= SPECTRAL_MWIR_LAMBDA_MIN) ||
-               (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT &&
-                payload.heroLambda >= SPECTRAL_MWIR_LAMBDA_MIN)) {
+               (IsSingleWavelengthMode() &&
+                RoutesToThermalBranch(SingleModeWavelength(payload.heroLambda)))) {
         // ====================================================================
         // MWIR/LWIR Fused Mode: Multi-Wavelength IR Band Integration
         // ====================================================================
@@ -4063,14 +4054,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
         bool includeSolarReflection = false;  // Only for MWIR during daytime
 
         const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
-        const bool singleRay = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE) || cameraRay;
-        const float carriedLambda = cameraRay ? payload.heroLambda :
-            (singleRay ? pushConsts.camera.wavelength_nm : payload.heroLambda);
+        const bool singleRay = IsSingleWavelengthMode();
+        const float carriedLambda = SingleModeWavelength(payload.heroLambda);
         const bool mwirLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED) ||
                               (singleRay && carriedLambda < SPECTRAL_LWIR_LAMBDA_MIN);
         if (mwirLike) {
-            lambda_min = singleRay ? carriedLambda : SPECTRAL_MWIR_LAMBDA_MIN;
-            lambda_max = singleRay ? carriedLambda + 1.0 : SPECTRAL_MWIR_LAMBDA_MAX;
+            // A single ray still sweeps one sample at its own wavelength
+            // below; the band bounds here are what a fused sweep uses.
+            lambda_min = SPECTRAL_MWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_MWIR_LAMBDA_MAX;
             // MWIR: solar contributes 5-20% for sunlit surfaces (P2 fix)
             // Only include if surface faces the sun AND the sun is visible.
             // shadowFactor was traced for every mode and read by three of
@@ -4080,8 +4072,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // shadowFactor would need.
             includeSolarReflection = (NdotL > 0.0 && shadowFactor > 0.0);
         } else {  // LWIR
-            lambda_min = singleRay ? carriedLambda : SPECTRAL_LWIR_LAMBDA_MIN;
-            lambda_max = singleRay ? carriedLambda + 1.0 : SPECTRAL_LWIR_LAMBDA_MAX;
+            lambda_min = SPECTRAL_LWIR_LAMBDA_MIN;
+            lambda_max = SPECTRAL_LWIR_LAMBDA_MAX;
             // LWIR: solar contribution < 0.1%, skip for performance
             includeSolarReflection = singleRay && NdotL > 0.0 && shadowFactor > 0.0;
         }

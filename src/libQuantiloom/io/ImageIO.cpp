@@ -1,4 +1,5 @@
 #include "io/ImageIO.hpp"
+#include "core/SrgbEncode.hpp"
 
 // stb_image for PNG/JPEG/BMP/TGA/HDR reading
 // Note: STB_IMAGE_IMPLEMENTATION is defined in GltfLoader.cpp via tinygltf
@@ -264,17 +265,6 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
 // Public API: WritePNG
 // ============================================================================
 
-// Helper: Apply sRGB gamma encoding (IEC 61966-2-1)
-// Input: linear value [0, 1]
-// Output: sRGB encoded value [0, 1]
-static float LinearToSRGB(float linear) {
-    if (linear <= 0.0031308f) {
-        return 12.92f * linear;
-    } else {
-        return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
-    }
-}
-
 bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
     if (!image.IsValid()) {
         QL_LOG_ERROR("ImageIO::WritePNG: Invalid image");
@@ -309,7 +299,7 @@ bool ImageIO::WritePNG(const std::string& filepath, const Image& image) {
                     // Apply sRGB gamma encoding (shader outputs linear RGB)
                     // Alpha channel (c == 3) should NOT be gamma encoded
                     if (c < 3 && !alreadySrgb) {
-                        value = LinearToSRGB(value);
+                        value = LinearToSrgb(value);
                     }
 
                     // Convert to 8-bit

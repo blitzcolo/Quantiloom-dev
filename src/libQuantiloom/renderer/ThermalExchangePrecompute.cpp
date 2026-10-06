@@ -8,20 +8,13 @@
 #include "core/Log.hpp"
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuBuffer.hpp"
+#include "renderer/ShaderBinary.hpp"
 
 #include <algorithm>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <numeric>
 #include <unordered_map>
 
-#if defined(_WIN32)
-#include <windows.h>
-#elif defined(__linux__)
-#include <climits>
-#include <unistd.h>
-#endif
 
 namespace quantiloom::rendercore {
 
@@ -50,52 +43,6 @@ struct ExchangePushConstants {
     u32 sunOutputOffset;
 };
 static_assert(sizeof(ExchangePushConstants) == 36, "ExchangePushConstants size mismatch");
-
-std::filesystem::path ExecutableDirectory() {
-#if defined(_WIN32)
-    wchar_t buffer[MAX_PATH];
-    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    return std::filesystem::path(buffer).parent_path();
-#elif defined(__linux__)
-    char buffer[PATH_MAX];
-    const ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (length != -1) {
-        buffer[length] = '\0';
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#else
-    return std::filesystem::current_path();
-#endif
-}
-
-Vector<u32> LoadSpirv(const String& name) {
-    // The same six places the pick pipeline looks, and for the same reason:
-    // the .spv sits beside the executable when installed, in src/shaders when
-    // run from the repository.
-    const auto exeDir = ExecutableDirectory();
-    const std::filesystem::path candidates[] = {
-        name,
-        exeDir / name,
-        std::filesystem::path("shaders") / name,
-        exeDir / "shaders" / name,
-        std::filesystem::path("..") / "shaders" / name,
-        std::filesystem::path("src") / "shaders" / name,
-    };
-
-    for (const auto& path : candidates) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file.is_open()) continue;
-        const auto size = static_cast<usize>(file.tellg());
-        if (size == 0 || size % 4 != 0) continue;
-        Vector<u32> code(size / 4);
-        file.seekg(0);
-        file.read(reinterpret_cast<char*>(code.data()), static_cast<std::streamsize>(size));
-        QL_LOG_DEBUG("Thermal exchange: loaded {} from {}", name, path.string());
-        return code;
-    }
-    return {};
-}
 
 }  // namespace
 

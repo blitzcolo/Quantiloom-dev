@@ -40,6 +40,7 @@
 #include "core/SpectralData.hpp"
 #include "io/SpectralIO.hpp"
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/EmissiveInvalidation.hpp"
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/ThermalEpochBuilder.hpp"
@@ -1847,7 +1848,7 @@ Result<Image, String> OfflineRenderer::Impl::RenderCameraWavelength(
     if(fusionOptions && fusionOptions->cancelled && fusionOptions->cancelled())
         return Result<Image,String>::Err("fusion export cancelled");
     const bool recordFusion=fusionCapture || quantitativeObserver || static_cast<bool>(init.onFusionPathChunk) ||
-        (!spectra.fusionTransport.empty() && spectra.fusionTransport[0].mode!=0);
+        rendercore::FusionOpticsActive(spectra.fusionTransport);
     if(recordFusion) {
         const auto initial=rendercore::InitialFusionMedia(loadedScene,spectra.fusionTransport,cameraData.origin);
         if(!initial)return Result<Image,String>::Err(initial.error());
@@ -1962,11 +1963,15 @@ Result<void, String> OfflineRenderer::SetTimelineTime(const f64 t_s) {
 
         // The emitter list holds world-space triangles, so a lamp that moved is
         // sampled where it used to be until it is rebuilt. Only a lamp: a rock
-        // that moved changes nothing in it.
+        // that moved changes nothing in it. The emissive test is read live
+        // rather than cached on AnimatedNode: materials can change after the
+        // timeline was built.
         const bool emitterMoved =
             std::any_of(impl.timeline.Animated().begin(), impl.timeline.Animated().end(),
-                        [&moved](const rendercore::AnimatedNode& animated) {
-                            return animated.emissive &&
+                        [&impl, &moved](const rendercore::AnimatedNode& animated) {
+                            return rendercore::NodeHasSampledEmission(
+                                       impl.loadedScene,
+                                       impl.loadedScene.nodes[animated.node]) &&
                                    std::find(moved.begin(), moved.end(), animated.node) !=
                                        moved.end();
                         });

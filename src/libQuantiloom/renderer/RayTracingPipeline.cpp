@@ -1,6 +1,7 @@
 #include "RayTracingPipeline.hpp"
 #include "CommandHelper.hpp"
 #include "DeferredBufferUploads.hpp"
+#include "ShaderBinary.hpp"
 #include "core/Log.hpp"
 #include "core/SpectralData.hpp"
 #include "core/Image.hpp"
@@ -10,15 +11,6 @@
 #include <cstring>
 #include <filesystem>
 #include <chrono>
-
-#if defined(_WIN32)
-    #include <windows.h>
-#elif defined(__linux__)
-    #include <unistd.h>
-    #include <limits.h>
-#elif defined(__APPLE__)
-    #include <mach-o/dyld.h>
-#endif
 
 namespace quantiloom {
 
@@ -168,36 +160,6 @@ void RayTracingPipeline::DestroyPipelineCache(VulkanContext& context, VkPipeline
     if (cache != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(context.GetDevice(), cache, nullptr);
     }
-}
-
-// ============================================================================
-// Helper: Get executable directory
-// ============================================================================
-
-static std::filesystem::path GetExecutableDirectory() {
-#if defined(_WIN32)
-    wchar_t buffer[MAX_PATH];
-    GetModuleFileNameW(nullptr, buffer, MAX_PATH);
-    std::filesystem::path exePath(buffer);
-    return exePath.parent_path();
-#elif defined(__linux__)
-    char buffer[PATH_MAX];
-    ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-    if (len != -1) {
-        buffer[len] = '\0';
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#elif defined(__APPLE__)
-    char buffer[PATH_MAX];
-    uint32_t size = sizeof(buffer);
-    if (_NSGetExecutablePath(buffer, &size) == 0) {
-        return std::filesystem::path(buffer).parent_path();
-    }
-    return std::filesystem::current_path();
-#else
-    return std::filesystem::current_path();
-#endif
 }
 
 // ============================================================================
@@ -897,7 +859,7 @@ std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
     // Try multiple search paths
     const std::vector<std::filesystem::path> searchPaths = {
         path,  // Original path (relative to CWD or absolute)
-        GetExecutableDirectory() / path,  // Relative to executable directory
+        rendercore::ShaderExecutableDir() / path,  // Relative to executable directory
     };
 
     std::ifstream file;

@@ -130,6 +130,8 @@ add_library(quantiloom_core OBJECT
     renderer/AccelerationStructure.hpp
     renderer/CommandHelper.cpp
     renderer/CommandHelper.hpp
+    renderer/AsyncPixelReadback.cpp
+    renderer/AsyncPixelReadback.hpp
     renderer/DeferredBufferUploads.cpp
     renderer/DeferredBufferUploads.hpp
     renderer/BRDFLutGenerator.cpp
@@ -164,6 +166,8 @@ add_library(quantiloom_core OBJECT
     renderer/GpuCameraPipeline.hpp
     renderer/GpuDisplayRange.cpp
     renderer/GpuDisplayRange.hpp
+    renderer/ShaderBinary.cpp
+    renderer/ShaderBinary.hpp
     renderer/CameraResponseGpu.hpp
     renderer/ThermalPreview.cpp
     renderer/ThermalPreview.hpp

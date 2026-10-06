@@ -1,6 +1,7 @@
 #include "mcp/McpImageUtil.hpp"
 
 #include "core/Log.hpp"
+#include "core/SrgbEncode.hpp"
 
 // STB_IMAGE_WRITE_IMPLEMENTATION lives in io/ImageIO.cpp. Defining it again here
 // would give the linker two copies of every stbi_write_* symbol.
@@ -14,14 +15,6 @@ QL_DISABLE_WARNINGS_POP
 
 namespace quantiloom::mcp {
 namespace {
-
-/// IEC 61966-2-1, the same curve ImageIO::WritePNG applies.
-f32 LinearToSRGB(const f32 linear) {
-    if (linear <= 0.0031308f) {
-        return 12.92f * linear;
-    }
-    return 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
-}
 
 constexpr const char* kBase64Alphabet =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -130,7 +123,7 @@ String EncodePngBase64(const Image& image) {
             for (u32 c = 0; c < outChannels; ++c) {
                 const f32 clamped = std::clamp(image(x, y, c), 0.0f, 1.0f);
                 pixels[(static_cast<usize>(y) * image.width + x) * outChannels + c] =
-                    static_cast<u8>(LinearToSRGB(clamped) * 255.0f + 0.5f);
+                    static_cast<u8>(LinearToSrgb(clamped) * 255.0f + 0.5f);
             }
         }
     }

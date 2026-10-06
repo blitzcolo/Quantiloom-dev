@@ -183,7 +183,7 @@ struct SpectralCurveGPU {
     // For emission curves only: 0 or next exact segment index + 1. An exact
     // segment has stepSize_nm = 0 and values packed as up to 32 (nm, value)
     // pairs. Reflection curves leave this at 0. Layout stays 272 bytes.
-    u32 _padding = 0;
+    u32 nextExactSegment = 0;
 
     // Default constructor: empty curve
     SpectralCurveGPU() = default;

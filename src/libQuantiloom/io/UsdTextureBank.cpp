@@ -6,6 +6,7 @@
 #include "io/UsdTextureBank.hpp"
 
 #include "core/Log.hpp"
+#include "core/SrgbEncode.hpp"
 #include "io/ImageIO.hpp"
 
 #include <stb_image.h>
@@ -49,11 +50,6 @@ u32 ChannelByte(ChannelSel channel) {
 f32 SrgbToLinear(f32 value) {
     return value <= 0.04045f ? value / 12.92f
                              : std::pow((value + 0.055f) / 1.055f, 2.4f);
-}
-
-f32 LinearToSrgb(f32 value) {
-    return value <= 0.0031308f ? 12.92f * value
-                               : 1.055f * std::pow(value, 1.0f / 2.4f) - 0.055f;
 }
 
 u8 Quantise(f32 value) {

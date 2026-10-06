@@ -37,6 +37,16 @@
  * The CPU twin of the Equalize tone is AgcTone in postprocess/CameraIsp.cpp;
  * it bins every pixel over [min,max], so the GPU histogram (unsaturated
  * pixels only) matches it exactly for images without saturated pixels.
+ *
+ * Why not share with display_range.comp.hlsl: that shader percentiles BT.709
+ * luminance of every finite pixel into 65,536 bins over the true absolute
+ * range and scans them on the host with a truncating rank, all for the
+ * current frame. This window instead covers unsaturated pixels only, in 256
+ * bins, with an llround nearest-rank over the unsaturated count, and reads
+ * the PREVIOUS frame's histogram -- the AGC window has to exist before this
+ * frame's display pass runs, so a readback round-trip is not an option.
+ * Different population, rank definition, resolution and timing: merging them
+ * would have to reconcile all four.
  */
 
 #include "camera_common.hlsli"

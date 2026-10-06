@@ -1,4 +1,5 @@
 #include "postprocess/CameraIsp.hpp"
+#include "core/SrgbEncode.hpp"
 
 #include "postprocess/CameraDemosaic.hpp"
 #include "postprocess/CameraPhysics.hpp"
@@ -11,26 +12,9 @@
 namespace quantiloom::camera {
 namespace {
 
-// CFA channel index at a pixel; mirrors ChannelAt in CpuCameraPipeline.cpp.
-// The CFA enum maps one scalar per pixel onto the device's R/G/B responses.
-u32 CfaChannelAt(CfaPattern cfa, u32 x, u32 y) {
-    const bool px = (x & 1u) != 0, py = (y & 1u) != 0;
-    switch (cfa) {
-    case CfaPattern::RGGB: return !py ? (px ? 1u : 0u) : (px ? 2u : 1u);
-    case CfaPattern::GRBG: return !py ? (px ? 0u : 1u) : (px ? 1u : 2u);
-    case CfaPattern::GBRG: return !py ? (px ? 2u : 1u) : (px ? 1u : 0u);
-    case CfaPattern::BGGR: return !py ? (px ? 1u : 2u) : (px ? 0u : 1u);
-    default: return 0u;
-    }
-}
+
 
 f64 Clamp01(f64 value) { return std::clamp(value, 0.0, 1.0); }
-
-f64 EncodeSrgb(f64 linear) {
-    const f64 clamped = Clamp01(linear);
-    return clamped <= 0.0031308 ? 12.92 * clamped :
-           1.055 * std::pow(clamped, 1.0 / 2.4) - 0.055;
-}
 
 // Piecewise-linear control-point ramp, matching the HLSL palette functions
 // (saturate, truncate, lerp).
@@ -332,7 +316,7 @@ Result<Image, String> RunVisibleIsp(const CameraConfig& config,
         for (u32 c = 0; c < 3; ++c) {
             f64 value = std::pow(std::max(0.0, rgb[pixel][c]), inverseGamma);
             value = isp.clipOutOfGamut ? Clamp01(value) : value / (1.0 + value);
-            display.data[pixel * 3 + c] = static_cast<f32>(EncodeSrgb(value));
+            display.data[pixel * 3 + c] = static_cast<f32>(LinearToSrgb(value));
         }
     return display;
 }
@@ -352,7 +336,7 @@ Result<Image, String> RunInfraredDisplay(const CameraConfig& config,
         const std::array<f64, 3> rgb =
             ApplyDisplayPalette(tone[i], config.isp.infraredPalette);
         for (u32 c = 0; c < 3; ++c)
-            display.data[i * 3 + c] = static_cast<f32>(EncodeSrgb(rgb[c]));
+            display.data[i * 3 + c] = static_cast<f32>(LinearToSrgb(rgb[c]));
     }
     return display;
 }

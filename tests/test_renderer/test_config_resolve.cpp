@@ -1741,8 +1741,8 @@ TEST_F(ConfigResolveTest, EmissionCurveIsResampledOntoTheBandBeingRendered) {
     const auto& gpu = spectra.value().curves[static_cast<usize>(idx)];
     EXPECT_NEAR(gpu.startWavelength_nm, 1400.0f, 1.0f);
     EXPECT_NEAR(gpu.GetWavelength(gpu.numSamples - 1), 2400.0f, 1.0f);
-    ASSERT_GT(gpu._padding, 0u);
-    u32 next = gpu._padding;
+    ASSERT_GT(gpu.nextExactSegment, 0u);
+    u32 next = gpu.nextExactSegment;
     f32 lastSourceNm = 0.0f;
     size_t visited = 0;
     while (next != 0) {
@@ -1752,7 +1752,7 @@ TEST_F(ConfigResolveTest, EmissionCurveIsResampledOntoTheBandBeingRendered) {
         ASSERT_GE(exact.numSamples, 2u);
         ASSERT_LE(exact.numSamples, 32u);
         lastSourceNm = exact.values[2 * (exact.numSamples - 1)];
-        next = exact._padding;
+        next = exact.nextExactSegment;
         ASSERT_LT(++visited, spectra.value().curves.size());
     }
     EXPECT_GT(lastSourceNm, 2400.0f)

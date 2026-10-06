@@ -1,5 +1,6 @@
 #include "postprocess/CameraPhysics.hpp"
 #include "postprocess/CameraConfigIO.hpp"
+#include "core/ResultFail.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -11,9 +12,6 @@
 namespace quantiloom::camera {
 namespace {
 
-template<class T> Result<T, String> Fail(const char* message) {
-    return typename Result<T, String>::Err(String(message));
-}
 
 bool FiniteNonnegative(f64 x) { return std::isfinite(x) && x >= 0.0; }
 bool FinitePositive(f64 x) { return std::isfinite(x) && x > 0.0; }

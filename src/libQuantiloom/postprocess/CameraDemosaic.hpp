@@ -19,10 +19,25 @@
  */
 
 #include "core/Types.hpp"
+#include "postprocess/CameraPipeline.hpp"
 
 #include <array>
 
 namespace quantiloom::camera {
+
+/// CFA channel index at a pixel. The 2x2 tile repeats, so (x&1, y&1) alone
+/// picks the channel; Mono and MultiChannel have no mosaic and answer 0 --
+/// their callers index response planes, not CFA sites.
+inline u32 CfaChannelAt(CfaPattern cfa, u32 x, u32 y) {
+    const bool px = (x & 1u) != 0, py = (y & 1u) != 0;
+    switch (cfa) {
+    case CfaPattern::RGGB: return !py ? (px ? 1u : 0u) : (px ? 2u : 1u);
+    case CfaPattern::GRBG: return !py ? (px ? 0u : 1u) : (px ? 1u : 2u);
+    case CfaPattern::GBRG: return !py ? (px ? 2u : 1u) : (px ? 1u : 0u);
+    case CfaPattern::BGGR: return !py ? (px ? 1u : 2u) : (px ? 0u : 1u);
+    default: return 0u;
+    }
+}
 
 namespace mhc {
 

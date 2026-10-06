@@ -1,9 +1,11 @@
 #include "postprocess/CpuCameraPipeline.hpp"
 
 #include "core/Log.hpp"
+#include "core/ResultFail.hpp"
 #include "io/ImageIO.hpp"
 #include "postprocess/CameraAutoControl.hpp"
 #include "postprocess/CameraIsp.hpp"
+#include "postprocess/CameraDemosaic.hpp"
 #include "postprocess/CameraPhysics.hpp"
 
 #include <algorithm>
@@ -18,15 +20,6 @@
 namespace quantiloom::camera {
 namespace {
 
-template<class T> Result<T, String> Fail(const String& message) {
-    // Result<void, E> is a specialization whose Err is a static factory,
-    // not a nested type; the primary template carries a nested Err wrapper.
-    if constexpr (std::is_void_v<T>) {
-        return Result<T, String>::Err(message);
-    } else {
-        return typename Result<T, String>::Err(message);
-    }
-}
 
 const ResponseCurve& DetectorCurve(const ResponseStack& stack, DetectorKind kind) {
     if (stack.systemResponse) return *stack.systemResponse;
@@ -34,16 +27,7 @@ const ResponseCurve& DetectorCurve(const ResponseStack& stack, DetectorKind kind
                                          *stack.thermalAbsorptance;
 }
 
-u32 ChannelAt(CfaPattern cfa, u32 x, u32 y) {
-    const bool px = (x & 1u) != 0, py = (y & 1u) != 0;
-    switch (cfa) {
-    case CfaPattern::RGGB: return !py ? (px ? 1u : 0u) : (px ? 2u : 1u);
-    case CfaPattern::GRBG: return !py ? (px ? 0u : 1u) : (px ? 1u : 2u);
-    case CfaPattern::GBRG: return !py ? (px ? 2u : 1u) : (px ? 1u : 0u);
-    case CfaPattern::BGGR: return !py ? (px ? 1u : 2u) : (px ? 0u : 1u);
-    default: return 0u;
-    }
-}
+
 
 u32 OutputChannels(const CameraConfig& config) {
     return config.device.cfa == CfaPattern::MultiChannel ?
@@ -454,7 +438,7 @@ CpuCameraPipeline::CaptureImpl(CaptureState& state, f64 firstRowMidpointSeconds,
                                 for(size_t c=0;c<4;++c)components[c][pixel*channels+channel]+=
                                     blurredComponents[c](x,y,0)*omega.value()*weights.value()[channel][wavelengthIndex]/captureConfig.quality.timeSamples;
                         } else {
-                            const u32 channel = ChannelAt(captureConfig.device.cfa, x, y);
+                            const u32 channel = CfaChannelAt(captureConfig.device.cfa, x, y);
                             expected[pixel] += irradiance *
                                 weights.value()[channel][wavelengthIndex] /
                                 captureConfig.quality.timeSamples;
@@ -552,7 +536,7 @@ CpuCameraPipeline::CaptureFastRgb(CaptureState& state, f64 firstRowMidpointSecon
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
                 if (captureConfig.device.cfa != CfaPattern::MultiChannel &&
-                    ChannelAt(captureConfig.device.cfa, x, y) != deviceChannel)
+                    CfaChannelAt(captureConfig.device.cfa, x, y) != deviceChannel)
                     continue;
                 f64 vignette = 1.0;
                 if (captureConfig.optics.cosFourthVignetting) {
@@ -713,7 +697,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
             if (!config.quality.noiseFree) {
                 const u32 deviceChannel = config.device.cfa == CfaPattern::MultiChannel ?
                                           static_cast<u32>(index % channels) :
-                                          ChannelAt(config.device.cfa, x, y);
+                                          CfaChannelAt(config.device.cfa, x, y);
                 analogDn += thermalReadNoiseDn[deviceChannel] *
                     TemporalGaussian(effectiveSeed, noisePixel, state.acquisitionIndex,
                                      NoiseClass::ThermalRead);
@@ -791,7 +775,7 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
                 const size_t pixel = static_cast<size_t>(y) * width + x;
                 for (u32 c = 0; c < channels; ++c) {
                     const u32 channel = config.device.cfa == CfaPattern::MultiChannel ?
-                                        c : ChannelAt(config.device.cfa, x, y);
+                                        c : CfaChannelAt(config.device.cfa, x, y);
                     const f64 measurement = config.device.detector == DetectorKind::Photon ?
                         corrected.data[pixel * channels + c] /
                             config.readout.exposureSeconds :

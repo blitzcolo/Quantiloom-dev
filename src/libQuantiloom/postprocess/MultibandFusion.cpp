@@ -2,8 +2,8 @@
 #include "core/Log.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
-#include <stdexcept>
 
 namespace quantiloom {
 namespace {
@@ -218,9 +218,10 @@ auto MultibandFusion::LaplacianPyramid(const Image& vis, const Image& swir,
 // ============================================================================
 
 auto MultibandFusion::BuildGaussianPyramid(const Image& img, const u32 levels) -> Vector<Image> {
-    if (!img.IsValid() || img.channels != 1 || levels == 0 ||
-        levels > MaximumPyramidLevels(img.width, img.height))
-        throw std::invalid_argument("Invalid pyramid image or depth");
+    // Reachable only from Fuse, which rejects exactly these conditions with a
+    // Result error before dispatching to LaplacianPyramid.
+    assert(img.IsValid() && img.channels == 1 && levels != 0 &&
+           levels <= MaximumPyramidLevels(img.width, img.height));
     Vector<Image> pyramid;
     pyramid.reserve(levels);
     pyramid.push_back(img);
@@ -282,8 +283,9 @@ auto MultibandFusion::CollapseLaplacianPyramid(const Vector<Image>& pyramid) -> 
 // ============================================================================
 
 auto MultibandFusion::Downsample(const Image& img) -> Image {
-    if (!img.IsValid() || img.width < 2 || img.height < 2)
-        throw std::invalid_argument("Cannot downsample an empty or single-pixel dimension");
+    // BuildGaussianPyramid only downsamples levels above the last, and Fuse's
+    // level cap keeps every level above the last at least 2x2.
+    assert(img.IsValid() && img.width >= 2 && img.height >= 2);
     const u32 newWidth = img.width / 2;
     const u32 newHeight = img.height / 2;
 
@@ -311,8 +313,9 @@ auto MultibandFusion::Downsample(const Image& img) -> Image {
 
 auto MultibandFusion::Upsample(const Image& img, const u32 targetWidth,
                                 const u32 targetHeight) -> Image {
-    if (!img.IsValid() || targetWidth == 0 || targetHeight == 0)
-        throw std::invalid_argument("Cannot upsample an empty image");
+    // Source and target are pyramid levels built from images Fuse already
+    // validated, so both are nonempty.
+    assert(img.IsValid() && targetWidth != 0 && targetHeight != 0);
     Image result(targetWidth, targetHeight, img.channels);
 
     // Bilinear interpolation

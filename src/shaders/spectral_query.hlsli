@@ -147,10 +147,10 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
     bool exactPacked = false;
     if ((SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SINGLE ||
          SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT) &&
-        spectralCurves[curveIndex]._padding != 0u) {
+        spectralCurves[curveIndex].nextExactSegment != 0u) {
         uint curveCount, curveStride;
         spectralCurves.GetDimensions(curveCount, curveStride);
-        uint next = spectralCurves[curveIndex]._padding;
+        uint next = spectralCurves[curveIndex].nextExactSegment;
         bool found = false;
         [loop]
         for (uint visited = 0u;
@@ -177,7 +177,7 @@ float EvaluateEmissionCurve(StructuredBuffer<SpectralCurveGPU> spectralCurves,
                 found = true;
                 break;
             }
-            next = spectralCurves[segment]._padding;
+            next = spectralCurves[segment].nextExactSegment;
             if (next == 0u) return 0.0;
         }
         if (!found) return 0.0; // corrupt/cyclic link never reads out of bounds

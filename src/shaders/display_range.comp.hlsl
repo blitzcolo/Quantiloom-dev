@@ -5,6 +5,15 @@
  * reduces the absolute BT.709 luminance range plus the valid-pixel count.
  * Pass 2 maps the same values into exactly 65,536 bins. The host scans that
  * fixed-size result with the pre-existing f64 percentile definition.
+ *
+ * camera_stats.comp.hlsl is the other percentile window in the tree and is
+ * deliberately not this: it bins only unsaturated pixels of the camera's
+ * display-domain scalar into 256 bins and walks a nearest-rank percentile on
+ * the GPU, one frame late, because the AGC window must exist before the same
+ * frame's display pass. This shader serves a readback path instead: every
+ * finite pixel, the true absolute range, 65,536 bins, and an exact f64 scan
+ * on the host -- where a serial walk costs a buffer read instead of hundreds
+ * of dependent global loads inside a single thread.
  */
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> inputImage;
