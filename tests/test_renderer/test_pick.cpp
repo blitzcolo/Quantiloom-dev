@@ -177,6 +177,78 @@ protected:
         EXPECT_EQ(vkGetFenceStatus(device, resources.fence), VK_SUCCESS);
     }
 
+    // The deferred-upload contract: an in-place write to a shared buffer is
+    // recorded into the next submission, so the setter returns while the
+    // gated frame is still in flight -- it must not drain the queue. The
+    // watchdog keeps a regression that reintroduces the wait from deadlocking
+    // the suite: it releases the reader after 10 s, letting the blocked
+    // setter return with the fence already signaled, which the assertion then
+    // catches as a failure instead of a hang.
+    void ExpectUploadDoesNotWaitForPriorReader(const std::function<void()>& upload) {
+        const VkDevice device = Device().GetDevice();
+        GpuImage target(Device().GetAllocator(), device, kSize, kSize,
+            VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+        struct Resources {
+            VkDevice device;
+            VkEvent event = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+            VkCommandPool pool = VK_NULL_HANDLE;
+            bool submitted = false;
+            ~Resources() {
+                if (submitted) vkQueueWaitIdle(queue);
+                if (event) vkDestroyEvent(device, event, nullptr);
+                if (fence) vkDestroyFence(device, fence, nullptr);
+                if (pool) vkDestroyCommandPool(device, pool, nullptr);
+            }
+            VkQueue queue;
+        } resources{device};
+        resources.queue = Device().GetGraphicsQueue();
+        VkEventCreateInfo eventInfo{VK_STRUCTURE_TYPE_EVENT_CREATE_INFO};
+        ASSERT_EQ(vkCreateEvent(device, &eventInfo, nullptr, &resources.event), VK_SUCCESS);
+        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        ASSERT_EQ(vkCreateFence(device, &fenceInfo, nullptr, &resources.fence), VK_SUCCESS);
+        VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        poolInfo.queueFamilyIndex = Device().GetGraphicsQueueFamily();
+        ASSERT_EQ(vkCreateCommandPool(device, &poolInfo, nullptr, &resources.pool), VK_SUCCESS);
+        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        allocation.commandPool = resources.pool;
+        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocation.commandBufferCount = 1;
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        ASSERT_EQ(vkAllocateCommandBuffers(device, &allocation, &cmd), VK_SUCCESS);
+        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        ASSERT_EQ(vkBeginCommandBuffer(cmd, &begin), VK_SUCCESS);
+        // Hold a real old trace in the queue, exactly as the waiting variant
+        // does: the gated reader is what used to force the host wait.
+        vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
+                        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
+                        0, nullptr, 0, nullptr);
+        context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+        ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        ASSERT_EQ(vkQueueSubmit(resources.queue, 1, &submit, resources.fence), VK_SUCCESS);
+        resources.submitted = true;
+        std::jthread watchdog([device, event = resources.event] {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            vkSetEvent(device, event);
+        });
+        upload();
+        // The setter must have returned without draining the queue: the
+        // gated frame has not been released yet (10 s watchdog), so its fence
+        // is still unsignaled unless the setter waited.
+        EXPECT_EQ(vkGetFenceStatus(device, resources.fence), VK_NOT_READY)
+            << "the setter waited on submitted readers -- the deferred queue "
+               "exists precisely to avoid that wait";
+        vkSetEvent(device, resources.event);
+        ASSERT_EQ(vkWaitForFences(device, 1, &resources.fence, VK_TRUE,
+                                 10ull * 1000 * 1000 * 1000), VK_SUCCESS);
+        // The deferred write lands with the next recorded frame.
+        RenderRawFrame();
+        EXPECT_GE(context->GetAccumulatedSamples(), 1u);
+    }
+
     void RenderRawFrame() {
         GpuImage target(Device().GetAllocator(), Device().GetDevice(), kSize, kSize,
             VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -460,11 +532,11 @@ TEST_F(PickTest, ViewportSampleBatchLimitsDoNotResetTheSequence) {
 }
 
 
-TEST_F(PickTest, OrdinaryMaterialUploadsWaitForSubmittedReaders) {
+TEST_F(PickTest, OrdinaryMaterialUploadsDeferAroundSubmittedReaders) {
     LoadEmitterScene();
     auto edited = context->GetScene()->materials[1];
     edited.roughnessFactor = 0.3f;
-    ExpectUploadCompletesPriorReader([&] { context->UpdateMaterial(1, edited); });
+    ExpectUploadDoesNotWaitForPriorReader([&] { context->UpdateMaterial(1, edited); });
 }
 
 TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
@@ -488,11 +560,11 @@ TEST_F(PickTest, CachedThermalUploadsWaitEvenWithoutAPendingRefit) {
 }
 
 
-TEST_F(PickTest, LightingUploadsWaitForSubmittedReaders) {
+TEST_F(PickTest, LightingUploadsDeferAroundSubmittedReaders) {
     LoadEmitterScene();
     auto lighting = context->GetLightingParams();
     lighting.skyRadiance_rgb *= 0.5f;
-    ExpectUploadCompletesPriorReader([&] { context->SetLightingParams(lighting); });
+    ExpectUploadDoesNotWaitForPriorReader([&] { context->SetLightingParams(lighting); });
 }
 
 TEST_F(PickTest, AppendingSpectralTablesWaitsForSubmittedReaders) {

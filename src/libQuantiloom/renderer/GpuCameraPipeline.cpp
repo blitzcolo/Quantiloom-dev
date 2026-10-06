@@ -632,7 +632,8 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
     dynamicCounterBuffer = std::make_unique<GpuBuffer>(
         context.GetAllocator(), 4u * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
     // ISP statistics (binding 14), Equalize CDF (15) and per-tile partials
     // (16). The statistics buffer is zeroed so the first acquisition's
@@ -1286,6 +1287,29 @@ GpuCameraPipeline::ReadDynamicCounters() const {
     std::memcpy(counts.data(), data, sizeof(counts));
     staging.Unmap();
     return counts;
+}
+
+void GpuCameraPipeline::RecordDynamicCounterCopy(VkCommandBuffer cmd,
+                                                 VkBuffer dst,
+                                                 VkDeviceSize dstOffset) const {
+    if (!m_impl->dynamicCounterBuffer) return;
+    VkBufferMemoryBarrier ready{};
+    ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    ready.buffer = m_impl->dynamicCounterBuffer->GetHandle();
+    ready.offset = 0;
+    ready.size = VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 1, &ready, 0, nullptr);
+    VkBufferCopy copy{};
+    copy.dstOffset = dstOffset;
+    copy.size = 4u * sizeof(u32);
+    vkCmdCopyBuffer(cmd, m_impl->dynamicCounterBuffer->GetHandle(), dst,
+                    1, &copy);
 }
 
 Result<GpuCameraPipeline::IspStats, String>

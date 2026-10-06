@@ -19,6 +19,7 @@
 #include "RayTracingPipeline.hpp"
 #include "AccelerationStructure.hpp"
 #include "GpuBuffer.hpp"
+#include "DeferredBufferUploads.hpp"
 #include "AsyncPixelReadback.hpp"
 #include "GpuImage.hpp"
 #include "GpuDisplayRange.hpp"
@@ -218,6 +219,10 @@ struct ExternalRenderContext::Impl {
     rendercore::EnvironmentCubemap envMap;
     rendercore::SceneGeometry geometry;
     bool pendingTlasRefit = false;
+    // Small host writes to descriptor-bound buffers, replayed into the next
+    // recorded command buffer so the GPU orders them after earlier readers
+    // instead of the host draining the queue at setter time.
+    DeferredBufferUploads pendingUploads;
 
     // Texture manager
     std::unique_ptr<TextureManager> textureManager;
@@ -383,6 +388,18 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuImage> cameraDepthImage;
     std::unique_ptr<GpuBuffer> cameraResponseBuffer; // Binding 29, knot/CDF table.
     std::unique_ptr<GpuBuffer> cameraDynamicCounterBuffer; // Binding 30, 4 x u32 raygen counters.
+    /// 32 bytes of GPU_TO_CPU: the raygen counters then the camera pipeline's
+    /// dynamic counters, copied at the end of a measurement recording so
+    /// GetLastDynamicExposureReport reads what already landed instead of
+    /// waiting on the queue. The event is set by that copy block and reset
+    /// by the next measurement recording.
+    std::unique_ptr<GpuBuffer> cameraDynamicReadback;
+    VkEvent cameraDynamicReadbackEvent = VK_NULL_HANDLE;
+    // The report's host-side inputs, snapshotted where the copy is recorded
+    // so a config change between record and read cannot retcon them.
+    u32 cameraDynamicSensorWidth = 0;
+    u32 cameraDynamicSensorHeight = 0;
+    u32 cameraDynamicGpuTimePositions = 1;
     std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
     std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
     std::unique_ptr<GpuBuffer> cameraBaselineAtmosHeaderBuffer;
@@ -475,6 +492,8 @@ struct ExternalRenderContext::Impl {
         if (device != VK_NULL_HANDLE) {
             vkDeviceWaitIdle(device);
         }
+        // Queued writes name buffers that are about to be destroyed.
+        pendingUploads.Clear();
 
         // Destroy resources in reverse order
         perfLogger.reset();  // query pool needs the (external) device alive
@@ -492,6 +511,12 @@ struct ExternalRenderContext::Impl {
         cameraDepthImage.reset();
         cameraResponseBuffer.reset();
         cameraDynamicCounterBuffer.reset();
+        cameraDynamicReadback.reset();
+        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE &&
+            device != VK_NULL_HANDLE) {
+            vkDestroyEvent(device, cameraDynamicReadbackEvent, nullptr);
+            cameraDynamicReadbackEvent = VK_NULL_HANDLE;
+        }
         cameraAtmosHeaderBuffer.reset();
         cameraAtmosDataBuffer.reset();
         cameraBaselineAtmosHeaderBuffer.reset();
@@ -691,8 +716,7 @@ struct ExternalRenderContext::Impl {
 
     void BuildAccelerationStructures();
     void UpdateGpuResources(bool rebuildEmitters = true);
-    void UpdateMaterial(u32 index, const Material& material, ExternalRenderContext& owner,
-                        bool readersComplete = false);
+    void UpdateMaterial(u32 index, const Material& material, ExternalRenderContext& owner);
     void RebuildEmissiveGeometry();
 
     /// Move the animated nodes to @p t_s and make the GPU agree.
@@ -706,7 +730,17 @@ struct ExternalRenderContext::Impl {
     ///
     /// @return the nodes that actually moved
     Vector<u32> ApplyTimelinePose(f64 t_s, bool deferRefit = false);
-    void FlushPendingTlasRefit();
+    /// Flush everything a synchronous consumer needs before it dispatches or
+    /// replaces buffers: the deferred TLAS refit, then any queued buffer
+    /// uploads, in one submission.
+    void FlushPendingGpuWork();
+    /// Upload a small change so it lands with the next recorded frame. A
+    /// payload too large for a command buffer keeps a synchronous path:
+    /// drain the queue, write through the mapping, and on a failed wait log
+    /// rather than throw -- the device is already lost at that point, and a
+    /// setter has no error channel.
+    void UploadDeferred(GpuBuffer& dst, VkDeviceSize offset, const void* data,
+                        VkDeviceSize bytes);
     // Config's renderer.enable_light_sampling. Held here rather than in
     // LightingParams, which has no bits left: turning it off is expressed by
     // publishing an emitter count of zero, which is the same thing the shader
@@ -1051,7 +1085,7 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     lightingParamsBuffer = std::make_unique<GpuBuffer>(
         contextAdapter->GetAllocator(),
         sizeof(LightingParams),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
     UploadLightingParams();
@@ -1655,9 +1689,6 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
     const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K,
     const Vector<f32>& lagVisibility, const Vector<glm::vec3>& lagDirection) {
-    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
-        throw std::runtime_error("cannot complete previous GPU thermal field readers");
-
     const auto records = rendercore::MakeThermalSunResponse(
         sunSensitivity_K, sunVisibility, sunDirection, lagSensitivity_K, lagVisibility,
         lagDirection);
@@ -1667,12 +1698,17 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const bool reallocate =
         !thermalSunResponseBuffer || thermalSunResponseBuffer->GetSize() != bytes;
     if (reallocate) {
+        // A pending upload would still name the buffer being replaced.
+        FlushPendingGpuWork();
         if (thermalSunResponseBuffer) vkDeviceWaitIdle(device);
         thermalSunResponseBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            contextAdapter->GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalSunResponseBuffer->Upload(records.data(), bytes);
+        return reallocate;
     }
-    thermalSunResponseBuffer->Upload(records.data(), bytes);
+    UploadDeferred(*thermalSunResponseBuffer, 0, records.data(), bytes);
     return reallocate;
 }
 
@@ -1686,9 +1722,6 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
 ///         caller the descriptor has to be rewritten.
 bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangent,
                                                        const f32 step) {
-    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
-        throw std::runtime_error("cannot complete previous GPU thermal field readers");
-
     Vector<f32> records;
     records.reserve(tangent.size() + 1);
     records.push_back(tangent.empty() ? 0.0f : step);
@@ -1699,18 +1732,21 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
     const bool reallocate =
         !thermalParameterTangentBuffer || thermalParameterTangentBuffer->GetSize() != bytes;
     if (reallocate) {
+        // A pending upload would still name the buffer being replaced.
+        FlushPendingGpuWork();
         if (thermalParameterTangentBuffer) vkDeviceWaitIdle(device);
         thermalParameterTangentBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            contextAdapter->GetAllocator(), bytes,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
+        thermalParameterTangentBuffer->Upload(records.data(), bytes);
+        return reallocate;
     }
-    thermalParameterTangentBuffer->Upload(records.data(), bytes);
+    UploadDeferred(*thermalParameterTangentBuffer, 0, records.data(), bytes);
     return reallocate;
 }
 
 void ExternalRenderContext::Impl::UploadLightingParams() {
-    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
-        throw std::runtime_error("cannot complete previous GPU lighting readers");
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
         effective.atmosphereTemperature_K =
@@ -1718,12 +1754,21 @@ void ExternalRenderContext::Impl::UploadLightingParams() {
     }
     effective.enableEnvironmentMap =
         (lightingParams.enableEnvironmentMap != 0 && hasCustomEnvMap && spectralMode==SpectralMode::RGB) ? 1u : 0u;
-    lightingParamsBuffer->Upload(&effective, sizeof(LightingParams));
-    if(!cameraLightingParamsBuffer)cameraLightingParamsBuffer=std::make_unique<GpuBuffer>(
-        contextAdapter->GetAllocator(),sizeof(LightingParams),VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_CPU_TO_GPU);
-    if(cameraConfig.inputKind!=camera::CameraInputKind::FastRgbApproximation)effective.enableEnvironmentMap=0;
-    cameraLightingParamsBuffer->Upload(&effective,sizeof(LightingParams));
-    if(pipeline)pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
+    UploadDeferred(*lightingParamsBuffer, 0, &effective, sizeof(LightingParams));
+    if (!cameraLightingParamsBuffer) {
+        cameraLightingParamsBuffer = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), sizeof(LightingParams),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        // The descriptor names the buffer, not its contents: written once,
+        // at creation, and never re-bound by the uploads below.
+        if (pipeline)
+            pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
+    }
+    if (cameraConfig.inputKind != camera::CameraInputKind::FastRgbApproximation)
+        effective.enableEnvironmentMap = 0;
+    UploadDeferred(*cameraLightingParamsBuffer, 0, &effective,
+                   sizeof(LightingParams));
 }
 
 // Lazily (re)bakes the NN atmosphere LUT when the bake key changed and
@@ -1733,10 +1778,9 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
     constexpr uint64_t kDisabledKey = 1;  // 0 = dirty, 1 = disabled uploaded
 
     auto uploadDisabled = [this](uint64_t completedKey) {
-        if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
-            throw std::runtime_error("cannot complete previous GPU atmosphere readers");
         AtmosNNHeaderGPU disabledHeader{};
-        atmosHeaderBuffer->Upload(&disabledHeader, sizeof(disabledHeader));
+        UploadDeferred(*atmosHeaderBuffer, 0, &disabledHeader,
+                       sizeof(disabledHeader));
         atmosBakeKey = completedKey;
         atmosphereActive = false;
         UploadLightingParams();  // Hand the fallback temperature back to the host
@@ -1799,11 +1843,13 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
         baked.header.worldUnitsToMeters =
             lightingParams.worldUnitsToMeters > 0.0f
                 ? lightingParams.worldUnitsToMeters : 1.0f;
-        if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
-            throw std::runtime_error("cannot complete previous GPU atmosphere readers");
-        atmosDataBuffer->Upload(baked.data.data(),
-                                baked.data.size() * sizeof(f32));
-        atmosHeaderBuffer->Upload(&baked.header, sizeof(baked.header));
+        // Data before header: the header's enabled flag is what lets a shader
+        // read the blob, so landing last keeps a frame from seeing a fresh
+        // header over a stale LUT.
+        UploadDeferred(*atmosDataBuffer, 0, baked.data.data(),
+                       baked.data.size() * sizeof(f32));
+        UploadDeferred(*atmosHeaderBuffer, 0, &baked.header,
+                       sizeof(baked.header));
         atmosBakeKey = key;
         atmosphereActive = true;
         UploadLightingParams();  // T_air must match what this LUT was baked at
@@ -1827,12 +1873,17 @@ void ExternalRenderContext::RenderFrame(
         return;
     }
 
+    // Host writes deferred since the last recording land first: the barriers
+    // in Record order them after whatever earlier submissions are still
+    // reading the buffers, and before the trace below reads the new values.
+    m_impl->pendingUploads.Record(cmd);
+
     // Ordinary poses are uploaded and refitted in this very submission, so
     // prior traces finish before UPDATE and the new trace sees the new pose.
     // Camera capture retains its synchronous pose/stratum contract.
     if (m_impl->pendingTlasRefit) {
         if (m_impl->cameraConfig.enabled) {
-            m_impl->FlushPendingTlasRefit();
+            m_impl->FlushPendingGpuWork();
         } else {
             m_impl->geometry.RecordPreparedTlasRefit(cmd);
             m_impl->pendingTlasRefit = false;
@@ -2688,7 +2739,7 @@ void ExternalRenderContext::UpdateMaterial(u32 materialIndex, const Material& ma
 }
 
 void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Material& material,
-                                                ExternalRenderContext& owner, bool readersComplete) {
+                                                ExternalRenderContext& owner) {
     if (!scene) {
         QL_LOG_WARN("UpdateMaterial: No scene loaded");
         return;
@@ -2716,11 +2767,9 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
     const Material& previous = scene->materials[materialIndex];
     const bool emissionChanged = rendercore::SampledEmissionChanged(previous, material);
     // Material bytes are shared by every submitted trace, including ordinary
-    // roughness/IR edits that do not rebuild an AS or the emitter list.
-    if (!readersComplete && vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS) {
-        QL_LOG_ERROR("UpdateMaterial: cannot complete previous GPU readers");
-        return;
-    }
+    // roughness/IR edits that do not rebuild an AS or the emitter list, so
+    // the write is deferred into the next recorded frame rather than gated
+    // on a queue drain.
     auto indices = rendercore::IndicesFromMaterial(material);
     if (materialGpuIndices.size() == scene->materials.size()) {
         const auto& oldSlots = materialGpuIndices[materialIndex];
@@ -2747,7 +2796,7 @@ void ExternalRenderContext::Impl::UpdateMaterial(u32 materialIndex, const Materi
 
     // 3. Partial upload at offset
     VkDeviceSize offset = materialIndex * sizeof(MaterialDataCPU);
-    materialBuffer->Upload(&cpuMat, sizeof(MaterialDataCPU), offset);
+    UploadDeferred(*materialBuffer, offset, &cpuMat, sizeof(MaterialDataCPU));
 
     // 4. Rebuild the geometry only when the opacity classification actually
     //    moved. Doing it on every edit would put an acceleration-structure
@@ -2823,9 +2872,9 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
         // worse than keeping a number whose provenance changed.
         material.emissiveRadianceCurveIndex = -1;
         material.emissiveCurveSource.clear();
-        if (!m_impl->CompleteLookupReaders())
-            return EmissionResult::Err("SetMaterialEmissionSpectrum: previous GPU readers did not complete");
-        m_impl->UpdateMaterial(materialIndex, material, *this, true);
+        // Nothing is replaced here -- only the material record changes, and
+        // that write rides the next recorded frame.
+        m_impl->UpdateMaterial(materialIndex, material, *this);
         return EmissionResult(Vector<String>{});
     }
 
@@ -2863,7 +2912,7 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
     if (resolved.rewriteRgb) {
         material.emissiveFactor = resolved.renderedRgb;
     }
-    m_impl->UpdateMaterial(materialIndex, material, *this, true);
+    m_impl->UpdateMaterial(materialIndex, material, *this);
 
     QL_LOG_INFO("SetMaterialEmissionSpectrum: '{}' on material {} ('{}'), curve index {}, "
                 "colour [{:.4g}, {:.4g}, {:.4g}]",
@@ -2983,7 +3032,9 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
     const SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunIrradiance, skyIrradiance);
     m_impl->cameraSolarSources = std::make_pair(sunIrradiance, skyIrradiance);
     // Replacing a descriptor-backed buffer while an earlier QVulkanWindow
-    // frame may still read it is invalid; solar edits are infrequent.
+    // frame may still read it is invalid; solar edits are infrequent. Drain
+    // the upload queue first so nothing pending still names the old buffer.
+    m_impl->FlushPendingGpuWork();
     if (m_impl->solarLutBuffer && m_impl->device != VK_NULL_HANDLE)
         vkDeviceWaitIdle(m_impl->device);
 
@@ -3154,11 +3205,14 @@ void ExternalRenderContext::SetThermalSolveEnabled(const bool enabled) {
 
     if (!enabled && m_impl->thermalTemperatureBuffer) {
         try {
+            m_impl->FlushPendingGpuWork();
             vkDeviceWaitIdle(m_impl->device);
             const f32 zero = 0.0f;
             m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
                 m_impl->contextAdapter->GetAllocator(), sizeof(f32),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                    VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VMA_MEMORY_USAGE_CPU_TO_GPU);
             m_impl->thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
             m_impl->UploadThermalSunResponse({}, {}, glm::vec3(0.0f));
             m_impl->UploadThermalTangent({}, 0.0f);
@@ -3190,9 +3244,9 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     const VkAccelerationStructureKHR tlas = m_impl->geometry.Tlas().GetHandle();
     rendercore::ThermalPreview::SolveResult result;
     try {
-        // The precompute consumes the current TLAS, and the field upload
-        // below also needs old frame readers completed before host writes.
-        m_impl->FlushPendingTlasRefit();
+        // The precompute consumes the current TLAS, so the deferred refit
+        // must land before it runs.
+        m_impl->FlushPendingGpuWork();
         result = m_impl->thermalPreview->SolveAt(time_h, *m_impl->scene, tlas);
     } catch (const std::exception& ex) {
         return fail(String("thermal solve failed: ") + ex.what());
@@ -3202,18 +3256,16 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
     }
     m_impl->thermalLastError.clear();
 
-    // A cached solve can do no GPU work and have no pending TLAS refit.
-    // Complete old readers even on that path before rewriting shared fields.
-    if (vkQueueWaitIdle(m_impl->graphicsQueue) != VK_SUCCESS)
-        return fail("cannot complete previous GPU thermal field readers");
-
     if (result.elementCountChanged || result.surfaceTemperature_K.size() * sizeof(f32) !=
             (m_impl->thermalTemperatureBuffer ? m_impl->thermalTemperatureBuffer->GetSize() : 0)) {
+        // A pending upload would still name the buffer being replaced.
+        m_impl->FlushPendingGpuWork();
         vkDeviceWaitIdle(m_impl->device);
         m_impl->thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
             m_impl->contextAdapter->GetAllocator(),
             result.surfaceTemperature_K.size() * sizeof(f32),
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
         m_impl->thermalTemperatureBuffer->Upload(
             result.surfaceTemperature_K.data(),
             result.surfaceTemperature_K.size() * sizeof(f32));
@@ -3222,7 +3274,7 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
         }
         m_impl->geometry.SetThermalElementBases(result.instanceElementBase);
     } else {
-        m_impl->thermalTemperatureBuffer->Upload(
+        m_impl->UploadDeferred(*m_impl->thermalTemperatureBuffer, 0,
             result.surfaceTemperature_K.data(),
             result.surfaceTemperature_K.size() * sizeof(f32));
     }
@@ -3258,12 +3310,30 @@ Result<void, String> ExternalRenderContext::SetThermalTime(const f64 time_h) {
 // The timeline
 // ============================================================================
 
-void ExternalRenderContext::Impl::FlushPendingTlasRefit() {
-    if (!pendingTlasRefit) return;
+void ExternalRenderContext::Impl::FlushPendingGpuWork() {
+    if (!contextAdapter || (!pendingTlasRefit && pendingUploads.Empty()))
+        return;
     CommandHelper::ExecuteImmediate(*contextAdapter, [this](VkCommandBuffer cmd) {
-        geometry.RecordPreparedTlasRefit(cmd);
+        if (pendingTlasRefit) geometry.RecordPreparedTlasRefit(cmd);
+        pendingUploads.Record(cmd);
     });
     pendingTlasRefit = false;
+}
+
+void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst,
+                                                 VkDeviceSize offset,
+                                                 const void* data,
+                                                 VkDeviceSize bytes) {
+    if (bytes <= DeferredBufferUploads::kMaxPayloadBytes) {
+        pendingUploads.Enqueue(dst, offset, data, bytes);
+        return;
+    }
+    // Too large to sit in a command buffer: drain and write through the
+    // mapping. A failed wait means the device is already lost, so log and
+    // still write rather than leave a stale field standing.
+    if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
+        QL_LOG_ERROR("deferred buffer upload: previous GPU readers did not complete");
+    dst.Upload(data, bytes, offset);
 }
 
 Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool deferRefit) {
@@ -3271,7 +3341,7 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
 
     Vector<u32> moved = timeline.Apply(*scene, t_s);
     if (moved.empty()) {
-        if (!deferRefit) FlushPendingTlasRefit();
+        if (!deferRefit) FlushPendingGpuWork();
         return moved;
     }
 
@@ -3308,7 +3378,7 @@ Vector<u32> ExternalRenderContext::Impl::ApplyTimelinePose(const f64 t_s, bool d
                    rendercore::NodeHasSampledEmission(*scene, scene->nodes[node]);
         });
     if (emitterMoved) {
-        FlushPendingTlasRefit();
+        FlushPendingGpuWork();
         RebuildEmissiveGeometry();
     }
 
@@ -3539,7 +3609,7 @@ void ExternalRenderContext::RefitAccelerationStructure() {
     if (m_impl->emissiveTransformDirty) {
         // The world-space emitter buffer is still updated synchronously;
         // normal nodes need no emitter upload and take the deferred path.
-        m_impl->FlushPendingTlasRefit();
+        m_impl->FlushPendingGpuWork();
         m_impl->RebuildEmissiveGeometry();
     }
 
@@ -3795,7 +3865,7 @@ struct ObserverSetScope {
 
 Result<PickResult, String> ExternalRenderContext::Pick(u32 x, u32 y) {
     try {
-        m_impl->FlushPendingTlasRefit();
+        m_impl->FlushPendingGpuWork();
     } catch (const std::exception& ex) {
         return Result<PickResult, String>::Err(String("Pick: ") + ex.what());
     }
@@ -4164,6 +4234,8 @@ Result<bool, String> ExternalRenderContext::TryUpdateCameraReadoutConfig(
     camera::CameraConfig previous = std::move(m_impl->cameraConfig);
     m_impl->cameraConfig = std::move(expected);
     if (m_impl->cameraGpuPipeline && m_impl->cameraCaptureCompleted) {
+        // A deferred upload must land before this submission, not race it.
+        m_impl->FlushPendingGpuWork();
         Result<void, String> status = Result<void, String>::Ok();
         CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
                                         [&](VkCommandBuffer cmd) {
@@ -4281,6 +4353,7 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
     Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String> recorded =
         Result<rendercore::GpuCameraPipeline::GpuCheckpoint, String>::Err(
             "camera history checkpoint was not recorded");
+    m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
                                     [&](VkCommandBuffer cmd) {
         recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(cmd);
@@ -4320,6 +4393,7 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
             "pipeline");
 
     Result<void, String> restored = Result<void, String>::Ok();
+    m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
                                     [&](VkCommandBuffer cmd) {
         restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(
@@ -4501,76 +4575,44 @@ CameraGpuTimings ExternalRenderContext::GetLastCameraGpuTimings() const {
 }
 
 DynamicExposureReport ExternalRenderContext::GetLastDynamicExposureReport() const {
-    m_impl->lastDynamicReport = DynamicExposureReport{};
+    // Never blocks: the counters were copied at the end of the acquisition's
+    // own submission and the event marks when they landed. A frame still in
+    // flight leaves the previous report standing.
+    if (!m_impl->cameraDynamicReadback ||
+        m_impl->cameraDynamicReadbackEvent == VK_NULL_HANDLE ||
+        vkGetEventStatus(m_impl->device, m_impl->cameraDynamicReadbackEvent) !=
+            VK_EVENT_SET)
+        return m_impl->lastDynamicReport;
+
+    std::array<u32, 8> counters{};
+    const void* data = m_impl->cameraDynamicReadback->MapRead();
+    if (!data) return m_impl->lastDynamicReport;
+    std::memcpy(counters.data(), data, sizeof(counters));
+    m_impl->cameraDynamicReadback->Unmap();
+    const u32* raygenCounts = counters.data();
+    const u32* dynamicCounts = counters.data() + 4;
+
     auto& report = m_impl->lastDynamicReport;
-    if (!m_impl->cameraCaptureCompleted || !m_impl->cameraGpuPipeline ||
-        m_impl->cameraLastAcquisitionSamples == 0u)
-        return report;
-
-    // Both counter sets are read back synchronously; the call must happen
-    // between submitted frames, never between record and submit.
-    std::array<u32, 4> raygenCounts{};
-    bool haveRaygen = false;
-    if (m_impl->cameraDynamicCounterBuffer &&
-        m_impl->cameraDynamicCounterBuffer->IsValid()) {
-        GpuBuffer staging(m_impl->contextAdapter->GetAllocator(),
-                          sizeof(raygenCounts), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                          VMA_MEMORY_USAGE_GPU_TO_CPU);
-        if (staging.IsValid()) {
-            CommandHelper::ExecuteImmediate(*m_impl->contextAdapter,
-                                            [&](VkCommandBuffer cmd) {
-                VkBufferMemoryBarrier ready{};
-                ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-                ready.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                ready.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-                ready.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                ready.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                ready.buffer = m_impl->cameraDynamicCounterBuffer->GetHandle();
-                ready.offset = 0;
-                ready.size = VK_WHOLE_SIZE;
-                vkCmdPipelineBarrier(cmd,
-                                     VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                                     0, nullptr, 1, &ready, 0, nullptr);
-                VkBufferCopy copy{};
-                copy.size = sizeof(raygenCounts);
-                vkCmdCopyBuffer(cmd,
-                                m_impl->cameraDynamicCounterBuffer->GetHandle(),
-                                staging.GetHandle(), 1, &copy);
-            });
-            if (const void* data = staging.MapRead()) {
-                std::memcpy(raygenCounts.data(), data, sizeof(raygenCounts));
-                staging.Unmap();
-                haveRaygen = true;
-            }
-        }
-    }
-    const auto dynamicCounts = m_impl->cameraGpuPipeline->ReadDynamicCounters();
-    const bool haveDynamic = dynamicCounts.has_value();
-
-    const f64 pixels = static_cast<f64>(m_impl->cameraConfig.optics.sensorWidthPx) *
-                       m_impl->cameraConfig.optics.sensorHeightPx;
+    report = DynamicExposureReport{};
+    const f64 pixels = static_cast<f64>(m_impl->cameraDynamicSensorWidth) *
+                       m_impl->cameraDynamicSensorHeight;
     const f64 samples = static_cast<f64>(
         std::max(1u, m_impl->cameraLastAcquisitionSamples));
     const f64 perPixelSample = pixels * samples;
-    if (haveRaygen) {
-        report.transparentFraction =
-            std::min(1.0, static_cast<f64>(raygenCounts[0]) / perPixelSample);
-        const f64 specular =
-            std::min(1.0, static_cast<f64>(raygenCounts[1]) / perPixelSample);
-        // View-dependent pixels are the ones a depth reprojection between
-        // strata cannot vouch for: disoccluded, specular, or transparent.
-        const f64 disoccluded = haveDynamic
-            ? static_cast<f64>((*dynamicCounts)[0]) / pixels : 0.0;
-        report.viewDependentFraction = std::min(
-            1.0, disoccluded + specular + report.transparentFraction);
-    }
-    if (haveDynamic)
-        report.disoccludedFraction =
-            std::min(1.0, static_cast<f64>((*dynamicCounts)[0]) / pixels);
+    report.transparentFraction =
+        std::min(1.0, static_cast<f64>(raygenCounts[0]) / perPixelSample);
+    const f64 specular =
+        std::min(1.0, static_cast<f64>(raygenCounts[1]) / perPixelSample);
+    // View-dependent pixels are the ones a depth reprojection between strata
+    // cannot vouch for: disoccluded, specular, or transparent.
+    const f64 disoccluded =
+        static_cast<f64>(dynamicCounts[0]) / pixels;
+    report.viewDependentFraction = std::min(
+        1.0, disoccluded + specular + report.transparentFraction);
+    report.disoccludedFraction = std::min(1.0, disoccluded);
     report.timeSampleCoverage =
         static_cast<f64>(m_impl->cameraLastStrataCount) /
-        std::clamp<u32>(m_impl->cameraConfig.quality.gpuTimePositions, 1u,
+        std::clamp<u32>(m_impl->cameraDynamicGpuTimePositions, 1u,
                         rendercore::kCameraTimeStrataMax);
     report.objectMotionApproximation = m_impl->cameraLastObjectMotion;
     report.strataCount = m_impl->cameraLastStrataCount;
@@ -4855,6 +4897,9 @@ void ExternalRenderContext::Impl::BuildAccelerationStructures() {
 void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     if (!scene) return;
 
+    // The material buffer is replaced outright below; a queued write would
+    // still name the allocation that is about to die.
+    FlushPendingGpuWork();
     QL_LOG_INFO("Updating GPU resources...");
     const auto resources = ResourceCounts();
     materialBuffer = rendercore::BuildMaterialBuffer(
@@ -4882,13 +4927,15 @@ void ExternalRenderContext::Impl::RebuildEmissiveGeometry() {
                          sizeof(rendercore::EmissiveTriangleGPU);
     const bool moved = !emissiveTriangleBuffer || emissiveTriangleBuffer->GetSize() < bytes;
     if (moved) {
+        // A pending upload would still name the buffer being replaced.
+        FlushPendingGpuWork();
         emissiveTriangleBuffer =
             rendercore::CreateEmissiveTriangleBuffer(*contextAdapter, triangles);
     } else {
         const rendercore::EmissiveTriangleGPU empty{};
         const void* data = triangles.empty() ? static_cast<const void*>(&empty)
                                              : static_cast<const void*>(triangles.data());
-        emissiveTriangleBuffer->Upload(data, bytes);
+        UploadDeferred(*emissiveTriangleBuffer, 0, data, bytes);
     }
 
     f32 totalPower = 0.0f;
@@ -4954,7 +5001,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     atmosHeaderBuffer = std::make_unique<GpuBuffer>(
         allocator,
         sizeof(AtmosNNHeaderGPU),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
     atmosHeaderBuffer->Upload(&disabledHeader, sizeof(AtmosNNHeaderGPU));
@@ -4962,7 +5009,7 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     atmosDataBuffer = std::make_unique<GpuBuffer>(
         allocator,
         kAtmosMaxDataFloats * sizeof(f32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
     {
@@ -4979,7 +5026,8 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
     {
         const f32 zero = 0.0f;
         thermalTemperatureBuffer = std::make_unique<GpuBuffer>(
-            contextAdapter->GetAllocator(), sizeof(f32), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            contextAdapter->GetAllocator(), sizeof(f32),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_CPU_TO_GPU);
         thermalTemperatureBuffer->Upload(&zero, sizeof(zero));
     }
@@ -5029,6 +5077,7 @@ void ExternalRenderContext::Impl::CreatePipeline() {
 
     pipeline = rendercore::CreateRayTracingPipeline(*contextAdapter, pipelineCache,
                                                     bindings);
+    pipeline->SetUploadQueue(&pendingUploads);
     if(cameraLightingParamsBuffer)pipeline->BindCameraLightingBuffer(*cameraLightingParamsBuffer);
 }
 
@@ -5222,7 +5271,8 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
     pipeline->BindCameraMeasurementDepthImage(*cameraMeasurementDepthImage);
     cameraDynamicCounterBuffer = std::make_unique<GpuBuffer>(
         allocator, 4u * sizeof(u32),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
         VMA_MEMORY_USAGE_GPU_ONLY);
     if (!cameraDynamicCounterBuffer->IsValid())
         return Result<void, String>::Err(
@@ -5232,6 +5282,25 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                         VK_WHOLE_SIZE, 0);
     });
     pipeline->BindCameraDynamicCounterBuffer(*cameraDynamicCounterBuffer);
+    // The DynamicExposureReport readback: both 4 x u32 counter blocks side
+    // by side, plus the event a measurement recording sets once they have
+    // landed. Neither depends on the sensor size, so they are made once.
+    if (!cameraDynamicReadback) {
+        cameraDynamicReadback = std::make_unique<GpuBuffer>(
+            allocator, 8u * sizeof(u32), VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_TO_CPU);
+        if (!cameraDynamicReadback->IsValid())
+            return Result<void, String>::Err(
+                "camera dynamic readback allocation failed");
+    }
+    if (cameraDynamicReadbackEvent == VK_NULL_HANDLE) {
+        VkEventCreateInfo eventInfo{};
+        eventInfo.sType = VK_STRUCTURE_TYPE_EVENT_CREATE_INFO;
+        if (vkCreateEvent(device, &eventInfo, nullptr,
+                          &cameraDynamicReadbackEvent) != VK_SUCCESS)
+            return Result<void, String>::Err(
+                "camera dynamic readback event creation failed");
+    }
     pipeline->BindCameraDepthImage(*cameraDepthImage);
     pipeline->BindCameraObserverOutputImage(*cameraBaselineImage);
     pipeline->BindCameraObserverDepthImage(*cameraDepthImage);
@@ -5477,6 +5546,7 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraDisplayReprocess(
     if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err(
             "camera display reprocess needs the GPU camera pipeline");
+    pendingUploads.Record(cmd);
     return cameraGpuPipeline->RecordDisplayReprocess(
         cmd, EffectiveCameraConfig());
 }
@@ -5485,6 +5555,10 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     VkCommandBuffer cmd) {
     if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
+    // Deferred host writes land first in this submission; anything enqueued
+    // by EnsureCameraResources below is caught by the second Record before
+    // the strata loop.
+    pendingUploads.Record(cmd);
     if (auto ready = EnsureCameraResources(); !ready) return ready;
     // M4-4: settle the previous committed tick's AE/AWB feedback first. The
     // statistics readback is queue-ordered after the last submitted frame,
@@ -5552,6 +5626,11 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
         // Zero the transparent/specular counters for this acquisition.
         vkCmdFillBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(), 0,
                         VK_WHOLE_SIZE, 0);
+        // This recording will publish fresh report counters at the end; the
+        // reset keeps a getter mid-flight pointed at the previous report.
+        if (cameraDynamicReadbackEvent != VK_NULL_HANDLE)
+            vkCmdResetEvent(cmd, cameraDynamicReadbackEvent,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT);
         VkBufferMemoryBarrier zeroed{};
         zeroed.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
         zeroed.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -5578,6 +5657,9 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
 
     const ObserverSetScope observerSet{*pipeline, fastRgb};
     pipeline->SetSpecConstants(static_cast<u32>(captureMode), false);
+    // Writes enqueued while resources were ensured (camera lighting params,
+    // the projection block) must reach the GPU before the first trace.
+    pendingUploads.Record(cmd);
     std::array<rendercore::DynamicLayerCamera,
                rendercore::kCameraTimeStrataMax> layerCameras{};
     u32 totalTraced = 0;
@@ -5697,12 +5779,50 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(
     if (!readout) return readout;
     cameraLastAcquisitionSamples = totalTraced;
     cameraLastStrataCount = strataCount;
+    if (!fastRgb && cameraDynamicReadback &&
+        cameraDynamicReadbackEvent != VK_NULL_HANDLE) {
+        // Both counter sets ride one 32-byte readback, copied here -- after
+        // the trace and the compositor have written them -- so the report
+        // getter only checks the event instead of draining the queue.
+        VkBufferMemoryBarrier raygenReady{};
+        raygenReady.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        raygenReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        raygenReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        raygenReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        raygenReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        raygenReady.buffer = cameraDynamicCounterBuffer->GetHandle();
+        raygenReady.offset = 0;
+        raygenReady.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(
+            cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+            0, nullptr, 1, &raygenReady, 0, nullptr);
+        VkBufferCopy copy{};
+        copy.size = 4u * sizeof(u32);
+        vkCmdCopyBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(),
+                        cameraDynamicReadback->GetHandle(), 1, &copy);
+        cameraGpuPipeline->RecordDynamicCounterCopy(
+            cmd, cameraDynamicReadback->GetHandle(), 4u * sizeof(u32));
+        VkMemoryBarrier hostRead{};
+        hostRead.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        hostRead.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_HOST_BIT, 0,
+                             1, &hostRead, 0, nullptr, 0, nullptr);
+        vkCmdSetEvent(cmd, cameraDynamicReadbackEvent,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+        cameraDynamicSensorWidth = cameraConfig.optics.sensorWidthPx;
+        cameraDynamicSensorHeight = cameraConfig.optics.sensorHeightPx;
+        cameraDynamicGpuTimePositions = cameraConfig.quality.gpuTimePositions;
+    }
     cameraCaptureRecorded = true;
     return Result<void, String>::Ok();
 }
 
 Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
     VkCommandBuffer cmd) {
+    pendingUploads.Record(cmd);
     if (auto ready = EnsureCameraResources(); !ready) return ready;
     const auto& optics=cameraConfig.optics;
     const auto projection=camera::ResolveProjection(optics.projection,
@@ -5728,6 +5848,9 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraBaseline(
     pipeline->SetSamplingParams(
         static_cast<u32>(cameraAcquisitionIndex), 0u, 1u,
         randomSeed, effectiveSeed);
+    // Writes enqueued while resources were ensured (camera lighting params,
+    // the projection block) must reach the GPU before the trace.
+    pendingUploads.Record(cmd);
     if (perfLogger) perfLogger->BeginFrame(cmd);
     pipeline->TraceRays(cmd,
         cameraConfig.optics.sensorWidthPx,

@@ -1,5 +1,6 @@
 #include "RayTracingPipeline.hpp"
 #include "CommandHelper.hpp"
+#include "DeferredBufferUploads.hpp"
 #include "core/Log.hpp"
 #include "core/SpectralData.hpp"
 #include "core/Image.hpp"
@@ -292,7 +293,8 @@ RayTracingPipeline::RayTracingPipeline(
         m_cameraFallbackResponse->Upload(disabledHeader, sizeof(disabledHeader));
         for (u32 i=0;i<3;++i) {
             m_projectionBuffers[i] = std::make_unique<GpuBuffer>(m_context.GetAllocator(),
-                64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+                64u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                     VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             SetCameraProjection(nullptr,i);
         }
         SetFusionTransport({rendercore::FusionTransportGpu{}});
@@ -1234,7 +1236,13 @@ void RayTracingPipeline::SetCameraProjection(const camera::CameraProjection* p, 
         for(size_t i=0;i<5;++i) values[8+i]=static_cast<f32>(p->coefficients[i]);
         values[13]=scalarVignetting ? 1.0f : 0.0f;
     }
-    m_projectionBuffers[set]->Upload(values.data(),sizeof(values));
+    // A submitted frame may still be reading this buffer; with an upload
+    // queue attached the write is recorded into the next submission instead.
+    if (m_uploadQueue)
+        m_uploadQueue->Enqueue(*m_projectionBuffers[set], 0, values.data(),
+                               sizeof(values));
+    else
+        m_projectionBuffers[set]->Upload(values.data(),sizeof(values));
     const VkDescriptorSet sets[]={m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet};
     WriteStorageBuffer(m_context.GetDevice(),sets[set],32u,*m_projectionBuffers[set]);
 }
@@ -1262,45 +1270,86 @@ void RayTracingPipeline::BeginFusionRecording(u32 width,u32 height,u32 spp,u32 m
     const size_t size=termsOffset+(aggregate ? static_cast<size_t>(count)*slots*16 : 0);
     if(size>m_context.GetDeviceProperties().limits.maxStorageBufferRange)
         throw std::runtime_error("fusion record buffer exceeds device storage range; lower fusionMaxRecordedRays");
-    auto replacement=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,VMA_MEMORY_USAGE_GPU_TO_CPU);
-    Vector<u8> zero(size,0);
+    if(m_initialFusionMedia.size()>8)throw std::runtime_error("invalid initial medium count");
+    if(!m_fusionRecordBuffer || m_fusionRecordBuffer->GetSize()<size) {
+        // Grow-only: a wavelength sweep that shrinks the footprint (fewer
+        // recorded rays, no aggregate image) reuses the allocation instead
+        // of freeing and remapping ~100 MB per band.
+        auto replacement=std::make_unique<GpuBuffer>(m_context.GetAllocator(),size,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_GPU_TO_CPU);
+        for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
+            WriteStorageBuffer(m_context.GetDevice(),set,36u,*replacement);
+        m_fusionRecordBuffer=std::move(replacement);
+    }
+    m_fusionRecordSize=size;
     u32 header[32]={count || aggregate ? 1u : 0u,stride,count,slots,width,height,spp,0};
     if(aggregate){header[11]=static_cast<u32>(pathSize);header[14]=static_cast<u32>(termsOffset);header[15]=static_cast<u32>(coordinateOffset);}
     header[12]=aggregate || quantitative ? 1u : 0u;
     header[8]=static_cast<u32>(m_initialFusionMedia.size());
-    if(m_initialFusionMedia.size()>8)throw std::runtime_error("invalid initial medium count");
     for(size_t i=0;i<m_initialFusionMedia.size();++i)header[16+i]=m_initialFusionMedia[i];
-    std::memcpy(zero.data(),header,sizeof(header));replacement->Upload(zero.data(),size);
-    for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
-        WriteStorageBuffer(m_context.GetDevice(),set,36u,*replacement);
-    m_fusionRecordBuffer=std::move(replacement);
+    std::copy(std::begin(header),std::end(header),m_fusionHeader.begin());
+    // The wipe is recorded ahead of the next trace rather than uploaded now:
+    // the header lands by vkCmdUpdateBuffer and the body by vkCmdFillBuffer,
+    // so arming a band costs two recorded commands, not a host memset.
+    m_pendingFusionZero=size>sizeof(m_fusionHeader) ? size-sizeof(m_fusionHeader) : 0;
+    m_fusionInitPending=true;
+}
+
+void RayTracingPipeline::RecordFusionInit(VkCommandBuffer cmd) const {
+    if(!m_fusionInitPending) return;
+    m_fusionInitPending=false;
+    if(!m_fusionRecordBuffer) { m_pendingFusionZero=0; return; }
+    const VkBuffer dst=m_fusionRecordBuffer->GetHandle();
+    VkBufferMemoryBarrier writable{};
+    writable.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    writable.srcAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+    writable.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    writable.srcQueueFamilyIndex=writable.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    writable.buffer=dst;writable.size=VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,1,&writable,0,nullptr);
+    vkCmdUpdateBuffer(cmd,dst,0,sizeof(m_fusionHeader),m_fusionHeader.data());
+    if(m_pendingFusionZero)
+        vkCmdFillBuffer(cmd,dst,sizeof(m_fusionHeader),m_pendingFusionZero,0);
+    m_pendingFusionZero=0;
+    VkBufferMemoryBarrier ready{};
+    ready.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    ready.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;
+    ready.dstAccessMask=VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+    ready.srcQueueFamilyIndex=ready.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
+    ready.buffer=dst;ready.size=VK_WHOLE_SIZE;
+    vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0,0,nullptr,1,&ready,0,nullptr);
 }
 
 void RayTracingPipeline::SetFusionInitialMedia(const Vector<u32>& media) {
     if(media.size()>8)throw std::invalid_argument("too many initial fusion media");
     if(m_initialFusionMedia==media)return;
-    if(m_fusionRecordBuffer) {
-        vkDeviceWaitIdle(m_context.GetDevice());
-        const u32 count=static_cast<u32>(media.size());
-        std::array<u32,8> values{};std::copy(media.begin(),media.end(),values.begin());
-        m_fusionRecordBuffer->Upload(&count,4,32);
-        m_fusionRecordBuffer->Upload(values.data(),sizeof(values),64);
-    }
     m_initialFusionMedia=media;
+    if(m_fusionRecordBuffer) {
+        // Header words 8 and 16..23 only; the rest of the buffer stands.
+        // The write lands with the next trace, so no device idle here.
+        std::array<u32,8> values{};std::copy(media.begin(),media.end(),values.begin());
+        m_fusionHeader[8]=static_cast<u32>(media.size());
+        std::copy(values.begin(),values.end(),m_fusionHeader.begin()+16);
+        m_fusionInitPending=true;
+    }
 }
 
 Vector<u8> RayTracingPipeline::ReadFusionRecording() {
-    if(!m_fusionRecordBuffer) return {};
+    if(!m_fusionRecordBuffer || m_fusionRecordSize==0) return {};
     CommandHelper::ExecuteImmediate(m_context,[&](VkCommandBuffer cmd) {
         VkBufferMemoryBarrier barrier{};barrier.sType=VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-        barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+        barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT|VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
         barrier.srcQueueFamilyIndex=barrier.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;
         barrier.buffer=m_fusionRecordBuffer->GetHandle();barrier.size=VK_WHOLE_SIZE;
-        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,VK_PIPELINE_STAGE_HOST_BIT,
-            0,0,nullptr,1,&barrier,0,nullptr);
+        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR|VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_HOST_BIT,0,0,nullptr,1,&barrier,0,nullptr);
     });
-    Vector<u8> bytes(static_cast<size_t>(m_fusionRecordBuffer->GetSize()));
+    Vector<u8> bytes(static_cast<size_t>(m_fusionRecordSize));
     const void* data=m_fusionRecordBuffer->MapRead();
     if(!data) throw std::runtime_error("cannot read fusion path records");
     std::memcpy(bytes.data(),data,bytes.size());m_fusionRecordBuffer->Unmap();return bytes;
@@ -1315,7 +1364,9 @@ void RayTracingPipeline::SetFusionProbes(const Vector<ProbeRay>& probes) {
     for(auto set:{m_descriptorSet,m_cameraDescriptorSet,m_observerDescriptorSet})
         WriteStorageBuffer(m_context.GetDevice(),set,37u,*buffer);
     m_fusionProbeBuffer=std::move(buffer);
-    const u32 count=static_cast<u32>(probes.size());m_fusionRecordBuffer->Upload(&count,4,40);
+    // Header word 10 carries the probe count; it lands with the next trace.
+    m_fusionHeader[10]=static_cast<u32>(probes.size());
+    m_fusionInitPending=true;
 }
 
 Vector<RayTracingPipeline::GeometryHit> RayTracingPipeline::CapturePrimaryGeometry(u32 width,u32 height,
@@ -1993,6 +2044,10 @@ void RayTracingPipeline::UpdateDescriptorSets() {
 // ============================================================================
 
 void RayTracingPipeline::TraceRays(VkCommandBuffer cmd, const u32 width, const u32 height, const bool finalDispatch) const {
+    // An armed record init -- header update plus zero fill -- lands in this
+    // submission before the trace that reads it.
+    RecordFusionInit(cmd);
+
     // Get function pointer for vkCmdTraceRaysKHR
     const auto vkCmdTraceRaysKHR = reinterpret_cast<PFN_vkCmdTraceRaysKHR>(vkGetDeviceProcAddr(
         m_context.GetDevice(), "vkCmdTraceRaysKHR"));

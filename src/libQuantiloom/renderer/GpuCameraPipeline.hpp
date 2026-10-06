@@ -153,6 +153,13 @@ public:
     /// pixels. Synchronized readback for DynamicExposureReport.
     [[nodiscard]] Result<std::array<u32, 4>, String> ReadDynamicCounters() const;
 
+    /// Record a copy of the four dynamic counters into `dst` at `dstOffset`,
+    /// preceded by the compute-write -> transfer-read barrier the copy needs.
+    /// Used by the non-blocking DynamicExposureReport path; the caller orders
+    /// the transfer write for whatever consumes `dst` afterwards.
+    void RecordDynamicCounterCopy(VkCommandBuffer cmd, VkBuffer dst,
+                                  VkDeviceSize dstOffset) const;
+
     /// Full-resolution ISP statistics (min/max/mean of the unsaturated
     /// display scalar, saturated count, 256-bin histogram). Synchronized
     /// readback; call between submitted frames, never between record and

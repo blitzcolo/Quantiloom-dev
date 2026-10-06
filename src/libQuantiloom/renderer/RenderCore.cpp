@@ -1471,7 +1471,8 @@ std::unique_ptr<GpuBuffer> BuildMaterialBuffer(VulkanContext& ctx, const Scene& 
 
     const size_t bytes = gpuMaterials.size() * sizeof(MaterialDataCPU);
     auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                               VMA_MEMORY_USAGE_CPU_TO_GPU);
     buffer->Upload(gpuMaterials.data(), bytes);
     return buffer;
@@ -1815,7 +1816,8 @@ std::unique_ptr<GpuBuffer> CreateEmissiveTriangleBuffer(
                          sizeof(EmissiveTriangleGPU);
 
     auto buffer = std::make_unique<GpuBuffer>(ctx.GetAllocator(), bytes,
-                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                  VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                               VMA_MEMORY_USAGE_CPU_TO_GPU);
     buffer->Upload(data, bytes);
     return buffer;

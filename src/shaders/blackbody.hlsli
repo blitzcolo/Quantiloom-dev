@@ -116,6 +116,19 @@ float IRPlanckRadiance(float temperature_K, float wavelength_nm) {
     return L_lambda_per_nm;
 }
 
+/// A spectral radiance below this cannot change a float32 sum of any lit
+/// scene's signal: 1e-12 against >= 1e-5 W/(m^2 sr nm) is under float epsilon.
+static const float kNegligibleSpectralRadiance = 1e-12;
+
+/// True when a surface at T emits nothing measurable anywhere in a band whose
+/// longest wavelength is lambdaMax_nm. Planck rises with wavelength short of
+/// the Wien peak, and a radiance this small at the long edge means T is far
+/// too low for the peak to lie inside the band, so the edge bounds the band.
+bool ThermalEmissionNegligible(float temperature_K, float lambdaMax_nm) {
+    return temperature_K <= 0.0 ||
+           IRPlanckRadiance(temperature_K, lambdaMax_nm) < kNegligibleSpectralRadiance;
+}
+
 // ============================================================================
 // Helper: Wien's Displacement Law (Peak Wavelength)
 // ============================================================================

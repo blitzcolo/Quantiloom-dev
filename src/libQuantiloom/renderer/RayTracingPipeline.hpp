@@ -85,6 +85,8 @@
 
 namespace quantiloom {
 
+class DeferredBufferUploads;
+
 /**
  * @class RayTracingPipeline
  * @brief Manages Vulkan ray tracing pipeline, shader binding table, and resource bindings
@@ -389,9 +391,23 @@ public:
     void SetCameraData(const struct CameraData& cameraData);
     /// Projection lives outside the frozen CameraData/push-constant ABI.
     /// Set 0 is ordinary/CPU spectral capture, 1 is GPU measurement, 2 observer.
+    /// When an upload queue is attached the write is recorded into the next
+    /// submitted frame instead of landing through the mapping behind a host
+    /// wait -- a frame may still be reading the previous projection.
     void SetCameraProjection(const camera::CameraProjection* projection, u32 set = 0,
         bool scalarVignetting=false);
+    /// Attach the queue deferred buffer writes go through. Owned by the
+    /// caller (ExternalRenderContext::Impl); stays null for hosts that upload
+    /// synchronously.
+    void SetUploadQueue(DeferredBufferUploads* queue) { m_uploadQueue = queue; }
     void SetFusionTransport(const Vector<rendercore::FusionTransportGpu>& records);
+    /// Arm path recording for the next trace. The record buffer is grow-only:
+    /// a smaller request reuses the allocation. Zeroing and the header write
+    /// are recorded ahead of the next TraceRays (vkCmdFillBuffer +
+    /// vkCmdUpdateBuffer), not uploaded here -- a per-wavelength sweep does
+    /// not pay a host memset + upload per band. (0,0,0,0) disarms; it
+    /// allocates nothing unless no record buffer exists yet, in which case a
+    /// minimal one is created so the descriptor stays valid.
     void BeginFusionRecording(u32 width,u32 height,u32 spp,u32 maxRays,bool aggregate=false,
         bool quantitative=false);
     Vector<u8> ReadFusionRecording();
@@ -460,6 +476,11 @@ private:
     // Get SBT aligned size
     static u32 AlignedSize(u32 size, u32 alignment);
 
+    /// Record the armed record-buffer init -- header update plus zero fill --
+    /// into `cmd` ahead of a trace. Invoked from TraceRays so the barriers
+    /// order the writes against whatever read the buffer last.
+    void RecordFusionInit(VkCommandBuffer cmd) const;
+
     // ========================================================================
     // Vulkan handles
     // ========================================================================
@@ -488,9 +509,21 @@ private:
     std::unique_ptr<GpuImage> m_cameraFallbackDepth;
     std::unique_ptr<GpuBuffer> m_cameraFallbackResponse;
     std::array<std::unique_ptr<GpuBuffer>, 3> m_projectionBuffers;
+    // Deferred-upload queue attached by the render context; null means
+    // uploads write through the mapping directly.
+    DeferredBufferUploads* m_uploadQueue = nullptr;
     VkPipeline m_geometryPipeline=VK_NULL_HANDLE;
     std::unique_ptr<GpuBuffer> m_fusionTransportBuffer;
     std::unique_ptr<GpuBuffer> m_fusionRecordBuffer;
+    /// Bytes the last BeginFusionRecording armed; ReadFusionRecording returns
+    /// exactly this even when the grow-only allocation is larger.
+    VkDeviceSize m_fusionRecordSize = 0;
+    /// The 32-word record header the shader should see. Begin builds it and
+    /// the SetFusion* calls patch single fields; it lands on the device with
+    /// the next trace.
+    std::array<u32, 32> m_fusionHeader{};
+    mutable VkDeviceSize m_pendingFusionZero = 0;
+    mutable bool m_fusionInitPending = false;
     Vector<u32> m_initialFusionMedia;
     std::unique_ptr<GpuBuffer> m_fusionProbeBuffer;
     std::unique_ptr<GpuBuffer> m_cameraFallbackAtmosHeader;

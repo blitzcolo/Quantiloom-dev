@@ -72,16 +72,20 @@ std::vector<f64> AgcTone(const std::vector<f64>& values,
     std::vector<f64> tone(values.size(), 0.5);
     if (count == 0) return tone;
     if (isp.infraredTone == DisplayToneMode::Linear) {
+        // Two percentiles need two selected elements, not a sorted image:
+        // nth_element puts the element at `index` in sorted order, which is
+        // the same element the full sort put there, at O(n) per query.
         std::vector<f64> sorted = values;
-        std::sort(sorted.begin(), sorted.end());
         const auto percentile = [&sorted](f64 p) {
             const f64 rank = Clamp01(p / 100.0) *
                              static_cast<f64>(sorted.size() - 1);
             if (!std::isfinite(rank) || rank < 0.0 ||
                 rank > static_cast<f64>(sorted.size() - 1))
-                return sorted.front();
+                return *std::min_element(sorted.begin(), sorted.end());
             const size_t index = std::min(static_cast<size_t>(std::floor(rank + 0.5)),
                                           sorted.size() - 1);
+            std::nth_element(sorted.begin(), sorted.begin() + index,
+                             sorted.end());
             return sorted[index];
         };
         const f64 lo = percentile(isp.contrastLowPercentile);

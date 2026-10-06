@@ -2749,6 +2749,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float T_surface_vis = GetSurfaceTemperatureK(
             material, geoInfo, PrimitiveIndex(), uv,
             WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+        // One Planck evaluation at the band edge decides whether surface
+        // emission can matter anywhere in the sweep at all; a ray carrying a
+        // single wavelength asks at that wavelength instead.
+        const bool thermalNegligible = ThermalEmissionNegligible(
+            T_surface_vis, heroRay ? heroLambdaAbs : LAMBDA_MAX_VIS);
 
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
@@ -2968,8 +2973,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // separate irTransmittance curve is measured only in the IR and
             // must not be clamped from its 3 um endpoint into this band.
             const float epsilon_vis = saturate(1.0 - rho_lambda - material.transmission);
-            const float L_thermal = T_surface_vis > 0.0
-                ? epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda) : 0.0;
+            const float L_thermal = thermalNegligible
+                ? 0.0 : epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda);
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl +
                              L_nee + L_fluor + L_thermal;
 
@@ -3524,6 +3529,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const uint sampleCount = heroRay ? 1u : NUM_SWIR_SAMPLES;
         float heroRadiance = 0.0;
 
+        // One Planck evaluation at the band edge (or the carried wavelength
+        // for a single-ray hit) decides whether emission can matter anywhere
+        // in this sweep.
+        const bool thermalNegligible = ThermalEmissionNegligible(
+            T_surface_swir, heroRay ? abs(carriedLambda) : SWIR_LAMBDA_MAX);
+
         // ====================================================================
         // Reflected environment: the traced correction
         // ====================================================================
@@ -3679,7 +3690,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // 4. Thermal emission (minor in SWIR below threshold)
             float L_emission = 0.0;
-            if (T_surface_swir > 0.0) {
+            if (!thermalNegligible) {
                 float L_blackbody = IRPlanckRadiance(T_surface_swir, lambda);
                 // Under the coat, which transmits 1 - clearcoat*F_c of it. A
                 // non-absorbing dielectric does not emit, so attenuating what
@@ -3822,6 +3833,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float T_surface_nir = GetSurfaceTemperatureK(
             material, geoInfo, PrimitiveIndex(), uv,
             WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+        // One Planck evaluation at the band edge (or the carried wavelength
+        // for a single-ray hit) decides whether emission can matter anywhere
+        // in this sweep.
+        const bool thermalNegligible = ThermalEmissionNegligible(
+            T_surface_nir, heroRay ? payload.heroLambda : NIR_LAMBDA_MAX);
         const float fluorM_nir = SampleFluorescenceExcitation(
             material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
             normal, NdotL, shadowFactor, payload);
@@ -3951,7 +3967,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             // Planck is tiny near room temperature, but a hot surface can emit
             // strongly here. The measured rho sets epsilon by Kirchhoff.
-            if (T_surface_nir > 0.0) {
+            if (!thermalNegligible) {
                 L_reflected += fractions.y * IRPlanckRadiance(T_surface_nir, lambda) * ccBase;
             }
             // Bound emission is an independent authored source.

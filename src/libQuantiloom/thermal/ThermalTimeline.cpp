@@ -237,8 +237,19 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
     // steps after the previous one.
     auto it = m_checkpoints.upper_bound(target);
     if (it != m_checkpoints.begin()) --it;
+
+    // A query landing exactly on a checkpoint needs no working copy at all:
+    // the checkpoint is the answer. (Checkpoints only sit on stride
+    // multiples, so this also covers the boundary return below.)
+    if (it->first == target && remainder_s <= 0.01) {
+        m_lastStepCount = 0;
+        return it->second;
+    }
+
+    // An equal step can reuse the recent state directly: m_gridState holds
+    // that step's content already, so `>=` avoids a pointless copy.
     const bool useRecent = m_hasGridState && m_gridStateStep <= target &&
-                           m_gridStateStep > it->first;
+                           m_gridStateStep >= it->first;
 
     if (!useRecent) {
         m_gridState = it->second;

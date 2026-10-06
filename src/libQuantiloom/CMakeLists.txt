@@ -130,6 +130,8 @@ add_library(quantiloom_core OBJECT
     renderer/AccelerationStructure.hpp
     renderer/CommandHelper.cpp
     renderer/CommandHelper.hpp
+    renderer/DeferredBufferUploads.cpp
+    renderer/DeferredBufferUploads.hpp
     renderer/BRDFLutGenerator.cpp
     renderer/BRDFLutGenerator.hpp
     renderer/PerformanceLogger.cpp

@@ -777,12 +777,18 @@ public:
     /**
      * @brief Update lighting parameters
      * @param params New lighting parameters
+     *
+     * The change reaches the GPU with the next recorded frame (or synchronous
+     * camera call); this setter never waits on the device.
      */
     void SetLightingParams(const LightingParams& params);
 
     /**
      * @brief Set sun direction
      * @param direction Normalized direction vector (from surface to sun)
+     *
+     * The change reaches the GPU with the next recorded frame; dragging the
+     * sun between frames coalesces into one upload and never waits.
      */
     void SetSunDirection(const glm::vec3& direction);
 
@@ -1090,10 +1096,11 @@ public:
     [[nodiscard]] Result<void, String> ReprocessCameraDisplay();
 
     /// Error decomposition of the last committed acquisition's GPU
-    /// dynamic-exposure approximation. Performs a synchronized readback of
-    /// the device counters, so it must be called between submitted frames,
-    /// not between record and submit. Returns an invalid (zeroed) report
-    /// when no stratified spectral acquisition has completed.
+    /// dynamic-exposure approximation. Never blocks: the counters are copied
+    /// into a readback buffer at record time and an event marks when the GPU
+    /// has landed them, so a call while the frame is still in flight returns
+    /// the previous report. Returns an invalid (zeroed) report until the
+    /// first stratified spectral acquisition's counters have arrived.
     [[nodiscard]] DynamicExposureReport GetLastDynamicExposureReport() const;
 
     // ========================================================================
@@ -1156,6 +1163,10 @@ public:
      * Steps from the nearest checkpoint, uploads the result, and resets
      * accumulation. The exchange is recomputed only when geometry or rays/topK
      * changed since the last call — scrubbing time alone never reruns it.
+     *
+     * Field uploads reach the GPU with the next recorded frame rather than
+     * behind a host wait; a buffer that must be resized is still replaced
+     * synchronously.
      *
      * Must not be called from within a host command buffer recording (it
      * submits its own work via ExecuteImmediate).
@@ -1387,6 +1398,10 @@ public:
      * @brief Update material properties
      * @param materialIndex Index of material
      * @param material New material properties
+     *
+     * The write reaches the GPU with the next recorded frame rather than
+     * behind a host wait; an opacity or emission change may still rebuild
+     * geometry synchronously.
      */
     void UpdateMaterial(u32 materialIndex, const Material& material);
 
@@ -1490,6 +1505,9 @@ public:
      *          silently substituting a standard spectrum would make an unconfigured
      *          scene look plausible while reporting radiance nobody asked for.
      *          assets/luts/astmg173.csv holds AM1.5 if a caller wants that default.
+     *
+     * The replacement reaches the GPU with the next recorded frame, without a
+     * host wait, so changing the illuminant is safe between submitted frames.
      */
     void SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
                              const SpectralCurve& skyIrradiance);
