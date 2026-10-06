@@ -106,6 +106,12 @@ assets/spectral/ecospeclib-all/
 /hyperspectral_output.*
 /hyperspectral_output_bands/
 /pipeline_cache.bin
+# Since 1ecb7ea every render writes <stem>.metadata.json and <stem>.replay.toml
+# beside its output, so a render to the root leaves these two as well.
+/*.metadata.json
+/*.replay.toml
+# Output directory of docs/dataset/example/scene.toml run from the root.
+/dataset_example/
 
 # Fitted at first run and cached; see core/RgbToSpectrum.hpp for why it is not
 # checked in -- a stale copy would silently outlive a correction to the CIE table.
