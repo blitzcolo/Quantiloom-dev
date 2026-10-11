@@ -71,9 +71,12 @@ public:
     // manifest.py::slant_range_km (R = 6371 km, grazing clamp +0.05 deg).
     static double SlantRangeKm(double h1Km, double viewZenithDeg);
 
-    // Hash over everything that changes baked data contents.
+    // Hash over everything that changes baked data contents. The capture
+    // window matters: a narrow-window bake and a Voronoi-cell bake of the
+    // same lambda grid produce different LUTs.
     static uint64_t BakeKey(const AtmosphereNNConfig& cfg, const std::string& band,
-                            const std::vector<double>& lambdasNm);
+                            const std::vector<double>& lambdasNm,
+                            double windowHalfWidthNm = 0.0);
 
 private:
     AtmosModelPack& pack_;

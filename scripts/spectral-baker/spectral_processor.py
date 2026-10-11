@@ -95,21 +95,50 @@ class MaterialWeights:
 LOW_COVERAGE_WARN = 0.5
 
 
-def compute_coverage(source_min_um: float,
-                     source_max_um: float,
-                     band_config: BandConfig) -> float:
+def measured_intervals(wavelengths: np.ndarray,
+                       hole_um: float = 0.25) -> List[Tuple[float, float]]:
     """
-    Fraction of a band's wavelength range that the source data actually spans.
+    Union of [lo, hi] intervals the source actually measured, in micrometers.
+
+    Consecutive samples belong to one measured run; a run is broken wherever
+    the gap between adjacent source wavelengths exceeds hole_um. The default
+    0.25 um is far above library sampling intervals (SLUM samples every
+    ~0.02 um at 14 um) and far below spliced-source data holes (SLUM leaves
+    2.5-8 um unmeasured), which is what compute_coverage needs that min/max
+    cannot say: support on each side of a hole and none inside it. A source
+    sampled sparser than hole_um honestly reports low coverage -- linear
+    interpolation cannot stand in for measurement at that scale.
+    """
+    w = np.unique(np.asarray(wavelengths, dtype=float))
+    if w.size == 0:
+        return []
+    if w.size == 1:
+        return [(float(w[0]), float(w[0]))]
+    splits = np.where(np.diff(w) > hole_um)[0] + 1
+    bounds = np.concatenate([[0], splits, [w.size]])
+    return [(float(w[bounds[i]]), float(w[bounds[i + 1] - 1]))
+            for i in range(len(bounds) - 1)]
+
+
+def compute_coverage(wavelengths: np.ndarray,
+                     band_config: BandConfig,
+                     hole_um: float = 0.25) -> float:
+    """
+    Fraction of a band's wavelength range covered by measured intervals.
 
     resample_uniform() extrapolates by clamping to the first/last sample, so a
     band outside the source range comes back as a horizontal line rather than an
     error. Such a band then factorises perfectly (rank 1), reporting RMSE 0 and
     100% explained variance -- numbers that look better than the bands backed by
     real measurements. Coverage is what distinguishes the two.
+
+    The union over measured_intervals(), not the source min/max span: a data
+    hole inside the span must not count as covered.
     """
     lo, hi = band_config.range_um
-    overlap = min(hi, source_max_um) - max(lo, source_min_um)
-    return float(np.clip(overlap / (hi - lo), 0.0, 1.0))
+    covered = sum(max(0.0, min(hi, b) - max(lo, a))
+                  for a, b in measured_intervals(wavelengths, hole_um))
+    return float(np.clip(covered / (hi - lo), 0.0, 1.0))
 
 
 def resample_uniform(wavelengths: np.ndarray,
@@ -216,9 +245,7 @@ def build_reflectance_matrix(materials: List,
 
             rows.append(resampled)
             valid_materials.append(mat)
-            coverage.append(compute_coverage(mat.wavelength_range[0],
-                                             mat.wavelength_range[1],
-                                             band_config))
+            coverage.append(compute_coverage(mat.wavelengths, band_config))
 
         except Exception as e:
             logger.warning(f"Skipping {mat.name}: {e}")

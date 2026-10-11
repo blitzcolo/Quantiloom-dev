@@ -86,6 +86,7 @@ uint64_t AtmosphereNNConfig::BakeHash() const {
     h = HashDouble(std::round(sunZenithDeg * 2.0), h);
     h = HashDouble(std::round(sunAzimuthDeg * 2.0), h);
     h = HashDouble(std::round(h1Km * 20.0), h);
+    h = HashDouble(solarScatterScale, h);
     h = HashDouble(static_cast<double>(lutASamples), h);
     h = HashDouble(static_cast<double>(lutAzSamples), h);
     return h;

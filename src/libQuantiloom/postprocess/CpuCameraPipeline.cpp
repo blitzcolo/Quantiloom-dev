@@ -32,6 +32,8 @@ u32 OutputChannels(const CameraConfig& config) {
                : 1u;
 }
 
+}  // namespace
+
 std::vector<f64> WavelengthGrid(const CameraConfig& config) {
     std::vector<f64> grid;
     for (const auto& channel : config.device.channels) {
@@ -58,6 +60,8 @@ std::vector<f64> WavelengthGrid(const CameraConfig& config) {
     grid.erase(std::unique(grid.begin(), grid.end()), grid.end());
     return grid;
 }
+
+namespace {
 
 struct Kernel {
     u32 radius = 0;

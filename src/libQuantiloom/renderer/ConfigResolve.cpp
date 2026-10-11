@@ -799,6 +799,15 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         overrideD("atmosphere.rh", out.atmosphere.rh);
         overrideD("atmosphere.p_hPa", out.atmosphere.pHPa);
         overrideD("atmosphere.h2o_scale", out.atmosphere.h2oScale);
+        if (config.Has("atmosphere.solar_scatter_scale")) {
+            out.atmosphere.solarScatterScale = static_cast<double>(
+                config.Get<f32>("atmosphere.solar_scatter_scale"));
+            if (out.atmosphere.solarScatterScale < 0.0) {
+                diag.Warn("atmosphere.solar_scatter_scale",
+                          "  atmosphere.solar_scatter_scale must be >= 0; clamped");
+                out.atmosphere.solarScatterScale = 0.0;
+            }
+        }
         if (config.Has("atmosphere.lut_a_samples")) {
             out.atmosphere.lutASamples = config.Get<i32>("atmosphere.lut_a_samples");
         }

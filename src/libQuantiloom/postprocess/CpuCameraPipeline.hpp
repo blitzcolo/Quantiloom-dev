@@ -3,6 +3,7 @@
 #include "postprocess/CameraPipeline.hpp"
 
 #include <functional>
+#include <vector>
 
 namespace quantiloom::camera {
 
@@ -11,6 +12,14 @@ namespace quantiloom::camera {
 // The callback must not have already applied lens/filter/QE.
 using SpectralFrameSampler =
     std::function<Result<Image, String>(f64 timeSeconds, f64 wavelengthNm)>;
+
+// The deterministic integration grid for a capture: every detector/lens/
+// filter response node plus quality.wavelengthSamples+1 uniform points per
+// channel span, sorted unique. Exposed so callers that bake per-sample
+// quantities (e.g. the NN atmosphere) can weight each point by its Voronoi
+// cell rather than a fixed window -- the trapezoid sum over cell means is
+// then the exact integral of the channel-quantized function.
+[[nodiscard]] std::vector<f64> WavelengthGrid(const CameraConfig& config);
 
 class CpuCameraPipeline {
 public:

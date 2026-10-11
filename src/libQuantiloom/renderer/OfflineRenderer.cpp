@@ -321,6 +321,9 @@ struct OfflineRenderer::Impl {
     /// What the last upload put on the GPU, so an hour that lands on the same
     /// field is not re-uploaded.
     f64 thermalUploadedHour = std::numeric_limits<f64>::quiet_NaN();
+    /// The same surface temperature field as last uploaded, kept on the host
+    /// so geometry truth can read a surface temperature per triangle.
+    Vector<f32> lastSurfaceTemperatures;
 
     /// Lends the scene to the epoch builder.
     struct OfflineEpochHost final : rendercore::EpochGeometryHost {
@@ -357,7 +360,8 @@ struct OfflineRenderer::Impl {
 
     OfflineRenderOutput RenderHyperspectral();
     OfflineRenderOutput RenderSingleFrame();
-    Result<Image, String> RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex, u32 seed);
+    Result<Image, String> RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex,
+                                                 u32 seed, f64 atmosWindowHalfWidthNm = -1.0);
     Result<CameraData, String> CameraDataAt(f64 timeSeconds, SpectralMode mode, f64 wavelengthNm,
                                             bool physicalSensorProjection) const;
 };
@@ -504,6 +508,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
     if (!result.instanceElementBase.empty()) {
         geometry.SetThermalElementBases(result.instanceElementBase);
     }
+    lastSurfaceTemperatures = result.surfaceTemperature_K;
 }
 
 VkAccelerationStructureKHR OfflineRenderer::Impl::OfflineEpochHost::ApplyEpoch(const f64 t_s) {
@@ -1494,12 +1499,35 @@ OfflineRenderer::CaptureCameraInternal(camera::CaptureState& state, f64 frameTim
                                      impl.fusionCapture ? &impl.fusionSample : nullptr,
                                      impl.fusionCapture ? &impl.fusionIntegrated : nullptr);
     camera::CaptureState nextState = state;
+    const auto cameraWavelengthGrid =
+        camera::WavelengthGrid(impl.resolved.cameraConfig);
     const auto sampler = [&](f64 timeSeconds, f64 wavelengthNm) -> Result<Image, String> {
         auto moved = SetTimelineTime(timeSeconds);
         if (!moved)
             return Result<Image, String>::Err(moved.error());
+        // The camera sweep integrates by trapezoid over this grid. Baking the
+        // atmosphere as a box mean over each sample's Voronoi cell makes that
+        // sum the exact integral of the NN channel function; a fixed narrow
+        // window instead point-samples a 1/cm-structured quantity and aliases
+        // it into the product (measured ~1.7 K on LWIR ldown at 13 samples).
+        f64 atmosHalfWidth = -1.0;
+        const auto it = std::lower_bound(cameraWavelengthGrid.begin(),
+                                         cameraWavelengthGrid.end(), wavelengthNm);
+        if (it != cameraWavelengthGrid.end() && *it == wavelengthNm) {
+            const size_t i = static_cast<size_t>(it - cameraWavelengthGrid.begin());
+            const f64 left = i > 0 ? wavelengthNm - cameraWavelengthGrid[i - 1] : 0.0;
+            const f64 right = i + 1 < cameraWavelengthGrid.size()
+                                  ? cameraWavelengthGrid[i + 1] - wavelengthNm
+                                  : 0.0;
+            f64 gap = std::max(left, right);
+            if (gap <= 0.0 && cameraWavelengthGrid.size() > 1)
+                gap = cameraWavelengthGrid.back() - cameraWavelengthGrid.front();
+            if (gap > 0.0)
+                atmosHalfWidth = gap / 2.0;
+        }
         return impl.RenderCameraWavelength(wavelengthNm, state.acquisitionIndex,
-                                           impl.resolved.cameraConfig.randomSeed);
+                                           impl.resolved.cameraConfig.randomSeed,
+                                           atmosHalfWidth);
     };
     Result<camera::CameraOutput, String> captured =
         Result<camera::CameraOutput, String>::Err("camera capture did not run");
@@ -1865,7 +1893,8 @@ Result<void, String> OfflineRenderer::WarmUpCamera(camera::CaptureState& state, 
 }
 
 Result<Image, String>
-OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex, u32 seed) {
+OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionIndex,
+                                              u32 seed, f64 atmosWindowHalfWidthNm) {
     if (!std::isfinite(wavelengthNm) || wavelengthNm <= 0.0 ||
         wavelengthNm > std::numeric_limits<f32>::max())
         return Result<Image, String>::Err("invalid camera spectral sample wavelength");
@@ -1905,8 +1934,11 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
         try {
             AtmosModelPack pack(resolved.atmosphere.modelPackDir);
             AtmosphereBaker baker(pack);
+            const f64 windowNm = atmosWindowHalfWidthNm > 0.0
+                                     ? atmosWindowHalfWidthNm
+                                     : grid.windowHalfWidthNm;
             auto baked =
-                baker.Bake(resolved.atmosphere, grid.band, grid.lambdasNm, grid.windowHalfWidthNm);
+                baker.Bake(resolved.atmosphere, grid.band, grid.lambdasNm, windowNm);
             const glm::vec3& sunDir = resolved.lighting.sunDirection;
             baked.header.sunDirWorld[0] = sunDir.x;
             baked.header.sunDirWorld[1] = sunDir.y;
@@ -2437,6 +2469,12 @@ OfflineRenderer::CaptureGeometry(f64 time, const camera::CameraProjection* proje
         out.instanceId.width = w;
         out.instanceId.height = h;
         out.instanceId.pixels.resize(hits.size());
+        out.surfaceTemperatureKelvin = Image(w, h, 1);
+        out.surfaceTemperatureKelvin.channelNames = {"surface_temperature_K"};
+        out.surfaceTemperatureKelvin.data.assign(hits.size(), -1.0f);
+        out.materialId.width = w;
+        out.materialId.height = h;
+        out.materialId.pixels.resize(hits.size());
         out.geometry.width = w;
         out.geometry.height = h;
         out.geometry.referenceTimeSeconds = time;
@@ -2444,13 +2482,105 @@ OfflineRenderer::CaptureGeometry(f64 time, const camera::CameraProjection* proje
         out.geometry.camera = *camera;
         out.geometry.nativeProjection = projection;
         const auto& mapping = host.geometry.InstanceToNode();
+        const auto& instances = host.geometry.Instances();
         using Json = nlohmann::json;
-        Json instances = Json::array();
+        Json instanceIndex = Json::array();
         for (size_t i = 0; i < host.loadedScene.nodes.size(); ++i)
-            instances.push_back({{"instance_id", i + 1},
-                                 {"node_index", i},
-                                 {"name", host.loadedScene.nodes[i].name}});
-        out.instancesJson = instances.dump();
+            instanceIndex.push_back({{"instance_id", i + 1},
+                                     {"node_index", i},
+                                     {"name", host.loadedScene.nodes[i].name}});
+        out.instancesJson = instanceIndex.dump();
+
+        // The band this truth was captured against: fused modes carry a real
+        // wavelength span, single-wavelength modes collapse to a point. Band
+        // emissivity is averaged over it so a TES-style consumer gets exactly
+        // the quantity the shader integrated.
+        f64 bandLo = static_cast<f64>(host.params.wavelengthNm);
+        f64 bandHi = bandLo;
+        if (const auto fused = GetFusedBandInfo(host.params.mode)) {
+            bandLo = static_cast<f64>(fused->lambdaMinNm);
+            bandHi = static_cast<f64>(fused->lambdaMaxNm);
+        }
+        const f64 bandCentre = 0.5 * (bandLo + bandHi);
+        const auto bandMean = [&](const SpectralCurveGPU& curve) -> std::optional<f64> {
+            if (curve.numSamples == 0) return std::nullopt;
+            f64 sum = 0.0;
+            u32 count = 0;
+            for (u32 i = 0; i < curve.numSamples; ++i) {
+                const f64 nm = static_cast<f64>(curve.GetWavelength(i));
+                if (nm < bandLo || nm > bandHi) continue;
+                sum += curve.values[i];
+                ++count;
+            }
+            if (!count) return std::nullopt;
+            return sum / count;
+        };
+        Json materialIndex = Json::array();
+        for (size_t i = 0; i < host.loadedScene.materials.size(); ++i) {
+            const Material& mat = host.loadedScene.materials[i];
+            const bool boundSpectral =
+                host.spectra.materialNameToCurve.find(mat.name) !=
+                host.spectra.materialNameToCurve.end();
+            const bool boundNk =
+                host.spectra.materialNameToRefractiveIndex.find(mat.name) !=
+                host.spectra.materialNameToRefractiveIndex.end();
+            const bool boundEmissivityCurve =
+                host.spectra.materialNameToIrEmissivityCurve.find(mat.name) !=
+                    host.spectra.materialNameToIrEmissivityCurve.end() ||
+                !mat.irEmissivityCurve.empty();
+            Json record;
+            record["material_id"] = i + 1;
+            record["name"] = mat.name;
+            record["authored_ir_temperature_k"] = mat.irTemperature_K;
+            // Band-averaged emissivity the render actually used: Kirchhoff
+            // over the measured band curve where one is bound, the authored
+            // curve or scalar where it is not. nk-bound surfaces are listed
+            // as Fresnel because their emissivity is angle dependent and a
+            // single number would be a lie.
+            if (boundSpectral) {
+                record["emissivity_model"] = "kirchhoff_spectral";
+                const auto& curve =
+                    host.spectra.curves[host.spectra.materialNameToCurve.at(mat.name)];
+                if (const auto rho = bandMean(curve)) {
+                    const f64 tau = mat.irTransmittanceCurve.empty()
+                                        ? 0.0
+                                        : static_cast<f64>(mat.GetIRTransmittance(
+                                              static_cast<f32>(bandCentre)));
+                    record["band_emissivity"] =
+                        std::clamp(1.0 - *rho - tau, 0.0, 1.0);
+                } else {
+                    record["band_emissivity"] = nullptr;
+                }
+            } else if (boundNk) {
+                record["emissivity_model"] = "fresnel_complex_refractive_index";
+                record["band_emissivity"] = nullptr;
+            } else if (boundEmissivityCurve) {
+                record["emissivity_model"] = "authored_curve";
+                record["band_emissivity"] =
+                    static_cast<f64>(mat.GetIREmissivity(static_cast<f32>(bandCentre)));
+            } else {
+                record["emissivity_model"] = "derived_from_metallic";
+                record["band_emissivity"] = nullptr;
+            }
+            record["band_nm"] = {bandLo, bandHi};
+            if (i < host.thermalSolvedMaterials.size()) {
+                const auto& tm = host.thermalSolvedMaterials[i];
+                record["thermal_participates"] =
+                    tm.conductivity_W_mK > 0.0f ||
+                    tm.interiorBoundary != thermal::InteriorBoundary::Adiabatic ||
+                    tm.internalHeat_W_m2 != 0.0f;
+                record["interior_bc"] =
+                    tm.interiorBoundary == thermal::InteriorBoundary::FixedTemperature
+                        ? "fixed"
+                        : tm.interiorBoundary == thermal::InteriorBoundary::AmbientInterior
+                              ? "ambient"
+                              : "adiabatic";
+                record["interior_temperature_k"] = tm.interiorTemperature_K;
+            }
+            materialIndex.push_back(std::move(record));
+        }
+        out.materialsJson = materialIndex.dump();
+
         for (size_t i = 0; i < hits.size(); ++i) {
             const auto& hit = hits[i];
             out.rayDistanceMeters.data[i] =
@@ -2463,6 +2593,22 @@ OfflineRenderer::CaptureGeometry(f64 time, const camera::CameraProjection* proje
                 if (hit.instanceIndex >= mapping.size())
                     throw std::runtime_error("geometry hit references unknown instance");
                 out.instanceId.pixels[i] = mapping[hit.instanceIndex] + 1;
+                const auto& info = instances[hit.instanceIndex];
+                out.materialId.pixels[i] = info.materialId + 1;
+                // Solved element temperature where the solve covered this
+                // instance's triangles; authored or default elsewhere. The
+                // order mirrors the shader's own element lookup.
+                const Material& mat = host.loadedScene.materials[info.materialId];
+                f32 temperature = mat.irTemperature_K > 0.0f
+                                      ? mat.irTemperature_K
+                                      : host.resolved.defaultTemperatureK;
+                const u64 element = static_cast<u64>(info.thermalElementBase) +
+                                    hit.primitiveIndex;
+                if (info.thermalElementBase != 0xFFFFFFFFu &&
+                    element < host.lastSurfaceTemperatures.size()) {
+                    temperature = host.lastSurfaceTemperatures[element];
+                }
+                out.surfaceTemperatureKelvin.data[i] = temperature;
                 for (u32 c = 0; c < 3; ++c) {
                     out.worldPosition.data[i * 3 + c] = hit.position[c];
                     out.worldNormal.data[i * 3 + c] = hit.normal[c];

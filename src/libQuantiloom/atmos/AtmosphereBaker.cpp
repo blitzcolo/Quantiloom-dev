@@ -72,8 +72,15 @@ void FillRow(const AtmosNet& net, const AtmosphereNNConfig& cfg,
 
 // Box-average src[K] channels into render lambda bins. binOf[k] gives the
 // render bin for NN channel k (or -1 when outside every bin).
+// nearestOf[i] names a fallback channel for bin i: discrete-lambda renders
+// capture channels inside a half-window, and a band whose wavenumber grid is
+// coarser than the window (LWIR: 6-14 nm per channel vs a 2 nm window)
+// leaves most requested wavelengths with no channel at all. The network's
+// per-channel output is already the mean over that channel's bin, so the
+// nearest channel in wavenumber is the faithful point value; an empty bin
+// would otherwise read tau = lpath = ldown = 0 and render black.
 void BoxAverage(const std::vector<double>& src, const std::vector<int>& binOf,
-                int numBins, double* dst) {
+                const std::vector<int>& nearestOf, int numBins, double* dst) {
     std::vector<double> sum(numBins, 0.0);
     std::vector<int> cnt(numBins, 0);
     for (size_t k = 0; k < src.size(); ++k) {
@@ -83,7 +90,10 @@ void BoxAverage(const std::vector<double>& src, const std::vector<int>& binOf,
         cnt[b] += 1;
     }
     for (int b = 0; b < numBins; ++b)
-        dst[b] = cnt[b] > 0 ? sum[b] / cnt[b] : 0.0;
+        dst[b] = cnt[b] > 0 ? sum[b] / cnt[b]
+               : (b < static_cast<int>(nearestOf.size()) && nearestOf[b] >= 0
+                      ? src[static_cast<size_t>(nearestOf[b])]
+                      : 0.0);
 }
 
 }  // namespace
@@ -193,10 +203,12 @@ double AtmosphereBaker::SlantRangeKm(double h1Km, double viewZenithDeg) {
 
 uint64_t AtmosphereBaker::BakeKey(const AtmosphereNNConfig& cfg,
                                   const std::string& band,
-                                  const std::vector<double>& lambdasNm) {
+                                  const std::vector<double>& lambdasNm,
+                                  double windowHalfWidthNm) {
     uint64_t h = cfg.BakeHash();
     h = Fnv1a(band.data(), band.size(), h);
     h = Fnv1a(lambdasNm.data(), lambdasNm.size() * sizeof(double), h);
+    h = Fnv1a(&windowHalfWidthNm, sizeof(windowHalfWidthNm), h);
     return h;
 }
 
@@ -282,8 +294,16 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
     // NN channel k (wavenumber grid) -> render bin. Bin edges are midpoints
     // between consecutive render samples.
     const int numLambda = static_cast<int>(lambdasNm.size());
-    auto makeBinOf = [&](const AtmosBandGrid& grid) {
-        std::vector<int> binOf(grid.K, -1);
+    struct BinMap {
+        std::vector<int> binOf;
+        // Per-bin fallback channel (nearest in wavenumber), filled only for
+        // discrete-lambda renders; -1 elsewhere keeps empty bins reading 0.
+        std::vector<int> nearestOf;
+    };
+    auto makeBinOf = [&](const AtmosBandGrid& grid) -> BinMap {
+        BinMap map;
+        map.binOf.assign(grid.K, -1);
+        map.nearestOf.assign(numLambda, -1);
         if (windowHalfWidthNm > 0.0) {
             // Discrete-lambda mode: nearest sample within the window
             for (int k = 0; k < grid.K; ++k) {
@@ -297,9 +317,18 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
                         best = i;
                     }
                 }
-                binOf[k] = best;
+                map.binOf[k] = best;
             }
-            return binOf;
+            // Bins that captured no channel fall back to the channel whose
+            // wavenumber bin contains the render sample -- the quantity the
+            // network actually resolved there.
+            for (int i = 0; i < numLambda; ++i) {
+                const double nu = 1e7 / lambdasNm[i];
+                const int k = static_cast<int>(
+                    std::lround((nu - grid.v1_cm) / grid.dv_cm));
+                map.nearestOf[i] = std::clamp(k, 0, grid.K - 1);
+            }
+            return map;
         }
         std::vector<double> edges(numLambda + 1);
         edges[0] = std::max(lambdasNm[0] - 0.5 * (numLambda > 1
@@ -319,9 +348,9 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
             const int b = static_cast<int>(
                 std::upper_bound(edges.begin(), edges.end(), lam) -
                 edges.begin()) - 1;
-            if (b >= 0 && b < numLambda) binOf[k] = b;
+            if (b >= 0 && b < numLambda) map.binOf[k] = b;
         }
-        return binOf;
+        return map;
     };
 
     // ---------------------------------------------------------- layout ----
@@ -351,7 +380,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
         const AtmosNet& net = tauNet;
         const int P = net.NumFeatures();
         const int K = net.K();
-        const std::vector<int> binOf = makeBinOf(net.Band());
+        const BinMap bins = makeBinOf(net.Band());
         std::vector<double> rows(static_cast<size_t>(countA) * P);
         for (int ia = 0; ia < countA; ++ia)
             FillRow(net, cfg, sunZen, 0.0, h1, viewZenith[ia], rangeKm[ia],
@@ -370,7 +399,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
                 continue;
             }
             for (int k = 0; k < K; ++k) tauK[k] = std::exp(-delta[k]);
-            BoxAverage(tauK, binOf, numLambda, avg.data());
+            BoxAverage(tauK, bins.binOf, bins.nearestOf, numLambda, avg.data());
             for (int i = 0; i < numLambda; ++i)
                 result.data[hd.tauOffset + static_cast<size_t>(i) * countA + ia] =
                     static_cast<float>(avg[i]);
@@ -383,7 +412,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
         const int P = net.NumFeatures();
         const int K = net.K();
         const int T = net.T();  // 1, or 2 for mwir (PTH_THRML + SOL_SCAT)
-        const std::vector<int> binOf = makeBinOf(net.Band());
+        const BinMap bins = makeBinOf(net.Band());
         const size_t numRows = static_cast<size_t>(countA) * countAz;
         std::vector<double> rows(numRows * P);
         for (int ia = 0; ia < countA; ++ia) {
@@ -404,12 +433,24 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
                 const double* sol = T > 1 ? out.data() + (r * T + 1) * K : nullptr;
                 for (int k = 0; k < K; ++k) {
                     double lv = thrml[k];
-                    if (sol && !night) lv += sol[k];
+                    if (sol) {
+                        if (!night) lv += sol[k] * cfg.solarScatterScale;
+                    } else if (!thermal) {
+                        // Non-thermal bands emit one combined path radiance:
+                        // at VIS/NIR/SWIR wavelengths atmospheric thermal
+                        // emission is nil, so the product is essentially all
+                        // solar scatter. A scaled-sun scene scales all of it,
+                        // and a night scene (sun below the 85 deg training
+                        // domain) has none -- the nets were not trained below
+                        // a 5 deg solar elevation, so a clamped inference
+                        // would still return twilight fog.
+                        lv *= night ? 0.0 : cfg.solarScatterScale;
+                    }
                     // W cm^-2 sr^-1 / cm^-1 -> W m^-2 sr^-1 nm^-1
                     const double lam = net.Band().WavelengthNmAt(k);
                     lvK[k] = lv * 1e11 / (lam * lam);
                 }
-                BoxAverage(lvK, binOf, numLambda, avg.data());
+                BoxAverage(lvK, bins.binOf, bins.nearestOf, numLambda, avg.data());
                 const int ia = static_cast<int>(row / countAz);
                 const int iaz = static_cast<int>(row % countAz);
                 for (int i = 0; i < numLambda; ++i)
@@ -425,7 +466,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
         const AtmosNet& net = *ldownNet;
         const int P = net.NumFeatures();
         const int K = net.K();
-        const std::vector<int> binOf = makeBinOf(net.Band());
+        const BinMap bins = makeBinOf(net.Band());
         std::vector<double> row(P);
         // ldown ignores viewing geometry (excluded inputs); fill neutral values.
         FillRow(net, cfg, sunZen, 0.0, h1, ground ? 90.0 : 135.0,
@@ -437,7 +478,7 @@ AtmosBakeResult AtmosphereBaker::Bake(const AtmosphereNNConfig& cfg,
             const double lam = net.Band().WavelengthNmAt(k);
             lvK[k] = out[k] * 1e11 / (lam * lam);
         }
-        BoxAverage(lvK, binOf, numLambda, avg.data());
+        BoxAverage(lvK, bins.binOf, bins.nearestOf, numLambda, avg.data());
         for (int i = 0; i < numLambda; ++i)
             result.data[hd.ldownOffset + i] = static_cast<float>(avg[i]);
     }

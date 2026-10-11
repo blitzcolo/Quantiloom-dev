@@ -47,6 +47,20 @@ struct QL_API AtmosphereNNConfig {
     bool h1FromCamera = true;
     double h1Km = 0.1;
 
+    // Scale applied to the solar-scatter content of path radiance at bake
+    // time. The networks were trained for the unattenuated sun; low-light
+    // scenarios (e.g. moonlight approximated by a scaled solar LUT) need the
+    // scatter term scaled by the same factor or it adds an unphysical
+    // twilight-bright fog. Single scattering is linear in source irradiance,
+    // so this is a first-order-correct scaling. MWIR's lpath product is
+    // decomposed, so only its SOL_SCAT term is scaled and the thermal
+    // path-emission term survives; VIS/NIR/SWIR emit a single combined
+    // product that is essentially all scatter, so the whole lpath is scaled
+    // there (and vanishes entirely for sun below the 85 deg training domain).
+    // LWIR lpath is pure thermal emission and is never scaled.
+    // 1.0 = unscaled sun.
+    double solarScatterScale = 1.0;
+
     // LUT resolution
     int lutASamples = 64;              // Range / zenith axis
     int lutAzSamples = 16;             // Relative azimuth axis (lpath only)

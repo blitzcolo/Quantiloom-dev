@@ -10,8 +10,10 @@
 #include <algorithm>  // For std::nth_element
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -192,6 +194,102 @@ void WriteApparentTemperature(const Config& config, const OfflineRenderOutput& r
 }
 
 /**
+ * @brief Write deterministic per-pixel geometry ground truth on the camera grid
+ *
+ * Registration truth for dataset consumers: depth, ray distance, world
+ * position, normals, coverage validity and instance ids, all from one raycast
+ * independent of path SPP. The sensor's own projection is used, so each image
+ * aligns pixel for pixel with the camera products above.
+ */
+Result<void, String> WriteGeometryTruth(const Config& config, OfflineRenderer& renderer,
+                                        const Image& img, const String& outputPath,
+                                        dataset::ExportSession* session) {
+    if (!config.GetBool("dataset.geometry_truth", false))
+        return Result<void, String>::Ok();
+    if (!session)
+        return Result<void, String>::Err(
+            "dataset.geometry_truth requires dataset.metadata (truth ships inside the record)");
+    auto truth = renderer.CaptureGeometry(renderer.GetTimelineInfo().current_s);
+    if (!truth)
+        return Result<void, String>::Err("geometry truth export failed: " + truth.error());
+    const std::filesystem::path exrPath(outputPath);
+    const auto name = [&](const char* suffix) {
+        return exrPath.stem().string() + suffix + ".exr";
+    };
+    const char* provenance = nullptr;
+    std::string provenanceCopy;
+    if (const auto found = img.metadata.find("quantiloom_provenance"); found != img.metadata.end()) {
+        provenanceCopy = found->second;
+        provenance = provenanceCopy.c_str();
+    }
+    const std::tuple<Image*, const char*, const char*, const char*> images[] = {
+        {&truth.value().cameraDepthMeters, "_truth_camera_z", "m", "camera_z"},
+        {&truth.value().rayDistanceMeters, "_truth_ray_distance", "m", "ray_distance"},
+        {&truth.value().worldPosition, "_truth_world_position", "world_units", "world_position"},
+        {&truth.value().worldNormal, "_truth_geometric_normal", "dimensionless", "geometric_normal"},
+        {&truth.value().validity, "_truth_validity", "enum", "geometry_validity"},
+        {&truth.value().surfaceTemperatureKelvin, "_truth_surface_temperature", "K",
+         "surface_temperature"},
+    };
+    for (const auto& [image, suffix, unit, kind] : images) {
+        if (provenance) image->metadata["quantiloom_provenance"] = provenance;
+        const String description = String("{\"kind\":\"") + kind +
+            "\",\"unit\":\"" + unit +
+            "\",\"sampling\":\"instantaneous_pixel_centre\",\"projection\":\"camera_native\"" +
+            ",\"validity_codes\":{\"0\":\"miss\",\"1\":\"opaque\",\"2\":\"invalid_lens\"" +
+            ",\"3\":\"partial_coverage\",\"4\":\"transmissive\"}}";
+        const auto written = session->WriteImage(name(suffix), name(suffix), *image, description);
+        if (!written)
+            return Result<void, String>::Err("cannot write geometry truth: " + written.error());
+    }
+    const auto wroteIds = session->WriteUIntImage(
+        name("_truth_instance_id"), name("_truth_instance_id"), truth.value().instanceId,
+        "{\"kind\":\"instance_id\",\"sampling\":\"instantaneous_pixel_centre\""
+        ",\"projection\":\"camera_native\"}");
+    if (!wroteIds)
+        return Result<void, String>::Err("cannot write instance ids: " + wroteIds.error());
+    const auto wroteMatIds = session->WriteUIntImage(
+        name("_truth_material_id"), name("_truth_material_id"), truth.value().materialId,
+        "{\"kind\":\"material_id\",\"sampling\":\"instantaneous_pixel_centre\""
+        ",\"projection\":\"camera_native\",\"index\":\"truth_materials.json\"}");
+    if (!wroteMatIds)
+        return Result<void, String>::Err("cannot write material ids: " + wroteMatIds.error());
+    const auto staged = session->StagingPath(exrPath.stem().string() + "_truth_instances.json");
+    if (!staged) return Result<void, String>::Err(staged.error());
+    {
+        std::ofstream stream(std::filesystem::path(*staged), std::ios::binary);
+        stream << truth.value().instancesJson;
+        stream.close();
+        if (!stream) return Result<void, String>::Err("cannot write instance index");
+    }
+    const auto registered = session->RegisterFile(
+        exrPath.stem().string() + "_truth_instances.json",
+        exrPath.stem().string() + "_truth_instances.json",
+        "{\"kind\":\"instance_index\",\"schema\":[{\"instance_id\":\"u32\",\"node_index\":\"u32\""
+        ",\"name\":\"gltf node name\"}]}");
+    if (!registered)
+        return Result<void, String>::Err("cannot register instance index: " + registered.error());
+    const auto stagedMats = session->StagingPath(exrPath.stem().string() + "_truth_materials.json");
+    if (!stagedMats) return Result<void, String>::Err(stagedMats.error());
+    {
+        std::ofstream stream(std::filesystem::path(*stagedMats), std::ios::binary);
+        stream << truth.value().materialsJson;
+        stream.close();
+        if (!stream) return Result<void, String>::Err("cannot write material index");
+    }
+    const auto registeredMats = session->RegisterFile(
+        exrPath.stem().string() + "_truth_materials.json",
+        exrPath.stem().string() + "_truth_materials.json",
+        "{\"kind\":\"material_index\",\"schema\":[{\"material_id\":\"u32\",\"name\":\"gltf "
+        "material name\",\"emissivity_model\":\"string\",\"band_emissivity\":\"f64|null\","
+        "\"band_nm\":\"[f64,f64]\",\"thermal_participates\":\"bool\"}]}");
+    if (!registeredMats)
+        return Result<void, String>::Err("cannot register material index: " +
+                                         registeredMats.error());
+    return Result<void, String>::Ok();
+}
+
+/**
  * @brief Build the displayable RGB frame for the PNG preview
  *
  * Physical radiance does not live in [0, 1], so a raw clamp makes a preview
@@ -328,6 +426,10 @@ void WriteFrameOutputs(const Config& config, OfflineRenderer& renderer,
             outcome.error = "failed to write " + pngPath.string();
         }
     }
+    if (outcome.error.empty()) {
+        const auto truth = WriteGeometryTruth(config, renderer, img, outcome.exrPath, session.get());
+        if (!truth) outcome.error = truth.error();
+    }
     if (session && outcome.error.empty()) {
         const auto committed = session->Commit();
         if (!committed) outcome.error = committed.error();
@@ -375,6 +477,12 @@ RenderOutcome RenderConfigToFiles(const Config& config,
     // frame to save. Everything below is the single-frame output stage.
     if (!rendered.wroteItsOwnOutput) {
         camera::CaptureState cameraState;
+        // A dataset job may pin the acquisition counter so fixed-pattern
+        // noise stays put across captures while the temporal streams draw
+        // from distinct counter keys; FPN classes ignore the counter by
+        // design, everything else keys on it.
+        cameraState.acquisitionIndex =
+            config.Get<u64>("dataset.acquisition_index", 0);
         WriteFrameOutputs(config, renderer, cameraState, rendered, spectralMode, outcome);
     }
 
