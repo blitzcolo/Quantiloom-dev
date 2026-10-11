@@ -1836,7 +1836,8 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
     }
 
     const uint64_t key =
-        AtmosphereBaker::BakeKey(resolved, grid.band, grid.lambdasNm);
+        AtmosphereBaker::BakeKey(resolved, grid.band, grid.lambdasNm,
+                                 grid.windowHalfWidthNm);
     if (key == atmosBakeKey) return;
 
     try {
