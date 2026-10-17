@@ -422,10 +422,14 @@ public:
      *
      * The caller is responsible for:
      * - Beginning the command buffer
-     * - Ensuring target image is in TRANSFER_DST_OPTIMAL or GENERAL layout
-     * - Calling this method to record ray tracing and blit commands
-     * - Transitioning target image to PRESENT_SRC_KHR before present
+     * - Passing the target image's CURRENT layout as @p targetLayout; this call
+     *   transitions it to TRANSFER_DST_OPTIMAL for the blit and leaves it in
+     *   PRESENT_SRC_KHR, so no transition is needed before present
      * - Submitting the command buffer
+     *
+     * If recording fails (an allocation failure, a lost device) the error is
+     * logged, nothing is thrown, and IsReady() turns false until a scene is
+     * loaded again; later calls return without recording.
      *
      * @param cmd Command buffer (must be in recording state)
      * @param targetImage Target swapchain image (from QVulkanWindow::swapChainImage)
@@ -793,8 +797,11 @@ public:
     void SetSunDirection(const glm::vec3& direction);
 
     /**
-     * @brief Set sun radiance
-     * @param radiance RGB radiance (W/m^2/sr)
+     * @brief Set the sun's strength for RGB mode
+     * @param radiance RGB irradiance on a surface facing the sun, W/m^2 per
+     *        channel -- not W/m^2/sr, despite the name: the sun is a delta
+     *        light and the shader takes it as brdf * E * cos(theta). A disc
+     *        radiance would be off by the sun's solid angle (~6.8e-5 sr).
      */
     void SetSunRadiance(const glm::vec3& radiance);
 
@@ -833,7 +840,8 @@ public:
      * @endcode
      *
      * @note Resets accumulation when config changes
-     * @throws std::runtime_error if the model pack directory does not exist
+     * @throws std::runtime_error if the model pack directory does not exist;
+     *         the previous atmosphere then stays in force, unchanged
      */
     void SetAtmosphere(const AtmosphereNNConfig& config);
 

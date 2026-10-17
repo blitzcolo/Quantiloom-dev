@@ -9,20 +9,24 @@
  * - World unit scaling for physically-correct Beer-Lambert attenuation
  *
  * Dual-mode support:
- * - RGB mode: Uses sunRadiance_rgb and skyRadiance_rgb
+ * - RGB mode: Uses sunRadiance_rgb (an irradiance, see units) and skyRadiance_rgb
  * - VIS_Fused mode: Uses RGB-to-spectrum conversion (spectral fields are fallback only)
  * - When SolarSpectralLUT available, these RGB values serve as additional fallback
  *
  * Physical units:
- * - RGB radiance: W·sr⁻¹·m⁻² (per RGB channel)
- * - Spectral fallback: W·sr⁻¹·m⁻² (RGB average, NOT per-nm spectral density)
+ * - Sun: IRRADIANCE on a surface facing the sun, W·m⁻² per RGB channel. The
+ *   field is named "radiance" for history; the shader uses it as
+ *   brdf × E × cosθ, which is how a delta light's irradiance enters. Passing
+ *   the disc's radiance instead is off by its solid angle (~6.8e-5 sr).
+ * - Sky: radiance, W·sr⁻¹·m⁻² per RGB channel
+ * - Spectral fallback: the RGB average of the above, NOT per-nm spectral density
  * - Temperature: Kelvin (K)
  * - worldUnitsToMeters: Conversion factor for scene unit scaling
  *
  * CRITICAL: This struct MUST match GPU LightingParams in common.hlsli exactly!
  * Memory layout validated by static_assert at compile time.
  *
- * @note Size: 64 bytes (16-byte aligned for GPU)
+ * @note Size: 80 bytes (16-byte aligned for GPU)
  * @note Uploaded to GPU via storage buffer (binding 2)
  * @note Any layout change requires shader update
  *
@@ -63,7 +67,10 @@ namespace quantiloom {
  * @endcode
  *
  * @note MUST match shader struct in common.hlsli (verified at compile time)
- * @note Use RGB values for RGB mode, spectral values for Single/MWIR/LWIR modes
+ * @note The RGB values light RGB mode (and VIS when no SolarSpectralLUT is bound).
+ *       The *_spectral averages are a legacy fallback: the spectral bands are lit
+ *       by the SolarSpectralLUT and the analytic sky, and render no sun at all
+ *       without one -- these two fields do not stand in for it.
  * @note atmosphereTemperature_K used for IR downwelling thermal radiation
  * @note chromaR/B_correction used for VIS_FUSED mode chromaticity correction
  * @note enableShadowRays: 0 = disabled (debug/GPU-crash workaround), 1 = enabled (default)

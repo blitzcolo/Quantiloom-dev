@@ -1886,147 +1886,160 @@ void ExternalRenderContext::RenderFrame(
         return;
     }
 
-    // Host writes deferred since the last recording land first: the barriers
-    // in Record order them after whatever earlier submissions are still
-    // reading the buffers, and before the trace below reads the new values.
-    m_impl->pendingUploads.Record(cmd);
+    // Nothing recorded here may throw past this point: the caller is a host
+    // render callback (QVulkanWindowRenderer::startNextFrame) that has no
+    // handler, and an allocation failure or a lost device would otherwise end
+    // the host process. The frame that failed is abandoned, the context stops
+    // reporting ready, and every later call returns at the check above until
+    // a scene is loaded again -- a frozen viewport with a reason in the log
+    // rather than a crash that takes unsaved work with it.
+    try {
+        // Host writes deferred since the last recording land first: the barriers
+        // in Record order them after whatever earlier submissions are still
+        // reading the buffers, and before the trace below reads the new values.
+        m_impl->pendingUploads.Record(cmd);
 
-    // Ordinary poses are uploaded and refitted in this very submission, so
-    // prior traces finish before UPDATE and the new trace sees the new pose.
-    // Camera capture retains its synchronous pose/stratum contract.
-    if (m_impl->pendingTlasRefit) {
-        if (m_impl->cameraConfig.enabled) {
-            m_impl->FlushPendingGpuWork();
-        } else {
-            m_impl->geometry.RecordPreparedTlasRefit(cmd);
-            m_impl->pendingTlasRefit = false;
-        }
-    }
-
-    // Collect GPU timings from frames the GPU has finished by now. Never
-    // blocks: with the host's frames-in-flight the previous dispatch may
-    // still be running, and its result is simply picked up next time.
-    if (m_impl->perfLogger && m_impl->perfLogger->TryResolvePending()) {
-        m_impl->lastSampleGpuMs = m_impl->perfLogger->GetLastFrameGpuMs();
-    }
-
-    // Update CLAHE min/max cache from previous frame's output image
-    // The histogram's own queue-ordered completion points protect these
-    // reads; a new QVulkanWindow callback does not complete all older frames.
-    // Only update every N frames to reduce readback overhead, but always update
-    // on frame 1 (after first render) and whenever cache is invalid
-    constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
-    if (m_impl->claheInitialized &&
-        (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->accumulatedSamples > 0 &&
-        (!m_impl->hasCachedMinMax ||
-         m_impl->accumulatedSamples == 1 ||  // Always update after first frame
-         m_impl->frameIndex % minMaxUpdateInterval == 0)) {
-        m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
-        m_impl->hasCachedMinMax = true;
-        //QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
-        //             m_impl->cachedImageMin, m_impl->cachedImageMax);
-    }
-
-    // Record the target extent and bring the render extent in line with it and
-    // the current scale. Everything below traces and post-processes at the
-    // render extent; only the closing blit knows about the target's.
-    m_impl->EnsureExtent(width, height);
-    const u32 renderW = m_impl->width;
-    const u32 renderH = m_impl->height;
-
-    // Rebake the NN atmosphere LUT if the bake key changed (band, weather,
-    // quantized altitude / sun geometry)
-    m_impl->UpdateAtmosphereNN();
-
-    // Update camera data with current state
-    CameraData cameraData = m_impl->camera.GetCameraData();
-    cameraData.wavelength_nm = m_impl->wavelength_nm;
-    cameraData.spectral_mode = static_cast<u32>(m_impl->spectralMode);
-    cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
-    cameraData.debugParam = m_impl->debugParam;
-    m_impl->pipeline->SetCameraData(cameraData);
-
-    // The shader branches on the SPEC_SPECTRAL_MODE specialization constant,
-    // not the push-constant copy above. Sync the pipeline variant here at the
-    // point of use: setters may run before the pipeline exists (scene not yet
-    // loaded), and scene reload recreates the pipeline with the default
-    // variant. Cached variants make this a hash lookup.
-    m_impl->pipeline->SetSpecConstants(
-        static_cast<u32>(m_impl->spectralMode),
-        m_impl->debugMode != DebugVisualizationMode::None);
-
-    // A presentation and a path sample are different units. Camera capture
-    // owns its own acquisition history and is deliberately never batched here.
-    const u32 samplesToRender = m_impl->cameraConfig.enabled ? 1u : m_impl->viewportSampleBatch;
-    for (u32 sample = 0; sample < samplesToRender; ++sample) {
-        // Set sampling parameters
-        // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
-        //
-        // Mixed with accumulatedSamples only. frameIndex used to be part of this,
-        // but it counts every frame ever drawn and is never reset, so it made the
-        // seed depend on session history rather than on the accumulation -- the one
-        // thing that had to be reproducible. Dropping it makes this identical to
-        // the CLI's `dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009)`, where
-        // frameIndex is fixed at 0 and sampleIndex is the accumulation index.
-        u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->accumulatedSamples * 1009);
-
-        // frameIndex is passed as 0, exactly as the CLI passes it. raygen.rgen
-        // folds this push constant into the per-pixel seed
-        // (`seed ^= pushConsts.frameIndex * 26699`) and uses it for nothing else,
-        // so feeding it the free-running frame counter made the image depend on how
-        // many frames the session had drawn before this accumulation began. The
-        // sample-to-sample variation it was there to provide already comes from
-        // sampleIndex below.
-        constexpr u32 kShaderFrameIndex = 0;
-        m_impl->pipeline->SetSamplingParams(kShaderFrameIndex, m_impl->accumulatedSamples,
-                                            m_impl->spp, randomSeed, m_impl->sequenceSeed);
-
-        if (m_impl->cameraConfig.enabled) {
-            // The camera chain owns the frame: it traces at the physical sensor
-            // extent and produces the display product. The visibility
-            // accumulation in outputImage is not traced in this mode; hosts that
-            // read CaptureScreenshot with the camera enabled get the last
-            // non-camera frame, if any.
-            if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
-                QL_LOG_WARN("Camera scheduler: {}", stepped.error());
+        // Ordinary poses are uploaded and refitted in this very submission, so
+        // prior traces finish before UPDATE and the new trace sees the new pose.
+        // Camera capture retains its synchronous pose/stratum contract.
+        if (m_impl->pendingTlasRefit) {
+            if (m_impl->cameraConfig.enabled) {
+                m_impl->FlushPendingGpuWork();
+            } else {
+                m_impl->geometry.RecordPreparedTlasRefit(cmd);
+                m_impl->pendingTlasRefit = false;
             }
-        } else {
-            // Execute ray tracing (writes to internal outputImage in GENERAL
-            // layout). Timestamps bracket the trace alone -- not CLAHE or the
-            // blit -- so what gets measured is the cost of one sample of *this
-            // scene*. The camera trace is bracketed by the camera perf queries
-            // inside RecordCameraMeasurement.
-            if (m_impl->perfLogger)
-                m_impl->perfLogger->BeginFrame(cmd);
-            m_impl->pipeline->TraceRays(cmd, renderW, renderH, sample + 1 == samplesToRender);
-            if (m_impl->perfLogger)
-                m_impl->perfLogger->EndFrame(cmd);
-            m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
-            m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
         }
-        ++m_impl->accumulatedSamples;
+
+        // Collect GPU timings from frames the GPU has finished by now. Never
+        // blocks: with the host's frames-in-flight the previous dispatch may
+        // still be running, and its result is simply picked up next time.
+        if (m_impl->perfLogger && m_impl->perfLogger->TryResolvePending()) {
+            m_impl->lastSampleGpuMs = m_impl->perfLogger->GetLastFrameGpuMs();
+        }
+
+        // Update CLAHE min/max cache from previous frame's output image
+        // The histogram's own queue-ordered completion points protect these
+        // reads; a new QVulkanWindow callback does not complete all older frames.
+        // Only update every N frames to reduce readback overhead, but always update
+        // on frame 1 (after first render) and whenever cache is invalid
+        constexpr u32 minMaxUpdateInterval = 10; // Update every 10 frames
+        if (m_impl->claheInitialized &&
+            (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+            m_impl->accumulatedSamples > 0 &&
+            (!m_impl->hasCachedMinMax ||
+             m_impl->accumulatedSamples == 1 ||  // Always update after first frame
+             m_impl->frameIndex % minMaxUpdateInterval == 0)) {
+            m_impl->ComputeImageMinMax(m_impl->cachedImageMin, m_impl->cachedImageMax);
+            m_impl->hasCachedMinMax = true;
+            //QL_LOG_DEBUG("CLAHE: Updated min/max cache: [{}, {}]",
+            //             m_impl->cachedImageMin, m_impl->cachedImageMax);
+        }
+
+        // Record the target extent and bring the render extent in line with it and
+        // the current scale. Everything below traces and post-processes at the
+        // render extent; only the closing blit knows about the target's.
+        m_impl->EnsureExtent(width, height);
+        const u32 renderW = m_impl->width;
+        const u32 renderH = m_impl->height;
+
+        // Rebake the NN atmosphere LUT if the bake key changed (band, weather,
+        // quantized altitude / sun geometry)
+        m_impl->UpdateAtmosphereNN();
+
+        // Update camera data with current state
+        CameraData cameraData = m_impl->camera.GetCameraData();
+        cameraData.wavelength_nm = m_impl->wavelength_nm;
+        cameraData.spectral_mode = static_cast<u32>(m_impl->spectralMode);
+        cameraData.debug_mode = static_cast<u32>(m_impl->debugMode);
+        cameraData.debugParam = m_impl->debugParam;
+        m_impl->pipeline->SetCameraData(cameraData);
+
+        // The shader branches on the SPEC_SPECTRAL_MODE specialization constant,
+        // not the push-constant copy above. Sync the pipeline variant here at the
+        // point of use: setters may run before the pipeline exists (scene not yet
+        // loaded), and scene reload recreates the pipeline with the default
+        // variant. Cached variants make this a hash lookup.
+        m_impl->pipeline->SetSpecConstants(
+            static_cast<u32>(m_impl->spectralMode),
+            m_impl->debugMode != DebugVisualizationMode::None);
+
+        // A presentation and a path sample are different units. Camera capture
+        // owns its own acquisition history and is deliberately never batched here.
+        const u32 samplesToRender = m_impl->cameraConfig.enabled ? 1u : m_impl->viewportSampleBatch;
+        for (u32 sample = 0; sample < samplesToRender; ++sample) {
+            // Set sampling parameters
+            // Use Mersenne Twister RNG for better sample distribution (reduces fireflies)
+            //
+            // Mixed with accumulatedSamples only. frameIndex used to be part of this,
+            // but it counts every frame ever drawn and is never reset, so it made the
+            // seed depend on session history rather than on the accumulation -- the one
+            // thing that had to be reproducible. Dropping it makes this identical to
+            // the CLI's `dist(rng) ^ (frameIndex * 997 + sampleIndex * 1009)`, where
+            // frameIndex is fixed at 0 and sampleIndex is the accumulation index.
+            u32 randomSeed = m_impl->randDist(m_impl->rng) ^ (m_impl->accumulatedSamples * 1009);
+
+            // frameIndex is passed as 0, exactly as the CLI passes it. raygen.rgen
+            // folds this push constant into the per-pixel seed
+            // (`seed ^= pushConsts.frameIndex * 26699`) and uses it for nothing else,
+            // so feeding it the free-running frame counter made the image depend on how
+            // many frames the session had drawn before this accumulation began. The
+            // sample-to-sample variation it was there to provide already comes from
+            // sampleIndex below.
+            constexpr u32 kShaderFrameIndex = 0;
+            m_impl->pipeline->SetSamplingParams(kShaderFrameIndex, m_impl->accumulatedSamples,
+                                                m_impl->spp, randomSeed, m_impl->sequenceSeed);
+
+            if (m_impl->cameraConfig.enabled) {
+                // The camera chain owns the frame: it traces at the physical sensor
+                // extent and produces the display product. The visibility
+                // accumulation in outputImage is not traced in this mode; hosts that
+                // read CaptureScreenshot with the camera enabled get the last
+                // non-camera frame, if any.
+                if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
+                    QL_LOG_WARN("Camera scheduler: {}", stepped.error());
+                }
+            } else {
+                // Execute ray tracing (writes to internal outputImage in GENERAL
+                // layout). Timestamps bracket the trace alone -- not CLAHE or the
+                // blit -- so what gets measured is the cost of one sample of *this
+                // scene*. The camera trace is bracketed by the camera perf queries
+                // inside RecordCameraMeasurement.
+                if (m_impl->perfLogger)
+                    m_impl->perfLogger->BeginFrame(cmd);
+                m_impl->pipeline->TraceRays(cmd, renderW, renderH, sample + 1 == samplesToRender);
+                if (m_impl->perfLogger)
+                    m_impl->perfLogger->EndFrame(cmd);
+                m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
+                m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
+            }
+            ++m_impl->accumulatedSamples;
+        }
+
+        // Post-processing, then the blit. Both halves are shared with
+        // PresentAccumulated, which does them without the trace above. They run
+        // at the render extent, before the magnifying blit, so a reduced scale
+        // makes them cheaper too -- and CLAHE never sees an upsampled image.
+        if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+            m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
+            const auto claheExtent = m_impl->ClaheInputExtent();
+            m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
+        }
+
+        const auto blitSource = m_impl->CurrentDisplaySource();
+        // Whichever pass wrote it last is what the barrier has to wait on.
+        const VkPipelineStageFlags srcStage = (blitSource.image == m_impl->outputImage->GetImage())
+                                                  ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
+                                                  : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, blitSource.width,
+                             blitSource.height, width, height, srcStage);
+
+        m_impl->frameIndex++;
+    } catch (const std::exception& e) {
+        QL_LOG_ERROR("ExternalRenderContext::RenderFrame failed, rendering stopped: {}",
+                     e.what());
+        m_impl->isReady = false;
     }
-
-    // Post-processing, then the blit. Both halves are shared with
-    // PresentAccumulated, which does them without the trace above. They run
-    // at the render extent, before the magnifying blit, so a reduced scale
-    // makes them cheaper too -- and CLAHE never sees an upsampled image.
-    if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
-        m_impl->claheInitialized && m_impl->displayImage && m_impl->ClaheInputReady()) {
-        const auto claheExtent = m_impl->ClaheInputExtent();
-        m_impl->ExecuteCLAHE(cmd, claheExtent.width, claheExtent.height);
-    }
-
-    const auto blitSource = m_impl->CurrentDisplaySource();
-    // Whichever pass wrote it last is what the barrier has to wait on.
-    const VkPipelineStageFlags srcStage = (blitSource.image == m_impl->outputImage->GetImage())
-                                              ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
-                                              : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-    m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, blitSource.width,
-                         blitSource.height, width, height, srcStage);
-
-    m_impl->frameIndex++;
 }
 
 ExternalRenderContext::Impl::DisplaySource
@@ -6753,18 +6766,21 @@ void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
 // ============================================================================
 
 void ExternalRenderContext::SetAtmosphere(const AtmosphereNNConfig& config) {
+    // Open the pack before touching any state. It throws if the directory does
+    // not exist -- a hard error, no fallback -- and doing it first means a
+    // throw leaves the previous atmosphere in force, rather than a config that
+    // says "enabled" with no pack behind it.
+    std::unique_ptr<AtmosModelPack> pack;
+    if (config.enabled && !config.modelPackDir.empty()) {
+        pack = std::make_unique<AtmosModelPack>(config.modelPackDir);
+    }
+
     m_impl->atmosphereConfig = config;
-    m_impl->atmosModelPack.reset();
+    m_impl->atmosModelPack = std::move(pack);
     m_impl->atmosBakeKey = 0;  // Force rebake (or disable-upload) next frame
     m_impl->cameraResourcesDirty = true;
     if (m_impl->cameraConfig.enabled)
         m_impl->cameraCapturePending = true;
-
-    if (config.enabled && !config.modelPackDir.empty()) {
-        // Throws if the directory does not exist -- hard error, no fallback
-        m_impl->atmosModelPack =
-            std::make_unique<AtmosModelPack>(config.modelPackDir);
-    }
 
     ResetAccumulation();
     QL_LOG_INFO("NN atmosphere config updated: {} (preset '{}')",

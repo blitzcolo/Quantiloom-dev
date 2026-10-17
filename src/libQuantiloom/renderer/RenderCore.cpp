@@ -1723,7 +1723,12 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
     }
 
     Vector<EmissiveTriangleGPU> triangles;
-    f32 runningPower = 0.0f;
+    // Summed in f64 and stored rounded. An f32 running sum stops resolving one
+    // triangle's share long before a million of them (its ulp at the end of
+    // the CDF is ~6% of an equal-power triangle there), so the selection
+    // probabilities the binary search realises drift from the
+    // luminance * area / total that the MIS density assumes.
+    f64 runningPower = 0.0;
 
     ForEachInstance(scene, [&](const glm::mat4& transform, size_t globalPrim,
                                size_t /*nodeIndex*/) {
@@ -1780,11 +1785,11 @@ Vector<EmissiveTriangleGPU> CollectEmissiveTriangles(const Scene& scene) {
                 continue;  // degenerate, and it would divide by zero downstream
             }
 
-            runningPower += luminance * area;
+            runningPower += static_cast<f64>(luminance) * static_cast<f64>(area);
 
             EmissiveTriangleGPU tri{};
             tri.v0 = p0;
-            tri.cumulativePower = runningPower;
+            tri.cumulativePower = static_cast<f32>(runningPower);
             tri.edge1 = e1;
             tri.area = area;
             tri.edge2 = e2;

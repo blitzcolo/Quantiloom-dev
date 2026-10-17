@@ -262,6 +262,10 @@ struct OfflineRenderer::Impl {
     std::unique_ptr<PerformanceLogger> perfLogger;
     std::unique_ptr<BatchRenderer> cameraBatchRenderer;
     std::unique_ptr<GpuBuffer> cameraAtmosHeaderBuffer;
+    /// The network pack the per-wavelength camera bakes read. It caches every
+    /// net it loads, so it lives as long as the renderer: a fresh one per
+    /// camera wavelength re-read the .safetensors from disk for each of them.
+    std::unique_ptr<AtmosModelPack> cameraAtmosPack;
     std::unique_ptr<GpuBuffer> cameraAtmosDataBuffer;
 
     // ------------------------------------------------------------------
@@ -1932,8 +1936,10 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
                 "camera wavelength lacks atmosphere coverage: " +
                 (grid.error.empty() ? std::to_string(wavelengthNm) : grid.error));
         try {
-            AtmosModelPack pack(resolved.atmosphere.modelPackDir);
-            AtmosphereBaker baker(pack);
+            const std::filesystem::path packDir(resolved.atmosphere.modelPackDir);
+            if (!cameraAtmosPack || cameraAtmosPack->Dir() != packDir)
+                cameraAtmosPack = std::make_unique<AtmosModelPack>(packDir);
+            AtmosphereBaker baker(*cameraAtmosPack);
             const f64 windowNm = atmosWindowHalfWidthNm > 0.0
                                      ? atmosWindowHalfWidthNm
                                      : grid.windowHalfWidthNm;
