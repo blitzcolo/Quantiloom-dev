@@ -211,7 +211,11 @@ CameraConfig GenericUncooledThermalIrConfig() {
     config.thermal.readoutWindowSeconds = 1.0 / 30.0;
     config.thermal.netdKelvin = 0.05;
     config.thermal.netdReferenceTemperatureK = 300.0;
-    config.thermal.netdNoiseBandwidthHz = 30.0;
+    // The readout's noise bandwidth is 1/(2 T_window) = 15 Hz, and the NETD is
+    // this camera's own figure at its own readout -- so it is stated at that
+    // bandwidth. At 30 Hz the readout scaled it by sqrt(15/30) and the preset
+    // delivered 35 mK while calling itself a 50 mK camera.
+    config.thermal.netdNoiseBandwidthHz = 15.0;
     config.thermal.netdOpticalCondition = "f/1.4, reference conditions assumed";
     config.device.effectiveMinNm = 8000.0;
     config.device.effectiveMaxNm = 14000.0;

@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <limits>
 #include <numbers>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <type_traits>
@@ -276,32 +277,123 @@ Result<CameraProduct, String> Product(Image image, SignalDescriptor signal) {
     return product;
 }
 
-Result<f64, String> ApparentTemperature(f64 measurement, const CameraConfig& config, u32 channel,
-                                        f64 pixelAreaM2) {
+/// The on-axis signal a blackbody at @p kelvin produces in one channel: an
+/// electron rate for a photon detector, an absorbed power for a thermal one.
+Result<f64, String> BlackbodySignal(f64 kelvin, const CameraConfig& config, u32 channel,
+                                    f64 pixelAreaM2) {
     const auto& response = config.device.channels[channel].response;
-    f64 lo = 10.0, hi = 5000.0;
-    for (int iteration = 0; iteration < 48; ++iteration) {
-        const f64 middle = (lo + hi) / 2.0;
-        f64 reference = 0.0;
-        if (config.device.detector == DetectorKind::Photon) {
-            const auto rate =
-                IntegrateBlackbodyPhoton(middle, response, config.optics.fNumber, pixelAreaM2);
-            if (!rate)
-                return Fail<f64>(rate.error());
-            reference = rate.value().electronRatePerSecond;
-        } else {
-            const auto power =
-                IntegrateBlackbodyThermal(middle, response, config.optics.fNumber, pixelAreaM2);
-            if (!power)
-                return Fail<f64>(power.error());
-            reference = power.value().absorbedPowerW;
-        }
-        if (reference < measurement)
-            lo = middle;
-        else
-            hi = middle;
+    if (config.device.detector == DetectorKind::Photon) {
+        const auto rate =
+            IntegrateBlackbodyPhoton(kelvin, response, config.optics.fNumber, pixelAreaM2);
+        if (!rate)
+            return Fail<f64>(rate.error());
+        return rate.value().electronRatePerSecond;
     }
-    return (lo + hi) / 2.0;
+    const auto power =
+        IntegrateBlackbodyThermal(kelvin, response, config.optics.fNumber, pixelAreaM2);
+    if (!power)
+        return Fail<f64>(power.error());
+    return power.value().absorbedPowerW;
+}
+
+/// One channel's inverse of BlackbodySignal over [10, 5000] K.
+///
+/// The inversion used to bisect 48 times per pixel, each iteration a full band
+/// integral -- for an 8-14 um response about 230 thousand Planck evaluations a
+/// pixel, and some 2e10 for a 320x240 frame. The signal does not depend on the
+/// pixel, so it is tabulated once per channel on a geometric temperature grid
+/// and inverted by cubic interpolation of 1/T against ln(signal). That pairing
+/// is close to linear (Wien: ln S ~ a - c2/(lambda T) for a narrow band), and
+/// at a grid ratio of 1.002 a flat 8-14 um band inverts to within 1e-10 K of
+/// the bisection across the whole range -- below the f32 the product is
+/// stored in.
+class ApparentTemperatureTable {
+public:
+    static Result<ApparentTemperatureTable, String> Build(const CameraConfig& config, u32 channel,
+                                                          f64 pixelAreaM2) {
+        constexpr f64 kLowest = 10.0;
+        constexpr f64 kHighest = 5000.0;
+        constexpr f64 kRatio = 1.002;
+        ApparentTemperatureTable table;
+        for (f64 kelvin = kLowest;; kelvin = std::min(kelvin * kRatio, kHighest)) {
+            const auto signal = BlackbodySignal(kelvin, config, channel, pixelAreaM2);
+            if (!signal)
+                return Fail<ApparentTemperatureTable>(signal.error());
+            // Only strictly increasing, positive nodes: a band far short of
+            // a cold body's emission underflows to zero at the bottom of the
+            // range, and ln 0 has nothing to interpolate.
+            const f64 value = signal.value();
+            if (value > 0.0 && std::isfinite(value)) {
+                const f64 lnValue = std::log(value);
+                if (table.m_lnSignal.empty() || lnValue > table.m_lnSignal.back()) {
+                    table.m_lnSignal.push_back(lnValue);
+                    table.m_inverseKelvin.push_back(1.0 / kelvin);
+                }
+            }
+            if (kelvin >= kHighest)
+                break;
+        }
+        if (table.m_lnSignal.size() < 2)
+            return Fail<ApparentTemperatureTable>(
+                "apparent temperature: the channel response sees no blackbody signal in "
+                "[10, 5000] K");
+        return table;
+    }
+
+    /// Clamped to the tabulated range, which is what the bisection's bracket
+    /// did at either end.
+    [[nodiscard]] f64 Invert(f64 measurement) const {
+        const size_t n = m_lnSignal.size();
+        if (!(measurement > 0.0) || std::log(measurement) <= m_lnSignal.front())
+            return 1.0 / m_inverseKelvin.front();
+        const f64 y = std::log(measurement);
+        if (y >= m_lnSignal.back())
+            return 1.0 / m_inverseKelvin.back();
+        // The bracketing node pair, then the four nodes around it.
+        const size_t upper = static_cast<size_t>(
+            std::upper_bound(m_lnSignal.begin(), m_lnSignal.end(), y) - m_lnSignal.begin());
+        if (n < 4) {
+            const size_t i = upper - 1;
+            const f64 t = (y - m_lnSignal[i]) / (m_lnSignal[i + 1] - m_lnSignal[i]);
+            return 1.0 / (m_inverseKelvin[i] + t * (m_inverseKelvin[i + 1] - m_inverseKelvin[i]));
+        }
+        const size_t first = std::clamp<size_t>(upper, 2, n - 2) - 2;
+        f64 inverseKelvin = 0.0;
+        for (size_t a = first; a < first + 4; ++a) {
+            f64 weight = 1.0;
+            for (size_t b = first; b < first + 4; ++b)
+                if (a != b)
+                    weight *= (y - m_lnSignal[b]) / (m_lnSignal[a] - m_lnSignal[b]);
+            inverseKelvin += weight * m_inverseKelvin[a];
+        }
+        return 1.0 / inverseKelvin;
+    }
+
+private:
+    std::vector<f64> m_lnSignal;
+    std::vector<f64> m_inverseKelvin;
+};
+
+/// cos^4 of each pixel's field angle, or all ones when the optics do not
+/// vignette. One reading for the forward model and for every product that has
+/// to undo it.
+Result<std::vector<f64>, String> CosFourthVignette(const CameraConfig& config, u32 width,
+                                                   u32 height) {
+    std::vector<f64> vignette(static_cast<size_t>(width) * height, 1.0);
+    if (!config.optics.cosFourthVignetting)
+        return vignette;
+    const auto projection = ResolveProjection(config.optics.projection, width, height,
+                                              config.optics.focalLengthMm,
+                                              config.optics.pixelPitchUm);
+    if (!projection)
+        return Fail<std::vector<f64>>(projection.error());
+    for (u32 y = 0; y < height; ++y)
+        for (u32 x = 0; x < width; ++x) {
+            const auto ray = UnprojectPixel(*projection, {x + .5, y + .5});
+            const f64 cosine = ray.valid ? ray.direction.z : 0;
+            vignette[static_cast<size_t>(y) * width + x] = std::pow(cosine, 4.0);
+        }
+    return vignette;
 }
 
 } // namespace
@@ -386,17 +478,10 @@ Result<CameraOutput, String> CpuCameraPipeline::CaptureImpl(CaptureState& state,
     }
     std::vector<f64> vignette(pixelCount, 1.0);
     if (captureConfig.optics.cosFourthVignetting && !m_samplerAppliesVignetting) {
-        const auto projection = ResolveProjection(captureConfig.optics.projection, width, height,
-                                                  captureConfig.optics.focalLengthMm,
-                                                  captureConfig.optics.pixelPitchUm);
-        if (!projection)
-            return Fail<CameraOutput>(projection.error());
-        for (u32 y = 0; y < height; ++y)
-            for (u32 x = 0; x < width; ++x) {
-                const auto ray = UnprojectPixel(*projection, {x + .5, y + .5});
-                const f64 cosine = ray.valid ? ray.direction.z : 0;
-                vignette[static_cast<size_t>(y) * width + x] = std::pow(cosine, 4.0);
-            }
+        auto factors = CosFourthVignette(captureConfig, width, height);
+        if (!factors)
+            return Fail<CameraOutput>(factors.error());
+        vignette = std::move(factors.value());
     }
     std::vector<f64> expected(elementCount, 0.0);
     std::array<std::vector<f64>, 4> components;
@@ -823,23 +908,40 @@ CpuCameraPipeline::Readout(CaptureState& state, f64 firstRowMidpointSeconds,
         output.display = std::move(product.value());
     }
     if (config.products.apparentTemperature) {
+        // The forward model dimmed each pixel by cos^4 of its field angle --
+        // here or in the sampler -- and the reference below is on-axis, so the
+        // measurement is brought back on-axis before it is compared. Without it
+        // a pixel at 25 degrees inverts against 0.67 of its signal, tens of
+        // kelvin cold in MWIR.
+        const auto vignette = CosFourthVignette(config, width, height);
+        if (!vignette)
+            return Fail<CameraOutput>(vignette.error());
+        std::vector<std::optional<ApparentTemperatureTable>> tables(
+            config.device.channels.size());
         Image temperature(width, height, channels);
         for (u32 y = 0; y < height; ++y)
             for (u32 x = 0; x < width; ++x) {
                 const size_t pixel = static_cast<size_t>(y) * width + x;
+                const f64 falloff = vignette.value()[pixel];
                 for (u32 c = 0; c < channels; ++c) {
                     const u32 channel = config.device.cfa == CfaPattern::MultiChannel
                                             ? c
                                             : CfaChannelAt(config.device.cfa, x, y);
-                    const f64 measurement =
+                    if (!tables[channel]) {
+                        auto table =
+                            ApparentTemperatureTable::Build(config, channel, area.value());
+                        if (!table)
+                            return Fail<CameraOutput>(table.error());
+                        tables[channel] = std::move(table.value());
+                    }
+                    f64 measurement =
                         config.device.detector == DetectorKind::Photon
                             ? corrected.data[pixel * channels + c] / config.readout.exposureSeconds
                             : corrected.data[pixel * channels + c];
-                    const auto kelvin =
-                        ApparentTemperature(measurement, config, channel, area.value());
-                    if (!kelvin)
-                        return Fail<CameraOutput>(kelvin.error());
-                    temperature.data[pixel * channels + c] = static_cast<f32>(kelvin.value());
+                    if (falloff > 0.0)
+                        measurement /= falloff;
+                    temperature.data[pixel * channels + c] =
+                        static_cast<f32>(tables[channel]->Invert(measurement));
                 }
             }
         auto product =
