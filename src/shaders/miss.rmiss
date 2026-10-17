@@ -81,7 +81,7 @@ void main(inout Payload payload) {
     AtmosNNHeader atmos = atmosNNHeader[0];
 
     // Check if spectral solar LUT is available
-    bool hasSpectralSolarLUT = (solarSpectralLUT[0].skyIrradiance.numSamples > 0);
+    bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
     // ========================================================================
     // Sky Radiance

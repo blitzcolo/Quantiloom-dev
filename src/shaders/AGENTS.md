@@ -70,7 +70,8 @@ The quartet is derived from `λ_h` wherever it is needed and never stored: the
 rotation is a group action on the band, so the *set* does not depend on which
 member was drawn, and the balance heuristic's denominator collapses to one
 scalar `S = Σₖ p(λₖ)` that any vertex can recompute. That is what lets four
-wavelengths ride a 40-byte payload.
+wavelengths ride the payload's 44 transport bytes -- the whole `Payload` is 148,
+the rest being fusion-export bookkeeping every ray carries (see `common.hlsli`).
 
 **Transport is diagonal in λ, and that is an assumption rather than a
 convention.** A wavelength in is a wavelength out at each vertex, which is why

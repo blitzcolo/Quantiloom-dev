@@ -31,7 +31,7 @@ struct CameraPush {
     uint rollingShutter;        // 0/1: rows integrate at firstRowMid + y*rowDelay
     float exposureSeconds;      // E: integration window each row integrates over
     float rowDelaySeconds;      // rolling-shutter per-row offset
-    float firstRowMidSeconds;   // t0: midpoint of row 0's exposure
+    float firstRowMidSeconds;   // t0: midpoint of row 0's exposure. Absolute, so f32-coarse; nothing may subtract with it
     // Multi-phase camera passes (camera_stats) select their stage here; 0 for
     // every other pass. Must match CameraPush in GpuCameraPipeline.cpp.
     uint ispPhase;

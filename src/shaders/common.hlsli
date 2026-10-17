@@ -176,10 +176,13 @@ bool IsVisMode(uint mode) {
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline
 //
-// PERFORMANCE OPTIMIZATION:
-// - Payload size CRITICAL for RT Core performance (NVIDIA: prefer ≤32 bytes, max 64 bytes)
-// - Original size: 5×float3 = 60 bytes (near register pressure threshold)
-// - Optimized size: 2×float3 = 24 bytes (50% reduction)
+// SIZE: 148 bytes -- 44 of transport (radiance through primaryMaterialFlags)
+// and 104 of fusion-export bookkeeping (the fusion* fields and the 8-entry
+// medium stack), carried by every ray including shadow rays whether or not a
+// fusion export is running. Payload size is register pressure across every
+// TraceRay; a separate shadow payload, or the fusion state behind its own
+// payload, is the lever if trace throughput ever needs it. (This note said 24
+// bytes for a long time; that predates the hero quartet and fusion export.)
 //
 // Ray Differentials for Texture Filtering:
 // Used for computing texture LOD (level of detail) for proper filtering
@@ -582,6 +585,17 @@ float SampleSkyIrradiance(StructuredBuffer<SolarSpectralLUT> lutBuf, float wavel
     const uint i0 = uint(floor(index_f));
     return lerp(lutBuf[0].skyIrradiance.values[i0],
                 lutBuf[0].skyIrradiance.values[i0 + 1], frac(index_f));
+}
+
+// Whether a spectral illuminant is bound -- either curve. The one test every
+// band branch of closesthit.rchit and miss.rmiss asks, so a surface and the
+// sky it sees agree on it. They used to ask different curves (closesthit the
+// sun's, miss the sky's), so a LUT carrying one curve lit the surfaces with
+// nothing while the visible sky fell back to an RGB-derived one in arbitrary
+// units, or the other way round. Each sampler returns 0 for an empty curve,
+// so a LUT with only one of them means exactly that much light.
+bool HasSolarSpectralLUT(StructuredBuffer<SolarSpectralLUT> lutBuf) {
+    return lutBuf[0].sunIrradiance.numSamples > 0 || lutBuf[0].skyIrradiance.numSamples > 0;
 }
 
 // ============================================================================

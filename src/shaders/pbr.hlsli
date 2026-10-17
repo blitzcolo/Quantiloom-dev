@@ -39,6 +39,13 @@
 static const float PI = 3.14159265358979323846;
 static const float EPSILON = 1e-6;
 
+// Floor on the GGX NDF's un-squared denominator 1 + (h.n)^2 (alpha^2 - 1).
+// For h.n <= 1 that quantity is already >= alpha^2 >= 0.045^4 = 4.1e-6, so the
+// floor only catches rounding past h.n = 1; it must sit far below alpha^2, or
+// it caps the peak. (It used to be applied to pi * denom^2 at 1e-6, which cut
+// the integral of D cos down to 0.0145 at roughness 0.045 and to 0.32 at 0.1.)
+static const float GGX_DENOM_FLOOR = 1e-12;
+
 // ============================================================================
 // Fresnel Term (Schlick Approximation)
 // ============================================================================
@@ -70,11 +77,8 @@ float DistributionGGX(float NdotH, float alpha) {
     float alpha2 = alpha * alpha;
     float NdotH2 = NdotH * NdotH;
 
-    float denom = NdotH2 * (alpha2 - 1.0) + 1.0;
-    denom = PI * denom * denom;
-
-    // Avoid division by zero
-    return alpha2 / max(denom, EPSILON);
+    const float denom = max(NdotH2 * (alpha2 - 1.0) + 1.0, GGX_DENOM_FLOOR);
+    return alpha2 / (PI * denom * denom);
 }
 
 // ============================================================================
@@ -347,16 +351,13 @@ float DistributionGGXAniso(float TdotH, float BdotH, float NdotH,
     if (d <= 0.0) {
         return 0.0;
     }
-    const float w2 = a2 / d;
-    // Written as a division rather than as a2 * w2 * w2 / PI so the guard is
-    // the same one DistributionGGX applies. That guard is a numerical floor,
-    // not physics -- it caps the NDF peak at alpha^2 / EPSILON, which for a
-    // smooth surface is well below the true value -- but the isotropic branch
-    // has always had it, and without a match here a material at strength 0.001
-    // would jump several orders of magnitude in peak brightness the instant the
-    // anisotropic branch took over. In the isotropic limit 1/w2 is exactly the
-    // denominator DistributionGGX squares, so the two agree to the last bit.
-    return a2 / max(PI / max(w2 * w2, EPSILON), EPSILON);
+    // x = d / a2 is, in the isotropic limit, exactly the un-squared
+    // denominator DistributionGGX floors and squares, so writing D as
+    // a2 / (pi x^2) with the same floor keeps the two branches continuous: a
+    // material at strength 0.001 cannot jump in peak brightness the instant
+    // this branch takes over.
+    const float x = max(d / a2, GGX_DENOM_FLOOR);
+    return a2 / (PI * x * x);
 }
 
 // Height-correlated Smith visibility, anisotropic. Already carries the

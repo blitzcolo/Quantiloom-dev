@@ -1517,9 +1517,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 tangent = tangent4.xyz;
         worldHandedness = tangent4.w;  // ±1 for bitangent orientation
 
-        // Transform tangent to world space
+        // Transform tangent to world space. ObjectToWorld3x4 is column-vector
+        // convention (world = M * p), so the tangent is mul(M, t); mul(t, M)
+        // would apply the transpose and rotate it the wrong way on any rotated
+        // instance. (The normal above uses mul(n, WorldToObject) because it
+        // wants exactly that transpose: the inverse transpose of M.)
         float3x3 objectToWorld = (float3x3)ObjectToWorld3x4();
-        float3 tangentWorld = mul(tangent, objectToWorld);
+        float3 tangentWorld = mul(objectToWorld, tangent);
 
         // Validate tangent - if invalid, fall back to fake tangent
         if (isfinite(dot(tangent, tangent)) && dot(tangent, tangent) > 1e-8) {
@@ -1557,7 +1561,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
         material.metallicRoughnessTextureIndex,
         material.metallicRoughnessTextureIndex,
         uvMetallicRoughness,
-        float4(1.0, material.roughnessFactor, material.metallicFactor, 1.0)
+        // Neutral: the factors multiply this below, so a fallback carrying them
+        // would square them (roughness 0.5 rendering as 0.25).
+        float4(1.0, 1.0, 1.0, 1.0)
     );
 
     float roughness = material.roughnessFactor * metallicRoughness.g;
@@ -2404,7 +2410,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float3 XYZ_accum = float3(0.0, 0.0, 0.0);
 
         // Check if we have physical spectral irradiance data
-        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+        bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
         // Precompute IBL parameters for spectral integration
         // F0 wavelength-dependent: interpolate RGB F0 based on wavelength for colored metals
@@ -3153,7 +3159,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float sunRadiance_lambda;
         float skyRadiance_lambda;
 
-        if (solarSpectralLUT[0].sunIrradiance.numSamples > 0) {
+        if (HasSolarSpectralLUT(solarSpectralLUT)) {
             // PHYSICAL PATH: Query ASTM G-173 spectral irradiance curves
             float sun_irr = SampleSunIrradiance(solarSpectralLUT, lambda);
             float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
@@ -3492,7 +3498,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float radiance_accum = 0.0;
 
         // Check if we have spectral solar LUT for accurate SWIR illumination
-        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+        bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
         // Compute view angle for angle-dependent emissivity
         float NdotV_swir = max(dot(normal, V), 0.0);
@@ -3806,7 +3812,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float radiance_accum = 0.0;
 
         // Check if we have spectral solar LUT for accurate NIR illumination
-        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+        bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
         // A ray spawned by an environment bounce carries one wavelength and
         // reports scalar spectral radiance; see Payload::heroLambda.
@@ -4125,7 +4131,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float T_atmosphere = lut.atmosphereTemperature_K;
 
         // Check if we have spectral solar LUT for accurate MWIR illumination
-        bool hasSpectralSolarLUT = (solarSpectralLUT[0].sunIrradiance.numSamples > 0);
+        bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
         // ====================================================================
         // Reflected environment: the traced correction
@@ -5204,9 +5210,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // ENERGY CONSERVATION:
     //   E_incident = F × E_reflected + (1-F) × E_transmitted
     //   Russian roulette ensures unbiased estimation of both paths
+    //
+    // NOT IN THE THERMAL BAND. MWIR/LWIR (and a single wavelength routed to
+    // that branch) already carry the surface's transmittance as
+    // InfraredSurfaceFractions' tau, from irTransmittance, and add tau*L
+    // themselves; Kirchhoff there is eps + rho + tau = 1. glTF transmission is
+    // a visible-band quantity -- window glass is opaque past ~5 um -- and
+    // lerping toward a refracted ray on top would both make glass see-through
+    // at 10 um and count the transmitted share twice.
     // ========================================================================
 
-    if (material.transmission > 0.0 && payload.depth < MAX_PATH_DEPTH) {
+    const bool thermalBranch =
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_MWIR_FUSED ||
+        SPEC_SPECTRAL_MODE == SPECTRAL_MODE_LWIR_FUSED ||
+        (IsSingleWavelengthMode() &&
+         RoutesToThermalBranch(SingleModeWavelength(payload.heroLambda)));
+    if (material.transmission > 0.0 && !thermalBranch && payload.depth < MAX_PATH_DEPTH) {
         // Get hit point and ray direction
         float3 hitPoint = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         float3 rayDir = WorldRayDirection();
@@ -5512,10 +5531,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
     TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 0, 0, recursiveRay, recursivePayload);
     RestoreFusionMedium(fusionContext8);
 
-            if (reflected) {
-                transmissionRadiance = recursivePayload.radiance;
-            } else {
-                // Apply Beer-Lambert absorption on the refraction path
+            {
+                // Beer-Lambert on whichever way the ray leaves. At an exit hit
+                // the segment just travelled was inside the glass whether the
+                // ray now refracts out or reflects back in (TIR included), so
+                // both outcomes are attenuated -- as the hero and dispersive
+                // branches above already do. Attenuating only the refraction
+                // left internally reflected paths in thick coloured glass at
+                // full brightness.
                 float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
                 if (!entering && material.attenuationDistance > 0.0) {
                     float travelDistance = RayTCurrent();
@@ -5572,6 +5595,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     }
                 }
                 transmissionRadiance = recursivePayload.radiance * attenuation4;
+                // The reflected child's w is passed through as it always was;
+                // only the refracted one historically carried w = 0.
+                if (reflected) transmissionRadiance.w = recursivePayload.radiance.w;
             }
         }
 

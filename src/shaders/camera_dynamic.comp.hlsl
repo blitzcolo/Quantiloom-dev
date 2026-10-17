@@ -139,10 +139,13 @@ void main(uint3 dispatchID : SV_DispatchThreadID) {
         return;
     }
 
-    const float rowTime = cameraPush.firstRowMidSeconds +
-        (cameraPush.rollingShutter != 0u
-             ? float(pixel.y) * cameraPush.rowDelaySeconds
-             : 0.0f);
+    // The row's mid-exposure time RELATIVE to row 0's. Only offsets reach the
+    // bracketing below, and keeping the absolute timeline second out of it is
+    // what keeps it in f32: at t = 86400 s an f32 has an ulp of 7.8 ms, so
+    // (t0 + y d) - (t0 - E/2) cancelled a 10 ms exposure down to a few strata
+    // of noise and rounded a 10 us row delay to zero.
+    const float rowOffset =
+        cameraPush.rollingShutter != 0u ? float(pixel.y) * cameraPush.rowDelaySeconds : 0.0f;
 
     // Reconstruct the world point the anchor depth implies. A miss carries a
     // far point along the pixel ray: exact for a rotating camera looking at
@@ -157,10 +160,10 @@ void main(uint3 dispatchID : SV_DispatchThreadID) {
     // The two strata whose times bracket the row's integration window,
     // clamped at the ends. Layer k integrates the window centred at
     // LayerTime(k); centres are E/T apart.
-    const float windowStart = cameraPush.firstRowMidSeconds -
-        0.5 * cameraPush.exposureSeconds;
+    // Row 0's window starts E/2 before its midpoint, so the row sits
+    // rowOffset + E/2 into the strata's span.
     const float stratumSpacing = cameraPush.exposureSeconds / float(strata);
-    float position = (rowTime - windowStart) / stratumSpacing - 0.5;
+    float position = (rowOffset + 0.5 * cameraPush.exposureSeconds) / stratumSpacing - 0.5;
     int lower = int(floor(position));
     lower = clamp(lower, 0, int(strata) - 2);
     const float upperWeight = saturate(position - float(lower));

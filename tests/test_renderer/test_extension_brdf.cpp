@@ -43,12 +43,12 @@ Vec3 Normalize(const Vec3& v) {
 }
 
 /// Isotropic GGX, as DistributionGGX in pbr.hlsli. alpha is roughness^2.
-constexpr double kEpsilon = 1e-6;  // the shader's EPSILON, and its NDF ceiling
+constexpr double kGgxDenomFloor = 1e-12;  // the shader's GGX_DENOM_FLOOR
 
 double DistributionGGX(double NdotH, double alpha) {
     const double a2 = alpha * alpha;
-    const double d = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / std::max(kPi * d * d, kEpsilon);
+    const double d = std::max(NdotH * NdotH * (a2 - 1.0) + 1.0, kGgxDenomFloor);
+    return a2 / (kPi * d * d);
 }
 
 /// Burley's anisotropic GGX, as DistributionGGXAniso. Note the crossed
@@ -62,10 +62,10 @@ double DistributionGGXAniso(double TdotH, double BdotH, double NdotH,
     if (d <= 0.0) {
         return 0.0;
     }
-    // The same guard the isotropic form applies, so the two agree even where
-    // that guard caps the peak -- see the note in pbr.hlsli.
-    const double w2 = a2 / d;
-    return a2 / std::max(kPi / std::max(w2 * w2, kEpsilon), kEpsilon);
+    // The same floor the isotropic form applies, on the same quantity: in the
+    // isotropic limit d / a2 is its un-squared denominator.
+    const double x = std::max(d / a2, kGgxDenomFloor);
+    return a2 / (kPi * x * x);
 }
 
 /// Height-correlated Smith visibility, anisotropic; already carries the
@@ -145,6 +145,36 @@ double DirectionalAlbedoAniso(double NdotV, double alpha, double strength,
 }
 
 }  // namespace
+
+// ============================================================================
+// Isotropic GGX
+// ============================================================================
+
+// The projected NDF integrates to one: the integral over the hemisphere of
+// D(h) (n.h) dw_h. With x = 1 - (n.h)^2 that is pi times the integral of D
+// over x in [0, 1], and the lobe lives within about alpha^2 of x = 0, so the
+// quadrature runs in ln x. The floor used to sit on pi d^2 at 1e-6, which
+// capped the peak and left 0.0145 of the integral at the roughness floor of
+// 0.045 and 0.32 at 0.1 -- a smooth surface that reflected a lamp at a few
+// percent of its brightness while the bounce sampler, which never evaluates D,
+// saw all of it.
+TEST(IsotropicGgx, TheProjectedDistributionIntegratesToOneDownToTheRoughnessFloor) {
+    for (const double roughness : {0.045, 0.08, 0.1, 0.155, 0.5, 1.0}) {
+        const double alpha = roughness * roughness;
+        constexpr int kSteps = 200000;
+        const double lnLo = std::log(1e-16);
+        const double lnHi = 0.0;
+        const double h = (lnHi - lnLo) / kSteps;
+        double integral = 0.0;
+        for (int i = 0; i < kSteps; ++i) {
+            const double x = std::exp(lnLo + (i + 0.5) * h);
+            const double NdotH = std::sqrt(1.0 - x);
+            integral += DistributionGGX(NdotH, alpha) * x * h;  // dx = x d(ln x)
+        }
+        integral *= kPi;
+        EXPECT_NEAR(integral, 1.0, 1e-3) << "roughness " << roughness;
+    }
+}
 
 // ============================================================================
 // KHR_materials_anisotropy
