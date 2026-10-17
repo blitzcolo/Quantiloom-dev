@@ -31,7 +31,10 @@ f32 EmissivityOf(const Material& material) {
         return material.bandAveragedIREmissivity;
     }
     if (!material.irEmissivityCurve.empty()) {
-        return material.irEmissivityCurve.front().second;
+        // At 10 um, where a ~300 K surface radiates most -- not front(), which
+        // is the curve's shortest wavelength (3 um for a glTF/USD curve) and
+        // says little about the long wave the balance exchanges.
+        return material.GetIREmissivity(10000.0f);
     }
     return 0.95f - 0.90f * material.metallicFactor;
 }
@@ -251,33 +254,32 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
     if (time_h <= series.front().first) return series.front().second;
     if (time_h >= series.back().first) return series.back().second;
 
-    for (usize i = 1; i < series.size(); ++i) {
-        if (time_h <= series[i].first) {
-            const f64 span = series[i].first - series[i - 1].first;
-            const f64 t = span > 0.0 ? (time_h - series[i - 1].first) / span : 0.0;
-            const ThermalForcing& a = series[i - 1].second;
-            const ThermalForcing& b = series[i].second;
+    // The first sample at or after time_h -- what the linear scan this
+    // replaced found, in log time: it runs once per step, and a month of
+    // minute-resolution station data at a minute a step was 1e9 comparisons.
+    // time_h is strictly inside the series here, so i >= 1.
+    const auto at = std::lower_bound(
+        series.begin(), series.end(), time_h,
+        [](const std::pair<f64, ThermalForcing>& sample, const f64 t) { return sample.first < t; });
+    const usize i = static_cast<usize>(at - series.begin());
+    const f64 span = series[i].first - series[i - 1].first;
+    const f64 t = span > 0.0 ? (time_h - series[i - 1].first) / span : 0.0;
+    const ThermalForcing& a = series[i - 1].second;
+    const ThermalForcing& b = series[i].second;
 
-            ThermalForcing out;
-            out.airTemperature_K = a.airTemperature_K + t * (b.airTemperature_K - a.airTemperature_K);
-            out.sunIrradiance_W_m2 =
-                a.sunIrradiance_W_m2 + t * (b.sunIrradiance_W_m2 - a.sunIrradiance_W_m2);
-            out.diffuseIrradiance_W_m2 =
-                a.diffuseIrradiance_W_m2 +
-                t * (b.diffuseIrradiance_W_m2 - a.diffuseIrradiance_W_m2);
-            out.skyTemperature_K =
-                a.skyTemperature_K + t * (b.skyTemperature_K - a.skyTemperature_K);
-            out.relativeHumidity =
-                a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
-            out.convection_W_m2K =
-                a.convection_W_m2K + t * (b.convection_W_m2K - a.convection_W_m2K);
-            out.windSpeed_m_s = a.windSpeed_m_s + t * (b.windSpeed_m_s - a.windSpeed_m_s);
-            out.sunDirection = glm::normalize(
-                glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
-            return out;
-        }
-    }
-    return series.back().second;
+    ThermalForcing out;
+    out.airTemperature_K = a.airTemperature_K + t * (b.airTemperature_K - a.airTemperature_K);
+    out.sunIrradiance_W_m2 =
+        a.sunIrradiance_W_m2 + t * (b.sunIrradiance_W_m2 - a.sunIrradiance_W_m2);
+    out.diffuseIrradiance_W_m2 =
+        a.diffuseIrradiance_W_m2 + t * (b.diffuseIrradiance_W_m2 - a.diffuseIrradiance_W_m2);
+    out.skyTemperature_K = a.skyTemperature_K + t * (b.skyTemperature_K - a.skyTemperature_K);
+    out.relativeHumidity = a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
+    out.convection_W_m2K = a.convection_W_m2K + t * (b.convection_W_m2K - a.convection_W_m2K);
+    out.windSpeed_m_s = a.windSpeed_m_s + t * (b.windSpeed_m_s - a.windSpeed_m_s);
+    out.sunDirection =
+        glm::normalize(glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
+    return out;
 }
 
 Vector<ThermalMaterial> BuildSolvedMaterials(const Scene& scene, const ThermalConfig& config,
@@ -472,6 +474,12 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
                     "using {}", chosen->Name(), impl.cpuStepper.Name());
         chosen = nullptr;
     }
+    if (chosen != nullptr && NeedsInteriorSources(impl.materials) &&
+        !chosen->CarriesInteriorSources()) {
+        QL_LOG_INFO("  Thermal stepper: {} does not carry internal heat or an ambient "
+                    "interior; using {}", chosen->Name(), impl.cpuStepper.Name());
+        chosen = nullptr;
+    }
     impl.cpuStepper.SetShellPartners(impl.mesh.shellPartner);
     impl.active = (chosen != nullptr) ? chosen : &impl.cpuStepper;
 
@@ -484,9 +492,9 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
         fastestWind_m_s);
     if (std::isfinite(shortest) && config.timestep_s > shortest) {
         QL_LOG_WARN("  Thermal: timestep {:.0f} s is longer than the shortest surface time "
-                    "constant ({:.0f} s). The radiative coupling is explicit, so the "
-                    "result is smoothed rather than unstable -- shorten the step if the "
-                    "fastest surface matters.",
+                    "constant ({:.0f} s). The step is stable, but that surface's "
+                    "transient is under-resolved and may ring for a few steps after a "
+                    "sharp change in forcing -- shorten the step if it matters.",
                     config.timestep_s, shortest);
     }
 

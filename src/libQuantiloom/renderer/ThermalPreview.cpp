@@ -29,7 +29,10 @@ f32 EmissivityOf(const Material& material) {
         return material.bandAveragedIREmissivity;
     }
     if (!material.irEmissivityCurve.empty()) {
-        return material.irEmissivityCurve.front().second;
+        // At 10 um, where a ~300 K surface radiates most -- not front(), which
+        // is the curve's shortest wavelength (3 um for a glTF/USD curve) and
+        // says little about the long wave the balance exchanges.
+        return material.GetIREmissivity(10000.0f);
     }
     return 0.95f - 0.90f * material.metallicFactor;
 }
@@ -228,7 +231,9 @@ struct ThermalPreview::Impl {
             (params.sunMemoryLags == 0 || gpuStepper->CarriesLagSensitivity()) &&
             (params.parameterSensitivities.empty() ||
              gpuStepper->CarriesParameterSensitivity()) &&
-            (mesh.shellPairCount == 0 || gpuStepper->CarriesShells())) {
+            (mesh.shellPairCount == 0 || gpuStepper->CarriesShells()) &&
+            (!thermal::NeedsInteriorSources(materials) ||
+             gpuStepper->CarriesInteriorSources())) {
             return *gpuStepper;
         }
         return cpuStepper;

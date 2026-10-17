@@ -20,6 +20,7 @@
 #include "thermal/ShortwaveGains.hpp"
 #include "thermal/ThermalSolver.hpp"  // MakeOpenSkyExchange
 
+#include <algorithm>
 #include <cmath>
 #include <span>
 
@@ -318,6 +319,79 @@ TEST(ThermalConductionTest, ASurfaceUnderAColdSkySettlesBelowTheAir) {
     EXPECT_LT(state.Surface(0), forcing.airTemperature_K)
         << "a surface under a cold sky must sit below the air";
     EXPECT_NEAR(state.Surface(0), expected, 0.05);
+}
+
+// The same balance on a layer thin and light enough that its face's heat
+// capacity is small against its radiative admittance: a millimetre of fabric,
+// rho c dx ~ 33 J/m^2K against Y = 4 eps sigma T^3 ~ 5.5 W/m^2K. With the long
+// wave fully explicit the face's amplification is (a - b - Y)/(a + b), past -1
+// once dt exceeds rho c dx / Y -- about six seconds here -- and at the default
+// minute it diverged to the clamp. Half implicit, it stays bounded at any step
+// and converges to the balance. What it still does at a very long step is
+// ring: Crank-Nicolson's stiffest conduction mode has an amplification near -1
+// (here the Fourier number is in the thousands), so the transient overshoots
+// and decays slowly. That is the scheme, not the radiation, and the bounds
+// below say how much of it each case is allowed.
+TEST(ThermalConductionTest, AThinLayerUnderAColdSkyIsStableAtLongSteps) {
+    struct Case {
+        const char* name;
+        f32 thickness_m, conductivity, density, specificHeat;
+        f64 dt_s;
+        i32 steps;
+        f64 undershoot_K;  ///< how far below the balance the transient may ring
+        f64 finalTolerance_K;
+    };
+    const Case cases[] = {
+        {"1 mm fabric at 60 s", 0.001f, 0.05f, 300.0f, 1000.0f, 60.0, 3000, 6.0, 0.05},
+        {"1 mm fabric at 600 s", 0.001f, 0.05f, 300.0f, 1000.0f, 600.0, 600, 25.0, 1.0},
+        {"2 cm wood at 3600 s", 0.02f, 0.12f, 500.0f, 2000.0f, 3600.0, 400, 10.0, 0.05},
+    };
+    for (const Case& c : cases) {
+        ThermalMaterial material;
+        material.conductivity_W_mK = c.conductivity;
+        material.density_kg_m3 = c.density;
+        material.specificHeat_J_kgK = c.specificHeat;
+        material.thickness_m = c.thickness_m;
+        material.convection_W_m2K = 10.0f;
+        material.shortwaveAbsorptivity = 0.0f;
+        material.longwaveEmissivity = 0.9f;
+        material.interiorBoundary = InteriorBoundary::Adiabatic;
+
+        const auto elements = OneElement();
+        const Vector<ThermalMaterial> materials{material};
+        const auto exchange = MakeOpenSkyExchange(1);
+
+        ThermalForcing forcing;
+        forcing.airTemperature_K = 290.0;
+        forcing.skyTemperature_K = 260.0;
+        forcing.sunIrradiance_W_m2 = 0.0;
+
+        ThermalState state = MakeState(1, 10, 300.0);
+        CpuCrankNicolsonStepper stepper;
+        f64 lowest = 1e9, highest = -1e9;
+        for (i32 i = 0; i < c.steps; ++i) {
+            stepper.Step(state, elements, materials, exchange, forcing, c.dt_s,
+                         {exchange.sunVisibility});
+            lowest = std::min(lowest, state.Surface(0));
+            highest = std::max(highest, state.Surface(0));
+        }
+
+        // An adiabatic slab under no sun settles where convection from the air
+        // balances radiation to the sky.
+        auto imbalance = [&](const f64 T) {
+            const f64 sky = forcing.skyTemperature_K;
+            return material.convection_W_m2K * (forcing.airTemperature_K - T) +
+                   material.longwaveEmissivity * kStefanBoltzmann *
+                       (sky * sky * sky * sky - T * T * T * T);
+        };
+        const f64 expected = BalanceTemperature(imbalance, 200.0, 320.0);
+
+        // Bounded -- an unstable face reaches the 1 K / 5000 K clamp within a
+        // few dozen steps -- and converging to the balance.
+        EXPECT_GT(lowest, expected - c.undershoot_K) << c.name;
+        EXPECT_LT(highest, 300.0 + 1e-6) << c.name;
+        EXPECT_NEAR(state.Surface(0), expected, c.finalTolerance_K) << c.name;
+    }
 }
 
 TEST(ThermalConductionTest, AnElementSeeingOnlyItsNeighbourExchangesWithIt) {

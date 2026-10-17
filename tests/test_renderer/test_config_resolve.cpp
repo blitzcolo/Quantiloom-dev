@@ -526,6 +526,55 @@ t_ground_K = 295.0
     EXPECT_FLOAT_EQ(resolved.value().lighting.atmosphereTemperature_K, 295.0f);
 }
 
+// The NN owns the *render's* sky, but the surface energy balance is broadband
+// and needs a sky of its own. It used to fall back to T_ground -- a sky as warm
+// as the air -- so a clear night under the NN atmosphere never cooled a
+// surface below the air. A clear NN sky now reads a clear-sky emissivity from
+// the network's own t_ground and rh.
+TEST_F(ConfigResolveTest, AClearNnSkyIsColderThanTheAirToTheEnergyBalance) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+t_ground_K = 295.0
+rh = 0.5
+icld = 0.0
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    ASSERT_TRUE(resolved.value().atmosphere.enabled);
+    // The GPU's copy stays zeroed: the network supplies the render's sky.
+    EXPECT_FLOAT_EQ(resolved.value().lighting.skyEmissivityClear, 0.0f);
+    // 22 C at 50% is a dew point near 11.1 C, an emissivity near 0.782, and
+    // an effective sky of 295 * 0.782^(1/4), about 277.4 K.
+    EXPECT_NEAR(resolved.value().thermal.skyTemperature_K, 277.4, 1.0);
+}
+
+TEST_F(ConfigResolveTest, ACloudyNnSkyStaysNearTheAir) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+t_ground_K = 295.0
+icld = 6.0
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().thermal.skyTemperature_K, 295.0);
+}
+
+TEST_F(ConfigResolveTest, AGivenThermalSkyTemperatureWins) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+t_ground_K = 295.0
+)",
+                         .trailing = "[thermal]\nenabled = true\nsky_temperature_k = 250.0\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_DOUBLE_EQ(resolved.value().thermal.skyTemperature_K, 250.0);
+}
+
 // ============================================================================
 // Keys a windowed context cannot honour are echoed, not swallowed
 // ============================================================================

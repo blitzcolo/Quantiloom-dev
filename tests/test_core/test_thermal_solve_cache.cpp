@@ -821,3 +821,32 @@ TEST(ThermalSolveCacheKeyTest, NoScheduleIsTheStaticCase) {
     // the existence of a feature it does not use.
     EXPECT_EQ(KeyWithSchedule(fixture, nullptr), fixture.Key());
 }
+
+// What the offline renderer actually does with a static scene: it looks the
+// key up before any session exists (no schedule), and stores it after
+// ThermalSolveSession::Build has filled epoch zero with the mesh's own
+// elements. The two have to be one key, or the early lookup -- the one that
+// skips the view-factor precompute -- can never hit.
+TEST(ThermalSolveCacheKeyTest, ASingleEpochOnTheMeshHashesAsNoSchedule) {
+    const KeyFixture fixture;
+
+    const ThermalGeometrySchedule asBuilt =
+        ThermalGeometrySchedule::Single({}, {}, fixture.mesh.elements);
+    EXPECT_EQ(KeyWithSchedule(fixture, &asBuilt), KeyWithSchedule(fixture, nullptr));
+
+    const ThermalGeometrySchedule unfilled = ThermalGeometrySchedule::Single({}, {});
+    EXPECT_EQ(KeyWithSchedule(fixture, &unfilled), KeyWithSchedule(fixture, nullptr));
+}
+
+// ...but only when that one epoch really is the mesh: one whose geometry
+// differs from it describes a different solve.
+TEST(ThermalSolveCacheKeyTest, ASingleEpochOffTheMeshChangesTheKey) {
+    const KeyFixture fixture;
+
+    Vector<ThermalElement> moved = fixture.mesh.elements;
+    ASSERT_FALSE(moved.empty());
+    moved[0].centroid += glm::vec3(1.0f, 0.0f, 0.0f);
+    const ThermalGeometrySchedule elsewhere =
+        ThermalGeometrySchedule::Single({}, {}, std::move(moved));
+    EXPECT_NE(KeyWithSchedule(fixture, &elsewhere), KeyWithSchedule(fixture, nullptr));
+}

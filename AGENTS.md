@@ -387,10 +387,26 @@ into the `SunVisibilityTable` when the timeline is built and a step just reads
 them. `R` has a column per sun sample and is interpolated on the same indices
 as the visibility it was baked from; `G` is one column.
 
-Evaporation is the only term that is **not** explicit. Its slope in
-temperature is several times the linearised radiative one, so it is Newton-
-linearised into `diag[0]` and `rhs[0]` beside the convection. Left explicit it
-oscillates at a minute per step.
+Evaporation and the emitted long wave are the two non-linear terms that are
+**not** explicit: each is Newton-linearised about the previous surface
+temperature and split half-and-half into `diag[0]` and `rhs[0]` beside the
+convection (and the same at a shell's or an `ambient` back face). Left explicit,
+evaporation oscillates at a minute per step, and the long wave makes the face's
+amplification `(a - b - Y)/(a + b)` with `a = rho c dx / 2dt` -- below -1 once
+`dt > rho c dx / 4 eps sigma T^3`, about six seconds for a millimetre of fabric,
+so a thin layer diverged at the default minute and the hour-long steps of the
+steady-state relaxation did the same to a few centimetres of wood
+(`AThinLayerUnderAColdSkyIsStableAtLongSteps`). What remains at a very long
+step is Crank-Nicolson's own ringing on its stiffest conduction mode, which
+decays. The neighbours' share of the incoming long wave stays explicit, and the
+tangents and parameter rows differentiate exactly this split.
+
+`[thermal] sky_temperature_k` states the sky the balance radiates against
+outright. Without it the sky comes from a clear-sky emissivity -- `sky_model =
+"clear_sky"`'s, or for a clear NN atmosphere (`icld = 0`) one derived from the
+network's own `t_ground_K` and `rh`, since the network only answers inside the
+render band and the balance is broadband -- and otherwise is the air. A forcing
+file's `sky_k` column overrides all of them row by row.
 
 The forcing CSV is ten columns, the last four optional and defaulted:
 `time_h, air_k, dni, sun_azimuth_deg, sun_elevation_deg, sky_k,
@@ -650,7 +666,7 @@ no exported symbol. `QUANTILOOM_THERMAL_CACHE=0` switches it off,
 `<platform cache dir>/Quantiloom/cache/thermal`). There is no eviction; the
 management story is deleting the directory.
 
-Four things to know before touching it:
+Five things to know before touching it:
 
 - **The boundary is `RunThermalSolver()`, not `RunThermalSolve`.** An entry
   stands for the GPU view-factor precompute *as well as* the trajectory — 15 s
@@ -670,6 +686,13 @@ Four things to know before touching it:
   coverage hash, no atomics — but BVH construction and intersection are a
   vendor's business. Keying on device identity makes a driver update a miss
   rather than a wrong answer.
+- **A static scene's key is taken twice and must come out once.**
+  `OfflineRenderer` looks it up before any session exists (no schedule, so the
+  precompute can be skipped) and stores it after `ThermalSolveSession::Build`
+  has filled epoch zero with the mesh. `ComputeThermalSolveCacheKey` hashes
+  that one-epoch-on-the-mesh schedule exactly as no schedule; before it did,
+  the early lookup never hit and every render paid the view factors.
+  `ASingleEpochOnTheMeshHashesAsNoSchedule` holds it.
 - **A hit still prints the gate line**, through `LogThermalSolveSummary`, which
   is now the only place that emits it. Downstream reads `solved/elements` off
   that line to catch a scene where the subject fell out of the solve; a hit that
@@ -681,10 +704,13 @@ Four things to know before touching it:
 Naming `thermal.dump_elements` opts out in both directions: the dump needs the
 exchange's sky fractions, which an entry does not carry.
 
-`kKeySchemaVersion` is at **3** and `kCacheFormatVersion` at **2**. The first
+`kKeySchemaVersion` is at **5** and `kCacheFormatVersion` at **2**. The first
 bumps when a new input joins the key — the convection law and its constants, `lateral_conduction`,
 `sun_memory_lags`, `parameter_sensitivities`, `internal_heat_w_m2` and the
-interior boundary all did — and `kCacheFormatVersion` bumps when the stored
+interior boundary all did — and also when the stepper's discretisation changes
+under an unchanged library version, since the version is the only other thing
+that would tell an old entry from a new solve (5: the long wave went half
+implicit). `kCacheFormatVersion` bumps when the stored
 result grows an array, which the lag and parameter tangents did. Adding an
 input without bumping the first serves a stale field; adding an output without
 bumping the second reads past the end of an old file. Each new field wants an

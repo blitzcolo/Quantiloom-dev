@@ -248,25 +248,29 @@ void main(uint3 tid : SV_DispatchThreadID) {
     float rhsTangent[QL_THERMAL_MAX_NODES];
     const bool carryTangent = pc.carryTangent != 0;
 
-    // Row 0: exposed face
+    // Row 0: exposed face. The emitted long wave is half implicit, exactly
+    // as in CpuCrankNicolsonStepper: surfaceFlux carries it at T^n and
+    // Y_rad/2 (T^n - T^{n+1}) moves it to the midpoint, which is what keeps a
+    // thin or low-k face stable at any step.
+    const float radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
     lower[0] = 0.0;
-    diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance);
+    diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance + radiativeSlope);
     upper[0] = -0.5 * (k / dx);
     rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
              0.5 * h * (2.0 * pc.airTemperature_K - T[0]) + surfaceFlux -
-             latentFlux + 0.5 * latentAdmittance * T[0];
+             latentFlux + 0.5 * latentAdmittance * T[0] + 0.5 * radiativeSlope * T[0];
 
     // The same row differentiated in v. Constants of v drop (the air
-    // temperature, the latent flux); the explicit long-wave loss leaves its
-    // own slope; the short wave leaves the only source. The neighbours' share
-    // of `incoming` is deliberately not differentiated -- see the CPU stepper
-    // for why that keeps this a per-element quantity.
+    // temperature, the latent flux); the half-implicit long-wave loss leaves
+    // half its slope, as the convection and evaporation do; the short wave
+    // leaves the only source. The neighbours' share of `incoming` is
+    // deliberately not differentiated -- see the CPU stepper for why that
+    // keeps this a per-element quantity.
     if (carryTangent) {
-        const float radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
         const float s0 = sensitivity[base + 0];
         const float s1 = sensitivity[base + 1];
         rhsTangent[0] = halfCell * s0 - 0.5 * (k / dx) * (s0 - s1) -
-                        0.5 * h * s0 - radiativeSlope * s0 -
+                        0.5 * h * s0 - 0.5 * radiativeSlope * s0 -
                         0.5 * latentAdmittance * s0 + directPerVisibility;
     }
 

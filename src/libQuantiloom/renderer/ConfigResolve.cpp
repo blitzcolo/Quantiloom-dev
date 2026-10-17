@@ -503,6 +503,11 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // and only the zenith emissivity goes to the GPU. sky_emissivity
     // overrides it for a measured or otherwise known sky.
     f32 skyEmissivityClear = 0.0f;
+    // The same emissivity, kept for the surface energy balance. The NN
+    // atmosphere below takes the render's sky over and zeroes the GPU copy,
+    // but the balance is broadband and the network only answers inside the
+    // render band, so the balance still needs a sky of its own.
+    f64 thermalSkyEmissivity = 0.0;
     const auto skyModel = config.GetString("atmosphere.sky_model", "isotropic");
     if (skyModel == "clear_sky") {
         const f32 airTemperature_K = config.Get<f32>("atmosphere.air_temperature_k", 288.15f);
@@ -516,6 +521,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                                    ? static_cast<f64>(emissivityOverride)
                                    : skythermal::ClearSkyEmissivity(dewPointC);
         skyEmissivityClear = static_cast<f32>(emissivity);
+        thermalSkyEmissivity = emissivity;
 
         // The air temperature IS the sky's Planck temperature under this
         // model; the emissivity is what makes it read colder. Overriding the
@@ -878,6 +884,16 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                         "supplies the sky's downwelling directly");
             out.lighting.skyEmissivityClear = 0.0f;
         }
+        // A clear NN sky is still a clear sky to the energy balance, and a
+        // clear sky is colder than the air -- radiating against T_ground
+        // instead would take away the nocturnal cooling the scene is often
+        // rendered for. Under cloud the sky really is close to the air, so
+        // that case keeps it.
+        if (thermalSkyEmissivity <= 0.0 && out.atmosphere.icld == 0.0) {
+            const f64 dewPointC = skythermal::DewPointC(
+                out.atmosphere.tGroundK - 273.15, out.atmosphere.rh * 100.0);
+            thermalSkyEmissivity = skythermal::ClearSkyEmissivity(dewPointC);
+        }
     }
     QL_LOG_INFO("  NN atmosphere: {}", out.atmosphere.enabled ? "ENABLED" : "DISABLED");
 
@@ -1066,12 +1082,23 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         // that is the effective temperature its emissivity implies rather than
         // the air temperature -- which is the whole difference between a
         // surface that frosts overnight and one that does not.
-        out.thermal.skyTemperature_K =
-            out.lighting.skyEmissivityClear > 0.0f
-                ? skythermal::EffectiveSkyTemperatureK(
-                      out.thermal.airTemperature_K,
-                      static_cast<f64>(out.lighting.skyEmissivityClear))
-                : static_cast<f64>(out.lighting.atmosphereTemperature_K);
+        //
+        // With the NN atmosphere on, the GPU's clear-sky emissivity has been
+        // zeroed (the network owns the render's sky), so the balance reads its
+        // own copy: the clear_sky model's, or for a clear NN sky one derived
+        // from the network's own t_ground and rh. thermal.sky_temperature_k
+        // states it outright, for a measured sky; a forcing file's sky_k
+        // column overrides all of these row by row.
+        const f64 givenSky_K = config.Get<f64>("thermal.sky_temperature_k", 0.0);
+        if (givenSky_K > 0.0) {
+            out.thermal.skyTemperature_K = givenSky_K;
+        } else if (thermalSkyEmissivity > 0.0) {
+            out.thermal.skyTemperature_K = skythermal::EffectiveSkyTemperatureK(
+                out.thermal.airTemperature_K, thermalSkyEmissivity);
+        } else {
+            out.thermal.skyTemperature_K =
+                static_cast<f64>(out.lighting.atmosphereTemperature_K);
+        }
 
         QL_LOG_INFO("  Thermal: {:.1f} h to {:.1f} h at {:.0f} s, {} layers, air {:.1f} K, "
                     "sky {:.1f} K",

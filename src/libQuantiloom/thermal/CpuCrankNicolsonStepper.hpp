@@ -80,6 +80,7 @@ public:
     /// then exactly the rows they were.
     void SetShellPartners(Vector<u32> partners) { m_shellPartner = std::move(partners); }
     [[nodiscard]] bool CarriesShells() const override { return true; }
+    [[nodiscard]] bool CarriesInteriorSources() const override { return true; }
     [[nodiscard]] ConvectionLaw Convection() const override { return m_convection; }
     [[nodiscard]] bool CarriesLateralConduction() const override { return true; }
     [[nodiscard]] bool CarriesLagSensitivity() const override { return true; }
@@ -102,10 +103,11 @@ public:
     [[nodiscard]] const char* Name() const override { return kName; }
 
     /// Shortest time constant across the participating materials, in seconds:
-    /// rho c d / (h + 4 eps sigma T^3 + latent), the scale a timestep should stay under
-    /// for the explicit radiative coupling to hold. Reported rather than
-    /// enforced -- a step twice this is inaccurate rather than unstable, and
-    /// which one matters is the caller's judgement.
+    /// rho c d / (h + 4 eps sigma T^3 + latent): how fast the slowest-to-react
+    /// mode of the thinnest surface relaxes. Every exchange at the face is
+    /// half implicit, so a longer step is stable; it under-resolves that
+    /// surface's transient (and Crank-Nicolson rings on it for a while before
+    /// settling), which is why this is reported rather than enforced.
     ///
     /// @param law             which correlation supplies h. Under a wind or
     ///                        stability law the material's own coefficient is

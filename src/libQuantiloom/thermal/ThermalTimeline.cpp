@@ -67,6 +67,7 @@ void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& eleme
 
     Vector<f64> previous(elements.size());
     f64 bestMove = std::numeric_limits<f64>::max();
+    f64 lastMove = std::numeric_limits<f64>::max();
     i32 staleTicks = 0;
 
     for (i32 iteration = 0; iteration < kMaxIterations; ++iteration) {
@@ -76,10 +77,19 @@ void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& eleme
         stepper.Step(state, elements, materials, exchange, forcing,
                      kRelaxStep_s, shortwave);
 
-        f64 largestMove = 0.0;
+        f64 stepMove = 0.0;
         for (usize e = 0; e < elements.size(); ++e) {
-            largestMove = std::max(largestMove, std::abs(state.Surface(e) - previous[e]));
+            stepMove = std::max(stepMove, std::abs(state.Surface(e) - previous[e]));
         }
+        // Judged on the envelope of two consecutive moves, not on one. At an
+        // hour a step Crank-Nicolson rings on the face's stiff mode -- an
+        // amplification near -0.7 -- on top of the slow decay towards steady,
+        // so single moves alternate large and small (1.0, 0.08, 0.75, 0.15,
+        // ...) and a valley could read as settled, or as a stall once later
+        // valleys came out shallower. The pairwise maximum decreases
+        // monotonically while the iteration is converging.
+        const f64 largestMove = std::max(stepMove, lastMove);
+        lastMove = stepMove;
         if (largestMove < kSettled_K) {
             QL_LOG_INFO("  Thermal: steady state after {} relaxation steps", iteration + 1);
             return;

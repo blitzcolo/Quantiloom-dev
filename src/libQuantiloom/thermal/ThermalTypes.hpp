@@ -466,8 +466,11 @@ struct ThermalForcing {
     f64 diffuseIrradiance_W_m2 = 0.0;
     glm::vec3 sunDirection{0.0f, 1.0f, 0.0f};  ///< from surface toward the sun
     /// Effective sky temperature: the blackbody radiating what the sky does.
-    /// SkyThermal derives it from the air temperature and humidity, or the NN
-    /// atmosphere's own downwelling gives it directly.
+    /// ResolveRenderConfig sets it from `thermal.sky_temperature_k` when given,
+    /// else from a clear-sky emissivity (SkyThermal, from the air temperature
+    /// and humidity -- for a clear NN atmosphere, from its own t_ground and
+    /// rh), else the air temperature. The NN's band-limited downwelling is not
+    /// used: this balance is broadband.
     f64 skyTemperature_K = 268.0;
     /// Relative humidity of the air, percent. Read only by the latent term:
     /// what a wet surface can evaporate is set by how far the air is from

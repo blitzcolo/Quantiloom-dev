@@ -98,10 +98,12 @@ struct ThermalSolveCacheKeyInputs {
     /// epoch three gives a different trajectory at every hour after it, and a
     /// key that only described the mesh would serve the old answer.
     ///
-    /// Null, or a schedule of one epoch with no elements of its own, is the
-    /// single-geometry case and adds nothing to the key beyond the mesh -- so
-    /// an entry written before epochs existed still matches a run without
-    /// them, once the schema version is accounted for.
+    /// Null, or a schedule of one epoch from -infinity whose elements are
+    /// empty or byte-equal to the mesh's, is the single-geometry case and adds
+    /// nothing to the key beyond the mesh. The second form is what
+    /// ThermalSolveSession::Build leaves behind for a static scene, so a key
+    /// taken before the session exists and one taken after it are the same
+    /// key -- which is what lets a hit skip the view-factor precompute.
     const ThermalGeometrySchedule* schedule = nullptr;
 
     /// [lighting] sun_direction, which is what the exchange precompute traces

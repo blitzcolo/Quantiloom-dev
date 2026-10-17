@@ -777,12 +777,29 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // tangent rows below linearise about too.
         const f64 Ti = surfacePrevious[e];
 
+        // The emitted long wave's slope in the surface temperature,
+        // Y_rad = 4 eps sigma T^3, linearised about the same previous
+        // temperature the balance was evaluated at.
+        const f64 radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
+
         // Crank-Nicolson on the half-cell at the face. The half cell has
         // capacity rho c dx/2 and exchanges with node 1 by conduction and with
         // the outside by h, by evaporation, and by the flux above.
+        //
+        // The emitted long wave is half implicit, the way the evaporation is:
+        // the flux above carries eps sigma T^4 at the previous temperature,
+        // and Y_rad/2 (T^n - T^{n+1}) corrects it to the step's midpoint. Left
+        // fully explicit the face's amplification is (a - b - Y)/(a + b) with
+        // a = rho c dx/(2 dt), which drops below -1 once dt > rho c dx / Y --
+        // about six seconds for a millimetre of fabric -- so a thin or low-k
+        // layer diverged at the default minute, and the hour-long steps
+        // of the steady-state relaxation did the same to a few cm of wood.
+        // With the split it is (a - b - Y/2)/(a + b + Y/2), inside (-1, 1) at
+        // any step.
         const f64 halfCell = rhoC * dx / (2.0 * dt_s);
         lower[0] = 0.0;
-        diag[0] = halfCell + 0.5 * (k / dx + convectiveAdmittance_W_m2K + latentAdmittance_W_m2K);
+        diag[0] = halfCell + 0.5 * (k / dx + convectiveAdmittance_W_m2K + latentAdmittance_W_m2K +
+                                    radiativeSlope);
         upper[0] = -0.5 * (k / dx);
         // The trailing term is what a temperature-dependent h adds, and it is
         // exactly zero -- and therefore exactly nothing, in floating point --
@@ -790,17 +807,17 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
                  0.5 * h * (2.0 * forcing.airTemperature_K - T[0]) + surfaceFlux_W_m2 -
                  latentFlux_W_m2 + 0.5 * latentAdmittance_W_m2K * T[0] +
-                 0.5 * (convectiveAdmittance_W_m2K - h) * T[0];
+                 0.5 * (convectiveAdmittance_W_m2K - h) * T[0] + 0.5 * radiativeSlope * T[0];
         if (carryLateral) rhs[0] += halfCell * dt_s * lateralRate[0];
 
         // The tangent's face row: the same equation differentiated in v.
         // Term by term against the line above -- the air temperature and the
-        // latent flux are constants of v and drop, the explicit long-wave
-        // loss contributes its own slope, and the short wave contributes the
-        // only source. What is left of the convection is -Y_conv/2 sigma0
-        // rather than the +h*Tair the temperature gets, and of the
-        // evaporation -Y_lat/2 sigma0, because the flux and the half-implicit
-        // correction cancel to half. Y_conv rather than h: under a
+        // latent flux are constants of v and drop, and the short wave
+        // contributes the only source. What is left of the convection is
+        // -Y_conv/2 sigma0 rather than the +h*Tair the temperature gets, and
+        // of the evaporation and the long-wave loss -Y_lat/2 sigma0 and
+        // -Y_rad/2 sigma0, because each flux and its half-implicit correction
+        // cancel to half. Y_conv rather than h: under a
         // temperature-dependent law the coefficient moves with the surface,
         // and the tangent is differentiating the same equation the matrix
         // solves.
@@ -811,10 +828,6 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // second-order fact that a colder patch of ground makes its
         // neighbours very slightly colder too. Keeping it out is what makes
         // this a per-element quantity a shader can apply per pixel.
-        // The one term of the face row that only a tangent uses. Hoisted so the
-        // rows below can be written once and applied to every tangent this
-        // state carries.
-        const f64 radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
 
         // ----------------------------------------------------------------
         // The interior
@@ -832,7 +845,18 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // ----------------------------------------------------------------
         const u32 last = nodes - 1;
         f64 backAdmittance_W_m2K = 0.0;
+        f64 backLatentAdmittance_W_m2K = 0.0;
         f64 backRadiativeSlope_W_m2K = 0.0;
+        // Read by the material-parameter rows: a shell's back face has the
+        // same alpha, eps and h as its front, so it carries their derivatives
+        // too.
+        SurfaceBalance back{};
+        // Only a Dirichlet back row has a tangent of exactly zero. A shell
+        // owner never has one, whatever interior_bc says: the shell branch
+        // takes the back face first, and the tangent has to describe the row
+        // the temperature actually took.
+        const bool backIsDirichlet =
+            !isShellOwner && material.interiorBoundary == InteriorBoundary::FixedTemperature;
         if (isShellOwner) {
             // The other face of the same slab, exposed. Not a boundary
             // condition standing in for what is behind the surface -- there is
@@ -845,9 +869,11 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // and surfacePrevious carries the owner's back node there -- which
             // is what makes this the same function rather than a second reading
             // of the balance written for one side.
-            const SurfaceBalance back = EvaluateSurfaceBalance(
+            back = EvaluateSurfaceBalance(
                 shellPartner, elements[shellPartner], material, exchange, forcing,
                 shortwave, sunVisibility, surfacePrevious, m_convection);
+            backRadiativeSlope_W_m2K =
+                4.0 * emissivity * kStefanBoltzmann * T[last] * T[last] * T[last];
 
             // Mirror of the front row. The internal source is deliberately not
             // added: a shell has two exposed faces and no interior for a source
@@ -855,20 +881,22 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // panel that is also a wall.
             lower[last] = -0.5 * (k / dx);
             diag[last] = halfCell + 0.5 * (k / dx + back.convectiveAdmittance_W_m2K +
-                                           back.latentAdmittance_W_m2K);
+                                           back.latentAdmittance_W_m2K +
+                                           backRadiativeSlope_W_m2K);
             upper[last] = 0.0;
             rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
                         0.5 * back.h * (2.0 * forcing.airTemperature_K - T[last]) +
                         back.surfaceFlux_W_m2 - back.latentFlux_W_m2 +
                         0.5 * back.latentAdmittance_W_m2K * T[last] +
-                        0.5 * (back.convectiveAdmittance_W_m2K - back.h) * T[last];
+                        0.5 * (back.convectiveAdmittance_W_m2K - back.h) * T[last] +
+                        0.5 * backRadiativeSlope_W_m2K * T[last];
             if (carryLateral) rhs[last] += halfCell * dt_s * lateralRate[last];
 
-            // The tangent rows below read these two, and for a shell the back
-            // face's own convection and radiation are what they see.
+            // The tangent rows below read these, and for a shell the back
+            // face's own convection, evaporation and radiation are what they
+            // see.
             backAdmittance_W_m2K = back.convectiveAdmittance_W_m2K;
-            backRadiativeSlope_W_m2K =
-                4.0 * emissivity * kStefanBoltzmann * T[last] * T[last] * T[last];
+            backLatentAdmittance_W_m2K = back.latentAdmittance_W_m2K;
         } else if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
             // A Dirichlet row: whatever is behind this surface holds it there.
             lower[last] = 0.0;
@@ -902,11 +930,15 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 backFlux_W_m2 += hBack * (interior - Tb) + radiative;
             }
 
+            // The interior radiation is half implicit for the reason the
+            // exposed face's is; it is zero, and so is its slope, unless the
+            // boundary is ambient.
             lower[last] = -0.5 * (k / dx);
-            diag[last] = halfCell + 0.5 * (k / dx + backAdmittance_W_m2K);
+            diag[last] = halfCell + 0.5 * (k / dx + backAdmittance_W_m2K + backRadiativeSlope_W_m2K);
             upper[last] = 0.0;
             rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]) +
-                        backFlux_W_m2 + 0.5 * backAdmittance_W_m2K * T[last];
+                        backFlux_W_m2 + 0.5 * backAdmittance_W_m2K * T[last] +
+                        0.5 * backRadiativeSlope_W_m2K * T[last];
             if (carryLateral) rhs[last] += halfCell * dt_s * lateralRate[last];
         }
 
@@ -916,8 +948,9 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // The same equation differentiated in v. Term by term against the
         // temperature's rows: the air temperature, the latent flux and
         // everything behind the back face are constants of v and drop; the
-        // explicit long-wave loss contributes its own slope; the short wave
-        // contributes the only source. What is left of the convection is
+        // long-wave loss, half implicit like the evaporation, leaves
+        // -Y_rad/2 sigma for the same reason; the short wave contributes the
+        // only source. What is left of the convection is
         // -Y_conv/2 sigma rather than the +h*Tair the temperature gets, and of
         // the evaporation -Y_lat/2 sigma, because the flux and the
         // half-implicit correction cancel to half. Y_conv rather than h: under
@@ -937,7 +970,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                           const f64* lateral) {
             out[0] = halfCell * sigma[0] - 0.5 * (k / dx) * (sigma[0] - sigma[1]) -
                      0.5 * convectiveAdmittance_W_m2K * sigma[0] -
-                     radiativeSlope * sigma[0] -
+                     0.5 * radiativeSlope * sigma[0] -
                      0.5 * latentAdmittance_W_m2K * sigma[0] + source;
             if (lateral != nullptr) out[0] += halfCell * dt_s * lateral[0];
 
@@ -946,7 +979,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                 if (lateral != nullptr) out[i] += dt_s * lateral[i];
             }
 
-            if (material.interiorBoundary == InteriorBoundary::FixedTemperature) {
+            if (backIsDirichlet) {
                 // A room held at its own temperature does not care about the
                 // sun, so the tangent's Dirichlet value is zero rather than
                 // the temperature's.
@@ -956,7 +989,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             out[last] = halfCell * sigma[last] -
                         0.5 * (k / dx) * (sigma[last] - sigma[last - 1]) -
                         0.5 * backAdmittance_W_m2K * sigma[last] -
-                        backRadiativeSlope_W_m2K * sigma[last];
+                        0.5 * backLatentAdmittance_W_m2K * sigma[last] -
+                        0.5 * backRadiativeSlope_W_m2K * sigma[last];
             if (lateral != nullptr) out[last] += halfCell * dt_s * lateral[last];
         };
 
@@ -997,18 +1031,31 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             switch (state.parameters[p]) {
                 case ThermalParameter::Absorptivity:
                     out[0] += shortwavePerAbsorptivity_W_m2;
+                    // A shell's back face absorbs with the same alpha.
+                    if (isShellOwner) out[last] += back.shortwavePerAbsorptivity_W_m2;
                     break;
 
-                case ThermalParameter::Emissivity:
-                    out[0] += longwavePerEmissivity_W_m2;
-                    if (material.interiorBoundary == InteriorBoundary::AmbientInterior) {
+                case ThermalParameter::Emissivity: {
+                    // The explicit flux's own derivative, plus that of the
+                    // half-implicit correction Y_rad/2 (T^n - T^{n+1}), whose
+                    // slope Y_rad is linear in eps.
+                    const f64 slopePerEmissivity0 = 4.0 * kStefanBoltzmann * T[0] * T[0] * T[0];
+                    out[0] += longwavePerEmissivity_W_m2 +
+                              0.5 * slopePerEmissivity0 * (T[0] - rhs[0]);
+                    const f64 Tb = T[last];
+                    const f64 slopePerEmissivityB = 4.0 * kStefanBoltzmann * Tb * Tb * Tb;
+                    if (isShellOwner) {
+                        out[last] += back.longwavePerEmissivity_W_m2 +
+                                     0.5 * slopePerEmissivityB * (Tb - rhs[last]);
+                    } else if (material.interiorBoundary == InteriorBoundary::AmbientInterior) {
                         const f64 interior = static_cast<f64>(material.interiorTemperature_K);
-                        const f64 Tb = T[last];
                         out[last] += kStefanBoltzmann *
-                                     (interior * interior * interior * interior -
-                                      Tb * Tb * Tb * Tb);
+                                         (interior * interior * interior * interior -
+                                          Tb * Tb * Tb * Tb) +
+                                     0.5 * slopePerEmissivityB * (Tb - rhs[last]);
                     }
                     break;
+                }
 
                 case ThermalParameter::Convection: {
                     // Only a free parameter where nothing else decides it: a
@@ -1023,6 +1070,14 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                         h > 0.0 ? latentAdmittance_W_m2K / h : 0.0;
                     out[0] += (forcing.airTemperature_K - T[0]) - latentPerH +
                               0.5 * (1.0 + latentAdmittancePerH) * (T[0] - rhs[0]);
+                    // The same h convects a shell's back face, through the
+                    // row built from the partner's balance.
+                    if (isShellOwner && back.h > 0.0) {
+                        out[last] += (forcing.airTemperature_K - T[last]) -
+                                     back.latentFlux_W_m2 / back.h +
+                                     0.5 * (1.0 + back.latentAdmittance_W_m2K / back.h) *
+                                         (T[last] - rhs[last]);
+                    }
                     break;
                 }
 
@@ -1037,7 +1092,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                   ((T[i - 1] - 2.0 * T[i] + T[i + 1]) +
                                    (rhs[i - 1] - 2.0 * rhs[i] + rhs[i + 1]));
                     }
-                    if (material.interiorBoundary != InteriorBoundary::FixedTemperature) {
+                    if (!backIsDirichlet) {
                         out[last] += -0.5 / dx *
                                      ((T[last] - T[last - 1]) + (rhs[last] - rhs[last - 1]));
                     }
@@ -1054,7 +1109,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
                                   ((T[i - 1] - 2.0 * T[i] + T[i + 1]) +
                                    (rhs[i - 1] - 2.0 * rhs[i] + rhs[i + 1]));
                     }
-                    if (material.interiorBoundary != InteriorBoundary::FixedTemperature) {
+                    if (!backIsDirichlet) {
                         out[last] += halfCell / rhoC * (T[last] - rhs[last]);
                     }
                     break;

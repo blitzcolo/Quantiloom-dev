@@ -102,6 +102,13 @@ public:
     /// against a wall.
     [[nodiscard]] virtual bool CarriesShells() const { return false; }
 
+    /// Whether it honours a material's internal_heat_w_m2 and an `ambient`
+    /// interior boundary. An implementation that knows only adiabatic and
+    /// fixed would solve an engine bay as an empty box -- the one way a
+    /// shaded surface can be the warmest thing in an infrared scene, silently
+    /// lost -- so the host asks, see NeedsInteriorSources.
+    [[nodiscard]] virtual bool CarriesInteriorSources() const { return false; }
+
     /**
      * @brief Decompose one element's surface balance at the state it is in
      *
@@ -135,5 +142,18 @@ public:
     /// which is not.
     [[nodiscard]] virtual const char* Name() const = 0;
 };
+
+/// True when some participating material has a heat source behind it or an
+/// `ambient` interior -- what CarriesInteriorSources answers for.
+[[nodiscard]] inline bool NeedsInteriorSources(const Vector<ThermalMaterial>& materials) {
+    for (const ThermalMaterial& material : materials) {
+        if (!material.ParticipatesInSolve()) continue;
+        if (material.internalHeat_W_m2 != 0.0f ||
+            material.interiorBoundary == InteriorBoundary::AmbientInterior) {
+            return true;
+        }
+    }
+    return false;
+}
 
 }  // namespace quantiloom::thermal

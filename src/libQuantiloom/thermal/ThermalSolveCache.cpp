@@ -28,8 +28,11 @@ namespace quantiloom::thermal {
 namespace {
 
 /// Bumped when the *list* of hashed inputs changes -- adding a field would
-/// otherwise leave every existing entry addressable under a new meaning.
-constexpr u32 kKeySchemaVersion = 4u;
+/// otherwise leave every existing entry addressable under a new meaning -- and
+/// when the solve those inputs feed computes something different from them
+/// without the library version moving. 5: the long wave became half implicit
+/// in both steppers, and a static scene's key stopped hashing its one epoch.
+constexpr u32 kKeySchemaVersion = 5u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
@@ -38,6 +41,19 @@ constexpr u32 kCacheMagic = 0x43544C51u;
 constexpr u32 kCacheFormatVersion = 2u;
 
 constexpr usize kKeyHexLength = 64;
+
+/// One epoch, starting at -infinity, on the mesh's own elements: what nothing
+/// moving looks like once ThermalSolveSession::Build has filled it in.
+bool IsStaticSchedule(const ThermalGeometrySchedule* schedule,
+                      const Vector<ThermalElement>& meshElements) {
+    if (schedule == nullptr || schedule->Count() != 1) return false;
+    const ThermalGeometryEpoch& epoch = schedule->epochs.front();
+    if (std::isfinite(epoch.from_h)) return false;
+    if (epoch.elements.empty()) return true;
+    return epoch.elements.size() == meshElements.size() &&
+           std::memcmp(epoch.elements.data(), meshElements.data(),
+                       meshElements.size() * sizeof(ThermalElement)) == 0;
+}
 
 /// Header, read and written field by field rather than as a struct -- a packed
 /// POD across a file boundary is a padding question on every compiler.
@@ -207,10 +223,18 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
 
     // 3b. ...and where it goes, when it goes anywhere. Each epoch's own
     //     elements are the geometry the solve ran on for that span, so all of
-    //     them are inputs to the hour finally asked for. A schedule of one
-    //     epoch with no elements of its own is the static case and contributes
-    //     only its count, which keeps it hashing the same as no schedule.
-    const usize epochCount = (inputs.schedule != nullptr) ? inputs.schedule->Count() : 0;
+    //     them are inputs to the hour finally asked for. The static case --
+    //     one epoch from -infinity whose elements are the mesh's own, or left
+    //     empty -- hashes exactly as no schedule at all. That equivalence is
+    //     load-bearing: a static scene asks the cache *before* building a
+    //     session (so with no schedule) and stores *after* it (when
+    //     ThermalSolveSession::Build has filled epoch zero with the mesh), and
+    //     the two keys have to meet or the early lookup never hits and the
+    //     view-factor precompute runs on every render.
+    const bool staticSchedule = IsStaticSchedule(inputs.schedule, elements);
+    const usize epochCount = (inputs.schedule != nullptr && !staticSchedule)
+                                 ? inputs.schedule->Count()
+                                 : 0;
     hasher.UpdateU64(epochCount);
     for (usize e = 0; e < epochCount; ++e) {
         const ThermalGeometryEpoch& epoch = inputs.schedule->epochs[e];
