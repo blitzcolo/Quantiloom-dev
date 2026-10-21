@@ -745,8 +745,21 @@ float ComputePhysicalFresnel(MaterialData material, float cosTheta, float wavele
 // Lobe selection is the caller's, through qSpec:
 //
 //   qSpec = 0    always cosine-sample, weight wDiffuse
-//   qSpec = 1    always GGX-sample,    weight wSpecular * G*VdotH/(NdotV*NdotH)
+//   qSpec = 1    always GGX-sample,    weight F(VdotH) * G*VdotH/(NdotV*NdotH)
 //   in between   pick stochastically and divide by the selection probability
+//
+// The specular weight is a pair, not a number: wSpecular0 and wSpecular90 are
+// the lobe's weight at normal and at grazing microfacet incidence, and the
+// Fresnel between them is Schlick at the SAMPLED half vector. That is where the
+// split-sum LUT takes it (BRDFLutGenerator integrates (1 - VdotH)^5), so it is
+// the only choice under which this lobe estimates the same integral as the
+// F0 * envBRDF.x + F90 * envBRDF.y it corrects. Taking F at the view vector
+// instead -- a number the caller could precompute -- grows to ~0.8 at grazing
+// while the split-sum albedo of a rough dielectric stays near 0.05, so every
+// occluded bounce subtracted ten times the specular sky the base had added.
+// Far ground went negative and displayed black, in an arc around the camera
+// where N.V crossed about 0.1. A band with one total reflectance passes the
+// same value twice, and the lerp is the identity.
 //
 // The thermal and reflective IR bands pass 0 or 1 -- they model one total
 // reflectance and the lobe is purely a sampling shape for it. VIS_FUSED passes
@@ -826,27 +839,32 @@ float BsdfMixturePdf(float3 normal, float3 V, float3 wi, float roughness, float 
 // Light sampling and BSDF sampling only combine into an unbiased estimator if
 // they are estimating the same integral, which means evaluating the same f.
 // Reaching for CookTorranceBRDF_Spectral here instead looks right and is not:
-// that function takes its Fresnel at the half vector, the way direct sun does,
-// while the bounce takes it at the view vector, the way the split-sum ambient
-// terms it is correcting do. Two different BRDFs, so the MIS weights partition
-// one integral while the strategies estimate another. It reads as a scene that
-// gets brighter the more grazing the view -- 25% on the side walls of a Cornell
-// box, 3% on the back wall, which is what pointed at the cause.
+// that function carries the direct-lighting remap of G and its own kD, while
+// the bounce is weighed against a split-sum base built with the IBL remap. Two
+// different BRDFs, so the MIS weights partition one integral while the
+// strategies estimate another. It reads as a scene that gets brighter the more
+// grazing the view -- 25% on the side walls of a Cornell box, 3% on the back
+// wall -- and that is also what a Fresnel taken at different vectors on the two
+// sides looks like, which is why both now take it at the half vector.
 //
 // So this inverts the bounce's own weights instead. Given weight = f cos / pdf
 // for each lobe:
 //
 //   cosine lobe: weight = wDiffuse/(1-qSpec), pdf = cos/PI   =>  f = wDiffuse/PI
-//   GGX lobe:    weight = wSpecular/qSpec * G VdotH/(NdotV NdotH),
+//   GGX lobe:    weight = F(VdotH)/qSpec * G VdotH/(NdotV NdotH),
 //                pdf    = D NdotH/(4 VdotH)
-//                                        =>  f = wSpecular G D / (4 NdotV NdotWi)
+//                                        =>  f = F(VdotH) G D / (4 NdotV NdotWi)
+//
+// with F(VdotH) the Schlick lerp from wSpecular0 to wSpecular90, exactly as
+// TraceEnvBounceResidual applies it.
 //
 // The specular term is gated on qSpec because a surface with qSpec == 0 never
 // samples that lobe, so it is not part of what the bounce estimates and must
 // not be part of what the light sampler estimates either.
 float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
                      float roughness, float qSpec,
-                     float wDiffuse, float wSpecular, AnisoFrame aniso) {
+                     float wDiffuse, float wSpecular0, float wSpecular90,
+                     AnisoFrame aniso) {
     roughness = max(roughness, MIN_BOUNCE_ROUGHNESS);
     const float NdotWi = dot(normal, wi);
     if (NdotWi <= 0.0) {
@@ -856,6 +874,8 @@ float EvalBounceBrdf(float3 normal, float3 V, float3 wi, float NdotV,
     if (qSpec > 0.0) {
         const float3 H     = normalize(V + wi);
         const float  NdotH = max(dot(normal, H), 0.0);
+        const float  wSpecular =
+            lerp(wSpecular0, wSpecular90, pow(saturate(1.0 - dot(V, H)), 5.0));
         if (aniso.active) {
             // The anisotropic visibility already carries the 1/(4 NdotV NdotWi),
             // so it takes the place of BOTH G and that denominator. The bounce
@@ -1181,7 +1201,8 @@ float BeerLambertAt(float4 attenSpectrum, float lambda, float distance, float at
 // times anything is the zero it reads back.
 float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float NdotV,
                               float roughness, float qSpec,
-                              float4 wDiffuse, float4 wSpecular, float rrSurvive,
+                              float4 wDiffuse, float4 wSpecular0, float4 wSpecular90,
+                              float rrSurvive,
                               float4 L_base_b, float lambda_b, AnisoFrame aniso,
                               inout Payload payload)
 {
@@ -1212,7 +1233,12 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
         : (qSpec > 0.0 && PathSample1D(payload, SAMPLE_SLOT_LOBE) < qSpec);
 
     if (specularLobe) {
-        weight *= wSpecular / max(qSpec, 1e-4);
+        // The Fresnel half of this weight needs the half vector, so it is
+        // applied after the draw below; only the selection is divided out here.
+        if (all(wSpecular0 == 0.0) && all(wSpecular90 == 0.0)) {
+            return 0.0;
+        }
+        weight /= max(qSpec, 1e-4);
     } else {
         weight *= wDiffuse / max(1.0 - qSpec, 1e-4);
     }
@@ -1262,6 +1288,8 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     // the sampler actually drew from. They are deliberately not the same
     // function: one belongs to the BRDF, the other to the density.
     if (specularLobe) {
+        const float Fc = pow(saturate(1.0 - dot(V, normalize(V + wi))), 5.0);
+        weight *= lerp(wSpecular0, wSpecular90, Fc);
         if (aniso.active) {
             // The same f cos / pdf, written from the anisotropic pair:
             //   f cos = wSpec D Vis NdotWi,  pdf = G1 D / (4 NdotV)
@@ -1595,11 +1623,29 @@ void main(inout Payload payload, in HitAttributes attribs) {
     }
 
     // CRITICAL: Face-forward correction for shading normal
-    // Ensures normal always points toward camera (opposite to ray direction)
-    // This prevents BRDF breakdown for thin geometry (grass, leaves) and backface hits
-    // Without this, NdotV can be negative -> Fresnel/GGX produce NaN/white spots
-    if (dot(normal, rayDir) > 0.0) {
+    // Ensures the normal faces the camera. Without it NdotV can be negative,
+    // and Fresnel/GGX produce NaN/white spots on thin geometry (grass, leaves)
+    // and on back-face hits.
+    //
+    // The geometric normal already faces the ray, so it is the reference for
+    // which side of the surface the shading normal belongs on. A shading normal
+    // that is on that side but still turned away from the viewer -- a normal
+    // map or a smoothed vertex normal leaning past a grazing view, which at
+    // N.V = 0.05 takes a tilt of three degrees -- is bent toward V just far
+    // enough to see it, never negated. Negating it used to point it INTO the
+    // surface: the sun went below its horizon, the bounce left from a millimetre
+    // under the ground and came back dark, and the residual subtracted the whole
+    // sky. Far ground shaded black wherever a bump faced away from the camera.
+    if (dot(normal, worldGeometricNormal) < 0.0) {
         normal = -normal;
+    }
+    {
+        const float kMinShadingNdotV = 1e-3;
+        const float NdotV_shading = dot(normal, -rayDir);
+        if (NdotV_shading < kMinShadingNdotV) {
+            normal = SafeNormalize(normal - rayDir * (kMinShadingNdotV - NdotV_shading),
+                                   worldGeometricNormal);
+        }
     }
 
     // Emissive texture
@@ -2207,8 +2253,22 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // - For quantitative analysis, consider CIE sky models or precomputed LUTs
     // ========================================================================
 
-    // Compute diffuse reflection coefficient (energy conservation with specular)
-    float3 kD = (1.0 - FresnelSchlickF90RGB(max(dot(normal, V), 0.0), F0, specularF90)) * (1.0 - metallic);
+    // The split-sum LUT, fetched ahead of kD because kD is what it leaves over.
+    // Same predicate as the IBL block below: a surface that block skips has no
+    // specular dome term, so nothing is carved out of the diffuse one.
+    float2 envBRDF = float2(0.0, 0.0);
+    if (metallic > 0.01 || roughness < 0.99) {
+        envBRDF = brdfLUT.SampleLevel(
+            iblSampler, float2(max(dot(normal, V), 0.0), roughness), 0.0).rg;
+    }
+
+    // Diffuse reflection coefficient: what the specular lobe leaves of the
+    // dome. That is the lobe's directional albedo F0 * x + F90 * y -- the same
+    // number the specular dome term below is weighted by -- and not Schlick at
+    // the view vector, which on a rough dielectric reaches 0.8 at grazing
+    // where the lobe actually takes about 0.05. The diffuse it denied went
+    // nowhere, and far ground under an open sky went dark in every mode.
+    float3 kD = (1.0 - (F0 * envBRDF.x + specularF90 * envBRDF.y)) * (1.0 - metallic);
 
     // Hemispherical integration with Lambertian BRDF
     // Factor of π from hemisphere integral cancels with π in BRDF denominator
@@ -2241,7 +2301,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
     // Declare IBL variables outside conditional for use in spectral integration
     float3 prefilteredColor = float3(0.0, 0.0, 0.0);
-    float2 envBRDF = float2(0.0, 0.0);
 
     // Only compute IBL for surfaces with non-zero metallic or roughness < 1.0
     // This optimization skips perfectly diffuse surfaces (no specular reflection).
@@ -2275,11 +2334,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
     const bool hasEnvMap = (lut.enableEnvironmentMap != 0) &&
                            SPEC_SPECTRAL_MODE != SPECTRAL_MODE_CAMERA_MEASUREMENT;
     if (metallic > 0.01 || roughness < 0.99) {
-        // 1. Sample BRDF integration LUT
-        //    Inputs: (NdotV, roughness) → Outputs: (scale, bias) for Fresnel term
-        //    Independent of the environment, and the LUT is always generated.
-        float NdotV_clamped = max(dot(normal, V), 0.0);
-        envBRDF = brdfLUT.SampleLevel(iblSampler, float2(NdotV_clamped, roughness), 0.0).rg;
+        // 1. envBRDF, the BRDF integration LUT at (NdotV, roughness), was
+        //    fetched above for kD. Independent of the environment, and the LUT
+        //    is always generated.
 
         if (hasEnvMap) {
             // 2. Compute reflection vector R = reflect(-V, N)
@@ -2486,7 +2543,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // of each where a quartet is carried, one otherwise -- the loop below
         // reads component 0 in that case and never the rest.
         float4 visKD = float4(0.0, 0.0, 0.0, 0.0);
-        float4 visF  = float4(0.0, 0.0, 0.0, 0.0);
+        float4 visF0 = float4(0.0, 0.0, 0.0, 0.0);
         float visQSpec = 0.0, visNdotV = 0.0;
         {
             // Drawn against a curve shaped like the colour matching functions
@@ -2509,7 +2566,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             const float NdotV_b = max(dot(normal, V), 0.0);
 
-            // Pick the specular lobe about as often as it carries energy. The
+            // Pick the specular lobe about as often as it carries energy, which
+            // is its split-sum albedo -- the same number that sets kD. The
             // floor keeps a rough dielectric's specular reachable; metals go to
             // 1 because their diffuse term is identically zero.
             //
@@ -2529,7 +2587,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // can be shared by four wavelengths at all: the lobe it takes and
             // whether it survives are decided for the surface, not for a colour.
             const float qSpec_b = (useIBL && !hasEnvMap)
-                ? clamp(lerp(FresnelSchlickF90(NdotV_b, (F0.r + F0.g + F0.b) / 3.0, specularF90), 1.0, metallic),
+                ? clamp(lerp((F0.r + F0.g + F0.b) / 3.0 * envBRDF.x + specularF90 * envBRDF.y,
+                             1.0, metallic),
                         0.05, 1.0)
                 : 0.0;
 
@@ -2544,11 +2603,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // The material's response at each wavelength the correction carries,
             // and the base each is measured against.
             float4 wDiffuse4 = float4(0.0, 0.0, 0.0, 0.0);
-            float4 wSpecular4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 wSpecular0_4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 wSpecular90_4 = float4(0.0, 0.0, 0.0, 0.0);
             float4 wDt4 = float4(0.0, 0.0, 0.0, 0.0);
             float4 sky4 = float4(0.0, 0.0, 0.0, 0.0);
             float4 kD4 = float4(0.0, 0.0, 0.0, 0.0);
-            float4 F4 = float4(0.0, 0.0, 0.0, 0.0);
+            float4 F04 = float4(0.0, 0.0, 0.0, 0.0);
 
             for (uint j = 0; j < bounceCount; ++j) {
                 const float lambda_j = carriesQuartet ? quartet[j] : lambda_b;
@@ -2558,9 +2618,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     ? EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda_j)
                     : RgbSpectrumAt(sBase, lambda_j);
 
+                // The specular lobe's Fresnel is taken per sample at the half
+                // vector, so only its endpoints are fixed here; kD is what its
+                // split-sum albedo leaves, as for L_ambient in the loop below.
                 const float F0_j = RgbSpectrumAt(sF0, lambda_j);
-                const float F_j  = FresnelSchlickF90(NdotV_b, F0_j, specularF90);
-                const float kD_j = (1.0 - F_j) * (1.0 - metallic);
+                const float kD_j =
+                    (1.0 - (F0_j * envBRDF.x + specularF90 * envBRDF.y)) * (1.0 - metallic);
 
                 // Sheen at lambda_j, folded into the cosine lobe rather than
                 // given a lobe of its own.
@@ -2590,14 +2653,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
                 wDiffuse4[j] = (kD_j * rho_j * dtBase * sheenScale_j + wSheen_j) * ccBase +
                                ccWeight * ccE;
-                wSpecular4[j] = F_j * sheenScale_j * ccBase;
+                wSpecular0_4[j]  = F0_j * sheenScale_j * ccBase;
+                wSpecular90_4[j] = specularF90 * sheenScale_j * ccBase;
                 if (hasDT) {
                     const float rhoDt_j = EvaluateDiffuseTransmissionColor(
                         spectralCurves, material, sDT, lambda_j, true);
                     wDt4[j] = kD_j * dt * rhoDt_j * ccBase;
                 }
                 kD4[j] = kD_j;
-                F4[j]  = F_j;
+                F04[j] = F0_j;
             }
 
             const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
@@ -2617,7 +2681,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // incoming wavelength, so it keeps the full 1/pdf share.
                     visNeeScaleFluor = NdotWl / visLight.pdfSolid;
                     visKD     = kD4;
-                    visF      = F4;
+                    visF0     = F04;
                     visQSpec  = qSpec_b;
                     visNdotV  = NdotV_b;
                 }
@@ -2625,7 +2689,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
             const float4 corr_b = TraceEnvBounceResidual(
                 visHitPos, normal, V, NdotV_b, roughness, qSpec_b,
-                wDiffuse4, wSpecular4, rrSurvive_b,
+                wDiffuse4, wSpecular0_4, wSpecular90_4, rrSurvive_b,
                 sky4, lambda_b, aniso, payload);
 
             // The transmitted half, traced into the BACK hemisphere. Reusing
@@ -2649,7 +2713,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (hasDT && rrDt > 0.0) {
                 corr_dt = TraceEnvBounceResidual(
                     visHitPos, -normal, V, NdotV_b, roughness, 0.0,
-                    wDt4, float4(0.0, 0.0, 0.0, 0.0), rrDt,
+                    wDt4, float4(0.0, 0.0, 0.0, 0.0), float4(0.0, 0.0, 0.0, 0.0), rrDt,
                     sky4, lambda_b, IsotropicFrame(), payload);
             }
 
@@ -2894,9 +2958,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             //
             float F0_at_lambda = RgbSpectrumAt(sF0, lambda);
 
-            float NdotV_ambient = max(dot(normal, V), 0.0);
-            float F_ambient = FresnelSchlickF90(NdotV_ambient, F0_at_lambda, specularF90);
-            float kD_lambda = (1.0 - F_ambient) * (1.0 - metallic);
+            // kD is what the specular lobe's split-sum albedo leaves -- the
+            // same weight L_ibl below carries -- so the two sum to the dome.
+            float kD_lambda =
+                (1.0 - (F0_at_lambda * envBRDF.x + specularF90 * envBRDF.y)) * (1.0 - metallic);
             // Lambertian BRDF = ρ/π, hemisphere integral = π, so π cancels
             // sky_radiance_lambda is already radiance (W·sr⁻¹·m⁻²·nm⁻¹)
             // Sheen rides the same dome. Its directional albedo IS the
@@ -2965,7 +3030,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
                     (visKD[qi] * rho_lambda * dtBase * sheenScale_lambda +
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
-                    visF[qi] * sheenScale_lambda * ccBase, aniso);
+                    visF0[qi] * sheenScale_lambda * ccBase,
+                    specularF90 * sheenScale_lambda * ccBase, aniso);
                 const float L_light = hasNeeCurve
                     ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda)
                     : RgbIlluminantAt(iNee, cieSample.w, lambda);
@@ -3268,8 +3334,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // 4. Sky ambient lighting (scalar)
         //    Use simplified diffuse approximation (same as RGB mode)
         float3 F0_scalar = lerp(dielectricF0, float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
-        float3 F_scalar = FresnelSchlickF90RGB(max(dot(normal, V), 0.0), F0_scalar, specularF90);
-        float kD_scalar = ((1.0 - F_scalar.r) * (1.0 - metallic));  // Use .r since all channels are identical
+        //    kD is what the specular lobe's split-sum albedo leaves, as in
+        //    VIS_FUSED; .r since all channels are identical.
+        float E_spec_scalar = F0_scalar.r * envBRDF.x + specularF90 * envBRDF.y;
+        float kD_scalar = (1.0 - E_spec_scalar) * (1.0 - metallic);
 
         // No 1/PI here. skyRadiance_lambda is already E_sky/PI -- the conversion
         // from irradiance to radiance happened when it was sampled -- so the
@@ -3356,7 +3424,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // prefiltered map and the analytic sky the miss shader returns are
             // different illuminants, and their difference corrects nothing.
             const float qSpec_s = (useIBL_scalar && !hasEnvMap)
-                ? clamp(lerp(F_scalar.r, 1.0, metallic), 0.05, 1.0)
+                ? clamp(lerp(E_spec_scalar, 1.0, metallic), 0.05, 1.0)
                 : 0.0;
             const float rrSurvive_s = clamp(lerp(spectralAlbedo, 1.0, metallic), 0.0, 0.95);
 
@@ -3375,7 +3443,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
                         (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                             ccWeight * ccE,
-                        F_scalar.r * sheenScale_s * ccBase, aniso);
+                        F0_scalar.r * sheenScale_s * ccBase,
+                        specularF90 * sheenScale_s * ccBase, aniso);
                     const float L_light_s = (s.curveIndex >= 0)
                         ? EvaluateEmissionCurve(spectralCurves, s.curveIndex, lambda)
                         : ConvertLinearRGBToIlluminantSpectrum(
@@ -3390,14 +3459,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
                 (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                     ccWeight * ccE,
-                F_scalar.r * sheenScale_s * ccBase, rrSurvive_s,
+                F0_scalar.r * sheenScale_s * ccBase,
+                specularF90 * sheenScale_s * ccBase, rrSurvive_s,
                 skyRadiance_lambda, lambda, aniso, payload).x;
 
             // The transmitted half against the back hemisphere, as VIS_FUSED.
             if (wDt_s > 0.0) {
                 radiance_spectral += TraceEnvBounceResidual(
                     singleHitPos, -normal, V, NdotV_s, roughness, 0.0,
-                    wDt_s * ccBase, 0.0, wDt_s * ccBase,
+                    wDt_s * ccBase, 0.0, 0.0, wDt_s * ccBase,
                     skyRadiance_lambda, lambda, IsotropicFrame(), payload).x;
             }
         }
@@ -3599,12 +3669,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
+            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
                 swirHitPos, -normal, V, NdotV_swir, roughness, 0.0,
-                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
+                wDt_b, 0.0, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -3888,12 +3958,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
             (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b,
+            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
                 nirHitPos, -normal, V, NdotV_nir, roughness, 0.0,
-                wDt_b, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
+                wDt_b, 0.0, 0.0, wDt_b, L_base_b, lambda_b, IsotropicFrame(), payload).x;
         }
 
         // NOTE: Removed [unroll] to reduce shader compilation time
@@ -4165,7 +4235,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         float bounceCorr = TraceEnvBounceResidual(
             irHitPos, normal, V, NdotV, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b,
+            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b, rho_b,
             L_base_b, lambda_b, aniso, payload).x;
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
