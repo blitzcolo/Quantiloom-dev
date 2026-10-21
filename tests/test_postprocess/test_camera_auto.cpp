@@ -212,12 +212,34 @@ TEST(CameraAutoControlTest, NoMeasurementHoldsPrevious) {
     isp.autoExposure = true;
     isp.autoWhiteBalance = true;
     const AutoControlState previous{0.02, 2.0, {1.2, 1.0, 0.9}};
-    // Zero mean (every pixel saturated or black): no information, hold.
-    const AutoControlInput empty{0.0, 1.0, {0.0, 0.0, 0.0}};
+    // Zero mean and nothing clipped (every pixel black): no information, hold.
+    const AutoControlInput empty{0.0, 0.0, {0.0, 0.0, 0.0}};
     const AutoControlState next = StepAutoControl(isp, previous, empty, true, true);
     EXPECT_DOUBLE_EQ(next.exposure, previous.exposure);
     EXPECT_DOUBLE_EQ(next.analogGain, previous.analogGain);
     EXPECT_EQ(next.whiteBalance, previous.whiteBalance);
+}
+
+// A clipped frame is a measurement, not the absence of one. Metering only the
+// unsaturated pixels held a fully white frame forever (no pixel left to
+// measure) and opened up a mostly white one (the survivors are the darkest).
+TEST(CameraAutoControlTest, ClippedFrameStopsDown) {
+    IspConfig isp;
+    isp.autoExposure = true;
+    isp.autoControl.smoothing = 1.0;
+    const AutoControlState previous{0.01, 1.0, {1.0, 1.0, 1.0}};
+
+    const AutoControlInput allClipped{0.0, 1.0, {0.0, 0.0, 0.0}};
+    const AutoControlState fromWhite = StepAutoControl(isp, previous, allClipped, true, false);
+    EXPECT_NEAR(fromWhite.exposure, previous.exposure * isp.autoControl.targetLuminance, 1e-12);
+    EXPECT_DOUBLE_EQ(fromWhite.analogGain, 1.0);
+
+    // 90 % clipped, the rest dark: the unsaturated mean alone (0.02) asked
+    // for nine times more light.
+    const AutoControlInput mostlyClipped{0.02, 0.9, {0.0, 0.0, 0.0}};
+    const AutoControlState fromBright =
+        StepAutoControl(isp, previous, mostlyClipped, true, false);
+    EXPECT_LT(fromBright.exposure, previous.exposure);
 }
 
 // ---------------------------------------------------------------------------

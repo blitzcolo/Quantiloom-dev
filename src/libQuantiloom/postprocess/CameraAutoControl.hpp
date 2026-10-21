@@ -9,9 +9,12 @@
  * the feedback; CaptureReprocess and the commitState=false path never call it,
  * so a same-tick reprocess cannot move the loop.
  *
- * AE drives the mean of the UNSATURATED display-domain scalar (the photon
- * chain's well fraction, exactly what camera_stats.comp.hlsl reports in
- * ISP_STAT_MEAN) toward targetLuminance. Exposure is adjusted first, clamped
+ * AE drives a metered mean toward targetLuminance: the mean of the
+ * UNSATURATED display-domain scalar (the photon chain's well fraction,
+ * exactly what camera_stats.comp.hlsl reports in ISP_STAT_MEAN) with each
+ * clipped pixel counted at full scale, 1.0. With nothing clipped that is the
+ * unsaturated mean itself; with everything clipped it is 1.0, so a white
+ * frame always stops the loop down. Exposure is adjusted first, clamped
  * to [minExposureSeconds, maxExposureSeconds]; only the residual the exposure
  * rail cannot absorb moves analogGain, clamped to [1, maxGain]. A first-order
  * IIR with fraction `smoothing` bounds the per-acquisition step.
@@ -48,8 +51,9 @@ struct AutoControlState {
 
 // enableAe=false leaves exposure and analogGain at `previous`;
 // enableAwb=false leaves whiteBalance at `previous`. A non-finite or
-// non-positive measured mean is "no information": the corresponding rail
-// holds its previous value rather than extrapolating toward infinity.
+// non-positive metered mean -- no pixel above black and none clipped -- is
+// "no information": the corresponding rail holds its previous value rather
+// than extrapolating toward infinity.
 [[nodiscard]] AutoControlState StepAutoControl(const IspConfig& isp,
                                                const AutoControlState& previous,
                                                const AutoControlInput& input,

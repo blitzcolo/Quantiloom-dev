@@ -178,8 +178,9 @@ struct HsvConfig {
 // so AE has no physical meaning there and the whole block is treated as off.
 // Fields are appended only; never reorder (public header).
 struct AutoControlConfig {
-    // Target mean of the unsaturated display-domain scalar (well fraction for
-    // a photon detector). The classic 18% grey-card value.
+    // Target metered mean of the display-domain scalar (well fraction for a
+    // photon detector): the unsaturated pixels' mean with each clipped pixel
+    // counted at full scale. The classic 18% grey-card value.
     f64 targetLuminance = 0.18;
     // First-order IIR smoothing fraction in [0, 1]: the fraction of the
     // computed correction applied per acquisition. 1.0 disables smoothing.

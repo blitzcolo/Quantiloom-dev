@@ -1208,6 +1208,52 @@ TEST_F(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisitio
     EXPECT_EQ(after.epoch, before.epoch);
 }
 
+// AE/AWB steps once per committed acquisition, and a clock that never moves
+// used to commit exactly one: the loop took a single step and froze, so a
+// preset's manual exposure stayed on screen however wrong it was. On a still
+// clock the viewport now commits a fresh acquisition per frame until the loop
+// settles, then converges the last one; the settling frames are not samples.
+TEST_F(CameraSchedulerGpuTest, AutoExposureSettlesOnAStillClock) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+    ApplyScene();
+    auto config = CameraConfigFor(kSensorSize, kSensorSize);
+    config.isp.autoExposure = true;
+    config.isp.autoControl.smoothing = 1.0;
+    config.readout.exposureSeconds = config.isp.autoControl.maxExposureSeconds;
+    ASSERT_TRUE(context->SetCameraConfig(config).has_value());
+
+    DrawFrame();
+    const auto first = context->GetCameraHistoryStatus();
+    ASSERT_EQ(first.acquisitionIndex, 0u);
+    const u32 samplesAtFirst = context->GetAccumulatedSamples();
+
+    constexpr int kMaxFrames = 32;
+    u64 index = first.acquisitionIndex;
+    int frame = 0;
+    for (; frame < kMaxFrames; ++frame) {
+        DrawFrame();
+        const u64 now = context->GetCameraHistoryStatus().acquisitionIndex;
+        if (now == index) break;
+        index = now;
+    }
+    EXPECT_GT(index, 0u) << "a still clock never let the AE loop take a second step";
+    EXPECT_LT(frame, kMaxFrames) << "the AE loop never settled on a static scene";
+
+    const auto settled = context->GetCameraHistoryStatus();
+    EXPECT_EQ(settled.frameTimeSeconds, first.frameTimeSeconds);
+    EXPECT_EQ(settled.epoch, first.epoch);
+    EXPECT_NE(settled.nextExposureSeconds * settled.nextAnalogGain,
+              config.readout.exposureSeconds * config.readout.analogGain)
+        << "the loop settled without ever moving the authored operating point";
+    // Only the frame that found the loop settled was a sample.
+    EXPECT_EQ(context->GetAccumulatedSamples(), samplesAtFirst + 1u);
+
+    DrawFrame();
+    DrawFrame();
+    EXPECT_EQ(context->GetCameraHistoryStatus().acquisitionIndex, settled.acquisitionIndex);
+    EXPECT_EQ(context->GetAccumulatedSamples(), samplesAtFirst + 3u);
+}
+
 TEST_F(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();

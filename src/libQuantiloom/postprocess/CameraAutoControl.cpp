@@ -21,11 +21,29 @@ AutoControlState StepAutoControl(const IspConfig& isp,
     AutoControlState next = previous;
 
     if (enableAe) {
-        // Total optical scaling needed to land the unsaturated mean on the
+        // Total optical scaling needed to land the metered mean on the
         // target. The ratio is multiplicative: exposure * gain * mean ~ target.
+        //
+        // The metered mean counts a clipped pixel at full scale. The
+        // unsaturated mean alone is the right measurement while clipping is
+        // incidental -- a glint, the sun disc -- and the wrong one once it is
+        // not: with most of the frame clipped, the pixels left are the
+        // darkest, their mean is low, and the loop opened up, clipping more.
+        // With all of it clipped there was no unsaturated pixel at all, the
+        // mean read as no information, and the loop held a white frame
+        // forever -- every visible preset in sunlight. Full scale is a lower
+        // bound on what a clipped pixel saw, so the loop now always stops
+        // down from a clipped frame, and with nothing clipped it is the
+        // unsaturated mean exactly as before.
+        const f64 clipped = std::isfinite(input.saturatedFraction)
+                                ? std::clamp(input.saturatedFraction, 0.0, 1.0)
+                                : 0.0;
+        const f64 unsaturated =
+            std::isfinite(input.lumaMean) ? std::max(input.lumaMean, 0.0) : 0.0;
+        const f64 metered = (1.0 - clipped) * unsaturated + clipped;
         f64 ratio = 1.0;
-        if (std::isfinite(input.lumaMean) && input.lumaMean > 1e-12)
-            ratio = config.targetLuminance / input.lumaMean;
+        if (metered > 1e-12)
+            ratio = config.targetLuminance / metered;
         if (std::isfinite(ratio) && ratio > 0.0) {
             // Exposure rail first: try to absorb the whole correction with
             // exposure alone, clamped to its range.

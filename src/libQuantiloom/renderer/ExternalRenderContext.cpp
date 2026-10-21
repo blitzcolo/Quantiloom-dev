@@ -427,6 +427,9 @@ struct ExternalRenderContext::Impl {
         u64 historyEpoch = 0;
         bool hasCommittedAcquisition = false;
         f64 lastCommittedAcquisitionTime = 0.0;
+        // The clock as the previous RenderFrame found it; equal to the
+        // current clock when nothing moved it in between.
+        f64 lastStepTimeSeconds = std::numeric_limits<f64>::quiet_NaN();
     };
     CameraScheduler cameraScheduler;
 
@@ -457,6 +460,13 @@ struct ExternalRenderContext::Impl {
     u64 cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
     u64 cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
     bool cameraAutoThermalNoted = false;
+    // Whether the loop has settled: its last step had a measurement to act
+    // on and moved neither exposure x gain nor any white-balance gain by more
+    // than 1 %. Until it has, a viewport whose clock stands still commits a
+    // fresh acquisition per frame (StepCameraAcquisition), and
+    // `cameraAutoSettleFrame` marks the frame that did.
+    bool cameraAutoSettled = false;
+    bool cameraAutoSettleFrame = false;
 
     // Temporal stratification state. `cameraStratumSampleCounts` carries
     // each layer's running sample count across same-tick re-records so a
@@ -776,7 +786,14 @@ struct ExternalRenderContext::Impl {
     /// pending history reset (which records nothing). Returns true when a new
     /// acquisition was committed.
     Result<bool, String> StepCameraAcquisition(VkCommandBuffer cmd);
-    Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd);
+    /// How many paths one record traces. An explicit acquisition (the
+    /// Queue/Record/Complete facade) is a finished measurement: `spp` paths
+    /// split across the time strata. A viewport frame is one step of a
+    /// progressive measurement: one path per stratum, so the frame costs what
+    /// a viewport frame costs and the host's sample count -- one per frame --
+    /// is the number of paths each stratum holds.
+    enum class CameraSampleBudget { Acquisition, ViewportFrame };
+    Result<void, String> RecordCameraMeasurement(VkCommandBuffer cmd, CameraSampleBudget budget);
     Result<void, String> RecordCameraBaseline(VkCommandBuffer cmd);
     Result<CameraData, String>
     CameraDataForCapture(SpectralMode mode, f64 wavelengthNm,
@@ -793,6 +810,8 @@ struct ExternalRenderContext::Impl {
     [[nodiscard]] camera::CameraConfig EffectiveCameraConfig() const;
     void MaybeRunCameraAutoControl();
     void RunCameraAutoControl();
+    /// A photon detector with AE or AWB on: the loop has something to do.
+    [[nodiscard]] bool CameraAutoControlActive() const;
     /// Record the display-half reprocess (demosaic -> color -> display ->
     /// HSV) over the last acquisition on `cmd`. No trace, no statistics, no
     /// state advance; see ReprocessCameraDisplay.
@@ -1999,6 +2018,12 @@ void ExternalRenderContext::RenderFrame(
                 if (auto stepped = m_impl->StepCameraAcquisition(cmd); !stepped) {
                     QL_LOG_WARN("Camera scheduler: {}", stepped.error());
                 }
+                // A settling frame restarted the measurement at a new
+                // acquisition. Counting it would credit paths the displayed
+                // acquisition does not hold, and let a host that stops at
+                // its target stop before the AE/AWB loop has settled.
+                if (m_impl->cameraAutoSettleFrame)
+                    continue;
             } else {
                 // Execute ray tracing (writes to internal outputImage in GENERAL
                 // layout). Timestamps bracket the trace alone -- not CLAHE or the
@@ -4189,6 +4214,8 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(const camera::Camera
     // A new configuration restarts the AE/AWB loop from its authored manual
     // values; the first acquisition under it is fresh state.
     m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoSettled = false;
+    m_impl->cameraAutoSettleFrame = false;
     m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
     m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
     m_impl->cameraHostState = camera::CaptureState{};
@@ -4337,7 +4364,7 @@ Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(VkComm
         return Result<void, String>::Err("no camera acquisition is queued");
     if (auto moved = SetTimelineTime(m_impl->cameraAcquisitionTimeSeconds); !moved)
         return moved;
-    return m_impl->RecordCameraMeasurement(cmd);
+    return m_impl->RecordCameraMeasurement(cmd, Impl::CameraSampleBudget::Acquisition);
 }
 
 Result<void, String> ExternalRenderContext::CompleteQueuedCameraAcquisition() {
@@ -4378,6 +4405,7 @@ Result<void, String> ExternalRenderContext::ResetCameraHistory() {
     // The AE/AWB loop restarts from the authored manual values; the zeroed
     // statistics buffer is a valid (empty) measurement, so the loop may run.
     m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoSettled = false;
     m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
     m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
     m_impl->cameraHostState = camera::CaptureState{};
@@ -4459,6 +4487,7 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
     // consuming the restored statistics buffer, and the effective config is
     // pushed to the device again on the next record.
     m_impl->cameraAutoControlDue = true;
+    m_impl->cameraAutoSettled = false;
     m_impl->cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
     m_impl->cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
 
@@ -5449,6 +5478,7 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         // next epoch starts from the authored manual values. The zeroed
         // statistics buffer is a valid (empty) measurement.
         cameraAutoControlDue = true;
+        cameraAutoSettled = false;
         cameraAutoLastAcquisition = std::numeric_limits<u64>::max();
         cameraAutoAppliedAcquisition = std::numeric_limits<u64>::max();
         cameraHostState = camera::CaptureState{};
@@ -5456,18 +5486,37 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
     }
 
     const f64 now = timeline.Current_s();
-    if (now + 1e-12 >= s.nextAcquisitionTimeSeconds) {
+    const bool clockStill = now == s.lastStepTimeSeconds;
+    s.lastStepTimeSeconds = now;
+    cameraAutoSettleFrame = false;
+    const bool slotReached = now + 1e-12 >= s.nextAcquisitionTimeSeconds;
+    // AE/AWB steps once per committed acquisition, and acquisitions are
+    // committed as the clock reaches frame-period slots. A clock that stands
+    // still -- paused, or a scene with no timeline at all -- reaches none
+    // after the first, so the loop took one step and stopped wherever that
+    // left it: a preset's manual exposure, tens of times too long for a
+    // sunlit scene, held a white frame for good. A still clock is a camera
+    // pointed at a frozen scene, and that camera keeps taking frames; so
+    // until the loop settles each frame commits a fresh acquisition at the
+    // same instant, and once it has, redraws go back to converging the last.
+    const bool settling = !slotReached && clockStill && s.hasCommittedAcquisition &&
+                          CameraAutoControlActive() && !cameraAutoSettled;
+    if (slotReached || settling) {
         // The clock reached the next scheduled slot: pose the scene at the
-        // slot and commit one acquisition there.
-        const f64 slot = s.nextAcquisitionTimeSeconds;
-        if (auto moved = owner->SetTimelineTime(slot); !moved) {
-            return Result<bool, String>(typename Result<bool, String>::Err(moved.error()));
+        // slot and commit one acquisition there. A settling acquisition
+        // lands where the clock already stands.
+        const f64 slot = slotReached ? s.nextAcquisitionTimeSeconds : now;
+        if (slotReached) {
+            if (auto moved = owner->SetTimelineTime(slot); !moved) {
+                return Result<bool, String>(typename Result<bool, String>::Err(moved.error()));
+            }
         }
         cameraAcquisitionIndex = s.nextAcquisitionIndex;
         cameraAcquisitionTimeSeconds = slot;
         cameraCapturePending = true;
         cameraCaptureRecorded = false;
-        if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
+        if (auto recorded = RecordCameraMeasurement(cmd, CameraSampleBudget::ViewportFrame);
+            !recorded) {
             cameraCapturePending = false;
             return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
         }
@@ -5477,9 +5526,11 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         // The committed tick's statistics wait on the device for the loop.
         cameraAutoControlDue = true;
         s.nextAcquisitionIndex += 1;
-        s.nextAcquisitionTimeSeconds = slot + s.framePeriodSeconds;
+        if (slotReached)
+            s.nextAcquisitionTimeSeconds = slot + s.framePeriodSeconds;
         s.hasCommittedAcquisition = true;
         s.lastCommittedAcquisitionTime = slot;
+        cameraAutoSettleFrame = settling;
         return Result<bool, String>(true);
     }
 
@@ -5489,7 +5540,8 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         // is wherever the host left the clock.
         cameraCapturePending = true;
         cameraCaptureRecorded = false;
-        if (auto recorded = RecordCameraMeasurement(cmd); !recorded) {
+        if (auto recorded = RecordCameraMeasurement(cmd, CameraSampleBudget::ViewportFrame);
+            !recorded) {
             cameraCapturePending = false;
             return Result<bool, String>(typename Result<bool, String>::Err(recorded.error()));
         }
@@ -5512,6 +5564,11 @@ camera::CameraConfig ExternalRenderContext::Impl::EffectiveCameraConfig() const 
     if (isp.autoWhiteBalance && !fresh)
         effective.isp.whiteBalance = cameraHostState.nextWhiteBalance;
     return effective;
+}
+
+bool ExternalRenderContext::Impl::CameraAutoControlActive() const {
+    return cameraConfig.device.detector == camera::DetectorKind::Photon &&
+           (cameraConfig.isp.autoExposure || cameraConfig.isp.autoWhiteBalance);
 }
 
 void ExternalRenderContext::Impl::MaybeRunCameraAutoControl() {
@@ -5537,11 +5594,14 @@ void ExternalRenderContext::Impl::RunCameraAutoControl() {
             QL_LOG_WARN("camera auto_exposure/auto_white_balance ignored: the thermal "
                         "detector responds to absorbed power, not scene luminance");
         }
+        cameraAutoSettled = true;
         return;
     }
     const auto stats = cameraGpuPipeline->ReadIspStats();
     if (!stats) {
         QL_LOG_WARN("camera auto control cannot read statistics: {}", stats.error());
+        // Nothing to steer by: stop committing acquisitions to settle on.
+        cameraAutoSettled = true;
         return;
     }
     const auto& measured = stats.value();
@@ -5564,6 +5624,17 @@ void ExternalRenderContext::Impl::RunCameraAutoControl() {
                                     : 0.0;
     const camera::AutoControlState next =
         camera::StepAutoControl(isp, previous, input, isp.autoExposure, isp.autoWhiteBalance);
+    // Settled once a step that had pixels to measure moves nothing by more
+    // than 1 %. The IIR closes a fifth of the remaining error per step, so
+    // that leaves the operating point within about 5 % of its target.
+    static constexpr f64 kSettleTolerance = 0.01;
+    const auto moved = [](const f64 from, const f64 to) {
+        return !(std::abs(to - from) <= kSettleTolerance * std::abs(from));
+    };
+    bool moving = moved(previous.exposure * previous.analogGain, next.exposure * next.analogGain);
+    for (u32 c = 0; c < 3u; ++c)
+        moving = moving || moved(previous.whiteBalance[c], next.whiteBalance[c]);
+    cameraAutoSettled = total > 0.0 && !moving;
     cameraHostState.nextExposureSeconds = next.exposure;
     cameraHostState.nextAnalogGain = next.analogGain;
     cameraHostState.nextWhiteBalance = next.whiteBalance;
@@ -5577,7 +5648,9 @@ ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
     return cameraGpuPipeline->RecordDisplayReprocess(cmd, EffectiveCameraConfig());
 }
 
-Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd) {
+Result<void, String>
+ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
+                                                     const CameraSampleBudget budget) {
     if (!cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
     // Deferred host writes land first in this submission; anything enqueued
@@ -5622,9 +5695,15 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(VkComm
     // their mean and draws noise exactly once after the loop.
     // CPU wavelengthSamples controls deterministic quadrature refinement.
     // GPU preview draws one response-distributed wavelength per path, so its
-    // convergence knob is the viewport SPP. Reusing the CPU default (32) here
-    // would launch 32 full 1080p traces for one preview acquisition.
-    const u32 spectralSamples = fastRgb ? 1u : std::max(spp, 1u);
+    // convergence knob is the SPP. Reusing the CPU default (32) here would
+    // launch 32 full 1080p traces for one preview acquisition.
+    //
+    // In the viewport the SPP is reached across frames, not inside one: the
+    // host counts one sample per frame and stops at the target, so a frame
+    // that traced the whole target cost SPP traces and the render SPP^2 --
+    // seconds per frame at 128, with the GUI thread blocked on each.
+    const bool viewportFrame = budget == CameraSampleBudget::ViewportFrame;
+    u32 spectralSamples = (fastRgb || viewportFrame) ? 1u : std::max(spp, 1u);
 
     // Temporal stratification: cut the exposure window into T strata and
     // trace each batch of samples at its own instant, the scene posed by the
@@ -5639,7 +5718,13 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(VkComm
         if (anythingMoves && rendercore::FusionOpticsActive(fusionTransport))
             return Result<void, String>::Err(
                 "fusion optical preview requires a frozen scene and camera");
-        strataCount = anythingMoves ? std::min<u32>(requested, spectralSamples) : 1u;
+        if (viewportFrame) {
+            // One path per stratum per frame: every layer advances together.
+            strataCount = anythingMoves ? requested : 1u;
+            spectralSamples = strataCount;
+        } else {
+            strataCount = anythingMoves ? std::min<u32>(requested, spectralSamples) : 1u;
+        }
         if (cameraStratumRecordedAcquisition != cameraAcquisitionIndex) {
             cameraStratumSampleCounts.fill(0);
             cameraStratumRecordedAcquisition = cameraAcquisitionIndex;
@@ -5734,8 +5819,12 @@ Result<void, String> ExternalRenderContext::Impl::RecordCameraMeasurement(VkComm
         const u32 running = cameraStratumSampleCounts[stratum];
         for (u32 sample = 0; sample < stratumSamples; ++sample) {
             const u32 sampleIndex = running + sample;
+            // The total is what turns sub-pixel jitter on; a viewport frame
+            // traces one path of an SPP-long accumulation, as RenderFrame's
+            // visibility trace does.
             pipeline->SetSamplingParams(static_cast<u32>(cameraAcquisitionIndex), sampleIndex,
-                                        stratumSamples, randomSeed ^ (sampleIndex * 0x9e3779b9u),
+                                        viewportFrame ? std::max(spp, 1u) : stratumSamples,
+                                        randomSeed ^ (sampleIndex * 0x9e3779b9u),
                                         effectiveSeed);
             pipeline->TraceRays(cmd, physicalW, physicalH);
             if (sample + 1u < stratumSamples || stratum + 1u < strataCount) {
