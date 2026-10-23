@@ -350,7 +350,16 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
 
 /// Read a forcing CSV. Returns an empty vector and logs when it cannot be
 /// read, which the caller treats as constant forcing.
-[[nodiscard]] Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path);
+///
+/// @param absentRelativeHumidity  what a row that stops before the eighth
+///        column gets: the run's own humidity ([atmosphere] relative_humidity,
+///        ThermalConfig::relativeHumidity), since a file that does not say is
+///        not saying the air is at 50%. The diffuse column has no such
+///        fallback and stays zero: [thermal] diffuse_irradiance_w_m2 is a
+///        constant-forcing number, and carried into a day it would light the
+///        night.
+[[nodiscard]] Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(
+    const String& path, f64 absentRelativeHumidity = ThermalForcing{}.relativeHumidity);
 
 /// The sun visibility every element had at one time, on the same two-column
 /// interpolation the solver's own steps use. Falls back to the exchange's

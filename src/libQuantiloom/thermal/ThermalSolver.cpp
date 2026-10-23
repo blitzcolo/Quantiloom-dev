@@ -179,7 +179,8 @@ Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
     return visibility;
 }
 
-Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
+Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path,
+                                                      const f64 absentRelativeHumidity) {
     Vector<std::pair<f64, ThermalForcing>> series;
     if (path.empty()) return series;
 
@@ -206,6 +207,7 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
         }
 
         ThermalForcing forcing;
+        forcing.relativeHumidity = absentRelativeHumidity;
         f64 azimuth_deg = 0.0;
         f64 elevation_deg = 90.0;
         fields >> forcing.airTemperature_K >> forcing.sunIrradiance_W_m2 >> azimuth_deg >>
@@ -213,7 +215,7 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path) {
 
         // Diffuse irradiance and humidity are optional trailing columns: a
         // file written before they existed keeps its meaning, with no diffuse
-        // light and average humidity. Read through locals so a row that stops
+        // light and the run's own humidity. Read through locals so a row that stops
         // early leaves the defaults alone rather than being handed whatever a
         // failed extraction wrote.
         f64 diffuse_W_m2 = 0.0;
@@ -443,7 +445,7 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
         }
     }
 
-    impl.forcingSeries = LoadForcingCsv(config.forcingFile);
+    impl.forcingSeries = LoadForcingCsv(config.forcingFile, config.relativeHumidity);
 
     impl.constantForcing = {};
     impl.constantForcing.airTemperature_K = config.airTemperature_K;

@@ -172,6 +172,31 @@ TEST(ThermalConvectionForcing, TheNinthCsvColumnIsOptional) {
     std::filesystem::remove(nine);
 }
 
+TEST(ThermalConvectionForcing, AnAbsentHumidityColumnIsTheRunsOwn) {
+    // A six-column file says nothing about the air's humidity, and saying
+    // nothing is not saying 50%: the run's own [atmosphere] humidity is what
+    // the latent term should see. A column that IS there still wins.
+    const auto six = WriteCsv("ql_forcing_six.csv",
+                              "# t air dni az el sky\n"
+                              "0.0 295.0 0.0 180.0 0.0 265.0\n");
+    const auto eight = WriteCsv("ql_forcing_eight_rh.csv",
+                                "# t air dni az el sky diff rh\n"
+                                "0.0 295.0 0.0 180.0 0.0 265.0 0.0 20.0\n");
+
+    const auto withoutColumn = LoadForcingCsv(six.string(), 72.0);
+    const auto withColumn = LoadForcingCsv(eight.string(), 72.0);
+    ASSERT_EQ(withoutColumn.size(), 1u);
+    ASSERT_EQ(withColumn.size(), 1u);
+
+    EXPECT_DOUBLE_EQ(withoutColumn[0].second.relativeHumidity, 72.0);
+    EXPECT_DOUBLE_EQ(withColumn[0].second.relativeHumidity, 20.0);
+    // The diffuse column has no run-wide stand-in: absent is no diffuse light.
+    EXPECT_DOUBLE_EQ(withoutColumn[0].second.diffuseIrradiance_W_m2, 0.0);
+
+    std::filesystem::remove(six);
+    std::filesystem::remove(eight);
+}
+
 TEST(ThermalConvectionForcing, InterpolationCarriesEveryField) {
     // SampleForcing interpolates field by field, which is the pattern that
     // silently drops whatever was added last. It dropped the convective
