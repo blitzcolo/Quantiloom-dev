@@ -451,7 +451,7 @@ float ThermalSunVisibilityCorrectionK(uint element, float3 hitPos, inout Payload
 
 float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo,
                              uint primitiveIndex, float2 uv, float3 hitPos,
-                             inout Payload payload) {
+                             inout Payload payload, bool applySunCorrection) {
     if (geoInfo.thermalElementBase != 0xFFFFFFFFu) {
         const uint element = geoInfo.thermalElementBase + primitiveIndex;
         const float solved = thermalTemperatures[element];
@@ -461,8 +461,14 @@ float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo
             // one buffer read on a path that already makes several.
             const float step = thermalParameterTangent[0];
             const float whatIf = step * thermalParameterTangent[1 + element];
+            // The sun correction is the expensive part -- one shadow ray per
+            // carried column. A caller whose band cannot see thermal
+            // emission anyway passes false: to a term multiplied by zero,
+            // the uncorrected temperature is the same number.
             return solved + whatIf +
-                   ThermalSunVisibilityCorrectionK(element, hitPos, payload);
+                   (applySunCorrection
+                       ? ThermalSunVisibilityCorrectionK(element, hitPos, payload)
+                       : 0.0);
         }
     }
 
@@ -1512,7 +1518,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         if (fusionTransport[1 + InstanceIndex()].mode != 0) {
             const float3 hit = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
             const float temperature =
-                GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv, hit, payload);
+                GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv, hit, payload,
+                                       true);
             if (TraceFusionInterface(payload, material, 1 + InstanceIndex(), hit,
                                      worldGeometricNormal, hitBackFace, temperature))
                 return;
@@ -2820,14 +2827,30 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // ray agree without three implementations.
         const float fluorM = FluorescenceExcitationWithLight(
             material, NdotL, shadowFactor, visLight, visNeeScaleFluor, payload);
-        const float T_surface_vis = GetSurfaceTemperatureK(
+        // Read the temperature without the sun-correction shadow rays and
+        // ask whether this band can see thermal emission at all; only a hit
+        // that can does the second, corrected read. In the visible the answer
+        // is no for anything colder than ~455 K (the Planck radiance at the
+        // 780 nm edge crosses the negligible threshold there), which is every
+        // ordinary scene -- the correction rays were being traced on each of
+        // those hits and multiplied by zero.
+        float T_surface_vis = GetSurfaceTemperatureK(
             material, geoInfo, PrimitiveIndex(), uv,
-            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload,
+            false);
         // One Planck evaluation at the band edge decides whether surface
         // emission can matter anywhere in the sweep at all; a ray carrying a
         // single wavelength asks at that wavelength instead.
         const bool thermalNegligible = ThermalEmissionNegligible(
             T_surface_vis, heroRay ? heroLambdaAbs : LAMBDA_MAX_VIS);
+        if (!thermalNegligible) {
+            // Emission can matter -- now pay for the correction that sharpens
+            // the temperature the Planck term reads.
+            T_surface_vis = GetSurfaceTemperatureK(
+                material, geoInfo, PrimitiveIndex(), uv,
+                WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload,
+                true);
+        }
 
         // Loop over wavelengths
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
@@ -3519,7 +3542,8 @@ void main(inout Payload payload, in HitAttributes attribs) {
         {
             const float T_single = GetSurfaceTemperatureK(
                 material, geoInfo, PrimitiveIndex(), uv,
-                WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+                WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload,
+                true);
 
             // Kirchhoff, against the same total reflectance the reflected
             // terms carry -- kD_scalar * albedo, the split-sum specular
@@ -3626,7 +3650,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Sample surface temperature from texture or use scalar value
         float T_surface_swir = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                       WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
-                                                      payload);
+                                                      payload, true);
         const float fluorM_swir = SampleFluorescenceExcitation(
             material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
             normal, NdotL, shadowFactor, payload);
@@ -3945,7 +3969,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // material declares, in the band it declares it for.
         const float T_surface_nir = GetSurfaceTemperatureK(
             material, geoInfo, PrimitiveIndex(), uv,
-            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
+            WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload, true);
         // One Planck evaluation at the band edge (or the carried wavelength
         // for a single-ray hit) decides whether emission can matter anywhere
         // in this sweep.
@@ -4222,7 +4246,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Sample surface temperature from texture or use scalar value
         float T_surface = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                  WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
-                                                 payload);
+                                                 payload, true);
         const float fluorM_ir = SampleFluorescenceExcitation(
             material, WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
             normal, NdotL, shadowFactor, payload);
@@ -4747,7 +4771,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // shows its field here instead of the scalar it overrides.
                 float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                       WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
-                                                      payload);
+                                                      payload, true);
                 if (temp_K <= 0.0) temp_K = 300.0;  // Default to room temp
                 debug_output = TemperatureToColor(temp_K, 200.0, 500.0);
                 break;
@@ -4804,7 +4828,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // Thermal emission component (grayscale, scaled)
                 float temp_K = GetSurfaceTemperatureK(material, geoInfo, PrimitiveIndex(), uv,
                                                       WorldRayOrigin() + WorldRayDirection() * RayTCurrent(),
-                                                      payload);
+                                                      payload, true);
                 if (temp_K <= 0.0) temp_K = 300.0;
                 float emission = GetEffectiveIREmissivity(material, metallic, roughness) * IRPlanckRadiance(temp_K, 10000.0);
                 emission = emission / (1.0 + emission);  // Tone map
