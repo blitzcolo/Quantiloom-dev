@@ -351,9 +351,9 @@ struct GpuCameraPipeline::Impl {
     std::unique_ptr<GpuBuffer> configBuffer, nucGainBuffer, nucOffsetBuffer;
     std::unique_ptr<GpuBuffer> layerCameraBuffer;   // binding 10, per-stratum frames
     std::unique_ptr<GpuBuffer> dynamicCounterBuffer; // binding 11, 4 x u32
-    std::unique_ptr<GpuBuffer> ispConfigBuffer;     // binding 12, 8 x float4
+    std::unique_ptr<GpuBuffer> ispConfigBuffer;     // binding 12, 9 x float4
     std::unique_ptr<GpuBuffer> defectPixelsBuffer;  // binding 13, uint2 array
-    std::unique_ptr<GpuBuffer> ispStatsBuffer;      // binding 14, 264 x u32
+    std::unique_ptr<GpuBuffer> ispStatsBuffer;      // binding 14, 272 x u32
     // Readback staging, allocated once with the pipeline instead of per
     // call: both readbacks run between frames and reuse the same copy.
     std::unique_ptr<GpuBuffer> counterStaging;
