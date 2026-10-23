@@ -9,7 +9,7 @@
  *
  * LUT format:
  * - Size: 512×512 (NdotV × roughness grid)
- * - Channels: RG (2 channels, f32 or f16)
+ * - Channels: RG (2 channels, f32)
  *   - R channel: Scale term for F·G integral
  *   - G channel: Bias term for F·G integral
  *
@@ -62,7 +62,6 @@ public:
     struct Config {
         u32 resolution = 512;          // LUT texture size (NxN)
         u32 sampleCount = 1024;        // Monte Carlo samples per pixel
-        bool highPrecision = false;    // Use float32 (true) vs float16 (false)
     };
 
     // ========================================================================
