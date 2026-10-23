@@ -1128,9 +1128,27 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.forcingFile =
             ResolveConfigPath(config.GetString("thermal.forcing_file", ""), options.baseDir);
 
-        // A top-k of zero leaves every row of the exchange matrix summing to
-        // less than one, so a surface cools without bound. Not a policy
-        // question: nothing downstream can run from it.
+        // What the stepper and the exchange precompute cannot be handed. None
+        // of these is a policy question: a zero step never advances, a one-node
+        // slab has no interior to conduct through, a zero stride never
+        // checkpoints, and a top-k of zero leaves every row of the exchange
+        // matrix summing to less than one, so a surface cools without bound.
+        if (!(out.thermal.timestep_s > 0.0) || !std::isfinite(out.thermal.timestep_s)) {
+            diag.Fatal("thermal.timestep_s",
+                       "thermal.timestep_s must be a positive number of seconds, but is " +
+                           std::to_string(out.thermal.timestep_s));
+        }
+        if (out.thermal.nodeCount < 2) {
+            diag.Fatal("thermal.layers",
+                       "thermal.layers must be at least 2, but is " +
+                           std::to_string(out.thermal.nodeCount));
+        }
+        if (!(out.thermal.checkpointStride_h > 0.0) ||
+            !std::isfinite(out.thermal.checkpointStride_h)) {
+            diag.Fatal("thermal.checkpoint_stride_h",
+                       "thermal.checkpoint_stride_h must be a positive number of hours, but is " +
+                           std::to_string(out.thermal.checkpointStride_h));
+        }
         if (out.thermal.exchangeTopK < 1) {
             diag.Fatal("thermal.exchange_top_k",
                        "thermal.exchange_top_k must be at least 1, but is " +

@@ -1944,9 +1944,12 @@ forcing_file = "beside.csv"
         << "the input beside it still resolves against the config";
 }
 
-TEST_F(ConfigResolveTest, AnExchangeTopKOfZeroIsRefused) {
+TEST_F(ConfigResolveTest, ThermalInputsTheSolverCannotRunWithAreRefused) {
     struct Case { const char* key; const char* value; };
     const Case cases[] = {
+        {"timestep_s", "0.0"},      {"timestep_s", "-60.0"},
+        {"layers", "1"},            {"layers", "0"},
+        {"checkpoint_stride_h", "0.0"},
         {"exchange_top_k", "0"},
     };
     for (const Case& c : cases) {
