@@ -86,7 +86,10 @@ public:
     /// the same unsaturated set. The per-channel sums and counts describe the
     /// unsaturated display-domain scalar per CFA/device channel, before white
     /// balance -- the AWB measurement. Blocks on the device: call between
-    /// frames.
+    /// frames. The statistics buffer also carries the Linear-AGC window and
+    /// the histogram the display pass consumes; both describe the PREVIOUS
+    /// acquisition (the window must exist before this frame's display pass
+    /// runs), while the fields above describe the acquisition just recorded.
     struct IspStats {
         f32 minValue = 0.0f;
         f32 maxValue = 0.0f;
