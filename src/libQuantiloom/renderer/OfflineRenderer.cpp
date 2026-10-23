@@ -578,6 +578,12 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     // gives different floats, so it cannot be judged by the byte-equality the
     // rest of this path is held to -- what it is actually for is the wait
     // while authoring a scene, where 165 s per material edit is the cost.
+    //
+    // The solved materials come first because the decision needs them: the
+    // session's Build falls back to the CPU for a run the GPU stepper cannot
+    // carry, and that has to be known here, or every key below would name a
+    // stepper that never ran.
+    thermalSolvedMaterials = thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
     thermal::IThermalStepper* stepper = nullptr;
     thermalStepperName = thermal::CpuCrankNicolsonStepper::kName;
     if (EnvFlagEnabled("QUANTILOOM_THERMAL_GPU_STEPPER")) {
@@ -587,8 +593,26 @@ void OfflineRenderer::Impl::BuildThermalSession() {
         } else {
             thermalGpuStepper = std::make_unique<rendercore::GpuThermalStepper>(context);
             if (thermalGpuStepper->IsValid()) {
-                stepper = thermalGpuStepper.get();
-                thermalStepperName = stepper->Name();
+                // Shell pairing is the one question the materials alone cannot
+                // answer; the mesh Build will make is asked only when some
+                // material is a shell, since that is the only way to have one.
+                const thermal::ThermalMeshOptions meshOptions = thermal::MeshOptionsFor(
+                    thermalSolvedMaterials, thermalConfig.lateralConduction);
+                const bool anyShell =
+                    std::any_of(meshOptions.shellMaterials.begin(),
+                                meshOptions.shellMaterials.end(), [](u8 s) { return s != 0; });
+                const u32 shellPairs =
+                    anyShell ? thermal::BuildThermalMesh(loadedScene, meshOptions).shellPairCount
+                             : 0u;
+                if (const char* refusal = thermal::ThermalStepperRefusal(
+                        *thermalGpuStepper, thermalConfig, thermalSolvedMaterials,
+                        shellPairs)) {
+                    QL_LOG_INFO("  Thermal stepper: CPU (the GPU stepper {})", refusal);
+                    thermalGpuStepper.reset();
+                } else {
+                    stepper = thermalGpuStepper.get();
+                    thermalStepperName = stepper->Name();
+                }
             } else {
                 thermalGpuStepper.reset();
                 QL_LOG_INFO("  Thermal stepper: CPU (the GPU stepper would not start)");
@@ -600,7 +624,6 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     const auto cacheSettings = thermal::ResolveThermalSolveCacheSettings();
     thermalCacheEligible = cacheSettings.enabled && thermalConfig.dumpElementsFile.empty();
     thermalCacheDir = cacheSettings.directory;
-    thermalSolvedMaterials = thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
     // Before BuildIlluminants uploads the textures: the CPU texels this reads are
     // still there now, as they are for the interactive preview. Taken here rather
     // than beside the precompute because the early cache lookup below needs it.

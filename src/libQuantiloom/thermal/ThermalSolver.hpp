@@ -302,6 +302,24 @@ private:
                                                            const ThermalConfig& config,
                                                            u32* namedCount = nullptr);
 
+/**
+ * @brief Why a stepper cannot run this solve, or nullptr when it can
+ *
+ * ThermalSolveSession::Build falls back to its own CPU stepper for any reason
+ * this names. Exposed so a host that keys something on the stepper's name --
+ * the offline renderer's solve cache -- can make the same decision before the
+ * build rather than label a CPU solve with the name of the stepper it
+ * offered.
+ *
+ * @param materials       the solved table, as BuildSolvedMaterials returns it
+ * @param shellPairCount  ThermalMesh::shellPairCount of the mesh built with
+ *                        MeshOptionsFor(materials, config.lateralConduction)
+ */
+[[nodiscard]] const char* ThermalStepperRefusal(const IThermalStepper& stepper,
+                                                const ThermalConfig& config,
+                                                const Vector<ThermalMaterial>& materials,
+                                                u32 shellPairCount);
+
 /// The one line the downstream gates parse out of a render's log. It lives here
 /// rather than at the end of RunThermalSolve so that a solve served from cache
 /// prints it identically -- a gate that reads nothing reports every render

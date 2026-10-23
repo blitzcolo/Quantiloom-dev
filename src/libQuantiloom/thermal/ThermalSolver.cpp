@@ -376,6 +376,40 @@ struct ThermalSolveSession::Impl {
 ThermalSolveSession::ThermalSolveSession() = default;
 ThermalSolveSession::~ThermalSolveSession() = default;
 
+const char* ThermalStepperRefusal(const IThermalStepper& stepper, const ThermalConfig& config,
+                                  const Vector<ThermalMaterial>& materials,
+                                  const u32 shellPairCount) {
+    // A stepper that does not evaluate the law this run asked for would step a
+    // different balance and say nothing about it. The fall back is to the one
+    // that does, and it changes the stepper's name, so the solve cache cannot
+    // serve the two for each other either.
+    if (stepper.Convection().model != config.convection.model) {
+        return "does not carry the requested convection law";
+    }
+    if (config.lateralConduction && !stepper.CarriesLateralConduction()) {
+        return "does not carry lateral conduction";
+    }
+    if (shellPairCount > 0 && !stepper.CarriesShells()) {
+        return "solves a shell as two independent slabs";
+    }
+    if (NeedsInteriorSources(materials) && !stepper.CarriesInteriorSources()) {
+        return "does not carry internal heat or an ambient interior";
+    }
+    // The two tangents are sized into the state by the Desc, not by the
+    // stepper, so one that does not integrate them hands them back at zero --
+    // a derivative, not an absence: a shading pass would trace every lagged
+    // shadow against no response and a what-if would predict that no slider
+    // moves anything. ThermalPreview's ChooseStepper asks the same two
+    // questions for the viewport.
+    if (config.sunCorrection && config.sunMemoryLags > 0 && !stepper.CarriesLagSensitivity()) {
+        return "does not carry the sun_memory_lags tangents";
+    }
+    if (!config.parameterSensitivities.empty() && !stepper.CarriesParameterSensitivity()) {
+        return "does not carry the parameter_sensitivities tangents";
+    }
+    return nullptr;
+}
+
 Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
     const Scene& scene, const ThermalConfig& config, ThermalGeometrySchedule schedule,
     IThermalStepper* stepper) {
@@ -503,50 +537,17 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
     impl.constantForcing.skyTemperature_K = config.skyTemperature_K;
     impl.constantForcing.relativeHumidity = config.relativeHumidity;
 
-    // The caller's stepper if it brought one, otherwise our own.
+    // The caller's stepper if it brought one, otherwise our own. A host that
+    // keys anything on the stepper's name asks ThermalStepperRefusal itself
+    // before getting here, so this fall back should find nothing to refuse.
     IThermalStepper* chosen = stepper;
-    if (chosen != nullptr && chosen->Convection().model != config.convection.model) {
-        // A stepper that does not evaluate the law this run asked for would
-        // step a different balance and say nothing about it. The fall back is
-        // to the one that does, and it changes the stepper's name, so the
-        // solve cache cannot serve the two for each other either.
-        QL_LOG_INFO("  Thermal stepper: {} does not carry the requested convection law; "
-                    "using {}", chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
-    }
-    if (chosen != nullptr && config.lateralConduction && !chosen->CarriesLateralConduction()) {
-        QL_LOG_INFO("  Thermal stepper: {} does not carry lateral conduction; using {}",
-                    chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
-    }
-    if (chosen != nullptr && impl.mesh.shellPairCount > 0 && !chosen->CarriesShells()) {
-        QL_LOG_INFO("  Thermal stepper: {} solves a shell as two independent slabs; "
-                    "using {}", chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
-    }
-    if (chosen != nullptr && NeedsInteriorSources(impl.materials) &&
-        !chosen->CarriesInteriorSources()) {
-        QL_LOG_INFO("  Thermal stepper: {} does not carry internal heat or an ambient "
-                    "interior; using {}", chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
-    }
-    // The two tangents are sized into the state by the Desc below, not by the
-    // stepper, so one that does not integrate them hands them back at zero --
-    // a derivative, not an absence: a shading pass would trace every lagged
-    // shadow against no response and a what-if would predict that no slider
-    // moves anything. ThermalPreview's ChooseStepper asks the same two
-    // questions for the viewport.
-    if (chosen != nullptr && config.sunCorrection && config.sunMemoryLags > 0 &&
-        !chosen->CarriesLagSensitivity()) {
-        QL_LOG_INFO("  Thermal stepper: {} does not carry the sun_memory_lags tangents; "
-                    "using {}", chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
-    }
-    if (chosen != nullptr && !config.parameterSensitivities.empty() &&
-        !chosen->CarriesParameterSensitivity()) {
-        QL_LOG_INFO("  Thermal stepper: {} does not carry the parameter_sensitivities "
-                    "tangents; using {}", chosen->Name(), impl.cpuStepper.Name());
-        chosen = nullptr;
+    if (chosen != nullptr) {
+        if (const char* refusal = ThermalStepperRefusal(*chosen, config, impl.materials,
+                                                        impl.mesh.shellPairCount)) {
+            QL_LOG_INFO("  Thermal stepper: {} {}; using {}", chosen->Name(), refusal,
+                        impl.cpuStepper.Name());
+            chosen = nullptr;
+        }
     }
     impl.cpuStepper.SetShellPartners(impl.mesh.shellPartner);
     impl.active = (chosen != nullptr) ? chosen : &impl.cpuStepper;
