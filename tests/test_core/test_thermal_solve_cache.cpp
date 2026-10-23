@@ -243,6 +243,29 @@ TEST_F(ThermalSolveCacheTest, StoreRefusesAnEmptySolve) {
     EXPECT_FALSE(std::filesystem::exists(Entry()));
 }
 
+TEST_F(ThermalSolveCacheTest, StoreRefusesANonFiniteSolve) {
+    // A diverged trajectory: well-formed arrays, a NaN inside one of them. The
+    // state clamp passes a NaN through, so this is reachable, and a stored one
+    // would be served to every later run with the same inputs.
+    const f32 nan = std::numeric_limits<f32>::quiet_NaN();
+
+    ThermalResult temperature = MakeResult();
+    temperature.surfaceTemperature_K[2] = nan;
+    EXPECT_FALSE(StoreThermalSolveCache(Entry("t.qltc"), kKeyA, temperature));
+    EXPECT_FALSE(std::filesystem::exists(Entry("t.qltc")));
+
+    ThermalResult tangent = MakeResult();
+    tangent.sunSensitivity_K[1] = std::numeric_limits<f32>::infinity();
+    EXPECT_FALSE(StoreThermalSolveCache(Entry("s.qltc"), kKeyA, tangent));
+
+    ThermalResult mean = MakeResult();
+    mean.meanTemperature_K = std::numeric_limits<f64>::quiet_NaN();
+    EXPECT_FALSE(StoreThermalSolveCache(Entry("m.qltc"), kKeyA, mean));
+
+    // And nothing is left behind, temporaries included.
+    EXPECT_TRUE(std::filesystem::is_empty(dir_));
+}
+
 TEST_F(ThermalSolveCacheTest, StoreCreatesMissingDirectories) {
     const auto nested = dir_ / "a" / "b" / "entry.qltc";
     EXPECT_TRUE(StoreThermalSolveCache(nested, kKeyA, MakeResult()));

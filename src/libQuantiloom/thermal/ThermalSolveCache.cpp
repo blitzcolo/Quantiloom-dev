@@ -130,6 +130,29 @@ void HashHeader(core::Sha256& hasher, const CacheHeader& header) {
     hasher.UpdateF64(header.meanTemperature_K);
 }
 
+/// Whether every number an entry carries is finite. The state clamp bounds a
+/// diverging temperature but passes a NaN straight through, and a field with
+/// one in it is a failed solve however well-formed its arrays are: stored, it
+/// would be served to every later run with the same inputs while the render
+/// exits 0. Checked on the way in and again on the way out -- the digest
+/// proves an entry is what was written, not that what was written was sane.
+bool AllFinite(const ThermalResult& result) {
+    const auto finite = [](const Vector<f32>& values) {
+        return std::all_of(values.begin(), values.end(),
+                           [](const f32 v) { return std::isfinite(v); });
+    };
+    const auto finiteDirection = [](const glm::vec3& d) {
+        return std::isfinite(d.x) && std::isfinite(d.y) && std::isfinite(d.z);
+    };
+    return finite(result.surfaceTemperature_K) && finite(result.sunSensitivity_K) &&
+           finite(result.sunVisibility) && finite(result.lagSensitivity_K) &&
+           finite(result.lagVisibility) &&
+           std::all_of(result.lagDirection.begin(), result.lagDirection.end(),
+                       finiteDirection) &&
+           finiteDirection(result.sunDirection) && std::isfinite(result.minTemperature_K) &&
+           std::isfinite(result.maxTemperature_K) && std::isfinite(result.meanTemperature_K);
+}
+
 String DigestEntry(const CacheHeader& header, const ThermalResult& result) {
     core::Sha256 hasher;
     HashHeader(hasher, header);
@@ -513,6 +536,11 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
         QL_LOG_WARN("  Thermal cache: {} failed its digest; solving instead", file.string());
         return std::nullopt;
     }
+    if (!AllFinite(result)) {
+        QL_LOG_WARN("  Thermal cache: {} holds a non-finite value; solving instead",
+                    file.string());
+        return std::nullopt;
+    }
     if (expectedMesh) {
         // The key and digest are public hashes, not authentication. A cache
         // mapping must equal the scene's mapping before the renderer uses it.
@@ -535,6 +563,11 @@ std::optional<ThermalResult> LoadThermalSolveCache(const std::filesystem::path& 
 bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex,
                             const ThermalResult& result) {
     if (keyHex.size() != kKeyHexLength || result.surfaceTemperature_K.empty()) {
+        return false;
+    }
+    if (!AllFinite(result)) {
+        QL_LOG_WARN("  Thermal cache: the solve produced a non-finite value; the entry is "
+                    "not kept");
         return false;
     }
 
