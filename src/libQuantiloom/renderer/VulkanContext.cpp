@@ -183,6 +183,18 @@ VulkanContext::~VulkanContext() {
         vkDeviceWaitIdle(m_device);
     }
 
+    // Immediate-submission state, lazily created by CommandHelper::ExecuteImmediate
+    if (m_device != VK_NULL_HANDLE) {
+        if (m_immediateFence != VK_NULL_HANDLE) {
+            vkDestroyFence(m_device, m_immediateFence, nullptr);
+            m_immediateFence = VK_NULL_HANDLE;
+        }
+        if (m_immediateCommandPool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(m_device, m_immediateCommandPool, nullptr);
+            m_immediateCommandPool = VK_NULL_HANDLE;
+        }
+    }
+
     // Destruction order: reverse of construction
     // VMA allocator must be destroyed BEFORE device (only if we own it)
     if (m_ownsAllocator && m_allocator != VK_NULL_HANDLE) {

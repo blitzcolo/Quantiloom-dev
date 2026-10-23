@@ -38,6 +38,7 @@
 struct VmaAllocator_T;
 typedef VmaAllocator_T* VmaAllocator;
 
+#include <mutex>
 #include <vector>
 
 // ============================================================================
@@ -194,6 +195,11 @@ public:
     [[nodiscard]] const DeviceCapabilities& GetCapabilities() const { return m_capabilities; }
 
 private:
+    // CommandHelper::ExecuteImmediate reuses one command pool + fence per
+    // context instead of creating and destroying them per call. Command pools
+    // are externally synchronized, so the mutex below serializes recording.
+    friend class CommandHelper;
+
     // ========================================================================
     // Initialization Steps
     // ========================================================================
@@ -243,6 +249,13 @@ private:
     DeviceCapabilities m_capabilities{};
 
     VmaAllocator m_allocator = VK_NULL_HANDLE;  // Last created, first destroyed
+
+    // Lazily created by CommandHelper::ExecuteImmediate on first use and
+    // destroyed with the device. Mutable because ExecuteImmediate takes a
+    // const context and creates them on its first call.
+    mutable VkCommandPool m_immediateCommandPool = VK_NULL_HANDLE;
+    mutable VkFence m_immediateFence = VK_NULL_HANDLE;
+    mutable std::mutex m_immediateSubmitMutex;
 
     // Debug messenger - CRITICAL: Do NOT wrap in #ifdef to avoid ODR violation!
     // Different translation units may have different QUANTILOOM_ENABLE_VALIDATION

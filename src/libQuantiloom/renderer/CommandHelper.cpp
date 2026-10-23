@@ -1,6 +1,8 @@
 #include "CommandHelper.hpp"
 #include "GpuBuffer.hpp"
 #include "core/Log.hpp"
+#include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <cstring>
 
@@ -16,73 +18,106 @@ void CommandHelper::ExecuteImmediate(
 {
     VkDevice device = context.GetDevice();
     VkQueue queue = context.GetGraphicsQueue();
-    const u32 queueFamily = context.GetGraphicsQueueFamily();
 
-    // Create temporary command pool
-    VkCommandPoolCreateInfo poolInfo{};
-    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-    poolInfo.queueFamilyIndex = queueFamily;
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;  // Short-lived buffers
+    // The pool and fence are shared per context and reused across calls.
+    // Both are externally synchronized, which the mutex provides; the
+    // serialization is not a regression, since the old vkQueueWaitIdle
+    // stalled on every submission on the queue, not just this one.
+    std::lock_guard<std::mutex> lock(context.m_immediateSubmitMutex);
 
-    VkCommandPool commandPool;
-    VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to create temporary command pool");
+    // Lazily create the shared pool and fence once per context
+    if (context.m_immediateCommandPool == VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;  // Short-lived buffers
+
+        VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr,
+                                              &context.m_immediateCommandPool);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create immediate command pool");
+        }
+    }
+    if (context.m_immediateFence == VK_NULL_HANDLE) {
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+
+        VkResult result = vkCreateFence(device, &fenceInfo, nullptr, &context.m_immediateFence);
+        if (result != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create immediate submission fence");
+        }
     }
 
-    // Allocate command buffer
+    // Allocate a one-shot command buffer from the shared pool. Buffers
+    // returned to a pool come back in the initial state, so no explicit
+    // reset is needed before re-recording.
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = commandPool;
+    allocInfo.commandPool = context.m_immediateCommandPool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer cmd;
-    result = vkAllocateCommandBuffers(device, &allocInfo, &cmd);
+    VkResult result = vkAllocateCommandBuffers(device, &allocInfo, &cmd);
     if (result != VK_SUCCESS) {
-        vkDestroyCommandPool(device, commandPool, nullptr);
         throw std::runtime_error("Failed to allocate command buffer");
     }
 
-    // Begin recording
+    auto freeCommandBuffer = [&]() {
+        vkFreeCommandBuffers(device, context.m_immediateCommandPool, 1, &cmd);
+    };
+
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    vkBeginCommandBuffer(cmd, &beginInfo);
+    result = vkBeginCommandBuffer(cmd, &beginInfo);
+    if (result != VK_SUCCESS) {
+        freeCommandBuffer();
+        throw std::runtime_error("Failed to begin immediate command buffer");
+    }
 
     // Execute user-provided recording function
     recordFunc(cmd);
 
-    // End recording
-    vkEndCommandBuffer(cmd);
+    result = vkEndCommandBuffer(cmd);
+    if (result != VK_SUCCESS) {
+        freeCommandBuffer();
+        throw std::runtime_error("Failed to end immediate command buffer");
+    }
 
-    // Submit and wait for completion
+    // The fence is reused across calls; make sure the previous submission on
+    // it has completed before signalling it again
+    constexpr u64 kWaitTimeoutNs = std::numeric_limits<u64>::max();
+    result = vkWaitForFences(device, 1, &context.m_immediateFence, VK_TRUE, kWaitTimeoutNs);
+    if (result != VK_SUCCESS) {
+        freeCommandBuffer();
+        throw std::runtime_error("Failed to wait for immediate fence (VkResult: " +
+                                 std::to_string(result) + ")");
+    }
+
+    // Submit and wait on this submission's fence (not the whole queue)
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    //QL_LOG_INFO("  [DEBUG CommandHelper] Submitting commands to GPU queue...");
-    result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+    result = vkQueueSubmit(queue, 1, &submitInfo, context.m_immediateFence);
     if (result != VK_SUCCESS) {
-        vkDestroyCommandPool(device, commandPool, nullptr);
+        freeCommandBuffer();
         QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueSubmit FAILED with VkResult: {}", static_cast<int>(result));
         throw std::runtime_error("Failed to submit command buffer (VkResult: " + std::to_string(result) + ")");
     }
-    //QL_LOG_INFO("  [DEBUG CommandHelper] Commands submitted successfully, waiting for GPU...");
 
     // Wait for completion (synchronous)
-    result = vkQueueWaitIdle(queue);
+    result = vkWaitForFences(device, 1, &context.m_immediateFence, VK_TRUE, kWaitTimeoutNs);
     if (result != VK_SUCCESS) {
-        vkDestroyCommandPool(device, commandPool, nullptr);
-        QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueWaitIdle FAILED with VkResult: {} (GPU CRASHED)", static_cast<int>(result));
-        throw std::runtime_error("Failed to wait for queue idle (VkResult: " + std::to_string(result) + ")");
+        freeCommandBuffer();
+        QL_LOG_ERROR("  [DEBUG CommandHelper] vkWaitForFences FAILED with VkResult: {} (GPU CRASHED)", static_cast<int>(result));
+        throw std::runtime_error("Failed to wait for immediate submission (VkResult: " + std::to_string(result) + ")");
     }
-    //QL_LOG_INFO("  [DEBUG CommandHelper] GPU execution completed successfully");
 
-    // Cleanup
-    vkDestroyCommandPool(device, commandPool, nullptr);
+    freeCommandBuffer();
 }
 
 // ============================================================================

@@ -16,7 +16,7 @@
  * - Texture uploads (staging buffer → GPU image)
  * - Render target readback (GPU → CPU for saving to disk)
  *
- * @note All functions are synchronous (vkQueueWaitIdle)
+ * @note All functions are synchronous (wait on a fence for the submission)
  * @note Not suitable for per-frame operations (use persistent command buffers instead)
  * @note Designed for initialization and cleanup only
  *
@@ -44,13 +44,13 @@ namespace quantiloom {
  * All commands execute synchronously (blocking CPU until GPU completes).
  *
  * ExecuteImmediate workflow:
- * 1. Allocate temporary command buffer from graphics queue
+ * 1. Allocate a one-shot command buffer from the context's shared command pool
  * 2. Begin command buffer recording
  * 3. Execute user-provided lambda function (records commands)
  * 4. End command buffer recording
- * 5. Submit to graphics queue
- * 6. Wait for completion (vkQueueWaitIdle)
- * 7. Free command buffer
+ * 5. Submit to graphics queue with the shared fence
+ * 6. Wait for the fence (this submission only)
+ * 7. Free the command buffer back to the pool
  *
  * Usage patterns:
  * @code
