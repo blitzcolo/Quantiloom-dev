@@ -597,11 +597,12 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     const VkDeviceSize tileCount =
         static_cast<VkDeviceSize>((width + 15u) / 16u) * ((height + 15u) / 16u);
-    // Three float4 rows per tile (min/max/sum/sat, per-channel unsaturated
-    // sums and counts -- camera_stats phases 0/1), then the per-tile 256-bin
-    // histogram block the phase-2 flush writes and the CDF pass merges.
+    // Four float4 rows per tile (all-element min/max/sum/sat, per-channel
+    // unsaturated sums and counts, unsaturated channel-0 display range --
+    // camera_stats phases 0/1), then the per-tile 256-bin histogram block
+    // the phase-2 flush writes and the CDF pass merges.
     tileStatsBuffer = std::make_unique<GpuBuffer>(
-        context.GetAllocator(), tileCount * (12u + 256u) * sizeof(u32),
+        context.GetAllocator(), tileCount * (16u + 256u) * sizeof(u32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_GPU_ONLY);
     if (!layerCameraBuffer->IsValid() || !dynamicCounterBuffer->IsValid() ||
         !ispStatsBuffer->IsValid() || !cdfBuffer->IsValid() ||

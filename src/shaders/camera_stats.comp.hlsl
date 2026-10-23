@@ -8,8 +8,10 @@
  * Three phases, selected by cameraPush.ispPhase, run back to back between
  * readout and the fused demosaic/color/display pass:
  *
- *   Phase 0 (per-16x16-tile groups): local min/max/sum/satCount plus the
- *     per-channel unsaturated sums and counts -> three tileStats rows
+ *   Phase 0 (per-16x16-tile groups): local min/max/sum/satCount over every
+ *     element (pixel x channel), plus the per-channel unsaturated sums and
+ *     counts and the unsaturated channel-0 display range -> four tileStats
+ *     rows
  *   Phase 1 (one group of 256): reduce tiles to global min/max/mean, build the
  *     NEXT Linear-AGC window from the PREVIOUS frame's histogram, preloaded
  *     into shared memory so the percentile walk is a shared-memory scan
@@ -25,6 +27,10 @@
  * the unsaturated display-domain scalar gathered per CFA/device channel
  * BEFORE white balance, exactly CameraIsp::ComputeAcquisitionStats on the
  * CPU. The channel sums (float bits) and counts ride in stat slots 263-268.
+ * That CPU twin loops every element of a multi-channel image, so the global
+ * min/max/sum/sat do too; the display AGC (window, Equalize range,
+ * histogram) keeps its own channel-0 population, the Signal channel the CPU
+ * tone maps, in slots 269-271.
  *
  * camera_cdf.comp.hlsl then merges the per-tile histograms into the
  * persistent global histogram and prefix-sums it into a CDF for the Equalize
@@ -70,6 +76,12 @@
 #define ISP_STAT_CH_CNT_R 266
 #define ISP_STAT_CH_CNT_G 267
 #define ISP_STAT_CH_CNT_B 268
+// Unsaturated channel-0 min/max/count: the display AGC population (the
+// Signal channel the CPU tone maps), which differs from the all-element
+// acquisition stats above on multi-channel detectors.
+#define ISP_STAT_DISPLAY_MIN 269
+#define ISP_STAT_DISPLAY_MAX 270
+#define ISP_STAT_DISPLAY_UNSAT 271
 
 // CFA channel at a pixel; mirrors CfaChannelAt in the fused demosaic pass.
 uint CfaChannelAt(uint cfa, uint x, uint y) {
@@ -135,8 +147,8 @@ uint TilesX() { return (cameraPush.width + 15u) / 16u; }
 uint TileCount() { return TilesX() * ((cameraPush.height + 15u) / 16u); }
 
 // First uint slot of the per-tile histogram block in binding 16: the partial
-// statistics occupy 3 float4 (= 12 uint) rows per tile.
-uint TileHistBase() { return TileCount() * 12u; }
+// statistics occupy 4 float4 (= 16 uint) rows per tile.
+uint TileHistBase() { return TileCount() * 16u; }
 
 // ---------------------------------------------------------------------------
 // Phase 0: per-tile partial statistics
@@ -145,11 +157,14 @@ uint TileHistBase() { return TileCount() * 12u; }
 
 [[vk::binding(16, 0)]] RWStructuredBuffer<float4> tileStats;
 
-// Three rows per tile: global min/max/sum/sat, per-channel unsaturated
-// sums, per-channel unsaturated counts.
+// Four rows per tile: all-element min/max/sum/sat (the acquisition-stats
+// population, exactly CameraIsp::ComputeAcquisitionStats on the CPU),
+// per-channel unsaturated sums, per-channel unsaturated counts, and the
+// unsaturated channel-0 min/max (the display AGC population).
 groupshared float4 sPartial[256];
 groupshared float4 sChSum[256];
 groupshared float4 sChCnt[256];
+groupshared float4 sDisp[256];
 
 [numthreads(16, 16, 1)]
 void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
@@ -162,6 +177,9 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
     float localMax = -3.402823e+38f;
     float localSum = 0.0f;
     uint localSat = 0;
+    float localDispMin = 3.402823e+38f;
+    float localDispMax = -3.402823e+38f;
+    uint localDispCnt = 0;
     float3 localChSum = 0.0f;
     float3 localChCnt = 0.0f;
     const float satThreshold = SaturationThreshold();
@@ -170,24 +188,44 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
         for (uint x = first.x; x < limit.x; x += 16u) {
             const uint2 coord = uint2(x, y);
             const float4 c = correctedImage[coord];
-            const float v = ChannelValue(c, 0u);
-            if (v >= satThreshold) {
-                ++localSat;
-                continue;
-            }
-            localMin = min(localMin, v);
-            localMax = max(localMax, v);
-            localSum += v;
             if (channels == 1u) {
                 // Mono/Bayer: one scalar per pixel, attributed to its CFA
-                // channel (Mono always lands on channel 0).
+                // channel (Mono always lands on channel 0). The acquisition
+                // and display populations are the same scalar.
+                const float v = ChannelValue(c, 0u);
+                if (v >= satThreshold) {
+                    ++localSat;
+                    continue;
+                }
+                localMin = min(localMin, v);
+                localMax = max(localMax, v);
+                localSum += v;
+                localDispMin = min(localDispMin, v);
+                localDispMax = max(localDispMax, v);
+                ++localDispCnt;
                 const uint ch = CfaChannelAt(cameraPush.cfa, x, y);
                 localChSum[ch] += v;
                 localChCnt[ch] += 1.0f;
             } else {
+                // MultiChannel: the CPU acquisition stats loop every element
+                // of every channel, so min/max/sum/sat do too. The display
+                // AGC keeps its own channel-0 (Signal) range: the histogram
+                // and the window describe the channel the display branch
+                // actually tone-maps.
                 for (uint ch = 0u; ch < channels; ++ch) {
                     const float vc = ChannelValue(c, ch);
-                    if (vc >= satThreshold) continue;
+                    if (vc >= satThreshold) {
+                        ++localSat;
+                        continue;
+                    }
+                    localMin = min(localMin, vc);
+                    localMax = max(localMax, vc);
+                    localSum += vc;
+                    if (ch == 0u) {
+                        localDispMin = min(localDispMin, vc);
+                        localDispMax = max(localDispMax, vc);
+                        ++localDispCnt;
+                    }
                     localChSum[ch] += vc;
                     localChCnt[ch] += 1.0f;
                 }
@@ -198,6 +236,8 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
                                   float(localSat));
     sChSum[localIndex] = float4(localChSum, 0.0f);
     sChCnt[localIndex] = float4(localChCnt, 0.0f);
+    sDisp[localIndex] =
+        float4(localDispMin, localDispMax, float(localDispCnt), 0.0f);
     GroupMemoryBarrierWithGroupSync();
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
         if (localIndex < stride) {
@@ -209,14 +249,20 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
                 sPartial[localIndex].z + other.z, sat);
             sChSum[localIndex] += sChSum[localIndex + stride];
             sChCnt[localIndex] += sChCnt[localIndex + stride];
+            const float4 otherDisp = sDisp[localIndex + stride];
+            sDisp[localIndex] = float4(
+                min(sDisp[localIndex].x, otherDisp.x),
+                max(sDisp[localIndex].y, otherDisp.y),
+                sDisp[localIndex].z + otherDisp.z, 0.0f);
         }
         GroupMemoryBarrierWithGroupSync();
     }
     if (localIndex == 0) {
-        const uint row = (groupId.y * TilesX() + groupId.x) * 3u;
+        const uint row = (groupId.y * TilesX() + groupId.x) * 4u;
         tileStats[row] = sPartial[0];
         tileStats[row + 1u] = sChSum[0];
         tileStats[row + 2u] = sChCnt[0];
+        tileStats[row + 3u] = sDisp[0];
     }
 }
 
@@ -232,6 +278,7 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
 groupshared float4 sTiles[256];
 groupshared float4 sChSum[256];
 groupshared float4 sChCnt[256];
+groupshared float4 sDisp[256];
 groupshared uint sPrevHist[ISP_HISTOGRAM_BINS];
 
 // Nearest-rank percentile of the PREVIOUS histogram, reconstructed as a bin
@@ -268,20 +315,27 @@ void main(uint localIndex : SV_GroupIndex) {
     float gmax = -3.402823e+38f;
     float gsum = 0.0f;
     uint gsat = 0;
+    float dispMin = 3.402823e+38f;
+    float dispMax = -3.402823e+38f;
+    uint dispCnt = 0;
     float3 chSum = 0.0f;
     float3 chCnt = 0.0f;
     for (uint i = localIndex; i < tileCount; i += 256u) {
-        const float4 t = tileStats[i * 3u];
+        const float4 t = tileStats[i * 4u];
         gmin = min(gmin, t.x);
         gmax = max(gmax, t.y);
         gsum += t.z;
         gsat += uint(t.w);
-        chSum += tileStats[i * 3u + 1u].xyz;
-        chCnt += tileStats[i * 3u + 2u].xyz;
+        chSum += tileStats[i * 4u + 1u].xyz;
+        chCnt += tileStats[i * 4u + 2u].xyz;
+        dispMin = min(dispMin, tileStats[i * 4u + 3u].x);
+        dispMax = max(dispMax, tileStats[i * 4u + 3u].y);
+        dispCnt += uint(tileStats[i * 4u + 3u].z + 0.5f);
     }
     sTiles[localIndex] = float4(gmin, gmax, gsum, float(gsat));
     sChSum[localIndex] = float4(chSum, 0.0f);
     sChCnt[localIndex] = float4(chCnt, 0.0f);
+    sDisp[localIndex] = float4(dispMin, dispMax, float(dispCnt), 0.0f);
     GroupMemoryBarrierWithGroupSync();
     for (uint stride = 128u; stride > 0u; stride >>= 1u) {
         if (localIndex < stride) {
@@ -293,16 +347,23 @@ void main(uint localIndex : SV_GroupIndex) {
                 sTiles[localIndex].w + other.w);
             sChSum[localIndex] += sChSum[localIndex + stride];
             sChCnt[localIndex] += sChCnt[localIndex + stride];
+            const float4 otherDisp = sDisp[localIndex + stride];
+            sDisp[localIndex] = float4(
+                min(sDisp[localIndex].x, otherDisp.x),
+                max(sDisp[localIndex].y, otherDisp.y),
+                sDisp[localIndex].z + otherDisp.z, 0.0f);
         }
         GroupMemoryBarrierWithGroupSync();
     }
 
     if (localIndex == 0) {
-        // The window describes the PREVIOUS frame: read its globals and
-        // histogram before anything below overwrites them.
-        const float prevMin = asfloat(ispStats[ISP_STAT_MIN]);
-        const float prevMax = asfloat(ispStats[ISP_STAT_MAX]);
-        const uint prevUnsat = ispStats[ISP_STAT_UNSAT];
+        // The window describes the PREVIOUS frame: read its display range
+        // and histogram before anything below overwrites them. Both are the
+        // channel-0 population -- the histogram bins unsaturated channel-0
+        // pixels and the display branch tone-maps channel 0.
+        const float prevMin = asfloat(ispStats[ISP_STAT_DISPLAY_MIN]);
+        const float prevMax = asfloat(ispStats[ISP_STAT_DISPLAY_MAX]);
+        const uint prevUnsat = ispStats[ISP_STAT_DISPLAY_UNSAT];
         float winLo = 0.0f;
         float winHi = 0.0f;
         if (prevUnsat > 0u && prevMax > prevMin) {
@@ -311,7 +372,10 @@ void main(uint localIndex : SV_GroupIndex) {
             winHi = PreviousPercentile(prevMin, prevMax, prevUnsat,
                                        ispConfig[5].y);
         }
-        const uint total = cameraPush.width * cameraPush.height;
+        // The acquisition stats count elements (pixels x channels), exactly
+        // ComputeAcquisitionStats on the CPU; the unsaturated count is the
+        // element count minus the saturated one.
+        const uint total = cameraPush.width * cameraPush.height * channels;
         const uint sat = uint(sTiles[0].w);
         const uint unsat = total - sat;
         ispStats[ISP_STAT_MIN] = asuint(sTiles[0].x);
@@ -321,6 +385,11 @@ void main(uint localIndex : SV_GroupIndex) {
         ispStats[ISP_STAT_UNSAT] = unsat;
         ispStats[ISP_STAT_WIN_LO] = asuint(winLo);
         ispStats[ISP_STAT_WIN_HI] = asuint(winHi);
+        // The display AGC range: unsaturated channel 0 only, the population
+        // the histogram bins and the display branch tone-maps.
+        ispStats[ISP_STAT_DISPLAY_MIN] = asuint(sDisp[0].x);
+        ispStats[ISP_STAT_DISPLAY_MAX] = asuint(sDisp[0].y);
+        ispStats[ISP_STAT_DISPLAY_UNSAT] = uint(sDisp[0].z + 0.5f);
         // Per-channel unsaturated sums and counts for the AWB loop. The
         // counts ride as exact float bits (a sensor has fewer than 2^24
         // pixels); the host converts them back to integers.

@@ -62,6 +62,12 @@ static const uint ISP_FLAG_DEFECTS = 16u;
 #define ISP_STAT_MAX 257
 #define ISP_STAT_WIN_LO 261
 #define ISP_STAT_WIN_HI 262
+// Unsaturated channel-0 min/max (the display AGC population), written by
+// camera_stats phase 1; the all-element ISP_STAT_MIN/MAX are the
+// acquisition stats and differ from the displayed range on multi-channel
+// detectors.
+#define ISP_STAT_DISPLAY_MIN 269
+#define ISP_STAT_DISPLAY_MAX 270
 
 // DisplayToneMode order matches DisplayControl.hpp.
 static const uint TONE_LINEAR = 0u;
@@ -421,20 +427,21 @@ void main(uint3 groupId : SV_GroupID, uint3 localId : SV_GroupThreadID,
     if (tone == TONE_LINEAR) {
         // The window came from the previous frame's histogram (stats phase
         // 1); a degenerate one (first frame, flat previous image) falls back
-        // to this frame's range, and a flat current frame is the CPU chain's
-        // flat 0.5.
+        // to this frame's display range, and a flat current frame is the CPU
+        // chain's flat 0.5.
         float lo = asfloat(ispStats[ISP_STAT_WIN_LO]);
         float hi = asfloat(ispStats[ISP_STAT_WIN_HI]);
         if (!(hi > lo)) {
-            lo = asfloat(ispStats[ISP_STAT_MIN]);
-            hi = asfloat(ispStats[ISP_STAT_MAX]);
+            lo = asfloat(ispStats[ISP_STAT_DISPLAY_MIN]);
+            hi = asfloat(ispStats[ISP_STAT_DISPLAY_MAX]);
         }
         t = (hi > lo) ? saturate((v - lo) / (hi - lo)) : 0.5f;
     } else {
         // Equalize, and the offline Clahe degradation (a global
-        // equalization), from this frame's merged histogram CDF.
-        const float lo = asfloat(ispStats[ISP_STAT_MIN]);
-        const float hi = asfloat(ispStats[ISP_STAT_MAX]);
+        // equalization), from this frame's merged histogram CDF. The range
+        // is the display population's (channel 0), matching the histogram.
+        const float lo = asfloat(ispStats[ISP_STAT_DISPLAY_MIN]);
+        const float hi = asfloat(ispStats[ISP_STAT_DISPLAY_MAX]);
         if (!(hi > lo)) {
             t = 0.5f;
         } else {

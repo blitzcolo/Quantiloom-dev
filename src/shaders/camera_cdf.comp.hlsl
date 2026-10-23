@@ -25,12 +25,15 @@
 
 #define ISP_HISTOGRAM_BINS 256
 #define ISP_STAT_UNSAT 260
+// Unsaturated channel-0 count: the histogram's own population (the display
+// AGC bins unsaturated Signal-channel pixels, not all elements).
+#define ISP_STAT_DISPLAY_UNSAT 271
 
 groupshared uint sHist[ISP_HISTOGRAM_BINS];
 
 uint TilesX() { return (cameraPush.width + 15u) / 16u; }
 uint TileCount() { return TilesX() * ((cameraPush.height + 15u) / 16u); }
-uint TileHistBase() { return TileCount() * 12u; }
+uint TileHistBase() { return TileCount() * 16u; }
 
 [numthreads(256, 1, 1)]
 void main(uint localIndex : SV_GroupIndex) {
@@ -51,7 +54,10 @@ void main(uint localIndex : SV_GroupIndex) {
         sHist[localIndex] += add;
         GroupMemoryBarrierWithGroupSync();
     }
-    const uint unsat = ispStats[ISP_STAT_UNSAT];
+    // The binned population is unsaturated channel 0 (display AGC), not the
+    // all-element acquisition count; normalizing by it lands the last CDF
+    // entry on exactly 1 whenever any pixel binned, as on the CPU.
+    const uint unsat = ispStats[ISP_STAT_DISPLAY_UNSAT];
     const float invCount = unsat > 0u ? 1.0 / float(unsat) : 0.0;
     cdfBuffer[localIndex] = float(sHist[localIndex]) * invCount;
 }
