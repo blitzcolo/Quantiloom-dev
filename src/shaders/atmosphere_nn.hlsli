@@ -152,7 +152,11 @@ float AtmosSkyRadianceIR(AtmosNNHeader h, StructuredBuffer<float> data,
     float L_down_zenith = data[h.ldownOffset + iLambda];
     float eps0 = clamp(L_down_zenith / B_air, 0.0, 1.0);
 
-    float abscos = max(abs(cosZenith), 0.01);
+    // A ray pointing below the horizon is not looking at the sky's upper
+    // hemisphere. abs() folded it onto the mirror-image upward ray and gave it
+    // that ray's emissivity; clamping instead sends it to the horizon limit
+    // (sec = SEC_MAX), the optically thick end of the same law.
+    float abscos = max(cosZenith, 0.01);
     float sec_theta = min(1.0 / abscos, SEC_MAX);
 
     // (1 - eps0)^sec models accumulated absorption along the slant path
