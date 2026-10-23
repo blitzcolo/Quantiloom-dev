@@ -235,6 +235,49 @@ TEST_F(ThermalExchangeGpuTest, EveryRowSumsToOneWithItsSkyFraction) {
     }
 }
 
+TEST_F(ThermalExchangeGpuTest, ViewFactorsAreReciprocalAndRowsStillSumToOne) {
+    // A_i F_ij = A_j F_ji. The gather in the energy balance only conserves
+    // energy between a pair if this holds, and per-row estimates from each
+    // element's own rays do not give it without the symmetrisation.
+    Scene scene = MakeScene();
+    AddQuad(scene, 0.0f, 5.0f, true, 0);
+    AddQuad(scene, 5.0f, 5.0f, false, 0);
+    AddQuad(scene, 2.0f, 2.0f, true, 0);
+
+    SceneGeometry geometry = SceneGeometry::Build(Device(), scene);
+    ASSERT_TRUE(geometry.IsValid());
+
+    const thermal::ThermalMesh mesh = thermal::BuildThermalMesh(scene);
+    ThermalExchangePrecompute precompute(Device());
+    if (!precompute.IsValid()) {
+        GTEST_SKIP() << "thermal_exchange.spv unavailable";
+    }
+
+    ThermalExchangePrecompute::Params params;
+    params.topK = 0;  // clamped to one entry per row, never to none
+    const auto exchange = precompute.Run(geometry.Tlas().GetHandle(), mesh.elements,
+                                         mesh.instanceElementBase, params);
+
+    const auto& vf = exchange.viewFactors;
+    for (usize i = 0; i < mesh.elements.size(); ++i) {
+        f32 rowSum = exchange.skyFraction[i];
+        for (u32 n = vf.rowStart[i]; n < vf.rowStart[i + 1]; ++n) {
+            rowSum += vf.value[n];
+            const u32 j = vf.column[n];
+            f32 reverse = -1.0f;
+            for (u32 m = vf.rowStart[j]; m < vf.rowStart[j + 1]; ++m) {
+                if (vf.column[m] == i) reverse = vf.value[m];
+            }
+            ASSERT_GE(reverse, 0.0f) << "entry " << i << "->" << j << " has no reverse";
+            const f32 forwardFlux = mesh.elements[i].area_m2 * vf.value[n];
+            const f32 reverseFlux = mesh.elements[j].area_m2 * reverse;
+            EXPECT_NEAR(forwardFlux, reverseFlux, 1e-3f * std::max(forwardFlux, 1e-3f))
+                << i << "->" << j;
+        }
+        EXPECT_NEAR(rowSum, 1.0f, 1e-4f) << "row " << i;
+    }
+}
+
 TEST_F(ThermalExchangeGpuTest, AnUnoccludedPlateIsFullyLitAndAShadedOneIsNot) {
     // The other geometric question the pass answers. The upper plate blocks
     // the sun from the lower one entirely at this size and separation.
