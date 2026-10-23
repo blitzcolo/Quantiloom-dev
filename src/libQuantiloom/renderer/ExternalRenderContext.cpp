@@ -2629,20 +2629,14 @@ void ExternalRenderContext::SetWavelength(f32 wavelength_nm) {
     m_impl->wavelength_nm = wavelength_nm;
 
     // The material buffer holds IR emissivity and transmittance sampled at the old
-    // wavelength, so it is now stale. Re-uploading in place keeps the descriptor
-    // binding valid -- the material count has not changed -- and follows what
-    // UpdateMaterial already does for a single entry.
+    // wavelength, so it is now stale. UpdateGpuResources refreshes the records
+    // in place -- the material count has not changed -- and the deferred
+    // upload lands with the next recorded frame, ordered after any submitted
+    // frame still reading the buffer. No drain, no descriptor rebind.
     if (m_impl->scene && m_impl->materialBuffer) {
-        // UpdateGpuResources replaces descriptor-backed buffers. A viewport
-        // frame recorded before this setter may still read the old allocation.
-        if (m_impl->device != VK_NULL_HANDLE)
-            vkDeviceWaitIdle(m_impl->device);
         // The emitter CDF contains positions, areas and material emission,
         // none of which depends on the wavelength used to sample IR curves.
         m_impl->UpdateGpuResources(false);
-        if (m_impl->pipeline && m_impl->materialBuffer) {
-            m_impl->pipeline->BindMaterialBuffer(*m_impl->materialBuffer);
-        }
     }
 
     ResetAccumulation();
@@ -5049,13 +5043,36 @@ void ExternalRenderContext::Impl::BuildAccelerationStructures() {
 void ExternalRenderContext::Impl::UpdateGpuResources(bool rebuildEmitters) {
     if (!scene) return;
 
-    // The material buffer is replaced outright below; a queued write would
-    // still name the allocation that is about to die.
-    FlushPendingGpuWork();
     QL_LOG_INFO("Updating GPU resources...");
     const auto resources = ResourceCounts();
-    materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm,
-                                                     materialGpuIndices, &resources);
+    const size_t bytes = scene->materials.size() * sizeof(MaterialDataCPU);
+    if (materialBuffer && materialBuffer->GetSize() == bytes) {
+        // The SetWavelength path: the material count has not changed, so the
+        // existing allocation stays valid. Rebuild the records on the CPU and
+        // let the deferred-upload queue land them with the next recorded
+        // frame -- the barriers in Record order them after any submitted
+        // frame still reading the buffer, so neither a drain nor a
+        // descriptor rebind is needed. A queued write to the same range is
+        // replaced by the newer one, which is exactly right here.
+        Vector<MaterialDataCPU> gpuMaterials;
+        gpuMaterials.reserve(scene->materials.size());
+        for (size_t i = 0; i < scene->materials.size(); ++i) {
+            const Material& material = scene->materials[i];
+            const rendercore::MaterialGpuIndices resolved =
+                i < materialGpuIndices.size() ? materialGpuIndices[i]
+                                              : rendercore::IndicesFromMaterial(material);
+            gpuMaterials.push_back(
+                rendercore::ConvertMaterial(material, wavelength_nm, resolved, &resources));
+        }
+        if (!gpuMaterials.empty())
+            UploadDeferred(*materialBuffer, 0, gpuMaterials.data(), bytes);
+    } else {
+        // The material buffer is replaced outright below; a queued write
+        // would still name the allocation that is about to die.
+        FlushPendingGpuWork();
+        materialBuffer = rendercore::BuildMaterialBuffer(*contextAdapter, *scene, wavelength_nm,
+                                                         materialGpuIndices, &resources);
+    }
     if (rebuildEmitters)
         RebuildEmissiveGeometry();
     QL_LOG_INFO("  GPU resources updated");
