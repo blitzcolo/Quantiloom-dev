@@ -204,6 +204,11 @@ struct ExternalRenderContext::Impl {
     // CRI management (CPU-side copy for rebuild when new entries are added)
     std::vector<ComplexRefractiveIndexGPU> criEntries;
     std::vector<SpectralCurveGPU> spectralCurveEntries;
+    // Spare capacity, in entries, of the growable lookup tables above; 0
+    // marks a buffer that was never allocated growable (the start-up
+    // dummies), which the first append replaces. See AppendLookupEntry.
+    usize criTableCapacity = 0;
+    usize spectralCurveTableCapacity = 0;
 
     // Merged global geometry buffers (for multi-BLAS support)
     // All BLAS geometry data is merged into single global buffers
@@ -582,6 +587,8 @@ struct ExternalRenderContext::Impl {
         solarLutBuffer.reset();
         criBuffer.reset();
         spectralCurvesBuffer.reset();
+        criTableCapacity = 0;
+        spectralCurveTableCapacity = 0;
         materialBuffer.reset();
         lightingParamsBuffer.reset();
         cameraLightingParamsBuffer.reset();
@@ -710,15 +717,27 @@ struct ExternalRenderContext::Impl {
                 spectralCurveEntries.size(), criEntries.size()};
     }
 
+    /// Round a lookup-table entry count up to the allocation granularity:
+    /// powers of two with an eight-entry floor, so appends amortise instead
+    /// of reallocating on every add.
+    static usize LookupCapacity(usize entries) {
+        usize capacity = 8;
+        while (capacity < entries) capacity *= 2;
+        return capacity;
+    }
+
     template<class Entry>
     std::unique_ptr<GpuBuffer> PrepareLookupTable(const Vector<Entry>& entries) {
         if (entries.empty())
             return nullptr;
-        const auto bytes = entries.size() * sizeof(Entry);
+        // Spare capacity and TRANSFER_DST: after this upload the table can be
+        // appended in place -- see AppendLookupEntry.
+        const auto bytes = LookupCapacity(entries.size()) * sizeof(Entry);
         auto buffer = std::make_unique<GpuBuffer>(contextAdapter->GetAllocator(), bytes,
-                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                  VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                                                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                                                   VMA_MEMORY_USAGE_CPU_TO_GPU);
-        buffer->Upload(entries.data(), bytes);
+        buffer->Upload(entries.data(), entries.size() * sizeof(Entry));
         return buffer;
     }
 
@@ -729,10 +748,41 @@ struct ExternalRenderContext::Impl {
         return false;
     }
 
-    template<class Entry> bool ReplaceLookupTable(Vector<Entry> entries, Vector<Entry>& current,
-                                                  std::unique_ptr<GpuBuffer>& buffer) {
-        // Prepare before waiting; failed synchronization leaves all published state intact.
-        auto replacement = PrepareLookupTable(entries);
+    /// Append one entry to a descriptor-backed lookup table. When the buffer
+    /// has spare capacity the write rides the deferred-upload queue -- its
+    /// barriers order the new record after submitted frames still reading
+    /// the table -- so the hot path neither drains the device nor rebinds
+    /// the descriptor. Only when the spare runs out is the table
+    /// reallocated, doubling the capacity after a drain. Appends used to be
+    /// whole-table replacements, so adding k entries one at a time cost
+    /// O(k^2) copying and k vkDeviceWaitIdle.
+    /// @param capacity  Spare-capacity entry count maintained by the caller;
+    ///                  0 marks a buffer that was never allocated growable
+    ///                  (the start-up dummies), which the first append
+    ///                  replaces.
+    /// @return false when the reallocation could not synchronise; all
+    ///         published state is left intact in that case.
+    template<class Entry>
+    bool AppendLookupEntry(const Entry& entry, Vector<Entry>& current,
+                           std::unique_ptr<GpuBuffer>& buffer, usize& capacity) {
+        const usize index = current.size();
+        if (buffer && capacity > index) {
+            UploadDeferred(*buffer, index * sizeof(Entry), &entry, sizeof(Entry));
+            current.push_back(entry);
+            return true;
+        }
+        Vector<Entry> grown = current;
+        grown.push_back(entry);
+        // Prepare before waiting; failed synchronization leaves all published
+        // state intact.
+        const usize newCapacity = std::max(LookupCapacity(grown.size()), capacity * 2);
+        auto replacement = std::make_unique<GpuBuffer>(
+            contextAdapter->GetAllocator(), newCapacity * sizeof(Entry),
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
+        replacement->Upload(grown.data(), grown.size() * sizeof(Entry));
+        // Queued deferred appends still name the buffer being replaced.
+        FlushPendingGpuWork();
         if (!CompleteLookupReaders())
             return false;
         if (pipeline) {
@@ -742,7 +792,8 @@ struct ExternalRenderContext::Impl {
                 pipeline->BindComplexRefractiveIndexBuffer(replacement.get());
         }
         buffer = std::move(replacement);
-        current = std::move(entries);
+        capacity = newCapacity;
+        current = std::move(grown);
         return true;
     }
 
@@ -1328,10 +1379,14 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     }
 
     // The curve and refractive-index tables the material indices point into.
-    // Uploaded directly rather than through AddSpectralCurve, which rebuilds
-    // the whole buffer per curve and would do so before the scene exists.
+    // Uploaded directly rather than through AddSpectralCurve, which would
+    // append one curve at a time, and before the scene exists.
     m_impl->spectralCurvesBuffer = std::move(newCurves);
     m_impl->criBuffer = std::move(newCri);
+    m_impl->spectralCurveTableCapacity =
+        m_impl->spectralCurvesBuffer ? Impl::LookupCapacity(spectra.curves.size()) : 0;
+    m_impl->criTableCapacity =
+        m_impl->criBuffer ? Impl::LookupCapacity(spectra.refractiveIndices.size()) : 0;
     m_impl->spectralCurveEntries = std::move(spectra.curves);
     m_impl->criEntries = std::move(spectra.refractiveIndices);
 
@@ -2951,9 +3006,8 @@ i32 ExternalRenderContext::AddComplexRefractiveIndex(const ComplexRefractiveInde
     ComplexRefractiveIndexGPU gpuCRI = ComplexRefractiveIndexGPU::FromCPU(cri);
 
     const i32 index = static_cast<i32>(m_impl->criEntries.size());
-    auto entries = m_impl->criEntries;
-    entries.push_back(gpuCRI);
-    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->criEntries, m_impl->criBuffer))
+    if (!m_impl->AppendLookupEntry(gpuCRI, m_impl->criEntries, m_impl->criBuffer,
+                                   m_impl->criTableCapacity))
         return -1;
 
     QL_LOG_INFO("AddComplexRefractiveIndex: Added CRI at index {} "
@@ -3016,10 +3070,9 @@ Result<Vector<String>, String> ExternalRenderContext::SetMaterialEmissionSpectru
     // already resampled and levelled -- going back through the CPU curve would
     // discard the band clipping and the band averaging that make it right.
     const auto index = static_cast<i32>(m_impl->spectralCurveEntries.size());
-    auto entries = m_impl->spectralCurveEntries;
-    entries.push_back(resolved.curve);
-    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
-                                    m_impl->spectralCurvesBuffer))
+    if (!m_impl->AppendLookupEntry(resolved.curve, m_impl->spectralCurveEntries,
+                                   m_impl->spectralCurvesBuffer,
+                                   m_impl->spectralCurveTableCapacity))
         return EmissionResult::Err(
             "SetMaterialEmissionSpectrum: previous GPU readers did not complete");
 
@@ -3048,10 +3101,9 @@ i32 ExternalRenderContext::AddSpectralCurve(const SpectralCurve& curve) {
     }
 
     const i32 index = static_cast<i32>(m_impl->spectralCurveEntries.size());
-    auto entries = m_impl->spectralCurveEntries;
-    entries.push_back(SpectralCurveGPU::FromCPU(curve));
-    if (!m_impl->ReplaceLookupTable(std::move(entries), m_impl->spectralCurveEntries,
-                                    m_impl->spectralCurvesBuffer))
+    if (!m_impl->AppendLookupEntry(SpectralCurveGPU::FromCPU(curve), m_impl->spectralCurveEntries,
+                                   m_impl->spectralCurvesBuffer,
+                                   m_impl->spectralCurveTableCapacity))
         return -1;
 
     QL_LOG_INFO("AddSpectralCurve: Added curve at index {} ({} curves total)",
