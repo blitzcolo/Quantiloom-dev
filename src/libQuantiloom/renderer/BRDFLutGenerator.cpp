@@ -38,9 +38,12 @@ Image BRDFLutGenerator::Generate(const Config& config) {
     lut.metadata["method"] = "ImportanceSampling_GGX";
 
     // Generate LUT using Monte Carlo integration
+    // Log every tenth of the rows; a resolution below 10 has a tenth of zero, and
+    // the modulo by it would be an integer division by zero.
+    const u32 progressStep = std::max(1u, config.resolution / 10);
     for (u32 y = 0; y < config.resolution; ++y) {
         // Progress logging
-        if (y % (config.resolution / 10) == 0) {
+        if (y % progressStep == 0) {
             QL_LOG_INFO("  Progress: {}%", (y * 100) / config.resolution);
         }
 
