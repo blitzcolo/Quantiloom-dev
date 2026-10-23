@@ -845,6 +845,14 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
 
             out.solarSunSky = std::make_pair(std::move(lut.sun), std::move(lut.sky));
             report.solarLutLoaded = true;
+        } else if (out.mode != SpectralMode::RGB) {
+            // The RGB triple is in arbitrary units and means nothing to a
+            // spectral band: falling back to it renders "successfully" with an
+            // illuminant nobody supplied. The shaders have no such fallback
+            // either, which is why a table is required in the first place.
+            diag.Fatal("lighting.solar_lut",
+                       "  Failed to load solar LUT: " + result.error() +
+                           ". A spectral render has no RGB illuminant to fall back to.");
         } else {
             diag.Warn("lighting.solar_lut",
                       "  Failed to load solar LUT: " + result.error() +

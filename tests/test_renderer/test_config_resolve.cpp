@@ -62,6 +62,14 @@ struct SceneToml {
     }
 };
 
+bool HasMessage(const ConfigApplyReport& report, const char* key,
+                ConfigApplyMessage::Severity severity) {
+    return std::any_of(report.messages.begin(), report.messages.end(),
+                       [&](const ConfigApplyMessage& m) {
+                           return m.key == key && m.severity == severity;
+                       });
+}
+
 class ConfigResolveTest : public ::testing::Test {
 protected:
     void SetUp() override {
@@ -307,6 +315,21 @@ TEST_F(ConfigResolveTest, UnitLuminanceNormalisationPutsEqualEnergyAtYEqualsOne)
     const auto& rgb = resolved.value().lighting.sunRadiance_rgb;
     const float Y = 0.2126f * rgb.r + 0.7152f * rgb.g + 0.0722f * rgb.b;
     EXPECT_NEAR(Y, 1.0f, 1e-3f);
+}
+
+TEST_F(ConfigResolveTest, ASolarLutThatFailsToLoadIsFatalInASpectralMode) {
+    // The RGB triple is in arbitrary units; a spectral band cannot fall back to it.
+    auto config = Parse({.spectralKeys = "mode = \"swir_fused\"\n",
+                         .lightingKeys = "solar_lut = \"/nonexistent/solar.txt\"\n"});
+    EXPECT_FALSE(ResolveLenient(config).has_value());
+    EXPECT_TRUE(HasMessage(report, "lighting.solar_lut", ConfigApplyMessage::Severity::Error));
+}
+
+TEST_F(ConfigResolveTest, ASolarLutThatFailsToLoadOnlyWarnsInRgb) {
+    auto config = Parse({.lightingKeys = "solar_lut = \"/nonexistent/solar.txt\"\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_TRUE(HasMessage(report, "lighting.solar_lut", ConfigApplyMessage::Severity::Warning));
 }
 
 TEST_F(ConfigResolveTest, AnUnknownNormalisationWarnsRatherThanSilentlyDoingNothing) {
@@ -603,18 +626,6 @@ t_ground_K = 295.0
 // atmosphere.rh is a fraction in [0.05, 1]; atmosphere.relative_humidity is a
 // percentage. Scenes wrote a percentage into rh, which the network clamped to
 // saturated and the dew point read as 4500 %.
-
-namespace {
-
-bool HasMessage(const ConfigApplyReport& report, const char* key,
-                ConfigApplyMessage::Severity severity) {
-    return std::any_of(report.messages.begin(), report.messages.end(),
-                       [&](const ConfigApplyMessage& m) {
-                           return m.key == key && m.severity == severity;
-                       });
-}
-
-}  // namespace
 
 TEST_F(ConfigResolveTest, APercentageWrittenIntoRhIsReadAsAFractionAndWarns) {
     auto config = Parse({.atmosphereKeys = R"(model_pack = "/nonexistent/pack"
