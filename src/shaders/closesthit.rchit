@@ -3056,7 +3056,20 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // Visible transport uses the glTF transmission channel; the
             // separate irTransmittance curve is measured only in the IR and
             // must not be clamped from its 3 um endpoint into this band.
-            const float epsilon_vis = saturate(1.0 - rho_lambda - material.transmission);
+            //
+            // Kirchhoff balances emission against everything the reflected
+            // terms above carry -- the diffuse share kD_lambda * rho_lambda,
+            // the split-sum specular albedo and sheen -- not against the
+            // diffuse albedo alone: with a Fresnel term reflecting on top,
+            // epsilon derived from rho_lambda let epsilon + R exceed 1, and a
+            // hot coated surface in a cavity emitted more than a blackbody
+            // absorbs. The base total, before the coat's own shares, matching
+            // how the fused IR bands treat their clearcoat.
+            const float R_vis = (kD_lambda * rho_lambda * dtBase +
+                                 (F0_at_lambda * envBRDF.x + specularF90 * envBRDF.y)) *
+                                    sheenScale_lambda +
+                                sheenE * rhoSheen_lambda;
+            const float epsilon_vis = saturate(1.0 - R_vis - material.transmission);
             const float L_thermal = thermalNegligible
                 ? 0.0 : epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda);
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl +
@@ -3508,11 +3521,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 material, geoInfo, PrimitiveIndex(), uv,
                 WorldRayOrigin() + WorldRayDirection() * RayTCurrent(), payload);
 
-            // Kirchhoff, and spectral wherever a curve says so: the same
+            // Kirchhoff, against the same total reflectance the reflected
+            // terms carry -- kD_scalar * albedo, the split-sum specular
+            // albedo and sheen -- not the diffuse albedo alone, or
+            // emissivity + reflectance exceeds 1 on any surface with a
+            // Fresnel term. Spectral wherever a curve says so: the same
             // reflectance that varies across the surface varies what it
             // radiates, which is what a thermal image is of.
-            const float emissivity_s = saturate(
-                1.0 - spectralAlbedo - material.transmission);
+            const float R_s = (kD_scalar * spectralAlbedo * dtBase + E_spec_scalar) *
+                                  sheenScale_s +
+                              wSheen_s;
+            const float emissivity_s = saturate(1.0 - R_s - material.transmission);
             const float reflectance_s =
                 saturate(1.0 - emissivity_s - material.transmission);
 
