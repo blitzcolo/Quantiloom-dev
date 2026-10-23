@@ -358,10 +358,23 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // ------------------------------------------------------------------
     // [renderer]
     // ------------------------------------------------------------------
-    const auto resolution = config.GetArray<i32>("renderer.resolution");
+    // Read wide, so 4294967297 is refused as too large instead of reading as 1,
+    // and checked before the cast: a negative extent wrapped to about four
+    // billion pixels, and [0, 0] was accepted as a render with nothing in it.
+    constexpr i64 kMaxResolution = 32768;
+    const auto resolution = config.GetArray<i64>("renderer.resolution");
     if (resolution.size() >= 2) {
-        out.width = static_cast<u32>(resolution[0]);
-        out.height = static_cast<u32>(resolution[1]);
+        if (resolution[0] < 1 || resolution[0] > kMaxResolution || resolution[1] < 1 ||
+            resolution[1] > kMaxResolution) {
+            diag.Fatal("renderer.resolution",
+                       "renderer.resolution must be two integers in [1, " +
+                           std::to_string(kMaxResolution) + "], but is [" +
+                           std::to_string(resolution[0]) + ", " +
+                           std::to_string(resolution[1]) + "]");
+        } else {
+            out.width = static_cast<u32>(resolution[0]);
+            out.height = static_cast<u32>(resolution[1]);
+        }
     } else {
         diag.Required("renderer.resolution",
                       "renderer.resolution must be an array of 2 integers, but has " +

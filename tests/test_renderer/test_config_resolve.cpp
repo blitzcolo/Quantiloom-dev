@@ -234,6 +234,28 @@ albedo = [0.8, 0.8, 0.8]
     EXPECT_FALSE(resolved.has_value());
 }
 
+TEST_F(ConfigResolveTest, AResolutionThatIsNotPositiveIsRefusedUnderEveryPolicy) {
+    // Negative extents used to wrap to about four billion pixels, [0, 0] was
+    // accepted, and 4294967297 read as 1 -- none of it is a policy question.
+    for (const char* bad : {"[0, 0]", "[-5, 64]", "[64, 0]", "[4294967297, 64]", "[64, 99999]"}) {
+        auto config = Parse({.trailing = std::string("[renderer]\nresolution = ") + bad + R"(
+[camera]
+position = [0.0, 1.0, 5.0]
+look_at = [0.0, 0.0, 0.0]
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+[material]
+albedo = [0.8, 0.8, 0.8]
+)", .includeRequired = false});
+        ConfigApplyReport fresh;
+        report = fresh;
+        EXPECT_FALSE(ResolveLenient(config).has_value()) << bad;
+        EXPECT_EQ(report.configWidth, 0u) << bad;
+    }
+}
+
 TEST_F(ConfigResolveTest, LenientOpensTheSameFileAndSaysWhatIsMissing) {
     auto config = Parse({.trailing = R"(
 [camera]

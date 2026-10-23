@@ -145,6 +145,23 @@ TEST_F(ConfigTest, GetUnsignedInteger) {
     EXPECT_EQ(config.Get<u32>("value_u32", 0), 123u);
 }
 
+TEST_F(ConfigTest, AnIntegerTheTypeCannotHoldIsAMismatchNotAWrap) {
+    auto filepath = CreateTOML("test.toml", R"(
+        negative = -1
+        too_big = 4294967297
+        edge = 4294967295
+    )");
+
+    auto config = Config::Load(filepath).value();
+
+    EXPECT_EQ(config.Get<u32>("negative", 7u), 7u);
+    EXPECT_EQ(config.Get<u32>("too_big", 7u), 7u);
+    EXPECT_EQ(config.Get<u32>("edge", 7u), 4294967295u);
+    EXPECT_EQ(config.Get<u64>("negative", 7u), 7u);
+    EXPECT_EQ(config.Get<i32>("too_big", 7), 7);
+    EXPECT_EQ(config.Get<i64>("too_big", 7), 4294967297);
+}
+
 TEST_F(ConfigTest, GetFloat) {
     auto filepath = CreateTOML("test.toml", R"(
         value_f32 = 3.14

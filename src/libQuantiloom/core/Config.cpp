@@ -17,6 +17,7 @@ QL_DISABLE_WARNINGS_PUSH
 QL_DISABLE_WARNINGS_POP
 
 #include <fstream>
+#include <limits>
 #include <sstream>
 
 namespace quantiloom {
@@ -158,7 +159,11 @@ String Config::GetString(StringView key, const String& defaultValue) const {
 i32 Config::GetInt(StringView key, i32 defaultValue) const {
     const toml::node* node = m_impl->Navigate(key);
     if (!node) return defaultValue;
-    if (const auto val = node->value<int64_t>()) {
+    // An integer the type cannot hold is a mismatch, not a wrapped value:
+    // 4294967297 must not read as 1.
+    if (const auto val = node->value<int64_t>();
+        val && *val >= std::numeric_limits<i32>::min() &&
+        *val <= std::numeric_limits<i32>::max()) {
         return static_cast<i32>(*val);
     }
     return defaultValue;
@@ -176,7 +181,10 @@ i64 Config::GetInt64(StringView key, i64 defaultValue) const {
 u32 Config::GetUInt(StringView key, u32 defaultValue) const {
     const toml::node* node = m_impl->Navigate(key);
     if (!node) return defaultValue;
-    if (const auto val = node->value<int64_t>()) {
+    // Same rule as GetInt, and the one that matters most here: -1 must not
+    // become 4294967295 (a resolution, a sample count, a layer count).
+    if (const auto val = node->value<int64_t>();
+        val && *val >= 0 && *val <= std::numeric_limits<u32>::max()) {
         return static_cast<u32>(*val);
     }
     return defaultValue;
@@ -185,7 +193,7 @@ u32 Config::GetUInt(StringView key, u32 defaultValue) const {
 u64 Config::GetUInt64(StringView key, u64 defaultValue) const {
     const toml::node* node = m_impl->Navigate(key);
     if (!node) return defaultValue;
-    if (const auto val = node->value<int64_t>()) {
+    if (const auto val = node->value<int64_t>(); val && *val >= 0) {
         return static_cast<u64>(*val);
     }
     return defaultValue;
