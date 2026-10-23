@@ -198,7 +198,19 @@ Protocol::Response Protocol::HandlePost(const String& body) {
         auto slot = std::make_shared<ToolResult>();
         const ToolDef& def = tool.value();
         const bool ran = m_queue.Submit(
-            [handler = def.handler, argumentsJson, slot]() { *slot = handler(argumentsJson); },
+            [handler = def.handler, argumentsJson, slot]() {
+                // A throwing handler leaves the slot at its default, which is a
+                // successful empty result. Say it failed, and why.
+                try {
+                    *slot = handler(argumentsJson);
+                } catch (const std::exception& e) {
+                    QL_LOG_ERROR("MCP: tool handler threw: {}", e.what());
+                    *slot = ToolResult::Error(String("The tool failed: ") + e.what());
+                } catch (...) {
+                    QL_LOG_ERROR("MCP: tool handler threw a non-standard exception");
+                    *slot = ToolResult::Error("The tool failed with a non-standard exception.");
+                }
+            },
             def.venue == ToolVenue::HostDispatch, def.timeoutMs);
 
         if (!ran) {

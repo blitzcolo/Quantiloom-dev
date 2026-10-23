@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <stdexcept>
 #include <thread>
 
 using namespace quantiloom;
@@ -250,6 +251,27 @@ TEST_F(McpProtocolTest, HandlerFailureIsAToolErrorNotAProtocolError) {
     EXPECT_FALSE(reply.contains("error"));
     EXPECT_TRUE(reply["result"]["isError"].get<bool>());
     EXPECT_EQ(reply["result"]["content"][0]["text"], "no scene is loaded");
+}
+
+// An exception must not turn into the default ToolResult, which is a
+// successful empty reply.
+TEST_F(McpProtocolTest, ThrowingHandlerIsAToolErrorCarryingItsMessage) {
+    ToolDef tool;
+    tool.name = "ql_throws";
+    tool.description = "always throws";
+    tool.inputSchemaJson = R"({"type":"object"})";
+    tool.handler = [](const String&) -> ToolResult { throw std::runtime_error("gpu lost"); };
+    ASSERT_TRUE(registry.Add(tool).has_value());
+
+    const PumpingHost host(queue);
+    const json reply = Post({{"jsonrpc", "2.0"},
+                             {"id", 12},
+                             {"method", "tools/call"},
+                             {"params", {{"name", "ql_throws"}}}});
+
+    EXPECT_FALSE(reply.contains("error"));
+    EXPECT_TRUE(reply["result"]["isError"].get<bool>());
+    EXPECT_NE(reply["result"]["content"][0]["text"].get<String>().find("gpu lost"), String::npos);
 }
 
 // Image content must be typed as an image, not pasted into text -- the token
