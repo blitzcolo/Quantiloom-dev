@@ -65,8 +65,11 @@ struct QL_API AtmosphereNNConfig {
     int lutASamples = 64;              // Range / zenith axis
     int lutAzSamples = 16;             // Relative azimuth axis (lpath only)
 
-    // Applies one of the 8 named presets (or "disabled"). Returns false and
-    // leaves the config untouched for unknown names.
+    // Applies one of the 8 named presets (or "disabled"). A named preset also
+    // sets enabled = true and "disabled" sets it false, so the last preset
+    // applied decides; a caller that cannot run the atmosphere (no model pack)
+    // clears enabled itself afterwards. Returns false and leaves the config
+    // untouched for unknown names.
     bool ApplyPreset(const std::string& name);
 
     // Stable hash over everything that affects baked LUT contents, with

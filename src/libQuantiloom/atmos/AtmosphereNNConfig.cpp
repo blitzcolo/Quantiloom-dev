@@ -52,6 +52,10 @@ bool AtmosphereNNConfig::ApplyPreset(const std::string& name) {
     }
     for (const Preset& p : kPresets) {
         if (name == p.name) {
+            // A named preset is a request for an atmosphere. "disabled" leaves
+            // enabled false, so without this a config that was disabled and
+            // then given a preset stayed off with every weather feature set.
+            enabled = true;
             preset = name;
             atmosModel = p.atmosModel;
             ihaze = p.ihaze;

@@ -922,6 +922,9 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
                       "  Unknown atmosphere preset '" + presetName + "', using 'clear'");
             out.atmosphere.ApplyPreset("clear");
         }
+        // ApplyPreset turns a named preset on; whether the atmosphere can run
+        // is decided here, by whether there is a pack to run it from.
+        out.atmosphere.enabled = !disabledPreset && !out.atmosphere.modelPackDir.empty();
 
         // Out-of-domain values are clamped by the network input spec, with a
         // warning from the baker.

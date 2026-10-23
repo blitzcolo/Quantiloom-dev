@@ -529,6 +529,28 @@ preset = "disabled"
     EXPECT_FALSE(resolved.value().atmosphere.enabled);
 }
 
+TEST_F(ConfigResolveTest, APresetWithNoModelPackLeavesTheAtmosphereOffInAnEditor) {
+    // ApplyPreset turns a named preset on, so the resolver has to turn it
+    // back off when there is no pack to run it from.
+    auto config = Parse({.atmosphereKeys = "preset = \"clear\"\n"});
+    auto resolved = ResolveLenient(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FALSE(resolved.value().atmosphere.enabled);
+    EXPECT_TRUE(HasMessage(report, "atmosphere.model_pack",
+                           ConfigApplyMessage::Severity::Warning));
+}
+
+TEST_F(ConfigResolveTest, ANamedPresetAfterDisabledEnablesTheAtmosphereConfig) {
+    AtmosphereNNConfig atmosphere;
+    ASSERT_TRUE(atmosphere.ApplyPreset("disabled"));
+    EXPECT_FALSE(atmosphere.enabled);
+    ASSERT_TRUE(atmosphere.ApplyPreset("fog"));
+    EXPECT_TRUE(atmosphere.enabled);
+    EXPECT_EQ(atmosphere.preset, "fog");
+    ASSERT_TRUE(atmosphere.ApplyPreset("disabled"));
+    EXPECT_FALSE(atmosphere.enabled);
+}
+
 TEST_F(ConfigResolveTest, DisabledPresetNeedsNoModelPack) {
     // Studio writes this explicit token even when an authored scene had no
     // atmosphere section. The disabled state must round-trip into the CLI
