@@ -4,14 +4,15 @@
 // One step of the Crank-Nicolson surface energy balance, on the GPU.
 // Mirrors CpuCrankNicolsonStepper line-by-line, in f32.
 //
-// Each thread owns one element. The inter-element coupling (radiative T^4
-// exchange) reads from a ping-pong surface buffer seeded before the dispatch;
-// the intra-element solve is a Thomas tridiagonal, thread-local.
+// Each thread owns one element. The inter-element coupling (diffuse-grey
+// long-wave exchange) reads the neighbours' radiosity from a ping-pong buffer
+// seeded before the dispatch; the intra-element solve is a Thomas tridiagonal,
+// thread-local.
 //
 // Non-participating elements (conductivity zero) are never written to the
 // state buffer, preserving the bit-exact contract the CPU stepper keeps.
-// They DO write their temperature into the surface buffer so the next step's
-// radiative read is correct.
+// They DO write their temperature into the surface buffer, and their radiosity
+// into the radiosity buffer, so the next step's radiative read is correct.
 // ============================================================================
 
 #define QL_THERMAL_MAX_NODES 32
@@ -56,6 +57,15 @@ struct ThermalMaterialGpu {
 // host is not carrying it, and pc.carryTangent is what stops this shader
 // touching it -- see ThermalState::sunSensitivity_K for what it is for.
 [[vk::binding(11, 0)]] RWStructuredBuffer<float>            sensitivity;
+// Diffuse-grey long wave, as in CpuCrankNicolsonStepper. Binding 12 is the
+// radiosity J = eps sigma T^4 + (1 - eps) H, ping-ponged on pc.parity like the
+// surface buffer: each thread gathers its neighbours' J from the read half and
+// leaves its own for the next step in the write half. Binding 13 is H, the
+// irradiance each element gathered on the latest step -- written by its own
+// thread only, and read back by the host as ThermalState::
+// longwaveIrradiance_W_m2 so the next batch seeds the radiosity from it.
+[[vk::binding(12, 0)]] RWStructuredBuffer<float>            radiosity;
+[[vk::binding(13, 0)]] RWStructuredBuffer<float>            irradiance;
 
 struct StepPushConstants {
     float3 sunDirection;
@@ -78,6 +88,15 @@ struct StepPushConstants {
 [[vk::push_constant]] StepPushConstants pc;
 
 static const float kStefanBoltzmann = 5.670374419e-8;
+
+// What an element leaves its face with: what it emits plus what it reflects of
+// the irradiance that reached it. Grey and diffuse, so the reflectance is
+// 1 - eps.
+float Radiosity(float emissivity, float temperature_K, float irradiance_W_m2) {
+    const float T = temperature_K;
+    return emissivity * kStefanBoltzmann * T * T * T * T +
+           (1.0 - emissivity) * irradiance_W_m2;
+}
 
 // Air at the surface, for the latent term. Mirrors the CPU constants.
 static const float kAirPressure_Pa = 101325.0;
@@ -123,9 +142,26 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const uint writeSlot = (1 - pc.parity) * pc.elementCount;
     const float mySurface = surface[readSlot + e];
 
-    // Non-participating: write surface for neighbour reads, skip state.
+    // Long-wave irradiance H: the neighbours' radiosity plus the sky. Gathered
+    // before the participation test, because every element reflects and its
+    // radiosity is what the others read on the next step -- the CPU stepper
+    // gathers it for all of them too.
+    const float emissivity = mat.longwaveEmissivity;
+    float irradianceIn = 0.0;
+    const uint rowBegin = csrRowStart[e];
+    const uint rowEnd = csrRowStart[e + 1];
+    for (uint n = rowBegin; n < rowEnd; ++n) {
+        irradianceIn += csrValue[n] * radiosity[readSlot + csrColumn[n]];
+    }
+    const float Tsky = pc.skyTemperature_K;
+    irradianceIn += skyFraction[e] * kStefanBoltzmann * Tsky * Tsky * Tsky * Tsky;
+    irradiance[e] = irradianceIn;
+
+    // Non-participating: write surface and radiosity for neighbour reads,
+    // skip state.
     if (mat.conductivity <= 0.0) {
         surface[writeSlot + e] = mySurface;
+        radiosity[writeSlot + e] = Radiosity(emissivity, mySurface, irradianceIn);
         return;
     }
 
@@ -134,6 +170,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     const float dx = mat.thickness / float(nodes - 1);
     if (rhoC <= 0.0 || dx <= 0.0) {
         surface[writeSlot + e] = mySurface;
+        radiosity[writeSlot + e] = Radiosity(emissivity, mySurface, irradianceIn);
         return;
     }
 
@@ -149,7 +186,6 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // ----------------------------------------------------------------
     // Exposed face
     // ----------------------------------------------------------------
-    const float emissivity = mat.longwaveEmissivity;
     float surfaceFlux = 0.0;
 
     // Sun: interpolate visibility from the sun table
@@ -194,20 +230,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         surfaceFlux += mat.shortwaveAbsorptivity * pc.diffuseIrradiance * diffuseGain[e];
     }
 
-    // Long-wave exchange
-    float incoming = 0.0;
-    const uint rowBegin = csrRowStart[e];
-    const uint rowEnd = csrRowStart[e + 1];
-    for (uint n = rowBegin; n < rowEnd; ++n) {
-        const uint j = csrColumn[n];
-        const float Tj = surface[readSlot + j];
-        incoming += csrValue[n] * Tj * Tj * Tj * Tj;
-    }
-    const float Tsky = pc.skyTemperature_K;
-    incoming += skyFraction[e] * Tsky * Tsky * Tsky * Tsky;
-
+    // Long-wave exchange: eps H absorbed, eps sigma T^4 emitted, against the
+    // irradiance gathered above.
     const float Ti = mySurface;
-    surfaceFlux += emissivity * kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
+    surfaceFlux += emissivity * (irradianceIn - kStefanBoltzmann * Ti * Ti * Ti * Ti);
 
     // The forcing's coefficient wins when it has one, matching
     // CpuCrankNicolsonStepper. A constant cannot describe a day: the
@@ -263,8 +289,8 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // The same row differentiated in v. Constants of v drop (the air
     // temperature, the latent flux); the half-implicit long-wave loss leaves
     // half its slope, as the convection and evaporation do; the short wave
-    // leaves the only source. The neighbours' share of `incoming` is
-    // deliberately not differentiated -- see the CPU stepper for why that
+    // leaves the only source. The irradiance H (the neighbours' lagged
+    // radiosity) is deliberately not differentiated -- see the CPU stepper for why that
     // keeps this a per-element quantity.
     if (carryTangent) {
         const float s0 = sensitivity[base + 0];
@@ -338,6 +364,11 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     }
 
-    // Write new surface to ping-pong buffer for next step's radiative read
-    surface[writeSlot + e] = clamp(rhs[0], 1.0, 5000.0);
+    // Write new surface to ping-pong buffer for next step's radiative read,
+    // and the radiosity the neighbours will gather from it: emitted at the new
+    // temperature, reflected from the irradiance this step gathered -- the
+    // same lag the CPU stepper's next sweep takes.
+    const float newSurface = clamp(rhs[0], 1.0, 5000.0);
+    surface[writeSlot + e] = newSurface;
+    radiosity[writeSlot + e] = Radiosity(emissivity, newSurface, irradianceIn);
 }

@@ -69,8 +69,10 @@ enum class ConvectionModel : u8 {
  * and the two that set how fast the slab behind it responds.
  *
  * The derivative is taken holding the NEIGHBOURS' temperatures fixed, exactly
- * as dT/dv is -- what it would add is the second-order fact that a warmer
- * patch warms what can see it. With lateral conduction on, elements that
+ * as dT/dv is, and with them the long-wave irradiance G_i they and the sky send
+ * (ThermalState::longwaveIrradiance_W_m2) -- what it would add is the
+ * second-order fact that a warmer patch warms what can see it, and that a
+ * neighbour of the same material reflects a little differently. With lateral conduction on, elements that
  * conduct into each other do share the derivative, which is the right reading
  * for a fit: one h is fitted for a material, not one per triangle.
  */
@@ -395,6 +397,22 @@ struct ThermalState {
     Vector<f64> parameterSensitivity;
     Vector<ThermalParameter> parameters;
 
+    /// G_i: the long wave each element's hemisphere sent it on the last step,
+    /// W/m^2, one per element -- the neighbours' radiosity plus the sky.
+    ///
+    /// A state rather than a by-product because the exchange is diffuse-grey:
+    /// what a neighbour sends is its radiosity J_j = eps_j sigma T_j^4 +
+    /// (1 - eps_j) G_j, which contains what reached IT. The steppers reach that
+    /// fixed point by lagging the reflected part one step, so the irradiance a
+    /// step produced is an input to the next one, and a replay from a
+    /// checkpoint has to start from the same one to be the same trajectory.
+    ///
+    /// Empty is a state nothing has stepped yet. A stepper then seeds it with
+    /// sigma T_j^4, which makes every first radiosity sigma T_j^4: the
+    /// blackbody-neighbour answer, exact for an isothermal enclosure and
+    /// refined from the next step on.
+    Vector<f64> longwaveIrradiance_W_m2;
+
     static constexpr u32 kNoLagColumn = 0xFFFFFFFFu;
 
     u32 nodeCount = 0;
@@ -441,7 +459,7 @@ struct ThermalState {
     /// file. Every vector this struct owns belongs in the sum.
     [[nodiscard]] usize ByteSize() const {
         return (temperature_K.size() + sunSensitivity_K.size() + lagSensitivity_K.size() +
-                parameterSensitivity.size()) *
+                parameterSensitivity.size() + longwaveIrradiance_W_m2.size()) *
                    sizeof(f64) +
                lagColumn.size() * sizeof(u32) +
                parameters.size() * sizeof(ThermalParameter);

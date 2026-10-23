@@ -32,7 +32,11 @@ namespace {
 /// when the solve those inputs feed computes something different from them
 /// without the library version moving. 5: the long wave became half implicit
 /// in both steppers, and a static scene's key stopped hashing its one epoch.
-constexpr u32 kKeySchemaVersion = 5u;
+/// 6: the long-wave exchange became diffuse-grey radiosity in both steppers --
+/// a neighbour sends what it emits plus what it reflects instead of a
+/// blackbody's sigma T^4 -- so every field solved under 5 is a different
+/// answer to the same inputs.
+constexpr u32 kKeySchemaVersion = 6u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;

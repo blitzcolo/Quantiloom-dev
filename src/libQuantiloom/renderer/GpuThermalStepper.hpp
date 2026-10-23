@@ -3,8 +3,9 @@
  * @brief GPU Crank-Nicolson thermal stepper (f32)
  *
  * Mirrors the CPU stepper's math line by line, in f32. Each element is one
- * thread; the inter-element coupling (radiative T^4 exchange) reads from a
- * ping-pong surface buffer, and the intra-element Thomas solve is thread-local.
+ * thread; the inter-element coupling (diffuse-grey long-wave exchange) reads
+ * the neighbours' radiosity from a ping-pong buffer, and the intra-element
+ * Thomas solve is thread-local.
  *
  * StepMany dispatches the whole batch in one ExecuteImmediate, which is 1-5 ms
  * at 15k elements — the point of putting the stepper on the GPU is that the

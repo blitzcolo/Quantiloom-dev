@@ -441,6 +441,68 @@ TEST(ThermalConductionTest, AnElementSeeingOnlyItsNeighbourExchangesWithIt) {
     EXPECT_NEAR(state.Surface(0) + state.Surface(1), startingSum, 2.0);
 }
 
+TEST(ThermalConductionTest, AGreyNeighbourExchangesAtTheParallelPlateRate) {
+    // Two faces filling each other's hemisphere: a dark one, and a polished
+    // metal held at its own temperature. Diffuse-grey exchange between them is
+    // the parallel-plate closed form
+    //
+    //   q = sigma (T1^4 - T0^4) / (1/eps0 + 1/eps1 - 1),
+    //
+    // which for 0.9 against 0.1 is a ninth of eps0 sigma (T1^4 - T0^4) -- the
+    // answer a balance that takes every neighbour for a blackbody gives. The
+    // metal emits little, and hands most of what the dark face sends it back.
+    Vector<ThermalElement> elements(2);
+    for (auto& element : elements) {
+        element.area_m2 = 1.0f;
+        element.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        element.materialId = 0;
+    }
+    elements[1].materialId = 1;
+
+    ThermalMaterial dark = LumpedMaterial();
+    dark.longwaveEmissivity = 0.9f;
+    dark.convection_W_m2K = 0.0f;   // radiation only
+    dark.density_kg_m3 = 8.0e9f;    // so it holds still while the radiosity settles
+    ThermalMaterial metal;
+    metal.conductivity_W_mK = 0.0f;  // not in the solve: held where it is
+    metal.longwaveEmissivity = 0.1f;
+    const Vector<ThermalMaterial> materials{dark, metal};
+
+    ExchangeGeometry exchange;
+    exchange.viewFactors.rowStart = {0, 1, 2};
+    exchange.viewFactors.column = {1, 0};
+    exchange.viewFactors.value = {1.0f, 1.0f};
+    exchange.skyFraction = {0.0f, 0.0f};
+    exchange.sunVisibility = {0.0f, 0.0f};
+
+    ThermalState state = MakeState(2, 8, 300.0);
+    for (u32 n = 0; n < 8; ++n) state.temperature_K[8 + n] = 350.0;
+
+    CpuCrankNicolsonStepper stepper;
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 300.0;
+    // Each step is one sweep of the radiosity, and a round trip between the
+    // two shrinks its error by (1 - 0.9)(1 - 0.1).
+    for (i32 i = 0; i < 40; ++i) {
+        stepper.Step(state, elements, materials, exchange, forcing, 1.0,
+                     {exchange.sunVisibility});
+    }
+    ASSERT_EQ(state.longwaveIrradiance_W_m2.size(), 2u);
+
+    SurfaceFluxes fluxes;
+    ASSERT_TRUE(stepper.SurfaceFluxesAt(state, elements, materials, exchange, forcing,
+                                        {exchange.sunVisibility}, 0, fluxes));
+
+    const f64 T0 = state.Surface(0);
+    const f64 T1 = state.Surface(1);
+    EXPECT_DOUBLE_EQ(T1, 350.0) << "the metal is not in the solve";
+    const f64 eps0 = static_cast<f64>(dark.longwaveEmissivity);
+    const f64 eps1 = static_cast<f64>(metal.longwaveEmissivity);
+    const f64 expected = kStefanBoltzmann * (T1 * T1 * T1 * T1 - T0 * T0 * T0 * T0) /
+                         (1.0 / eps0 + 1.0 / eps1 - 1.0);
+    EXPECT_NEAR(fluxes.longwave_W_m2, expected, 1e-4 * expected);
+}
+
 TEST(ThermalConductionTest, MaterialsWithNoConductivityAreLeftAlone) {
     // Zero conductivity means "this material has no thermal properties", which
     // has to leave the temperature exactly as the config set it rather than

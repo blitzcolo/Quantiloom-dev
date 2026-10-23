@@ -69,8 +69,12 @@ static_assert(sizeof(StepPushConstants) == 72);
 /// Bindings the compute shader declares. Buffers 9 and 10 are the baked
 /// short-wave gains and 11 is the tangent dT/dv; all three are always bound,
 /// with placeholders when there is nothing to put there -- Vulkan has no
-/// notion of an optional descriptor here.
-constexpr u32 kBindingCount = 12;
+/// notion of an optional descriptor here. 12 is the long-wave radiosity
+/// ping-pong and 13 the irradiance each element gathered, the two halves of
+/// the diffuse-grey exchange CpuCrankNicolsonStepper sweeps.
+constexpr u32 kBindingCount = 14;
+
+constexpr f32 kStefanBoltzmann = 5.670374419e-8f;
 
 }  // namespace
 
@@ -113,6 +117,8 @@ struct GpuThermalStepper::Impl {
     std::unique_ptr<GpuBuffer> stateBuffer;
     std::unique_ptr<GpuBuffer> surfaceBuffer;
     std::unique_ptr<GpuBuffer> sensitivityBuffer;
+    std::unique_ptr<GpuBuffer> radiosityBuffer;
+    std::unique_ptr<GpuBuffer> irradianceBuffer;
 
     u32 lastElementCount = 0;
     u32 lastNodeCount = 0;
@@ -152,7 +158,7 @@ struct GpuThermalStepper::Impl {
             return false;
         }
 
-        // Bindings 0-6 and 9-10 read-only, 7-8 and 11 read-write
+        // Bindings 0-6 and 9-10 read-only, 7-8 and 11-13 read-write
         Vector<VkDescriptorSetLayoutBinding> bindings(kBindingCount);
         for (u32 i = 0; i < kBindingCount; ++i) {
             bindings[i] = {};
@@ -402,6 +408,35 @@ struct GpuThermalStepper::Impl {
         descriptorsChanged |= UploadDynamicBuffer(
             surfaceBuffer, surfInit, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
 
+        // Long-wave radiosity ping-pong, 2 * n floats, both halves seeded with
+        // J = eps sigma T^4 + (1 - eps) H from the irradiance the state carries
+        // -- or, for a state nothing has stepped yet, H = sigma T^4, the seed
+        // CpuCrankNicolsonStepper takes, which makes the first J sigma T^4.
+        // The irradiance buffer starts as that H and is rewritten by every
+        // dispatch; ReadBack hands the last one back to the state, so the next
+        // batch continues the same sweep rather than restarting it.
+        const bool carriedIrradiance = state.longwaveIrradiance_W_m2.size() == n;
+        Vector<f32> irradianceInit(n);
+        Vector<f32> radiosityInit(2u * n);
+        for (u32 e = 0; e < n; ++e) {
+            const f32 T = stateF32[static_cast<usize>(e) * nodes];
+            const f32 emitted = kStefanBoltzmann * T * T * T * T;
+            const f32 received = carriedIrradiance
+                                     ? static_cast<f32>(state.longwaveIrradiance_W_m2[e])
+                                     : emitted;
+            const u32 id = elements[e].materialId;
+            const f32 eps = id < materials.size() ? materials[id].longwaveEmissivity : 1.0f;
+            const f32 J = eps * emitted + (1.0f - eps) * received;
+            irradianceInit[e] = received;
+            radiosityInit[e] = J;       // parity 0
+            radiosityInit[n + e] = J;   // parity 1
+        }
+        descriptorsChanged |= UploadDynamicBuffer(
+            radiosityBuffer, radiosityInit, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        descriptorsChanged |= UploadDynamicBuffer(
+            irradianceBuffer, irradianceInit,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+
         if (!descriptorsChanged) return;
 
         // Buffer handles only change on creation or resize. Contents can be
@@ -419,6 +454,8 @@ struct GpuThermalStepper::Impl {
             {reflectedGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {diffuseGainBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
             {sensitivityBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+            {radiosityBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
+            {irradianceBuffer->GetHandle(), 0, VK_WHOLE_SIZE},
         };
         Vector<VkWriteDescriptorSet> writes(kBindingCount);
         for (u32 i = 0; i < kBindingCount; ++i) {
@@ -460,6 +497,16 @@ struct GpuThermalStepper::Impl {
         }
         if (tangent) sensitivityBuffer->Unmap();
         stateBuffer->Unmap();
+
+        // Every element's, participating or not: each one reflects, and the
+        // next batch seeds its radiosity from this.
+        const f32* gathered = static_cast<const f32*>(irradianceBuffer->MapRead());
+        if (!gathered) return;
+        state.longwaveIrradiance_W_m2.resize(n);
+        for (usize e = 0; e < n; ++e) {
+            state.longwaveIrradiance_W_m2[e] = static_cast<f64>(gathered[e]);
+        }
+        irradianceBuffer->Unmap();
     }
 };
 

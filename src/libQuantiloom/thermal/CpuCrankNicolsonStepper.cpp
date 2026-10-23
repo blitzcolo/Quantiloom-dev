@@ -283,6 +283,72 @@ u32 ClaimLagSlot(ThermalState& state, const u32 column) {
 /// as a wrong number rather than turn into a NaN that spreads.
 constexpr f64 kMaxSensitivity_K = 1000.0;
 
+/// H_i, the long wave every element's hemisphere sends it, in W/m^2.
+///
+/// Diffuse-grey exchange: element j leaves its face with radiosity
+///
+///     J_j = eps_j sigma T_j^4 + (1 - eps_j) H_j
+///
+/// -- what it emits plus what it reflects of what reached it -- and element i
+/// gathers
+///
+///     H_i = sum_j F_ij J_j + s_i sigma T_sky^4
+///
+/// of which it absorbs eps_i H_i. The two lines are a linear system over the
+/// whole scene. It is not solved here; it is swept once per step, with H_j on
+/// the right taken from the state, i.e. from the step before. Each sweep adds a
+/// bounce and the error shrinks by (1 - eps) per bounce, against temperatures
+/// that move a fraction of a kelvin per step, so a trajectory tracks the fixed
+/// point -- and a long relaxation reaches it -- without an inner iteration.
+///
+/// A state that carries no irradiance yet is seeded with H_j = sigma T_j^4,
+/// which makes its first radiosity sigma T_j^4 for every eps: the
+/// blackbody-neighbour exchange this replaced, exact in an isothermal
+/// enclosure, and refined from the next step on.
+///
+/// Every element, participating or not: one that does not solve still has a
+/// temperature and an emissivity, and what it reflects is what its neighbours
+/// see. An element whose material is out of range radiates as a blackbody.
+void ComputeLongwaveIrradiance(const ThermalState& state,
+                               const Vector<ThermalElement>& elements,
+                               const Vector<ThermalMaterial>& materials,
+                               const ExchangeGeometry& exchange, const f64 skyTemperature_K,
+                               const Vector<f64>& surfacePrevious, Vector<f64>& radiosity,
+                               Vector<f64>& irradiance) {
+    const usize n = elements.size();
+    const bool carried = state.longwaveIrradiance_W_m2.size() == n;
+
+    radiosity.resize(n);
+    for (usize j = 0; j < n; ++j) {
+        const f64 T = surfacePrevious[j];
+        const f64 emitted = kStefanBoltzmann * T * T * T * T;
+        const f64 eps = elements[j].materialId < materials.size()
+                            ? static_cast<f64>(materials[elements[j].materialId].longwaveEmissivity)
+                            : 1.0;
+        const f64 received = carried ? state.longwaveIrradiance_W_m2[j] : emitted;
+        radiosity[j] = eps * emitted + (1.0 - eps) * received;
+    }
+
+    const f64 sky = kStefanBoltzmann * skyTemperature_K * skyTemperature_K *
+                    skyTemperature_K * skyTemperature_K;
+    irradiance.resize(n);
+    for (usize i = 0; i < n; ++i) {
+        f64 gathered = 0.0;
+        if (i + 1 < exchange.viewFactors.rowStart.size()) {
+            const u32 begin = exchange.viewFactors.rowStart[i];
+            const u32 end = exchange.viewFactors.rowStart[i + 1];
+            for (u32 nz = begin; nz < end; ++nz) {
+                const u32 j = exchange.viewFactors.column[nz];
+                if (j < n) gathered += exchange.viewFactors.value[nz] * radiosity[j];
+            }
+        }
+        if (i < exchange.skyFraction.size()) {
+            gathered += static_cast<f64>(exchange.skyFraction[i]) * sky;
+        }
+        irradiance[i] = gathered;
+    }
+}
+
 /// Everything the outside does to one exposed face, at the temperatures it had
 /// at the start of a step.
 ///
@@ -323,6 +389,7 @@ SurfaceBalance EvaluateSurfaceBalance(const u32 e, const ThermalElement& element
                                       const ShortwaveSample& shortwave,
                                       const std::span<const f32> sunVisibility,
                                       const Vector<f64>& surfacePrevious,
+                                      const std::span<const f64> irradiance,
                                       const ConvectionLaw& convection) {
     SurfaceBalance out;
     const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
@@ -385,28 +452,16 @@ SurfaceBalance EvaluateSurfaceBalance(const u32 e, const ThermalElement& element
         out.shortwavePerAbsorptivity_W_m2 += forcing.diffuseIrradiance_W_m2 * diffuseGain;
     }
 
-    // Long wave: what the hemisphere sends back, minus what this element
-    // radiates. The sky fills whatever the other elements do not, which is
-    // what makes a surface under an overhang cool more slowly than one
-    // under open sky.
-    f64 incoming = 0.0;
-    if (e + 1 < exchange.viewFactors.rowStart.size()) {
-        const u32 begin = exchange.viewFactors.rowStart[e];
-        const u32 end = exchange.viewFactors.rowStart[e + 1];
-        for (u32 n = begin; n < end; ++n) {
-            const u32 j = exchange.viewFactors.column[n];
-            if (j < surfacePrevious.size()) {
-                const f64 Tj = surfacePrevious[j];
-                incoming += exchange.viewFactors.value[n] * Tj * Tj * Tj * Tj;
-            }
-        }
-    }
-    if (e < exchange.skyFraction.size()) {
-        const f64 Tsky = forcing.skyTemperature_K;
-        incoming += static_cast<f64>(exchange.skyFraction[e]) * Tsky * Tsky * Tsky * Tsky;
-    }
+    // Long wave: what the hemisphere sends, H_i, against what this element
+    // radiates. H_i is the neighbours' radiosity plus the sky (see
+    // ComputeLongwaveIrradiance), so a neighbour contributes what it emits AND
+    // what it reflects -- a polished one mostly the latter. The sky fills
+    // whatever the other elements do not, which is what makes a surface under
+    // an overhang cool more slowly than one under open sky. Grey and diffuse:
+    // eps_i of H_i is absorbed, eps_i sigma T_i^4 emitted.
     const f64 Ti = surfacePrevious[e];
-    out.longwavePerEmissivity_W_m2 = kStefanBoltzmann * (incoming - Ti * Ti * Ti * Ti);
+    const f64 received = e < irradiance.size() ? irradiance[e] : 0.0;
+    out.longwavePerEmissivity_W_m2 = received - kStefanBoltzmann * Ti * Ti * Ti * Ti;
     out.surfaceFlux_W_m2 += emissivity * out.longwavePerEmissivity_W_m2;
 
     // Convection, which is linear in the unknown and therefore goes into
@@ -464,10 +519,16 @@ bool CpuCrankNicolsonStepper::SurfaceFluxesAt(
     // were before anything moved.
     Vector<f64> surfacePrevious(elements.size());
     for (usize i = 0; i < elements.size(); ++i) surfacePrevious[i] = state.Surface(i);
+    // And the irradiance the step would gather from it, by the same sweep.
+    Vector<f64> radiosity;
+    Vector<f64> irradiance;
+    ComputeLongwaveIrradiance(state, elements, materials, exchange, forcing.skyTemperature_K,
+                              surfacePrevious, radiosity, irradiance);
 
     const SurfaceBalance balance =
         EvaluateSurfaceBalance(element, e, material, exchange, forcing, shortwave,
-                               shortwave.sunVisibility, surfacePrevious, m_convection);
+                               shortwave.sunVisibility, surfacePrevious, irradiance,
+                               m_convection);
 
     const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
     const f64 Ts = surfacePrevious[element];
@@ -524,6 +585,15 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     for (usize i = 0; i < elements.size(); ++i) {
         surfacePrevious[i] = state.Surface(i);
     }
+
+    // The long-wave irradiance every element gathers this step: one sweep of
+    // the diffuse-grey radiosity from the irradiance the last step left in the
+    // state. Gathered for all of them before any moves, for the same reason
+    // surfacePrevious is, and handed back to the state at the end.
+    Vector<f64>& radiosity = workspace.radiosity;
+    Vector<f64>& irradiance = workspace.irradiance;
+    ComputeLongwaveIrradiance(state, elements, materials, exchange, forcing.skyTemperature_K,
+                              surfacePrevious, radiosity, irradiance);
 
     // Lateral conduction is explicit, and it reaches every node rather than
     // only the surface, so it needs the whole field as it was -- otherwise an
@@ -763,7 +833,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // decomposition shown in a panel is the decomposition the step used.
         const SurfaceBalance balance = EvaluateSurfaceBalance(
             e, element, material, exchange, forcing, shortwave, sunVisibility,
-            surfacePrevious, m_convection);
+            surfacePrevious, irradiance, m_convection);
         const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
         const f64 surfaceFlux_W_m2 = balance.surfaceFlux_W_m2;
         const f64 shortwavePerAbsorptivity_W_m2 = balance.shortwavePerAbsorptivity_W_m2;
@@ -822,12 +892,13 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // and the tangent is differentiating the same equation the matrix
         // solves.
         //
-        // The neighbours' share of `incoming` is deliberately NOT
-        // differentiated. Its derivative is the off-diagonal of a Jacobian
-        // over every element that sees this one, and what it would add is the
-        // second-order fact that a colder patch of ground makes its
-        // neighbours very slightly colder too. Keeping it out is what makes
-        // this a per-element quantity a shader can apply per pixel.
+        // The irradiance H_i is deliberately NOT differentiated. It is the
+        // neighbours' radiosity, lagged a step, and its derivative is the
+        // off-diagonal of a Jacobian over every element that sees this one:
+        // what it would add is the second-order fact that a colder patch of
+        // ground makes its neighbours very slightly colder too. Keeping it out
+        // is what makes this a per-element quantity a shader can apply per
+        // pixel.
 
         // ----------------------------------------------------------------
         // The interior
@@ -871,7 +942,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // of the balance written for one side.
             back = EvaluateSurfaceBalance(
                 shellPartner, elements[shellPartner], material, exchange, forcing,
-                shortwave, sunVisibility, surfacePrevious, m_convection);
+                shortwave, sunVisibility, surfacePrevious, irradiance, m_convection);
             backRadiativeSlope_W_m2K =
                 4.0 * emissivity * kStefanBoltzmann * T[last] * T[last] * T[last];
 
@@ -956,12 +1027,15 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // half-implicit correction cancel to half. Y_conv rather than h: under
         // a temperature-dependent law the coefficient moves with the surface.
         //
-        // The neighbours' share of `incoming` is deliberately NOT
-        // differentiated. Its derivative is the off-diagonal of a Jacobian
-        // over every element that sees this one, and what it would add is the
+        // The irradiance H_i is deliberately NOT differentiated, in v or in
+        // any material parameter. It is the neighbours' radiosity, lagged a
+        // step, and its derivative is the off-diagonal of a Jacobian over
+        // every element that sees this one; what it would add is the
         // second-order fact that a colder patch of ground makes its
         // neighbours very slightly colder too. Keeping it out is what makes
-        // this a per-element quantity a shader can apply per pixel.
+        // this a per-element quantity a shader can apply per pixel. So the
+        // emissivity row below differentiates eps_i (H_i - sigma T_i^4) in
+        // eps_i with H_i held, which is longwavePerEmissivity.
         //
         // Written once and applied to each: the tangent against the whole
         // day's visibility, and one per tracked sun column, which differ only
@@ -1162,6 +1236,10 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     // visibility -- a different quantity. Zero means the back face gets the
     // triangle's own temperature with no sub-triangle shadow correction, which
     // is what every surface got before the correction existed.
+    // What this step gathered is the reflected part of the next one's
+    // radiosity.
+    state.longwaveIrradiance_W_m2.assign(irradiance.begin(), irradiance.end());
+
     if (m_shellPartner.size() == elements.size()) {
         for (usize e = 0; e < elements.size(); ++e) {
             const u32 partner = m_shellPartner[e];

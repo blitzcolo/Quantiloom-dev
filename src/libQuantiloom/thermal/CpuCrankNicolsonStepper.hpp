@@ -27,20 +27,37 @@ namespace quantiloom::thermal {
  * At the exposed face:
  *
  *   -k dT/dx = alpha_s (E_sun v_i max(cos theta, 0) + E_sun R_i + E_diff G_i)
- *              + eps sigma (sum_j F_ij T_j^4 + s_i T_sky^4 - T_i^4)
+ *              + eps_i (H_i - sigma T_i^4)
  *              + h (T_air - T_i)
  *              - f_wet (h / c_p) L_v (q_sat(T_i) - RH q_sat(T_air))
  *
  * where R_i and G_i are the baked short-wave gains -- sunlight and skylight
  * that reached the element off a neighbour, which the direct term cannot see.
  *
- * The radiative term uses the PREVIOUS step's temperatures for every T on the
- * right, including the element's own. That is the linearisation Aguerre et al.
- * describe, and it is why the timestep matters: it is accurate while the
- * surface does not move far within one step, which for a masonry wall at a
- * minute per step it does not, and for a thin metal sheet in direct sun it
- * might. The scale to compare against is rho c d / (h + 4 eps sigma T^3),
- * which the solver logs.
+ * The long wave is diffuse-grey exchange. H_i is the irradiance the element's
+ * hemisphere sends it,
+ *
+ *   H_i = sum_j F_ij J_j + s_i sigma T_sky^4,   J_j = eps_j sigma T_j^4 + (1 - eps_j) H_j
+ *
+ * J_j the neighbour's radiosity: what it emits plus what it reflects. Of H_i
+ * the element absorbs eps_i H_i, by Kirchhoff, and it emits eps_i sigma T_i^4.
+ * Treating every neighbour as a blackbody instead -- J_j = sigma T_j^4 -- would
+ * over-state a neighbour's emission by 1/eps_j and drop its reflection, which
+ * for a polished metal is twenty times the wrong number.
+ *
+ * The radiosity is reached by lagging the reflected part: J_j takes H_j from
+ * the previous step (ThermalState::longwaveIrradiance_W_m2), so every step is
+ * one Jacobi sweep of the radiosity system started from the last one. The
+ * sweep contracts by (1 - eps) per bounce and the temperatures it reads move
+ * slowly against it, so it tracks the fixed point to well within what the
+ * linearisation below already costs.
+ *
+ * The neighbours' radiosity uses the PREVIOUS step's temperatures. The
+ * element's own emission does not: it is Newton-linearised and split half
+ * implicit, like the evaporation. That is accurate while the surface does not
+ * move far within one step, which for a masonry wall at a minute per step it
+ * does not, and for a thin metal sheet in direct sun it might. The scale to
+ * compare against is rho c d / (h + 4 eps sigma T^3), which the solver logs.
  *
  * The latent term does not get that treatment. Its slope in T is several times
  * the radiative one -- saturation humidity roughly doubles every eleven
@@ -128,6 +145,8 @@ private:
     /// timestep while keeping the numerical loop and its order unchanged.
     struct Workspace {
         Vector<f64> surfacePrevious;
+        Vector<f64> radiosity;
+        Vector<f64> irradiance;
         Vector<f64> lateralPrevious;
         Vector<f64> lateralPreviousSensitivity;
         Vector<f64> lateralPreviousLag;

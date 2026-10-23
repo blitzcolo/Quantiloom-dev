@@ -285,6 +285,93 @@ TEST_F(ThermalStepGpuTest, ADiurnalRunMatchesTheCpuStepper) {
     EXPECT_DOUBLE_EQ(gpuState.SurfaceSensitivity(2), 0.0);
 }
 
+TEST_F(ThermalStepGpuTest, AReflectingNeighbourMatchesTheCpuStepperAcrossBatches) {
+    // Diffuse-grey exchange carries the irradiance from one step into the
+    // next one's radiosity, and from one StepMany into the next through the
+    // state. A low emissivity is what makes that reflected part large enough to
+    // see, and four batches are what make a GPU host that forgot to read it
+    // back -- or to seed from it -- disagree with one uninterrupted CPU run.
+    GpuThermalStepper gpuStepper(Device());
+    if (!gpuStepper.IsValid()) {
+        GTEST_SKIP() << "thermal_step.spv unavailable";
+    }
+
+    Vector<ThermalElement> elements(2);
+    for (auto& el : elements) {
+        el.area_m2 = 1.0f;
+        el.normal = glm::vec3(0.0f, 1.0f, 0.0f);
+        el.materialId = 0;
+    }
+    elements[1].materialId = 1;
+
+    ThermalMaterial asphalt;
+    asphalt.conductivity_W_mK = 0.75f;
+    asphalt.density_kg_m3 = 2100.0f;
+    asphalt.specificHeat_J_kgK = 920.0f;
+    asphalt.thickness_m = 0.1f;
+    asphalt.convection_W_m2K = 8.0f;
+    asphalt.shortwaveAbsorptivity = 0.9f;
+    asphalt.longwaveEmissivity = 0.93f;
+    ThermalMaterial aluminium = asphalt;
+    aluminium.conductivity_W_mK = 200.0f;
+    aluminium.density_kg_m3 = 2700.0f;
+    aluminium.thickness_m = 0.003f;
+    aluminium.shortwaveAbsorptivity = 0.2f;
+    aluminium.longwaveEmissivity = 0.08f;
+    const Vector<ThermalMaterial> materials{asphalt, aluminium};
+
+    ExchangeGeometry exchange;
+    exchange.viewFactors.rowStart = {0, 1, 2};
+    exchange.viewFactors.column = {1, 0};
+    exchange.viewFactors.value = {0.5f, 0.5f};
+    exchange.skyFraction = {0.5f, 0.5f};
+    exchange.sunVisibility = {1.0f, 1.0f};
+
+    SunVisibilityTable sunTable;
+    sunTable.sampleTime_h = {0.0};
+    sunTable.visibility = exchange.sunVisibility;
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 295.0;
+    forcing.sunIrradiance_W_m2 = 700.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+    forcing.skyTemperature_K = 255.0;
+
+    const u32 nodeCount = 10;
+    const f64 dt = 60.0;
+    const i32 batches = 4;
+    const i32 stepsPerBatch = 360;
+
+    ThermalState cpuState = MakeState(2, nodeCount, 290.0);
+    CpuCrankNicolsonStepper cpuStepper;
+    for (i32 i = 0; i < batches * stepsPerBatch; ++i) {
+        cpuStepper.Step(cpuState, elements, materials, exchange, forcing, dt,
+                        {exchange.sunVisibility});
+    }
+
+    ThermalState gpuState = MakeState(2, nodeCount, 290.0);
+    Vector<ThermalBatchStep> batch(stepsPerBatch);
+    for (auto& b : batch) {
+        b.forcing = forcing;
+        b.dt_s = dt;
+    }
+    for (i32 i = 0; i < batches; ++i) {
+        gpuStepper.StepMany(gpuState, elements, materials, exchange, sunTable, batch);
+    }
+
+    ASSERT_EQ(gpuState.longwaveIrradiance_W_m2.size(), 2u);
+    ASSERT_EQ(cpuState.longwaveIrradiance_W_m2.size(), 2u);
+    for (usize e = 0; e < 2; ++e) {
+        EXPECT_NEAR(gpuState.Surface(e), cpuState.Surface(e), 0.05) << "element " << e;
+        // The irradiance is what the next batch is seeded from, so it has to
+        // agree too: 0.5 W/m^2 is what the 0.05 K above is worth through
+        // 4 sigma T^3 at the neighbour, with room for the f32 floor.
+        EXPECT_NEAR(gpuState.longwaveIrradiance_W_m2[e], cpuState.longwaveIrradiance_W_m2[e],
+                    0.5)
+            << "element " << e;
+    }
+}
+
 TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {
     // Evaporation is the one term with an exponential in it, so it is the one
     // where f32 and f64 could plausibly part company. Magnus over a day, on a
