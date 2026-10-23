@@ -116,8 +116,9 @@ public:
     /// by the host on every new acquisition tick before RecordMeasurement;
     /// the ISP/statistics shaders read the values from the re-uploaded
     /// buffers, so a same-tick re-record keeps the previous tick's values by
-    /// simply not calling this. Buffers are CPU_TO_GPU; the upload is a
-    /// host-side memcpy, safe at record time.
+    /// simply not calling this. The rows are staged here and written by the
+    /// next record call inside its command buffer, so a frame still in flight
+    /// from an earlier submission cannot read a half-overwritten buffer.
     [[nodiscard]] Result<void, String> ApplyEffectiveConfig(
         const camera::CameraConfig& config);
     /// Re-run the display half of the ISP over the last acquisition without

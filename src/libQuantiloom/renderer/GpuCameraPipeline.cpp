@@ -347,6 +347,13 @@ struct GpuCameraPipeline::Impl {
     u32 ispFlags = 0;
     std::array<f32, 3> sigmaX{}, sigmaY{};
     ConfigRows configRows{};
+    // Effective-config rows staged by ApplyEffectiveConfig and written by
+    // the next record call through vkCmdUpdateBuffer (each buffer is far
+    // under 64 KiB): a host memcpy at record time could overwrite
+    // parameters a previous, still-in-flight submission is reading.
+    bool paramsPending = false;
+    ConfigRows pendingConfigRows{};
+    std::array<std::array<f32, 4>, 9> pendingIspRows{};
 
     std::unique_ptr<GpuImage> psfTemp, blurred, rawDn, corrected, display;
     std::unique_ptr<GpuImage> fastRgbRate;
@@ -365,6 +372,38 @@ struct GpuCameraPipeline::Impl {
     std::unique_ptr<GpuBuffer> cdfBuffer;           // binding 15, 256 x f32
     std::unique_ptr<GpuBuffer> tileStatsBuffer;     // binding 16, per-tile float4
     std::unique_ptr<GpuBuffer> ispStatsCheckpoint;  // previous-frame AGC window snapshot (acquisition history)
+
+    // Writes the effective-config rows staged by ApplyEffectiveConfig into
+    // the device buffers, inside the recorded command buffer.
+    // vkCmdUpdateBuffer is limited to 64 KiB per call; both buffers are
+    // 144 bytes. Queue order then guarantees the write lands after any
+    // in-flight frame that read the previous values, which a record-time
+    // host memcpy could not.
+    void UploadPendingParams(VkCommandBuffer cmd) {
+        if (!paramsPending) return;
+        vkCmdUpdateBuffer(cmd, configBuffer->GetHandle(), 0,
+                          sizeof(pendingConfigRows), pendingConfigRows.data());
+        vkCmdUpdateBuffer(cmd, ispConfigBuffer->GetHandle(), 0,
+                          sizeof(pendingIspRows), pendingIspRows.data());
+        std::array<VkBufferMemoryBarrier, 2> uploaded{};
+        const VkBuffer buffers[] = {configBuffer->GetHandle(),
+                                    ispConfigBuffer->GetHandle()};
+        for (u32 i = 0; i < uploaded.size(); ++i) {
+            uploaded[i].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+            uploaded[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            uploaded[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            uploaded[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            uploaded[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            uploaded[i].buffer = buffers[i];
+            uploaded[i].offset = 0;
+            uploaded[i].size = VK_WHOLE_SIZE;
+        }
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             0, nullptr, static_cast<u32>(uploaded.size()),
+                             uploaded.data(), 0, nullptr);
+        paramsPending = false;
+    }
 
     VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
@@ -572,12 +611,15 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         return Result<void, String>::Err("cannot allocate GPU camera descriptor sets");
 
     // Per-stratum camera frames (binding 10) and the compositor's disocclusion
-    // counters (binding 11). The frame buffer is re-uploaded per measurement;
-    // both are bound into every set, used or not.
+    // counters (binding 11). Both are bound into every set, used or not. The
+    // frame buffer lives in device memory: each measurement writes it inside
+    // the recorded command buffer (vkCmdUpdateBuffer), so an in-flight frame
+    // from a previous submission can no longer read a half-overwritten copy.
     layerCameraBuffer = std::make_unique<GpuBuffer>(
         context.GetAllocator(),
         8u * sizeof(DynamicLayerCamera),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+        VMA_MEMORY_USAGE_GPU_ONLY);
     dynamicCounterBuffer = std::make_unique<GpuBuffer>(
         context.GetAllocator(), 4u * sizeof(u32),
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
@@ -621,9 +663,9 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
     if (!ispStatsCheckpoint->IsValid())
         return Result<void, String>::Err(
             "cannot allocate GPU camera checkpoint buffer");
-    const std::array<DynamicLayerCamera, 8> zeroLayers{};
-    layerCameraBuffer->Upload(zeroLayers.data(), sizeof(zeroLayers));
     CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
+        vkCmdFillBuffer(cmd, layerCameraBuffer->GetHandle(), 0,
+                        VK_WHOLE_SIZE, 0);
         vkCmdFillBuffer(cmd, dynamicCounterBuffer->GetHandle(), 0,
                         VK_WHOLE_SIZE, 0);
         vkCmdFillBuffer(cmd, ispStatsBuffer->GetHandle(), 0, VK_WHOLE_SIZE, 0);
@@ -893,17 +935,19 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     }
     m_impl->configRows[8][0] = static_cast<f32>(optics.focalLengthMm * 1e-3);
     m_impl->configRows[8][1] = static_cast<f32>(optics.pixelPitchUm * 1e-6);
-    const auto makeBuffer = [&](const void* data, VkDeviceSize size)
+    const auto makeBuffer = [&](const void* data, VkDeviceSize size,
+                                VkBufferUsageFlags usage)
         -> std::unique_ptr<GpuBuffer> {
         auto buffer = std::make_unique<GpuBuffer>(
-            m_impl->context.GetAllocator(), size,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            m_impl->context.GetAllocator(), size, usage,
+            VMA_MEMORY_USAGE_CPU_TO_GPU);
         if (!buffer->IsValid()) return {};
         buffer->Upload(data, size);
         return buffer;
     };
     m_impl->configBuffer = makeBuffer(
-        m_impl->configRows.data(), sizeof(m_impl->configRows));
+        m_impl->configRows.data(), sizeof(m_impl->configRows),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     if (!m_impl->configBuffer)
         return Result<void, String>::Err("cannot upload GPU camera parameters");
     const auto& gainMap = config.device.detector == camera::DetectorKind::Photon
@@ -916,7 +960,8 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
         upload.reserve(std::max<size_t>(values.size(), 1));
         if (values.empty()) upload.push_back(fallback);
         else for (const f64 value : values) upload.push_back(static_cast<f32>(value));
-        return makeBuffer(upload.data(), upload.size() * sizeof(f32));
+        return makeBuffer(upload.data(), upload.size() * sizeof(f32),
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     };
     m_impl->nucGainBuffer = uploadMap(gainMap, 1.0f);
     m_impl->nucOffsetBuffer = uploadMap(offsetMap, 0.0f);
@@ -931,7 +976,9 @@ GpuCameraPipeline::Configure(const camera::CameraConfig& config) {
     // placeholder when empty, matching the NUC map convention.
     std::array<std::array<f32, 4>, 9> ispRows{};
     BuildIspRows(config, ispRows, m_impl->ispFlags);
-    m_impl->ispConfigBuffer = makeBuffer(ispRows.data(), sizeof(ispRows));
+    m_impl->ispConfigBuffer = makeBuffer(
+        ispRows.data(), sizeof(ispRows),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
     std::vector<std::array<u32, 2>> defects = config.isp.defectPixels;
     if (defects.empty()) defects.push_back({0u, 0u});
     if (!m_impl->ispConfigBuffer)
@@ -1028,18 +1075,19 @@ GpuCameraPipeline::ApplyEffectiveConfig(const camera::CameraConfig& config) {
     // pipeline's config so MakePush and the display/stats shading see one
     // consistent state. Refresh detector/readout rows 0-4 and the ISP buffer;
     // PSF sigmas and response integrals in rows 5-8 remain tied to the
-    // measurement config and are never changed by this path.
+    // measurement config and are never changed by this path. The rows are
+    // staged here and written by the next record call inside its command
+    // buffer (Impl::UploadPendingParams): a host memcpy at record time could
+    // overwrite parameters a still-in-flight frame is reading.
     m_impl->config = config;
     if (auto rows = UpdateReadoutRows(config, m_impl->configRows); !rows)
         return rows;
     if (!m_impl->configBuffer || !m_impl->ispConfigBuffer)
         return Result<void, String>::Err(
             "GPU camera parameter buffers are not allocated");
-    m_impl->configBuffer->Upload(m_impl->configRows.data(),
-                                 sizeof(m_impl->configRows));
-    std::array<std::array<f32, 4>, 9> ispRows{};
-    BuildIspRows(config, ispRows, m_impl->ispFlags);
-    m_impl->ispConfigBuffer->Upload(ispRows.data(), sizeof(ispRows));
+    m_impl->pendingConfigRows = m_impl->configRows;
+    BuildIspRows(config, m_impl->pendingIspRows, m_impl->ispFlags);
+    m_impl->paramsPending = true;
     return Result<void, String>::Ok();
 }
 
@@ -1053,6 +1101,7 @@ GpuCameraPipeline::RecordDisplayReprocess(
     auto applied = ApplyEffectiveConfig(config);
     if (!applied) return applied;
     m_impl->TransitionImages(cmd);
+    m_impl->UploadPendingParams(cmd);
     // The same acquisition index keys the HSV noise streams, so a reprocess
     // of unchanged parameters is bit-identical to the original display.
     auto push = m_impl->MakePush(m_impl->lastAcquisitionIndex,
@@ -1079,6 +1128,7 @@ Result<void, String> GpuCameraPipeline::RecordReadoutReprocess(
             "GPU camera readout reprocess needs a completed acquisition");
     if (auto applied = ApplyEffectiveConfig(config); !applied) return applied;
     m_impl->TransitionImages(cmd);
+    m_impl->UploadPendingParams(cmd);
     auto push = m_impl->MakePush(m_impl->lastAcquisitionIndex,
                                  m_impl->lastFrameTimeSeconds);
     const VkDescriptorSet readoutSet =
@@ -1394,6 +1444,7 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
 
     auto push = m_impl->MakePush(acquisitionIndex, frameTimeSeconds);
     m_impl->TransitionImages(cmd);
+    m_impl->UploadPendingParams(cmd);
     if (!stratified && m_impl->measurementView == VK_NULL_HANDLE) {
         const auto dummy = m_impl->psfTemp.get();
         m_impl->UpdateSet(m_impl->sets[0], {
@@ -1403,13 +1454,28 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     }
 
     if (stratified) {
-        // The per-stratum frames change per acquisition. Uploading at record
-        // time is safe for the interactive host, which serializes frames; the
-        // explicit Queue/Record/Complete contract makes the same promise.
+        // The per-stratum frames change per acquisition. Write them inside
+        // the command buffer (vkCmdUpdateBuffer, 640 bytes of the 64 KiB
+        // limit) so the update is ordered with the compositor's read and
+        // cannot overwrite frames a previous, still-in-flight submission is
+        // reading.
         std::array<DynamicLayerCamera, 8> frames{};
         const u32 count = std::min<u32>(dynamic.strataCount, 8u);
         std::copy_n(dynamic.layerCameras, count, frames.data());
-        m_impl->layerCameraBuffer->Upload(frames.data(), sizeof(frames));
+        vkCmdUpdateBuffer(cmd, m_impl->layerCameraBuffer->GetHandle(), 0,
+                          sizeof(frames), frames.data());
+        VkBufferMemoryBarrier framesUploaded{};
+        framesUploaded.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        framesUploaded.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        framesUploaded.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        framesUploaded.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        framesUploaded.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        framesUploaded.buffer = m_impl->layerCameraBuffer->GetHandle();
+        framesUploaded.offset = 0;
+        framesUploaded.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             0, nullptr, 1, &framesUploaded, 0, nullptr);
         if (m_impl->strataRateView == VK_NULL_HANDLE) {
             const auto dummy = m_impl->psfTemp.get();
             m_impl->UpdateSet(m_impl->sets[7], {
