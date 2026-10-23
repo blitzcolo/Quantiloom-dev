@@ -72,10 +72,11 @@ u8 EncodeWeight(f32 w, bool& clipped) {
     return static_cast<u8>(std::clamp(scaled, 0.0f, 1.0f) * 255.0f + 0.5f);
 }
 
-/// Load an authored weight map and re-encode it into the halved convention.
-/// Authors paint weights in [0, 1] because that is what a paint program and a
-/// remote-sensing abundance map both mean by a weight; the halving is an
-/// internal storage detail and should not leak into an asset.
+/// Load an authored weight map and re-encode it into the kWeightScale
+/// convention. Authors paint weights in [0, 1] because that is what a paint
+/// program and a remote-sensing abundance map both mean by a weight; the
+/// UNORM8 scaling by kWeightScale (6) is an internal storage detail and
+/// should not leak into an asset.
 std::optional<Texture> LoadAuthoredWeightTexture(const String& path, const String& materialName) {
     auto imageResult = ImageIO::ReadImage(path);
     if (!imageResult.has_value()) {
