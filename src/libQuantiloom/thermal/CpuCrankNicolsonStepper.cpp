@@ -390,6 +390,7 @@ SurfaceBalance EvaluateSurfaceBalance(const u32 e, const ThermalElement& element
                                       const std::span<const f32> sunVisibility,
                                       const Vector<f64>& surfacePrevious,
                                       const std::span<const f64> irradiance,
+                                      const glm::vec3& sunDirection,
                                       const ConvectionLaw& convection) {
     SurfaceBalance out;
     const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
@@ -411,7 +412,7 @@ SurfaceBalance EvaluateSurfaceBalance(const u32 e, const ThermalElement& element
     // right-hand side rather than a Jacobian.
     if (forcing.sunIrradiance_W_m2 > 0.0) {
         const f64 cosTheta = static_cast<f64>(
-            glm::dot(element.normal, glm::normalize(forcing.sunDirection)));
+            glm::dot(element.normal, sunDirection));
         if (cosTheta > 0.0) {
             out.directPerVisibility_W_m2 =
                 absorptivity * forcing.sunIrradiance_W_m2 * cosTheta;
@@ -528,7 +529,7 @@ bool CpuCrankNicolsonStepper::SurfaceFluxesAt(
     const SurfaceBalance balance =
         EvaluateSurfaceBalance(element, e, material, exchange, forcing, shortwave,
                                shortwave.sunVisibility, surfacePrevious, irradiance,
-                               m_convection);
+                               glm::normalize(forcing.sunDirection), m_convection);
 
     const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
     const f64 Ts = surfacePrevious[element];
@@ -594,6 +595,9 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
     Vector<f64>& irradiance = workspace.irradiance;
     ComputeLongwaveIrradiance(state, elements, materials, exchange, forcing.skyTemperature_K,
                               surfacePrevious, radiosity, irradiance);
+
+    // One sun for the whole step, normalised once rather than per element.
+    const glm::vec3 sunDirection = glm::normalize(forcing.sunDirection);
 
     // Lateral conduction is explicit, and it reaches every node rather than
     // only the surface, so it needs the whole field as it was -- otherwise an
@@ -833,7 +837,7 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
         // decomposition shown in a panel is the decomposition the step used.
         const SurfaceBalance balance = EvaluateSurfaceBalance(
             e, element, material, exchange, forcing, shortwave, sunVisibility,
-            surfacePrevious, irradiance, m_convection);
+            surfacePrevious, irradiance, sunDirection, m_convection);
         const f64 emissivity = static_cast<f64>(material.longwaveEmissivity);
         const f64 surfaceFlux_W_m2 = balance.surfaceFlux_W_m2;
         const f64 shortwavePerAbsorptivity_W_m2 = balance.shortwavePerAbsorptivity_W_m2;
@@ -942,7 +946,8 @@ void CpuCrankNicolsonStepper::Step(ThermalState& state, const Vector<ThermalElem
             // of the balance written for one side.
             back = EvaluateSurfaceBalance(
                 shellPartner, elements[shellPartner], material, exchange, forcing,
-                shortwave, sunVisibility, surfacePrevious, irradiance, m_convection);
+                shortwave, sunVisibility, surfacePrevious, irradiance, sunDirection,
+                m_convection);
             backRadiativeSlope_W_m2K =
                 4.0 * emissivity * kStefanBoltzmann * T[last] * T[last] * T[last];
 
