@@ -496,6 +496,24 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
                     "interior; using {}", chosen->Name(), impl.cpuStepper.Name());
         chosen = nullptr;
     }
+    // The two tangents are sized into the state by the Desc below, not by the
+    // stepper, so one that does not integrate them hands them back at zero --
+    // a derivative, not an absence: a shading pass would trace every lagged
+    // shadow against no response and a what-if would predict that no slider
+    // moves anything. ThermalPreview's ChooseStepper asks the same two
+    // questions for the viewport.
+    if (chosen != nullptr && config.sunCorrection && config.sunMemoryLags > 0 &&
+        !chosen->CarriesLagSensitivity()) {
+        QL_LOG_INFO("  Thermal stepper: {} does not carry the sun_memory_lags tangents; "
+                    "using {}", chosen->Name(), impl.cpuStepper.Name());
+        chosen = nullptr;
+    }
+    if (chosen != nullptr && !config.parameterSensitivities.empty() &&
+        !chosen->CarriesParameterSensitivity()) {
+        QL_LOG_INFO("  Thermal stepper: {} does not carry the parameter_sensitivities "
+                    "tangents; using {}", chosen->Name(), impl.cpuStepper.Name());
+        chosen = nullptr;
+    }
     impl.cpuStepper.SetShellPartners(impl.mesh.shellPartner);
     impl.active = (chosen != nullptr) ? chosen : &impl.cpuStepper;
 

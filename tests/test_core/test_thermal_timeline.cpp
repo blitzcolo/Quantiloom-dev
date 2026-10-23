@@ -500,3 +500,81 @@ TEST(ThermalTimelineTest, ANonPositiveTimestepFallsBackToTheDefault) {
         EXPECT_GT(state.Surface(0), desc.initialTemperature_K) << "the sun did something";
     }
 }
+
+TEST(ThermalTimelineTest, AStepperWithoutParameterTangentsIsNotChosen) {
+    // What the GPU stepper is: it steps the temperature and leaves the
+    // parameter tangents the Desc sized at zero. Chosen anyway, the solve would
+    // report dT/deps = 0 everywhere -- a derivative, not an absence. Build has
+    // to fall back to the CPU stepper, so the answer is the CPU one exactly.
+    class TangentlessStepper final : public IThermalStepper {
+    public:
+        void Step(ThermalState& state, const Vector<ThermalElement>& elements,
+                  const Vector<ThermalMaterial>& materials,
+                  const ExchangeGeometry& exchange, const ThermalForcing& forcing,
+                  const f64 dt_s, const ShortwaveSample& shortwave) override {
+            const Vector<f64> untouched = state.parameterSensitivity;
+            m_inner.Step(state, elements, materials, exchange, forcing, dt_s, shortwave);
+            state.parameterSensitivity = untouched;
+        }
+        [[nodiscard]] const char* Name() const override { return "tangentless"; }
+
+    private:
+        CpuCrankNicolsonStepper m_inner;
+    };
+
+    Scene scene;
+    scene.materials.push_back(Material::CreateLambertian(glm::vec3(0.5f), "Concrete"));
+    scene.materials[0].irEmissivityCurve = {{3000.0f, 0.92f}, {15000.0f, 0.92f}};
+    GeometryPrimitive prim;
+    prim.materialId = 0;
+    prim.positions = {
+        glm::vec3(-1, 0, -1), glm::vec3(1, 0, -1),
+        glm::vec3(1, 0, 1),   glm::vec3(-1, 0, 1),
+    };
+    prim.normals.assign(4, glm::vec3(0, 1, 0));
+    prim.indices = {0, 2, 1, 0, 3, 2};
+    Mesh mesh;
+    mesh.primitives.push_back(std::move(prim));
+    scene.meshes.push_back(std::move(mesh));
+    SceneNode node;
+    node.meshIndex = 0;
+    node.transform = glm::mat4(1.0f);
+    node.active = true;
+    scene.nodes.push_back(node);
+
+    ThermalConfig config;
+    config.enabled = true;
+    config.time_h = 3.0;
+    config.startTime_h = 0.0;
+    config.timestep_s = 60.0;
+    config.nodeCount = 10;
+    config.initial = InitialCondition::Uniform;
+    config.initialTemperature_K = 293.15;
+    config.airTemperature_K = 293.15;
+    config.sunIrradiance_W_m2 = 900.0;
+    config.skyTemperature_K = 270.0;
+    config.parameterSensitivities = {ThermalParameter::Emissivity};
+    ThermalMaterial tm;
+    tm.conductivity_W_mK = 1.4f;
+    tm.density_kg_m3 = 2300.0f;
+    tm.specificHeat_J_kgK = 880.0f;
+    tm.thickness_m = 0.2f;
+    tm.convection_W_m2K = 10.0f;
+    tm.shortwaveAbsorptivity = 0.6f;
+    config.materials["Concrete"] = tm;
+
+    const auto exchange = MakeOpenSkyExchange(2);
+    const ThermalResult reference =
+        RunThermalSolve(scene, config, exchange, SunVisibilityTable{}, nullptr);
+    ASSERT_TRUE(reference.error.empty()) << reference.error;
+    ASSERT_EQ(reference.parameterSensitivity.size(), 2u);
+    EXPECT_LT(reference.parameterSensitivity[0], -1.0f)
+        << "radiating more cools a surface under a cold sky";
+
+    TangentlessStepper tangentless;
+    const ThermalResult offered =
+        RunThermalSolve(scene, config, exchange, SunVisibilityTable{}, &tangentless);
+    ASSERT_TRUE(offered.error.empty()) << offered.error;
+    EXPECT_EQ(offered.parameterSensitivity, reference.parameterSensitivity);
+    EXPECT_EQ(offered.surfaceTemperature_K, reference.surfaceTemperature_K);
+}
