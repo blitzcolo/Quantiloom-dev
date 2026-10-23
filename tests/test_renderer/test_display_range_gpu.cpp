@@ -46,7 +46,11 @@ DisplayRange CpuReference(const std::vector<f32>& rgba,
         absMin = std::min(absMin, lum);
         absMax = std::max(absMax, lum);
     }
-    if (luminances.empty() || absMin >= absMax) return {};
+    if (luminances.empty()) return {};
+    if (absMin >= absMax) {
+        const f32 epsilon = std::max(std::abs(absMin), 1.0f) * 1e-6f;
+        return {absMin - epsilon, absMax + epsilon};
+    }
 
     constexpr usize binsCount = GpuDisplayRange::kHistogramBins;
     std::vector<u32> histogram(binsCount, 0);
@@ -157,7 +161,7 @@ std::vector<f32> Rgba(const std::vector<std::array<f32, 4>>& pixels) {
 
 class DisplayRangeGpuTest : public VulkanDeviceTest {};
 
-TEST_F(DisplayRangeGpuTest, FiltersInvalidRgbAndFallsBackForEmptyOrConstantImages) {
+TEST_F(DisplayRangeGpuTest, FiltersInvalidRgbAndFallsBackForEmptyImages) {
     auto created = GpuDisplayRange::Create(Device());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
@@ -168,17 +172,47 @@ TEST_F(DisplayRangeGpuTest, FiltersInvalidRgbAndFallsBackForEmptyOrConstantImage
                                {1.0f, 1.0f, -inf, 9.0f}});
     ExpectExactRange(*gpu, Device(), 3, 1, invalid, 1.0f, 99.0f);
 
-    const auto constant = Rgba({{-4.0f, -4.0f, -4.0f, nan},
-                                {-4.0f, -4.0f, -4.0f, inf},
-                                {-4.0f, -4.0f, -4.0f, 0.0f}});
-    ExpectExactRange(*gpu, Device(), 3, 1, constant, 1.0f, 99.0f);
-
     const auto mixed = Rgba({{nan, 0.0f, 0.0f, 0.0f},
                              {-8.0f, 1.0f, 3.0f, nan},
                              {10.0f, -4.0f, 2.0f, inf},
                              {1.0f, 2.0f, 30.0f, -inf},
                              {inf, 0.0f, 0.0f, 0.0f}});
     ExpectExactRange(*gpu, Device(), 5, 1, mixed, 1.0f, 99.0f);
+}
+
+TEST_F(DisplayRangeGpuTest, AConstantImageKeepsItsOwnRange) {
+    auto created = GpuDisplayRange::Create(Device());
+    ASSERT_TRUE(created.has_value()) << created.error();
+    auto gpu = std::move(created.value());
+    const auto constant = Rgba({{-4.0f, -4.0f, -4.0f, 0.0f},
+                                {-4.0f, -4.0f, -4.0f, 0.0f},
+                                {-4.0f, -4.0f, -4.0f, 0.0f}});
+    ExpectExactRange(*gpu, Device(), 3, 1, constant, 1.0f, 99.0f);
+    // Pin the window itself: the image's range, widened by an epsilon --
+    // not the {0,1} an empty input reports.
+    auto image = UploadRgba32f(Device(), 3, 1, constant);
+    ASSERT_NE(image, nullptr);
+    const auto computed = gpu->Compute(*image, 3, 1, 1.0f, 99.0f);
+    ASSERT_TRUE(computed.has_value()) << computed.error();
+    const f32 epsilon = 4.0f * 1e-6f;
+    EXPECT_EQ(computed.value().min, -4.0f - epsilon);
+    EXPECT_EQ(computed.value().max, -4.0f + epsilon);
+}
+
+TEST_F(DisplayRangeGpuTest, AnAllInvalidImageKeepsTheDefaultWindow) {
+    auto created = GpuDisplayRange::Create(Device());
+    ASSERT_TRUE(created.has_value()) << created.error();
+    auto gpu = std::move(created.value());
+    const f32 nan = std::numeric_limits<f32>::quiet_NaN();
+    const auto invalid = Rgba({{nan, nan, nan, 0.0f},
+                               {nan, nan, nan, 0.0f},
+                               {nan, nan, nan, 0.0f}});
+    auto image = UploadRgba32f(Device(), 3, 1, invalid);
+    ASSERT_NE(image, nullptr);
+    const auto computed = gpu->Compute(*image, 3, 1, 1.0f, 99.0f);
+    ASSERT_TRUE(computed.has_value()) << computed.error();
+    EXPECT_EQ(computed.value().min, 0.0f);
+    EXPECT_EQ(computed.value().max, 1.0f);
 }
 
 TEST_F(DisplayRangeGpuTest, RequestsCpuFallbackForUnsafeSmallRgb) {

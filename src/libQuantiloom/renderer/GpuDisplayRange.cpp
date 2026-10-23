@@ -316,7 +316,15 @@ Result<DisplayRange, String> GpuDisplayRange::Compute(
     const u32 validCount = scratch[2];
     const f32 absMin = OrderedToFloat(scratch[0]);
     const f32 absMax = OrderedToFloat(scratch[1]);
-    if (validCount == 0 || absMin >= absMax) return DisplayRange{};
+    // No valid pixels at all: the {0,1} default window is the only answer.
+    if (validCount == 0) return DisplayRange{};
+    // A flat image is still an image. Stretching it would turn rounding noise
+    // into a picture, so it keeps its own range, widened by an epsilon so the
+    // window is nonzero -- not the arbitrary [0,1] an empty input reports.
+    if (absMin >= absMax) {
+        const f32 epsilon = std::max(std::abs(absMin), 1.0f) * 1e-6f;
+        return DisplayRange{absMin - epsilon, absMax + epsilon};
+    }
 
     // This is deliberately host arithmetic: Vulkan permits a less accurate
     // floating-point division than MSVC's f32 division, enough to move an

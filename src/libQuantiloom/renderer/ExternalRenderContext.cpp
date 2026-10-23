@@ -6612,10 +6612,19 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
         absMax = std::max(absMax, lum);
     }
 
-    // Fallback if no valid pixels
-    if (luminances.empty() || absMin >= absMax) {
+    // No valid pixels at all: the {0,1} default window is the only answer.
+    // A flat image, by contrast, keeps its own range, widened by an epsilon
+    // so the stretch has a nonzero window -- same rule as the GPU path in
+    // GpuDisplayRange::Compute.
+    if (luminances.empty()) {
         outMin = 0.0f;
         outMax = 1.0f;
+        return;
+    }
+    if (absMin >= absMax) {
+        const f32 epsilon = std::max(std::abs(absMin), 1.0f) * 1e-6f;
+        outMin = absMin - epsilon;
+        outMax = absMax + epsilon;
         return;
     }
 
