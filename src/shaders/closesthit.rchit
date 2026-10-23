@@ -3696,10 +3696,19 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float sheenScale_b = SheenAlbedoScaling(rhoSheen_b, NdotV_swir, sheenRoughness);
         const float wSheen_b = sheenE * rhoSheen_b;
 
-        // One total reflectance, so the lobe is only a sampling shape for it:
-        // qSpec is 0 or 1 and both weights are rho_b -- plus whatever the sheen
-        // lobe returns, which is added rather than carved out because this is a
-        // reflective band with no emission to keep in step with it.
+        // The direct term in this band is Lambertian: rho(λ) × E/PI with one
+        // total reflectance and no diffuse/specular split. The bounce has to
+        // estimate that same f -- sampling GGX with the reflectance as a
+        // Schlick weight, as this call used to do for smooth surfaces, makes
+        // the traced correction converge to a different integral than the
+        // analytic terms it corrects, and the gap shows in every non-uniform
+        // environment. qSpec is 0: the cosine lobe samples f = wDiffuse/PI
+        // with the matching pdf, and the GGX lobe stays out of both the
+        // sampling and EvalBounceBrdf. The specular weight pair is still
+        // carried -- the IR bands pass the same value twice, as designed --
+        // it just multiplies a lobe nothing samples. Sheen rides in wTotal_b,
+        // added rather than carved out because this is a reflective band with
+        // no emission to keep in step with it.
         const float3 swirHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
         // Diffuse transmission here is measured-curve only, for the same
         // reason sheen is: an RGB colour upsampled through the visible basis
@@ -3713,7 +3722,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
         float bounceCorr = TraceEnvBounceResidual(
             swirHitPos, normal, V, NdotV_swir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
+            0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
@@ -4000,9 +4009,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         const float wDt_b = dt * rhoDt_b * ccBase;
         const float wTotal_b =
             (rho_b * dtBase * sheenScale_b + wSheen_b) * ccBase + ccWeight * ccE;
+        // qSpec 0, as in the SWIR branch: the bounce estimates the same
+        // Lambertian f the loop's direct term uses, not a GGX lobe carrying the
+        // reflectance as a Schlick weight.
         float bounceCorr = TraceEnvBounceResidual(
             nirHitPos, normal, V, NdotV_nir, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
+            0.0, wTotal_b, wTotal_b, wTotal_b, wTotal_b,
             L_base_b, lambda_b, aniso, payload).x;
         if (wDt_b > 0.0) {
             bounceCorr += TraceEnvBounceResidual(
@@ -4277,9 +4289,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                                     T_atmosphere, lut.skyEmissivityClear);
 
         const float3 irHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+        // qSpec 0, as in the SWIR branch: the loop's reflected term is
+        // Lambertian rho(λ) × L_down, and the bounce must estimate that same f
+        // or the correction converges to a different integral than the base it
+        // corrects.
         float bounceCorr = TraceEnvBounceResidual(
             irHitPos, normal, V, NdotV, roughness,
-            (roughness > 0.5) ? 0.0 : 1.0, rho_b, rho_b, rho_b, rho_b,
+            0.0, rho_b, rho_b, rho_b, rho_b,
             L_base_b, lambda_b, aniso, payload).x;
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
