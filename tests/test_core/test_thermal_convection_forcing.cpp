@@ -19,6 +19,7 @@
 #include "thermal/CpuCrankNicolsonStepper.hpp"
 #include "thermal/ThermalSolver.hpp"  // MakeOpenSkyExchange, LoadForcingCsv
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -195,6 +196,26 @@ TEST(ThermalConvectionForcing, AnAbsentHumidityColumnIsTheRunsOwn) {
 
     std::filesystem::remove(six);
     std::filesystem::remove(eight);
+}
+
+TEST(ThermalConvectionForcing, OppositeSunDirectionsInterpolateToADirection) {
+    // Two rows whose sun directions cancel half way. Normalising the zero
+    // blend gave NaN, which every element's cos(theta) then carried; the
+    // nearer row's direction is what the series can actually say.
+    ThermalForcing early;
+    early.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+    ThermalForcing late;
+    late.sunDirection = glm::vec3(0.0f, -1.0f, 0.0f);
+    const Vector<std::pair<f64, ThermalForcing>> series{{0.0, early}, {2.0, late}};
+
+    const glm::vec3 middle = SampleForcing(series, 1.0, ThermalForcing{}).sunDirection;
+    EXPECT_TRUE(std::isfinite(middle.x) && std::isfinite(middle.y) &&
+                std::isfinite(middle.z));
+    EXPECT_NEAR(glm::length(middle), 1.0f, 1e-6f);
+
+    // Away from the cancellation it is the ordinary normalised blend.
+    const glm::vec3 nearStart = SampleForcing(series, 0.5, ThermalForcing{}).sunDirection;
+    EXPECT_NEAR(nearStart.y, 1.0f, 1e-6f);
 }
 
 TEST(ThermalConvectionForcing, InterpolationCarriesEveryField) {

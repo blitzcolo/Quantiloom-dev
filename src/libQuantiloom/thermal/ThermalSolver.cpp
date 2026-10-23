@@ -280,8 +280,21 @@ ThermalForcing SampleForcing(const Vector<std::pair<f64, ThermalForcing>>& serie
     out.relativeHumidity = a.relativeHumidity + t * (b.relativeHumidity - a.relativeHumidity);
     out.convection_W_m2K = a.convection_W_m2K + t * (b.convection_W_m2K - a.convection_W_m2K);
     out.windSpeed_m_s = a.windSpeed_m_s + t * (b.windSpeed_m_s - a.windSpeed_m_s);
-    out.sunDirection =
-        glm::normalize(glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t)));
+    // Normalised only when the blend has a length. Two opposite directions
+    // blend to zero half way, and a zero row blends to nothing near it; either
+    // way glm::normalize returns NaN, which every element's cos(theta) then
+    // carries. The nearer endpoint is the honest stand-in for a direction the
+    // series does not determine.
+    const glm::vec3 mixed = glm::mix(a.sunDirection, b.sunDirection, static_cast<f32>(t));
+    const f32 length = glm::length(mixed);
+    if (length > 1e-6f) {
+        out.sunDirection = glm::normalize(mixed);
+    } else {
+        const ThermalForcing& nearer = t < 0.5 ? a : b;
+        const ThermalForcing& farther = t < 0.5 ? b : a;
+        out.sunDirection = glm::length(nearer.sunDirection) > 0.0f ? nearer.sunDirection
+                                                                   : farther.sunDirection;
+    }
     return out;
 }
 
