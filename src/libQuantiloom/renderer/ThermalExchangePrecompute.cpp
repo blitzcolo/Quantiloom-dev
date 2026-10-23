@@ -328,11 +328,11 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
 
     std::unordered_map<u32, u32> counts;
     Vector<std::pair<u32, u32>> ranked;
-    const f32 perRay = 1.0f / static_cast<f32>(rays);
 
     for (u32 e = 0; e < elementCount; ++e) {
         counts.clear();
         u32 skyHits = 0;
+        u32 selfHits = 0;
         const u32* row = records + static_cast<usize>(e) * rays;
         for (u32 r = 0; r < rays; ++r) {
             const u32 hit = row[r];
@@ -342,12 +342,16 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
                 ++counts[hit];
             } else {
                 // A ray that came back to its own element is the offset losing
-                // to a grazing direction. Counting it as sky would cool the
-                // surface; counting it as self-exchange does nothing at all,
-                // which is the honest answer.
-                ++skyHits;
+                // to a grazing direction, so it says nothing about what the
+                // surface sees. Counting it as sky would cool the surface and
+                // counting it as self-exchange does nothing at all; the ray is
+                // dropped and the rest of the row is normalised over the rays
+                // that did report.
+                ++selfHits;
             }
         }
+        const u32 validRays = rays - selfHits;
+        const f32 perRay = 1.0f / static_cast<f32>(std::max(1u, validRays));
 
         ranked.assign(counts.begin(), counts.end());
         if (ranked.size() > topK) {
@@ -369,7 +373,8 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
         for (const auto& [column, count] : ranked) {
             keptWeight += static_cast<f32>(count) * perRay;
         }
-        const f32 skyFraction = static_cast<f32>(skyHits) * perRay;
+        // No ray reported at all: the open-sky answer, as for a degenerate element.
+        const f32 skyFraction = validRays == 0 ? 1.0f : static_cast<f32>(skyHits) * perRay;
         const f32 target = 1.0f - skyFraction;
         const f32 rescale = keptWeight > 0.0f ? target / keptWeight : 0.0f;
 
