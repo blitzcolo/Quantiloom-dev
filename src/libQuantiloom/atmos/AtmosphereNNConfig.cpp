@@ -86,9 +86,12 @@ uint64_t AtmosphereNNConfig::BakeHash() const {
     h = HashDouble(rh, h);
     h = HashDouble(pHPa, h);
     h = HashDouble(h2oScale, h);
-    // Quantized geometry: 0.5 deg sun, 50 m altitude
+    // Quantized geometry: 0.5 deg sun zenith, 50 m altitude. The absolute sun
+    // azimuth is deliberately not here: the baker's azimuth axis is the
+    // relative azimuth between view and sun, filled per LUT row, and nothing
+    // in a bake reads sunAzimuthDeg -- so turning the sun around the scene
+    // must not rebake.
     h = HashDouble(std::round(sunZenithDeg * 2.0), h);
-    h = HashDouble(std::round(sunAzimuthDeg * 2.0), h);
     h = HashDouble(std::round(h1Km * 20.0), h);
     h = HashDouble(solarScatterScale, h);
     h = HashDouble(static_cast<double>(lutASamples), h);

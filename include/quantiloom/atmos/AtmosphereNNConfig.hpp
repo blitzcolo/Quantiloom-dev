@@ -73,9 +73,10 @@ struct QL_API AtmosphereNNConfig {
     bool ApplyPreset(const std::string& name);
 
     // Stable hash over everything that affects baked LUT contents, with
-    // h1 quantized to 50 m and sun angles to 0.5 deg so per-frame jitter
-    // does not trigger rebakes. Band and lambda grid are hashed separately
-    // by the baker.
+    // h1 quantized to 50 m and the sun zenith to 0.5 deg so per-frame jitter
+    // does not trigger rebakes. The absolute sun azimuth is not hashed: a bake
+    // is indexed by relative azimuth and never reads it. Band and lambda grid
+    // are hashed separately by the baker.
     uint64_t BakeHash() const;
 };
 
