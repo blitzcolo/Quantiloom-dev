@@ -3335,11 +3335,17 @@ void main(inout Payload payload, in HitAttributes attribs) {
         float directSun_scalar = brdf_scalar * sunRadiance_lambda * NdotL * shadowFactor;
 
         // 4. Sky ambient lighting (scalar)
-        //    Use simplified diffuse approximation (same as RGB mode)
-        float3 F0_scalar = lerp(dielectricF0, float3(spectralAlbedo, spectralAlbedo, spectralAlbedo), metallic);
+        //    One F0 at the wavelength this mode is accountable for, computed
+        //    exactly as CookTorranceBRDF_Spectral derives it inside the direct
+        //    BRDF above (dielectric F0 spectrum at lambda, physical n,k data
+        //    when bound), so the split-sum, the dome IBL and NEE stop
+        //    disagreeing with the direct term.
+        const float F0_scalar = ComputeF0_Scalar(
+            spectralAlbedo, metallic, material.complexRefractiveIndexIndex, lambda,
+            RgbSpectrumAt(sDielF0, lambda));
         //    kD is what the specular lobe's split-sum albedo leaves, as in
-        //    VIS_FUSED; .r since all channels are identical.
-        float E_spec_scalar = F0_scalar.r * envBRDF.x + specularF90 * envBRDF.y;
+        //    VIS_FUSED.
+        float E_spec_scalar = F0_scalar * envBRDF.x + specularF90 * envBRDF.y;
         float kD_scalar = (1.0 - E_spec_scalar) * (1.0 - metallic);
 
         // No 1/PI here. skyRadiance_lambda is already E_sky/PI -- the conversion
@@ -3385,7 +3391,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
             } else {
                 // Uniform analytic sky dome on the solar LUT, as VIS_FUSED.
                 ibl_scalar = skyRadiance_lambda *
-                             (F0_scalar.r * envBRDF.x + specularF90 * envBRDF.y);
+                             (F0_scalar * envBRDF.x + specularF90 * envBRDF.y);
             }
             ibl_scalar *= sheenScale_s;  // specular is base, and pays the toll
             ibl_scalar *= ccBase;
@@ -3448,7 +3454,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         normal, V, s.wi, NdotV_s, roughness, qSpec_s,
                         (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                             ccWeight * ccE,
-                        F0_scalar.r * sheenScale_s * ccBase,
+                        F0_scalar * sheenScale_s * ccBase,
                         specularF90 * sheenScale_s * ccBase, aniso);
                     const float L_light_s = (s.curveIndex >= 0)
                         ? EvaluateEmissionCurve(spectralCurves, s.curveIndex, lambda)
@@ -3464,7 +3470,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 singleHitPos, normal, V, NdotV_s, roughness, qSpec_s,
                 (kD_scalar * spectralAlbedo * dtBase * sheenScale_s + wSheen_s) * ccBase +
                     ccWeight * ccE,
-                F0_scalar.r * sheenScale_s * ccBase,
+                F0_scalar * sheenScale_s * ccBase,
                 specularF90 * sheenScale_s * ccBase, rrSurvive_s,
                 skyRadiance_lambda, lambda, aniso, payload).x;
 
