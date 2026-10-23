@@ -53,7 +53,7 @@ inline constexpr u32 kFlagTemporalDrift = 64u;   // camera_hsv.comp.hlsl bit 6
 inline constexpr u32 kFlagHsv = 128u;  // any HSV parameter off its default
 
 // ispStats buffer layout (uint slots), shared with camera_stats.comp.hlsl /
-// camera_display.comp.hlsl. 256 histogram bins, then the named slots; the
+// camera_demosaic.comp.hlsl. 256 histogram bins, then the named slots; the
 // per-channel AWB rows are written by the stats reduce phase.
 inline constexpr u32 kStatsSlots = 272;
 inline constexpr u32 kStatsMin = 256;
@@ -418,8 +418,6 @@ struct GpuCameraPipeline::Impl {
     VkPipeline statsHistPipeline = VK_NULL_HANDLE;
     VkPipeline cdfPipeline = VK_NULL_HANDLE;
     VkPipeline demosaicPipeline = VK_NULL_HANDLE;
-    VkPipeline colorPipeline = VK_NULL_HANDLE;
-    VkPipeline displayPipeline = VK_NULL_HANDLE;
     VkPipeline hsvPipeline = VK_NULL_HANDLE;
     VkPipeline rngPipeline = VK_NULL_HANDLE;
     VkPipeline fastRgbPipeline = VK_NULL_HANDLE;
@@ -429,7 +427,7 @@ struct GpuCameraPipeline::Impl {
     // path). 2/3: readout ping/pong. 4: display. 5: RNG audit. 6: fast RGB.
     // 7: dynamic compositor (strata array inputs, composited output).
     // 8/9: PSF H/V reading the compositor output (stratified path).
-    // 10: acquisition statistics. 11: demosaic. 12: color. 13: CDF.
+    // 10: acquisition statistics. 11: demosaic. 12: unused. 13: CDF.
     // 14: HSV (display image bound as both input and in-place output).
     // Immutable while frames may be in flight; Configure waits idle first.
     std::array<VkDescriptorSet, 15> sets{};
@@ -445,8 +443,8 @@ struct GpuCameraPipeline::Impl {
         if (device == VK_NULL_HANDLE) return;
         for (auto pipeline : {psfPipeline, readoutPipeline, statsTilesPipeline,
                               statsReducePipeline, statsHistPipeline,
-                              cdfPipeline, demosaicPipeline, colorPipeline,
-                              displayPipeline, hsvPipeline, rngPipeline,
+                              cdfPipeline, demosaicPipeline,
+                              hsvPipeline, rngPipeline,
                               fastRgbPipeline, dynamicPipeline})
             if (pipeline != VK_NULL_HANDLE)
                 vkDestroyPipeline(device, pipeline, nullptr);
@@ -574,7 +572,7 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
     if (vkCreatePipelineLayout(device, &layoutInfo, nullptr, &pipelineLayout) != VK_SUCCESS)
         return Result<void, String>::Err("cannot create GPU camera pipeline layout");
 
-    const std::array<std::pair<StringView, VkPipeline*>, 13> shaders{{
+    const std::array<std::pair<StringView, VkPipeline*>, 11> shaders{{
         {"camera_psf.comp.spv", &psfPipeline},
         {"camera_readout.comp.spv", &readoutPipeline},
         {"camera_stats_tiles.comp.spv", &statsTilesPipeline},
@@ -582,8 +580,6 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
         {"camera_stats_hist.comp.spv", &statsHistPipeline},
         {"camera_cdf.comp.spv", &cdfPipeline},
         {"camera_demosaic.comp.spv", &demosaicPipeline},
-        {"camera_color.comp.spv", &colorPipeline},
-        {"camera_display.comp.spv", &displayPipeline},
         {"camera_hsv.comp.spv", &hsvPipeline},
         {"camera_rng_vectors.comp.spv", &rngPipeline},
         {"camera_fast_rgb.comp.spv", &fastRgbPipeline},
@@ -1560,7 +1556,7 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     // merges the tile histograms into the persistent global histogram and
     // prefix-sums it in the same single workgroup. The demosaic pass then
     // runs the fused demosaic + color + display product chain (former
-    // camera_demosaic/camera_color/camera_display) in one dispatch.
+    // camera_demosaic) in one dispatch.
     m_impl->BindAndDispatch(cmd, m_impl->statsTilesPipeline, m_impl->sets[10],
                             push);
     StorageBarrier(cmd);
