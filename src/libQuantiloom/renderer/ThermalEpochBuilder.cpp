@@ -142,6 +142,20 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
                     count, forcing.size());
     }
 
+    // However this function leaves, the scene goes back where the host had it:
+    // an exception from a mesh build or a dispatch must not strand the scene
+    // in the last epoch's pose.
+    struct RestoreOnExit {
+        EpochGeometryHost& host;
+        ~RestoreOnExit() {
+            try {
+                host.Restore();
+            } catch (const std::exception& e) {
+                QL_LOG_ERROR("  Thermal epochs: restoring the scene failed: {}", e.what());
+            }
+        }
+    } restoreOnExit{host};
+
     ThermalExchangePrecompute precompute(context);
     precompute.SetMaterialCoverage(input.materialCoverage);
 
@@ -210,8 +224,6 @@ thermal::ThermalGeometrySchedule BuildThermalGeometrySchedule(
         epoch.sunTable = std::move(sunTable);
         schedule.epochs.push_back(std::move(epoch));
     }
-
-    host.Restore();
 
     if (schedule.Count() > 1) {
         QL_LOG_INFO("  Thermal epochs: {}, {} exchange precompute(s), {} sun column(s) in "
