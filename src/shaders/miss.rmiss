@@ -317,12 +317,10 @@ void main(inout Payload payload) {
 
         float radiance_accum = 0.0;
 
-        // Fallback: RGB luminance / bandwidth (same as closesthit)
-        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
-                              0.7152 * lut.skyRadiance_rgb.g +
-                              0.0722 * lut.skyRadiance_rgb.b;
-        float swir_bandwidth = SWIR_LAMBDA_MAX - SWIR_LAMBDA_MIN;
-        float sky_power_rgb = sky_luminance / swir_bandwidth;
+        // No spectral solar LUT, no sky: closesthit's SWIR/NIR branches answer
+        // 0 in this case ("no curve, no sun"), and the miss shader agrees.
+        // The RGB triple is an average in arbitrary units and would invent
+        // light a measurement does not have.
 
         // An environment bounce carries one wavelength and must get that
         // wavelength's sky back; the band average would be weighed by a single
@@ -343,7 +341,7 @@ void main(inout Payload payload) {
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                sky_radiance_lambda = singleRay ? 0.0 : sky_power_rgb;
+                sky_radiance_lambda = 0.0;
             }
 
             // A primary miss composes like a primary hit; the index scheme is
@@ -411,12 +409,8 @@ void main(inout Payload payload) {
 
         float radiance_accum = 0.0;
 
-        // Fallback: RGB luminance / bandwidth
-        float sky_luminance = 0.2126 * lut.skyRadiance_rgb.r +
-                              0.7152 * lut.skyRadiance_rgb.g +
-                              0.0722 * lut.skyRadiance_rgb.b;
-        float nir_bandwidth = NIR_LAMBDA_MAX - NIR_LAMBDA_MIN;
-        float sky_power_rgb = sky_luminance / nir_bandwidth;
+        // No spectral solar LUT, no sky -- as in the SWIR branch above and in
+        // closesthit.
 
         // Hero rays as in the SWIR branch above.
         const bool heroRay = (payload.heroLambda > 0.0);
@@ -432,7 +426,7 @@ void main(inout Payload payload) {
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                sky_radiance_lambda = sky_power_rgb;
+                sky_radiance_lambda = 0.0;
             }
 
             // A primary miss composes like a primary hit; the index scheme is
