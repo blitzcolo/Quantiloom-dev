@@ -5,7 +5,9 @@
 #include "core/Sha256.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -580,10 +582,21 @@ bool StoreThermalSolveCache(const std::filesystem::path& file, StringView keyHex
     }
 
     // A temporary in the same directory, so the rename below is within one
-    // filesystem and therefore atomic. The pid keeps two processes solving the
-    // same scene from writing each other's temporary.
+    // filesystem and therefore atomic. Its name has to be unique to this one
+    // write, not merely to this process: two threads of one host (a sequence
+    // render beside a cube export, say) storing the same key shared
+    // "<entry>.tmp.<pid>", truncated and wrote the same file at once, and the
+    // first rename took the other's half-written bytes with it. The pid
+    // separates processes, the counter writes within one, and the salt --
+    // the clock when this process first stored anything -- two machines
+    // sharing a cache directory whose pids happen to agree.
+    static std::atomic<u64> writeCounter{0};
+    static const u64 processSalt = static_cast<u64>(
+        std::chrono::steady_clock::now().time_since_epoch().count());
     std::filesystem::path temp = file;
-    temp += ".tmp." + std::to_string(QL_GETPID());
+    temp += ".tmp." + std::to_string(QL_GETPID()) + "." +
+            std::to_string(writeCounter.fetch_add(1, std::memory_order_relaxed)) + "." +
+            std::to_string(processSalt);
 
     {
         std::ofstream out(temp, std::ios::binary | std::ios::trunc);
