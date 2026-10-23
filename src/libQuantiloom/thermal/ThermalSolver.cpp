@@ -15,6 +15,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <sstream>
@@ -180,21 +181,37 @@ Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
     return visibility;
 }
 
+std::optional<String> ReadForcingFile(const String& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return std::nullopt;
+    String contents{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    if (in.bad()) return std::nullopt;
+    return contents;
+}
+
 Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path,
                                                       const f64 absentRelativeHumidity) {
-    Vector<std::pair<f64, ThermalForcing>> series;
-    if (path.empty()) return series;
-
-    std::ifstream in(path);
-    if (!in) {
+    if (path.empty()) return {};
+    const std::optional<String> contents = ReadForcingFile(path);
+    if (!contents) {
         QL_LOG_WARN("  Thermal: cannot read forcing file '{}'; using constant forcing", path);
-        return series;
+        return {};
     }
+    return ParseForcingCsv(*contents, path, absentRelativeHumidity);
+}
+
+Vector<std::pair<f64, ThermalForcing>> ParseForcingCsv(const StringView contents,
+                                                       const StringView source,
+                                                       const f64 absentRelativeHumidity) {
+    Vector<std::pair<f64, ThermalForcing>> series;
+    std::istringstream in{String(contents)};
 
     String line;
     usize lineNumber = 0;
     while (std::getline(in, line)) {
         ++lineNumber;
+        // The bytes are read in binary, so a CRLF file keeps its CR here.
+        if (!line.empty() && line.back() == '\r') line.pop_back();
         if (line.empty() || line[0] == '#') continue;
 
         std::replace(line.begin(), line.end(), ',', ' ');
@@ -247,7 +264,7 @@ Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(const String& path,
 
     std::sort(series.begin(), series.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
-    QL_LOG_INFO("  Thermal: {} forcing samples from {}", series.size(), path);
+    QL_LOG_INFO("  Thermal: {} forcing samples from {}", series.size(), source);
     return series;
 }
 
@@ -341,6 +358,9 @@ struct ThermalSolveSession::Impl {
     Vector<ThermalMaterial> materials;
     ThermalGeometrySchedule schedule;
     Vector<std::pair<f64, ThermalForcing>> forcingSeries;
+    /// The forcing file's bytes as forcingSeries was parsed from them; empty
+    /// when no file is named, nullopt when one is and could not be read.
+    std::optional<String> forcingContents;
     ThermalForcing constantForcing;
 
     CpuCrankNicolsonStepper cpuStepper;
@@ -459,7 +479,21 @@ Result<std::unique_ptr<ThermalSolveSession>, String> ThermalSolveSession::Build(
         }
     }
 
-    impl.forcingSeries = LoadForcingCsv(config.forcingFile, config.relativeHumidity);
+    // Read once. The bytes parsed here are the bytes the solve cache key is
+    // taken from (ForcingContents), so a file rewritten while this session
+    // lives cannot store a field under a key that describes other forcing.
+    if (config.forcingFile.empty()) {
+        impl.forcingContents = String{};
+    } else {
+        impl.forcingContents = ReadForcingFile(config.forcingFile);
+        if (impl.forcingContents) {
+            impl.forcingSeries = ParseForcingCsv(*impl.forcingContents, config.forcingFile,
+                                                 config.relativeHumidity);
+        } else {
+            QL_LOG_WARN("  Thermal: cannot read forcing file '{}'; using constant forcing",
+                        config.forcingFile);
+        }
+    }
 
     impl.constantForcing = {};
     impl.constantForcing.airTemperature_K = config.airTemperature_K;
@@ -583,6 +617,10 @@ u32 ThermalSolveSession::ElementCount() const {
 
 const ThermalGeometrySchedule& ThermalSolveSession::Schedule() const {
     return m_impl->schedule;
+}
+
+const std::optional<String>& ThermalSolveSession::ForcingContents() const {
+    return m_impl->forcingContents;
 }
 
 ThermalResult ThermalSolveSession::FieldAt(const f64 time_h) {

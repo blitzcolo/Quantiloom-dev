@@ -749,6 +749,7 @@ void OfflineRenderer::Impl::UploadThermalFieldAt(const f64 time_h) {
         keyInputs.solvedMaterials = &thermalSolvedMaterials;
         keyInputs.config = &thermalConfig;
         keyInputs.schedule = &thermalSession->Schedule();
+        keyInputs.forcingContents = &thermalSession->ForcingContents();
         keyInputs.materialCoverage = &thermalMaterialCoverage;
         keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
         keyInputs.gpuIdentity = thermalGpuIdentity;

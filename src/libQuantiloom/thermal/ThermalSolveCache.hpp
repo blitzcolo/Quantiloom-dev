@@ -114,6 +114,15 @@ struct ThermalSolveCacheKeyInputs {
     /// ThermalMaterial table or the mesh. Null hashes as an empty vector.
     const Vector<f32>* materialCoverage = nullptr;
 
+    /// The forcing file's bytes as the solve read them --
+    /// ThermalSolveSession::ForcingContents -- for a key taken after a session
+    /// exists. Null reads config->forcingFile here instead, which is right for
+    /// a lookup made before any solve; pointing at nullopt says the solve
+    /// could not read its file, and the key is then empty. Reading the file
+    /// again at store time is what let a file rewritten between the parse and
+    /// the store file a field under a key that described other forcing.
+    const std::optional<String>* forcingContents = nullptr;
+
     /// [lighting] sun_direction, which is what the exchange precompute traces
     /// sun visibility against. Not the same field as config->sunDirection and
     /// not redundant with it.

@@ -190,16 +190,21 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
     // Read the forcing file before hashing anything: a named-but-unreadable
     // file means we cannot describe this run's inputs, and an entry keyed on a
     // guess would be served to runs that are not the same.
+    // When the solve already read it, hash the bytes it parsed, not the file
+    // as it stands now.
     String forcingContents;
     if (!config.forcingFile.empty()) {
-        std::ifstream forcing(config.forcingFile, std::ios::binary);
-        if (!forcing) {
-            return {};
-        }
-        forcingContents.assign(std::istreambuf_iterator<char>(forcing),
-                               std::istreambuf_iterator<char>());
-        if (forcing.bad()) {
-            return {};
+        if (inputs.forcingContents != nullptr) {
+            if (!inputs.forcingContents->has_value()) {
+                return {};
+            }
+            forcingContents = **inputs.forcingContents;
+        } else {
+            std::optional<String> read = ReadForcingFile(config.forcingFile);
+            if (!read) {
+                return {};
+            }
+            forcingContents = std::move(*read);
         }
     }
 

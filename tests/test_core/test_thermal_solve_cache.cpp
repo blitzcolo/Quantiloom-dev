@@ -86,6 +86,9 @@ struct KeyFixture {
     /// One per material, as ComputeMaterialCoverage gives it: the metal is
     /// opaque, the sand alpha-tested down to 40%.
     Vector<f32> coverage{0.4f, 1.0f};
+    /// What a session parsed, when the key is taken after one; null reads the
+    /// file.
+    const std::optional<String>* forcingContents = nullptr;
     glm::vec3 exchangeSun{0.3f, 0.8f, 0.1f};
     String gpu = "TestGPU|4318|8712|123456";
     String stepper = "CPU Crank-Nicolson";
@@ -126,6 +129,7 @@ struct KeyFixture {
         inputs.solvedMaterials = &materials;
         inputs.config = &config;
         inputs.materialCoverage = &coverage;
+        inputs.forcingContents = forcingContents;
         inputs.exchangeSunDirection = exchangeSun;
         inputs.gpuIdentity = gpu;
         inputs.stepperName = stepper;
@@ -586,6 +590,37 @@ TEST(ThermalSolveCacheKey, AlphaCoverageChangesIt) {
     KeyFixture none;
     none.coverage.clear();
     EXPECT_NE(none.Key(), reference);
+}
+
+// The store-side key is taken after the session parsed the forcing file, and
+// has to describe what it parsed: a file rewritten in between used to be read
+// again for the key, filing a field solved from the old rows under the new.
+TEST(ThermalSolveCacheKey, TheSolvesOwnForcingBytesAreWhatIsHashed) {
+    const auto path = std::filesystem::temp_directory_path() / "ql_key_forcing.csv";
+    const String parsedRows = "0 290 0 0 90 260\n1 291 0 0 90 261\n";
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << parsedRows;
+
+    KeyFixture fixture;
+    fixture.config.forcingFile = path.string();
+    const String fromFile = fixture.Key();
+    ASSERT_FALSE(fromFile.empty());
+
+    // Rewritten after the parse.
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << "0 300 0 0 90 260\n";
+
+    const std::optional<String> parsed = parsedRows;
+    fixture.forcingContents = &parsed;
+    EXPECT_EQ(fixture.Key(), fromFile) << "the bytes the solve parsed, not the file now";
+
+    fixture.forcingContents = nullptr;
+    EXPECT_NE(fixture.Key(), fromFile) << "a lookup before any solve reads the file";
+
+    // The session could not read its file and ran constant forcing: no key.
+    const std::optional<String> unread;
+    fixture.forcingContents = &unread;
+    EXPECT_TRUE(fixture.Key().empty());
+
+    std::filesystem::remove(path);
 }
 
 TEST(ThermalSolveCacheKey, LightingSunDirectionChangesIt) {

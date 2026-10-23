@@ -19,6 +19,7 @@
 #include "thermal/ThermalTypes.hpp"
 
 #include <memory>
+#include <optional>
 
 #include <unordered_map>
 
@@ -264,6 +265,13 @@ public:
     /// The geometry this session runs over. The solve cache keys on it, and
     /// there is no second copy of it to key on.
     [[nodiscard]] const ThermalGeometrySchedule& Schedule() const;
+    /// The forcing file's bytes exactly as this session parsed them: empty
+    /// when the config names no file, nullopt when it names one that could not
+    /// be read (the session then runs constant forcing). The solve cache key
+    /// hashes these rather than reading the file a second time, which is what
+    /// keeps an entry stored from this session describing the forcing it was
+    /// solved with.
+    [[nodiscard]] const std::optional<String>& ForcingContents() const;
 
 private:
     ThermalSolveSession();
@@ -360,6 +368,16 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
 ///        night.
 [[nodiscard]] Vector<std::pair<f64, ThermalForcing>> LoadForcingCsv(
     const String& path, f64 absentRelativeHumidity = ThermalForcing{}.relativeHumidity);
+
+/// A forcing file's bytes, read in binary: what ParseForcingCsv parses and
+/// what the solve cache hashes, from one read. nullopt when it cannot be read.
+[[nodiscard]] std::optional<String> ReadForcingFile(const String& path);
+
+/// LoadForcingCsv's parser, on bytes already read. @p source names them in the
+/// log.
+[[nodiscard]] Vector<std::pair<f64, ThermalForcing>> ParseForcingCsv(
+    StringView contents, StringView source,
+    f64 absentRelativeHumidity = ThermalForcing{}.relativeHumidity);
 
 /// The sun visibility every element had at one time, on the same two-column
 /// interpolation the solver's own steps use. Falls back to the exchange's
