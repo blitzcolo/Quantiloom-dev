@@ -5198,7 +5198,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Shadows the sunRadiance declared at the top of main(), on purpose:
         // that one is the RGB path's, and reading it here is the bug this
         // replaced.
-        float3 sunDir = normalize(lut.sunDirection);
+        // SafeNormalize and an explicit finite check: a zero or non-finite
+        // sun direction from the buffer must not poison the phase function
+        // and every downstream dot product.
+        float3 sunDir = SafeNormalize(lut.sunDirection, float3(0.0, 1.0, 0.0));
+        if (any(!isfinite(sunDir))) {
+            sunDir = float3(0.0, 1.0, 0.0);
+        }
         float3 sunRadiance;
         if (isRgbLike) {
             // Derived from the illuminant's own spectrum by the host, so this
