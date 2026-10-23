@@ -769,11 +769,12 @@ TEST_F(ThermalPreviewTest, TheEpochPlanStartsAtTheMappedHour) {
     EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 1u);
 
     // Moving the mapping moves every epoch's from_h, so the plan has to be
-    // rebuilt: with the start hour at 13, hour 13 (the clock still at 0 s)
-    // is the first epoch's start again.
-    ASSERT_TRUE(context->SetTimelineThermalMapping(13.0, 3600.0).has_value());
+    // rebuilt. The clock stands at 2 s, so with the start hour at 11 the
+    // solved hour is 13, which a fresh plan {11, 13, ...} puts in epoch 1
+    // while the stale one {12, 14, ...} would put it in epoch 0.
+    ASSERT_TRUE(context->SetTimelineThermalMapping(11.0, 3600.0).has_value());
     EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 13.0, 1e-9);
-    EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 0u);
+    EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 1u);
 }
 
 TEST_F(ThermalPreviewTest, AStaticSceneStillHasExactlyOneEpoch) {
