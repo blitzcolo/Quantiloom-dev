@@ -510,6 +510,18 @@ Result<CameraOutput, String> CpuCameraPipeline::CaptureImpl(CaptureState& state,
     std::stable_sort(
         events.begin(), events.end(),
         [](const ExposureEvent& a, const ExposureEvent& b) { return a.time < b.time; });
+    // The PSF kernel depends only on the wavelength, not the exposure event:
+    // build one per grid point up front instead of per event x wavelength --
+    // a rolling shutter with time samples rebuilt identical kernels hundreds
+    // of thousands of times.
+    std::vector<Kernel> kernels(wavelengths.size());
+    for (size_t wavelengthIndex = 0; wavelengthIndex < wavelengths.size(); ++wavelengthIndex) {
+        const auto kernel =
+            BuildKernel(captureConfig, wavelengths[wavelengthIndex], knownPsf);
+        if (!kernel)
+            return Fail<CameraOutput>(kernel.error());
+        kernels[wavelengthIndex] = std::move(kernel.value());
+    }
     for (const auto& event : events) {
         for (size_t wavelengthIndex = 0; wavelengthIndex < wavelengths.size(); ++wavelengthIndex) {
             auto sampled = sampler(event.time, wavelengths[wavelengthIndex]);
@@ -523,13 +535,11 @@ Result<CameraOutput, String> CpuCameraPipeline::CaptureImpl(CaptureState& state,
             for (const f32 value : radiance.data)
                 if (!std::isfinite(value))
                     return Fail<CameraOutput>("spectral sampler returned nonfinite radiance");
-            const auto kernel = BuildKernel(captureConfig, wavelengths[wavelengthIndex], knownPsf);
-            if (!kernel)
-                return Fail<CameraOutput>(kernel.error());
             Image irradianceInput = radiance;
             for (size_t i = 0; i < pixelCount; ++i)
                 irradianceInput.data[i] *= static_cast<f32>(vignette[i]);
-            const Image blurred = Convolve(irradianceInput, kernel.value());
+            const Kernel& kernel = kernels[wavelengthIndex];
+            const Image blurred = Convolve(irradianceInput, kernel);
             std::array<Image, 4> blurredComponents;
             if (m_integratedContributions) {
                 if (!m_sampledContributions)
@@ -540,7 +550,7 @@ Result<CameraOutput, String> CpuCameraPipeline::CaptureImpl(CaptureState& state,
                         return Fail<CameraOutput>("fusion component grid mismatch");
                     for (size_t i = 0; i < pixelCount; ++i)
                         input.data[i] *= static_cast<f32>(vignette[i]);
-                    blurredComponents[c] = Convolve(input, kernel.value());
+                    blurredComponents[c] = Convolve(input, kernel);
                 }
             }
             for (u32 y = event.firstY; y < event.lastY; ++y)
