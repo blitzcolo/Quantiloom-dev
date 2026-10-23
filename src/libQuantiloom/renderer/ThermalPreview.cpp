@@ -508,10 +508,12 @@ void ThermalPreview::SetParams(const ThermalSolveParams& params) {
 void ThermalPreview::SetMaterial(const String& name, const ThermalMaterialParams& params) {
     // A shell is found while the geometry is walked, so turning one on is a
     // mesh rebuild rather than a flag on the table -- the same reason lateral
-    // conduction is.
+    // conduction is. So is its thickness: two faces pair when their distance is
+    // within a multiple of it.
     const auto existing = m_impl->materialParams.find(name);
     if (existing == m_impl->materialParams.end() ||
-        existing->second.isShell != params.isShell) {
+        existing->second.isShell != params.isShell ||
+        (params.isShell && existing->second.thickness_m != params.thickness_m)) {
         m_impl->exchangeDirty = true;
     }
     m_impl->materialParams[name] = params;
