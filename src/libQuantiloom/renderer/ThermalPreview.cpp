@@ -392,6 +392,7 @@ struct ThermalPreview::Impl {
         ThermalExchangePrecompute precompute(context);
         precompute.SetMaterialCoverage(materialCoverage);
 
+        bool sunColumnStale = false;
         const bool reuseExchange =
             !exchangeDirty && schedule.Count() == 1 &&
             schedule.epochs.front().exchange.skyFraction.size() == mesh.elements.size();
@@ -399,8 +400,12 @@ struct ThermalPreview::Impl {
             // Only the sun moved -- a new forcing file, a new fallback
             // direction. Who sees whom has not changed, and the hemisphere
             // trace is the expensive half; keeping it is why the sun table has
-            // a dirty flag of its own.
+            // a dirty flag of its own. Only the view factors and sky fractions
+            // are kept: exchange.sunVisibility was traced toward the direction
+            // the exchange was computed with, so the single-column fallback
+            // below re-traces it for the current one.
             exchange = std::move(schedule.epochs.front().exchange);
+            sunColumnStale = true;
         } else if (precompute.IsValid() && tlas != VK_NULL_HANDLE && !mesh.elements.empty()) {
             ThermalExchangePrecompute::Params ep;
             ep.hemisphereRays = params.exchangeRays;
@@ -434,6 +439,21 @@ struct ThermalPreview::Impl {
                 sunTable.sampleDirection = std::move(directions);
             } else {
                 sunTable = {};  // the dispatch failed; fall through to one column
+            }
+        }
+        if (sunTable.SampleCount() == 0 && sunColumnStale && precompute.IsValid() &&
+            tlas != VK_NULL_HANDLE) {
+            // The kept exchange's column points at the old fallback direction;
+            // a cosine for the new one against that shadow is half an update.
+            const glm::vec3 direction = fallbackSunDirection;
+            Vector<f32> column = precompute.RunSunVisibility(
+                tlas, mesh.elements, mesh.instanceElementBase,
+                std::span<const glm::vec3>(&direction, 1));
+            if (column.size() == mesh.elements.size()) {
+                exchange.sunVisibility = std::move(column);
+            } else {
+                QL_LOG_WARN("Thermal sun visibility: the dispatch for the new fallback "
+                            "direction failed; keeping the previous column");
             }
         }
         if (sunTable.SampleCount() == 0 && !exchange.sunVisibility.empty()) {
