@@ -307,6 +307,29 @@ Result<std::map<String, String>, String> SpectralCubeIO::ParseENVIHeader(
     return params;
 }
 
+namespace {
+
+/// An unsigned decimal header value, or nullopt when the text is not exactly one.
+/// std::stoul throws on garbage and wraps a negative sign, and ReadENVI returns a
+/// Result rather than throwing.
+std::optional<u32> ParseHeaderU32(const String& text) {
+    std::string_view view(text);
+    while (!view.empty() && std::isspace(static_cast<unsigned char>(view.front()))) {
+        view.remove_prefix(1);
+    }
+    while (!view.empty() && std::isspace(static_cast<unsigned char>(view.back()))) {
+        view.remove_suffix(1);
+    }
+    u32 value = 0;
+    const auto [end, ec] = std::from_chars(view.data(), view.data() + view.size(), value);
+    if (ec != std::errc() || end != view.data() + view.size()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+}  // namespace
+
 Result<SpectralCube, String> SpectralCubeIO::ReadENVI(const String& basePath) {
     // Determine header and data paths
     String headerPath = basePath;
@@ -341,12 +364,29 @@ Result<SpectralCube, String> SpectralCubeIO::ReadENVI(const String& basePath) {
     if (!linesResult) return Result<SpectralCube, String>::Err("Missing required parameter: lines");
     if (!bandsResult) return Result<SpectralCube, String>::Err("Missing required parameter: bands");
 
-    u32 width = static_cast<u32>(std::stoul(*samplesResult));
-    u32 height = static_cast<u32>(std::stoul(*linesResult));
-    u32 nbands = static_cast<u32>(std::stoul(*bandsResult));
+    const auto samples = ParseHeaderU32(*samplesResult);
+    const auto lines = ParseHeaderU32(*linesResult);
+    const auto bands = ParseHeaderU32(*bandsResult);
+    if (!samples || !lines || !bands || *samples == 0 || *lines == 0 || *bands == 0) {
+        return Result<SpectralCube, String>::Err(
+            "ENVI header: samples, lines and bands must be positive integers");
+    }
+    const u32 width = *samples;
+    const u32 height = *lines;
+    const u32 nbands = *bands;
+
+    // The element count is formed in size_t, and refused if it cannot be stored.
+    size_t elementCount = 0;
+    if (!Image::TryElementCount(width, height, nbands, elementCount)) {
+        return Result<SpectralCube, String>::Err("ENVI header: cube dimensions are too large");
+    }
 
     // Get data type (must be float32 = 4)
-    u32 dataType = dataTypeResult ? static_cast<u32>(std::stoul(*dataTypeResult)) : 4;
+    const auto parsedDataType = dataTypeResult ? ParseHeaderU32(*dataTypeResult) : std::optional<u32>(4);
+    if (!parsedDataType) {
+        return Result<SpectralCube, String>::Err("ENVI header: 'data type' is not an integer");
+    }
+    const u32 dataType = *parsedDataType;
     if (dataType != 4) {
         return Result<SpectralCube, String>::Err("Unsupported ENVI data type: " + std::to_string(dataType) + " (only float32 = 4 supported)");
     }
@@ -372,7 +412,12 @@ Result<SpectralCube, String> SpectralCubeIO::ReadENVI(const String& basePath) {
             token.erase(0, token.find_first_not_of(" \t\n"));
             token.erase(token.find_last_not_of(" \t\n") + 1);
             if (!token.empty()) {
-                wavelengths.push_back(std::stof(token));
+                try {
+                    wavelengths.push_back(std::stof(token));
+                } catch (const std::exception&) {
+                    return Result<SpectralCube, String>::Err(
+                        "ENVI header: wavelength '" + token + "' is not a number");
+                }
             }
         }
 
@@ -386,14 +431,6 @@ Result<SpectralCube, String> SpectralCubeIO::ReadENVI(const String& basePath) {
     if (wavelengths.empty()) {
         lambdaMin = 400.0f;
         lambdaMax = 400.0f + (nbands - 1) * 10.0f;
-    }
-
-    // Create cube
-    SpectralCube cube(width, height, nbands, lambdaMin, lambdaMax);
-
-    // Override wavelengths if custom ones were provided
-    if (!wavelengths.empty() && wavelengths.size() == nbands) {
-        cube.wavelengths = wavelengths;
     }
 
     // Read data file
@@ -415,13 +452,35 @@ Result<SpectralCube, String> SpectralCubeIO::ReadENVI(const String& basePath) {
     u32 headerOffset = 0;
     auto offsetResult = getParam("header offset");
     if (offsetResult.has_value()) {
-        headerOffset = static_cast<u32>(std::stoul(offsetResult.value()));
+        const auto parsedOffset = ParseHeaderU32(offsetResult.value());
+        if (!parsedOffset) {
+            return Result<SpectralCube, String>::Err("ENVI header: 'header offset' is not an integer");
+        }
+        headerOffset = *parsedOffset;
+    }
+
+    // The file has to hold the cube the header describes before anything is
+    // allocated for it.
+    dat.seekg(0, std::ios::end);
+    const auto fileSize = static_cast<u64>(dat.tellg());
+    const u64 payloadBytes = static_cast<u64>(elementCount) * sizeof(f32);
+    if (fileSize < headerOffset || fileSize - headerOffset < payloadBytes) {
+        return Result<SpectralCube, String>::Err(
+            "ENVI data file is shorter than its header describes");
     }
     dat.seekg(headerOffset);
 
+    // Create cube
+    SpectralCube cube(width, height, nbands, lambdaMin, lambdaMax);
+
+    // Override wavelengths if custom ones were provided
+    if (!wavelengths.empty() && wavelengths.size() == nbands) {
+        cube.wavelengths = wavelengths;
+    }
+
     // Read data
-    Vector<f32> rawData(width * height * nbands);
-    dat.read(reinterpret_cast<char*>(rawData.data()), rawData.size() * sizeof(f32));
+    Vector<f32> rawData(elementCount);
+    dat.read(reinterpret_cast<char*>(rawData.data()), static_cast<std::streamsize>(payloadBytes));
 
     if (!dat.good()) {
         return Result<SpectralCube, String>::Err("Error reading ENVI data file");
