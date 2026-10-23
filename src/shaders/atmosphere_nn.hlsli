@@ -96,13 +96,48 @@ float AtmosIndexA(AtmosNNHeader h, float a, out uint i0, out uint i1)
     return fi - (float)i0;
 }
 
+// The ground LUT starts at exp(aStart) km (50 m); AtmosIndexA clamps anything
+// nearer to that first sample, which would charge a hit at 5 m the full 50 m of
+// tau and path radiance. A ground path is one homogeneous layer, so the
+// shorter range is the first sample scaled in optical depth. This is the
+// fraction of the first range a nearer hit covers: 1 everywhere the table has
+// data (and always in slant mode, whose axis is an angle, not a range).
+float AtmosNearFieldFraction(AtmosNNHeader h, float a)
+{
+    if (h.pathMode != 0)
+        return 1.0;
+    return exp(min(a - h.aStart, 0.0));
+}
+
 float SampleAtmosTau(AtmosNNHeader h, StructuredBuffer<float> data,
                      uint iLambda, float a)
 {
     uint i0, i1;
     float f = AtmosIndexA(h, a, i0, i1);
     uint base = h.tauOffset + iLambda * h.countA;
-    return lerp(data[base + i0], data[base + i1], f);
+    float tau = lerp(data[base + i0], data[base + i1], f);
+    // Beer-Lambert over a homogeneous layer: tau(r) = tau(r0)^(r / r0).
+    float nearFrac = AtmosNearFieldFraction(h, a);
+    if (nearFrac < 1.0)
+        tau = pow(max(tau, 0.0), nearFrac);
+    return tau;
+}
+
+// Path radiance of a hit nearer than the table's first range, as a multiple of
+// the first sample: the emitted/scattered fraction (1 - tau) scales exactly as
+// the layer's own opacity does, which is exact for thermal emission and first
+// order for scattering. Optically thin air degenerates to the plain range ratio.
+float AtmosNearFieldPathScale(AtmosNNHeader h, StructuredBuffer<float> data,
+                              uint iLambda, float a)
+{
+    float nearFrac = AtmosNearFieldFraction(h, a);
+    if (nearFrac >= 1.0)
+        return 1.0;
+    float tauFirst = clamp(data[h.tauOffset + iLambda * h.countA], 0.0, 1.0);
+    float opacityFirst = 1.0 - tauFirst;
+    if (opacityFirst < 1e-6)
+        return nearFrac;
+    return (1.0 - pow(tauFirst, nearFrac)) / opacityFirst;
 }
 
 float SampleAtmosLpath(AtmosNNHeader h, StructuredBuffer<float> data,
@@ -111,9 +146,10 @@ float SampleAtmosLpath(AtmosNNHeader h, StructuredBuffer<float> data,
     uint i0, i1;
     float f = AtmosIndexA(h, a, i0, i1);
     uint base = h.lpathOffset + iLambda * h.countA * h.countAz;
+    float nearScale = AtmosNearFieldPathScale(h, data, iLambda, a);
     if (h.countAz <= 1) {
-        return lerp(data[base + i0 * h.countAz],
-                    data[base + i1 * h.countAz], f);
+        return nearScale * lerp(data[base + i0 * h.countAz],
+                                data[base + i1 * h.countAz], f);
     }
     float fj = (azDeg - h.azStart) / max(h.azStep, 1e-12);
     fj = clamp(fj, 0.0, (float)(h.countAz - 1));
@@ -124,7 +160,7 @@ float SampleAtmosLpath(AtmosNNHeader h, StructuredBuffer<float> data,
                     data[base + i0 * h.countAz + j1], g);
     float v1 = lerp(data[base + i1 * h.countAz + j0],
                     data[base + i1 * h.countAz + j1], g);
-    return lerp(v0, v1, f);
+    return nearScale * lerp(v0, v1, f);
 }
 
 // Thermal downwelling radiance (W m^-2 sr^-1 nm^-1); one spectrum per bake.
