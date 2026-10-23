@@ -1650,7 +1650,9 @@ public:
      * @param y Y coordinate in the target extent (pixels, 0 = top)
      * @return Raw float4 value from outputImage, or error if out of bounds
      *
-     * @note Call this AFTER RenderFrame to get meaningful results
+     * @note Call this only after the host submitted the recorded frame and
+     *       the queue drained: RenderFrame only records, so reading earlier
+     *       describes the previous frame, not the one just recorded
      * @note The returned value is the mapped debug output, use inverse
      *       mapping to recover original values (e.g., for normals:
      *       original = (output - 0.5) * 2)
@@ -1699,7 +1701,9 @@ public:
      *
      * @return Image with current render output, or error if not ready
      *
-     * @note Call this AFTER RenderFrame to capture the frame
+     * @note Call this only after the host submitted the recorded frame and
+     *       the queue drained: RenderFrame only records, so an earlier read
+     *       captures the previous frame, not the one just recorded
      * @note Blocks until GPU transfer completes (synchronous)
      * @note Performs layout transition internally (GENERAL → TRANSFER_SRC → GENERAL)
      */
