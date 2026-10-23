@@ -2537,13 +2537,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
         LightSample visLight;
         float visNeeScale = 0.0;
         float visNeeScaleFluor = 0.0;
-        // The bounce's BRDF terms, kept so the loop evaluates the same f the
-        // bounce samples. wDiffuse is per-wavelength, so what is carried out is
-        // everything except rho: kD_b, and the pieces of the specular lobe. Four
-        // of each where a quartet is carried, one otherwise -- the loop below
-        // reads component 0 in that case and never the rest.
-        float4 visKD = float4(0.0, 0.0, 0.0, 0.0);
-        float4 visF0 = float4(0.0, 0.0, 0.0, 0.0);
         float visQSpec = 0.0, visNdotV = 0.0;
         {
             // Drawn against a curve shaped like the colour matching functions
@@ -2607,8 +2600,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
             float4 wSpecular90_4 = float4(0.0, 0.0, 0.0, 0.0);
             float4 wDt4 = float4(0.0, 0.0, 0.0, 0.0);
             float4 sky4 = float4(0.0, 0.0, 0.0, 0.0);
-            float4 kD4 = float4(0.0, 0.0, 0.0, 0.0);
-            float4 F04 = float4(0.0, 0.0, 0.0, 0.0);
 
             for (uint j = 0; j < bounceCount; ++j) {
                 const float lambda_j = carriesQuartet ? quartet[j] : lambda_b;
@@ -2660,8 +2651,6 @@ void main(inout Payload payload, in HitAttributes attribs) {
                         spectralCurves, material, sDT, lambda_j, true);
                     wDt4[j] = kD_j * dt * rhoDt_j * ccBase;
                 }
-                kD4[j] = kD_j;
-                F04[j] = F0_j;
             }
 
             const float3 visHitPos = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
@@ -2680,8 +2669,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                     // Excitation has no opposing BSDF strategy at its sampled
                     // incoming wavelength, so it keeps the full 1/pdf share.
                     visNeeScaleFluor = NdotWl / visLight.pdfSolid;
-                    visKD     = kD4;
-                    visF0     = F04;
+                    // The loop below re-derives kD and F0 at each wavelength
+                    // it integrates (kD_lambda, F0_at_lambda) -- the same
+                    // formula -- so both strategies estimate one integral.
                     visQSpec  = qSpec_b;
                     visNdotV  = NdotV_b;
                 }
@@ -2838,11 +2828,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // NOTE: Removed [unroll] to reduce shader compilation time (was 50+ seconds)
         // Modern GPUs handle small loops efficiently without forced unrolling
         for (uint i = 0; i < sampleCount; ++i) {
-            // Which of the four this iteration is, for the quantities the
-            // bounce settled per wavelength. Clamped because a deterministic
-            // sweep runs past four and reads component 0 throughout.
-            const uint qi = carriesQuartet ? min(i, VIS_HERO_QUARTET - 1u) : 0u;
+            // Which of the four this iteration reads the quartet-indexed
+            // quantities at. Clamped because a deterministic sweep runs past
+            // four; it never reads them since carriesQuartet is false there.
+            const uint qi = min(i, VIS_HERO_QUARTET - 1u);
 
+            // The bounce settled its weights per wavelength; the deterministic
+            // sweep runs past four and re-derives kD_lambda and F0_at_lambda
+            // below, at the wavelength this iteration integrates.
             float lambda = heroRay ? heroLambdaAbs
                          : (carriesQuartet ? quartet[qi]
                                            : (LAMBDA_MIN_VIS + float(i) * LAMBDA_STEP));
@@ -3027,14 +3020,15 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // solid-angle conversion are both already inside pdfSolid.
             float L_nee = 0.0;
             if (visNeeScale > 0.0) {
-                // The same weights the bounce was given, so both strategies
-                // estimate one integral -- including sheen as the cosine lobe
-                // the bounce folded it into.
+                // kD_lambda and F0_at_lambda, computed above at this
+                // iteration's wavelength: NEE and the bounce evaluate the same
+                // BRDF at the bounce wavelength, and the deterministic sweep
+                // no longer shades all 32 wavelengths with the sampled one.
                 const float brdf_at_light = EvalBounceBrdf(
                     normal, V, visLight.wi, visNdotV, roughness, visQSpec,
-                    (visKD[qi] * rho_lambda * dtBase * sheenScale_lambda +
+                    (kD_lambda * rho_lambda * dtBase * sheenScale_lambda +
                      sheenE * rhoSheen_lambda) * ccBase + ccWeight * ccE,
-                    visF0[qi] * sheenScale_lambda * ccBase,
+                    F0_at_lambda * sheenScale_lambda * ccBase,
                     specularF90 * sheenScale_lambda * ccBase, aniso);
                 const float L_light = hasNeeCurve
                     ? EvaluateEmissionCurve(spectralCurves, neeCurve, lambda)
