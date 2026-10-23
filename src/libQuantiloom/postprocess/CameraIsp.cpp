@@ -456,8 +456,14 @@ Result<Image, String> ApplyHsv(const CameraConfig& config, Image display,
             // fully above S=0.2, so an IR-grey frame stays exactly grey.
             const f64 weight = SmoothStep(0.05, 0.2, hsvValue[1]);
             if (weight > 0.0) {
-                const f64 shifted = hue + offsetTurns;
-                hue = hue + weight * (shifted - std::floor(shifted) - hue);
+                // Interpolate along the shorter arc: wrap the offset into
+                // [-0.5, 0.5) turns so a partial-strength offset crossing
+                // the 0/1 seam does not take the long way around (0.95 + 0.1
+                // at weight 0.5 gave 0.50 instead of 0.00), then keep the
+                // result in [0,1).
+                const f64 delta = offsetTurns - std::floor(offsetTurns + 0.5);
+                hue += weight * delta;
+                hue -= std::floor(hue);
             }
         }
         f64 saturation = Clamp01(hsvValue[1] * hsv.saturationScale);

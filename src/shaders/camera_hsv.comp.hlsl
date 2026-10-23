@@ -100,8 +100,14 @@ void main(uint3 id : SV_DispatchThreadID) {
         // Grey has no hue: fade the offset out on low saturation.
         const float weight = smoothstep(0.05f, 0.2f, hsv.y);
         if (weight > 0.0f) {
-            const float shifted = hsv.x + hueOffsetDeg / 360.0f;
-            hsv.x = hsv.x + weight * (shifted - floor(shifted) - hsv.x);
+            // Interpolate along the shorter arc: wrap the offset into
+            // [-0.5, 0.5) turns so a partial offset crossing the 0/1 seam
+            // does not take the long way around, then keep the result in
+            // [0,1).
+            float delta = hueOffsetDeg / 360.0f;
+            delta -= floor(delta + 0.5f);
+            hsv.x += weight * delta;
+            hsv.x -= floor(hsv.x);
         }
     }
     hsv.y = saturate(hsv.y * saturationScale);

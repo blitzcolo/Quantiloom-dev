@@ -133,6 +133,22 @@ TEST(CameraHsvTest, HueOffsetWrapsAroundTheCircle) {
         EXPECT_NEAR(pixel[c], expected[c], 1e-6);
 }
 
+TEST(CameraHsvTest, PartialWeightOffsetCrossingTheSeamTakesTheShortArc) {
+    CameraConfig config = BaseConfig();
+    config.isp.hsv.hueOffsetDegrees = 36.0;
+    // S=0.125 sits at the middle of the 0.05-0.2 smoothstep, so the offset
+    // applies at exactly half strength. Hue 342 degrees + 36 degrees crosses
+    // the 0/1 seam: the short arc lands on 0 degrees (rgb 1, 0.875, 0.875),
+    // the long arc would have given 0.50 turns (rgb 0.875, 1, 0.875).
+    const Image input = SolidDisplay(4, 4, {1.0, 0.875, 0.9125});
+    auto output = ApplyHsv(config, input, 0);
+    ASSERT_TRUE(output.has_value());
+    const std::array<f64, 3> pixel = Pixel(*output, 0, 0);
+    EXPECT_NEAR(pixel[0], 1.0, 1e-6);
+    EXPECT_NEAR(pixel[1], 0.875, 1e-6);
+    EXPECT_NEAR(pixel[2], 0.875, 1e-6);
+}
+
 TEST(CameraHsvTest, LowSaturationSuppressesTheHueOffset) {
     CameraConfig config = BaseConfig();
     config.isp.hsv.hueOffsetDegrees = 60.0;
