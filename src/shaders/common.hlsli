@@ -176,13 +176,16 @@ bool IsVisMode(uint mode) {
 // ============================================================================
 // Carries radiance information through the ray tracing pipeline
 //
-// SIZE: 148 bytes -- 44 of transport (radiance through primaryMaterialFlags)
-// and 104 of fusion-export bookkeeping (the fusion* fields and the 8-entry
+// SIZE: 152 bytes -- 44 of transport (radiance through primaryMaterialFlags)
+// and 108 of fusion-export bookkeeping (the fusion* fields and the 8-entry
 // medium stack), carried by every ray including shadow rays whether or not a
-// fusion export is running. Payload size is register pressure across every
-// TraceRay; a separate shadow payload, or the fusion state behind its own
-// payload, is the lever if trace throughput ever needs it. (This note said 24
-// bytes for a long time; that predates the hero quartet and fusion export.)
+// fusion export is running. (This note said 148 -- 44 and 104 -- for a while;
+// both were undercounts once fusionTerminalDepth, fusionForced and
+// fusionBranchMask joined the struct. It said 24 bytes for a long time before
+// that; that predates the hero quartet and fusion export.) Payload size is
+// register pressure across every TraceRay; a separate shadow payload, or the
+// fusion state behind its own payload, is the lever if trace throughput ever
+// needs it.
 //
 // Ray Differentials for Texture Filtering:
 // Used for computing texture LOD (level of detail) for proper filtering
