@@ -3,6 +3,7 @@
 #include "postprocess/CameraPipeline.hpp"
 #include "postprocess/CameraConfigIO.hpp"
 
+#include <algorithm>
 #include <span>
 
 namespace quantiloom::camera {
@@ -60,9 +61,49 @@ IntegrateThermal(std::span<const SpectralIrradianceSample> samples,
                                                     f64 pixelPitchM, f64 wavelengthNm,
                                                     f64 fNumber, u32 samplesPerSide);
 
+// The response-curve lookup shared by the CPU postprocess chain
+// (CameraPhysics.cpp), the GPU response packing (CameraResponseGpu.hpp) and
+// the GPU camera pipeline (GpuCameraPipeline.cpp). All three used to carry
+// their own copy of these; read this one.
+[[nodiscard]] inline const ResponseCurve* BaseCurve(const ResponseStack& stack,
+                                                    DetectorKind detector) {
+    if (stack.systemResponse) return &*stack.systemResponse;
+    if (detector == DetectorKind::Photon && stack.quantumEfficiency)
+        return &*stack.quantumEfficiency;
+    if (detector == DetectorKind::Thermal && stack.thermalAbsorptance)
+        return &*stack.thermalAbsorptance;
+    return nullptr;
+}
+
+// Piecewise-linear amplitude-scaled lookup; zero outside the curve's span,
+// end values held constant past the first/last knot.
+[[nodiscard]] inline f64 CurveAt(const ResponseCurve& curve, f64 wavelengthNm) {
+    if (wavelengthNm < curve.MinNm() || wavelengthNm > curve.MaxNm()) return 0.0;
+    const auto hi = std::lower_bound(curve.wavelengthNm.begin(), curve.wavelengthNm.end(),
+                                     wavelengthNm);
+    if (hi == curve.wavelengthNm.begin()) return curve.amplitude * curve.value.front();
+    if (hi == curve.wavelengthNm.end()) return curve.amplitude * curve.value.back();
+    const auto index = static_cast<size_t>(hi - curve.wavelengthNm.begin());
+    const f64 t = (wavelengthNm - curve.wavelengthNm[index - 1]) /
+                  (curve.wavelengthNm[index] - curve.wavelengthNm[index - 1]);
+    return curve.amplitude *
+        (curve.value[index - 1] + t * (curve.value[index] - curve.value[index - 1]));
+}
+
+// Base curve times lens and filter transmission, all at one wavelength.
+[[nodiscard]] inline f64 EffectiveResponse(const ResponseStack& stack,
+                                           DetectorKind detector,
+                                           f64 wavelengthNm) {
+    f64 response = CurveAt(*BaseCurve(stack, detector), wavelengthNm);
+    if (stack.lensTransmission)
+        response *= CurveAt(*stack.lensTransmission, wavelengthNm);
+    if (stack.filterTransmission)
+        response *= CurveAt(*stack.filterTransmission, wavelengthNm);
+    return response;
+}
+
 [[nodiscard]] Result<f64, String> PlanckRadianceWm2SrNm(f64 wavelengthNm,
-                                                        f64 temperatureK);
-[[nodiscard]] Result<f64, String> PlanckDerivativeWm2SrNmPerK(f64 wavelengthNm,
+                                                        f64 temperatureK);[[nodiscard]] Result<f64, String> PlanckDerivativeWm2SrNmPerK(f64 wavelengthNm,
                                                               f64 temperatureK);
 [[nodiscard]] Result<PhotonMeasurement, String>
 IntegrateBlackbodyPhoton(f64 temperatureK, const ResponseStack& response,

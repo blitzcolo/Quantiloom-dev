@@ -29,30 +29,11 @@ inline void PutFloat(Vector<u32>& words, size_t index, f64 value) {
 }
 
 inline const ResponseCurve& Base(const ResponseStack& stack, DetectorKind detector) {
-    return stack.systemResponse ? *stack.systemResponse :
-        detector == DetectorKind::Photon ? *stack.quantumEfficiency : *stack.thermalAbsorptance;
-}
-
-inline f64 CurveAt(const ResponseCurve& curve, f64 nm) {
-    if (nm < curve.MinNm() || nm > curve.MaxNm()) return 0.0;
-    const auto hi = std::lower_bound(curve.wavelengthNm.begin(), curve.wavelengthNm.end(), nm);
-    if (hi == curve.wavelengthNm.begin()) return curve.amplitude * curve.value.front();
-    if (hi == curve.wavelengthNm.end()) return curve.amplitude * curve.value.back();
-    const size_t index = static_cast<size_t>(hi - curve.wavelengthNm.begin());
-    const f64 x0 = curve.wavelengthNm[index - 1], x1 = curve.wavelengthNm[index];
-    const f64 t = (nm - x0) / (x1 - x0);
-    return curve.amplitude * (curve.value[index - 1] * (1.0 - t) + curve.value[index] * t);
-}
-
-inline f64 ResponseAt(const ResponseStack& stack, DetectorKind detector, f64 nm) {
-    f64 value = CurveAt(Base(stack, detector), nm);
-    if (stack.lensTransmission) value *= CurveAt(*stack.lensTransmission, nm);
-    if (stack.filterTransmission) value *= CurveAt(*stack.filterTransmission, nm);
-    return value;
+    return *BaseCurve(stack, detector);
 }
 
 inline f64 ProposalDensity(const ResponseStack& stack, DetectorKind detector, f64 nm) {
-    const f64 value = ResponseAt(stack, detector, nm);
+    const f64 value = EffectiveResponse(stack, detector, nm);
     return detector == DetectorKind::Photon ? value * nm : value;
 }
 

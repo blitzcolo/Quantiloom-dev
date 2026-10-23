@@ -249,24 +249,9 @@ f64 EffectiveWavelengthNm(const camera::ResponseStack& response,
     // Preview-effective wavelength assumes flat incident spectral radiance
     // inside this channel. The physical capture integrates the actual scene
     // spectrum; this one number only sizes the approximate GPU Gaussian PSF.
-    const camera::ResponseCurve* base = response.systemResponse
-        ? &*response.systemResponse
-        : detector == camera::DetectorKind::Photon
-              ? &*response.quantumEfficiency : &*response.thermalAbsorptance;
-    const auto at = [](const camera::ResponseCurve& curve, f64 lambdaNm) {
-        if (lambdaNm < curve.MinNm() || lambdaNm > curve.MaxNm()) return 0.0;
-        const auto upper = std::lower_bound(
-            curve.wavelengthNm.begin(), curve.wavelengthNm.end(), lambdaNm);
-        if (upper == curve.wavelengthNm.begin())
-            return curve.amplitude * curve.value.front();
-        if (upper == curve.wavelengthNm.end())
-            return curve.amplitude * curve.value.back();
-        const size_t hi = static_cast<size_t>(upper - curve.wavelengthNm.begin());
-        const f64 t = (lambdaNm - curve.wavelengthNm[hi - 1]) /
-                      (curve.wavelengthNm[hi] - curve.wavelengthNm[hi - 1]);
-        return curve.amplitude *
-            (curve.value[hi - 1] + t * (curve.value[hi] - curve.value[hi - 1]));
-    };
+    // The curve lookup is the shared CameraPhysics one (BaseCurve/CurveAt).
+    const camera::ResponseCurve* base =
+        camera::BaseCurve(response, detector);
     Vector<f64> knots = base->wavelengthNm;
     for (const auto* extra : {
              response.lensTransmission ? &*response.lensTransmission : nullptr,
@@ -279,11 +264,11 @@ f64 EffectiveWavelengthNm(const camera::ResponseStack& response,
     std::sort(knots.begin(), knots.end());
     knots.erase(std::unique(knots.begin(), knots.end()), knots.end());
     const auto density = [&](f64 lambda) {
-        f64 value = at(*base, lambda);
+        f64 value = camera::CurveAt(*base, lambda);
         if (response.lensTransmission)
-            value *= at(*response.lensTransmission, lambda);
+            value *= camera::CurveAt(*response.lensTransmission, lambda);
         if (response.filterTransmission)
-            value *= at(*response.filterTransmission, lambda);
+            value *= camera::CurveAt(*response.filterTransmission, lambda);
         // A photon detector's electron response includes photon energy;
         // a thermal absorber is weighted directly by power.
         if (detector == camera::DetectorKind::Photon) value *= lambda;

@@ -16,34 +16,8 @@ namespace {
 bool FiniteNonnegative(f64 x) { return std::isfinite(x) && x >= 0.0; }
 bool FinitePositive(f64 x) { return std::isfinite(x) && x > 0.0; }
 
-const ResponseCurve* BaseCurve(const ResponseStack& stack, DetectorKind detector) {
-    if (stack.systemResponse) return &*stack.systemResponse;
-    if (detector == DetectorKind::Photon && stack.quantumEfficiency)
-        return &*stack.quantumEfficiency;
-    if (detector == DetectorKind::Thermal && stack.thermalAbsorptance)
-        return &*stack.thermalAbsorptance;
-    return nullptr;
-}
-
-f64 CurveAt(const ResponseCurve& curve, f64 wavelengthNm) {
-    if (wavelengthNm < curve.MinNm() || wavelengthNm > curve.MaxNm()) return 0.0;
-    const auto hi = std::lower_bound(curve.wavelengthNm.begin(), curve.wavelengthNm.end(),
-                                     wavelengthNm);
-    if (hi == curve.wavelengthNm.begin()) return curve.amplitude * curve.value.front();
-    if (hi == curve.wavelengthNm.end()) return curve.amplitude * curve.value.back();
-    const auto index = static_cast<size_t>(hi - curve.wavelengthNm.begin());
-    const f64 t = (wavelengthNm - curve.wavelengthNm[index - 1]) /
-                  (curve.wavelengthNm[index] - curve.wavelengthNm[index - 1]);
-    return curve.amplitude *
-        (curve.value[index - 1] + t * (curve.value[index] - curve.value[index - 1]));
-}
-
-f64 EffectiveResponse(const ResponseStack& stack, DetectorKind detector, f64 wavelengthNm) {
-    f64 response = CurveAt(*BaseCurve(stack, detector), wavelengthNm);
-    if (stack.lensTransmission) response *= CurveAt(*stack.lensTransmission, wavelengthNm);
-    if (stack.filterTransmission) response *= CurveAt(*stack.filterTransmission, wavelengthNm);
-    return response;
-}
+// BaseCurve/CurveAt/EffectiveResponse live in CameraPhysics.hpp: the GPU
+// response packing and the GPU camera pipeline read the same lookup.
 
 template<class Sample> bool ValidSamples(std::span<const Sample> samples) {
     if (samples.size() < 2) return false;
