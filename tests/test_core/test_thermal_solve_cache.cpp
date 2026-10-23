@@ -83,6 +83,9 @@ struct KeyFixture {
     ThermalMesh mesh;
     Vector<ThermalMaterial> materials;
     ThermalConfig config;
+    /// One per material, as ComputeMaterialCoverage gives it: the metal is
+    /// opaque, the sand alpha-tested down to 40%.
+    Vector<f32> coverage{0.4f, 1.0f};
     glm::vec3 exchangeSun{0.3f, 0.8f, 0.1f};
     String gpu = "TestGPU|4318|8712|123456";
     String stepper = "CPU Crank-Nicolson";
@@ -122,6 +125,7 @@ struct KeyFixture {
         inputs.mesh = &mesh;
         inputs.solvedMaterials = &materials;
         inputs.config = &config;
+        inputs.materialCoverage = &coverage;
         inputs.exchangeSunDirection = exchangeSun;
         inputs.gpuIdentity = gpu;
         inputs.stepperName = stepper;
@@ -564,6 +568,26 @@ TEST(ThermalSolveCacheKey, EveryConfigScalarChangesIt) {
     }
 }
 
+// The exchange sees through an alpha-tested material in proportion to its
+// coverage, so two scenes differing only in a texture's alpha are two solves --
+// and nothing about it reaches the material table or the mesh.
+TEST(ThermalSolveCacheKey, AlphaCoverageChangesIt) {
+    const KeyFixture base;
+    const String reference = base.Key();
+
+    KeyFixture thinner;
+    thinner.coverage[0] = 0.3f;
+    EXPECT_NE(thinner.Key(), reference);
+
+    KeyFixture solid;
+    solid.coverage[0] = 1.0f;
+    EXPECT_NE(solid.Key(), reference);
+
+    KeyFixture none;
+    none.coverage.clear();
+    EXPECT_NE(none.Key(), reference);
+}
+
 TEST(ThermalSolveCacheKey, LightingSunDirectionChangesIt) {
     // Distinct from config.sunDirection: this is what the exchange precompute
     // traces sun visibility against.
@@ -754,6 +778,7 @@ String KeyWithSchedule(const KeyFixture& fixture, const ThermalGeometrySchedule*
     inputs.solvedMaterials = &fixture.materials;
     inputs.config = &fixture.config;
     inputs.schedule = schedule;
+    inputs.materialCoverage = &fixture.coverage;
     inputs.exchangeSunDirection = fixture.exchangeSun;
     inputs.gpuIdentity = fixture.gpu;
     inputs.stepperName = fixture.stepper;

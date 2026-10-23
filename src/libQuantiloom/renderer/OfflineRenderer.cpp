@@ -318,6 +318,9 @@ struct OfflineRenderer::Impl {
     thermal::ThermalConfig thermalConfig;
     thermal::ThermalMesh thermalMesh;
     Vector<thermal::ThermalMaterial> thermalSolvedMaterials;
+    /// Per-material alpha coverage, which the exchange sees through and the
+    /// cache key therefore hashes.
+    Vector<f32> thermalMaterialCoverage;
     String thermalStepperName;
     String thermalGpuIdentity;
     bool thermalCacheEligible = false;
@@ -598,6 +601,10 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     thermalCacheEligible = cacheSettings.enabled && thermalConfig.dumpElementsFile.empty();
     thermalCacheDir = cacheSettings.directory;
     thermalSolvedMaterials = thermal::BuildSolvedMaterials(loadedScene, thermalConfig);
+    // Before BuildIlluminants uploads the textures: the CPU texels this reads are
+    // still there now, as they are for the interactive preview. Taken here rather
+    // than beside the precompute because the early cache lookup below needs it.
+    thermalMaterialCoverage = rendercore::ComputeMaterialCoverage(loadedScene);
     {
         const VkPhysicalDeviceProperties& gpu = context.GetDeviceProperties();
         thermalGpuIdentity =
@@ -615,6 +622,7 @@ void OfflineRenderer::Impl::BuildThermalSession() {
         keyInputs.mesh = &thermalMesh;
         keyInputs.solvedMaterials = &thermalSolvedMaterials;
         keyInputs.config = &thermalConfig;
+        keyInputs.materialCoverage = &thermalMaterialCoverage;
         keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
         keyInputs.gpuIdentity = thermalGpuIdentity;
         keyInputs.stepperName = thermalStepperName;
@@ -689,9 +697,7 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     buildInput.meshOptions = thermal::MeshOptionsFor(thermalSolvedMaterials,
                                                      thermalConfig.lateralConduction);
     buildInput.materials = &thermalSolvedMaterials;
-    // Before BuildIlluminants uploads the textures: the CPU texels this reads are
-    // still there now, as they are for the interactive preview.
-    buildInput.materialCoverage = rendercore::ComputeMaterialCoverage(loadedScene);
+    buildInput.materialCoverage = thermalMaterialCoverage;
     buildInput.precompute.hemisphereRays = resolved.thermal.exchangeRays;
     buildInput.precompute.topK = resolved.thermal.exchangeTopK;
     buildInput.precompute.sunDirection = resolved.lighting.sunDirection;
@@ -743,6 +749,7 @@ void OfflineRenderer::Impl::UploadThermalFieldAt(const f64 time_h) {
         keyInputs.solvedMaterials = &thermalSolvedMaterials;
         keyInputs.config = &thermalConfig;
         keyInputs.schedule = &thermalSession->Schedule();
+        keyInputs.materialCoverage = &thermalMaterialCoverage;
         keyInputs.exchangeSunDirection = resolved.lighting.sunDirection;
         keyInputs.gpuIdentity = thermalGpuIdentity;
         keyInputs.stepperName = thermalStepperName;

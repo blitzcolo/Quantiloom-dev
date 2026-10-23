@@ -35,8 +35,8 @@ namespace {
 /// 6: the long-wave exchange became diffuse-grey radiosity in both steppers --
 /// a neighbour sends what it emits plus what it reflects instead of a
 /// blackbody's sigma T^4 -- so every field solved under 5 is a different
-/// answer to the same inputs.
-constexpr u32 kKeySchemaVersion = 6u;
+/// answer to the same inputs. 7: per-material alpha coverage joined the key.
+constexpr u32 kKeySchemaVersion = 7u;
 
 /// "QLTC", little-endian.
 constexpr u32 kCacheMagic = 0x43544C51u;
@@ -270,6 +270,16 @@ String ComputeThermalSolveCacheKey(const ThermalSolveCacheKeyInputs& inputs) {
         // changes the trajectory even when nothing else about the material
         // moved.
         hasher.UpdateBool(material.isShell);
+    }
+
+    // 4b. How much of each material is there, which the exchange rays see
+    //     through. Beside the materials rather than in them because it comes
+    //     from the scene's alpha, not from [thermal].
+    const usize coverageCount =
+        inputs.materialCoverage != nullptr ? inputs.materialCoverage->size() : 0;
+    hasher.UpdateU64(coverageCount);
+    for (usize m = 0; m < coverageCount; ++m) {
+        hasher.UpdateF32((*inputs.materialCoverage)[m]);
     }
 
     // 5. The [thermal] scalars. Not dumpElementsFile (an output), not enabled

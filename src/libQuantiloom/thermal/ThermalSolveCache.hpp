@@ -106,6 +106,14 @@ struct ThermalSolveCacheKeyInputs {
     /// key -- which is what lets a hit skip the view-factor precompute.
     const ThermalGeometrySchedule* schedule = nullptr;
 
+    /// Per material, the fraction of its area that is there -- what
+    /// rendercore::ComputeMaterialCoverage derives from alpha mode, cutoff,
+    /// base colour alpha and texture. The exchange precompute lets radiation
+    /// and sunlight through an alpha-tested material in that proportion, so it
+    /// moves view factors and sun visibility, and none of it reaches the
+    /// ThermalMaterial table or the mesh. Null hashes as an empty vector.
+    const Vector<f32>* materialCoverage = nullptr;
+
     /// [lighting] sun_direction, which is what the exchange precompute traces
     /// sun visibility against. Not the same field as config->sunDirection and
     /// not redundant with it.
