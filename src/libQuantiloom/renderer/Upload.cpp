@@ -59,7 +59,15 @@ void EndSingleTimeCommands(VkDevice device, VkCommandPool commandPool,
         throw std::runtime_error("Failed to submit upload command buffer");
     }
     if (const VkResult result = vkQueueWaitIdle(queue); result != VK_SUCCESS) {
-        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        // The queue did not say the copy finished, so the command buffer may
+        // still be pending, and freeing a pending one is invalid. Ask the
+        // whole device once more; if that cannot vouch for it either, the
+        // buffer is left in its pool rather than freed under the GPU -- the
+        // throw below skips the caller's vkDestroyCommandPool too, so a
+        // device that is gone leaks one pool instead of corrupting it.
+        if (vkDeviceWaitIdle(device) == VK_SUCCESS) {
+            vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        }
         throw std::runtime_error("Failed to wait for upload to complete (VkResult: " +
                                  std::to_string(result) + ")");
     }
