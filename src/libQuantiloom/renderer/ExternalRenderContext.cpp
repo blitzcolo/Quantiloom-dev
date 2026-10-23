@@ -285,6 +285,11 @@ struct ExternalRenderContext::Impl {
 
     // Accumulation
     u32 accumulatedSamples = 0;
+    // True once the visibility accumulation has actually traced into
+    // outputImage. accumulatedSamples also counts camera frames, which never
+    // touch outputImage, so it cannot answer "is the raw accumulation
+    // presentable" -- only this flag can.
+    bool rawAccumulationValid = false;
     u32 frameIndex = 0;
     u64 pixelImageGeneration = 1;
     u64 rawPixelGeneration = 0;
@@ -846,6 +851,18 @@ struct ExternalRenderContext::Impl {
         u32 height;
     };
     [[nodiscard]] DisplaySource CurrentDisplaySource() const;
+
+    /// Whether the source CurrentDisplaySource picked holds real content:
+    /// the raw accumulation only after a non-camera trace, the CLAHE image
+    /// only after a recorded run. The camera display needs no check here --
+    /// CameraDisplayImage() already gates on cameraCaptureCompleted.
+    [[nodiscard]] bool DisplaySourceReady(const DisplaySource& source) const {
+        if (outputImage && source.image == outputImage->GetImage())
+            return rawAccumulationValid;
+        if (displayImage && source.image == displayImage->GetImage())
+            return displayImageValid;
+        return true;
+    }
 
     /// The camera display product once an acquisition has completed, else
     /// null (the image exists before the first acquisition but holds no
@@ -2058,6 +2075,7 @@ void ExternalRenderContext::RenderFrame(
                     m_impl->perfLogger->EndFrame(cmd);
                 m_impl->rawPixelGeneration = m_impl->pixelImageGeneration;
                 m_impl->rawPixelSamples = m_impl->accumulatedSamples + 1;
+                m_impl->rawAccumulationValid = true;
             }
             ++m_impl->accumulatedSamples;
         }
@@ -2205,10 +2223,12 @@ bool ExternalRenderContext::PresentAccumulated(
     if (!m_impl->isReady || !m_impl->outputImage) {
         return false;
     }
-    // Nothing has been traced, so there is no accumulation to show. The caller
-    // has to draw a real frame instead -- returning true here would present an
-    // image whose contents are undefined.
-    if (m_impl->accumulatedSamples == 0) {
+    // Nothing presentable has been produced, so there is no image to show.
+    // accumulatedSamples cannot answer that -- it also counts camera frames,
+    // which never trace the raw accumulation -- so ask the source itself:
+    // a camera-only session has no raw image, and a CLAHE image first needs a
+    // recorded run. Returning true here would present undefined contents.
+    if (!m_impl->DisplaySourceReady(m_impl->CurrentDisplaySource())) {
         return false;
     }
     // A change of target extent invalidates the accumulation the caller is
@@ -2250,11 +2270,17 @@ bool ExternalRenderContext::ReprocessAccumulated(
     u32 width,
     u32 height) {
 
-    // The same three refusals as PresentAccumulated, for the same reasons.
+    // The same refusals as PresentAccumulated, for the same reasons, with one
+    // exception: this path re-runs CLAHE below, which produces the CLAHE
+    // image from a ready input -- so a not-yet-written displayImage is not a
+    // reason to refuse when a run is about to be recorded. Every other source
+    // has to hold real content already.
     if (!m_impl->isReady || !m_impl->outputImage) {
         return false;
     }
-    if (m_impl->accumulatedSamples == 0) {
+    const bool claheWillRun = (m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
+                              m_impl->claheInitialized && m_impl->ClaheInputReady();
+    if (!claheWillRun && !m_impl->DisplaySourceReady(m_impl->CurrentDisplaySource())) {
         return false;
     }
     if (width != m_impl->targetWidth || height != m_impl->targetHeight) {
@@ -2297,6 +2323,11 @@ bool ExternalRenderContext::ReprocessAccumulated(
     }
 
     const auto source = m_impl->CurrentDisplaySource();
+    // The CLAHE re-run above (or a previous frame) may be the only thing that
+    // ever wrote the source; if it is still empty there is nothing to blit.
+    if (!m_impl->DisplaySourceReady(source)) {
+        return false;
+    }
     const VkPipelineStageFlags sourceStage =
         (source.image == m_impl->outputImage->GetImage())
             ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
@@ -2492,6 +2523,7 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
     // Nothing survives a change of extent. Same two steps as
     // ExternalRenderContext::ResetAccumulation.
     accumulatedSamples = 0;
+    rawAccumulationValid = false;
     // A new extent is a different image, so pixel copies outstanding against
     // the old one must stop matching Poll().
     ++pixelImageGeneration;
@@ -2500,6 +2532,7 @@ void ExternalRenderContext::Impl::ApplyInternalExtent(u32 renderW, u32 renderH) 
 
 void ExternalRenderContext::ResetAccumulation() {
     m_impl->accumulatedSamples = 0;
+    m_impl->rawAccumulationValid = false;
     // A reset accumulation is a different image, so pixel copies outstanding
     // against the old one must stop matching Poll().
     ++m_impl->pixelImageGeneration;
