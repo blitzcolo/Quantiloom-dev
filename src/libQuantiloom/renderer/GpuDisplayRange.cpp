@@ -18,8 +18,6 @@
 namespace quantiloom::rendercore {
 namespace {
 
-constexpr u32 kScratchWords = 4;
-
 u32 FloatToOrdered(f32 value) {
     const u32 bits = std::bit_cast<u32>(value);
     return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
@@ -59,7 +57,6 @@ struct GpuDisplayRange::Impl {
     std::unique_ptr<GpuBuffer> scratch;
     std::unique_ptr<GpuBuffer> histogram;
     std::unique_ptr<GpuBuffer> scratchReadback;
-    std::unique_ptr<GpuBuffer> histogramReadback;
 
     explicit Impl(VulkanContext& ctx) : context(ctx), device(ctx.GetDevice()) {}
 
@@ -99,7 +96,14 @@ struct GpuDisplayRange::Impl {
             return Result<void, String>::Err(
                 "cannot create display-range descriptor layout");
 
-        struct Push { u32 width; u32 height; f32 absMin; f32 scale; };
+        struct Push {
+            u32 width;
+            u32 height;
+            f32 absMin;
+            f32 scale;
+            u32 targetLow;
+            u32 targetHigh;
+        };
         VkPushConstantRange push{};
         push.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push.size = sizeof(Push);
@@ -172,9 +176,6 @@ struct GpuDisplayRange::Impl {
         scratchReadback = std::make_unique<GpuBuffer>(
             context.GetAllocator(), scratchBytes,
             VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
-        histogramReadback = std::make_unique<GpuBuffer>(
-            context.GetAllocator(), histogramBytes,
-            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
 
         const VkDescriptorBufferInfo scratchInfo{
             scratch->GetHandle(), 0, VK_WHOLE_SIZE};
@@ -235,9 +236,17 @@ Result<DisplayRange, String> GpuDisplayRange::Compute(
 
     const std::array<u32, kScratchWords> initialScratch{
         FloatToOrdered(std::numeric_limits<f32>::max()),
-        FloatToOrdered(std::numeric_limits<f32>::lowest()), 0u, 0u};
-    struct Push { u32 width; u32 height; f32 absMin; f32 scale; };
-    const Push extentsPush{width, height, 0.0f, 0.0f};
+        FloatToOrdered(std::numeric_limits<f32>::lowest()),
+        0u, 0u, 0u, 0u, 0u, 0u};
+    struct Push {
+        u32 width;
+        u32 height;
+        f32 absMin;
+        f32 scale;
+        u32 targetLow;
+        u32 targetHigh;
+    };
+    const Push extentsPush{width, height, 0.0f, 0.0f, 0u, 0u};
     const u32 groupsX = (width + 15u) / 16u;
     const u32 groupsY = (height + 15u) / 16u;
 
@@ -335,7 +344,21 @@ Result<DisplayRange, String> GpuDisplayRange::Compute(
     if (!std::isfinite(span) || !(span > 0.0f) || !std::isfinite(scale))
         return Result<DisplayRange, String>::Err(
             "display range input needs CPU scale arithmetic");
-    const Push histogramPush{width, height, absMin, scale};
+    // Percentile targets, as counts: the histogram pass's last workgroup
+    // finds the first bin whose inclusive cumulative count reaches each
+    // target and writes the two bins into the scratch words, so the bins
+    // never cross to the host.
+    const f64 lowFraction =
+        std::clamp(static_cast<f64>(percentileLow), 0.0, 100.0) / 100.0;
+    const f64 highFraction =
+        std::clamp(static_cast<f64>(percentileHigh), 0.0, 100.0) / 100.0;
+    const usize targetLow =
+        static_cast<usize>(static_cast<f64>(validCount) * lowFraction);
+    const usize targetHigh =
+        static_cast<usize>(static_cast<f64>(validCount) * highFraction);
+    const Push histogramPush{width, height, absMin, scale,
+                             static_cast<u32>(targetLow),
+                             static_cast<u32>(targetHigh)};
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
         vkCmdFillBuffer(cmd, m_impl->histogram->GetHandle(), 0,
                         VK_WHOLE_SIZE, 0u);
@@ -363,63 +386,40 @@ Result<DisplayRange, String> GpuDisplayRange::Compute(
                           m_impl->histogramPipeline);
         vkCmdDispatch(cmd, groupsX, groupsY, 1);
 
-        VkBufferMemoryBarrier copyReady{
+        // The last workgroup wrote the crossing bins into the scratch words;
+        // those words are all the host needs.
+        VkBufferMemoryBarrier binsReady{
             VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
-        copyReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        copyReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        copyReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        copyReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        copyReady.buffer = m_impl->histogram->GetHandle();
-        copyReady.offset = 0;
-        copyReady.size = VK_WHOLE_SIZE;
+        binsReady.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        binsReady.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        binsReady.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        binsReady.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        binsReady.buffer = m_impl->scratch->GetHandle();
+        binsReady.offset = 0;
+        binsReady.size = VK_WHOLE_SIZE;
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                             0, nullptr, 1, &copyReady, 0, nullptr);
-        VkBufferCopy histogramCopy{};
-        histogramCopy.size = m_impl->histogram->GetSize();
-        vkCmdCopyBuffer(cmd, m_impl->histogram->GetHandle(),
-                        m_impl->histogramReadback->GetHandle(), 1,
-                        &histogramCopy);
+                             0, nullptr, 1, &binsReady, 0, nullptr);
+        VkBufferCopy scratchCopyOut{};
+        scratchCopyOut.size = m_impl->scratch->GetSize();
+        vkCmdCopyBuffer(cmd, m_impl->scratch->GetHandle(),
+                        m_impl->scratchReadback->GetHandle(), 1,
+                        &scratchCopyOut);
     });
 
-    std::array<u32, kHistogramBins> bins{};
-    const void* histogramData = m_impl->histogramReadback->MapRead();
-    if (!histogramData)
+    std::array<u32, kScratchWords> resultWords{};
+    const void* resultData = m_impl->scratchReadback->MapRead();
+    if (!resultData)
         return Result<DisplayRange, String>::Err(
-            "cannot map display-range histogram readback");
-    std::memcpy(bins.data(), histogramData, sizeof(bins));
-    m_impl->histogramReadback->Unmap();
-
-    const f64 lowFraction =
-        std::clamp(static_cast<f64>(percentileLow), 0.0, 100.0) / 100.0;
-    const f64 highFraction =
-        std::clamp(static_cast<f64>(percentileHigh), 0.0, 100.0) / 100.0;
-    const usize targetLow =
-        static_cast<usize>(static_cast<f64>(validCount) * lowFraction);
-    const usize targetHigh =
-        static_cast<usize>(static_cast<f64>(validCount) * highFraction);
-
-    usize cumulative = 0;
-    usize binLow = 0;
-    usize binHigh = kHistogramBins - 1;
-    bool haveLow = false;
-    for (usize i = 0; i < bins.size(); ++i) {
-        cumulative += bins[i];
-        if (!haveLow && cumulative >= targetLow) {
-            binLow = i;
-            haveLow = true;
-        }
-        if (cumulative >= targetHigh) {
-            binHigh = i;
-            break;
-        }
-    }
+            "cannot map display-range percentile readback");
+    std::memcpy(resultWords.data(), resultData, sizeof(resultWords));
+    m_impl->scratchReadback->Unmap();
 
     const f32 invScale =
         (absMax - absMin) / static_cast<f32>(kHistogramBins - 1);
     DisplayRange result{
-        absMin + static_cast<f32>(binLow) * invScale,
-        absMin + static_cast<f32>(binHigh) * invScale};
+        absMin + static_cast<f32>(resultWords[5]) * invScale,
+        absMin + static_cast<f32>(resultWords[6]) * invScale};
     if (!(result.max - result.min > (absMax - absMin) * 1e-3f))
         result = {absMin, absMax};
     return result;

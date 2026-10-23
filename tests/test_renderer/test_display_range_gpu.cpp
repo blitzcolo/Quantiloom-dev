@@ -451,7 +451,7 @@ TEST_F(DisplayRangeGpuTest, DISABLED_BenchmarkGpuHistogramAgainstFullImageReadba
                   << mean(gpuMs) << "/" << median(gpuMs)
                   << " ms, readback " << oldBytes / (1024.0 * 1024.0)
                   << " MiB -> "
-                  << (GpuDisplayRange::kHistogramBins * sizeof(u32) + 4 * sizeof(u32)) /
+                  << static_cast<double>(GpuDisplayRange::kScratchWords) * sizeof(u32) /
                          1024.0
                   << " KiB\n";
     }

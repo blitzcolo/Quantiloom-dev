@@ -19,12 +19,21 @@ struct DisplayRange {
 
 /// GPU histogram used by the interactive display-range calculation.
 ///
-/// The image scan and 65,536-bin histogram remain on the device. Compute()
-/// first reads three scalar words so the CPU computes the original f32 bin
-/// scale exactly, then reads the fixed histogram. The host also retains the
-/// original double-precision percentile thresholds and fallback rules.
+/// The image scan and the 65,536-bin histogram stay on the device, and the
+/// percentile crossing bins are scanned on the device too: the histogram
+/// pass's last-finishing workgroup writes the two crossing bins into the
+/// scratch buffer. Compute() reads one batch of scalar words per pass --
+/// the extents first, so the CPU computes the original f32 bin scale
+/// exactly, then the two bins -- instead of reading the histogram back.
+/// The host retains the original double-precision percentile thresholds,
+/// the fallback rules, and the CPU path for images the device flags as
+/// needing exact small-value arithmetic.
 class GpuDisplayRange {
 public:
+    /// Scalar words in the scratch buffer: ordered min, ordered max, valid
+    /// count, needs-CPU flag, histogram done-group counter, then the low and
+    /// high percentile crossing bins. Must match display_range.comp.hlsl.
+    static constexpr u32 kScratchWords = 8;
     static constexpr u32 kHistogramBins = 65536;
 
     [[nodiscard]] static Result<std::unique_ptr<GpuDisplayRange>, String>
