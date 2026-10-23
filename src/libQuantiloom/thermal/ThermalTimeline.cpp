@@ -363,7 +363,14 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
 bool ThermalTimeline::SurfaceFluxesAt(const f64 time_h, const u32 element,
                                       SurfaceFluxes& out,
                                       const IThermalStepper& decomposer) {
-    const ThermalGeometryEpoch& epoch = m_schedule->At(time_h);
+    // The geometry of the grid step this hour lies in, by the rule StateAt and
+    // the complete steps follow -- a boundary inside a step belongs to the
+    // step after it -- not the one whose from_h the hour has passed. The
+    // balance reported is the one driving the trajectory out of this state,
+    // and inside a boundary step that is still the old world: decomposing it
+    // against the new one would show fluxes no step ever integrated.
+    const ThermalGeometryEpoch& epoch =
+        m_schedule->epochs[EpochForStep(GridIndex(std::max(time_h, m_desc.startTime_h)))];
     if (element >= epoch.elements.size()) return false;
 
     const ThermalState& state = StateAt(time_h);

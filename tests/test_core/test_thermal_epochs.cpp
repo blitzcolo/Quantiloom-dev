@@ -121,6 +121,18 @@ public:
         m_inner.StepMany(state, elements, materials, exchange, sunTable, steps);
     }
 
+    [[nodiscard]] bool SurfaceFluxesAt(const ThermalState& state,
+                                       const Vector<ThermalElement>& elements,
+                                       const Vector<ThermalMaterial>& materials,
+                                       const ExchangeGeometry& exchange,
+                                       const ThermalForcing& forcing,
+                                       const ShortwaveSample& shortwave, u32 element,
+                                       SurfaceFluxes& out) const override {
+        fluxExchange.push_back(&exchange);
+        return m_inner.SurfaceFluxesAt(state, elements, materials, exchange, forcing,
+                                       shortwave, element, out);
+    }
+
     [[nodiscard]] const char* Name() const override { return "counting"; }
     [[nodiscard]] bool CarriesShells() const override { return m_inner.CarriesShells(); }
 
@@ -128,6 +140,8 @@ public:
     Vector<usize> batchSize;
     /// The same for single steps: the relaxation and an off-grid partial step.
     Vector<const ExchangeGeometry*> stepExchange;
+    /// And for flux decompositions, which are queries and so const.
+    mutable Vector<const ExchangeGeometry*> fluxExchange;
 
 private:
     CpuCrankNicolsonStepper m_inner;
@@ -357,6 +371,30 @@ TEST(ThermalEpochTest, APartialStepInsideABoundaryStepKeepsTheOldGeometry) {
 
     ASSERT_FALSE(stepper.stepExchange.empty());
     EXPECT_EQ(stepper.stepExchange.back(), &split.epochs[0].exchange);
+}
+
+TEST(ThermalEpochTest, AFluxProbeFollowsTheStepGridAcrossABoundary) {
+    // The same boundary, 15 s into the step that starts at 0.5 h. A probe 50 s
+    // into that step decomposes the balance that step integrates, which is the
+    // old geometry's; one 90 s past 0.5 h is in the next step, the first that
+    // sees the new world.
+    const Vector<ThermalMaterial> materials{Concrete()};
+    const Vector<std::pair<f64, ThermalForcing>> noSeries;
+    const ThermalForcing forcing = SunnyForcing();
+
+    ThermalGeometrySchedule split;
+    split.epochs.push_back(OpenEpoch(-1e308));
+    split.epochs.push_back(ShadedEpoch(0.5 + 15.0 / 3600.0));
+
+    CountingStepper stepper;
+    ThermalTimeline timeline(PlateDesc(), split, materials, noSeries, forcing, stepper);
+
+    SurfaceFluxes fluxes;
+    ASSERT_TRUE(timeline.SurfaceFluxesAt(0.5 + 50.0 / 3600.0, 0, fluxes, stepper));
+    ASSERT_TRUE(timeline.SurfaceFluxesAt(0.5 + 90.0 / 3600.0, 0, fluxes, stepper));
+    ASSERT_EQ(stepper.fluxExchange.size(), 2u);
+    EXPECT_EQ(stepper.fluxExchange[0], &split.epochs[0].exchange);
+    EXPECT_EQ(stepper.fluxExchange[1], &split.epochs[1].exchange);
 }
 
 TEST(ThermalEpochTest, TheScheduleFindsTheEpochAnHourBelongsTo) {

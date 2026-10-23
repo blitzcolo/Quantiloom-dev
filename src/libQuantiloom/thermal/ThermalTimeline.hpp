@@ -122,9 +122,10 @@ public:
     [[nodiscard]] u32 EpochAt(f64 time_h) const {
         return static_cast<u32>(m_schedule->EpochAt(time_h));
     }
-    /// The geometry in force at @p time_h -- what SurfaceFluxesAt decomposed
-    /// against, and what a field extracted at that hour must read its normals
-    /// from.
+    /// The geometry in force at @p time_h -- what a field extracted at that
+    /// hour must read its normals from. Not what SurfaceFluxesAt decomposes
+    /// against inside a boundary step: that follows the step grid, where a
+    /// boundary belongs to the step after it.
     [[nodiscard]] const ThermalGeometryEpoch& GeometryAt(f64 time_h) const {
         return m_schedule->At(time_h);
     }
