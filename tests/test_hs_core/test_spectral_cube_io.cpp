@@ -17,6 +17,9 @@
 #include <filesystem>
 #include <cmath>
 #include <fstream>
+#include <iterator>
+#include <string>
+#include <vector>
 
 using namespace quantiloom;
 
@@ -538,6 +541,77 @@ TEST_F(SpectralCubeIOTest, TIFFHoldsHDRValues) {
     EXPECT_FLOAT_EQ(read.value()(0, 0, 0), 1.0e-6f);
     EXPECT_FLOAT_EQ(read.value()(1, 0, 0), 1.0e5f);
     EXPECT_FLOAT_EQ(read.value()(0, 1, 1), -2.5f);
+}
+
+// D-SE-08: the header numbers and the data length are the file's word.
+TEST_F(SpectralCubeIOTest, ENVIRejectsMalformedHeaderNumbers) {
+    const SpectralCube cube = CreateTestCube(4, 3, 2, 400.0f, 500.0f);
+    const std::string basePath = (testDir / "malformed").string();
+    ASSERT_TRUE(SpectralCubeIO::WriteENVI(cube, basePath, ENVIInterleave::BSQ));
+    ASSERT_TRUE(SpectralCubeIO::ReadENVI(basePath).has_value());
+
+    std::string header;
+    {
+        std::ifstream in(basePath + ".hdr");
+        header.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    for (const char* bad : {"samples = abc", "samples = -4", "samples = 0"}) {
+        std::string edited = header;
+        const size_t at = edited.find("samples = 4");
+        ASSERT_NE(at, std::string::npos);
+        edited.replace(at, std::string("samples = 4").size(), bad);
+        {
+            std::ofstream out(basePath + ".hdr");
+            out << edited;
+        }
+        EXPECT_FALSE(SpectralCubeIO::ReadENVI(basePath).has_value()) << bad;
+    }
+}
+
+TEST_F(SpectralCubeIOTest, ENVIRejectsDataShorterThanTheHeaderPromises) {
+    const SpectralCube cube = CreateTestCube(4, 3, 2, 400.0f, 500.0f);
+    const std::string basePath = (testDir / "short").string();
+    ASSERT_TRUE(SpectralCubeIO::WriteENVI(cube, basePath, ENVIInterleave::BSQ));
+    const auto dat = std::filesystem::path(basePath + ".dat");
+    ASSERT_TRUE(std::filesystem::exists(dat));
+    std::filesystem::resize_file(dat, std::filesystem::file_size(dat) - sizeof(f32));
+    EXPECT_FALSE(SpectralCubeIO::ReadENVI(basePath).has_value());
+}
+
+// D-SE-09: the GDAL metadata offset is the file's word too.
+TEST_F(SpectralCubeIOTest, TIFFMetadataOffsetPastEofFallsBack) {
+    SpectralCube cube(4, 3, 5, 400.0f, 800.0f);
+    for (usize i = 0; i < cube.data.size(); ++i) cube.data[i] = static_cast<f32>(i);
+    const std::string path = (testDir / "badmeta.tif").string();
+    ASSERT_TRUE(SpectralCubeIO::WriteGeoTIFF(cube, path));
+
+    std::vector<unsigned char> bytes;
+    {
+        std::ifstream in(path, std::ios::binary);
+        bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    const auto u16At = [&](size_t at) { return static_cast<unsigned>(bytes[at] | (bytes[at + 1] << 8)); };
+    const size_t ifd = bytes[4] | (bytes[5] << 8) | (bytes[6] << 16) | (static_cast<size_t>(bytes[7]) << 24);
+    const unsigned entries = u16At(ifd);
+    bool patched = false;
+    for (unsigned i = 0; i < entries; ++i) {
+        const size_t at = ifd + 2 + static_cast<size_t>(i) * 12;
+        if (u16At(at) != 42112) continue;
+        for (size_t k = 0; k < 4; ++k) bytes[at + 8 + k] = 0xFF;  // offset 0xFFFFFFFF
+        patched = true;
+    }
+    ASSERT_TRUE(patched) << "WriteGeoTIFF no longer writes tag 42112";
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    }
+
+    auto read = SpectralCubeIO::ReadGeoTIFF(path);
+    ASSERT_TRUE(read.has_value()) << read.error();
+    ASSERT_EQ(read.value().wavelengths.size(), 5u);
+    for (u32 b = 0; b < 5; ++b) {
+        EXPECT_FLOAT_EQ(read.value().wavelengths[b], static_cast<f32>(b));
+    }
 }
 
 TEST_F(SpectralCubeIOTest, ReadNonexistentTIFF) {
