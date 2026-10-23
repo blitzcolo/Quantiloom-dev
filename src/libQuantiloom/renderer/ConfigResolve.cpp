@@ -452,21 +452,29 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // ------------------------------------------------------------------
     out.lighting = CreateDefaultLightingParams();
 
-    const auto sunDirArray = config.GetArray<f32>("lighting.sun_direction");
-    if (sunDirArray.size() == 3) {
-        out.lighting.sunDirection =
-            glm::normalize(glm::vec3(sunDirArray[0], sunDirArray[1], sunDirArray[2]));
-    } else {
-        diag.Required("lighting.sun_direction",
-                      "lighting.sun_direction must be an array of 3 floats, but has " +
-                          std::to_string(sunDirArray.size()) + " element(s)");
-    }
+    // Each of these is required where the render actually uses it, and not
+    // otherwise. A key that is present is always validated, so a misspelled
+    // value still says so.
+    //
+    // sun_radiance and sky_radiance are RGB stand-ins: a spectral render that
+    // names a solar_lut takes both illuminants from the table and overwrites
+    // them (a table that fails to load is fatal there), so asking for them
+    // would be asking for numbers nothing reads. Everywhere else -- RGB, or a
+    // spectral scene with no table -- they are the illumination, and a missing
+    // one would render dark without saying why.
+    //
+    // sun_direction matters wherever there is a sun: an analytic or tabulated
+    // one, the thermal balance's forcing, or the atmosphere's solar geometry.
+    // With none of those it is never read, and the default direction in
+    // LightingDefaults stands.
+    const bool illuminantFromTable =
+        config.Has("lighting.solar_lut") && out.mode != SpectralMode::RGB;
 
     glm::vec3 sunRadiance(0.0f);
     const auto sunRadArray = config.GetArray<f32>("lighting.sun_radiance");
     if (sunRadArray.size() == 3) {
         sunRadiance = glm::vec3(sunRadArray[0], sunRadArray[1], sunRadArray[2]);
-    } else {
+    } else if (config.Has("lighting.sun_radiance") || !illuminantFromTable) {
         diag.Required("lighting.sun_radiance",
                       "lighting.sun_radiance must be an array of 3 floats, but has " +
                           std::to_string(sunRadArray.size()) + " element(s)");
@@ -476,10 +484,25 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     const auto skyRadArray = config.GetArray<f32>("lighting.sky_radiance");
     if (skyRadArray.size() == 3) {
         skyRadiance = glm::vec3(skyRadArray[0], skyRadArray[1], skyRadArray[2]);
-    } else {
+    } else if (config.Has("lighting.sky_radiance") || !illuminantFromTable) {
         diag.Required("lighting.sky_radiance",
                       "lighting.sky_radiance must be an array of 3 floats, but has " +
                           std::to_string(skyRadArray.size()) + " element(s)");
+    }
+
+    const bool sunIsUsed =
+        sunRadiance.r > 0.0f || sunRadiance.g > 0.0f || sunRadiance.b > 0.0f ||
+        config.Has("lighting.solar_lut") || config.Get<bool>("thermal.enabled", false) ||
+        config.Has("atmosphere.model_pack") ||
+        config.Get<String>("atmosphere.preset", "disabled") != "disabled";
+    const auto sunDirArray = config.GetArray<f32>("lighting.sun_direction");
+    if (sunDirArray.size() == 3) {
+        out.lighting.sunDirection =
+            glm::normalize(glm::vec3(sunDirArray[0], sunDirArray[1], sunDirArray[2]));
+    } else if (config.Has("lighting.sun_direction") || sunIsUsed) {
+        diag.Required("lighting.sun_direction",
+                      "lighting.sun_direction must be an array of 3 floats, but has " +
+                          std::to_string(sunDirArray.size()) + " element(s)");
     }
 
     f32 atmosphereTemperature_K =
@@ -625,12 +648,16 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
 
     // ------------------------------------------------------------------
     // [material] -- read even when the scene brings its own materials, so a
-    // misspelled key says so rather than rendering.
+    // misspelled key says so rather than rendering. Whether it must be there is
+    // a question about the scene, which is not loaded yet: it is the stand-in
+    // for a scene with no materials of its own, so ResolveMaterialSpectra
+    // requires it only for that case.
     // ------------------------------------------------------------------
     const auto albedoArray = config.GetArray<f32>("material.albedo");
     if (albedoArray.size() == 3) {
         out.defaultAlbedo = glm::vec3(albedoArray[0], albedoArray[1], albedoArray[2]);
-    } else {
+        out.defaultAlbedoGiven = true;
+    } else if (config.Has("material.albedo")) {
         diag.Required("material.albedo",
                       "material.albedo must be an array of 3 floats, but has " +
                           std::to_string(albedoArray.size()) + " element(s)");
@@ -1903,6 +1930,18 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
 
     ResolvedMaterialSpectra out;
     Diagnostics diag(options, report);
+
+    // material.albedo is the colour of the stand-in a host adds to a scene that
+    // loaded with no materials, and nothing else reads it -- so a config whose
+    // scene brings its own does not need it. Both hosts add the stand-in
+    // before this runs, under kDefaultMaterialName.
+    if (!resolved.defaultAlbedoGiven && scene.materials.size() == 1 &&
+        scene.materials.front().name == kDefaultMaterialName) {
+        diag.Required("material.albedo",
+                      "material.albedo must be an array of 3 floats: the scene has no "
+                      "materials of its own, so it is the colour every surface gets");
+    }
+
     const bool strictCamera = resolved.cameraConfig.enabled && config.Has("sensor.version");
     const auto deviceDomains = DeviceDomains(resolved.cameraConfig);
     // Keep the source knot positions for energy checks. A narrow measured

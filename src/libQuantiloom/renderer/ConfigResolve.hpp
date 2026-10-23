@@ -74,6 +74,10 @@
 
 namespace quantiloom::rendercore {
 
+/// The name both hosts give the one-material stand-in they add to a scene that
+/// loaded with none (see ResolvedRenderConfig::defaultAlbedo).
+inline constexpr const char* kDefaultMaterialName = "DefaultMaterial";
+
 /**
  * @brief Resolve a path a config named, the way every other config path is
  *
@@ -233,6 +237,10 @@ struct ResolvedRenderConfig {
 
     // [material] -- the fallback for a scene that brings no materials of its own
     glm::vec3 defaultAlbedo{0.8f, 0.8f, 0.8f};
+    /// `material.albedo` was present and well formed. Only a scene with no
+    /// materials of its own reads defaultAlbedo, so the requirement is checked
+    /// where the scene is known: ResolveMaterialSpectra.
+    bool defaultAlbedoGiven = false;
 
     // [hyperspectral], echoed rather than resolved: the cube renderer reads it
     bool hasHyperspectralSection = false;

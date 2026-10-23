@@ -740,6 +740,134 @@ TEST_F(ConfigResolveTest, DefaultTemperatureBackfillsMaterialsInThermalModes) {
     EXPECT_FLOAT_EQ(scene.materials[0].irTemperature_K, 310.0f);
 }
 
+// ============================================================================
+// Required keys are required where they are used
+// ============================================================================
+// material.albedo colours the stand-in a host adds to a scene that loaded with
+// no materials, and nothing else reads it. The CLI refused every scene that
+// brought its own materials and named no [material], which Studio rendered.
+
+namespace {
+
+constexpr const char* kBareScene = R"(
+[renderer]
+resolution = [64, 64]
+[camera]
+position = [0.0, 1.0, 5.0]
+look_at = [0.0, 0.0, 0.0]
+)";
+
+ConfigApplyOptions StrictOptions() {
+    ConfigApplyOptions options;
+    options.missingRequired = ConfigApplyOptions::MissingKeyPolicy::Error;
+    return options;
+}
+
+}  // namespace
+
+TEST_F(ConfigResolveTest, ASceneWithItsOwnMaterialsNeedsNoMaterialSectionUnderStrict) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+)", .includeRequired = false});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_FALSE(resolved.value().defaultAlbedoGiven);
+
+    Scene scene = MakeSceneWithMaterials({"Wall", "Floor"});
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), StrictOptions(), report);
+    EXPECT_TRUE(spectra.has_value()) << spectra.error();
+}
+
+TEST_F(ConfigResolveTest, ASceneWithNoMaterialsStillNeedsAlbedoUnderStrict) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+)", .includeRequired = false});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    // What both hosts hand over for a scene that loaded with none.
+    Scene scene = MakeSceneWithMaterials({kDefaultMaterialName});
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), StrictOptions(), report);
+    EXPECT_FALSE(spectra.has_value());
+    EXPECT_TRUE(HasMessage(report, "material.albedo", ConfigApplyMessage::Severity::Error));
+}
+
+TEST_F(ConfigResolveTest, ASceneWithNoMaterialsAndNoAlbedoOnlyWarnsInAnEditor) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+)", .includeRequired = false});
+    auto resolved = ResolveLenient(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({kDefaultMaterialName});
+    ConfigApplyOptions lenient;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), lenient, report);
+    EXPECT_TRUE(spectra.has_value()) << spectra.error();
+    EXPECT_TRUE(HasMessage(report, "material.albedo", ConfigApplyMessage::Severity::Warning));
+}
+
+TEST_F(ConfigResolveTest, AMalformedAlbedoIsRefusedWhateverTheSceneBrings) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+[material]
+albedo = [0.8, 0.8]
+)", .includeRequired = false});
+    EXPECT_FALSE(ResolveStrict(config).has_value());
+}
+
+TEST_F(ConfigResolveTest, ASpectralSceneLitByATableNeedsNoRgbIlluminantKeys) {
+    // solar_lut supplies both illuminants and overwrites sun_radiance and
+    // sky_radiance, so there is nothing for the RGB triples to say.
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[spectral]
+mode = "lwir_fused"
+[lighting]
+solar_lut = "equal_energy"
+sun_direction = [0.0, 1.0, 0.0]
+)", .includeRequired = false});
+    auto resolved = ResolveStrict(config);
+    EXPECT_TRUE(resolved.has_value()) << resolved.error();
+}
+
+TEST_F(ConfigResolveTest, AnRgbSceneStillNeedsItsIlluminantAndSunDirection) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 1.0, 0.0]
+)", .includeRequired = false});
+    EXPECT_FALSE(ResolveStrict(config).has_value());  // no sun_radiance / sky_radiance
+
+    ConfigApplyReport fresh;
+    report = fresh;
+    auto noDirection = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+)", .includeRequired = false});
+    EXPECT_FALSE(ResolveStrict(noDirection).has_value());  // a sun with no direction
+}
+
+TEST_F(ConfigResolveTest, ASceneWithNoSunNeedsNoSunDirection) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_radiance = [0.0, 0.0, 0.0]
+sky_radiance = [0.1, 0.1, 0.1]
+)", .includeRequired = false});
+    auto resolved = ResolveStrict(config);
+    EXPECT_TRUE(resolved.has_value()) << resolved.error();
+}
+
 // NIR was missing from the list of bands that demand measured spectra, which
 // is how it ended up as the one band that upsampled a base colour into the
 // infrared. It got away with it because the Gaussian mapping's tail decayed to
