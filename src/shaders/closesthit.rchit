@@ -5082,7 +5082,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // attenuation call below converts, as fusion_transport.hlsli already does.
     const float worldUnitsToMeters = lightingParams[0].worldUnitsToMeters;
 
-    if (material.volumeDensity > 0.0 && material.scatteringCoeff > 0.0) {
+    // A pure absorber (sigma_s = 0, sigma_a > 0) still extinguishes -- the
+    // gate is on extinction, not on scattering.
+    if (material.volumeDensity > 0.0 &&
+        (material.scatteringCoeff + material.absorptionCoeff) > 0.0) {
         // ====================================================================
         // What "RGB-like" means here, and why the rest of this block asks
         // ====================================================================
