@@ -1953,14 +1953,20 @@ OfflineRenderer::Impl::RenderCameraWavelength(f64 wavelengthNm, u64 acquisitionI
             baked.header.sunDirWorld[1] = sunDir.y;
             baked.header.sunDirWorld[2] = sunDir.z;
             baked.header.worldUnitsToMeters = resolved.worldUnitsToMeters;
-            cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
-                contextRef->GetAllocator(), sizeof(AtmosNNHeaderGPU),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            // Allocated once and refilled per wavelength: every earlier render
+            // has finished (RenderSingleBand returns the read-back image), so
+            // nothing on the GPU is still reading them.
+            if (!cameraAtmosHeaderBuffer)
+                cameraAtmosHeaderBuffer = std::make_unique<GpuBuffer>(
+                    contextRef->GetAllocator(), sizeof(AtmosNNHeaderGPU),
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
             cameraAtmosHeaderBuffer->Upload(&baked.header, sizeof(AtmosNNHeaderGPU));
-            cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
-                contextRef->GetAllocator(), baked.data.size() * sizeof(f32),
-                VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-            cameraAtmosDataBuffer->Upload(baked.data.data(), baked.data.size() * sizeof(f32));
+            const VkDeviceSize dataBytes = baked.data.size() * sizeof(f32);
+            if (!cameraAtmosDataBuffer || cameraAtmosDataBuffer->GetSize() != dataBytes)
+                cameraAtmosDataBuffer = std::make_unique<GpuBuffer>(
+                    contextRef->GetAllocator(), dataBytes,
+                    VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+            cameraAtmosDataBuffer->Upload(baked.data.data(), dataBytes);
             pipeline->BindAtmosphereNN(cameraAtmosHeaderBuffer.get(), cameraAtmosDataBuffer.get());
         } catch (const std::exception& e) {
             return Result<Image, String>::Err(String("camera atmosphere bake failed: ") + e.what());
