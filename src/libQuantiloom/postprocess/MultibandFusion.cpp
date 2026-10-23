@@ -45,6 +45,16 @@ auto MultibandFusion::Fuse(const Image& vis, const Image& swir,
          params.pyramidLevels > MaximumPyramidLevels(vis.width, vis.height))) {
         return Result<Image>::Err("Pyramid levels must be positive and fit both image dimensions");
     }
+    if (params.method == FusionMethod::WeightedAverage) {
+        // The weighted average divides by the weight sum: a zero or
+        // non-finite total (all weights zero, or a NaN/inf weight reaching
+        // in from the config) would NaN the whole image instead of failing.
+        const f32 totalWeight =
+            params.weightVis + params.weightSwir + params.weightMwir;
+        if (!std::isfinite(totalWeight) || totalWeight <= 0.0f)
+            return Result<Image>::Err(
+                "Weighted-average fusion needs a finite, positive total weight");
+    }
 
     Log::Info("Multiband fusion: {}x{} VIS/SWIR/MWIR → {} mode",
               vis.width, vis.height,

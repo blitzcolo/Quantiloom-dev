@@ -123,6 +123,20 @@ TEST_F(MultibandFusionTest, RejectsZeroAndExcessivePyramidDepth) {
     EXPECT_TRUE(MultibandFusion::Fuse(small, small, small, params).has_value());
 }
 
+TEST_F(MultibandFusionTest, WeightedAverageRejectsZeroOrNonFiniteTotalWeight) {
+    const Image small(8, 8, 1);
+    params.method = FusionMethod::WeightedAverage;
+    params.weightVis = 0.0f;
+    params.weightSwir = 0.0f;
+    params.weightMwir = 0.0f;
+    EXPECT_FALSE(MultibandFusion::Fuse(small, small, small, params).has_value());
+    params.weightVis = std::numeric_limits<f32>::quiet_NaN();
+    EXPECT_FALSE(MultibandFusion::Fuse(small, small, small, params).has_value());
+    params.weightVis = 0.4f;
+    params.weightMwir = std::numeric_limits<f32>::infinity();
+    EXPECT_FALSE(MultibandFusion::Fuse(small, small, small, params).has_value());
+}
+
 TEST_F(MultibandFusionTest, PyramidAcceptsLastNonemptyLevelAndSinglePixelBands) {
     params.method = FusionMethod::LaplacianPyramid;
     params.autoNormalize = false;
