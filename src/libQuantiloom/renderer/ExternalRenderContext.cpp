@@ -4497,6 +4497,16 @@ Result<void, String> ExternalRenderContext::QueueCameraAcquisition(u64 acquisiti
     if (m_impl->cameraCaptureCompleted && acquisitionIndex < m_impl->cameraAcquisitionIndex)
         return Result<void, String>::Err(
             "camera acquisition cannot move backwards without resetting state");
+    // Move the clock here, between frames, rather than in the Record call
+    // that follows: SetTimelineTime refits the TLAS synchronously, may solve
+    // the thermal hour (which drains the queue) and resets the accumulation,
+    // none of which may happen while the host's command buffer is open. The
+    // Record calls re-pose inside the recording, which costs nothing when
+    // the scene already stands here.
+    if (m_impl->scene) {
+        if (auto moved = SetTimelineTime(firstRowMidpointSeconds); !moved)
+            return moved;
+    }
     m_impl->cameraAcquisitionIndex = acquisitionIndex;
     m_impl->cameraAcquisitionTimeSeconds = firstRowMidpointSeconds;
     m_impl->cameraCapturePending = true;
@@ -4510,8 +4520,14 @@ Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(VkComm
             "camera acquisition needs a ready context and command buffer");
     if (!m_impl->cameraCapturePending)
         return Result<void, String>::Err("no camera acquisition is queued");
-    if (auto moved = SetTimelineTime(m_impl->cameraAcquisitionTimeSeconds); !moved)
-        return moved;
+    if (!m_impl->scene)
+        return Result<void, String>::Err("no scene loaded");
+    // Recorded, not scrubbed: the host's command buffer is open. Queue already
+    // moved the clock and solved its hour; this only restores the pose if
+    // something moved it since, ordering the refit with the trace below.
+    if (auto posed = m_impl->RecordTimelinePose(cmd, m_impl->cameraAcquisitionTimeSeconds);
+        !posed)
+        return posed;
     return m_impl->RecordCameraMeasurement(cmd, Impl::CameraSampleBudget::Acquisition);
 }
 
@@ -4749,8 +4765,14 @@ Result<void, String> ExternalRenderContext::RecordCameraBaseline(VkCommandBuffer
     if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err(
             "camera baseline needs a ready context and command buffer");
-    if (auto moved = SetTimelineTime(m_impl->cameraAcquisitionTimeSeconds); !moved)
-        return moved;
+    if (!m_impl->scene)
+        return Result<void, String>::Err("no scene loaded");
+    // The same reason as RecordQueuedCameraAcquisition: the host is recording,
+    // so the pose is recorded with the trace instead of scrubbed, and the
+    // thermal hour is the one QueueCameraAcquisition already solved.
+    if (auto posed = m_impl->RecordTimelinePose(cmd, m_impl->cameraAcquisitionTimeSeconds);
+        !posed)
+        return posed;
     return m_impl->RecordCameraBaseline(cmd);
 }
 

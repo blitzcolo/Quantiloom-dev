@@ -1030,11 +1030,17 @@ public:
 
     /// Request one device acquisition. Redrawing or re-presenting the previous
     /// frame does not advance thermal state or draw new detector noise.
+    /// Between frames only: with a scene loaded this moves the timeline to
+    /// @p firstRowMidpointSeconds as SetTimelineTime does -- pose, thermal
+    /// hour, accumulation reset -- so the Record calls that follow can pose
+    /// inside the host's command buffer without draining the queue.
     [[nodiscard]] Result<void, String> QueueCameraAcquisition(
         u64 acquisitionIndex, f64 firstRowMidpointSeconds);
 
     /// Headless recording of the same queued camera trace and detector chain
     /// that RenderFrame uses, without a swapchain blit or PRESENT layout.
+    /// Records the pose at the queued time into @p cmd; never submits or
+    /// waits, and does not re-solve the thermal hour.
     [[nodiscard]] Result<void, String> RecordQueuedCameraAcquisition(
         VkCommandBuffer cmd);
 
@@ -1088,6 +1094,8 @@ public:
 
     /// Matched physical-extent ordinary single-wavelength scene trace for
     /// measuring camera cost above ray tracing. Does not acquire the detector.
+    /// Poses the scene at the queued acquisition time inside @p cmd, like
+    /// RecordQueuedCameraAcquisition, and never submits or waits.
     [[nodiscard]] Result<void, String> RecordCameraBaseline(
         VkCommandBuffer cmd);
 
