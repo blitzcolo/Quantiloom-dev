@@ -369,6 +369,10 @@ struct GpuCameraPipeline::Impl {
     std::unique_ptr<GpuBuffer> ispConfigBuffer;     // binding 12, 8 x float4
     std::unique_ptr<GpuBuffer> defectPixelsBuffer;  // binding 13, uint2 array
     std::unique_ptr<GpuBuffer> ispStatsBuffer;      // binding 14, 264 x u32
+    // Readback staging, allocated once with the pipeline instead of per
+    // call: both readbacks run between frames and reuse the same copy.
+    std::unique_ptr<GpuBuffer> counterStaging;
+    std::unique_ptr<GpuBuffer> ispStatsStaging;
     std::unique_ptr<GpuBuffer> cdfBuffer;           // binding 15, 256 x f32
     std::unique_ptr<GpuBuffer> tileStatsBuffer;     // binding 16, per-tile float4
     std::unique_ptr<GpuBuffer> ispStatsCheckpoint;  // previous-frame AGC window snapshot (acquisition history)
@@ -663,6 +667,15 @@ Result<void, String> GpuCameraPipeline::Impl::Initialize() {
     if (!ispStatsCheckpoint->IsValid())
         return Result<void, String>::Err(
             "cannot allocate GPU camera checkpoint buffer");
+    counterStaging = std::make_unique<GpuBuffer>(
+        context.GetAllocator(), 4u * sizeof(u32),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    ispStatsStaging = std::make_unique<GpuBuffer>(
+        context.GetAllocator(), isp::kStatsSlots * sizeof(u32),
+        VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
+    if (!counterStaging->IsValid() || !ispStatsStaging->IsValid())
+        return Result<void, String>::Err(
+            "cannot allocate GPU camera statistics staging");
     CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
         vkCmdFillBuffer(cmd, layerCameraBuffer->GetHandle(), 0,
                         VK_WHOLE_SIZE, 0);
@@ -1254,13 +1267,11 @@ GpuCameraPipeline::ReadDynamicCounters() const {
     if (!m_impl->dynamicCounterBuffer || !m_impl->dynamicCounterBuffer->IsValid())
         return Result<std::array<u32, 4>, String>::Err(
             "GPU camera dynamic counters are not allocated");
-    std::array<u32, 4> counts{};
-    GpuBuffer staging(m_impl->context.GetAllocator(), sizeof(counts),
-                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                      VMA_MEMORY_USAGE_GPU_TO_CPU);
-    if (!staging.IsValid())
+    if (!m_impl->counterStaging || !m_impl->counterStaging->IsValid())
         return Result<std::array<u32, 4>, String>::Err(
-            "cannot allocate GPU camera counter staging");
+            "GPU camera counter staging is not allocated");
+    std::array<u32, 4> counts{};
+    GpuBuffer& staging = *m_impl->counterStaging;
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
         VkBufferMemoryBarrier ready{};
         ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
@@ -1316,13 +1327,11 @@ GpuCameraPipeline::ReadIspStats() const {
     if (!m_impl->ispStatsBuffer || !m_impl->ispStatsBuffer->IsValid())
         return Result<IspStats, String>::Err(
             "GPU camera statistics are not allocated");
-    std::array<u32, isp::kStatsSlots> slots{};
-    GpuBuffer staging(m_impl->context.GetAllocator(), sizeof(slots),
-                      VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-                      VMA_MEMORY_USAGE_GPU_TO_CPU);
-    if (!staging.IsValid())
+    if (!m_impl->ispStatsStaging || !m_impl->ispStatsStaging->IsValid())
         return Result<IspStats, String>::Err(
-            "cannot allocate GPU camera statistics staging");
+            "GPU camera statistics staging is not allocated");
+    std::array<u32, isp::kStatsSlots> slots{};
+    GpuBuffer& staging = *m_impl->ispStatsStaging;
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
         VkBufferMemoryBarrier ready{};
         ready.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
