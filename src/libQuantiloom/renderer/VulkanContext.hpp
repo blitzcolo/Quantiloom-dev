@@ -255,7 +255,9 @@ private:
     // const context and creates them on its first call.
     mutable VkCommandPool m_immediateCommandPool = VK_NULL_HANDLE;
     mutable VkFence m_immediateFence = VK_NULL_HANDLE;
-    mutable std::mutex m_immediateSubmitMutex;
+    mutable std::recursive_mutex m_immediateSubmitMutex;
+    // Nesting depth of ExecuteImmediate on the lock-holding thread.
+    mutable int m_immediateDepth = 0;
 
     // Debug messenger - CRITICAL: Do NOT wrap in #ifdef to avoid ODR violation!
     // Different translation units may have different QUANTILOOM_ENABLE_VALIDATION

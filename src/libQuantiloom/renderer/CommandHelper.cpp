@@ -18,42 +18,86 @@ void CommandHelper::ExecuteImmediate(
 {
     VkDevice device = context.GetDevice();
     VkQueue queue = context.GetGraphicsQueue();
+    constexpr u64 kWaitTimeoutNs = std::numeric_limits<u64>::max();
 
-    // The pool and fence are shared per context and reused across calls.
-    // Both are externally synchronized, which the mutex provides; the
-    // serialization is not a regression, since the old vkQueueWaitIdle
-    // stalled on every submission on the queue, not just this one.
-    std::lock_guard<std::mutex> lock(context.m_immediateSubmitMutex);
+    // Recursive: a record lambda may itself allocate resources that submit an
+    // immediate command buffer (e.g. a camera image allocation inside a
+    // RenderFrame recorded under ExecuteImmediate). Other threads still block
+    // here, so cross-thread callers serialize. The depth counter is only
+    // touched while the lock is held.
+    std::lock_guard<std::recursive_mutex> lock(context.m_immediateSubmitMutex);
+    const bool nested = context.m_immediateDepth > 0;
+    struct DepthGuard {
+        int& depth;
+        explicit DepthGuard(int& d) : depth(d) { ++depth; }
+        ~DepthGuard() { --depth; }
+    } depthGuard(context.m_immediateDepth);
 
-    // Lazily create the shared pool and fence once per context
-    if (context.m_immediateCommandPool == VK_NULL_HANDLE) {
+    // The outermost call uses the shared pool and fence. A nested call runs
+    // while the outer command buffer is still being recorded, so it gets its
+    // own pool (the outer pool is mid-recording) and its own fence (the outer
+    // one is not yet submitted); both are destroyed on exit.
+    VkCommandPool pool = VK_NULL_HANDLE;
+    VkFence fence = VK_NULL_HANDLE;
+    bool poolReclaimable = true;  // false once a wait failed: cb may be pending
+    struct TempGuard {
+        VkDevice device;
+        VkCommandPool& pool;
+        VkFence& fence;
+        bool active;
+        bool& poolReclaimable;
+        ~TempGuard() {
+            if (!active) return;
+            if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+            if (pool != VK_NULL_HANDLE && poolReclaimable)
+                vkDestroyCommandPool(device, pool, nullptr);
+        }
+    } tempGuard{device, pool, fence, nested, poolReclaimable};
+
+    if (nested) {
         VkCommandPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
         poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
-        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;  // Short-lived buffers
-
-        VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr,
-                                              &context.m_immediateCommandPool);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create immediate command pool");
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        if (vkCreateCommandPool(device, &poolInfo, nullptr, &pool) != VK_SUCCESS) {
+            pool = VK_NULL_HANDLE;
+            throw std::runtime_error("Failed to create nested immediate command pool");
         }
-    }
-    if (context.m_immediateFence == VK_NULL_HANDLE) {
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-
-        VkResult result = vkCreateFence(device, &fenceInfo, nullptr, &context.m_immediateFence);
-        if (result != VK_SUCCESS) {
-            throw std::runtime_error("Failed to create immediate submission fence");
+        if (vkCreateFence(device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+            fence = VK_NULL_HANDLE;
+            throw std::runtime_error("Failed to create nested immediate fence");
         }
+    } else {
+        // Lazily create the shared pool and fence once per context
+        if (context.m_immediateCommandPool == VK_NULL_HANDLE) {
+            VkCommandPoolCreateInfo poolInfo{};
+            poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+            poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
+            poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+            if (vkCreateCommandPool(device, &poolInfo, nullptr,
+                                    &context.m_immediateCommandPool) != VK_SUCCESS) {
+                context.m_immediateCommandPool = VK_NULL_HANDLE;
+                throw std::runtime_error("Failed to create immediate command pool");
+            }
+        }
+        if (context.m_immediateFence == VK_NULL_HANDLE) {
+            VkFenceCreateInfo fenceInfo{};
+            fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            if (vkCreateFence(device, &fenceInfo, nullptr,
+                              &context.m_immediateFence) != VK_SUCCESS) {
+                context.m_immediateFence = VK_NULL_HANDLE;
+                throw std::runtime_error("Failed to create immediate submission fence");
+            }
+        }
+        pool = context.m_immediateCommandPool;
+        fence = context.m_immediateFence;
     }
 
-    // Allocate a one-shot command buffer from the shared pool. Buffers
-    // returned to a pool come back in the initial state, so no explicit
-    // reset is needed before re-recording.
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    allocInfo.commandPool = context.m_immediateCommandPool;
+    allocInfo.commandPool = pool;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandBufferCount = 1;
 
@@ -64,7 +108,15 @@ void CommandHelper::ExecuteImmediate(
     }
 
     auto freeCommandBuffer = [&]() {
-        vkFreeCommandBuffers(device, context.m_immediateCommandPool, 1, &cmd);
+        vkFreeCommandBuffers(device, pool, 1, &cmd);
+    };
+
+    // Drop a shared fence whose state is unknown so the next call recreates it
+    auto discardFence = [&]() {
+        if (nested) return;  // TempGuard destroys the nested fence
+        vkDestroyFence(device, context.m_immediateFence, nullptr);
+        context.m_immediateFence = VK_NULL_HANDLE;
+        fence = VK_NULL_HANDLE;
     };
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -77,8 +129,12 @@ void CommandHelper::ExecuteImmediate(
         throw std::runtime_error("Failed to begin immediate command buffer");
     }
 
-    // Execute user-provided recording function
-    recordFunc(cmd);
+    try {
+        recordFunc(cmd);
+    } catch (...) {
+        freeCommandBuffer();
+        throw;
+    }
 
     result = vkEndCommandBuffer(cmd);
     if (result != VK_SUCCESS) {
@@ -86,48 +142,38 @@ void CommandHelper::ExecuteImmediate(
         throw std::runtime_error("Failed to end immediate command buffer");
     }
 
-    // The fence is reused across calls and is only ever touched under this
-    // mutex: created unsignaled, submitted once, waited, then reset before it
-    // can be passed to another vkQueueSubmit (submitting with an already
-    // signaled fence is invalid, VUID-vkQueueSubmit-fence-00063).
+    // Fence lifecycle: unsignaled -> submitted -> waited -> reset
+    // (VUID-vkQueueSubmit-fence-00063 forbids submitting a signaled fence).
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &cmd;
 
-    result = vkQueueSubmit(queue, 1, &submitInfo, context.m_immediateFence);
+    result = vkQueueSubmit(queue, 1, &submitInfo, fence);
     if (result != VK_SUCCESS) {
-        // The fence was not submitted with anything; it stays unsignaled and
-        // is safe to reuse on the next call.
         freeCommandBuffer();
         QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueSubmit FAILED with VkResult: {}", static_cast<int>(result));
         throw std::runtime_error("Failed to submit command buffer (VkResult: " + std::to_string(result) + ")");
     }
 
-    // Wait for completion (synchronous)
-    constexpr u64 kWaitTimeoutNs = std::numeric_limits<u64>::max();
-    result = vkWaitForFences(device, 1, &context.m_immediateFence, VK_TRUE, kWaitTimeoutNs);
+    result = vkWaitForFences(device, 1, &fence, VK_TRUE, kWaitTimeoutNs);
     if (result != VK_SUCCESS) {
-        // The fence's state is unknown now; do not reuse it. Destroy it so the
-        // next call creates a fresh one. The command buffer is deliberately
-        // NOT freed: it may still be pending, and freeing a pending command
-        // buffer is invalid use. It is reclaimed when the pool is destroyed
-        // after vkDeviceWaitIdle in ~VulkanContext.
-        vkDestroyFence(device, context.m_immediateFence, nullptr);
-        context.m_immediateFence = VK_NULL_HANDLE;
+        // Fence state unknown; the command buffer may still be pending and is
+        // not freed (reclaimed with the pool at ~VulkanContext).
+        poolReclaimable = false;
+        discardFence();
         QL_LOG_ERROR("  [DEBUG CommandHelper] vkWaitForFences FAILED with VkResult: {} (GPU CRASHED)", static_cast<int>(result));
         throw std::runtime_error("Failed to wait for immediate submission (VkResult: " + std::to_string(result) + ")");
     }
 
-    result = vkResetFences(device, 1, &context.m_immediateFence);
-    if (result != VK_SUCCESS) {
-        // An un-reset fence stays signaled and could not legally be submitted
-        // again; drop it so the next call starts over.
-        freeCommandBuffer();
-        vkDestroyFence(device, context.m_immediateFence, nullptr);
-        context.m_immediateFence = VK_NULL_HANDLE;
-        throw std::runtime_error("Failed to reset immediate fence (VkResult: " +
-                                 std::to_string(result) + ")");
+    if (!nested) {
+        result = vkResetFences(device, 1, &fence);
+        if (result != VK_SUCCESS) {
+            freeCommandBuffer();
+            discardFence();
+            throw std::runtime_error("Failed to reset immediate fence (VkResult: " +
+                                     std::to_string(result) + ")");
+        }
     }
 
     freeCommandBuffer();
