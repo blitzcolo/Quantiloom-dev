@@ -1321,7 +1321,12 @@ float4 TraceEnvBounceResidual(float3 hitPos, float3 normal, float3 V, float Ndot
     child.isShadowed  = 0;
     child.depth       = payload.depth + 1;
     child.rngState    = payload.rngState;
-    child.heroLambda  = lambda_b;
+    // Keep the collapsed-hero sign convention: a ray that arrived carrying
+    // one wavelength at heroLambda < 0 must not come back a quartet root.
+    // Losing the sign re-quartetized the child, and a second dispersive
+    // interface on the path then applied the S/p weighting again (expectation
+    // 4 instead of 1).
+    child.heroLambda  = (payload.heroLambda < 0.0) ? -lambda_b : lambda_b;
     child.primaryHitT = -1.0;
     // If this ray lands on an emitter, that surface has to know how likely the
     // BSDF was to have sent a ray its way, so it can weigh its emission against
