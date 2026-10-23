@@ -335,7 +335,8 @@ int main(int argc, char** argv) {
     ExchangeGeometry exchange = MakeOpenSkyExchange(1);
     exchange.skyFraction[0] = spec.skyFraction;
 
-    const auto forcingSeries = LoadForcingCsv(spec.forcingFile);
+    const auto forcingSeries =
+        LoadForcingCsv(spec.forcingFile, spec.constant.relativeHumidity);
     if (!spec.forcingFile.empty() && forcingSeries.empty()) {
         QL_LOG_ERROR("forcing.file '{}' produced no rows", spec.forcingFile);
         return 1;
