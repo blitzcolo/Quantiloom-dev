@@ -450,6 +450,13 @@ struct ExternalRenderContext::Impl {
     };
     CameraScheduler cameraScheduler;
 
+    // Set when a committed acquisition moved the clock to a slot whose
+    // thermal hour still has to be solved. RenderFrame runs the solve once
+    // the frame's commands are recorded: the solve drains the queue and
+    // must not run while the host's command buffer is open.
+    bool cameraThermalSolvePending = false;
+    f64 cameraThermalSolveHour = 0.0;
+
     // Acquisition history. One checkpoint deep is all the interactive
     // hosts need (rewind to the marked tick). The GPU half of a record holds
     // the device state; the host half carries the CaptureState feedback
@@ -2103,6 +2110,16 @@ void ExternalRenderContext::RenderFrame(
         QL_LOG_ERROR("ExternalRenderContext::RenderFrame failed, rendering stopped: {}",
                      e.what());
         m_impl->isReady = false;
+    }
+
+    // An acquisition that moved the clock deferred its thermal solve out of
+    // the recording above; now that the commands are recorded the solve may
+    // drain the queue.
+    if (m_impl->isReady && m_impl->cameraThermalSolvePending) {
+        m_impl->cameraThermalSolvePending = false;
+        if (auto solved = SetThermalTime(m_impl->cameraThermalSolveHour); !solved)
+            QL_LOG_WARN("Camera scheduler: thermal solve at the acquisition hour failed: {}",
+                        solved.error());
     }
 }
 
@@ -5577,9 +5594,25 @@ Result<bool, String> ExternalRenderContext::Impl::StepCameraAcquisition(VkComman
         // lands where the clock already stands.
         const f64 slot = slotReached ? s.nextAcquisitionTimeSeconds : now;
         if (slotReached) {
-            if (auto moved = owner->SetTimelineTime(slot); !moved) {
+            // The clock reached the next scheduled slot: pose the scene at
+            // the slot and commit one acquisition there. The public scrub
+            // path cannot do the posing: SetTimelineTime drains the queue
+            // and would run the thermal solve while the host's command
+            // buffer is still open, both of which the header forbids
+            // mid-recording. RecordTimelinePose orders the refit with the
+            // recorded traces, exactly as the per-stratum posing below does;
+            // the thermal hour the slot maps to is solved once the frame is
+            // recorded (see cameraThermalSolvePending).
+            if (auto moved = RecordTimelinePose(cmd, slot); !moved) {
                 return Result<bool, String>(typename Result<bool, String>::Err(moved.error()));
             }
+            if (thermalEnabled && timeline.ThermalMapped()) {
+                cameraThermalSolvePending = true;
+                cameraThermalSolveHour = timeline.HourAt(slot);
+            }
+            // SetTimelineTime also resets the accumulation on every path;
+            // host state only, so it is safe mid-recording and stays.
+            owner->ResetAccumulation();
         }
         cameraAcquisitionIndex = s.nextAcquisitionIndex;
         cameraAcquisitionTimeSeconds = slot;
