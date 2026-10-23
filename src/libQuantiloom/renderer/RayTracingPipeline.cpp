@@ -1072,7 +1072,14 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
 
     constexpr u32 groupCount = 4;
     std::vector<u8> handleData(groupCount * handleSize);
-    vkGetRayTracingShaderGroupHandlesKHR(device, variant.pipeline, 0, groupCount, handleData.size(), handleData.data());
+    if (const VkResult handlesResult = vkGetRayTracingShaderGroupHandlesKHR(
+            device, variant.pipeline, 0, groupCount, handleData.size(), handleData.data());
+        handlesResult != VK_SUCCESS) {
+        // Carrying on would build the SBT from the zero-initialised handleData.
+        vkDestroyPipeline(device, variant.pipeline, nullptr);
+        throw std::runtime_error("Failed to get ray tracing shader group handles (VkResult " +
+                                 std::to_string(static_cast<int>(handlesResult)) + ")");
+    }
 
     std::vector<u8> sbtData(sbtSize, 0);
     std::memcpy(sbtData.data(), handleData.data() + handleSize * 0, handleSize);
