@@ -37,6 +37,12 @@ PerformanceLogger::PerformanceLogger(VulkanContext& context)
 }
 
 PerformanceLogger::~PerformanceLogger() {
+    if (m_droppedFrames > 0) {
+        QL_LOG_WARN("PerformanceLogger dropped {} GPU frame timing(s) the pool "
+                    "could not hold ({} pairs); enlarge queryPoolSize if the gap "
+                    "was not expected",
+                    m_droppedFrames, m_config.queryPoolSize / 2);
+    }
     if (m_queryPool != VK_NULL_HANDLE) {
         vkDestroyQueryPool(m_context.GetDevice(), m_queryPool, nullptr);
     }
@@ -52,8 +58,16 @@ void PerformanceLogger::BeginFrame(VkCommandBuffer cmd) {
     }
 
     // If the pool is about to lap the read cursor, drop the oldest unread
-    // pair rather than reset a slot whose result was never collected.
+    // pair rather than reset a slot whose result was never collected. The
+    // drop is counted and reported: a silent gap reads as a speedup.
     if (m_pendingFrames >= m_config.queryPoolSize / 2) {
+        if (m_droppedFrames == 0) {
+            QL_LOG_WARN("GPU frame timing pool exhausted ({} pairs); oldest unread "
+                        "timing dropped. TryResolvePending/ResolveLastGpuMs is not "
+                        "keeping up with BeginFrame",
+                        m_config.queryPoolSize / 2);
+        }
+        m_droppedFrames++;
         m_readQueryIndex = (m_readQueryIndex + 1) % (m_config.queryPoolSize / 2);
         m_pendingFrames--;
     }

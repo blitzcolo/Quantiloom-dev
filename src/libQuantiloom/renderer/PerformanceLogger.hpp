@@ -100,6 +100,10 @@ private:
     u32 m_writeQueryIndex = 0;
     u32 m_readQueryIndex = 0;
     u32 m_pendingFrames = 0;
+    // Pairs dropped because the pool lapped the read cursor (BeginFrame).
+    // Counted rather than silently discarded: a resolution gap reads as
+    // "the GPU got faster" in the numbers this logger produces.
+    u32 m_droppedFrames = 0;
 
     // Timestamp frequency (nanoseconds per tick)
     f64 m_timestampPeriod = 1.0;
