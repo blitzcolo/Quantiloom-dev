@@ -1523,8 +1523,10 @@ public:
      *          scene look plausible while reporting radiance nobody asked for.
      *          assets/luts/astmg173.csv holds AM1.5 if a caller wants that default.
      *
-     * The replacement reaches the GPU with the next recorded frame, without a
-     * host wait, so changing the illuminant is safe between submitted frames.
+     * The replacement is uploaded synchronously, not deferred: pending
+     * deferred writes are flushed and the device drained before the new
+     * allocation is written and the descriptor re-pointed at it, so the swap
+     * is safe only between submitted frames.
      */
     void SetSolarSpectralLUT(const SpectralCurve& sunIrradiance,
                              const SpectralCurve& skyIrradiance);
