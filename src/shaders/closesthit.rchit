@@ -5072,6 +5072,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // (clouds, dense fog), use the full delta-tracking in volumetric.hlsli.
     // ========================================================================
 
+    // Beer-Lambert distances are metres -- glTF attenuationDistance and the
+    // medium coefficients are -- while RayTCurrent is in scene units. Every
+    // attenuation call below converts, as fusion_transport.hlsli already does.
+    const float worldUnitsToMeters = lightingParams[0].worldUnitsToMeters;
+
     if (material.volumeDensity > 0.0 && material.scatteringCoeff > 0.0) {
         // ====================================================================
         // What "RGB-like" means here, and why the rest of this block asks
@@ -5102,11 +5107,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Create medium properties from material
         MediumProperties medium = CreateMediumFromMaterial(material);
 
-        // Distance traveled through the medium (ray path length)
+        // Distance traveled through the medium (ray path length, scene units)
         float pathLength = RayTCurrent();
 
-        // Compute transmittance using Beer-Lambert law
-        float3 volumeTransmittance = BeerLambertTransmittance(pathLength, medium);
+        // Compute transmittance using Beer-Lambert law (path in metres)
+        float3 volumeTransmittance = BeerLambertTransmittance(pathLength * worldUnitsToMeters, medium);
         if (!isRgbLike) {
             float t_avg = (volumeTransmittance.r + volumeTransmittance.g +
                            volumeTransmittance.b) / 3.0;
@@ -5460,7 +5465,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // glass attenuate a blue path by a red glass's mean.
                 L_h *= BeerLambertAt(
                     FetchRgbSpectrum(rgbToSpectrumTable, material.attenuationColor),
-                    lambda_h, RayTCurrent(), material.attenuationDistance);
+                    lambda_h, RayTCurrent() * worldUnitsToMeters, material.attenuationDistance);
             }
 
             if (carriesQuartet) {
@@ -5540,7 +5545,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
 
                 // Apply Beer-Lambert absorption for this channel
                 if (!entering && material.attenuationDistance > 0.0) {
-                    float travelDistance = RayTCurrent();
+                    float travelDistance = RayTCurrent() * worldUnitsToMeters;
                     float3 volumeAtten = BeerLambertAbsorption(
                         material.attenuationColor, travelDistance, material.attenuationDistance);
                     float attenValue = (ch == 0) ? volumeAtten.r :
@@ -5617,7 +5622,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // full brightness.
                 float3 volumeAttenuation = float3(1.0, 1.0, 1.0);
                 if (!entering && material.attenuationDistance > 0.0) {
-                    float travelDistance = RayTCurrent();
+                    float travelDistance = RayTCurrent() * worldUnitsToMeters;
                     volumeAttenuation = BeerLambertAbsorption(
                         material.attenuationColor, travelDistance, material.attenuationDistance);
                 }
@@ -5632,7 +5637,7 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 // colouring what came through it.
                 float4 attenuation4 = float4(volumeAttenuation, 0.0);
                 if (!entering && material.attenuationDistance > 0.0) {
-                    const float travel = RayTCurrent();
+                    const float travel = RayTCurrent() * worldUnitsToMeters;
                     if (carriesQuartet) {
                         // Four wavelengths, four transmittances, read off the
                         // spectrum the attenuation colour stands for. This is

@@ -1118,7 +1118,7 @@ struct MaterialData {
 
     // Volume attenuation (Beer-Lambert absorption)
     float3 attenuationColor;             // Color at attenuation distance                           // Offset: 128-140
-    float  attenuationDistance;          // Distance for attenuation (mm, 0 = no attenuation)       // Offset: 140-144
+    float  attenuationDistance;          // Distance for attenuation (m, 0 = no attenuation)   // Offset: 140-144
 
     float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 144-148
     int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 148-152
