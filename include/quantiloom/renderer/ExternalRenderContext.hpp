@@ -31,7 +31,12 @@
  * @endcode
  *
  * @note Requires Vulkan 1.3 or VK_KHR_dynamic_rendering extension
- * @note Thread-safe for parameter updates, but not for rendering
+ * @note Every call must be made from one thread -- the host's render/GUI
+ *       thread. The implementation carries no internal locking: parameter
+ *       setters write the deferred-upload queue and some drain the device,
+ *       so concurrent calls from several threads race regardless of whether
+ *       a render is in flight. Quantiloom Studio satisfies this by calling
+ *       everything from its GUI thread.
  *
  * @author blitzcolo
  */
