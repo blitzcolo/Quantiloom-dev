@@ -42,6 +42,7 @@
 #pragma once
 
 #include "Types.hpp"
+#include "Image.hpp"
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -110,11 +111,13 @@ struct SpectralCube {
         : width(w), height(h), nbands(nb),
           lambda_min(lmin), lambda_max(lmax) {
 
-        // Compute delta_lambda
-        delta_lambda = (lmax - lmin) / static_cast<f32>(nb - 1);
+        // Compute delta_lambda. A single band has no spacing; dividing by nb - 1
+        // would make it infinite (and NaN when lmax == lmin).
+        delta_lambda = nb > 1 ? (lmax - lmin) / static_cast<f32>(nb - 1) : 0.0f;
 
-        // Allocate data
-        data.resize(w * h * nb, 0.0f);
+        // Allocate data. The count is formed in size_t and throws if it cannot be
+        // represented, instead of wrapping in u32 arithmetic.
+        data.resize(Image::CheckedElementCount(w, h, nb), 0.0f);
 
         // Generate wavelength array
         wavelengths.resize(nb);
@@ -160,8 +163,9 @@ struct SpectralCube {
         return width > 0 && height > 0 && nbands > 0 &&
                data.size() == TotalElements() &&
                wavelengths.size() == nbands &&
-               lambda_min < lambda_max &&
-               delta_lambda > 0.0f;
+               // One band has no spacing, so its range may be a single wavelength.
+               (nbands == 1 ? lambda_min <= lambda_max
+                            : lambda_min < lambda_max && delta_lambda > 0.0f);
     }
 
     // Clear cube data

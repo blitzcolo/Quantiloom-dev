@@ -338,7 +338,7 @@ TEST(SpectralCubeTest, MetadataStorage) {
 // ============================================================================
 
 TEST(SpectralCubeTest, SinglePixelCube) {
-    // Single pixel with multiple bands (avoid nbands=1 which causes divide-by-zero)
+    // Single pixel with multiple bands
     SpectralCube cube(1, 1, 5, 400.0f, 700.0f);
 
     EXPECT_TRUE(cube.IsValid());
@@ -350,9 +350,7 @@ TEST(SpectralCubeTest, SinglePixelCube) {
 }
 
 TEST(SpectralCubeTest, SingleBandCube) {
-    // Single band with multiple pixels (avoid nbands=1 for now - known limitation)
-    // Note: nbands=1 causes delta_lambda division by zero in constructor
-    // This is a known limitation that should be fixed in SpectralCube.hpp
+    // Two bands with multiple pixels
     SpectralCube cube(100, 100, 2, 550.0f, 560.0f);
 
     EXPECT_TRUE(cube.IsValid());
@@ -360,6 +358,21 @@ TEST(SpectralCubeTest, SingleBandCube) {
     EXPECT_EQ(cube.wavelengths.size(), 2);
     EXPECT_NEAR(cube.wavelengths[0], 550.0f, 1e-5f);
     EXPECT_NEAR(cube.wavelengths[1], 560.0f, 1e-5f);
+}
+
+// A single band has no spacing; the constructor must not divide by nbands - 1.
+TEST(SpectralCubeTest, SingleBandHasFiniteWavelengthAndSpacing) {
+    const SpectralCube cube(8, 4, 1, 550.0f, 560.0f);
+
+    EXPECT_EQ(cube.delta_lambda, 0.0f);
+    ASSERT_EQ(cube.wavelengths.size(), 1u);
+    EXPECT_EQ(cube.wavelengths[0], 550.0f);
+    EXPECT_EQ(cube.TotalElements(), 8u * 4u);
+    EXPECT_TRUE(cube.IsValid());
+
+    const SpectralCube point(2, 2, 1, 550.0f, 550.0f);
+    EXPECT_EQ(point.wavelengths[0], 550.0f);
+    EXPECT_TRUE(point.IsValid());
 }
 
 TEST(SpectralCubeTest, HighSpectralResolution) {
