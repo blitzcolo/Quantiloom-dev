@@ -333,6 +333,11 @@ struct ExternalRenderContext::Impl {
     // passes -- Linear skips the first two and Equalize sums across tiles.
     DisplayEnhancementParams displayParams;
     std::unique_ptr<GpuImage> displayImage;           // tone-mapped output for display
+    // True once ExecuteCLAHE has written displayImage under the current
+    // setting. Enabling CLAHE after the trace stopped leaves the image
+    // never-written; without this flag a present would blit undefined
+    // contents. Reset wherever the image is recreated.
+    bool displayImageValid = false;
     std::unique_ptr<GpuBuffer> claheHistogramBuffer;  // Per-tile histograms
     std::unique_ptr<GpuBuffer> claheCdfBuffer;        // Per-tile CDFs
     std::unique_ptr<GpuBuffer> claheMinMaxBuffer;     // Per-tile min/max for normalization
@@ -576,6 +581,8 @@ struct ExternalRenderContext::Impl {
         // Cleanup CLAHE resources
         displayRange.reset();
         displayImage.reset();
+        displayImageValid = false;
+        claheBoundInputView = VK_NULL_HANDLE;
         claheHistogramBuffer.reset();
         claheCdfBuffer.reset();
         claheMinMaxBuffer.reset();
@@ -2087,7 +2094,7 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
     // tone) -> camera display -> raw accumulation. The camera product sits at
     // the physical sensor extent, which BlitToTarget magnifies to the target
     // like any other source.
-    if (displayImage && claheInitialized && ClaheInputReady() &&
+    if (displayImage && claheInitialized && displayImageValid && ClaheInputReady() &&
         (displayParams.enabled || CameraClahePersistent())) {
         const auto extent = ClaheInputExtent();
         return {displayImage->GetImage(), extent.width, extent.height};
@@ -6473,6 +6480,8 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
     write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
     write.pImageInfo = &outputImageInfo;
     vkUpdateDescriptorSets(device, 1, &write, 0, nullptr);
+    // A fresh allocation holds nothing worth presenting until a run writes it.
+    displayImageValid = false;
 }
 
 void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
@@ -6807,6 +6816,10 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
         0, nullptr,
         0, nullptr
     );
+
+    // The pass recorded above writes the image this frame; a present or
+    // reprocess that picks it later is reading real content.
+    displayImageValid = true;
 }
 
 void ExternalRenderContext::Impl::TransitionImageLayoutImmediate(
