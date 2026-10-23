@@ -172,6 +172,23 @@ std::optional<Image> BRDFLutGenerator::LoadFromBinary(const String& filepath, co
         return std::nullopt;
     }
 
+    // The resolution is read from the file and sizes the allocation below, so it
+    // is bounded, and the file must be exactly as long as that resolution implies.
+    constexpr u32 kMaxCacheResolution = 8192;
+    if (header.resolution == 0 || header.resolution > kMaxCacheResolution) {
+        QL_LOG_WARN("LoadFromBinary: Implausible resolution {} in {}", header.resolution, filepath);
+        return std::nullopt;
+    }
+    const u64 expectedFileSize =
+        sizeof(header) + static_cast<u64>(header.resolution) * header.resolution * 2 * sizeof(f32);
+    std::error_code sizeError;
+    const auto actualFileSize = std::filesystem::file_size(filepath, sizeError);
+    if (sizeError || actualFileSize != expectedFileSize) {
+        QL_LOG_WARN("LoadFromBinary: File size of {} does not match a {}x{} LUT (expected {} bytes)",
+                    filepath, header.resolution, header.resolution, expectedFileSize);
+        return std::nullopt;
+    }
+
     // Validate against expected config if provided
     if (expectedConfig != nullptr) {
         if (header.resolution != expectedConfig->resolution) {
