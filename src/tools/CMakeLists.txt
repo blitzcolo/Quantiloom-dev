@@ -89,8 +89,6 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_hist.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_cdf.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_demosaic.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_color.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_display.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_dynamic.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
