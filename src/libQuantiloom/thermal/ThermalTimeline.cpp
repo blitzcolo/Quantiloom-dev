@@ -65,21 +65,23 @@ void RelaxToSteadyState(ThermalState& state, const Vector<ThermalElement>& eleme
     constexpr f64 kSettled_K = 0.01;
     constexpr i32 kStaleLimit = 10;
 
-    Vector<f64> previous(elements.size());
+    // Every node, not only the surfaces: a thick slab's face can sit still
+    // while its interior is still drifting towards the profile the face will
+    // follow, and a start taken there replays that drift into the first hours
+    // of the day as if it were weather.
+    Vector<f64> previous;
     f64 bestMove = std::numeric_limits<f64>::max();
     f64 lastMove = std::numeric_limits<f64>::max();
     i32 staleTicks = 0;
 
     for (i32 iteration = 0; iteration < kMaxIterations; ++iteration) {
-        for (usize e = 0; e < elements.size(); ++e) {
-            previous[e] = state.Surface(e);
-        }
+        previous = state.temperature_K;
         stepper.Step(state, elements, materials, exchange, forcing,
                      kRelaxStep_s, shortwave);
 
         f64 stepMove = 0.0;
-        for (usize e = 0; e < elements.size(); ++e) {
-            stepMove = std::max(stepMove, std::abs(state.Surface(e) - previous[e]));
+        for (usize i = 0; i < previous.size(); ++i) {
+            stepMove = std::max(stepMove, std::abs(state.temperature_K[i] - previous[i]));
         }
         // Judged on the envelope of two consecutive moves, not on one. At an
         // hour a step Crank-Nicolson rings on the face's stiff mode -- an
