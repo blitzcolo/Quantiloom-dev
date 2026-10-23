@@ -567,7 +567,12 @@ TEST_F(PickTest, LightingUploadsDeferAroundSubmittedReaders) {
     ExpectUploadDoesNotWaitForPriorReader([&] { context->SetLightingParams(lighting); });
 }
 
-TEST_F(PickTest, AppendingSpectralTablesWaitsForSubmittedReaders) {
+// Appending into spare capacity writes only slots past the live entry count
+// through the deferred-upload queue, so a submitted reader of the old table
+// sees unchanged data and the setter need not wait for it. Growing past the
+// capacity replaces the buffer, and that path still drains the queue and the
+// device before the old allocation goes (see the next test).
+TEST_F(PickTest, AppendingSpectralTablesIntoSpareCapacityDoesNotWaitForReaders) {
     LoadEmitterScene();
     SpectralCurve curve;
     curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
@@ -583,12 +588,25 @@ TEST_F(PickTest, AppendingSpectralTablesWaitsForSubmittedReaders) {
     material.spectralReflectanceCurveIndex = curveIndex;
     material.complexRefractiveIndexIndex = criIndex;
     context->UpdateMaterial(0, material);
-    ExpectUploadCompletesPriorReader([&] { EXPECT_GE(context->AddSpectralCurve(curve), 0); });
-    ExpectUploadCompletesPriorReader([&] { EXPECT_GE(context->AddComplexRefractiveIndex(cri), 0); });
+    ExpectUploadDoesNotWaitForPriorReader([&] { EXPECT_GE(context->AddSpectralCurve(curve), 0); });
+    ExpectUploadDoesNotWaitForPriorReader([&] { EXPECT_GE(context->AddComplexRefractiveIndex(cri), 0); });
+}
+
+TEST_F(PickTest, GrowingSpectralTablesWaitsForSubmittedReaders) {
+    LoadEmitterScene();
+    SpectralCurve curve;
+    curve.samples = {{400.0f, 0.25f}, {780.0f, 0.5f}};
+    ASSERT_GE(context->AddSpectralCurve(curve), 0);
+    // Tables start at eight entries of capacity and double, so sixty-four
+    // appends from a handful of entries must replace the buffer at least
+    // once; that replacement has to outwait the submitted reader.
     ExpectUploadCompletesPriorReader([&] {
-        const auto bound = context->SetMaterialEmissionSpectrum(0, "d65", "match_luminance", "");
-        EXPECT_TRUE(bound.has_value());
+        for (int i = 0; i < 64; ++i) EXPECT_GE(context->AddSpectralCurve(curve), 0);
     });
+    // Binding an emission curve appends too, and then rewrites a material
+    // through the deferred queue; it must simply succeed.
+    const auto bound = context->SetMaterialEmissionSpectrum(0, "d65", "match_luminance", "");
+    EXPECT_TRUE(bound.has_value());
 }
 
 TEST_F(PickTest, ApplyingConfigWaitsBeforeReplacingLiveSpectralTables) {
