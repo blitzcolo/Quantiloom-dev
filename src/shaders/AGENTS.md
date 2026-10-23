@@ -15,9 +15,12 @@ run there.
 
 ## Adding a shader
 
-`compile_shaders.bat` is a hardcoded sequence of 13 invocations with literal
-`[n/13]` labels — not a glob. A new shader must be added there (and the counts
-renumbered) or it is silently never compiled.
+`src/shaders/CMakeLists.txt` is the authoritative list: 27 invocations (25
+HLSL via `quantiloom_compile_hlsl`, 2 GLSL in `COMPUTE_SHADER_SOURCES`).
+`compile_shaders.bat` and `compile_shaders.sh` mirror it with literal
+`[n/27]` labels — not a glob. A new shader must be added to all three (and
+the counts renumbered) or it is silently never compiled by the ones that
+miss it.
 
 ## Stage extensions
 
