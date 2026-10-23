@@ -5160,8 +5160,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // per-channel sigma would answer three of them with numbers meant for
         // red, green and blue. It takes the average with the spectral bands
         // until a medium can carry a curve.
-        const bool isRgbLike = (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
-                                SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED);
+        const bool isRgbLike =
+            (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB ||
+             // An undivided VIS_FUSED ray carries the band average, which the
+             // RGB triple answers; a hero quartet and a collapsed hero carry
+             // wavelengths, which it does not (see the note above).
+             (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_VIS_FUSED && payload.heroLambda == 0.0));
 
         // Create medium properties from material
         MediumProperties medium = CreateMediumFromMaterial(material);
