@@ -28,6 +28,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <iterator>
+#include <optional>
 
 namespace quantiloom::rendercore {
 
@@ -490,6 +491,78 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     }
 
     // ------------------------------------------------------------------
+    // Humidity: one number per scene
+    // ------------------------------------------------------------------
+    // Two keys describe the same air. atmosphere.rh is a fraction in
+    // [0.05, 1], the network's input domain; atmosphere.relative_humidity is a
+    // percentage that the clear-sky dew point and the thermal balance read.
+    // They are resolved here to ONE fraction, so the NN input, the dew point
+    // and the evaporation term cannot describe three different atmospheres.
+    //
+    // A scene that wrote a percentage into atmosphere.rh (45 for 45 %) used to
+    // reach the network as 45, which its input spec clamps to the top of the
+    // domain, and the dew point as 4500 %, which SkyThermal clamps to 100 %:
+    // saturated air twice over. A value above 1 is read as a percentage.
+    constexpr f64 kNnHumidityMin = 0.05;
+    std::optional<f64> explicitHumidity;  // fraction
+    {
+        std::optional<f64> fromRh;
+        std::optional<f64> fromPercent;
+        if (config.Has("atmosphere.rh")) {
+            f64 rh = config.Get<f64>("atmosphere.rh");
+            if (rh > 1.0) {
+                diag.Warn("atmosphere.rh",
+                          "  atmosphere.rh = " + std::to_string(rh) +
+                              " is above 1, so it was read as a percentage (" +
+                              std::to_string(rh / 100.0) +
+                              "). atmosphere.rh is a fraction in [0.05, 1].");
+                rh /= 100.0;
+            }
+            fromRh = rh;
+        }
+        if (config.Has("atmosphere.relative_humidity")) {
+            fromPercent = config.Get<f64>("atmosphere.relative_humidity") / 100.0;
+        }
+        if (fromRh && fromPercent && std::abs(*fromRh - *fromPercent) > 0.005) {
+            diag.Warn("atmosphere.relative_humidity",
+                      "  atmosphere.rh (" + std::to_string(*fromRh) +
+                          ") and atmosphere.relative_humidity (" +
+                          std::to_string(*fromPercent * 100.0) +
+                          " %) disagree; using atmosphere.rh for both the NN "
+                          "atmosphere and the thermal balance. Give one of them.");
+        }
+        explicitHumidity = fromRh ? fromRh : fromPercent;
+        if (explicitHumidity) {
+            const char* key = fromRh ? "atmosphere.rh" : "atmosphere.relative_humidity";
+            if (!std::isfinite(*explicitHumidity) || *explicitHumidity <= 0.0 ||
+                *explicitHumidity > 1.0) {
+                diag.Fatal(key, String("  ") + key +
+                                    " resolves to a relative humidity of " +
+                                    std::to_string(*explicitHumidity) +
+                                    " (fraction); it must lie in (0, 1], and the NN "
+                                    "atmosphere is trained on [0.05, 1]");
+            } else if (*explicitHumidity < kNnHumidityMin) {
+                diag.Warn(key, String("  ") + key + " resolves to a relative humidity of " +
+                                   std::to_string(*explicitHumidity) +
+                                   ", below the NN atmosphere's training domain "
+                                   "[0.05, 1]; the network input is clamped to 0.05");
+            }
+        }
+    }
+    // Not stated: the preset's own humidity when the NN atmosphere is named
+    // (so its air and the thermal balance's are the same air), else 50 %.
+    f64 resolvedHumidity = 0.5;
+    if (explicitHumidity && std::isfinite(*explicitHumidity)) {
+        resolvedHumidity = *explicitHumidity;
+    } else if (config.Has("atmosphere.model_pack") || config.Has("atmosphere.preset")) {
+        const auto presetName = config.Get<String>("atmosphere.preset", "clear");
+        AtmosphereNNConfig presetProbe;
+        if (presetName != "disabled" && presetProbe.ApplyPreset(presetName)) {
+            resolvedHumidity = presetProbe.rh;
+        }
+    }
+
+    // ------------------------------------------------------------------
     // Clear sky
     // ------------------------------------------------------------------
     // Without the NN atmosphere the thermal sky was one isotropic blackbody:
@@ -511,7 +584,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     const auto skyModel = config.GetString("atmosphere.sky_model", "isotropic");
     if (skyModel == "clear_sky") {
         const f32 airTemperature_K = config.Get<f32>("atmosphere.air_temperature_k", 288.15f);
-        const f32 relativeHumidity = config.Get<f32>("atmosphere.relative_humidity", 50.0f);
+        const f32 relativeHumidity = static_cast<f32>(resolvedHumidity * 100.0);
         const f32 emissivityOverride = config.Get<f32>("atmosphere.sky_emissivity", 0.0f);
 
         const f64 dewPointC =
@@ -802,7 +875,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         overrideD("atmosphere.vis_km", out.atmosphere.visKm);
         overrideD("atmosphere.rainrt_mm_h", out.atmosphere.rainrtMmH);
         overrideD("atmosphere.t_ground_K", out.atmosphere.tGroundK);
-        overrideD("atmosphere.rh", out.atmosphere.rh);
+        out.atmosphere.rh = resolvedHumidity;
         overrideD("atmosphere.p_hPa", out.atmosphere.pHPa);
         overrideD("atmosphere.h2o_scale", out.atmosphere.h2oScale);
         if (config.Has("atmosphere.solar_scatter_scale")) {
@@ -1076,7 +1149,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         // evaporate. Read from [atmosphere] rather than duplicated here: it is
         // the same humidity the clear-sky model derives its dew point from,
         // and a scene with two of them would be a scene with two atmospheres.
-        out.thermal.relativeHumidity = config.Get<f64>("atmosphere.relative_humidity", 50.0);
+        out.thermal.relativeHumidity = resolvedHumidity * 100.0;
 
         // The sky the surfaces radiate against. With the clear-sky model on,
         // that is the effective temperature its emissivity implies rather than

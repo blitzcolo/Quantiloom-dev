@@ -576,6 +576,111 @@ t_ground_K = 295.0
 }
 
 // ============================================================================
+// Humidity: one air per scene
+// ============================================================================
+// atmosphere.rh is a fraction in [0.05, 1]; atmosphere.relative_humidity is a
+// percentage. Scenes wrote a percentage into rh, which the network clamped to
+// saturated and the dew point read as 4500 %.
+
+namespace {
+
+bool HasMessage(const ConfigApplyReport& report, const char* key,
+                ConfigApplyMessage::Severity severity) {
+    return std::any_of(report.messages.begin(), report.messages.end(),
+                       [&](const ConfigApplyMessage& m) {
+                           return m.key == key && m.severity == severity;
+                       });
+}
+
+}  // namespace
+
+TEST_F(ConfigResolveTest, APercentageWrittenIntoRhIsReadAsAFractionAndWarns) {
+    auto config = Parse({.atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+rh = 45.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().atmosphere.rh, 0.45, 1e-6);
+    EXPECT_TRUE(HasMessage(report, "atmosphere.rh", ConfigApplyMessage::Severity::Warning));
+}
+
+TEST_F(ConfigResolveTest, AFractionalRhIsTakenAsWrittenWithoutAWarning) {
+    auto config = Parse({.atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+rh = 0.45
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().atmosphere.rh, 0.45, 1e-6);
+    EXPECT_FALSE(HasMessage(report, "atmosphere.rh", ConfigApplyMessage::Severity::Warning));
+}
+
+TEST_F(ConfigResolveTest, RhOutsideTheHumidityDomainIsRefused) {
+    for (const char* bad : {"rh = 250.0\n", "rh = 0.0\n", "rh = -0.2\n"}) {
+        auto config = Parse({.atmosphereKeys = std::string("model_pack = \"/nonexistent/pack\"\n"
+                                                           "preset = \"clear\"\n") + bad});
+        ConfigApplyReport fresh;
+        report = fresh;
+        EXPECT_FALSE(ResolveStrict(config).has_value()) << bad;
+    }
+}
+
+TEST_F(ConfigResolveTest, TheNnInputAndTheThermalBalanceReadOneHumidity) {
+    // Only the percentage key is given: the network must get the same air.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+relative_humidity = 30.0
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().atmosphere.rh, 0.30, 1e-6);
+    EXPECT_NEAR(resolved.value().thermal.relativeHumidity, 30.0, 1e-4);
+}
+
+TEST_F(ConfigResolveTest, RhDrivesTheThermalHumidityToo) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+rh = 0.8
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().thermal.relativeHumidity, 80.0, 1e-4);
+}
+
+TEST_F(ConfigResolveTest, ThePresetsHumidityIsTheThermalHumidityWhenNoKeyStatesOne) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "fog"
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_NEAR(resolved.value().atmosphere.rh, 1.0, 1e-9);
+    EXPECT_NEAR(resolved.value().thermal.relativeHumidity, 100.0, 1e-4);
+}
+
+TEST_F(ConfigResolveTest, TwoHumiditiesThatDisagreeWarnAndRhWins) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .atmosphereKeys = R"(model_pack = "/nonexistent/pack"
+preset = "clear"
+rh = 0.8
+relative_humidity = 20.0
+)",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_TRUE(HasMessage(report, "atmosphere.relative_humidity",
+                           ConfigApplyMessage::Severity::Warning));
+    EXPECT_NEAR(resolved.value().atmosphere.rh, 0.8, 1e-6);
+    EXPECT_NEAR(resolved.value().thermal.relativeHumidity, 80.0, 1e-4);
+}
+
+// ============================================================================
 // Keys a windowed context cannot honour are echoed, not swallowed
 // ============================================================================
 
