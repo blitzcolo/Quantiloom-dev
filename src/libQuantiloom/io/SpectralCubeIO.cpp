@@ -895,8 +895,13 @@ Result<SpectralCube, String> SpectralCubeIO::ReadGeoTIFF(const String& path) {
                 break;
             case kTiffTagGdalMetadata: {
                 if (count <= 4) break;  // no room for a document
-                const usize end = std::min<usize>(value + count, bytes.size());
-                metadata.assign(bytes.begin() + static_cast<isize>(value),
+                // The offset is the file's word. Bound it in usize before it is
+                // used as an iterator offset, and add the length in usize too:
+                // value + count in u32 wraps for a hostile pair.
+                const usize begin = value;
+                if (begin >= bytes.size()) break;
+                const usize end = std::min<usize>(begin + count, bytes.size());
+                metadata.assign(bytes.begin() + static_cast<isize>(begin),
                                 bytes.begin() + static_cast<isize>(end));
                 if (!metadata.empty() && metadata.back() == '\0') metadata.pop_back();
                 break;
