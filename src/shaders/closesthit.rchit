@@ -3093,8 +3093,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
                                     sheenScale_lambda +
                                 sheenE * rhoSheen_lambda;
             const float epsilon_vis = saturate(1.0 - R_vis - material.transmission);
+            // ccBase as on every base term the coat covers: the coat dims
+            // thermal emission exactly as it dims bound emission and the
+            // reflected light.
             const float L_thermal = thermalNegligible
-                ? 0.0 : epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda);
+                ? 0.0 : epsilon_vis * IRPlanckRadiance(T_surface_vis, lambda) * ccBase;
             float L_lambda = L_direct + L_ambient + L_emissive + L_ibl +
                              L_nee + L_fluor + L_thermal;
 
@@ -3560,7 +3563,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
                 saturate(1.0 - emissivity_s - material.transmission);
 
             if (T_single > 0.0) {
-                radiance_spectral += emissivity_s * IRPlanckRadiance(T_single, lambda);
+                // ccBase: the coat dims the Planck term as it dims the bound
+                // emission and every other base term.
+                radiance_spectral += emissivity_s * IRPlanckRadiance(T_single, lambda) * ccBase;
             }
             radiance_spectral += reflectance_s *
                 IRDownwellingRadiance(atmos, 0, lambda, lut.atmosphereTemperature_K,
@@ -4318,11 +4323,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             const float reflectance_l = fractions.x;
             const float emissivity_l = fractions.y;
 
-            // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ)
+            // 1. Self-emission: ε(λ) × L_blackbody(T_surface, λ). ccBase as
+            // the SWIR and NIR branches apply it: the coat dims the base's
+            // thermal emission exactly as it dims the bound emission and the
+            // reflected light.
             float L_emission = 0.0;
             if (T_surface > 0.0) {
                 float L_blackbody = IRPlanckRadiance(T_surface, lambda);
-                L_emission = emissivity_l * L_blackbody;
+                L_emission = emissivity_l * L_blackbody * ccBase;
             }
 
             // 2. Reflected environment, base term.
