@@ -2977,9 +2977,13 @@ void main(inout Payload payload, in HitAttributes attribs) {
             if (hasDT) {
                 const float rhoDt_lambda = EvaluateDiffuseTransmissionColor(
                     spectralCurves, material, sDT, lambda, true);
+                // The sun term is irradiance through a Lambert BTDF
+                // (kD * dt * rhoDt / PI), so it carries the 1/PI the RGB
+                // branch spells out -- without it backlit leaves and paper
+                // came out PI times too bright in the spectral modes.
                 L_ambient += kD_lambda * dt * rhoDt_lambda *
                              (sky_radiance_lambda +
-                              sun_radiance_lambda * dtNdotL * dtShadow);
+                              sun_radiance_lambda * dtNdotL * dtShadow / PI);
             }
             if (hasClearcoat) {
                 L_ambient = L_ambient * ccBase + ccWeight * ccE * sky_radiance_lambda;
@@ -3356,8 +3360,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
             : 0.0;
         const float wDt_s = kD_scalar * dt * rhoDt_s;
         if (hasDT) {
+            // 1/PI as in the RGB branch and VIS_FUSED: the transmitted sun
+            // is irradiance through a Lambert BTDF.
             skyAmbient_scalar += wDt_s * (skyRadiance_lambda +
-                                          sunRadiance_lambda * dtNdotL * dtShadow);
+                                          sunRadiance_lambda * dtNdotL * dtShadow / PI);
         }
         if (hasClearcoat) {
             skyAmbient_scalar = skyAmbient_scalar * ccBase +
