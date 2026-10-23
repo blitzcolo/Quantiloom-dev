@@ -1128,6 +1128,15 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         out.thermal.forcingFile =
             ResolveConfigPath(config.GetString("thermal.forcing_file", ""), options.baseDir);
 
+        // A top-k of zero leaves every row of the exchange matrix summing to
+        // less than one, so a surface cools without bound. Not a policy
+        // question: nothing downstream can run from it.
+        if (out.thermal.exchangeTopK < 1) {
+            diag.Fatal("thermal.exchange_top_k",
+                       "thermal.exchange_top_k must be at least 1, but is " +
+                           std::to_string(out.thermal.exchangeTopK));
+        }
+
         // Both of these exist to be measured rather than to be rendered with.
         // sun_correction off gives the uncorrected temperature field -- one
         // constant per triangle, shadow edges on triangle borders -- which is

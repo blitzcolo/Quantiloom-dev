@@ -1944,6 +1944,33 @@ forcing_file = "beside.csv"
         << "the input beside it still resolves against the config";
 }
 
+TEST_F(ConfigResolveTest, AnExchangeTopKOfZeroIsRefused) {
+    struct Case { const char* key; const char* value; };
+    const Case cases[] = {
+        {"exchange_top_k", "0"},
+    };
+    for (const Case& c : cases) {
+        auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                             .trailing = std::string("[thermal]\nenabled = true\n") + c.key +
+                                         " = " + c.value + "\n"});
+        ConfigApplyReport fresh;
+        report = fresh;
+        EXPECT_FALSE(ResolveLenient(config).has_value()) << c.key << " = " << c.value;
+        EXPECT_TRUE(HasMessage(report, (std::string("thermal.") + c.key).c_str(),
+                               ConfigApplyMessage::Severity::Error))
+            << c.key;
+    }
+}
+
+TEST_F(ConfigResolveTest, TheThermalDefaultsPassTheirOwnValidation) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = "[thermal]\nenabled = true\n"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+    EXPECT_GE(resolved.value().thermal.exchangeTopK, 1u);
+    EXPECT_GE(resolved.value().thermal.nodeCount, 2u);
+}
+
 TEST_F(ConfigResolveTest, ThermalKeysAreIgnoredWhileThermalIsOff) {
     // The whole section is read only when enabled, which is what lets a scene
     // keep a thermal block it is not currently using.
