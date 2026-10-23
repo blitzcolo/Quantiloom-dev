@@ -876,11 +876,23 @@ std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
             " (searched in CWD and executable directory)");
     }
 
-    const size_t fileSize = static_cast<size_t>(file.tellg());
+    // tellg() returns -1 on failure, and the buffer holds whole words: a size
+    // that is not a positive multiple of four is not SPIR-V, and reading it into
+    // fileSize / 4 words would write past the end of the buffer.
+    const std::streamoff signedSize = file.tellg();
+    if (signedSize < static_cast<std::streamoff>(sizeof(u32)) ||
+        signedSize % static_cast<std::streamoff>(sizeof(u32)) != 0) {
+        throw std::runtime_error("Invalid SPIR-V file (size is not a positive multiple of 4): " +
+                                 foundPath.string());
+    }
+    const size_t fileSize = static_cast<size_t>(signedSize);
     std::vector<u32> buffer(fileSize / sizeof(u32));
 
     file.seekg(0);
     file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
+    if (!file) {
+        throw std::runtime_error("Failed to read SPIR-V file: " + foundPath.string());
+    }
     file.close();
 
     QL_LOG_DEBUG("  Loaded shader from: {}", foundPath.string());
