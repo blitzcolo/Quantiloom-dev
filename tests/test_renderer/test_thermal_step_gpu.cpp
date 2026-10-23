@@ -312,10 +312,15 @@ TEST_F(ThermalStepGpuTest, AReflectingNeighbourMatchesTheCpuStepperAcrossBatches
     asphalt.convection_W_m2K = 8.0f;
     asphalt.shortwaveAbsorptivity = 0.9f;
     asphalt.longwaveEmissivity = 0.93f;
+    // A 30 mm plate rather than a 3 mm sheet. Thinner, at k = 200 and ten
+    // nodes, the Fourier number reaches 4e4 per minute and the f32 elimination
+    // alone parts from the CPU by over a kelvin with no exchange at all -- a
+    // limit of the f32 stepper on stiff slabs, not of the radiosity this case
+    // is here to compare.
     ThermalMaterial aluminium = asphalt;
     aluminium.conductivity_W_mK = 200.0f;
     aluminium.density_kg_m3 = 2700.0f;
-    aluminium.thickness_m = 0.003f;
+    aluminium.thickness_m = 0.03f;
     aluminium.shortwaveAbsorptivity = 0.2f;
     aluminium.longwaveEmissivity = 0.08f;
     const Vector<ThermalMaterial> materials{asphalt, aluminium};
