@@ -15,6 +15,8 @@
 #include <fstream>
 #include <vector>
 #include <cstring>
+#include <algorithm>
+#include <cmath>
 
 namespace quantiloom {
 
@@ -52,6 +54,65 @@ struct ReconstructPushConstants {
     u32 _pad1;
     u32 _pad2;
 };
+
+// ============================================================================
+// Reconstruction Mapping (must match spectral_reconstruct.comp, binding 4)
+// ============================================================================
+namespace {
+
+// One entry per target band, packed as 6 x u32 (uint4 + float2) exactly as
+// the shader's MappingBuffer declares it.
+struct GpuMappingEntry {
+    u32 targetBand;
+    u32 sourceBand;
+    u32 sourceNextBand;
+    u32 wasRendered;
+    f32 targetWavelength;
+    f32 interpWeight;
+};
+static_assert(sizeof(GpuMappingEntry) == 6u * sizeof(u32));
+
+// Builds one mapping entry with the same index search the shader used to do
+// per pixel: an exact match within 0.01 nm wins, otherwise the interval
+// whose upper edge is the first source wavelength at or above the target.
+// All interpolation modes share those indices; only the interpolant differs.
+GpuMappingEntry BuildMappingEntry(u32 targetBand, f32 targetWl,
+                                  const Vector<f32>& srcWavelengths) {
+    GpuMappingEntry entry{};
+    entry.targetBand = targetBand;
+    entry.targetWavelength = targetWl;
+    const u32 numSrc = static_cast<u32>(srcWavelengths.size());
+
+    for (u32 i = 0; i < numSrc; ++i) {
+        if (std::fabs(srcWavelengths[i] - targetWl) < 0.01f) {
+            entry.wasRendered = 1u;
+            entry.sourceBand = i;
+            entry.sourceNextBand = i;
+            return entry;
+        }
+    }
+
+    u32 idx = 0;
+    for (u32 i = 0; i + 1 < numSrc; ++i) {
+        if (srcWavelengths[i + 1] < targetWl) {
+            idx = i + 1;
+        } else {
+            break;
+        }
+    }
+    const u32 next = idx + 1 < numSrc ? idx + 1 : idx;
+    entry.sourceBand = idx;
+    entry.sourceNextBand = next;
+    if (next > idx) {
+        entry.interpWeight = std::clamp(
+            (targetWl - srcWavelengths[idx]) /
+                (srcWavelengths[next] - srcWavelengths[idx]),
+            0.0f, 1.0f);
+    }
+    return entry;
+}
+
+} // namespace
 
 // ============================================================================
 // GpuSpectralReconstructor::Impl
@@ -414,7 +475,10 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
     VkDeviceSize dstCubeSize = width * height * dstBands * sizeof(f32);
     VkDeviceSize srcWlSize = srcBands * sizeof(f32);
     VkDeviceSize dstWlSize = dstBands * sizeof(f32);
-    VkDeviceSize mappingSize = dstBands * 6 * sizeof(u32);  // Not used in current shader
+    // One mapping entry per target band (uint4 + float2), built once on the
+    // CPU: the shader reads indices and weights from it instead of scanning
+    // the source grid for every pixel and band.
+    VkDeviceSize mappingSize = dstBands * 6 * sizeof(u32);
 
     m_impl->lastMemoryUsage = srcCubeSize + dstCubeSize + srcWlSize + dstWlSize + mappingSize;
 
@@ -436,10 +500,14 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY);
 
-        // Dummy mapping buffer (required by shader but not used in simple mode)
-        GpuBuffer mappingBuffer(m_impl->context.GetAllocator(), sizeof(u32) * 4,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+        // Pre-computed band mapping (binding 4)
+        GpuBuffer mappingBuffer(m_impl->context.GetAllocator(), mappingSize,
+            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
             VMA_MEMORY_USAGE_GPU_ONLY);
+
+        GpuBuffer mappingStaging(m_impl->context.GetAllocator(), mappingSize,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VMA_MEMORY_USAGE_CPU_ONLY);
 
         // Staging buffers for upload
         GpuBuffer srcCubeStaging(m_impl->context.GetAllocator(), srcCubeSize,
@@ -475,6 +543,18 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
             dstWlStaging.Unmap();
         }
 
+        // Build and upload the per-band mapping: the search depends only on
+        // the two wavelength grids, so it happens once here, not per pixel.
+        Vector<GpuMappingEntry> mapping(dstBands);
+        for (u32 b = 0; b < dstBands; ++b)
+            mapping[b] =
+                BuildMappingEntry(b, targetWavelengths[b], sparseCube.wavelengths);
+        {
+            void* mapped = mappingStaging.Map();
+            std::memcpy(mapped, mapping.data(), mappingSize);
+            mappingStaging.Unmap();
+        }
+
         // Copy staging to GPU buffers
         CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
             VkBufferCopy copyRegion{};
@@ -487,6 +567,9 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
 
             copyRegion.size = dstWlSize;
             vkCmdCopyBuffer(cmd, dstWlStaging.GetHandle(), dstWlBuffer.GetHandle(), 1, &copyRegion);
+
+            copyRegion.size = mappingSize;
+            vkCmdCopyBuffer(cmd, mappingStaging.GetHandle(), mappingBuffer.GetHandle(), 1, &copyRegion);
 
             // Memory barrier before compute
             VkMemoryBarrier barrier{};
@@ -519,7 +602,7 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
         bufferInfos[1] = {dstCubeBuffer.GetHandle(), 0, dstCubeSize};
         bufferInfos[2] = {srcWlBuffer.GetHandle(), 0, srcWlSize};
         bufferInfos[3] = {dstWlBuffer.GetHandle(), 0, dstWlSize};
-        bufferInfos[4] = {mappingBuffer.GetHandle(), 0, sizeof(u32) * 4};
+        bufferInfos[4] = {mappingBuffer.GetHandle(), 0, mappingSize};
 
         Vector<VkWriteDescriptorSet> writes(5);
         for (u32 i = 0; i < 5; ++i) {

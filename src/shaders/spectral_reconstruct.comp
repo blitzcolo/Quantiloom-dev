@@ -67,15 +67,17 @@ layout(std430, binding = 3) readonly buffer DstWavelengthsBuffer {
 };
 
 // Reconstruction mapping (pre-computed on CPU)
-// Each entry: [targetBand, sourceBand, sourceNextBand, wasRendered, targetWavelength, interpWeight]
+// One entry per target band, packed as uint4 + float2 (6 x u32):
+// x: targetBand
+// y: sourceBand (exact index, or the interval's left/lower index)
+// z: sourceNextBand (the interval's upper index)
+// w: wasRendered (1 = direct copy, 0 = interpolate)
+// float[0]: targetWavelength
+// float[1]: interpWeight (t between the two source bands)
+// The search depends only on the two wavelength grids, so the host builds
+// the table once and the shader reads it instead of scanning the source
+// grid for every pixel and band.
 layout(std430, binding = 4) readonly buffer MappingBuffer {
-    // Packed as: uint4 + float2 per entry
-    // x: targetBand
-    // y: sourceBand (or nearest)
-    // z: sourceNextBand (for linear interp)
-    // w: wasRendered (1 = direct copy, 0 = interpolate)
-    // float[0]: targetWavelength
-    // float[1]: interpWeight (for linear: t between src bands)
     uint mappingData[];  // Access via helper functions
 };
 
@@ -108,6 +110,22 @@ void WriteFull(uint x, uint y, uint band, float value) {
 }
 
 // ============================================================================
+// Reconstruction Mapping Readers
+// ============================================================================
+
+uvec4 ReadMappingIndices(uint dstBand) {
+    const uint base = dstBand * 6u;
+    return uvec4(mappingData[base], mappingData[base + 1u],
+                 mappingData[base + 2u], mappingData[base + 3u]);
+}
+
+vec2 ReadMappingWavelengthWeight(uint dstBand) {
+    const uint base = dstBand * 6u;
+    return vec2(uintBitsToFloat(mappingData[base + 4u]),
+                uintBitsToFloat(mappingData[base + 5u]));
+}
+
+// ============================================================================
 // Linear Interpolation
 // ============================================================================
 
@@ -135,107 +153,14 @@ float CatmullRomInterp(float p0, float p1, float p2, float p3, float t) {
 }
 
 // ============================================================================
-// Find Cubic Interpolation Indices
-// ============================================================================
-// Finds 4 surrounding points (idx0, idx1, idx2, idx3) and interpolation parameter t
-// for Catmull-Rom spline at target wavelength
-
-void GetCubicIndices(float targetWl, out uint idx0, out uint idx1, out uint idx2, out uint idx3, out float t) {
-    uint numSrc = params.srcBands;
-
-    // Find idx1 such that srcWavelengths[idx1] <= targetWl < srcWavelengths[idx1+1]
-    idx1 = 0;
-    for (uint i = 0; i < numSrc - 1; ++i) {
-        if (srcWavelengths[i + 1] < targetWl) {
-            idx1 = i + 1;
-        } else {
-            break;
-        }
-    }
-
-    // Set idx2 (next point)
-    idx2 = (idx1 < numSrc - 1) ? idx1 + 1 : idx1;
-
-    // Set idx0 (one before idx1)
-    idx0 = (idx1 > 0) ? idx1 - 1 : 0;
-
-    // Set idx3 (one after idx2)
-    idx3 = (idx2 < numSrc - 1) ? idx2 + 1 : numSrc - 1;
-
-    // Compute interpolation parameter
-    if (idx2 > idx1) {
-        t = (targetWl - srcWavelengths[idx1]) / (srcWavelengths[idx2] - srcWavelengths[idx1]);
-    } else {
-        t = 0.0;
-    }
-
-    // Clamp t to [0, 1]
-    t = clamp(t, 0.0, 1.0);
-}
-
-// ============================================================================
-// Find Linear Interpolation Indices
-// ============================================================================
-
-void GetLinearIndices(float targetWl, out uint idx0, out uint idx1, out float t) {
-    uint numSrc = params.srcBands;
-
-    // Find interval
-    idx0 = 0;
-    for (uint i = 0; i < numSrc - 1; ++i) {
-        if (srcWavelengths[i + 1] < targetWl) {
-            idx0 = i + 1;
-        } else {
-            break;
-        }
-    }
-
-    idx1 = (idx0 < numSrc - 1) ? idx0 + 1 : idx0;
-
-    // Compute interpolation parameter
-    if (idx1 > idx0) {
-        t = (targetWl - srcWavelengths[idx0]) / (srcWavelengths[idx1] - srcWavelengths[idx0]);
-    } else {
-        t = 0.0;
-    }
-
-    t = clamp(t, 0.0, 1.0);
-}
-
-// ============================================================================
-// Find Exact Match
-// ============================================================================
-// Returns index if targetWl exactly matches a source wavelength, otherwise -1
-
-int FindExactMatch(float targetWl) {
-    float epsilon = 0.01;  // 0.01 nm tolerance
-
-    for (uint i = 0; i < params.srcBands; ++i) {
-        if (abs(srcWavelengths[i] - targetWl) < epsilon) {
-            return int(i);
-        }
-    }
-    return -1;
-}
-
-// ============================================================================
 // Akima Spline Interpolation (Simplified GPU Version)
 // ============================================================================
 // Akima splines are more robust to outliers but require more computation
 // This is a simplified version suitable for GPU execution
+// idx is the interval's left source band from the mapping table.
 
-float AkimaInterp(uint x, uint y, float targetWl) {
+float AkimaInterp(uint x, uint y, uint idx, float targetWl) {
     uint numSrc = params.srcBands;
-
-    // Find interval
-    uint idx = 0;
-    for (uint i = 0; i < numSrc - 1; ++i) {
-        if (srcWavelengths[i + 1] < targetWl) {
-            idx = i + 1;
-        } else {
-            break;
-        }
-    }
 
     if (idx >= numSrc - 1) {
         return ReadSparse(x, y, numSrc - 1);
@@ -293,46 +218,46 @@ float AkimaInterp(uint x, uint y, float targetWl) {
 void ReconstructPixel(uint x, uint y) {
     // Process each target band
     for (uint dstBand = 0; dstBand < params.dstBands; ++dstBand) {
-        float targetWl = dstWavelengths[dstBand];
+        const uvec4 mapIdx = ReadMappingIndices(dstBand);
+        const vec2 wlWeight = ReadMappingWavelengthWeight(dstBand);
+        const uint sourceBand = mapIdx.y;
+        const uint sourceNextBand = mapIdx.z;
+        const float interpWeight = wlWeight.y;
         float value;
 
-        // Check if this wavelength was directly rendered
-        int exactIdx = FindExactMatch(targetWl);
-
-        if (exactIdx >= 0) {
-            // Direct copy - no interpolation needed
-            value = ReadSparse(x, y, exactIdx);
+        if (mapIdx.w != 0u) {
+            // This wavelength was directly rendered - no interpolation needed
+            value = ReadSparse(x, y, sourceBand);
         } else {
             // Interpolation needed
             switch (params.interpolationMode) {
                 case INTERP_MODE_LINEAR: {
-                    uint idx0, idx1;
-                    float t;
-                    GetLinearIndices(targetWl, idx0, idx1, t);
                     value = LinearInterp(
-                        ReadSparse(x, y, idx0),
-                        ReadSparse(x, y, idx1),
-                        t
+                        ReadSparse(x, y, sourceBand),
+                        ReadSparse(x, y, sourceNextBand),
+                        interpWeight
                     );
                     break;
                 }
 
                 case INTERP_MODE_CATMULL_ROM: {
-                    uint idx0, idx1, idx2, idx3;
-                    float t;
-                    GetCubicIndices(targetWl, idx0, idx1, idx2, idx3, t);
+                    const uint numSrc = params.srcBands;
+                    const uint idx1 = sourceBand;
+                    const uint idx2 = sourceNextBand;
+                    const uint idx0 = (idx1 > 0u) ? idx1 - 1u : 0u;
+                    const uint idx3 = (idx2 < numSrc - 1u) ? idx2 + 1u : numSrc - 1u;
                     value = CatmullRomInterp(
                         ReadSparse(x, y, idx0),
                         ReadSparse(x, y, idx1),
                         ReadSparse(x, y, idx2),
                         ReadSparse(x, y, idx3),
-                        t
+                        interpWeight
                     );
                     break;
                 }
 
                 case INTERP_MODE_AKIMA: {
-                    value = AkimaInterp(x, y, targetWl);
+                    value = AkimaInterp(x, y, sourceBand, wlWeight.x);
                     break;
                 }
 
