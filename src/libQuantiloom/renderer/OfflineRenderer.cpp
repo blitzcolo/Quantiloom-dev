@@ -689,6 +689,9 @@ void OfflineRenderer::Impl::BuildThermalSession() {
     buildInput.meshOptions = thermal::MeshOptionsFor(thermalSolvedMaterials,
                                                      thermalConfig.lateralConduction);
     buildInput.materials = &thermalSolvedMaterials;
+    // Before BuildIlluminants uploads the textures: the CPU texels this reads are
+    // still there now, as they are for the interactive preview.
+    buildInput.materialCoverage = rendercore::ComputeMaterialCoverage(loadedScene);
     buildInput.precompute.hemisphereRays = resolved.thermal.exchangeRays;
     buildInput.precompute.topK = resolved.thermal.exchangeTopK;
     buildInput.precompute.sunDirection = resolved.lighting.sunDirection;

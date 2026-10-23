@@ -98,6 +98,18 @@ struct EpochBuildInput {
 };
 
 /**
+ * @brief Per scene material, the fraction of its area that is actually there
+ *
+ * 1 for an opaque surface; for MASK or BLEND the mean of its base colour alpha,
+ * which is what the exchange precompute's any-hit commits an occluder with.
+ * Reads the CPU texels the loader retains for exactly these materials, so it
+ * has to run while they still exist. Every host that builds a schedule passes
+ * this as EpochBuildInput::materialCoverage; leaving it empty makes every
+ * alpha-tested material a solid occluder.
+ */
+Vector<f32> ComputeMaterialCoverage(const Scene& scene);
+
+/**
  * @brief Build the schedule, leaving the scene where the host wants it
  *
  * @param scene    the host's scene, mutated through the epochs and restored
