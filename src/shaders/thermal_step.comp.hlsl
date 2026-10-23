@@ -2,7 +2,17 @@
 // Quantiloom - Thermal Step Compute Shader
 // ============================================================================
 // One step of the Crank-Nicolson surface energy balance, on the GPU.
-// Mirrors CpuCrankNicolsonStepper line-by-line, in f32.
+// Mirrors CpuCrankNicolsonStepper's matrix and balance, in f32.
+//
+// Solved for the increment dT = T^{n+1} - T^n rather than for T^{n+1}: the
+// same system, with A T^n moved to the right-hand side, which leaves there the
+// explicit net flux of each cell. The difference is f32 conditioning. On a
+// stiff slab -- 3 mm of aluminium over ten nodes is a Fourier number of 4e4
+// per minute -- the cell's own heat capacity is the 1 in 1 + r, a few ulps of
+// r, and solving for T multiplies that rounding by 300 K every step: such a
+// sheet drifted 1.3 K from the f64 stepper over a day with nothing else
+// going on. Solved for dT the same rounding multiplies a fraction of a
+// kelvin.
 //
 // Each thread owns one element. The inter-element coupling (diffuse-grey
 // long-wave exchange) reads the neighbours' radiosity from a ping-pong buffer
@@ -279,12 +289,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // Y_rad/2 (T^n - T^{n+1}) moves it to the midpoint, which is what keeps a
     // thin or low-k face stable at any step.
     const float radiativeSlope = 4.0 * emissivity * kStefanBoltzmann * Ti * Ti * Ti;
+    //
+    // Each right-hand side below is the CPU stepper's minus the row applied
+    // to the current state (see the header): what is left is the cell's net
+    // flux at T^n, and the halfCell, half-implicit and linearised terms that
+    // carried T^n on both sides cancel out of it exactly.
     lower[0] = 0.0;
     diag[0] = halfCell + 0.5 * (k / dx + h + latentAdmittance + radiativeSlope);
     upper[0] = -0.5 * (k / dx);
-    rhs[0] = halfCell * T[0] - 0.5 * (k / dx) * (T[0] - T[1]) +
-             0.5 * h * (2.0 * pc.airTemperature_K - T[0]) + surfaceFlux -
-             latentFlux + 0.5 * latentAdmittance * T[0] + 0.5 * radiativeSlope * T[0];
+    rhs[0] = -(k / dx) * (T[0] - T[1]) + h * (pc.airTemperature_K - T[0]) + surfaceFlux -
+             latentFlux;
 
     // The same row differentiated in v. Constants of v drop (the air
     // temperature, the latent flux); the half-implicit long-wave loss leaves
@@ -292,12 +306,12 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // leaves the only source. The irradiance H (the neighbours' lagged
     // radiosity) is deliberately not differentiated -- see the CPU stepper for why that
     // keeps this a per-element quantity.
+    // In increment form like the temperature, so it shares the same matrix.
     if (carryTangent) {
         const float s0 = sensitivity[base + 0];
         const float s1 = sensitivity[base + 1];
-        rhsTangent[0] = halfCell * s0 - 0.5 * (k / dx) * (s0 - s1) -
-                        0.5 * h * s0 - 0.5 * radiativeSlope * s0 -
-                        0.5 * latentAdmittance * s0 + directPerVisibility;
+        rhsTangent[0] = -(k / dx) * (s0 - s1) -
+                        (h + radiativeSlope + latentAdmittance) * s0 + directPerVisibility;
     }
 
     // Interior nodes
@@ -305,12 +319,10 @@ void main(uint3 tid : SV_DispatchThreadID) {
         lower[i] = -0.5 * r;
         diag[i] = 1.0 + r;
         upper[i] = -0.5 * r;
-        rhs[i] = T[i] + 0.5 * r * (T[i - 1] - 2.0 * T[i] + T[i + 1]);
+        rhs[i] = r * ((T[i - 1] - T[i]) + (T[i + 1] - T[i]));
         if (carryTangent) {
-            rhsTangent[i] = sensitivity[base + i] +
-                            0.5 * r * (sensitivity[base + i - 1] -
-                                       2.0 * sensitivity[base + i] +
-                                       sensitivity[base + i + 1]);
+            rhsTangent[i] = r * ((sensitivity[base + i - 1] - sensitivity[base + i]) +
+                                 (sensitivity[base + i + 1] - sensitivity[base + i]));
         }
     }
 
@@ -320,18 +332,18 @@ void main(uint3 tid : SV_DispatchThreadID) {
         lower[last] = 0.0;
         diag[last] = 1.0;
         upper[last] = 0.0;
-        rhs[last] = mat.interiorTemperature;
-        // A room held at its own temperature does not care about the sun.
-        if (carryTangent) rhsTangent[last] = 0.0;
+        rhs[last] = mat.interiorTemperature - T[last];
+        // A room held at its own temperature does not care about the sun: the
+        // increment takes the tangent to zero.
+        if (carryTangent) rhsTangent[last] = -sensitivity[base + last];
     } else {
         lower[last] = -0.5 * (k / dx);
         diag[last] = halfCell + 0.5 * (k / dx);
         upper[last] = 0.0;
-        rhs[last] = halfCell * T[last] - 0.5 * (k / dx) * (T[last] - T[last - 1]);
+        rhs[last] = -(k / dx) * (T[last] - T[last - 1]);
         if (carryTangent) {
-            const float sLast = sensitivity[base + last];
-            rhsTangent[last] = halfCell * sLast -
-                               0.5 * (k / dx) * (sLast - sensitivity[base + last - 1]);
+            rhsTangent[last] =
+                -(k / dx) * (sensitivity[base + last] - sensitivity[base + last - 1]);
         }
     }
 
@@ -352,15 +364,16 @@ void main(uint3 tid : SV_DispatchThreadID) {
         }
     }
 
-    // Write solved temperatures, clamped
+    // Write solved temperatures -- the state plus the increment -- clamped
     for (uint i = 0; i < nodes; ++i) {
-        state[base + i] = clamp(rhs[i], 1.0, 5000.0);
+        state[base + i] = clamp(T[i] + rhs[i], 1.0, 5000.0);
     }
     // And the tangent, on its own clamp: a sensitivity is a derivative, not a
     // temperature, so [1, 5000] would be meaningless for it.
     if (carryTangent) {
         for (uint i = 0; i < nodes; ++i) {
-            sensitivity[base + i] = clamp(rhsTangent[i], -1000.0, 1000.0);
+            sensitivity[base + i] =
+                clamp(sensitivity[base + i] + rhsTangent[i], -1000.0, 1000.0);
         }
     }
 
@@ -368,7 +381,7 @@ void main(uint3 tid : SV_DispatchThreadID) {
     // and the radiosity the neighbours will gather from it: emitted at the new
     // temperature, reflected from the irradiance this step gathered -- the
     // same lag the CPU stepper's next sweep takes.
-    const float newSurface = clamp(rhs[0], 1.0, 5000.0);
+    const float newSurface = clamp(T[0] + rhs[0], 1.0, 5000.0);
     surface[writeSlot + e] = newSurface;
     radiosity[writeSlot + e] = Radiosity(emissivity, newSurface, irradianceIn);
 }

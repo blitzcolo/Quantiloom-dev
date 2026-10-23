@@ -312,15 +312,10 @@ TEST_F(ThermalStepGpuTest, AReflectingNeighbourMatchesTheCpuStepperAcrossBatches
     asphalt.convection_W_m2K = 8.0f;
     asphalt.shortwaveAbsorptivity = 0.9f;
     asphalt.longwaveEmissivity = 0.93f;
-    // A 30 mm plate rather than a 3 mm sheet. Thinner, at k = 200 and ten
-    // nodes, the Fourier number reaches 4e4 per minute and the f32 elimination
-    // alone parts from the CPU by over a kelvin with no exchange at all -- a
-    // limit of the f32 stepper on stiff slabs, not of the radiosity this case
-    // is here to compare.
     ThermalMaterial aluminium = asphalt;
     aluminium.conductivity_W_mK = 200.0f;
     aluminium.density_kg_m3 = 2700.0f;
-    aluminium.thickness_m = 0.03f;
+    aluminium.thickness_m = 0.003f;
     aluminium.shortwaveAbsorptivity = 0.2f;
     aluminium.longwaveEmissivity = 0.08f;
     const Vector<ThermalMaterial> materials{asphalt, aluminium};
@@ -375,6 +370,68 @@ TEST_F(ThermalStepGpuTest, AReflectingNeighbourMatchesTheCpuStepperAcrossBatches
                     0.5)
             << "element " << e;
     }
+}
+
+TEST_F(ThermalStepGpuTest, AThinMetalSheetMatchesTheCpuStepper) {
+    // 3 mm of aluminium over ten nodes: a Fourier number of 4e4 per minute,
+    // where a cell's own heat capacity is a few ulps of its conduction in
+    // f32. Solving for the temperature rather than its increment turned that
+    // rounding into a 1.3 K drift over this day with nothing else going on --
+    // one element, open sky, no exchange. The tangent shares the matrix, so it
+    // is compared on the same footing.
+    GpuThermalStepper gpuStepper(Device());
+    if (!gpuStepper.IsValid()) {
+        GTEST_SKIP() << "thermal_step.spv unavailable";
+    }
+
+    const auto elements = OneElement();
+    ThermalMaterial aluminium;
+    aluminium.conductivity_W_mK = 200.0f;
+    aluminium.density_kg_m3 = 2700.0f;
+    aluminium.specificHeat_J_kgK = 920.0f;
+    aluminium.thickness_m = 0.003f;
+    aluminium.convection_W_m2K = 8.0f;
+    aluminium.shortwaveAbsorptivity = 0.2f;
+    aluminium.longwaveEmissivity = 0.08f;
+    const Vector<ThermalMaterial> materials{aluminium};
+    const auto exchange = MakeOpenSkyExchange(1);
+
+    SunVisibilityTable sunTable;
+    sunTable.sampleTime_h = {0.0};
+    sunTable.visibility = exchange.sunVisibility;
+
+    ThermalForcing forcing;
+    forcing.airTemperature_K = 295.0;
+    forcing.sunIrradiance_W_m2 = 700.0;
+    forcing.sunDirection = glm::vec3(0.0f, 1.0f, 0.0f);
+    forcing.skyTemperature_K = 255.0;
+
+    const u32 nodeCount = 10;
+    const f64 dt = 60.0;
+    const i32 steps = 1440;
+
+    ThermalState cpuState = MakeState(1, nodeCount, 290.0, true);
+    CpuCrankNicolsonStepper cpuStepper;
+    for (i32 i = 0; i < steps; ++i) {
+        cpuStepper.Step(cpuState, elements, materials, exchange, forcing, dt,
+                        {exchange.sunVisibility});
+    }
+
+    ThermalState gpuState = MakeState(1, nodeCount, 290.0, true);
+    Vector<ThermalBatchStep> batch(steps);
+    for (auto& b : batch) {
+        b.forcing = forcing;
+        b.dt_s = dt;
+    }
+    gpuStepper.StepMany(gpuState, elements, materials, exchange, sunTable, batch);
+
+    EXPECT_NEAR(gpuState.Surface(0), cpuState.Surface(0), 0.05);
+    // The back face too: a sheet this conductive is one temperature through,
+    // and an elimination that lost it would show up as a gradient.
+    EXPECT_NEAR(gpuState.temperature_K[nodeCount - 1], cpuState.temperature_K[nodeCount - 1],
+                0.05);
+    EXPECT_GT(cpuState.SurfaceSensitivity(0), 1.0) << "nothing to compare otherwise";
+    EXPECT_NEAR(gpuState.SurfaceSensitivity(0), cpuState.SurfaceSensitivity(0), 0.05);
 }
 
 TEST_F(ThermalStepGpuTest, AWetSurfaceMatchesTheCpuStepper) {
