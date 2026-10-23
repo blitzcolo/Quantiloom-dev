@@ -92,6 +92,7 @@ add_custom_command(
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_dynamic.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
         "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
+        "${CMAKE_SOURCE_DIR}/src/shaders/camera_hsv.comp.spv"
         "$<TARGET_FILE_DIR:camera_gpu_bench>"
     COMMENT "Copying camera shaders next to camera_gpu_bench"
 )
