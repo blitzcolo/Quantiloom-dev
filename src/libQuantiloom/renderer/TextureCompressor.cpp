@@ -17,6 +17,7 @@
 #include "core/Log.hpp"
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <future>
 #include <mutex>
 #include <thread>
@@ -241,16 +242,26 @@ void TextureCompressor::ParallelCompressTextures(
 
     auto startTime = std::chrono::steady_clock::now();
 
-    // Launch async compression tasks
-    std::vector<std::future<std::pair<size_t, std::optional<BC7CompressedData>>>> futures;
-    futures.reserve(compressibleIndices.size());
+    // numThreads workers take the next texture off a shared counter, so the
+    // thread count stays at numThreads however many textures there are. Each
+    // result lands in its own slot; the textures are only read until all workers
+    // have been joined.
+    std::vector<std::optional<BC7CompressedData>> results(compressibleIndices.size());
+    std::atomic<size_t> nextTask{0};
+    auto worker = [&]() {
+        for (size_t t = nextTask.fetch_add(1); t < compressibleIndices.size();
+             t = nextTask.fetch_add(1)) {
+            results[t] = CompressBC7(textures[compressibleIndices[t]], highQuality);
+        }
+    };
 
-    for (size_t idx : compressibleIndices) {
-        const Texture& tex = textures[idx];
-        futures.push_back(std::async(std::launch::async, [&tex, idx, highQuality]() {
-            auto result = CompressBC7(tex, highQuality);
-            return std::make_pair(idx, std::move(result));
-        }));
+    std::vector<std::future<void>> futures;
+    futures.reserve(numThreads);
+    for (unsigned int n = 0; n < numThreads; ++n) {
+        futures.push_back(std::async(std::launch::async, worker));
+    }
+    for (auto& f : futures) {
+        f.get();
     }
 
     // Collect results and store in texture.bc7Data
@@ -258,8 +269,9 @@ void TextureCompressor::ParallelCompressTextures(
     size_t totalCompressedBytes = 0;
     size_t totalUncompressedBytes = 0;
 
-    for (auto& f : futures) {
-        auto [idx, compressedOpt] = f.get();
+    for (size_t t = 0; t < results.size(); ++t) {
+        const size_t idx = compressibleIndices[t];
+        auto& compressedOpt = results[t];
         if (compressedOpt.has_value()) {
             const auto& compressed = compressedOpt.value();
             Texture& tex = textures[idx];
