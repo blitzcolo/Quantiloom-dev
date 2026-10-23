@@ -80,6 +80,24 @@ void main(inout Payload payload) {
     LightingParams lut = lightingParams[0];
     AtmosNNHeader atmos = atmosNNHeader[0];
 
+    // NN atmosphere composition for a primary miss. closesthit.rchit applies
+    // L_pixel = tau * L_surface + L_path to every depth-0 hit, per wavelength
+    // (or per RGB channel); a primary miss has a surface radiance too -- the
+    // sky at the end of the ray -- and leaving it uncomposited opened a step
+    // between sky and ground pixels at the horizon, exactly the
+    // discontinuity the contract forbids. RayTCurrent() in a miss shader is
+    // the ray's TMax (the camera far plane for a primary ray), which is the
+    // range the LUT wants. Secondary misses return raw surface radiance for
+    // the parent vertex's BRDF integration and must not composite, exactly
+    // as in closesthit.
+    const bool atmosComposite = (atmos.enabled != 0) && (payload.depth == 0);
+    float atmosA = 0.0;
+    float atmosAz = 0.0;
+    if (atmosComposite) {
+        atmosA = AtmosCoordA(atmos, WorldRayDirection(), RayTCurrent());
+        atmosAz = AtmosRelAz(atmos, WorldRayDirection());
+    }
+
     // Check if spectral solar LUT is available
     bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
@@ -96,6 +114,16 @@ void main(inout Payload payload) {
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
         payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
+        // Composition contract as in closesthit: the visible network's three
+        // lambda slots carry R/G/B (650/550/450 nm).
+        if (atmosComposite) {
+            [unroll]
+            for (uint ch = 0; ch < 3; ++ch) {
+                const float tau_ch = SampleAtmosTau(atmos, atmosNNData, ch, atmosA);
+                const float lpath_ch = SampleAtmosLpath(atmos, atmosNNData, ch, atmosA, atmosAz);
+                payload.radiance[ch] = tau_ch * payload.radiance[ch] + lpath_ch;
+            }
+        }
         payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
     } else if (IsVisMode(SPEC_SPECTRAL_MODE)) {
@@ -166,6 +194,20 @@ void main(inout Payload payload) {
             } else {
                 // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
                 sky_radiance_lambda = RgbIlluminantAt(skyFallback, cieSample.w, lambda);
+            }
+
+            // A primary miss composes like a primary hit: the sky at the end
+            // of the ray is L_surface in the contract. A hero or quartet ray
+            // takes the nearest baked sample, as closesthit does for the same
+            // ray.
+            if (atmosComposite) {
+                const uint atmosIdx = (heroRay || carriesQuartet)
+                    ? (uint)clamp(round((lambda - LAMBDA_MIN_VIS) / LAMBDA_STEP),
+                                  0.0, float(NUM_WAVELENGTH_SAMPLES - 1))
+                    : i;
+                sky_radiance_lambda =
+                    SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * sky_radiance_lambda +
+                    SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             }
 
             // Weight by CIE color matching functions (use LUT for high precision)
@@ -246,6 +288,15 @@ void main(inout Payload payload) {
             radiance_spectral = 0.0;
         }
 
+        if (atmosComposite) {
+            // As in closesthit's SINGLE branch: one lambda, index 0 unless the
+            // camera-response grid says otherwise.
+            const uint atmosIdx = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT
+                ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda) : 0u;
+            radiance_spectral = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * radiance_spectral +
+                                SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
+        }
+
         payload.radiance = float4(radiance_spectral, radiance_spectral, radiance_spectral, 0.0);
         payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
     } else if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_SWIR_FUSED ||
@@ -293,6 +344,24 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = singleRay ? 0.0 : sky_power_rgb;
+            }
+
+            // A primary miss composes like a primary hit; the index scheme is
+            // closesthit's SWIR branch: the fused sweep walks the baked grid,
+            // a carried wavelength takes the nearest sample (or the camera
+            // grid), a single-wavelength render reads the one-sample LUT.
+            if (atmosComposite) {
+                const uint atmosIdx = heroRay
+                    ? (cameraRay
+                        ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda)
+                        : (singleRay
+                            ? 0u
+                            : (uint)clamp(round((lambda - SWIR_LAMBDA_MIN) / lambda_step),
+                                          0.0, float(NUM_SWIR_SAMPLES - 1))))
+                    : i;
+                sky_radiance_lambda =
+                    SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * sky_radiance_lambda +
+                    SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             }
 
             if (heroRay) {
@@ -364,6 +433,19 @@ void main(inout Payload payload) {
                 sky_radiance_lambda = sky_irr / PI;
             } else {
                 sky_radiance_lambda = sky_power_rgb;
+            }
+
+            // A primary miss composes like a primary hit; the index scheme is
+            // closesthit's NIR branch: the sweep walks the baked grid, a
+            // carried wavelength takes the nearest sample.
+            if (atmosComposite) {
+                const uint atmosIdx = heroRay
+                    ? (uint)clamp(round((lambda - NIR_LAMBDA_MIN) / lambda_step),
+                                  0.0, float(NUM_NIR_SAMPLES - 1))
+                    : i;
+                sky_radiance_lambda =
+                    SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * sky_radiance_lambda +
+                    SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             }
 
             if (heroRay) {
@@ -471,6 +553,15 @@ void main(inout Payload payload) {
                                            T_atmosphere, lambda);
             } else {
                 L_sky = IRPlanckRadiance(T_atmosphere, lambda);
+            }
+
+            // A primary miss composes like a primary hit: the sky at the end
+            // of the ray goes through the view path like any other surface
+            // radiance. atmosIdx was chosen above by the same rule closesthit
+            // uses (sweep index, or the nearest sample for a carried lambda).
+            if (atmosComposite) {
+                L_sky = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * L_sky +
+                        SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             }
 
             if (heroRay) {
