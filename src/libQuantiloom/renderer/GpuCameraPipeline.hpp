@@ -41,6 +41,11 @@ struct DynamicExposureInput {
     const GpuImage* strataDepth = nullptr;   // 2D array R32F, same layering
     const DynamicLayerCamera* layerCameras = nullptr;  // strataCount entries
     u32 strataCount = 1;
+    // Array layer count the two strata images actually carry. RecordMeasurement
+    // rejects a strataCount above it so the compositor cannot read past the
+    // last layer; 0 means the caller does not declare it and the check is
+    // skipped.
+    u32 strataLayers = 0;
     f64 firstRowMidSeconds = 0.0;            // t0: midpoint of row 0's exposure
     f64 exposureSeconds = 0.0;               // E: per-row integration window
     f64 rowDelaySeconds = 0.0;               // rolling-shutter per-row offset (0 = global)

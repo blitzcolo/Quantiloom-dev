@@ -1454,6 +1454,12 @@ Result<void, String> GpuCameraPipeline::RecordMeasurement(
     }
 
     if (stratified) {
+        if (dynamic.strataCount > kCameraTimeStrataMax)
+            return Result<void, String>::Err(
+                "GPU camera strata count exceeds the supported maximum");
+        if (dynamic.strataLayers > 0u && dynamic.strataCount > dynamic.strataLayers)
+            return Result<void, String>::Err(
+                "GPU camera strata count exceeds the strata images' layer count");
         // The per-stratum frames change per acquisition. Write them inside
         // the command buffer (vkCmdUpdateBuffer, 640 bytes of the 64 KiB
         // limit) so the update is ordered with the compositor's read and

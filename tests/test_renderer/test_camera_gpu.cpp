@@ -1832,6 +1832,7 @@ Result<void, String> RecordDynamicMeasurement(
     dynamic.strataDepth = &strataDepth;
     dynamic.layerCameras = frames.data();
     dynamic.strataCount = count;
+    dynamic.strataLayers = kDynamicStrata;
     dynamic.firstRowMidSeconds = spec.t0;
     dynamic.exposureSeconds = spec.exposureSeconds;
     dynamic.rowDelaySeconds = spec.rowDelaySeconds;
@@ -1845,6 +1846,43 @@ Result<void, String> RecordDynamicMeasurement(
 }
 
 } // namespace
+
+TEST_F(CameraGpuTest, StratifiedCompositorRejectsCountAboveImageLayers) {
+    const auto spec = MakeDynamicSceneSpec();
+    std::vector<f32> rateRgba, depth;
+    RasterizeSpec(spec, rateRgba, depth);
+    auto strataRate = UploadStrataImage(Device(), kDynamicWidth, kDynamicHeight,
+                                        kDynamicStrata,
+                                        VK_FORMAT_R32G32B32A32_SFLOAT, rateRgba,
+                                        4u);
+    auto strataDepth = UploadStrataImage(Device(), kDynamicWidth,
+                                         kDynamicHeight, kDynamicStrata,
+                                         VK_FORMAT_R32_SFLOAT, depth, 1u);
+    auto created = GpuCameraPipeline::Create(Device(), kDynamicWidth,
+                                             kDynamicHeight);
+    ASSERT_TRUE(created.has_value());
+    auto pipeline = std::move(created.value());
+    ASSERT_TRUE(pipeline->Configure(ThermalConfigFor(kDynamicWidth,
+                                                     kDynamicHeight))
+                    .has_value());
+    std::array<DynamicLayerCamera, kCameraTimeStrataMax> frames{};
+    DynamicExposureInput dynamic;
+    dynamic.strataRate = strataRate.get();
+    dynamic.strataDepth = strataDepth.get();
+    dynamic.layerCameras = frames.data();
+    dynamic.strataCount = kDynamicStrata;
+    // The images carry kDynamicStrata layers; declaring one fewer must be
+    // rejected instead of letting the compositor read past the last layer.
+    dynamic.strataLayers = kDynamicStrata - 1u;
+    Result<void, String> status = Result<void, String>::Ok();
+    GpuCameraPipeline::TimingQueries timing{VK_NULL_HANDLE, 0u};
+    CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
+        status = pipeline->RecordMeasurement(cmd, *strataRate, 0, spec.t0,
+                                             timing, dynamic);
+    });
+    EXPECT_FALSE(status.has_value());
+    EXPECT_NE(status.error().find("layer count"), std::string::npos);
+}
 
 TEST_F(CameraGpuTest, StratifiedCompositorMatchesAnchorsAndCountsDisocclusion) {
     const auto spec = MakeDynamicSceneSpec();
