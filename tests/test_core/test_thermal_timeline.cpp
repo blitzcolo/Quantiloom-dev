@@ -474,3 +474,29 @@ TEST(ThermalTimelineTest, NoSunVisibilityAnywhereIsShadowNotFullSun) {
         SampleSunVisibilityAt(SunVisibilityTable{}, MakeOpenSkyExchange(2), 0.0, 2);
     EXPECT_EQ(open, (Vector<f32>{1.0f, 1.0f}));
 }
+
+TEST(ThermalTimelineTest, ANonPositiveTimestepFallsBackToTheDefault) {
+    // The config refuses these, but a host can fill a Desc itself. Every grid
+    // index divides by the step, so a zero, a negative or a NaN one used to
+    // give a clock that never moved; it now steps at the Desc default.
+    const auto elements = OneElement();
+    const Vector<ThermalMaterial> materials{ConcreteMaterial()};
+    const auto exchange = MakeOpenSkyExchange(1);
+    const auto forcing = ConstantForcing();
+    const Vector<std::pair<f64, ThermalForcing>> noSeries;
+    const SunVisibilityTable table = OneColumnTable(1, 0.0);
+
+    for (const f64 bad : {0.0, -60.0, std::numeric_limits<f64>::quiet_NaN()}) {
+        auto desc = DefaultDesc();
+        desc.initial = InitialCondition::Uniform;
+        desc.timestep_s = bad;
+        CpuCrankNicolsonStepper stepper;
+        ThermalTimeline timeline(desc, elements, materials, exchange, table, noSeries, forcing,
+                                 stepper);
+
+        const ThermalState& state = timeline.StateAt(1.0);
+        EXPECT_EQ(timeline.LastStepCount(), 60u) << "timestep " << bad;
+        EXPECT_TRUE(std::isfinite(state.Surface(0))) << "timestep " << bad;
+        EXPECT_GT(state.Surface(0), desc.initialTemperature_K) << "the sun did something";
+    }
+}

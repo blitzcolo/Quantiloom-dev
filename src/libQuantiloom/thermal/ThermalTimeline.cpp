@@ -147,8 +147,38 @@ ThermalTimeline::ThermalTimeline(const Desc& desc, const Vector<ThermalElement>&
 }
 
 void ThermalTimeline::Initialise() {
-    const f64 strideSteps =
-        (m_desc.checkpointStride_h * 3600.0) / std::max(m_desc.timestep_s, 1e-6);
+    // ResolveRenderConfig refuses a config with any of these wrong. A host that
+    // fills a Desc itself -- the interactive preview's SetParams, a tool --
+    // does not pass through it, and everything below divides by the step: a
+    // zero, negative or NaN one makes every grid index a NaN cast to an
+    // integer and a clock that never advances, a NaN stride or start does the
+    // same to the checkpoints and the grid. Such a value is reported and the
+    // Desc default stands in for it.
+    const Desc defaults;
+    if (!(std::isfinite(m_desc.timestep_s) && m_desc.timestep_s > 0.0)) {
+        QL_LOG_ERROR("  Thermal: timestep {} s is not a positive number; using {} s",
+                     m_desc.timestep_s, defaults.timestep_s);
+        m_desc.timestep_s = defaults.timestep_s;
+    }
+    if (!(std::isfinite(m_desc.checkpointStride_h) && m_desc.checkpointStride_h > 0.0)) {
+        QL_LOG_ERROR("  Thermal: checkpoint stride {} h is not a positive number; "
+                     "using {} h",
+                     m_desc.checkpointStride_h, defaults.checkpointStride_h);
+        m_desc.checkpointStride_h = defaults.checkpointStride_h;
+    }
+    if (!std::isfinite(m_desc.startTime_h)) {
+        QL_LOG_ERROR("  Thermal: start time {} h is not a number; using {} h",
+                     m_desc.startTime_h, defaults.startTime_h);
+        m_desc.startTime_h = defaults.startTime_h;
+    }
+    if (m_desc.nodeCount < 2) {
+        // A one-node slab has no interior to conduct through; the state below
+        // was always sized with two, and now the Desc says so too.
+        QL_LOG_ERROR("  Thermal: {} layers cannot conduct; using 2", m_desc.nodeCount);
+        m_desc.nodeCount = 2;
+    }
+
+    const f64 strideSteps = (m_desc.checkpointStride_h * 3600.0) / m_desc.timestep_s;
     m_checkpointStride = std::max(static_cast<i64>(std::round(strideSteps)), i64{1});
 
     // Where each epoch begins on the step grid. A boundary that falls inside a
