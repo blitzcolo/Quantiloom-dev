@@ -51,32 +51,36 @@ struct ExchangePushConstants {
 };
 static_assert(sizeof(ExchangePushConstants) == 36, "ExchangePushConstants size mismatch");
 
-/// Make the view factors reciprocal and keep every row summing to one.
+/// Make the view factors reciprocal, and let the sky take what is left.
 ///
 /// Each row is an independent estimate from its own element's rays, so
-/// A_i F_ij and A_j F_ji disagree by the estimator's noise (and by the top-K
-/// truncation). The energy balance gathers along rows -- element i absorbs
-/// sum_j F_ij sigma T_j^4 while j emits its full sigma T_j^4 -- so what j emits
-/// reaches the others only if the column sums of A_i F_ij equal A_j (1 - sky_j),
-/// which is reciprocity. Without it the exchange between a pair creates or
-/// destroys energy.
+/// A_i F_ij and A_j F_ji disagree by the estimator's noise, and the top-K
+/// truncation makes the support itself one-sided: a small element often keeps
+/// a large neighbour in its row while the large element's row drops the small
+/// one. The energy balance gathers along rows (element i absorbs
+/// sum_j F_ij sigma T_j^4 while j emits its full sigma T_j^4), so what j emits
+/// reaches the others only if A_i F_ij = A_j F_ji.
 ///
-/// W = A F is symmetrised to S = (W + W^T) / 2, then scaled symmetrically,
-/// M = D S D, until every row of M sums to A_i (1 - sky_i), which is the
-/// constraint the rows already met. The scaling is a damped symmetric Sinkhorn
-/// iteration. If it does not converge -- noise can make the targets infeasible
-/// for a pathological element -- the rows are left as they were, normalised
-/// but not reciprocal, which is the pre-existing behaviour.
-///
-/// @return true if the matrix was replaced
-bool EnforceReciprocity(thermal::CsrMatrix& viewFactors, const Vector<f32>& skyFraction,
+/// The area-weighted exchange G_ij = A_i F_ij is made symmetric once, by
+/// construction: where both rows hold the pair, G is their mean; where only one
+/// does, the other was truncated rather than zero (reciprocity says the value
+/// is the same), so G takes the one that exists. G is then scaled by a
+/// symmetric D G D toward the row sums the rays measured, A_i (1 - sky_i), with
+/// D bounded to [1/2, 2] so that one pathological element cannot distort its
+/// neighbours, and any row still above A_i is scaled down together with its
+/// partners. Rows are F_ij = G_ij / A_i, and the sky fraction becomes whatever
+/// remains, 1 - sum_j F_ij, so every row sums to one with its sky fraction and
+/// the matrix is reciprocal whatever the iteration reached.
+void EnforceReciprocity(thermal::CsrMatrix& viewFactors, Vector<f32>& skyFraction,
                         const Vector<thermal::ThermalElement>& elements) {
-    constexpr u32 kMaxIterations = 200;
-    constexpr f64 kTolerance = 1e-4;
+    constexpr u32 kMaxIterations = 50;
+    constexpr f64 kTolerance = 1e-3;
+    constexpr f64 kMinScale = 0.5;
+    constexpr f64 kMaxScale = 2.0;
 
     const usize n = elements.size();
     if (viewFactors.column.empty() || viewFactors.rowStart.size() != n + 1) {
-        return false;
+        return;
     }
 
     Vector<f64> area(n);
@@ -90,15 +94,17 @@ bool EnforceReciprocity(thermal::CsrMatrix& viewFactors, const Vector<f32>& skyF
         u32 row;
         u32 column;
         f64 value;
+        u32 count;
     };
     Vector<Entry> entries;
     entries.reserve(viewFactors.column.size() * 2);
     for (usize i = 0; i < n; ++i) {
         for (u32 k = viewFactors.rowStart[i]; k < viewFactors.rowStart[i + 1]; ++k) {
             const u32 j = viewFactors.column[k];
-            const f64 half = 0.5 * area[i] * static_cast<f64>(viewFactors.value[k]);
-            entries.push_back({static_cast<u32>(i), j, half});
-            entries.push_back({j, static_cast<u32>(i), half});
+            if (j >= n || j == i || !(area[i] > 0.0) || !(area[j] > 0.0)) continue;
+            const f64 flux = area[i] * static_cast<f64>(viewFactors.value[k]);
+            entries.push_back({static_cast<u32>(i), j, flux, 1});
+            entries.push_back({j, static_cast<u32>(i), flux, 1});
         }
     }
     std::sort(entries.begin(), entries.end(), [](const Entry& a, const Entry& b) {
@@ -109,20 +115,24 @@ bool EnforceReciprocity(thermal::CsrMatrix& viewFactors, const Vector<f32>& skyF
         if (merged > 0 && entries[merged - 1].row == entries[k].row &&
             entries[merged - 1].column == entries[k].column) {
             entries[merged - 1].value += entries[k].value;
+            entries[merged - 1].count += entries[k].count;
         } else {
             entries[merged++] = entries[k];
         }
     }
     entries.resize(merged);
+    // Mean where both rows hold the pair, the one value where only one does.
+    for (Entry& entry : entries) entry.value /= static_cast<f64>(entry.count);
 
     Vector<usize> start(n + 1, 0);
     for (const Entry& entry : entries) ++start[entry.row + 1];
     for (usize i = 0; i < n; ++i) start[i + 1] += start[i];
 
+    // Symmetric scaling toward the measured row sums. Best effort: whatever it
+    // reaches, the sky below absorbs the remainder.
     Vector<f64> d(n, 1.0);
     Vector<f64> gathered(n, 0.0);
-    bool converged = false;
-    for (u32 iteration = 0; iteration < kMaxIterations && !converged; ++iteration) {
+    for (u32 iteration = 0; iteration < kMaxIterations; ++iteration) {
         f64 residual = 0.0;
         for (usize i = 0; i < n; ++i) {
             f64 sum = 0.0;
@@ -130,55 +140,52 @@ bool EnforceReciprocity(thermal::CsrMatrix& viewFactors, const Vector<f32>& skyF
                 sum += entries[k].value * d[entries[k].column];
             }
             gathered[i] = sum;
-            if (target[i] > 0.0) {
-                residual = std::max(residual, sum > 0.0 ? std::abs(d[i] * sum / target[i] - 1.0)
-                                                         : 1.0);
+            if (target[i] > 0.0 && sum > 0.0) {
+                residual = std::max(residual, std::abs(d[i] * sum / target[i] - 1.0));
             }
         }
-        if (residual < kTolerance) {
-            converged = true;
-            break;
-        }
+        if (residual < kTolerance) break;
         for (usize i = 0; i < n; ++i) {
-            d[i] = (target[i] > 0.0 && gathered[i] > 0.0)
-                       ? std::sqrt(d[i] * target[i] / gathered[i])
-                       : 0.0;
+            if (target[i] > 0.0 && gathered[i] > 0.0) {
+                d[i] = std::clamp(std::sqrt(d[i] * target[i] / gathered[i]), kMinScale,
+                                  kMaxScale);
+            }
         }
     }
-    if (!converged) {
-        QL_LOG_WARN("Thermal exchange: the view factors could not be made reciprocal; "
-                    "keeping the per-row estimates");
-        return false;
+    for (Entry& entry : entries) entry.value *= d[entry.row] * d[entry.column];
+
+    // A row may not exchange with more than its whole hemisphere. Scale the
+    // offending rows down, each pair by the smaller of its two factors so the
+    // matrix stays symmetric.
+    Vector<f64> rowTotal(n, 0.0);
+    for (const Entry& entry : entries) rowTotal[entry.row] += entry.value;
+    Vector<f64> cap(n, 1.0);
+    for (usize i = 0; i < n; ++i) {
+        if (rowTotal[i] > area[i]) cap[i] = area[i] / rowTotal[i];
+    }
+    std::fill(rowTotal.begin(), rowTotal.end(), 0.0);
+    for (Entry& entry : entries) {
+        entry.value *= std::min(cap[entry.row], cap[entry.column]);
+        rowTotal[entry.row] += entry.value;
     }
 
     thermal::CsrMatrix result;
     result.rowStart.reserve(n + 1);
     result.rowStart.push_back(0);
     for (usize i = 0; i < n; ++i) {
-        const usize first = result.column.size();
-        f64 rowSum = 0.0;
-        if (area[i] > 0.0 && d[i] > 0.0) {
-            for (usize k = start[i]; k < start[i + 1]; ++k) {
-                const f64 value = d[i] * entries[k].value * d[entries[k].column] / area[i];
-                if (value > 0.0) {
-                    result.column.push_back(entries[k].column);
-                    result.value.push_back(static_cast<f32>(value));
-                    rowSum += value;
-                }
-            }
-        }
-        // The iteration stopped inside its tolerance; close the last fraction
-        // of a percent so the row sums to one with its sky fraction exactly.
-        if (rowSum > 0.0) {
-            const f64 scale = (1.0 - static_cast<f64>(skyFraction[i])) / rowSum;
-            for (usize k = first; k < result.value.size(); ++k) {
-                result.value[k] = static_cast<f32>(result.value[k] * scale);
+        for (usize k = start[i]; k < start[i + 1]; ++k) {
+            const f64 value = entries[k].value / area[i];
+            if (value > 0.0) {
+                result.column.push_back(entries[k].column);
+                result.value.push_back(static_cast<f32>(value));
             }
         }
         result.rowStart.push_back(static_cast<u32>(result.column.size()));
+        if (area[i] > 0.0) {
+            skyFraction[i] = static_cast<f32>(std::clamp(1.0 - rowTotal[i] / area[i], 0.0, 1.0));
+        }
     }
     viewFactors = std::move(result);
-    return true;
 }
 
 }  // namespace
