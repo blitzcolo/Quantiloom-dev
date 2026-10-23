@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
 
 namespace quantiloom::rendercore {
@@ -835,15 +836,32 @@ bool IsDoubleSided(const Scene& scene, u32 materialId) {
 }
 
 
-std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VmaAllocator allocator,
+std::unique_ptr<GpuBuffer> UploadGeometryBuffer(VulkanContext& ctx,
                                                 const void* data, size_t bytes,
                                                 VkBufferUsageFlags extraUsage = 0) {
+    // Device-local: every consumer is device-side -- BLAS build inputs read by
+    // device address and the attribute buffers bound as SSBOs -- so the merged
+    // geometry never needs to be host-visible, and host-visible memory makes
+    // every vertex fetch cross the PCIe bus.
     auto buffer = std::make_unique<GpuBuffer>(
-        allocator, bytes,
+        ctx.GetAllocator(), bytes,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
             extraUsage,
-        VMA_MEMORY_USAGE_CPU_TO_GPU);
-    buffer->Upload(data, bytes);
+        VMA_MEMORY_USAGE_GPU_ONLY);
+
+    GpuBuffer staging(ctx.GetAllocator(), bytes,
+                      VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VMA_MEMORY_USAGE_CPU_ONLY);
+    void* mapped = staging.Map();
+    std::memcpy(mapped, data, bytes);
+    staging.Unmap();
+
+    CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
+        VkBufferCopy copyRegion{};
+        copyRegion.srcOffset = 0;
+        copyRegion.dstOffset = 0;
+        copyRegion.size = bytes;
+        vkCmdCopyBuffer(cmd, staging.GetHandle(), buffer->GetHandle(), 1, &copyRegion);
+    });
     return buffer;
 }
 
@@ -958,19 +976,19 @@ SceneGeometry SceneGeometry::Build(VulkanContext& ctx, const Scene& scene) {
     LogMergeValidation(vertices, indices, normals);
 
     VmaAllocator allocator = ctx.GetAllocator();
-    result.m_vertices = UploadGeometryBuffer(allocator, vertices.data(),
+    result.m_vertices = UploadGeometryBuffer(ctx, vertices.data(),
         vertices.size() * sizeof(glm::vec3),
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_indices = UploadGeometryBuffer(allocator, indices.data(),
+    result.m_indices = UploadGeometryBuffer(ctx, indices.data(),
         indices.size() * sizeof(u32),
         VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
             VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
-    result.m_normals = UploadGeometryBuffer(allocator, normals.data(),
+    result.m_normals = UploadGeometryBuffer(ctx, normals.data(),
                                             normals.size() * sizeof(glm::vec3));
-    result.m_uvs = UploadGeometryBuffer(allocator, uvs.data(),
+    result.m_uvs = UploadGeometryBuffer(ctx, uvs.data(),
                                         uvs.size() * sizeof(glm::vec2));
-    result.m_tangents = UploadGeometryBuffer(allocator, tangents.data(),
+    result.m_tangents = UploadGeometryBuffer(ctx, tangents.data(),
                                              tangents.size() * sizeof(glm::vec4));
     result.m_vertexCount = nVerts;
     result.m_indexCount = nIndices;
