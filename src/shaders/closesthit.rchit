@@ -3780,7 +3780,14 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // down. This band has no diffuse/specular split to layer onto -- one
             // total reflectance, sampled through whichever lobe shape -- so the
             // sheen lobe is the first directional BRDF the sun sees here.
-            if (rhoSheen_b > 0.0) {
+            //
+            // Gated on the material carrying a sheen curve, not on the value at
+            // lambda_b: a measured curve can be zero at the one sampled
+            // wavelength and positive elsewhere, and dropping the whole sweep
+            // because a single draw landed on a zero was a biased, per-sample
+            // flicker. Without a curve these bands evaluate sheen to 0 anyway
+            // (allowRgbUpsample is false), so the gate changes nothing there.
+            if (material.sheenReflectanceCurveIndex >= 0) {
                 const float rhoSheen_lambda = EvaluateSheenReflectance(
                     spectralCurves, material, sSheen, lambda, false);
                 const float sheenScale_lambda =
@@ -4068,7 +4075,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // 3b. Sheen, exactly as in SWIR: layered on, the Lambertian term
             // scaled down to pay for it, and the sun term needing its irradiance
             // back because sun_radiance_lambda already carries a folded 1/PI.
-            if (rhoSheen_b > 0.0) {
+            // Gated on the sheen curve's presence, not its value at lambda_b --
+            // see the SWIR branch for why.
+            if (material.sheenReflectanceCurveIndex >= 0) {
                 const float rhoSheen_lambda = EvaluateSheenReflectance(
                     spectralCurves, material, sSheen, lambda, false);
                 const float sheenScale_lambda =
