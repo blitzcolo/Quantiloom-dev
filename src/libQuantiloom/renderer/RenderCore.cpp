@@ -820,6 +820,15 @@ void ForEachInstance(const Scene& scene, F&& fn) {
         if (!node.active) {
             continue;  // tombstoned by RemoveNode; index reserved, no instances
         }
+        if (node.meshIndex >= scene.meshes.size()) {
+            // TimelineState guards the same access; an out-of-range reference
+            // here would index past the mesh table (the scene crossed from
+            // outside data, e.g. a hand-built or externally edited Scene).
+            QL_LOG_WARN("  Node '{}' references mesh index {} but the scene has "
+                        "{} meshes; skipping",
+                        node.name, node.meshIndex, scene.meshes.size());
+            continue;
+        }
         const Mesh& mesh = scene.meshes[node.meshIndex];
         const size_t base = meshToFirstPrim[node.meshIndex];
         for (size_t prim = 0; prim < mesh.primitives.size(); ++prim) {
