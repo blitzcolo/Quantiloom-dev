@@ -18,6 +18,7 @@
 #include <cstring>
 #include <algorithm>
 #include <future>
+#include <mutex>
 #include <thread>
 #include <chrono>
 
@@ -34,16 +35,15 @@
 
 namespace quantiloom {
 
-// Initialize bc7enc once
-static bool g_bc7encInitialized = false;
-
+// Initialize bc7enc once. CompressBC7 runs on several worker threads at once, so
+// the guard has to be one that orders the writes the init makes.
 static void EnsureBC7EncInitialized() {
-    if (!g_bc7encInitialized) {
+    static std::once_flag s_initOnce;
+    std::call_once(s_initOnce, [] {
         bc7enc_compress_block_init();
         rgbcx::init();
-        g_bc7encInitialized = true;
         QL_LOG_INFO("BC7 encoder initialized");
-    }
+    });
 }
 
 bool TextureCompressor::IsAvailable() {
