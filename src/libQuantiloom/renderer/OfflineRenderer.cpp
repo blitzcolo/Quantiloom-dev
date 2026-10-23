@@ -2923,7 +2923,17 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT | VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
         poolInfo.queueFamilyIndex = context.GetGraphicsQueueFamily();
 
-        VkCommandPool cmdPool = VK_NULL_HANDLE;
+        // Owns the pool and the fence so that every throw below releases them.
+        struct SubmitResources {
+            VkDevice device;
+            VkCommandPool pool = VK_NULL_HANDLE;
+            VkFence fence = VK_NULL_HANDLE;
+            ~SubmitResources() {
+                if (fence != VK_NULL_HANDLE) vkDestroyFence(device, fence, nullptr);
+                if (pool != VK_NULL_HANDLE) vkDestroyCommandPool(device, pool, nullptr);
+            }
+        } submitResources{context.GetDevice()};
+        VkCommandPool& cmdPool = submitResources.pool;
         if (vkCreateCommandPool(context.GetDevice(), &poolInfo, nullptr, &cmdPool) != VK_SUCCESS) {
             throw std::runtime_error("Failed to create command pool for batched rendering");
         }
@@ -2935,12 +2945,16 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
         allocInfo.commandBufferCount = 1;
 
         VkCommandBuffer cmd = VK_NULL_HANDLE;
-        vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd);
+        if (vkAllocateCommandBuffers(context.GetDevice(), &allocInfo, &cmd) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to allocate offline render command buffer");
+        }
 
         VkFenceCreateInfo fenceInfo{};
         fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        VkFence fence = VK_NULL_HANDLE;
-        vkCreateFence(context.GetDevice(), &fenceInfo, nullptr, &fence);
+        VkFence& fence = submitResources.fence;
+        if (vkCreateFence(context.GetDevice(), &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+            throw std::runtime_error("Failed to create offline render fence");
+        }
 
         for (u32 batchStart = 0; batchStart < spp;) {
             const u32 batchSize = batchScheduler.NextBatchSize(spp - batchStart);
@@ -2992,9 +3006,6 @@ OfflineRenderOutput OfflineRenderer::Impl::RenderSingleFrame() {
             largestBatch = std::max(largestBatch, batchSize);
             batchStart = batchEnd;
         }
-
-        vkDestroyFence(context.GetDevice(), fence, nullptr);
-        vkDestroyCommandPool(context.GetDevice(), cmdPool, nullptr);
 
         QL_LOG_INFO("  All samples completed!");
         QL_LOG_INFO("  GPU submits: {} (largest batch: {} samples)", submitCount, largestBatch);
