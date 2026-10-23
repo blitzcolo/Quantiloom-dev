@@ -75,7 +75,7 @@ struct ExchangePushConstants {
     uint   rayCount;       // hemisphere rays per element; 0 = sun-only pass
     uint   sunRayCount;    // rays toward the sun, for a soft shadow edge
     float  sunAngularRadius;  // radians; 0.00465 is the real sun
-    float  rayOffset;      // how far off the surface a ray starts
+    float  rayOffset;      // floor of how far off the surface a ray starts
     uint   sunOutputOffset;   // element offset into sunVisibility for this direction
 };
 [[vk::push_constant]] ExchangePushConstants pc;
@@ -206,10 +206,13 @@ void main(uint3 tid : SV_DispatchThreadID) {
     }
 
     // Offset along the normal, so a ray does not immediately re-hit the
-    // triangle it left. Scaled with the element rather than fixed: a scene in
-    // millimetres and a scene in metres need different epsilons, and the area
-    // is the only length this shader has.
-    const float3 origin = element.centre + element.normal * pc.rayOffset;
+    // triangle it left. Scaled with this element's own size rather than fixed
+    // or averaged over the mesh: a scene in millimetres and a scene in metres
+    // need different epsilons, and so do a sliver and a large triangle in the
+    // same scene. The area is the only length this shader has; pc.rayOffset
+    // is the floor under it.
+    const float rayOffset = max(pc.rayOffset, sqrt(element.area) * 1e-3);
+    const float3 origin = element.centre + element.normal * rayOffset;
 
     // Hemisphere pass: only when rayCount > 0. A sun-only batch pass sets
     // rayCount to zero and skips the hemisphere entirely.

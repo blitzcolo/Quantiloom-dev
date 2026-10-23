@@ -22,6 +22,12 @@ namespace {
 
 constexpr u32 kSkyRecord = 0xFFFFFFFFu;
 
+/// The smallest distance a ray starts off its surface. The shader scales the
+/// offset with each element's own size (sqrt(area) * 1e-3) and uses this only
+/// as the floor, so a sliver in a metre-scale scene is not offset by the mean
+/// triangle's size.
+constexpr f32 kRayOffsetFloor = 1e-5f;
+
 /// Mirrors ThermalElementGpu in thermal_exchange.rayq.hlsl. `centre`, not
 /// `centroid`: the latter is an HLSL interpolation modifier and will not parse
 /// as a member name, which is worth knowing before renaming it back.
@@ -213,15 +219,12 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     VmaAllocator allocator = m_impl->context.GetAllocator();
 
     Vector<ThermalElementGpu> gpuElements(elementCount);
-    f32 meanArea = 0.0f;
     for (u32 e = 0; e < elementCount; ++e) {
         gpuElements[e].centre = elements[e].centroid;
         gpuElements[e].area = elements[e].area_m2;
         gpuElements[e].normal = elements[e].normal;
         gpuElements[e].materialId = elements[e].materialId;
-        meanArea += elements[e].area_m2;
     }
-    meanArea /= static_cast<f32>(elementCount);
 
     GpuBuffer elementBuffer(allocator, gpuElements.size() * sizeof(ThermalElementGpu),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -287,7 +290,7 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
     pc.rayCount = rays;
     pc.sunRayCount = params.sunRays;
     pc.sunAngularRadius = params.sunAngularRadius;
-    pc.rayOffset = std::max(1e-5f, std::sqrt(std::max(meanArea, 0.0f)) * 1e-3f);
+    pc.rayOffset = kRayOffsetFloor;
     pc.sunOutputOffset = 0;
 
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
@@ -414,15 +417,12 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
     VmaAllocator allocator = m_impl->context.GetAllocator();
 
     Vector<ThermalElementGpu> gpuElements(elementCount);
-    f32 meanArea = 0.0f;
     for (u32 e = 0; e < elementCount; ++e) {
         gpuElements[e].centre = elements[e].centroid;
         gpuElements[e].area = elements[e].area_m2;
         gpuElements[e].normal = elements[e].normal;
         gpuElements[e].materialId = elements[e].materialId;
-        meanArea += elements[e].area_m2;
     }
-    meanArea /= static_cast<f32>(elementCount);
 
     GpuBuffer elementBuffer(allocator, gpuElements.size() * sizeof(ThermalElementGpu),
                             VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
@@ -483,8 +483,6 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
     vkUpdateDescriptorSets(m_impl->device, static_cast<u32>(writes.size()), writes.data(),
                            0, nullptr);
 
-    const f32 rayOffset =
-        std::max(1e-5f, std::sqrt(std::max(meanArea, 0.0f)) * 1e-3f);
     const u32 groups = (elementCount + 63) / 64;
 
     CommandHelper::ExecuteImmediate(m_impl->context, [&](VkCommandBuffer cmd) {
@@ -500,7 +498,7 @@ Vector<f32> ThermalExchangePrecompute::RunSunVisibility(
             pc.rayCount = 0;  // no hemisphere
             pc.sunRayCount = sunRays;
             pc.sunAngularRadius = sunAngularRadius;
-            pc.rayOffset = rayOffset;
+            pc.rayOffset = kRayOffsetFloor;
             pc.sunOutputOffset = k * elementCount;
 
             vkCmdPushConstants(cmd, m_impl->pipelineLayout,
