@@ -212,14 +212,24 @@ u64 UnmixTexels(const u8* rgba, const u64 texelCount, const bool srgb,
     // into the clamp, so the correction feeds back. It converges quickly because
     // the clipped population only shrinks -- a handful of iterations, and the
     // loop exits as soon as the encoded mean is within a UNORM8 quantum of 1.
+    // Parallel over texels like the solve and encode passes: the fixed-point
+    // loop below calls this up to 8 times, and serially that is 8 full scans
+    // of the weight texture.
     const auto encodedMean = [&](const f32 scale) {
-        f64 sum = 0.0;
-        for (usize i = 0; i < count; ++i) {
-            for (i32 c = 0; c < k; ++c) {
-                const f32 w = weights[i * Material::MAX_ENDMEMBERS + static_cast<usize>(c)] * scale;
-                sum += std::min(static_cast<f64>(w), static_cast<f64>(kWeightScale));
-            }
-        }
+        const f64 sum = std::transform_reduce(
+            std::execution::par_unseq, rows.begin(), rows.end(), f64{0.0},
+            std::plus<>(), [&](const u64 i) {
+                f64 rowSum = 0.0;
+                for (i32 c = 0; c < k; ++c) {
+                    const f32 w =
+                        weights[static_cast<usize>(i) * Material::MAX_ENDMEMBERS +
+                                static_cast<usize>(c)] *
+                        scale;
+                    rowSum += std::min(static_cast<f64>(w),
+                                       static_cast<f64>(kWeightScale));
+                }
+                return rowSum;
+            });
         return sum / static_cast<f64>(count);
     };
 
