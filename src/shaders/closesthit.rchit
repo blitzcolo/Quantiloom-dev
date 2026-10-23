@@ -5429,7 +5429,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // For VIS_FUSED: Use central wavelength (550nm) for single ray
         // For SINGLE: Use pushConsts.camera.wavelength_nm
         //
-        // Cauchy formula: n(λ) = n_d + dispersion × 0.01 / λ²
+        // Dispersion: n(lambda) follows KHR_materials_dispersion's Cauchy
+        // form with lambda in NANOMETRES --
+        //   n(λ) = max(n_d + (n_d − 1)·dispersion·(523655/λ² − 1.5168), 1)
+        // see CauchyIOR in common.hlsli. The same formula prefers a measured
+        // n(λ) table when one is bound (RefractionIOR in pbr.hlsli).
         // ====================================================================
 
         float4 transmissionRadiance = float4(0.0, 0.0, 0.0, 0.0);
