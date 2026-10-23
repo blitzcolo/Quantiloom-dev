@@ -284,7 +284,9 @@ struct ThermalPreview::Impl {
     /// them; otherwise this is what it always was -- one exchange and one sun
     /// table, computed where the scene stands.
     void RebuildSchedule(const Scene& scene, VkAccelerationStructureKHR tlas) {
-        forcingSeries = thermal::LoadForcingCsv(params.forcingFile);
+        // A file without the humidity column means the run's humidity, as it
+        // does offline, not the parser's default of 50%.
+        forcingSeries = thermal::LoadForcingCsv(params.forcingFile, params.relativeHumidity);
 
         // With epochs there is no cheap sun-only path: the columns are traced
         // against each epoch's own geometry, so getting them means walking the
@@ -491,7 +493,10 @@ void ThermalPreview::SetParams(const ThermalSolveParams& params) {
     if (params.exchangeRays != p.exchangeRays || params.exchangeTopK != p.exchangeTopK) {
         m_impl->exchangeDirty = true;
     }
-    if (params.forcingFile != p.forcingFile || params.startTime_h != p.startTime_h) {
+    // The humidity is part of what an absent column parses to, so a change of
+    // it re-reads the file.
+    if (params.forcingFile != p.forcingFile || params.startTime_h != p.startTime_h ||
+        params.relativeHumidity != p.relativeHumidity) {
         m_impl->sunTableDirty = true;
     }
     if (params.lateralConduction != p.lateralConduction) {

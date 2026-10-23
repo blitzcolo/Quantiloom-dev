@@ -313,6 +313,51 @@ TEST_F(ThermalPreviewTest, AWetMaterialCoolsTheInteractiveSolve) {
     EXPECT_LT(context->GetThermalSolveStatus().meanTemperature_K, dry - 5.0);
 }
 
+TEST_F(ThermalPreviewTest, AForcingFileWithoutHumidityUsesTheRunsHumidity) {
+    // The file has no eighth column, so the latent term of a wet material
+    // must follow ThermalSolveParams::relativeHumidity, as the offline solve does.
+    ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
+
+    ThermalMaterialParams wet;
+    wet.conductivity_W_mK = 1.4f;
+    wet.density_kg_m3 = 2300.0f;
+    wet.specificHeat_J_kgK = 880.0f;
+    wet.thickness_m = 0.2f;
+    wet.convection_W_m2K = 10.0f;
+    wet.shortwaveAbsorptivity = 0.6f;
+    wet.wetnessFactor = 0.8f;
+    context->SetThermalMaterial("CheckerGround", wet);
+
+    const auto forcingPath = testDir / "forcing_no_humidity.csv";
+    {
+        std::ofstream out(forcingPath);
+        out << "# time_h, air_k, dni, azimuth, elevation, sky_k, diffuse\n"
+               "6,  288.0, 200, 90,  15, 268.0, 90\n"
+               "12, 297.0, 900, 180, 70, 274.0, 160\n"
+               "18, 291.0, 150, 270, 10, 269.0, 70\n";
+    }
+
+    ThermalSolveParams params;
+    params.startTime_h = 6.0;
+    params.timestep_s = 300.0;
+    params.exchangeRays = 64;
+    params.exchangeTopK = 8;
+    params.forcingFile = forcingPath.string();
+
+    params.relativeHumidity = 95.0;
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 humid = context->GetThermalSolveStatus().meanTemperature_K;
+
+    params.relativeHumidity = 5.0;
+    context->SetThermalSolveParams(params);
+    ASSERT_TRUE(context->SetThermalTime(12.0).has_value());
+    const f64 arid = context->GetThermalSolveStatus().meanTemperature_K;
+
+    ASSERT_GT(humid, 0.0);
+    EXPECT_LT(arid, humid - 1.0);
+}
+
 TEST_F(ThermalPreviewTest, DiffuseIrradianceWarmsASceneWithNoDirectSun) {
     // Overcast: no disc at all. Before the diffuse term this scene had no
     // solar input and settled on the air temperature.
