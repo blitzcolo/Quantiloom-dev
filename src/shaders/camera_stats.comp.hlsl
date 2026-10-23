@@ -375,7 +375,7 @@ void main(uint localIndex : SV_GroupIndex) {
         // The acquisition stats count elements (pixels x channels), exactly
         // ComputeAcquisitionStats on the CPU; the unsaturated count is the
         // element count minus the saturated one.
-        const uint total = cameraPush.width * cameraPush.height * channels;
+        const uint total = cameraPush.width * cameraPush.height * StatsChannelCount();
         const uint sat = uint(sTiles[0].w);
         const uint unsat = total - sat;
         ispStats[ISP_STAT_MIN] = asuint(sTiles[0].x);
