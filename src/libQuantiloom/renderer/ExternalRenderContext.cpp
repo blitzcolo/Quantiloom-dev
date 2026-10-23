@@ -349,6 +349,13 @@ struct ExternalRenderContext::Impl {
     VkShaderModule claheCdfShader = VK_NULL_HANDLE;
     VkShaderModule claheApplyShader = VK_NULL_HANDLE;
     bool claheInitialized = false;
+    // Last input view written to claheDescriptorSet binding 0. The view only
+    // changes when the render target is recreated or the camera chain starts
+    // feeding CLAHE -- moments that drain the device first -- so the write is
+    // skipped while it is current: vkUpdateDescriptorSets on a set a submitted
+    // frame may still be executing is a VUID-03047 violation, and every frame
+    // used to take it for a view that had not moved.
+    VkImageView claheBoundInputView = VK_NULL_HANDLE;
 
     // Viewport pick (1x1 inline ray-query dispatch; see Pick())
     std::unique_ptr<GpuBuffer> pickOutputBuffer;  // host-visible, one PickResultGpu
@@ -6600,24 +6607,27 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     // (visible) feeds CLAHE when the camera is enabled; otherwise the raw
     // accumulation. Callers only run CLAHE once a camera acquisition has
     // completed, so the input product is present whenever the camera is.
+    // Update descriptor set binding 0 (input image) -- only when the view
+    // actually moved; see claheBoundInputView above.
     VkImageView inputView = ClaheInputImage()->GetView();
+    if (inputView != claheBoundInputView) {
+        VkDescriptorImageInfo inputImageInfo{};
+        inputImageInfo.imageView = inputView;
+        inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        inputImageInfo.sampler = VK_NULL_HANDLE;
 
-    // Update descriptor set binding 0 (input image)
-    VkDescriptorImageInfo inputImageInfo{};
-    inputImageInfo.imageView = inputView;
-    inputImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
-    inputImageInfo.sampler = VK_NULL_HANDLE;
+        VkWriteDescriptorSet inputWrite{};
+        inputWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        inputWrite.dstSet = claheDescriptorSet;
+        inputWrite.dstBinding = 0;
+        inputWrite.dstArrayElement = 0;
+        inputWrite.descriptorCount = 1;
+        inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        inputWrite.pImageInfo = &inputImageInfo;
 
-    VkWriteDescriptorSet inputWrite{};
-    inputWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    inputWrite.dstSet = claheDescriptorSet;
-    inputWrite.dstBinding = 0;
-    inputWrite.dstArrayElement = 0;
-    inputWrite.descriptorCount = 1;
-    inputWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-    inputWrite.pImageInfo = &inputImageInfo;
-
-    vkUpdateDescriptorSets(device, 1, &inputWrite, 0, nullptr);
+        vkUpdateDescriptorSets(device, 1, &inputWrite, 0, nullptr);
+        claheBoundInputView = inputView;
+    }
 
     // tileSize from UI represents tile grid dimension (e.g., 8 = 8x8 grid)
     // NOT pixels per tile
