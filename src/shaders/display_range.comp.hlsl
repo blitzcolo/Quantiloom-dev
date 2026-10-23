@@ -25,8 +25,11 @@
  */
 
 [[vk::binding(0, 0)]] RWTexture2D<float4> inputImage;
-[[vk::binding(1, 0)]] RWStructuredBuffer<uint> rangeScratch;
-[[vk::binding(2, 0)]] RWStructuredBuffer<uint> histogram;
+// globallycoherent: the last workgroup of the histogram pass reads bins and
+// scratch words other workgroups wrote, which must not come from its own
+// non-coherent cache.
+[[vk::binding(1, 0)]] globallycoherent RWStructuredBuffer<uint> rangeScratch;
+[[vk::binding(2, 0)]] globallycoherent RWStructuredBuffer<uint> histogram;
 
 struct RangePush {
     uint width;
@@ -39,6 +42,14 @@ struct RangePush {
 [[vk::push_constant]] RangePush params;
 
 static const uint HISTOGRAM_BINS = 65536u;
+
+#ifdef DISPLAY_RANGE_PASS_HISTOGRAM
+// Workgroup state of the last-workgroup scan in main(). groupshared storage
+// can only be declared at file scope.
+groupshared uint isLast;
+groupshared uint partial[256];
+groupshared uint loThread, loBase, hiThread, hiBase;
+#endif
 
 // rangeScratch layout, one u32 per word (see GpuDisplayRange::kScratchWords).
 static const uint SCRATCH_ORDERED_MIN = 0u;
@@ -121,7 +132,6 @@ void main(uint3 dispatchId : SV_DispatchThreadID, uint flatTid : SV_GroupIndex) 
     // workgroup that sees the final increment knows every other write is
     // complete and visible, and does the scan alone.
     AllMemoryBarrierWithGroupSync();
-    groupshared uint isLast;
     const uint2 groupCount = uint2((params.width + 15u) / 16u, (params.height + 15u) / 16u);
     if (flatTid == 0) {
         uint done;
@@ -136,14 +146,12 @@ void main(uint3 dispatchId : SV_DispatchThreadID, uint flatTid : SV_GroupIndex) 
     // [t*256, (t+1)*256). Subtotal the chunks, find the chunks holding the
     // two crossings, then walk those chunks to the exact bin.
     static const uint CHUNK_BINS = HISTOGRAM_BINS / 256u;
-    groupshared uint partial[256];
     const uint chunkBase = flatTid * CHUNK_BINS;
     uint subtotal = 0;
     [loop] for (uint i = 0; i < CHUNK_BINS; ++i)
         subtotal += histogram[chunkBase + i];
     partial[flatTid] = subtotal;
 
-    groupshared uint loThread, loBase, hiThread, hiBase;
     GroupMemoryBarrierWithGroupSync();
     if (flatTid == 0) {
         uint running = 0;
