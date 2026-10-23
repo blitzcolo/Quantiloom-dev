@@ -1,19 +1,18 @@
 ﻿// ============================================================================
 // Quantiloom - Volumetric Rendering Library
 // ============================================================================
-// Generic delta-tracking for participating media (fog, smoke, glass volumes).
-// Extends atmospheric delta-tracking to support arbitrary material volumes.
+// Medium properties, Beer-Lambert transmittance and the Henyey-Greenstein
+// phase function for the single-scattering block in closesthit.rchit.
 //
 // PHYSICS:
 //   σ_t(x) = σ_a(x) + σ_s(x)  (extinction = absorption + scattering)
 //   T(d) = exp(-∫σ_t(x)dx)    (Beer-Lambert transmittance)
 //
-// DELTA-TRACKING ALGORITHM:
-//   Woodcock tracking (null-collision method) for heterogeneous media:
-//   1. Sample free-flight distance: t = -ln(ξ) / σ_maj
-//   2. At sampled point, compute real extinction σ_t
-//   3. Accept collision with probability σ_t / σ_maj (real event)
-//   4. Reject with probability 1 - σ_t / σ_maj (null event, continue)
+// Stochastic tracking (Woodcock/delta-tracking) is not implemented here:
+// in a homogeneous medium the null-collision loop accepts every candidate
+// (sigma_t equals the majorant everywhere), which reduces it to the
+// analytic Beer-Lambert this file already provides. A heterogeneous
+// implementation would need a spatial majorant to be worth having.
 //
 // REFERENCES:
 //   - Novák et al., "Monte Carlo Methods for Volumetric Light Transport" (2018)
@@ -30,7 +29,6 @@
 // Constants
 // ============================================================================
 
-static const uint MAX_VOLUME_STEPS = 128;   // Maximum delta-tracking iterations
 static const float VOLUME_EPSILON = 1e-7;   // Minimum extinction threshold
 
 // ============================================================================
@@ -49,20 +47,6 @@ struct MediumProperties {
                              //   g = 0: isotropic scattering
                              //   g < 0: backward scattering (clouds)
     float3 albedo;           // Single-scattering albedo ω = σ_s / σ_t [0, 1]
-};
-
-// ============================================================================
-// Volumetric Ray Result
-// ============================================================================
-// Result of tracing a ray through participating medium.
-// ============================================================================
-
-struct VolumetricResult {
-    float3 transmittance;    // Accumulated transmittance along path [0, 1]
-    float  t_event;          // Distance to scattering/absorption event (-1 if none)
-    bool   scattered;        // True if scattering event occurred
-    bool   absorbed;         // True if absorption terminated the ray
-    float3 scatterPos;       // Position of scattering event (if scattered)
 };
 
 // ============================================================================
@@ -221,165 +205,6 @@ float3 LocalToWorld(float3 localDir, float3 forward) {
 
     // Transform
     return right * localDir.x + up * localDir.y + forward * localDir.z;
-}
-
-// ============================================================================
-// Random Number Generator (from atmospheric.hlsli)
-// ============================================================================
-// PCG hash-based RNG for GPU shaders.
-// ============================================================================
-
-float VolumeRandomFloat01(inout uint state) {
-    state = state * 747796405u + 2891336453u;
-    uint word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
-    word = (word >> 22u) ^ word;
-    return float(word) / 4294967296.0;
-}
-
-// ============================================================================
-// Delta-Tracking for Homogeneous Medium
-// ============================================================================
-// Samples free-flight distance in a homogeneous (constant density) medium.
-// Simpler and faster than heterogeneous tracking.
-//
-// Input:
-//   rayOrigin: ray origin (world space)
-//   rayDir: ray direction (normalized)
-//   tMin: minimum distance (entry point)
-//   tMax: maximum distance (exit point or intersection)
-//   medium: medium properties (constant throughout volume)
-//   rngState: random state (modified in-place)
-//
-// Returns:
-//   VolumetricResult with event information
-// ============================================================================
-
-VolumetricResult DeltaTrackingHomogeneous(
-    float3 rayOrigin,
-    float3 rayDir,
-    float tMin,
-    float tMax,
-    MediumProperties medium,
-    inout uint rngState
-) {
-    VolumetricResult result;
-    result.transmittance = float3(1.0, 1.0, 1.0);
-    result.t_event = -1.0;
-    result.scattered = false;
-    result.absorbed = false;
-    result.scatterPos = float3(0.0, 0.0, 0.0);
-
-    // Get maximum extinction coefficient (majorant)
-    float sigma_maj = max(max(medium.sigma_t.x, medium.sigma_t.y), medium.sigma_t.z);
-
-    // If extinction is negligible, return full transmittance
-    if (sigma_maj < VOLUME_EPSILON) {
-        return result;
-    }
-
-    // Delta-tracking loop
-    float t = tMin;
-
-    for (uint step = 0; step < MAX_VOLUME_STEPS; ++step) {
-        // Sample free-flight distance
-        float xi = VolumeRandomFloat01(rngState);
-        float dt = -log(max(xi, 1e-10)) / sigma_maj;
-        t += dt;
-
-        // Check if exited volume
-        if (t >= tMax) {
-            // Compute transmittance for the full path
-            float pathLength = tMax - tMin;
-            result.transmittance = exp(-medium.sigma_t * pathLength);
-            return result;
-        }
-
-        // Real collision probability (homogeneous: always sigma_t / sigma_maj)
-        float p_real = max(max(medium.sigma_t.x, medium.sigma_t.y), medium.sigma_t.z) / sigma_maj;
-
-        float xi2 = VolumeRandomFloat01(rngState);
-        if (xi2 < p_real) {
-            // Real collision - determine if scattering or absorption
-            // P(scatter) = σ_s / σ_t = albedo
-            float p_scatter = max(max(medium.albedo.x, medium.albedo.y), medium.albedo.z);
-
-            float xi3 = VolumeRandomFloat01(rngState);
-            if (xi3 < p_scatter) {
-                // Scattering event
-                result.scattered = true;
-                result.t_event = t;
-                result.scatterPos = rayOrigin + rayDir * t;
-                // Transmittance up to scattering point
-                result.transmittance = exp(-medium.sigma_t * (t - tMin));
-            } else {
-                // Absorption event - ray terminates
-                result.absorbed = true;
-                result.t_event = t;
-                result.transmittance = float3(0.0, 0.0, 0.0);
-            }
-            return result;
-        }
-        // Null collision - continue tracking
-    }
-
-    // Max steps exceeded - approximate with Beer-Lambert
-    float pathLength = tMax - tMin;
-    result.transmittance = exp(-medium.sigma_t * pathLength);
-    return result;
-}
-
-// ============================================================================
-// Ratio-Tracking Transmittance Estimation
-// ============================================================================
-// Estimates transmittance using ratio-tracking (unbiased).
-// More efficient than delta-tracking when only transmittance is needed.
-//
-// Input:
-//   tMin, tMax: path segment
-//   medium: medium properties
-//   rngState: random state
-//
-// Returns:
-//   Estimated transmittance [0, 1]
-// ============================================================================
-
-float3 RatioTrackingTransmittance(
-    float tMin,
-    float tMax,
-    MediumProperties medium,
-    inout uint rngState
-) {
-    float sigma_maj = max(max(medium.sigma_t.x, medium.sigma_t.y), medium.sigma_t.z);
-
-    if (sigma_maj < VOLUME_EPSILON) {
-        return float3(1.0, 1.0, 1.0);
-    }
-
-    float3 T = float3(1.0, 1.0, 1.0);
-    float t = tMin;
-
-    for (uint step = 0; step < MAX_VOLUME_STEPS; ++step) {
-        float xi = VolumeRandomFloat01(rngState);
-        float dt = -log(max(xi, 1e-10)) / sigma_maj;
-        t += dt;
-
-        if (t >= tMax) break;
-
-        // Ratio-tracking update
-        T *= (float3(sigma_maj, sigma_maj, sigma_maj) - medium.sigma_t) / sigma_maj;
-
-        // Russian roulette termination
-        float T_max = max(max(T.x, T.y), T.z);
-        if (T_max < 0.01) {
-            float xi2 = VolumeRandomFloat01(rngState);
-            if (xi2 > T_max) {
-                return float3(0.0, 0.0, 0.0);
-            }
-            T /= T_max;
-        }
-    }
-
-    return T;
 }
 
 // ============================================================================

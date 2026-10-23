@@ -5134,8 +5134,12 @@ void main(inout Payload payload, in HitAttributes attribs) {
     //   T(d) = exp(-σ_t × d) (Beer-Lambert transmittance)
     //   L_inscatter = σ_s × phase(θ) × L_sun × visibility
     //
-    // This is a simplified single-scattering model. For multiple scattering
-    // (clouds, dense fog), use the full delta-tracking in volumetric.hlsli.
+    // This is a simplified single-scattering model. Multiple scattering is
+    // not implemented: volumetric.hlsli's delta-tracking estimator had no
+    // callers and is gone -- in a homogeneous medium its real-event
+    // probability is identically 1, so it reduced to this same Beer-Lambert
+    // transmittance. Dense media will want a heterogeneous tracker reintroduced
+    // there, not that one back.
     // ========================================================================
 
     // Beer-Lambert distances are metres -- glTF attenuationDistance and the
