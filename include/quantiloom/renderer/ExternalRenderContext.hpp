@@ -1345,6 +1345,10 @@ public:
      * @param mesh Mesh to add
      * @param transform World transform
      * @return Index of added node
+     * @note Not implemented yet. Returns std::numeric_limits<u32>::max() as a
+     *       sentinel -- never a valid node index -- so a caller that ignores
+     *       the log warning cannot mistake the outcome for node 0 and edit
+     *       the first node of the scene.
      */
     u32 AddMesh(const Mesh& mesh, const glm::mat4& transform);
 

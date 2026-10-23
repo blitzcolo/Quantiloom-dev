@@ -2821,7 +2821,9 @@ u32 ExternalRenderContext::AddMesh(const Mesh& mesh, const glm::mat4& transform)
     (void)mesh;
     (void)transform;
     QL_LOG_WARN("ExternalRenderContext::AddMesh not implemented yet");
-    return 0;
+    // Sentinel, not 0: returning a plausible index would let a caller that
+    // missed the warning edit the first node of the scene.
+    return std::numeric_limits<u32>::max();
 }
 
 Result<u32, String> ExternalRenderContext::DuplicateNode(u32 sourceNodeIndex,
