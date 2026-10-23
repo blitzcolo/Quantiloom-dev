@@ -1340,6 +1340,15 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
         report);
     m_impl->thermalTimestep_s = resolved.thermal.timestep_s;
     if (m_impl->timeline.Present()) {
+        // With a clock, thermal.time_h is the hour at the timeline's start,
+        // not the hour to render. The epoch plan just below converts every
+        // planned epoch start through HourAt, so the mapping has to be
+        // installed before the plan is built -- otherwise each epoch's
+        // from_h is offset by the start hour the mapping does not carry yet.
+        if (resolved.thermal.enabled) {
+            m_impl->timeline.SetThermalMapping(resolved.thermal.time_h,
+                                               resolved.timeline.thermalTimeScale);
+        }
         m_impl->ApplyTimelinePose(resolved.timeline.time_s);
     }
     m_impl->RefreshEpochPlan();
@@ -1509,13 +1518,11 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
             SetThermalSolveEnabled(true);
             report.thermalSolveEnabled = true;
 
-            // With a clock, `thermal.time_h` stops meaning "the hour to
-            // render" and starts meaning "the hour at the timeline's start" --
-            // the hour to render is whatever `time_s` maps to from there.
+            // The thermal mapping was installed before the epoch plan was
+            // built (step 5b); with a clock the hour to solve at is wherever
+            // the current time lands under it.
             f64 hour = resolved.thermal.time_h;
             if (m_impl->timeline.Present()) {
-                m_impl->timeline.SetThermalMapping(resolved.thermal.time_h,
-                                                   resolved.timeline.thermalTimeScale);
                 hour = m_impl->timeline.HourAt(resolved.timeline.time_s);
             }
 
@@ -3605,6 +3612,10 @@ Result<void, String> ExternalRenderContext::SetTimelineThermalMapping(const f64 
         return Result<void, String>::Err("this scene has no timeline");
     }
     m_impl->timeline.SetThermalMapping(hourAtStart_h, scale);
+    // The mapping moves every epoch's from_h, so the plan the epochs were
+    // cut from is stale until it is rebuilt; the scrub below re-solves at
+    // the new hour either way.
+    if (m_impl->thermalPreview) m_impl->RefreshEpochPlan();
     return SetTimelineTime(m_impl->timeline.Current_s());
 }
 
