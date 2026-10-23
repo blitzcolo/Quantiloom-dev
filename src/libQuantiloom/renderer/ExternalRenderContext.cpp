@@ -3433,8 +3433,12 @@ void ExternalRenderContext::Impl::UploadDeferred(GpuBuffer& dst, VkDeviceSize of
         return;
     }
     // Too large to sit in a command buffer: drain and write through the
-    // mapping. A failed wait means the device is already lost, so log and
-    // still write rather than leave a stale field standing.
+    // mapping. The drain is not optional -- a queued deferred write to this
+    // same (buffer, offset) would otherwise be replayed by a later recorded
+    // frame and overwrite the fresh bytes with the stale ones. A failed wait
+    // means the device is already lost, so log and still write rather than
+    // leave a stale field standing.
+    FlushPendingGpuWork();
     if (vkQueueWaitIdle(graphicsQueue) != VK_SUCCESS)
         QL_LOG_ERROR("deferred buffer upload: previous GPU readers did not complete");
     dst.Upload(data, bytes, offset);
