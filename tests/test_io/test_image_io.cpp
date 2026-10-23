@@ -382,6 +382,19 @@ TEST_F(ImageIOTest, WriteEXRRejectsFewerChannelNamesThanChannels) {
     EXPECT_FALSE(ImageIO::FileExists(filepath.string()));
 }
 
+// GetDimensions used to open every file as an EXR, so a PNG always failed.
+TEST_F(ImageIOTest, GetDimensionsReadsAPngHeader) {
+    Image rgb(7, 5, 3);
+    auto filepath = GetTestPath("dimensions.png");
+    ASSERT_TRUE(ImageIO::WritePNG(filepath.string(), rgb));
+
+    auto dims = ImageIO::GetDimensions(filepath.string());
+    ASSERT_TRUE(dims.has_value());
+    EXPECT_EQ(std::get<0>(*dims), 7u);
+    EXPECT_EQ(std::get<1>(*dims), 5u);
+    EXPECT_EQ(std::get<2>(*dims), 3u);
+}
+
 // ============================================================================
 // Error Handling Tests
 // ============================================================================

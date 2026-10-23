@@ -529,6 +529,23 @@ std::optional<std::tuple<u32, u32, u32>> ImageIO::GetDimensions(const std::strin
         return std::nullopt;
     }
 
+    // Same split as ReadImage: .exr goes to OpenEXR, everything else to stb_image,
+    // whose header probe reads the size and native channel count without decoding.
+    std::string ext = std::filesystem::path(filepath).extension().string();
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+    if (ext != ".exr") {
+        int w = 0, h = 0, comp = 0;
+        if (!stbi_info(filepath.c_str(), &w, &h, &comp) || w <= 0 || h <= 0 || comp <= 0) {
+            return std::nullopt;
+        }
+        size_t count = 0;
+        if (!Image::TryElementCount(static_cast<u32>(w), static_cast<u32>(h),
+                                    static_cast<u32>(comp), count)) {
+            return std::nullopt;
+        }
+        return std::make_tuple(static_cast<u32>(w), static_cast<u32>(h), static_cast<u32>(comp));
+    }
+
     try {
         const Imf::InputFile file(filepath.c_str());
         const Imf::Header& header = file.header();
