@@ -2113,11 +2113,17 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         if (name.empty()) continue;
         materialTables.emplace_back(std::move(name), std::move(table));
     }
-    for (const auto& overrideName : config.GetSubtableNames("material_overrides")) {
+    // The table is copied out once, not once per override: GetTable deep-copies
+    // it, so asking inside the loop made the whole read quadratic in the number
+    // of overrides.
+    if (const auto overrideNames = config.GetSubtableNames("material_overrides");
+        !overrideNames.empty()) {
         auto root = config.GetTable("material_overrides");
-        auto table = root.value().GetNamedTable(overrideName);
-        if (table.has_value()) {
-            materialTables.emplace_back(overrideName, std::move(table.value()));
+        for (const auto& overrideName : overrideNames) {
+            auto table = root.value().GetNamedTable(overrideName);
+            if (table.has_value()) {
+                materialTables.emplace_back(overrideName, std::move(table.value()));
+            }
         }
     }
 
