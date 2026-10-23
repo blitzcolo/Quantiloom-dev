@@ -981,6 +981,10 @@ namespace {
 constexpr u32 kViewportSize = 64;
 constexpr u32 kSensorSize = 16;
 
+// readout.frame_period_s of CameraConfigFor: the scheduler commits one
+// acquisition per period, so the clock steps in these tests are multiples of it.
+constexpr f64 kFixtureFramePeriod = 0.1;
+
 class CameraSchedulerGpuTest : public quantiloom::testing::VulkanDeviceTest {
 protected:
     void SetUp() override {
@@ -1165,7 +1169,7 @@ TEST_F(CameraSchedulerGpuTest, ScheduledFramesAdvanceAcquisitionIndex) {
     // each draw commits the next scheduled acquisition.
     constexpr int kFrames = 4;
     for (int i = 1; i <= kFrames; ++i) {
-        ASSERT_TRUE(context->SetTimelineTime(static_cast<f64>(i) / 30.0).has_value());
+        ASSERT_TRUE(context->SetTimelineTime(static_cast<f64>(i) * kFixtureFramePeriod).has_value());
         DrawFrame();
         status = context->GetCameraHistoryStatus();
         EXPECT_EQ(status.acquisitionIndex, static_cast<u64>(i)) << "frame " << i;
@@ -1228,7 +1232,7 @@ TEST_F(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisitio
     ASSERT_TRUE(enabled.has_value()) << enabled.error();
 
     DrawFrame();
-    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(kFixtureFramePeriod).has_value());
     DrawFrame();
     const auto before = context->GetCameraHistoryStatus();
     ASSERT_EQ(before.acquisitionIndex, 1u);
@@ -1304,7 +1308,7 @@ TEST_F(CameraSchedulerGpuTest, HistoryEpochResetsOnScrubBackAndHostReset) {
     EXPECT_TRUE(status.lastResetReason.empty());
 
     DrawFrame();
-    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(kFixtureFramePeriod).has_value());
     DrawFrame();
     ASSERT_EQ(context->GetCameraHistoryStatus().acquisitionIndex, 1u);
 
@@ -1447,12 +1451,12 @@ TEST_F(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdenticall
     ASSERT_TRUE(enabled.has_value()) << enabled.error();
 
     DrawFrame();  // acquisition 0 at the current clock time
-    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(kFixtureFramePeriod).has_value());
     DrawFrame();  // acquisition 1
     ASSERT_EQ(context->GetCameraHistoryStatus().acquisitionIndex, 1u);
     ASSERT_TRUE(context->CheckpointCameraHistory().has_value());
 
-    ASSERT_TRUE(context->SetTimelineTime(2.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(2.0 * kFixtureFramePeriod).has_value());
     DrawFrame();  // acquisition 2
     const auto before = context->CaptureDisplayImage();
     ASSERT_TRUE(before.has_value());
@@ -1460,7 +1464,7 @@ TEST_F(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdenticall
     // Scrub back before the committed acquisition. Without a restore the
     // next frame would discard the detector history; the checkpoint keeps
     // it instead and the epoch moves on.
-    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(kFixtureFramePeriod).has_value());
     ASSERT_TRUE(context->RestoreCameraHistoryCheckpoint().has_value());
     auto status = context->GetCameraHistoryStatus();
     EXPECT_EQ(status.epoch, 1u);
@@ -1473,7 +1477,7 @@ TEST_F(CameraSchedulerGpuTest, CheckpointRestoreRewindsEpochAndReplaysIdenticall
     // the original run bit for bit.
     DrawFrame();
     EXPECT_EQ(context->GetCameraHistoryStatus().acquisitionIndex, 1u);
-    ASSERT_TRUE(context->SetTimelineTime(2.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(2.0 * kFixtureFramePeriod).has_value());
     DrawFrame();
     status = context->GetCameraHistoryStatus();
     EXPECT_EQ(status.acquisitionIndex, 2u);
@@ -2984,7 +2988,7 @@ TEST_F(CameraSchedulerGpuTest, ViewportBatchDoesNotMultiplyPhysicalAcquisitions)
     EXPECT_EQ(context->GetAccumulatedSamples(), 1u);
     const auto first = context->GetCameraHistoryStatus();
     EXPECT_EQ(first.acquisitionIndex, 0u);
-    ASSERT_TRUE(context->SetTimelineTime(1.0 / 30.0).has_value());
+    ASSERT_TRUE(context->SetTimelineTime(kFixtureFramePeriod).has_value());
     DrawFrame();
     const auto second = context->GetCameraHistoryStatus();
     EXPECT_EQ(second.acquisitionIndex, 1u);
