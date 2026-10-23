@@ -6064,6 +6064,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     dynamic.strataDepth = cameraMeasurementDepthImage.get();
     dynamic.layerCameras = layerCameras.data();
     dynamic.strataCount = strataCount;
+    dynamic.strataLayers = rendercore::kCameraTimeStrataMax;
     dynamic.firstRowMidSeconds = cameraAcquisitionTimeSeconds;
     dynamic.exposureSeconds = readoutConfig.exposureSeconds;
     dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
