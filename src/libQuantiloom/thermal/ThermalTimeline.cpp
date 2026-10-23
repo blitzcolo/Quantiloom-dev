@@ -290,7 +290,13 @@ const ThermalState& ThermalTimeline::StateAt(const f64 time_h) {
     // the next complete step must still begin on the regular grid.
     m_scratch = m_gridState;
     const f64 t_mid = gridTime + 0.5 * remainder_s / 3600.0;
-    const ThermalGeometryEpoch& epoch = m_schedule->At(t_mid);
+    // The geometry of the grid step this is the first part of, by the same
+    // rule the complete steps follow -- not the one at the partial step's
+    // midpoint. A boundary inside the step belongs to the step after it, so
+    // the midpoint would apply the new geometry from gridTime on, before the
+    // boundary, and the partial answer would stop converging to the complete
+    // step it is a part of.
+    const ThermalGeometryEpoch& epoch = m_schedule->epochs[EpochForStep(target)];
     const ThermalForcing forcing =
         SampleForcing(m_forcingSeries, t_mid, m_constantForcing);
     Vector<f32> sunVis;

@@ -108,6 +108,7 @@ public:
               const Vector<ThermalMaterial>& materials, const ExchangeGeometry& exchange,
               const ThermalForcing& forcing, f64 dt_s,
               const ShortwaveSample& shortwave) override {
+        stepExchange.push_back(&exchange);
         m_inner.Step(state, elements, materials, exchange, forcing, dt_s, shortwave);
     }
 
@@ -125,6 +126,8 @@ public:
 
     Vector<const ExchangeGeometry*> batchExchange;
     Vector<usize> batchSize;
+    /// The same for single steps: the relaxation and an off-grid partial step.
+    Vector<const ExchangeGeometry*> stepExchange;
 
 private:
     CpuCrankNicolsonStepper m_inner;
@@ -331,6 +334,29 @@ TEST(ThermalEpochTest, ABatchNeverSpansABoundary) {
         if (stepper.batchExchange[b] == first) firstEpochSteps += stepper.batchSize[b];
     }
     EXPECT_EQ(firstEpochSteps, 30u);
+}
+
+TEST(ThermalEpochTest, APartialStepInsideABoundaryStepKeepsTheOldGeometry) {
+    // The boundary lands 15 s into the step that starts at 0.5 h, so that whole
+    // step is integrated in the old geometry -- a boundary inside a step
+    // belongs to the step after it. A query 50 s into it runs a 50 s partial
+    // step whose midpoint is past the boundary; it is the first part of that
+    // same grid step and has to see the same world, or the answer at 0.5 h +
+    // 59 s would not approach the one at 0.5 h + 60 s.
+    const Vector<ThermalMaterial> materials{Concrete()};
+    const Vector<std::pair<f64, ThermalForcing>> noSeries;
+    const ThermalForcing forcing = SunnyForcing();
+
+    ThermalGeometrySchedule split;
+    split.epochs.push_back(OpenEpoch(-1e308));
+    split.epochs.push_back(ShadedEpoch(0.5 + 15.0 / 3600.0));
+
+    CountingStepper stepper;
+    ThermalTimeline timeline(PlateDesc(), split, materials, noSeries, forcing, stepper);
+    timeline.StateAt(0.5 + 50.0 / 3600.0);
+
+    ASSERT_FALSE(stepper.stepExchange.empty());
+    EXPECT_EQ(stepper.stepExchange.back(), &split.epochs[0].exchange);
 }
 
 TEST(ThermalEpochTest, TheScheduleFindsTheEpochAnHourBelongsTo) {
