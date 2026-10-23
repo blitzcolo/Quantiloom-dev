@@ -22,6 +22,16 @@ String Trim(StringView text) {
     return String(text.substr(begin, end - begin));
 }
 
+/// A rotation with no direction is not a rotation: glm::normalize of a zero
+/// quaternion divides by zero, and the NaN it returns rides through every
+/// slerp into the node's transform. False for a zero or non-finite input.
+bool NormalizeRotation(const glm::dquat& q, glm::dquat& out) {
+    const f64 length = std::sqrt(q.w * q.w + q.x * q.x + q.y * q.y + q.z * q.z);
+    if (!std::isfinite(length) || length < 1e-12) return false;
+    out = glm::normalize(q);
+    return true;
+}
+
 /// Reads three doubles out of an array-valued key. A short or missing array
 /// leaves @p out alone, so a default survives.
 bool ReadVec3(const Config& table, StringView key, glm::dvec3& out) {
@@ -155,8 +165,12 @@ Result<Vector<MotionKey>, String> LoadMotionKeysCsv(const String& path) {
         key.hasPosition = true;
         key.position = glm::dvec3(fields[1], fields[2], fields[3]);
         if (fields.size() >= 8) {
+            if (!NormalizeRotation(glm::dquat(fields[7], fields[4], fields[5], fields[6]),
+                                   key.rotation)) {
+                ++malformed;
+                continue;
+            }
             key.hasRotation = true;
-            key.rotation = glm::normalize(glm::dquat(fields[7], fields[4], fields[5], fields[6]));
         }
         keys.push_back(key);
     }
@@ -168,8 +182,8 @@ Result<Vector<MotionKey>, String> LoadMotionKeysCsv(const String& path) {
     std::stable_sort(keys.begin(), keys.end(),
                      [](const MotionKey& a, const MotionKey& b) { return a.t_s < b.t_s; });
     if (malformed > 0) {
-        QL_LOG_WARN("Motion keyframes: {} row(s) of \"{}\" were not four or more numbers "
-                    "and were skipped",
+        QL_LOG_WARN("Motion keyframes: {} row(s) of \"{}\" were not four or more numbers, "
+                    "or carried a zero rotation, and were skipped",
                     malformed, path);
     }
     return Result<Vector<MotionKey>, String>(std::move(keys));
@@ -213,8 +227,14 @@ void ParseKeys(const Config& table, const String& owner, const MotionPathResolve
         glm::dvec3 euler(0.0);
         const auto quat = keyTable.GetDoubleArray("rotation_quat");
         if (quat.size() >= 4) {
-            key.hasRotation = true;
-            key.rotation = glm::normalize(glm::dquat(quat[3], quat[0], quat[1], quat[2]));
+            if (NormalizeRotation(glm::dquat(quat[3], quat[0], quat[1], quat[2]), key.rotation)) {
+                key.hasRotation = true;
+            } else {
+                warnings.push_back(owner + ".motion.keys: the key at t=" +
+                                   std::to_string(key.t_s) +
+                                   " s has a zero or non-finite `rotation_quat`; its rotation "
+                                   "is ignored");
+            }
         } else if (ReadVec3(keyTable, "rotation_euler_degrees", euler)) {
             key.hasRotation = true;
             const glm::dvec3 r = glm::radians(euler);

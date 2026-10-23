@@ -891,6 +891,19 @@ sky_radiance = [0.1, 0.1, 0.1]
     EXPECT_FALSE(ResolveStrict(noDirection).has_value());  // a sun with no direction
 }
 
+TEST_F(ConfigResolveTest, AZeroSunDirectionIsRefusedRatherThanNormalisedToNaN) {
+    auto config = Parse({.trailing = std::string(kBareScene) + R"(
+[lighting]
+sun_direction = [0.0, 0.0, 0.0]
+sun_radiance = [1.0, 1.0, 1.0]
+sky_radiance = [0.1, 0.1, 0.1]
+[material]
+albedo = [0.8, 0.8, 0.8]
+)", .includeRequired = false});
+    EXPECT_FALSE(ResolveLenient(config).has_value());
+    EXPECT_TRUE(HasMessage(report, "lighting.sun_direction", ConfigApplyMessage::Severity::Error));
+}
+
 TEST_F(ConfigResolveTest, ASceneWithNoSunNeedsNoSunDirection) {
     auto config = Parse({.trailing = std::string(kBareScene) + R"(
 [lighting]

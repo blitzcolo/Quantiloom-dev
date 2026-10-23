@@ -393,6 +393,46 @@ rotation_euler_degrees = [0, 90, 0]
     EXPECT_TRUE(warnings.empty());
 }
 
+TEST(MotionSpecTest, AZeroRotationQuaternionIsIgnoredNotNormalisedToNaN) {
+    const auto config = Config::Parse(R"(
+[[keys]]
+t = 0
+position = [0, 0, 0]
+rotation_quat = [0, 0, 0, 0]
+[[keys]]
+t = 1
+position = [1, 0, 0]
+rotation_quat = [0, 0, 0, 2]
+)");
+    ASSERT_TRUE(config.has_value());
+
+    Vector<String> warnings;
+    auto spec = ParseMotionSpec(*config, 0.0, "models.car", Identity(), warnings);
+    ASSERT_TRUE(spec.has_value());
+    ASSERT_EQ(spec->keys.size(), 2u);
+    EXPECT_FALSE(spec->keys[0].hasRotation);
+    EXPECT_FALSE(warnings.empty());
+    // A valid quaternion is still normalised.
+    EXPECT_TRUE(spec->keys[1].hasRotation);
+    EXPECT_NEAR(spec->keys[1].rotation.w, 1.0, 1e-12);
+}
+
+TEST(MotionSpecTest, AKeyframeCsvRowWithAZeroRotationIsSkipped) {
+    const auto path = std::filesystem::temp_directory_path() / "quantiloom_motion_zero_quat.csv";
+    {
+        std::ofstream file(path);
+        file << "0, 0, 0, 0, 0, 0, 0, 1\n";
+        file << "2, 4, 0, 0, 0, 0, 0, 0\n";
+    }
+
+    auto keys = LoadMotionKeysCsv(path.string());
+    ASSERT_TRUE(keys.has_value()) << (keys.has_value() ? "" : keys.error());
+    ASSERT_EQ(keys.value().size(), 1u);
+    EXPECT_TRUE(std::isfinite(keys.value()[0].rotation.w));
+
+    std::filesystem::remove(path);
+}
+
 TEST(MotionSpecTest, KeysWinOverSegmentsAndSaySo) {
     const auto config = Config::Parse(R"(
 [[keys]]

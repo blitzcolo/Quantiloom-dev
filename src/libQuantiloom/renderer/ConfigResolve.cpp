@@ -510,8 +510,19 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
         config.Get<String>("atmosphere.preset", "disabled") != "disabled";
     const auto sunDirArray = config.GetArray<f32>("lighting.sun_direction");
     if (sunDirArray.size() == 3) {
-        out.lighting.sunDirection =
-            glm::normalize(glm::vec3(sunDirArray[0], sunDirArray[1], sunDirArray[2]));
+        // A zero vector normalises to NaN, which would travel into the shaders,
+        // the atmosphere's solar angles and the thermal solve.
+        const glm::vec3 sunDirection(sunDirArray[0], sunDirArray[1], sunDirArray[2]);
+        const f32 sunDirectionLength = glm::length(sunDirection);
+        if (std::isfinite(sunDirectionLength) && sunDirectionLength > 1e-6f) {
+            out.lighting.sunDirection = sunDirection / sunDirectionLength;
+        } else {
+            diag.Fatal("lighting.sun_direction",
+                       "lighting.sun_direction must be a non-zero vector, but is [" +
+                           std::to_string(sunDirArray[0]) + ", " +
+                           std::to_string(sunDirArray[1]) + ", " +
+                           std::to_string(sunDirArray[2]) + "]");
+        }
     } else if (config.Has("lighting.sun_direction") || sunIsUsed) {
         diag.Required("lighting.sun_direction",
                       "lighting.sun_direction must be an array of 3 floats, but has " +
