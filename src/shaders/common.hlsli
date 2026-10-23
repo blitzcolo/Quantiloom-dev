@@ -1065,7 +1065,15 @@ struct MaterialData {
     // Normal mapping
     int    normalTextureIndex;       // -1 = no normal map                   // Offset: 32-36
     float  normalScale;              // Normal intensity [0, inf]            // Offset: 36-40
-    uint   doubleSided;              // 0=single-sided (cull backface), 1=double-sided // Offset: 40-44
+    // NOT READ by any shader: the path tracer shades both sides by design.
+    // A closest-hit shader cannot un-see an intersection traversal already
+    // committed, and the any-hit shader reserves IgnoreHit for alpha coverage,
+    // so single-sided culling has no place to live on this pipeline -- it
+    // would need per-material any-hit programs or geometry/instance flags.
+    // glTF's flag is loaded and uploaded for CPU-side bookkeeping and to keep
+    // the layout in step with the host Material struct; both sides shade
+    // regardless of its value.
+    uint   doubleSided;              // loaded, not read; both sides shade // Offset: 40-44
     float  fluorescenceYield;        // Fraction of absorbed light re-emitted, 0 = does not fluoresce // Offset: 44-48
 
     // Emissive (now 16-byte aligned at offset 48)
