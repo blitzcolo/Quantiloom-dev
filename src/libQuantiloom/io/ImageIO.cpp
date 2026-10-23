@@ -223,6 +223,13 @@ bool ImageIO::WriteEXR(const std::string& filepath, const Image& image) {
         return false;
     }
 
+    // IsValid() does not look at the names, and every channel is indexed into them.
+    if (image.channelNames.size() < image.channels) {
+        QL_LOG_ERROR("ImageIO::WriteEXR: {} channels but only {} channel names",
+                     image.channels, image.channelNames.size());
+        return false;
+    }
+
     try {
         // Create EXR header
         Imf::Header header(static_cast<int>(image.width), static_cast<int>(image.height));

@@ -372,6 +372,16 @@ TEST_F(ImageIOTest, GetDimensionsNonexistent) {
     EXPECT_FALSE(dims.has_value());
 }
 
+// IsValid() does not check the names; the writer indexes into them per channel.
+TEST_F(ImageIOTest, WriteEXRRejectsFewerChannelNamesThanChannels) {
+    Image img(4, 4, 3);
+    img.channelNames.resize(1);
+    auto filepath = GetTestPath("short_names.exr");
+
+    EXPECT_FALSE(ImageIO::WriteEXR(filepath.string(), img));
+    EXPECT_FALSE(ImageIO::FileExists(filepath.string()));
+}
+
 // ============================================================================
 // Error Handling Tests
 // ============================================================================
