@@ -6687,21 +6687,19 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     VkMemoryBarrier memBarrier{};
     memBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
 
-    // Memory barrier: wait for the input's last writer. Without the histogram
-    // passes the next reader is pass 3's compute, not the buffer fill. A
-    // camera-enabled frame's input is a compute product (the camera chain),
-    // not the ray tracing output.
+    // Memory barrier: wait for the input's last writer and make the write
+    // visible to the compute passes that read the image -- pass 1's histogram
+    // is a compute read in both tone modes, so the destination is the compute
+    // stage with shader read|write even when a buffer fill (transfer) is the
+    // next command: the fill is ordered by its own buffer barrier below.
     memBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memBarrier.dstAccessMask = needsHistogram
-                                   ? VK_ACCESS_TRANSFER_WRITE_BIT
-                                   : (VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+    memBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
 
     vkCmdPipelineBarrier(
         cmd,
         cameraConfig.enabled ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
                              : VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        needsHistogram ? VK_PIPELINE_STAGE_TRANSFER_BIT
-                       : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0,
         1, &memBarrier,
         0, nullptr,
