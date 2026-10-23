@@ -532,6 +532,13 @@ void ThermalPreview::SetEnabled(bool enabled) {
 }
 
 void ThermalPreview::SetFallbackSunDirection(const glm::vec3& dir) {
+    // A zero or non-finite vector has no direction; normalising it would put
+    // NaN into every sun column and cosine. Keep the direction we have.
+    const f32 length = glm::length(dir);
+    if (!std::isfinite(length) || length < 1e-6f) {
+        QL_LOG_WARN("Thermal: ignoring a fallback sun direction with no direction");
+        return;
+    }
     if (m_impl->params.forcingFile.empty()) {
         m_impl->sunTableDirty = true;
         m_impl->timelineDirty = true;
