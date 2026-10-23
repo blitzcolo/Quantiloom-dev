@@ -199,6 +199,10 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
 
     const u32 elementCount = static_cast<u32>(elements.size());
     const u32 rays = std::max(1u, params.hemisphereRays);
+    // A row keeps at least its largest entry: topK = 0 would keep none, and a
+    // surface whose row sums to less than a whole hemisphere exchanges with
+    // nothing and cools toward absolute zero.
+    const u32 topK = std::max(1u, params.topK);
 
     // Hit records are elementCount * rays uints. At 15k elements and 256 rays
     // that is 15 MB, which is why they are a transient rather than something
@@ -346,10 +350,10 @@ thermal::ExchangeGeometry ThermalExchangePrecompute::Run(
         }
 
         ranked.assign(counts.begin(), counts.end());
-        if (ranked.size() > params.topK) {
-            std::nth_element(ranked.begin(), ranked.begin() + params.topK, ranked.end(),
+        if (ranked.size() > topK) {
+            std::nth_element(ranked.begin(), ranked.begin() + topK, ranked.end(),
                              [](const auto& a, const auto& b) { return a.second > b.second; });
-            ranked.resize(params.topK);
+            ranked.resize(topK);
         }
         // Sorted by column so the row is scanned in order, which is what makes
         // the CSR worth being one.
