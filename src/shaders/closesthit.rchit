@@ -3295,36 +3295,21 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // This enables physically-accurate spectral rendering.
             // One endmember and no weight texture is the single flat curve.
             spectralAlbedo = EvaluateEndmemberReflectanceW(spectralCurves, material, endmemberW, lambda);
-        } else if (lambda > SPECTRAL_VIS_LAMBDA_MAX) {
-            // Past the fitted band a base colour says nothing, but the
-            // material's own IR emissivity does, and Kirchhoff turns it into a
-            // reflectance: rho = 1 - eps - tau. This is the same expression
-            // NIR, SWIR, MWIR and LWIR use for the same material.
-            //
-            // It used to be zero here, which made the mode selector choose the
-            // material model rather than the integration domain: one surface
-            // with one emissivity curve reflected 0.7 in swir_fused and 0.0 in
-            // single at the same 2000 nm, and nothing said so -- the
-            // sRGB-upsampling gate does not fire, because the material *has*
-            // spectral data, just not of the kind this branch was looking for.
-            // A black surface is a physical claim, and it was the quantitative
-            // mode making it.
-            //
-            // No angle dependence, which this branch got right first: the
-            // fused bands used to apply a fabricated one and have now stopped,
-            // so all of them agree that a measured emissivity is hemispherical.
-            // A material carrying no IR data at all lands on
-            // GetEffectiveIREmissivity's metallic heuristic, which is again
-            // what the fused bands do -- and ResolveMaterialSpectra has
-            // already warned about that material by the time a ray is traced.
-            spectralAlbedo = saturate(1.0 - GetEffectiveIREmissivity(material, metallic, roughness)
-                                          - material.irTransmittance);
         } else {
             // FALLBACK PATH: RGB → Spectrum upsampling (approximate, ~70-80% accuracy)
             // WARNING: This path does NOT guarantee physical accuracy
             // For quantitative rendering, materials MUST have measured spectral curves
             // Inside the visible band this is exactly what VIS_FUSED does at
             // each of its 32 wavelengths, so the two modes agree here too.
+            //
+            // Past the fitted band a base colour says nothing, but the
+            // material's own IR data does: Kirchhoff turns emissivity into a
+            // reflectance (rho = 1 - eps - tau), the same expression NIR,
+            // SWIR, MWIR and LWIR use. Rays in that domain never reach this
+            // branch, though -- band_routing sends a single wavelength above
+            // the visible edge to the SWIR or thermal branch, which own that
+            // expression. The IR fallback for this branch used to live here
+            // and was unreachable.
             spectralAlbedo = RgbSpectrumAt(sBase, lambda);
         }
 
