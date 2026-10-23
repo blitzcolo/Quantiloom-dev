@@ -48,9 +48,11 @@ struct ConfigApplyOptions {
     /**
      * @brief Directory the config's relative paths resolve against.
      *
-     * Empty means the process working directory, which is what the CLI wants:
-     * it is run from the repo root and its configs name assets from there.
-     * A GUI opening a file from anywhere wants the file's own directory.
+     * Both hosts pass the config file's own directory (the CLI's single, batch
+     * and sequence jobs all do). A relative path is looked for there first and,
+     * when nothing is found, left as written -- relative to the process working
+     * directory -- which is how a repo-root-relative config keeps resolving.
+     * Empty means the working directory alone.
      */
     String baseDir;
 
