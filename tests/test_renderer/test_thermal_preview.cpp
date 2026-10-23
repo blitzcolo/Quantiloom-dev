@@ -701,6 +701,36 @@ TEST_F(ThermalPreviewTest, TheHourFollowsTheClock) {
     EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 15.0, 1e-9);
 }
 
+TEST_F(ThermalPreviewTest, TheEpochPlanStartsAtTheMappedHour) {
+    // The epoch plan converts every planned start through HourAt, so it has
+    // to be built after the thermal mapping exists. It once was not: every
+    // epoch's from_h sat thermal.time_h earlier, and the hour the config
+    // solved at fell into the last epoch instead of the first. Here
+    // thermal.time_h = 12, thermal_time_scale = 3600 and the clock at 0 s
+    // put the solved hour at exactly the first epoch's start.
+    const auto report = context->ApplyConfig(MakeMovingThermalConfig());
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+
+    const ThermalSolveStatus status = context->GetThermalSolveStatus();
+    ASSERT_GT(status.thermalEpochCount, 1u) << status.error;
+    EXPECT_NEAR(status.currentTime_h, 12.0, 1e-9);
+    EXPECT_EQ(status.currentThermalEpoch, 0u)
+        << "the solved hour fell outside the plan's first epoch -- the plan "
+           "was built without the thermal start hour";
+
+    // One stride (2 s = 2 h) further the second epoch is current.
+    ASSERT_TRUE(context->SetTimelineTime(2.0).has_value());
+    EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 14.0, 1e-9);
+    EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 1u);
+
+    // Moving the mapping moves every epoch's from_h, so the plan has to be
+    // rebuilt: with the start hour at 13, hour 13 (the clock still at 0 s)
+    // is the first epoch's start again.
+    ASSERT_TRUE(context->SetTimelineThermalMapping(13.0, 3600.0).has_value());
+    EXPECT_NEAR(context->GetThermalSolveStatus().currentTime_h, 13.0, 1e-9);
+    EXPECT_EQ(context->GetThermalSolveStatus().currentThermalEpoch, 0u);
+}
+
 TEST_F(ThermalPreviewTest, AStaticSceneStillHasExactlyOneEpoch) {
     ASSERT_TRUE(context->ApplyConfig(MakeThermalConfig()).ok());
     EXPECT_EQ(context->GetThermalSolveStatus().thermalEpochCount, 1u);
