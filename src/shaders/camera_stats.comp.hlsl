@@ -99,18 +99,36 @@ uint StatsChannelCount() {
                ? min(cameraPush.channelCount, 3u) : 1u;
 }
 
-// Saturation lives in the RAW DN domain (dn >= 0.98*adcMax); the statistics
-// scalar is the display-domain value, so convert the ceiling into it. The
-// thermal corrected signal is absorbed power in W (dn = W * responsivity);
-// the photon corrected signal is electrons (dn = e- / electronsPerDn, and
-// the scalar is the well fraction e- / fullWell).
+// Saturation lives in the RAW DN domain: the CPU twin
+// (CameraIsp::ComputeAcquisitionStats) classifies a pixel saturated when
+// dn >= 0.98*adcMax -- full ADC scale regardless of analog gain or black
+// level, the clipped-metering semantics the AE loop relies on. The
+// statistics scalar is the corrected display-domain value, so the ceiling
+// is converted by inverting the readout chain
+// (camera_readout.comp.hlsl):
+//   photon: scalar = ((dn - black) * electronsPerDn / analogGain
+//                     - darkElectrons) / fullWell
+//   thermal: scalar = (dn - black - drift * frameTime) / responsivity
+// Per-pixel NUC maps and the zero-mean FPN bias cannot be inverted and are
+// ignored on both sides of the comparison.
 float SaturationThreshold() {
     const float adcMax = max(ispConfig[6].w, 1.0);
-    if (cameraPush.detector == CAMERA_THERMAL)
-        return 0.98 * adcMax / max(cameraConfig[3].y, 1e-20);
+    const float blackLevel = cameraConfig[2].z;
+    const float ceiling = 0.98 * adcMax;
+    if (cameraPush.detector == CAMERA_THERMAL) {
+        const float drift = cameraConfig[3].z * cameraPush.frameTimeSeconds;
+        const float responsivity = max(cameraConfig[3].y, 1e-20);
+        return max(ceiling - blackLevel - drift, 0.0) / responsivity;
+    }
     const float fullWell = max(ispConfig[6].z, 1e-20);
     const float electronsPerDn = max(cameraConfig[2].y, 1e-20);
-    return 0.98 * adcMax * electronsPerDn / fullWell;
+    const float analogGain = max(cameraConfig[2].x, 1e-20);
+    const float darkElectrons = (cameraPush.flags & CAMERA_DARK_CURRENT) != 0u
+        ? cameraConfig[0].z * cameraConfig[0].x : 0.0;
+    return max((ceiling - blackLevel) * electronsPerDn / analogGain -
+                   darkElectrons,
+               0.0) /
+           fullWell;
 }
 
 uint TilesX() { return (cameraPush.width + 15u) / 16u; }
