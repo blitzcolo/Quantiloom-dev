@@ -486,7 +486,9 @@ void VulkanContext::CreateDevice() {
     rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
     rtPipelineFeatures.pNext = &features12;
 
-    // Enable Ray Query features (required if shaders declare RayQueryKHR capability)
+    // Enable Ray Query features (required if shaders declare RayQueryKHR capability).
+    // Safe to enable unconditionally: IsDeviceSuitable queried the feature and
+    // rejected any device that reports it unsupported.
     VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
     rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
     rayQueryFeatures.rayQuery = VK_TRUE;
@@ -641,6 +643,10 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) {
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
     rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
 
+    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
+    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+    rtPipelineFeatures.pNext = &rayQueryFeatures;
+
     VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
     asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
     asFeatures.pNext = &rtPipelineFeatures;
@@ -655,6 +661,14 @@ bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) {
         QL_LOG_WARN("  Skipping {}: Ray Tracing features not supported", deviceProperties.deviceName);
         QL_LOG_WARN("    - Acceleration Structure: {}", asFeatures.accelerationStructure ? "YES" : "NO");
         QL_LOG_WARN("    - Ray Tracing Pipeline: {}", rtPipelineFeatures.rayTracingPipeline ? "YES" : "NO");
+        return false;
+    }
+
+    // The extension being present does not imply the feature is supported;
+    // enabling rayQuery unconditionally here used to fail vkCreateDevice on
+    // devices that expose VK_KHR_ray_query without the feature.
+    if (!rayQueryFeatures.rayQuery) {
+        QL_LOG_WARN("  Skipping {}: rayQuery feature not supported", deviceProperties.deviceName);
         return false;
     }
 
