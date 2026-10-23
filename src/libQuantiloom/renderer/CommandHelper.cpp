@@ -86,17 +86,10 @@ void CommandHelper::ExecuteImmediate(
         throw std::runtime_error("Failed to end immediate command buffer");
     }
 
-    // The fence is reused across calls; make sure the previous submission on
-    // it has completed before signalling it again
-    constexpr u64 kWaitTimeoutNs = std::numeric_limits<u64>::max();
-    result = vkWaitForFences(device, 1, &context.m_immediateFence, VK_TRUE, kWaitTimeoutNs);
-    if (result != VK_SUCCESS) {
-        freeCommandBuffer();
-        throw std::runtime_error("Failed to wait for immediate fence (VkResult: " +
-                                 std::to_string(result) + ")");
-    }
-
-    // Submit and wait on this submission's fence (not the whole queue)
+    // The fence is reused across calls and is only ever touched under this
+    // mutex: created unsignaled, submitted once, waited, then reset before it
+    // can be passed to another vkQueueSubmit (submitting with an already
+    // signaled fence is invalid, VUID-vkQueueSubmit-fence-00063).
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
@@ -104,17 +97,37 @@ void CommandHelper::ExecuteImmediate(
 
     result = vkQueueSubmit(queue, 1, &submitInfo, context.m_immediateFence);
     if (result != VK_SUCCESS) {
+        // The fence was not submitted with anything; it stays unsignaled and
+        // is safe to reuse on the next call.
         freeCommandBuffer();
         QL_LOG_ERROR("  [DEBUG CommandHelper] vkQueueSubmit FAILED with VkResult: {}", static_cast<int>(result));
         throw std::runtime_error("Failed to submit command buffer (VkResult: " + std::to_string(result) + ")");
     }
 
     // Wait for completion (synchronous)
+    constexpr u64 kWaitTimeoutNs = std::numeric_limits<u64>::max();
     result = vkWaitForFences(device, 1, &context.m_immediateFence, VK_TRUE, kWaitTimeoutNs);
     if (result != VK_SUCCESS) {
-        freeCommandBuffer();
+        // The fence's state is unknown now; do not reuse it. Destroy it so the
+        // next call creates a fresh one. The command buffer is deliberately
+        // NOT freed: it may still be pending, and freeing a pending command
+        // buffer is invalid use. It is reclaimed when the pool is destroyed
+        // after vkDeviceWaitIdle in ~VulkanContext.
+        vkDestroyFence(device, context.m_immediateFence, nullptr);
+        context.m_immediateFence = VK_NULL_HANDLE;
         QL_LOG_ERROR("  [DEBUG CommandHelper] vkWaitForFences FAILED with VkResult: {} (GPU CRASHED)", static_cast<int>(result));
         throw std::runtime_error("Failed to wait for immediate submission (VkResult: " + std::to_string(result) + ")");
+    }
+
+    result = vkResetFences(device, 1, &context.m_immediateFence);
+    if (result != VK_SUCCESS) {
+        // An un-reset fence stays signaled and could not legally be submitted
+        // again; drop it so the next call starts over.
+        freeCommandBuffer();
+        vkDestroyFence(device, context.m_immediateFence, nullptr);
+        context.m_immediateFence = VK_NULL_HANDLE;
+        throw std::runtime_error("Failed to reset immediate fence (VkResult: " +
+                                 std::to_string(result) + ")");
     }
 
     freeCommandBuffer();
