@@ -1799,27 +1799,11 @@ const Scene* ExternalRenderContext::GetScene() const {
 // Rendering
 // ============================================================================
 
-// Uploads the lighting parameters, substituting the NN atmosphere's ground
-// temperature for the thermal-sky fallback while a bake is on the GPU.
-//
-// This is not cosmetic. AtmosSkyRadianceIR divides the network's zenith
-// downwelling by B(T_air) to recover an emissivity, so a T_air unrelated to
-// the bake distorts the entire horizon ramp, and the max-depth Planck
-// fallback in closesthit.rchit with it. src/app/main.cpp makes the same
-// substitution; without this the two front ends rendered the same scene
-// differently. The host's own value is left intact in lightingParams so it
-// returns when the atmosphere is switched off, and so GetLightingParams keeps
-// reporting what the host set.
-//
-// It also masks enableEnvironmentMap with whether a map is actually loaded, for
-// the same reason and in the same way. The flag says the shader may sample
-// binding 10 as a light source, and binding 10 holds a black placeholder
-// whenever no map loaded -- so an unmasked 1 there does not brighten the scene,
-// it darkens it: the shader takes the split-sum path, adds black, and zeroes the
-// traced specular residual (qSpec) that would otherwise have carried the
-// reflection. A host can raise the flag through SetLightingParams at any time
-// and this is the one place every upload passes through, so the check lives here
-// rather than at each of the nine call sites.
+// Puts the shadow-edge correction on binding 26: the solve's sun direction
+// in a header, then dT/dv and the element sun-visibility it multiplies, with
+// one record per element. Reallocates when the element count moves -- the
+// caller rewrites the descriptor on a true return -- and refreshes the
+// records in place through the deferred-upload queue otherwise.
 bool ExternalRenderContext::Impl::UploadThermalSunResponse(
     const Vector<f32>& sunSensitivity_K, const Vector<f32>& sunVisibility,
     const glm::vec3& sunDirection, const Vector<f32>& lagSensitivity_K,
@@ -1881,6 +1865,27 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
     return reallocate;
 }
 
+// Uploads the lighting parameters, substituting the NN atmosphere's ground
+// temperature for the thermal-sky fallback while a bake is on the GPU.
+//
+// This is not cosmetic. AtmosSkyRadianceIR divides the network's zenith
+// downwelling by B(T_air) to recover an emissivity, so a T_air unrelated to
+// the bake distorts the entire horizon ramp, and the max-depth Planck
+// fallback in closesthit.rchit with it. src/app/main.cpp makes the same
+// substitution; without this the two front ends rendered the same scene
+// differently. The host's own value is left intact in lightingParams so it
+// returns when the atmosphere is switched off, and so GetLightingParams keeps
+// reporting what the host set.
+//
+// It also masks enableEnvironmentMap with whether a map is actually loaded, for
+// the same reason and in the same way. The flag says the shader may sample
+// binding 10 as a light source, and binding 10 holds a black placeholder
+// whenever no map loaded -- so an unmasked 1 there does not brighten the scene,
+// it darkens it: the shader takes the split-sum path, adds black, and zeroes the
+// traced specular residual (qSpec) that would otherwise have carried the
+// reflection. A host can raise the flag through SetLightingParams at any time
+// and this is the one place every upload passes through, so the check lives here
+// rather than at each of the nine call sites.
 void ExternalRenderContext::Impl::UploadLightingParams() {
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
