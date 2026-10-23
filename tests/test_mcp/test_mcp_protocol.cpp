@@ -114,6 +114,54 @@ TEST_F(McpProtocolTest, MissingMethodIsAnInvalidRequest) {
     EXPECT_EQ(reply["error"]["code"], -32600);
 }
 
+// Valid JSON with the wrong member types is a malformed request, answered with
+// a JSON-RPC error rather than escaping as an exception (an HTTP 500).
+TEST_F(McpProtocolTest, NonStringMethodIsAnInvalidRequest) {
+    const json reply = Post({{"jsonrpc", "2.0"}, {"id", 1}, {"method", 42}});
+    EXPECT_EQ(lastStatus, 400);
+    EXPECT_EQ(reply["error"]["code"], -32600);
+    EXPECT_EQ(reply["id"], 1);
+}
+
+TEST_F(McpProtocolTest, StructuredIdIsAnInvalidRequest) {
+    const json reply = Post({{"jsonrpc", "2.0"}, {"id", json::array()}, {"method", "ping"}});
+    EXPECT_EQ(lastStatus, 400);
+    EXPECT_EQ(reply["error"]["code"], -32600);
+    EXPECT_TRUE(reply["id"].is_null());
+}
+
+TEST_F(McpProtocolTest, NonObjectParamsIsInvalidParams) {
+    const json reply =
+        Post({{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/call"}, {"params", "ql_echo"}});
+    EXPECT_EQ(reply["error"]["code"], -32602);
+    EXPECT_EQ(reply["id"], 2);
+}
+
+TEST_F(McpProtocolTest, NonStringToolNameIsInvalidParams) {
+    const json reply = Post({{"jsonrpc", "2.0"},
+                             {"id", 3},
+                             {"method", "tools/call"},
+                             {"params", {{"name", 7}}}});
+    EXPECT_EQ(reply["error"]["code"], -32602);
+}
+
+TEST_F(McpProtocolTest, NonObjectArgumentsIsInvalidParams) {
+    RegisterEcho();
+    const json reply = Post({{"jsonrpc", "2.0"},
+                             {"id", 4},
+                             {"method", "tools/call"},
+                             {"params", {{"name", "ql_echo"}, {"arguments", "hi"}}}});
+    EXPECT_EQ(reply["error"]["code"], -32602);
+}
+
+TEST_F(McpProtocolTest, NonStringProtocolVersionIsInvalidParams) {
+    const json reply = Post({{"jsonrpc", "2.0"},
+                             {"id", 5},
+                             {"method", "initialize"},
+                             {"params", {{"protocolVersion", 20250618}}}});
+    EXPECT_EQ(reply["error"]["code"], -32602);
+}
+
 // A notification carries no id and gets no reply -- only an acknowledgement.
 TEST_F(McpProtocolTest, NotificationIsAcknowledgedWithNoBody) {
     const Protocol::Response response =

@@ -58,6 +58,22 @@ json MakeResult(const json& id, json result) {
     };
 }
 
+/// Reads an optional string member. An absent or null member leaves @p out
+/// empty; any other non-string type is a malformed request, reported by the
+/// false return. nlohmann's value() would throw type_error on it instead.
+bool ReadString(const json& object, const char* key, String& out) {
+    out.clear();
+    const auto it = object.find(key);
+    if (it == object.end() || it->is_null()) {
+        return true;
+    }
+    if (!it->is_string()) {
+        return false;
+    }
+    out = it->get<String>();
+    return true;
+}
+
 json ServerCapabilities() {
     // No resources, no prompts, no logging. Advertising a capability this
     // server does not implement is how a client ends up calling a method that
@@ -115,7 +131,23 @@ Protocol::Response Protocol::HandlePost(const String& body) {
                          .dump()};
     }
 
-    const String method = request.value("method", String());
+    // JSON-RPC allows a string, a number or null as the id. Anything else cannot
+    // be echoed back as one, so the error carries a null id.
+    if (request.contains("id")) {
+        const json& rawId = request["id"];
+        if (!rawId.is_null() && !rawId.is_string() && !rawId.is_number()) {
+            return {400, MakeError(nullptr, kInvalidRequest,
+                                   "'id' must be a string, a number or null")
+                             .dump()};
+        }
+    }
+
+    String method;
+    if (!ReadString(request, "method", method)) {
+        return {400, MakeError(request.value("id", json(nullptr)), kInvalidRequest,
+                               "'method' must be a string")
+                         .dump()};
+    }
     if (method.empty()) {
         return {400, MakeError(request.value("id", json(nullptr)), kInvalidRequest,
                                "missing 'method'")
@@ -125,7 +157,6 @@ Protocol::Response Protocol::HandlePost(const String& body) {
     // No "id" means a notification: acknowledged with 202 and no body.
     const bool isNotification = !request.contains("id") || request["id"].is_null();
     const json id = isNotification ? json(nullptr) : request["id"];
-    const json params = request.value("params", json::object());
 
     if (isNotification) {
         // notifications/initialized, notifications/cancelled and friends. There
@@ -133,8 +164,19 @@ Protocol::Response Protocol::HandlePost(const String& body) {
         return {202, String()};
     }
 
+    json params = json::object();
+    if (request.contains("params") && !request["params"].is_null()) {
+        if (!request["params"].is_object()) {
+            return {200, MakeError(id, kInvalidParams, "'params' must be an object").dump()};
+        }
+        params = request["params"];
+    }
+
     if (method == "initialize") {
-        const String requested = params.value("protocolVersion", String());
+        String requested;
+        if (!ReadString(params, "protocolVersion", requested)) {
+            return {200, MakeError(id, kInvalidParams, "'protocolVersion' must be a string").dump()};
+        }
         const String negotiated =
             IsSupportedVersion(requested) ? requested : String(kLatestProtocolVersion);
         if (!requested.empty() && negotiated != requested) {
@@ -180,7 +222,10 @@ Protocol::Response Protocol::HandlePost(const String& body) {
     }
 
     if (method == "tools/call") {
-        const String name = params.value("name", String());
+        String name;
+        if (!ReadString(params, "name", name)) {
+            return {200, MakeError(id, kInvalidParams, "'name' must be a string").dump()};
+        }
         if (name.empty()) {
             return {200, MakeError(id, kInvalidParams, "missing tool name").dump()};
         }
@@ -189,8 +234,14 @@ Protocol::Response Protocol::HandlePost(const String& body) {
             return {200, MakeError(id, kInvalidParams, "no such tool: " + name).dump()};
         }
 
-        const String argumentsJson = params.contains("arguments") ? params["arguments"].dump()
-                                                                  : String("{}");
+        // Handlers parse their arguments as an object, as the tool schemas declare.
+        const auto arguments = params.find("arguments");
+        if (arguments != params.end() && !arguments->is_null() && !arguments->is_object()) {
+            return {200, MakeError(id, kInvalidParams, "'arguments' must be an object").dump()};
+        }
+        const String argumentsJson = (arguments != params.end() && !arguments->is_null())
+                                         ? arguments->dump()
+                                         : String("{}");
 
         // The handler runs on the host's thread, not this one. The result has to
         // outlive a timeout -- the work may still run after we stop waiting --
