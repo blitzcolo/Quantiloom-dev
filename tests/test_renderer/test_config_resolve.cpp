@@ -1187,6 +1187,49 @@ translation = [1.0, 0.0, 0.0]
     EXPECT_FALSE(report.messages.empty());
 }
 
+TEST_F(ConfigResolveTest, AnExplicitZeroIrEmissivityIsAnInstructionNotAnAbsence) {
+    // `ir_emissivity = 0` used to leave the loaded emissivity curve alone while
+    // the reflectance beside it was installed as a perfect mirror.
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([[materials]]
+name = "Panel"
+ir_emissivity = 0.0
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel"});
+    scene.materials[0].irEmissivityCurve = {{4000.0f, 0.7f}, {10000.0f, 0.7f}};
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    ASSERT_EQ(scene.materials[0].irEmissivityCurve.size(), 2u);
+    EXPECT_FLOAT_EQ(scene.materials[0].irEmissivityCurve[0].second, 0.0f);
+    ASSERT_EQ(scene.materials[0].irReflectanceCurve.size(), 2u);
+    EXPECT_FLOAT_EQ(scene.materials[0].irReflectanceCurve[0].second, 1.0f);
+}
+
+TEST_F(ConfigResolveTest, ABlockThatDoesNotMentionInfraredLeavesTheEmissivityCurveAlone) {
+    auto config = Parse({.spectralKeys = "mode = \"lwir_fused\"\n",
+                         .trailing = R"([[materials]]
+name = "Panel"
+roughness = 0.4
+)"});
+    auto resolved = ResolveStrict(config);
+    ASSERT_TRUE(resolved.has_value()) << resolved.error();
+
+    Scene scene = MakeSceneWithMaterials({"Panel"});
+    scene.materials[0].irEmissivityCurve = {{4000.0f, 0.7f}, {10000.0f, 0.7f}};
+    ConfigApplyOptions options;
+    auto spectra = ResolveMaterialSpectra(config, scene, resolved.value(), options, report);
+    ASSERT_TRUE(spectra.has_value()) << spectra.error();
+
+    ASSERT_EQ(scene.materials[0].irEmissivityCurve.size(), 2u);
+    EXPECT_FLOAT_EQ(scene.materials[0].irEmissivityCurve[0].second, 0.7f);
+    EXPECT_TRUE(scene.materials[0].irReflectanceCurve.empty());
+}
+
 TEST_F(ConfigResolveTest, MaterialsTableAppliesIrOverridesToTheNamedMaterial) {
     // This reading of [[materials]] began as Studio-only, so a config the GUI
     // honoured rendered without it from the CLI.

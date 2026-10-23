@@ -2507,16 +2507,28 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
             kLwirNm =
                 std::max(kLwirNm, static_cast<f32>(resolved.cameraConfig.device.effectiveMaxNm));
         }
+        const bool saysEmissivity = matTable.Has("ir_emissivity");
+        const bool saysTransmittance = matTable.Has("ir_transmittance");
         const f32 emissivity = matTable.GetFloat("ir_emissivity", 0.0f);
         const f32 transmittance = matTable.GetFloat("ir_transmittance", 0.0f);
 
-        if (emissivity > 0.0f) {
+        // A key that is present is an instruction, an explicit zero included:
+        // `ir_emissivity = 0` is a surface that does not emit, not a surface
+        // the config said nothing about. Testing the value instead of the key
+        // left the loaded emissivity curve in place while the reflectance
+        // below was installed as 1 - 0 - T, so the material both emitted and
+        // was a perfect mirror. A zero transmittance has no curve to carry
+        // (the material's zero scalar is exact), but it does retire whatever
+        // transmittance the scene file loaded, for the same reason.
+        if (saysEmissivity) {
             it->irEmissivityCurve = {{kMwirNm, emissivity}, {kLwirNm, emissivity}};
         }
         if (transmittance > 0.0f) {
             it->irTransmittanceCurve = {{kMwirNm, transmittance}, {kLwirNm, transmittance}};
+        } else if (saysTransmittance) {
+            it->irTransmittanceCurve.clear();
         }
-        if ((emissivity > 0.0f || transmittance > 0.0f) &&
+        if ((saysEmissivity || transmittance > 0.0f) &&
             (kMwirNm < 4000.0f || kLwirNm > 10000.0f)) {
             diag.Info("materials", "material '" + name +
                                        "' legacy scalar IR fractions are "
@@ -2536,8 +2548,7 @@ Result<ResolvedMaterialSpectra, String> ResolveMaterialSpectra(
         // looks like a config stating rho = 1. Found while porting the Cornell
         // box to a second renderer, where the wall reflectances stopped
         // matching the file both renderers were reading.
-        const bool saysInfrared =
-            matTable.Has("ir_emissivity") || matTable.Has("ir_transmittance");
+        const bool saysInfrared = saysEmissivity || saysTransmittance;
         const f32 reflectance = 1.0f - emissivity - transmittance;
         if (saysInfrared && reflectance > 0.0f) {
             it->irReflectanceCurve = {{kMwirNm, reflectance}, {kLwirNm, reflectance}};
