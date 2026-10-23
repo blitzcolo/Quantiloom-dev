@@ -22,28 +22,47 @@ VkCommandBuffer BeginSingleTimeCommands(VkDevice device, VkCommandPool commandPo
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+    if (const VkResult result = vkAllocateCommandBuffers(device, &allocInfo, &commandBuffer);
+        result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to allocate upload command buffer");
+    }
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
+    if (const VkResult result = vkBeginCommandBuffer(commandBuffer, &beginInfo);
+        result != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        throw std::runtime_error("Failed to begin upload command buffer");
+    }
 
     return commandBuffer;
 }
 
 void EndSingleTimeCommands(VkDevice device, VkCommandPool commandPool,
                            VkQueue queue, VkCommandBuffer commandBuffer) {
-    vkEndCommandBuffer(commandBuffer);
+    if (const VkResult result = vkEndCommandBuffer(commandBuffer);
+        result != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        throw std::runtime_error("Failed to end upload command buffer");
+    }
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
-    vkQueueWaitIdle(queue);  // Synchronous, blocking
+    if (const VkResult result = vkQueueSubmit(queue, 1, &submitInfo, VK_NULL_HANDLE);
+        result != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        throw std::runtime_error("Failed to submit upload command buffer");
+    }
+    if (const VkResult result = vkQueueWaitIdle(queue); result != VK_SUCCESS) {
+        vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
+        throw std::runtime_error("Failed to wait for upload to complete (VkResult: " +
+                                 std::to_string(result) + ")");
+    }
 
     vkFreeCommandBuffers(device, commandPool, 1, &commandBuffer);
 }
