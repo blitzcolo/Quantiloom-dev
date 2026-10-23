@@ -1184,6 +1184,43 @@ TEST_F(CameraSchedulerGpuTest, ScheduledFramesAdvanceAcquisitionIndex) {
         EXPECT_TRUE(std::isfinite(value));
 }
 
+TEST_F(CameraSchedulerGpuTest, AcquisitionsFollowTheConfiguredFramePeriod) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+    ApplyScene();
+    auto config = CameraConfigFor(kSensorSize, kSensorSize);
+    // A period the old hard-coded 1/30 s cadence would never land on: the
+    // scheduler has to take this from the camera configuration.
+    config.readout.framePeriodSeconds = 0.25;
+    const auto enabled = context->SetCameraConfig(config);
+    ASSERT_TRUE(enabled.has_value()) << enabled.error();
+
+    DrawFrame();
+    auto status = context->GetCameraHistoryStatus();
+    EXPECT_EQ(status.acquisitionIndex, 0u);
+    EXPECT_DOUBLE_EQ(status.frameTimeSeconds, 0.0);
+
+    // The host moves the clock; the scheduler commits when it reaches the
+    // next slot of the configured period grid, and the committed tick names
+    // the slot, not the scrubbed instant.
+    const std::array<f64, 3> slots{0.25, 0.5, 0.75};
+    for (u32 i = 0; i < slots.size(); ++i) {
+        ASSERT_TRUE(context->SetTimelineTime(slots[i]).has_value());
+        DrawFrame();
+        status = context->GetCameraHistoryStatus();
+        EXPECT_EQ(status.acquisitionIndex, static_cast<u64>(i) + 1u)
+            << "slot " << slots[i];
+        EXPECT_DOUBLE_EQ(status.frameTimeSeconds, slots[i]) << "slot " << slots[i];
+    }
+
+    // An off-grid scrub still commits on the configured grid: the clock at
+    // 1.1 s reaches the 1.0 s slot, and the acquisition lands there.
+    ASSERT_TRUE(context->SetTimelineTime(1.1).has_value());
+    DrawFrame();
+    status = context->GetCameraHistoryStatus();
+    EXPECT_EQ(status.acquisitionIndex, 4u);
+    EXPECT_DOUBLE_EQ(status.frameTimeSeconds, 1.0);
+}
+
 TEST_F(CameraSchedulerGpuTest, RedrawWithoutClockAdvanceDoesNotAdvanceAcquisition) {
     if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
     ApplyScene();
