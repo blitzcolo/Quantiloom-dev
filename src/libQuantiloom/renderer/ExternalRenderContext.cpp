@@ -4214,7 +4214,15 @@ Result<void, String> ExternalRenderContext::SetCameraConfig(const camera::Camera
     m_impl->cameraAcquisitionTimeSeconds = m_impl->timeline.Current_s();
     // The interactive scheduler restarts from the new configuration: the
     // first RenderFrame with the camera enabled takes scheduling ownership
-    // again and the first acquisition lands at the current clock time.
+    // again and the first acquisition lands at the current clock time. Its
+    // cadence is the configured frame period -- presets run at 1/7.2, 1/60 or
+    // 1/125 s, and the scheduler used to advance every acquisition at a fixed
+    // 1/30 s regardless, which desynchronised motion blur, rolling timing and
+    // the AE/AWB rhythm from the camera being simulated. A missing or
+    // non-positive period keeps the default rather than freezing the clock.
+    const f64 framePeriod = config.readout.framePeriodSeconds;
+    m_impl->cameraScheduler.framePeriodSeconds =
+        (std::isfinite(framePeriod) && framePeriod > 0.0) ? framePeriod : 1.0 / 30.0;
     m_impl->cameraScheduler.drivesAcquisition = false;
     m_impl->cameraScheduler.nextAcquisitionIndex = 0;
     m_impl->cameraScheduler.nextAcquisitionTimeSeconds = m_impl->timeline.Current_s();
