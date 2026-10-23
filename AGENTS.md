@@ -375,7 +375,7 @@ balance, decomposed for a different question.)
 | Direct sun | `α_s E_dni cosθ v_i`, `v_i` from the shadow dispatch | no sun |
 | **Diffuse sky** | `α_s E_diff G_i`, `G_i` the sky fraction plus one bounce | `diffuse_irradiance_w_m2 = 0` |
 | **Reflected sun** | `α_s E_dni R_ik`, baked per sun column | scene is a single plane |
-| Long wave | `ε σ (Σ F_ij T_j⁴ + s_i T_sky⁴ − T_i⁴)` | `ir_emissivity = 0` |
+| Long wave | `ε_i (H_i − σ T_i⁴)`, `H_i = Σ F_ij J_j + s_i σ T_sky⁴`, `J_j = ε_j σ T_j⁴ + (1 − ε_j) H_j` | `ir_emissivity = 0` |
 | Convection | `h (T_air − T_i)`, half implicit | `convection_h_w_m2k = 0` |
 | **Evaporation** | `f_wet (h/c_p) L_v (q_sat(T_i) − RH q_sat(T_air))`, Magnus | `wetness_factor = 0` (the default) |
 
@@ -398,7 +398,13 @@ so a thin layer diverged at the default minute and the hour-long steps of the
 steady-state relaxation did the same to a few centimetres of wood
 (`AThinLayerUnderAColdSkyIsStableAtLongSteps`). What remains at a very long
 step is Crank-Nicolson's own ringing on its stiffest conduction mode, which
-decays. The neighbours' share of the incoming long wave stays explicit, and the
+decays. The exchange is diffuse-grey: a neighbour leaves its face with radiosity
+`J_j`, not `σ T_j⁴`, so what it reflects counts and its emission is not
+overstated by `1/ε_j` (about 11% at ε 0.9, a factor of twenty against polished
+metal). The irradiance `H` is lagged one step -- carried in
+`ThermalState::longwaveIrradiance_W_m2`, each step one Jacobi sweep from the
+last, seeded with `σ T⁴` so an isothermal enclosure stays exact -- and the
+neighbours' share of it stays explicit, held fixed by the tangents. The
 tangents and parameter rows differentiate exactly this split.
 
 `[thermal] sky_temperature_k` states the sky the balance radiates against
@@ -411,7 +417,10 @@ file's `sky_k` column overrides all of them row by row.
 The forcing CSV is ten columns, the last four optional and defaulted:
 `time_h, air_k, dni, sun_azimuth_deg, sun_elevation_deg, sky_k,
 diffuse_w_m2, relative_humidity, convection_w_m2k, wind_speed_m_s`. A file
-written before any of those existed keeps its meaning exactly. A
+written before any of those existed keeps its meaning exactly, and a row that
+stops before the humidity column takes the run's `[atmosphere]
+relative_humidity` rather than a flat 50%, in the viewport and the column tool
+as offline. A
 constant-forcing run reads `[thermal] diffuse_irradiance_w_m2` and
 `[atmosphere] relative_humidity` — the humidity is deliberately *not*
 duplicated into `[thermal]`, since a scene with two of them would be a scene
@@ -548,7 +557,8 @@ computed once at construction.
 **GpuThermalStepper** (`renderer/GpuThermalStepper.hpp`) mirrors the CPU
 Crank-Nicolson math in f32 via `thermal_step.comp.hlsl`. Each element is one
 thread; the Thomas solve is thread-local (max 32 nodes); inter-element
-radiative coupling reads from a ping-pong surface buffer. `StepMany`
+radiative coupling reads each neighbour's radiosity from a ping-pong buffer
+(binding 12), with the lagged irradiance in binding 13. `StepMany`
 dispatches entire batches in a single `ExecuteImmediate`.
 
 **The host picks the stepper, and it picks CPU for anything the GPU one does
@@ -675,7 +685,8 @@ Five things to know before touching it:
 - **The key hashes resolved inputs, never config text.** That is what makes two
   configs differing only in `sensor.*` one entry. It covers the built
   `ThermalMesh`, the merged materials, the `[thermal]` scalars, the forcing
-  CSV's *contents*, `[lighting] sun_direction`, the stepper's `Name()`, the
+  CSV's *contents* (the bytes the solve parsed, not a second read), each
+  material's alpha coverage, `[lighting] sun_direction`, the stepper's `Name()`, the
   library version and the GPU. Miss a field and the cache serves another
   scene's temperature field while the render exits 0 — which is why it is 256
   bits and why `BuildSolvedMaterials` was hoisted: the emissivity the solve uses
@@ -704,13 +715,13 @@ Five things to know before touching it:
 Naming `thermal.dump_elements` opts out in both directions: the dump needs the
 exchange's sky fractions, which an entry does not carry.
 
-`kKeySchemaVersion` is at **5** and `kCacheFormatVersion` at **2**. The first
+`kKeySchemaVersion` is at **7** and `kCacheFormatVersion` at **2**. The first
 bumps when a new input joins the key — the convection law and its constants, `lateral_conduction`,
 `sun_memory_lags`, `parameter_sensitivities`, `internal_heat_w_m2` and the
-interior boundary all did — and also when the stepper's discretisation changes
+interior boundary all did, as did alpha coverage (7) — and also when the stepper's discretisation changes
 under an unchanged library version, since the version is the only other thing
 that would tell an old entry from a new solve (5: the long wave went half
-implicit). `kCacheFormatVersion` bumps when the stored
+implicit; 6: it went diffuse-grey). `kCacheFormatVersion` bumps when the stored
 result grows an array, which the lag and parameter tangents did. Adding an
 input without bumping the first serves a stale field; adding an output without
 bumping the second reads past the end of an old file. Each new field wants an
