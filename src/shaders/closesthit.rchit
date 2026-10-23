@@ -5398,9 +5398,23 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // Compute Fresnel reflectance (exact dielectric formula)
         float cosI = abs(dot(N, -rayDir));
 
-        // Scale transmission contribution by material.transmission factor
-        // This allows partial transmission (frosted glass effect)
+        // Scale transmission contribution by material.transmission factor.
+        // KHR_materials_transmission puts the factor in the R channel of its
+        // texture, multiplied with the scalar -- a textured pane can be clear
+        // where its map is bright and opaque where it is dark. The texture's
+        // own KHR_texture_transform is not applied: the 14-slot uvTransform
+        // layout has no free slot for it (same note as on thicknessFactor in
+        // common.hlsli).
         float transmissionWeight = material.transmission;
+        if (material.transmissionTextureIndex >= 0) {
+            transmissionWeight *= SampleTexture(
+                material.transmissionTextureIndex,
+                material.transmissionTextureIndex,  // 1:1 texture/sampler mapping
+                uv,
+                float4(1.0, 1.0, 1.0, 1.0)  // fully transmitting if the texture is missing
+            ).r;
+        }
+        transmissionWeight = saturate(transmissionWeight);
 
         // Compute reflection direction (same for all wavelengths)
         float3 reflectDir = reflect(rayDir, N);

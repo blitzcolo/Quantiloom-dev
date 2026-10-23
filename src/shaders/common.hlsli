@@ -1120,6 +1120,15 @@ struct MaterialData {
     float3 attenuationColor;             // Color at attenuation distance                           // Offset: 128-140
     float  attenuationDistance;          // Distance for attenuation (m, 0 = no attenuation)   // Offset: 140-144
 
+    // NOT READ by the shaders. KHR_materials_volume's thicknessFactor
+    // approximates the volume path for thin-walled assets that carry no
+    // volume geometry; this renderer traces real geometry and Beer-Lamberts
+    // over the actual path length through the medium (RayTCurrent, converted
+    // to metres by worldUnitsToMeters), which is the quantity thickness
+    // approximates. Overwriting the measured path with an authored thickness
+    // would discard information, so the fields are loaded and validated but
+    // intentionally unused. thicknessTexture would be the G channel per the
+    // extension, if a consumer ever wants it.
     float  thicknessFactor;              // Thickness for thin-walled approximation                 // Offset: 144-148
     int    thicknessTextureIndex;        // Thickness texture (-1 = no texture)                     // Offset: 148-152
     float  dispersion;                   // Abbe number reciprocal (0 = no dispersion)              // Offset: 152-156
