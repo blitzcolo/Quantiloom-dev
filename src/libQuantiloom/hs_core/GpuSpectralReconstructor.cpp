@@ -470,9 +470,13 @@ std::pair<GpuReconstructorStatus, SpectralCube> GpuSpectralReconstructor::Recons
                  width, height, dstBands, srcBands);
     }
 
-    // Calculate buffer sizes
-    VkDeviceSize srcCubeSize = width * height * srcBands * sizeof(f32);
-    VkDeviceSize dstCubeSize = width * height * dstBands * sizeof(f32);
+    // Calculate buffer sizes. Dimensions convert to VkDeviceSize before
+    // multiplying: as u32 the cube-size product only stays exact below 2^32
+    // elements, and the check belongs here, not at the overflow.
+    const VkDeviceSize srcCubeSize = static_cast<VkDeviceSize>(width) * height * srcBands *
+                                     sizeof(f32);
+    const VkDeviceSize dstCubeSize = static_cast<VkDeviceSize>(width) * height * dstBands *
+                                     sizeof(f32);
     VkDeviceSize srcWlSize = srcBands * sizeof(f32);
     VkDeviceSize dstWlSize = dstBands * sizeof(f32);
     // One mapping entry per target band (uint4 + float2), built once on the
