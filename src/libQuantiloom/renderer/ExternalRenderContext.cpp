@@ -3715,8 +3715,11 @@ TimelineInfo ExternalRenderContext::GetTimelineInfo() const {
             const ThermalSolveStatus status = m_impl->thermalPreview->Status();
             info.thermalEpochCount = status.thermalEpochCount;
             info.currentThermalEpoch = status.currentThermalEpoch;
-        } catch (...) {
-            // A status snapshot that throws says nothing about the clock.
+        } catch (const std::exception& ex) {
+            // A status snapshot that throws says nothing about the clock; the
+            // clock fields stay valid, and the failure is logged rather than
+            // mistaken for "no epochs".
+            QL_LOG_WARN("GetTimelineInfo: thermal status query failed: {}", ex.what());
         }
     }
     return info;
@@ -3753,8 +3756,13 @@ ThermalSolveStatus ExternalRenderContext::GetThermalSolveStatus() const {
     if (m_impl->thermalPreview) {
         try {
             status = m_impl->thermalPreview->Status();
-        } catch (...) {
+        } catch (const std::exception& ex) {
+            // Distinguish "never solved" from "the query itself failed": the
+            // error travels with the status so a host can tell the two apart.
             status = {};
+            status.error = String("thermal status query failed: ") + ex.what();
+            status.solveValid = false;
+            QL_LOG_ERROR("GetThermalSolveStatus: {}", status.error);
         }
     }
     if (!m_impl->thermalLastError.empty()) {
