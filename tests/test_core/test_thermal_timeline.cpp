@@ -451,3 +451,26 @@ TEST(ThermalTimelineTest, TheBlendedSunTableScalesTheAbsorbedFlux) {
     EXPECT_GT(T_fullSun, T_noSun + 1.0)
         << "full sun " << T_fullSun << ", no sun " << T_noSun;
 }
+
+TEST(ThermalTimelineTest, NoSunVisibilityAnywhereIsShadowNotFullSun) {
+    // A table and an exchange that both fail to describe the geometry. The
+    // batch path already stepped that as no direct sun; the single-step
+    // sampler -- the steady start, an off-grid query, the field's own v --
+    // used to invent full sun, the hottest answer there is.
+    SunVisibilityTable mismatched;
+    mismatched.sampleTime_h = {0.0};
+    mismatched.visibility = {1.0f, 1.0f, 1.0f};  // three elements, not two
+    ExchangeGeometry noColumn = MakeOpenSkyExchange(2);
+    noColumn.sunVisibility.clear();
+
+    const Vector<f32> visibility = SampleSunVisibilityAt(mismatched, noColumn, 0.0, 2);
+    ASSERT_EQ(visibility.size(), 2u);
+    EXPECT_EQ(visibility[0], 0.0f);
+    EXPECT_EQ(visibility[1], 0.0f);
+
+    // The open-sky exchange still means full sun: that is a statement, not a
+    // gap.
+    const Vector<f32> open =
+        SampleSunVisibilityAt(SunVisibilityTable{}, MakeOpenSkyExchange(2), 0.0, 2);
+    EXPECT_EQ(open, (Vector<f32>{1.0f, 1.0f}));
+}

@@ -160,7 +160,8 @@ ExchangeGeometry MakeOpenSkyExchange(const usize elementCount) {
 Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
                                   const ExchangeGeometry& exchange, const f64 time_h,
                                   const usize elementCount) {
-    Vector<f32> visibility(elementCount, 1.0f);
+    // Shadowed when nothing describes this geometry -- see the declaration.
+    Vector<f32> visibility(elementCount, 0.0f);
 
     if (table.SampleCount() > 0 && table.ElementCount() == elementCount) {
         usize a = 0;

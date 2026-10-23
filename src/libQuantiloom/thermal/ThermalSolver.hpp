@@ -363,8 +363,14 @@ void DumpThermalElements(const String& path, const Vector<ThermalElement>& eleme
 
 /// The sun visibility every element had at one time, on the same two-column
 /// interpolation the solver's own steps use. Falls back to the exchange's
-/// single column, and with neither to full sun -- which is what a scene with
-/// no shadowing precompute is.
+/// single column -- a scene with no shadowing precompute runs on
+/// MakeOpenSkyExchange, whose column is full sun -- and with neither, to no
+/// direct sun at all. That last case is a table and an exchange that do not
+/// describe this geometry, and inventing full sun for it was the hottest
+/// answer available; zero is also what IThermalStepper::StepMany and the GPU
+/// stepper already step with when they have no table, so the steady start,
+/// an off-grid query and a batch now agree. ThermalTimeline warns about it
+/// once per epoch.
 [[nodiscard]] Vector<f32> SampleSunVisibilityAt(const SunVisibilityTable& table,
                                                 const ExchangeGeometry& exchange,
                                                 f64 time_h, usize elementCount);

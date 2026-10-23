@@ -158,6 +158,22 @@ void ThermalTimeline::Initialise() {
     // before it happens, which matters more than half a step of accuracy.
     const ThermalGeometrySchedule& schedule = *m_schedule;
     m_epochBoundaryStep.assign(schedule.Count(), 0);
+    // A geometry with no sun visibility of its own is stepped as shadowed (see
+    // SampleSunVisibilityAt). Said once here, where it is decided, rather than
+    // on every step that reads it.
+    for (usize e = 0; e < schedule.Count(); ++e) {
+        const ThermalGeometryEpoch& epoch = schedule.epochs[e];
+        const usize n = epoch.elements.size();
+        const bool tableFits =
+            epoch.sunTable.SampleCount() > 0 && epoch.sunTable.ElementCount() == n;
+        if (n > 0 && !tableFits && epoch.exchange.sunVisibility.size() != n) {
+            QL_LOG_WARN("  Thermal: epoch {} has no sun visibility for its {} elements "
+                        "(table {} x {}, exchange {}); the direct beam is treated as "
+                        "shadowed",
+                        e, n, epoch.sunTable.SampleCount(), epoch.sunTable.ElementCount(),
+                        epoch.exchange.sunVisibility.size());
+        }
+    }
     for (usize e = 1; e < schedule.Count(); ++e) {
         const f64 elapsed_s = (schedule.epochs[e].from_h - m_desc.startTime_h) * 3600.0;
         m_epochBoundaryStep[e] =
