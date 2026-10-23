@@ -9,6 +9,18 @@
 
 namespace quantiloom {
 
+namespace {
+
+// Every stage that samples the uploaded textures. The material textures are
+// read by the ray-tracing stages (and by compute passes sharing the layout); a
+// barrier whose destination mask names only the fragment stage leaves them
+// unsynchronised against the transfer that wrote them.
+constexpr VkPipelineStageFlags kSampleStages = VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
+                                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                                                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+
+}  // namespace
+
 struct TextureManager::PendingUpload {
     std::unique_ptr<GpuBuffer> staging;
     std::unique_ptr<GpuImage> image;
@@ -458,7 +470,7 @@ void TextureManager::RecordTextureUpload(VkCommandBuffer cmd,
     ready.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     ready.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
         0, nullptr, 0, nullptr, 1, &ready);
 }
 
@@ -544,7 +556,7 @@ void TextureManager::GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
         vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+            VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
             0, nullptr,
             0, nullptr,
             1, &barrier);
@@ -558,7 +570,7 @@ void TextureManager::GenerateMipmaps(VkCommandBuffer cmd, GpuImage* gpuImage,
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
 
     vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, kSampleStages, 0,
         0, nullptr,
         0, nullptr,
         1, &barrier);
