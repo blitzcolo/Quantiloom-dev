@@ -78,7 +78,7 @@ namespace quantiloom {
 struct LightingParams {
     glm::vec3 sunDirection;         // FROM surface TO sun (normalized), offset 0
     // NOTE: sunRadiance_spectral is RGB average fallback, NOT true spectral density
-    // Unit: W·sr⁻¹·m⁻² (same as RGB), NOT W·sr⁻¹·m⁻²·nm⁻¹
+    // Unit: W·m⁻² (irradiance, same as sunRadiance_rgb), NOT W·m⁻²·nm⁻¹
     // VIS_Fused mode uses RGB-to-spectrum conversion, ignoring this field
     f32 sunRadiance_spectral;       // Spectral radiance fallback (RGB average), offset 12
 
