@@ -2651,6 +2651,12 @@ void ExternalRenderContext::SetCameraViewMatrix(const glm::mat4& viewMatrix) {
 }
 
 void ExternalRenderContext::SetCameraLookAt(const glm::vec3& position, const glm::vec3& target, const glm::vec3& up) {
+    SetCameraLookAt(position, target, up, glm::vec3(0.0f));
+}
+
+void ExternalRenderContext::SetCameraLookAt(const glm::vec3& position, const glm::vec3& target,
+                                            const glm::vec3& up, const glm::vec3& viewUpHint) {
+    m_impl->camera.SetViewUpHint(viewUpHint);
     m_impl->camera.SetPosition(position);
     m_impl->camera.SetLookAt(target);
     m_impl->camera.SetUp(up);

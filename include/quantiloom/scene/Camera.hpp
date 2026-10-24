@@ -155,6 +155,26 @@ public:
     void SetFovY(f32 fovYDegrees);
 
     /**
+     * @brief Which way is up on the film while forward is parallel to the up reference
+     *
+     * A straight-down or straight-up view gives the up reference nothing to
+     * say about which way the picture faces, and without this UpdateVectors()
+     * falls back to a fixed world axis. That is a defined answer, but every
+     * such view then faces the same way however it was reached: an orbit
+     * that arrives at the pole snaps to that one orientation and cannot turn
+     * about the vertical while it stays there. An interactive host knows the
+     * answer -- the up its own view rotation implies -- and passes it here.
+     *
+     * Consulted only in that degenerate case; anywhere else the reference
+     * decides and the hint is ignored. It is not the reference: it is never
+     * returned by GetUpReference(), so a host that saves camera state, and
+     * the motion poses built from the reference, see only what the author
+     * said. Zero clears it, which is also the default.
+     */
+    void SetViewUpHint(const glm::vec3& hint);
+    [[nodiscard]] glm::vec3 GetViewUpHint() const { return m_viewUpHint; }
+
+    /**
      * @brief How rays are generated across the film plane
      *
      * Perspective rays share an origin and fan out; orthographic rays share a
@@ -230,6 +250,7 @@ private:
     Projection m_projection = Projection::Perspective;
     f32 m_orthoHeight = 2.0f;
     f32 m_aspectRatio = 16.0f / 9.0f;
+    glm::vec3 m_viewUpHint{0, 0, 0};   // Zero: none -- see SetViewUpHint
 };
 
 } // namespace quantiloom

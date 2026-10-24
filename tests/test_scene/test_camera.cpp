@@ -436,6 +436,74 @@ TEST(CameraTest, LookStraightUpWithDefaultUp) {
     EXPECT_NEAR(glm::dot(cam.GetForward(), cam.GetRight()), 0.0f, 1e-5f);
 }
 
+// An orbit camera's own up at (pitch, yaw): the derivative of its offset
+// (cos p sin y, sin p, cos p cos y) with respect to pitch. Perpendicular to the
+// view at every pitch, poles included, which is why a host can always pass it.
+static glm::vec3 TurntableUp(f32 pitch, f32 yaw) {
+    return glm::vec3(-std::sin(pitch) * std::sin(yaw), std::cos(pitch),
+                     -std::sin(pitch) * std::cos(yaw));
+}
+
+TEST(CameraTest, ViewUpHintDecidesWhichWayAStraightDownViewFaces) {
+    Camera cam(glm::vec3(0, 10, 0), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+
+    cam.SetViewUpHint(glm::vec3(1, 0, 0));
+    EXPECT_TRUE(VecEqual(cam.GetUp(), glm::vec3(1, 0, 0)));
+    const glm::vec3 rightA = cam.GetRight();
+
+    // A different heading turns the picture about the vertical -- the thing
+    // the fixed fallback axis made impossible.
+    cam.SetViewUpHint(glm::vec3(0, 0, -1));
+    EXPECT_TRUE(VecEqual(cam.GetUp(), glm::vec3(0, 0, -1)));
+    EXPECT_NEAR(glm::dot(rightA, cam.GetRight()), 0.0f, 1e-5f);
+
+    // The hint is not the reference: nothing reading the authored up sees it.
+    EXPECT_EQ(cam.GetUpReference(), glm::vec3(0, 1, 0));
+}
+
+TEST(CameraTest, ViewUpHintIsIgnoredOffThePole) {
+    Camera plain(glm::vec3(5, 3, -10), glm::vec3(0, 1, 0), glm::vec3(0, 1, 0));
+    Camera hinted = plain;
+    hinted.SetViewUpHint(glm::vec3(1, 0, 0));
+
+    EXPECT_TRUE(VecEqual(hinted.GetUp(), plain.GetUp()));
+    EXPECT_TRUE(VecEqual(hinted.GetRight(), plain.GetRight()));
+}
+
+TEST(CameraTest, ViewUpHintIsIgnoredWhenItIsParallelToo) {
+    // A hint along the view is as uninformative as the reference; the fixed
+    // fallback still has to produce a finite basis.
+    Camera cam(glm::vec3(0, 10, 0), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+    cam.SetViewUpHint(glm::vec3(0, 1, 0));
+
+    EXPECT_FALSE(std::isnan(cam.GetRight().x));
+    EXPECT_TRUE(IsNormalized(cam.GetRight()));
+    EXPECT_TRUE(IsNormalized(cam.GetUp()));
+}
+
+TEST(CameraTest, OrbitReachingThePoleKeepsItsHeading) {
+    // Pitch an orbit camera up to straight-down in small steps at a yaw the
+    // fallback axis does not happen to match. Within 0.081 degrees of the pole
+    // the reference stops deciding; without the hint the film's up jumped
+    // there to the fixed axis (a 180-degree roll at yaw 0, here about 140),
+    // and every view along the pole faced the same way whatever the yaw.
+    const glm::vec3 target(3.0f, 1.0f, -2.0f);
+    const f32 radius = 5.0f;
+    const f32 yaw = 0.7f;
+
+    const int steps = 100;
+    for (int i = 0; i <= steps; ++i) {
+        const f32 pitch = glm::radians(89.0f + static_cast<f32>(i) / static_cast<f32>(steps));
+        const glm::vec3 offset(std::cos(pitch) * std::sin(yaw), std::sin(pitch),
+                               std::cos(pitch) * std::cos(yaw));
+        Camera cam(target + offset * radius, target, glm::vec3(0, 1, 0));
+        cam.SetViewUpHint(TurntableUp(pitch, yaw));
+
+        EXPECT_TRUE(VecEqual(cam.GetUp(), TurntableUp(pitch, yaw), 1e-3f))
+            << "pitch " << glm::degrees(pitch) << " deg";
+    }
+}
+
 TEST(CameraTest, VerySmallFOV) {
     Camera cam;
     cam.SetFovY(1.0f);  // Very narrow

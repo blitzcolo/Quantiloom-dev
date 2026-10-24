@@ -31,6 +31,11 @@ void Camera::SetUp(const glm::vec3& up) {
     UpdateVectors();
 }
 
+void Camera::SetViewUpHint(const glm::vec3& hint) {
+    m_viewUpHint = hint;
+    UpdateVectors();
+}
+
 void Camera::SetFovY(f32 fovYDegrees) {
     m_fovYDegrees = fovYDegrees;
 }
@@ -72,10 +77,21 @@ void Camera::UpdateVectors() {
     //    to an axis that is not parallel; the orthogonal up is rebuilt below.
     //    The reference, not m_up: deriving from the previous frame's derived
     //    up let roll accumulate across camera moves.
+    //    A host's view-up hint comes first: the fixed axis is the same for
+    //    every view along the pole, so on its own it snaps any orbit that
+    //    arrives there to one orientation (see SetViewUpHint).
     glm::vec3 up = m_upReference;
     if (std::abs(glm::dot(m_forward, up)) > 1.0f - kDegenerate) {
-        up = (std::abs(m_forward.y) > 0.9f) ? glm::vec3(0.0f, 0.0f, 1.0f)
-                                            : glm::vec3(0.0f, 1.0f, 0.0f);
+        const f32 hintLength = glm::length(m_viewUpHint);
+        const glm::vec3 hint =
+            (hintLength > kDegenerate) ? m_viewUpHint / hintLength : glm::vec3(0.0f);
+        if (hintLength > kDegenerate &&
+            std::abs(glm::dot(m_forward, hint)) <= 1.0f - kDegenerate) {
+            up = hint;
+        } else {
+            up = (std::abs(m_forward.y) > 0.9f) ? glm::vec3(0.0f, 0.0f, 1.0f)
+                                                : glm::vec3(0.0f, 1.0f, 0.0f);
+        }
     }
 
     // Compute right vector (perpendicular to forward and up)

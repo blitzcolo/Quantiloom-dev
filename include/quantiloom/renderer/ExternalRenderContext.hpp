@@ -655,8 +655,24 @@ public:
      * @param position Camera position (world space)
      * @param target Look-at target (world space)
      * @param up Up vector
+     *
+     * Clears any view-up hint, so a host that never passes one gets the
+     * camera's fixed fallback for a view along @p up, as it always has.
      */
     void SetCameraLookAt(const glm::vec3& position, const glm::vec3& target, const glm::vec3& up);
+
+    /**
+     * @brief Set camera from position/target/up, plus the up to show along the pole
+     * @param viewUpHint The film's up as the host's own view rotation has it.
+     *        Used only while the view is parallel to @p up, where @p up says
+     *        nothing about which way the picture faces; ignored otherwise,
+     *        and never stored as the up reference. An orbit host passes its
+     *        turntable up here, so a view that reaches straight down keeps
+     *        its heading and can still turn about the vertical.
+     *        See Camera::SetViewUpHint.
+     */
+    void SetCameraLookAt(const glm::vec3& position, const glm::vec3& target,
+                         const glm::vec3& up, const glm::vec3& viewUpHint);
 
     /**
      * @brief Set camera field of view
