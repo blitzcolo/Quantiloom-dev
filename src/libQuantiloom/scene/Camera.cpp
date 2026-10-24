@@ -135,11 +135,28 @@ Result<Camera, String> Camera::FromConfig(const Config& config, f32 aspectRatio)
         up = glm::vec3(upArray[0], upArray[1], upArray[2]);
     }
 
+    // View up (optional): which way the film's up points when the view runs
+    // along `up`, where `up` cannot say. Without it a straight-down or
+    // straight-up camera faces the fixed fallback axis, whatever the author
+    // saw when they framed it. Ignored for every other view, so a file may
+    // carry it unconditionally -- Studio writes the up it was showing.
+    auto viewUpArray = config.GetArray<f32>("camera.view_up");
+    glm::vec3 viewUp(0.0f);
+    if (!viewUpArray.empty()) {
+        if (viewUpArray.size() != 3) {
+            return Result<Camera>(
+                Result<Camera>::Err("camera.view_up must be array of 3 floats, but got " +
+                                    std::to_string(viewUpArray.size())));
+        }
+        viewUp = glm::vec3(viewUpArray[0], viewUpArray[1], viewUpArray[2]);
+    }
+
     // Read FOV (optional, defaults to 60 degrees)
     f32 fovY = config.Get<f32>("camera.fov_y", 60.0f);
 
     // Create camera
     Camera camera(position, lookAt, up, fovY, aspectRatio);
+    camera.SetViewUpHint(viewUp);
 
     // Projection. Absent means perspective, which is what every scene written
     // before this key existed meant. An orthographic camera has no field of

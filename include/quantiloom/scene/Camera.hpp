@@ -170,6 +170,9 @@ public:
      * returned by GetUpReference(), so a host that saves camera state, and
      * the motion poses built from the reference, see only what the author
      * said. Zero clears it, which is also the default.
+     *
+     * In a config it is `camera.view_up`, read by FromConfig(); motion poses
+     * carry it too, so a keyed pose along the reference faces the same way.
      */
     void SetViewUpHint(const glm::vec3& hint);
     [[nodiscard]] glm::vec3 GetViewUpHint() const { return m_viewUpHint; }

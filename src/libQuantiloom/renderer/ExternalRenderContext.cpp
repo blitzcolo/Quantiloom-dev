@@ -5624,6 +5624,9 @@ ExternalRenderContext::Impl::CameraDataForCapture(SpectralMode mode, f64 wavelen
                                       static_cast<f32>(pose.value().lookAt[1]),
                                       static_cast<f32>(pose.value().lookAt[2])),
                             camera.GetUpReference(), camera.GetFovY(), camera.GetAspectRatio());
+        // Same as OfflineRenderer::Impl::CameraDataAt: a keyed pose along the
+        // up reference faces the way the view-up hint says.
+        poseCamera.SetViewUpHint(camera.GetViewUpHint());
         poseCamera.SetProjection(camera.GetProjection());
         poseCamera.SetOrthoHeight(camera.GetOrthoHeight());
     }

@@ -14,6 +14,8 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/constants.hpp>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 
 using namespace quantiloom;
 
@@ -479,6 +481,45 @@ TEST(CameraTest, ViewUpHintIsIgnoredWhenItIsParallelToo) {
     EXPECT_FALSE(std::isnan(cam.GetRight().x));
     EXPECT_TRUE(IsNormalized(cam.GetRight()));
     EXPECT_TRUE(IsNormalized(cam.GetUp()));
+}
+
+static Config CameraConfigFrom(const std::string& toml) {
+    const auto path = std::filesystem::temp_directory_path() / "quantiloom_camera_view_up_test.toml";
+    std::ofstream(path) << toml;
+    auto cfg = Config::Load(path);
+    EXPECT_TRUE(cfg.has_value()) << (cfg.has_value() ? "" : cfg.error());
+    return std::move(cfg.value());
+}
+
+TEST(CameraTest, ConfigViewUpSetsTheHeadingOfAStraightDownCamera) {
+    // What a save of a top-down view has to carry: `up` alone cannot say
+    // which way the picture faced.
+    const auto cfg = CameraConfigFrom(
+        "[camera]\nposition = [0.0, 10.0, 0.0]\nlook_at = [0.0, 0.0, 0.0]\n"
+        "up = [0.0, 1.0, 0.0]\nview_up = [1.0, 0.0, 0.0]\n");
+    auto cam = Camera::FromConfig(cfg, 1.0f);
+    ASSERT_TRUE(cam.has_value()) << cam.error();
+
+    EXPECT_TRUE(VecEqual(cam.value().GetUp(), glm::vec3(1, 0, 0)));
+    EXPECT_EQ(cam.value().GetUpReference(), glm::vec3(0, 1, 0));
+}
+
+TEST(CameraTest, ConfigWithoutViewUpKeepsTheFallback) {
+    const auto cfg = CameraConfigFrom(
+        "[camera]\nposition = [0.0, 10.0, 0.0]\nlook_at = [0.0, 0.0, 0.0]\n");
+    auto cam = Camera::FromConfig(cfg, 1.0f);
+    ASSERT_TRUE(cam.has_value()) << cam.error();
+
+    const Camera plain(glm::vec3(0, 10, 0), glm::vec3(0, 0, 0), glm::vec3(0, 1, 0));
+    EXPECT_EQ(cam.value().GetViewUpHint(), glm::vec3(0.0f));
+    EXPECT_TRUE(VecEqual(cam.value().GetUp(), plain.GetUp()));
+}
+
+TEST(CameraTest, ConfigRejectsAMalformedViewUp) {
+    const auto cfg = CameraConfigFrom(
+        "[camera]\nposition = [0.0, 10.0, 0.0]\nlook_at = [0.0, 0.0, 0.0]\n"
+        "view_up = [1.0, 0.0]\n");
+    EXPECT_FALSE(Camera::FromConfig(cfg, 1.0f).has_value());
 }
 
 TEST(CameraTest, OrbitReachingThePoleKeepsItsHeading) {

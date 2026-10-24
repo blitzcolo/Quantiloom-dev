@@ -1370,6 +1370,9 @@ OfflineRenderer::Impl::CameraDataAt(f64 timeSeconds, SpectralMode mode, f64 wave
                                       static_cast<f32>(pose.value().lookAt[2]));
         poseCamera = Camera(position, lookAt, loadedScene.camera.GetUpReference(),
                             loadedScene.camera.GetFovY(), loadedScene.camera.GetAspectRatio());
+        // camera.view_up, so a keyed pose that looks straight down faces the
+        // way the document says rather than the fixed fallback axis.
+        poseCamera.SetViewUpHint(loadedScene.camera.GetViewUpHint());
         poseCamera.SetProjection(loadedScene.camera.GetProjection());
         poseCamera.SetOrthoHeight(loadedScene.camera.GetOrthoHeight());
     }
