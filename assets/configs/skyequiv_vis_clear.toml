@@ -1,0 +1,56 @@
+# Open-sky equivalence check, visible band -- the clear-sky arm.
+#
+# skyequiv_vis_fused.toml again, under the clear sky every scene gets unless it
+# says otherwise: blue overhead, pale at the horizon, bright around the sun.
+# Its light reaches the ground from directions in proportions the uniform dome
+# does not have, so the traced bounce now carries how far each direction it
+# takes departs from the uniform base, and the frame has a spread. Its mean
+# does not move. Per wavelength the clear sky integrates, cosine-weighted over
+# the upper hemisphere, to the illuminant's own sky irradiance, and that
+# integral is all a horizontal ground can see of it -- so this frame's mean must
+# equal the uniform frame's. A sky that adds or loses light, or a GPU shape that
+# disagrees with the normalisation tables the CPU computed for it, does not.
+#
+# Geometry: python scripts/utils/generate_shadow_scene.py
+# Check:    scripts/render-tests/check_sky_equiv.py, --reference the fused frame
+
+[renderer]
+resolution = [128, 128]
+spp = 256
+seed = 12345
+output = "skyequiv_vis_clear_output.exr"
+
+[spectral]
+mode = "vis_fused"
+band = "VIS"
+
+[scene]
+gltf = "H:/Quantiloom-dev/assets/models/shadow_scene/shadow_scene_open.gltf"
+world_units_to_meters = 1.0
+default_temperature_k = 300.0
+
+[camera]
+position   = [0.0, 20.0, 0.0]
+look_at    = [0.0, 0.0, 0.0]
+up         = [0.0, 0.0, 1.0]
+projection = "orthographic"
+ortho_height = 16.0
+
+[lighting]
+sun_direction = [0.6, 0.8, 0.0]
+sun_radiance  = [5.0, 5.0, 5.0]
+solar_lut = "assets/luts/flat_sun_sky.csv"
+solar_lut_columns = [4, 3]
+solar_lut_diffuse_is_global = true
+sky_radiance  = [1.0, 1.0, 1.0]
+atmosphere_temperature_k = 300.0
+sky_distribution = "clear"
+
+[material]
+albedo = [0.5, 0.5, 0.5]
+
+[quality]
+fail_on_srgb_upsample = false
+
+[sensor]
+enabled = false

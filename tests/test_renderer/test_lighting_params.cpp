@@ -21,8 +21,9 @@ using namespace quantiloom;
 // ============================================================================
 
 TEST(LightingParamsTest, StructSize) {
-    // LightingParams must be exactly 80 bytes to match GPU layout
-    EXPECT_EQ(sizeof(LightingParams), 80u);
+    // LightingParams must be exactly 224 bytes to match GPU layout: the 80 it
+    // was, plus the sky distribution's four words and its two 16-node tables.
+    EXPECT_EQ(sizeof(LightingParams), 224u);
 }
 
 TEST(LightingParamsTest, FieldOffsets) {
@@ -40,10 +41,14 @@ TEST(LightingParamsTest, FieldOffsets) {
     EXPECT_EQ(offsetof(LightingParams, chromaB_correction), 60u);
     EXPECT_EQ(offsetof(LightingParams, enableShadowRays), 64u);
     EXPECT_EQ(offsetof(LightingParams, enableEnvironmentMap), 68u);
-    // The last two padding floats. Nothing is left: another field here changes
-    // sizeof, and with it the SDK/Studio pairing.
     EXPECT_EQ(offsetof(LightingParams, emissiveTriangleCount), 72u);
     EXPECT_EQ(offsetof(LightingParams, emissiveTotalPower), 76u);
+    EXPECT_EQ(offsetof(LightingParams, skyDistribution), 80u);
+    EXPECT_EQ(offsetof(LightingParams, skyAerosolOpticalDepth), 84u);
+    EXPECT_EQ(offsetof(LightingParams, skyDomeLambdaStart_nm), 88u);
+    EXPECT_EQ(offsetof(LightingParams, skyDomeLambdaStep_nm), 92u);
+    EXPECT_EQ(offsetof(LightingParams, skyDomeN), 96u);
+    EXPECT_EQ(offsetof(LightingParams, skyDomeJ), 160u);
 }
 
 TEST(LightingParamsTest, Alignment16Byte) {
@@ -85,6 +90,11 @@ TEST(LightingParamsTest, CreateDefaultLightingParams) {
     // "this scene would like image-based lighting". It defaulted on, so a fresh
     // context lit every scene with the placeholder cubemap.
     EXPECT_EQ(params.enableEnvironmentMap, 0u);
+
+    // A host starting from these gets the clear sky the config default gives,
+    // in G-173's own atmosphere.
+    EXPECT_EQ(params.skyDistribution, SkyDistributionId::Clear);
+    EXPECT_FLOAT_EQ(params.skyAerosolOpticalDepth, 0.084f);
 }
 
 TEST(LightingParamsTest, DefaultAtmosphereTemperature) {
@@ -167,6 +177,9 @@ TEST(LightingParamsTest, ZeroInitializationSafe) {
     EXPECT_FLOAT_EQ(params.skyEmissivityClear, 0.0f);
     EXPECT_FLOAT_EQ(params.worldUnitsToMeters, 0.0f);
     EXPECT_FLOAT_EQ(params.atmosphereTemperature_K, 0.0f);
+    // Zero is the uniform dome, so a struct nobody filled in renders the sky
+    // every band had before the distribution existed.
+    EXPECT_EQ(params.skyDistribution, SkyDistributionId::Uniform);
 }
 
 // ============================================================================

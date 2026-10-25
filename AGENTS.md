@@ -30,7 +30,10 @@ trips; `src/libQuantiloom/AGENTS.md` has the rule it enforces.
 The illumination suite has seven arms: `nir`/`swir`/`mwir` occlusion, `open`
 (SWIR open sky against a closed form), `open:vis` (the same ground in the
 visible, where the deterministic mode must render with a spread of exactly zero
-and the sampled one must land on its mean), `bleed`, `mis`, `hero` (the two
+and the sampled one must land on its mean -- under a uniform sky, which those
+configs pin), `open:vis:clear` (the same ground under the default clear sky,
+whose mean must equal the uniform one's: the sky moved its light around, not
+how much there is), `bleed`, `mis`, `hero` (the two
 visible estimators against each other), `fluor` (a transfer between two
 wavelength bands, the one check a renderer diagonal in λ cannot pass by
 accident), and `view`. `check_dispersion.py` covers the RGB path and the two

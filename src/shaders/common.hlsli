@@ -931,7 +931,7 @@ float CauchyIOR(float ior_d, float dispersion, float wavelength_nm) {
 // This provides fallback RGB/scalar values when SolarSpectralLUT is unavailable.
 //
 // Must match CPU-side LightingParams data layout in LightingParams.hpp.
-// Size: 80 bytes (16-byte aligned)
+// Size: 224 bytes (16-byte aligned)
 //
 // DUAL MODE SUPPORT:
 // - RGB mode: Use sunRadiance_rgb and skyRadiance_rgb (float3)
@@ -975,7 +975,181 @@ struct LightingParams {
     uint   emissiveTriangleCount;// Entries in emissiveTriangles (binding 23); 0 = no light sampling
     float  emissiveTotalPower;   // Sum of luminance(emissive) * area; the area-measure sampling
                                  // density on any emitter is luminance(emissive) / this
+
+    // The visible sky's distribution over direction; see the functions below.
+    uint   skyDistribution;        // SKY_DISTRIBUTION_UNIFORM or SKY_DISTRIBUTION_CLEAR
+    float  skyAerosolOpticalDepth; // at 500 nm, shapes the clear sky
+    float  skyDomeLambdaStart_nm;  // grid of the two tables below, filled by the renderer
+    float  skyDomeLambdaStep_nm;
+    float  skyDomeN[16];           // cosine integral of the unnormalised clear sky
+    float  skyDomeJ[16];           // its multiple-scattering source
 };
+
+// ============================================================================
+// The visible sky's distribution (lighting.sky_distribution)
+// ============================================================================
+// GPU twin of src/libQuantiloom/renderer/SkyDome.{hpp,cpp}, whose header has the
+// model and its derivation; the constants below must match skydome:: there.
+// The CPU tabulates what depends on the sun alone (N and J, per wavelength);
+// what depends on the illuminant -- the anchor of the model to the direct
+// beam -- is computed here, where both curves are.
+//
+// The result is a factor on the uniform dome: a direction gets
+// E_sky(lambda)/pi times SkyDomeFactor, and the factor's cosine integral over
+// the upper hemisphere is pi at every wavelength, so the irradiance is the
+// illuminant's whatever the distribution. Uniform is the factor 1.
+// ============================================================================
+
+static const uint  SKY_DISTRIBUTION_UNIFORM = 0;
+static const uint  SKY_DISTRIBUTION_CLEAR   = 1;
+static const uint  SKY_DOME_NODES           = 16;
+static const float SKY_DOME_PI              = 3.14159265358979323846;
+static const float SKY_ANGSTROM_EXPONENT    = 1.3;
+static const float SKY_AEROSOL_ALBEDO       = 0.95;
+static const float SKY_AEROSOL_ASYMMETRY    = 0.7;
+static const float SKY_MIN_SUN_SIN          = 0.0523;
+static const float SKY_MIN_VIEW_COS         = 1e-4;
+static const float SKY_ANCHOR_MIN_NM        = 420.0;
+static const float SKY_ANCHOR_MAX_NM        = 680.0;
+
+float SkyRayleighOpticalDepth(float lambda_nm) {
+    const float l = lambda_nm * 1e-3;
+    const float l2 = l * l;
+    const float l4 = l2 * l2;
+    return 0.008569 / l4 * (1.0 + 0.0113 / l2 + 0.00013 / l4);
+}
+
+float SkyAerosolOpticalDepth(float lambda_nm, float aod500) {
+    return aod500 * pow(lambda_nm / 500.0, -SKY_ANGSTROM_EXPONENT);
+}
+
+// The sun the shape is computed for: held 3 degrees above the horizon at the
+// least, azimuth kept. The plane-parallel sky has no twilight.
+float3 SkySunDirection(float3 sunDirection) {
+    const float len = length(sunDirection);
+    float3 s = len > 1e-6 ? sunDirection / len : float3(0.0, 1.0, 0.0);
+    if (s.y < SKY_MIN_SUN_SIN) {
+        float2 h = s.xz;
+        const float hl = length(h);
+        h = hl > 1e-6 ? h / hl : float2(1.0, 0.0);
+        const float cosElevation = sqrt(max(1.0 - SKY_MIN_SUN_SIN * SKY_MIN_SUN_SIN, 0.0));
+        s = float3(h.x * cosElevation, SKY_MIN_SUN_SIN, h.y * cosElevation);
+    }
+    return s;
+}
+
+// The unnormalised clear sky toward dir, in units of the extraterrestrial
+// irradiance: single scattering of the direct beam by molecules and aerosol,
+// plus the isotropic multiple-scattering source J. A ray below the horizon
+// takes the horizon at its azimuth, as AtmosSkyRadianceIR does for the
+// thermal sky. ClearSkyShape in SkyDome.cpp, line for line.
+float ClearSkyShape(float lambda_nm, float3 dir, float3 sun, float aod500, float J) {
+    float3 d = float3(dir.x, max(dir.y, 0.0), dir.z);
+    const float dl = length(d);
+    d = dl > 1e-6 ? d / dl : float3(1.0, 0.0, 0.0);
+    const float mu = max(d.y, SKY_MIN_VIEW_COS);
+    const float mu0 = sun.y;
+
+    const float tauR = SkyRayleighOpticalDepth(lambda_nm);
+    const float tauA = SkyAerosolOpticalDepth(lambda_nm, aod500);
+    const float tau = tauR + tauA;
+
+    const float cosGamma = clamp(dot(d, sun), -1.0, 1.0);
+    const float phaseR = 3.0 / (16.0 * SKY_DOME_PI) * (1.0 + cosGamma * cosGamma);
+    const float g = SKY_AEROSOL_ASYMMETRY;
+    const float hg = 1.0 + g * g - 2.0 * g * cosGamma;
+    const float phaseA = (1.0 - g * g) / (4.0 * SKY_DOME_PI * hg * sqrt(hg));
+    const float phase = (tauR * phaseR + SKY_AEROSOL_ALBEDO * tauA * phaseA) / tau;
+
+    // The difference quotient's limit at mu = mu0, where it cancels badly.
+    const float dmu = mu - mu0;
+    float path;
+    if (abs(dmu) < 1e-3) {
+        path = tau * exp(-tau / mu0) / mu0;
+    } else {
+        path = mu0 * (exp(-tau / mu) - exp(-tau / mu0)) / dmu;
+    }
+    return phase * path + J * (1.0 - exp(-tau / mu));
+}
+
+// N and J at lambda from the 16-node tables, N log-linearly. Zero N when the
+// tables were never filled, which SkyDomeFactor reads as the uniform dome.
+float2 SkyDomeTables(StructuredBuffer<LightingParams> lp, float lambda_nm) {
+    const float step = lp[0].skyDomeLambdaStep_nm;
+    if (!(step > 0.0)) {
+        return float2(0.0, 0.0);
+    }
+    const float x = clamp((lambda_nm - lp[0].skyDomeLambdaStart_nm) / step,
+                          0.0, float(SKY_DOME_NODES - 1));
+    const uint i0 = min((uint)x, SKY_DOME_NODES - 2);
+    const float t = x - float(i0);
+    const float n0 = lp[0].skyDomeN[i0];
+    const float n1 = lp[0].skyDomeN[i0 + 1];
+    const float n = (n0 > 0.0 && n1 > 0.0) ? exp(lerp(log(n0), log(n1), t)) : 0.0;
+    return float2(n, lerp(lp[0].skyDomeJ[i0], lp[0].skyDomeJ[i0 + 1], t));
+}
+
+// The model's own cosine-weighted irradiance at a node, in the illuminant's
+// units: it is driven by the direct beam the LUT carries, undone of the
+// extinction the model knows about. The exponent is capped so a very hazy
+// sky at a low sun saturates rather than overflowing.
+float SkyDomeModelIrradiance(StructuredBuffer<SolarSpectralLUT> solar, float lambda_nm,
+                             float n, float aod500, float mu0) {
+    const float tau = SkyRayleighOpticalDepth(lambda_nm) + SkyAerosolOpticalDepth(lambda_nm, aod500);
+    return SampleSunIrradiance(solar, lambda_nm) * n * exp(min(tau / mu0, 60.0));
+}
+
+// The anchor: the largest scale that keeps the model under the illuminant's
+// sky everywhere in 420-680 nm. Per ray, not per wavelength. -1 when there is
+// nothing to anchor to (no illuminant, no sun in it, or a uniform sky), and
+// the model then carries each wavelength alone.
+float SkyDomeAnchor(StructuredBuffer<LightingParams> lp, StructuredBuffer<SolarSpectralLUT> solar,
+                    float3 sun) {
+    if (lp[0].skyDistribution != SKY_DISTRIBUTION_CLEAR || !HasSolarSpectralLUT(solar)) {
+        return -1.0;
+    }
+    float c = 3.0e38;
+    bool found = false;
+    for (uint k = 0; k < SKY_DOME_NODES; ++k) {
+        const float lambda = lp[0].skyDomeLambdaStart_nm + float(k) * lp[0].skyDomeLambdaStep_nm;
+        if (lambda < SKY_ANCHOR_MIN_NM || lambda > SKY_ANCHOR_MAX_NM) {
+            continue;
+        }
+        const float model = SkyDomeModelIrradiance(solar, lambda, lp[0].skyDomeN[k],
+                                                   lp[0].skyAerosolOpticalDepth, sun.y);
+        const float sky = SampleSkyIrradiance(solar, lambda);
+        if (model > 0.0 && sky > 0.0) {
+            c = min(c, sky / model);
+            found = true;
+        }
+    }
+    return found ? c : -1.0;
+}
+
+// What a direction gets at lambda, as a multiple of the uniform dome E_sky/pi:
+//   f (pi/N) S + (1 - f),   f = min(1, anchor * model / E_sky)
+// so the share of E_sky the anchored model explains is distributed the way the
+// model says, and the rest stays uniform. Exactly 1 for a uniform sky.
+float SkyDomeFactor(StructuredBuffer<LightingParams> lp, StructuredBuffer<SolarSpectralLUT> solar,
+                    float lambda_nm, float3 dir, float3 sun, float anchor) {
+    if (lp[0].skyDistribution != SKY_DISTRIBUTION_CLEAR) {
+        return 1.0;
+    }
+    const float2 nj = SkyDomeTables(lp, lambda_nm);
+    if (!(nj.x > 0.0)) {
+        return 1.0;
+    }
+    const float aod500 = lp[0].skyAerosolOpticalDepth;
+    const float shape = ClearSkyShape(lambda_nm, dir, sun, aod500, nj.y);
+    float f = 1.0;
+    if (anchor > 0.0) {
+        const float sky = SampleSkyIrradiance(solar, lambda_nm);
+        f = sky > 0.0
+            ? saturate(anchor * SkyDomeModelIrradiance(solar, lambda_nm, nj.x, aod500, sun.y) / sky)
+            : 1.0;
+    }
+    return f * (SKY_DOME_PI / nj.x) * shape + (1.0 - f);
+}
 
 // ============================================================================
 // Camera Data Structure

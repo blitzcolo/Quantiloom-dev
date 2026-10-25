@@ -1633,6 +1633,29 @@ TEST_F(ConfigResolveTest, AnIlluminantTooNarrowForTheBandSaysSo) {
         << "a spectrum that does not reach the band must not pass silently";
 }
 
+TEST_F(ConfigResolveTest, TheSkyIsClearUnlessTheConfigSaysUniform) {
+    // Clear by default, with its tables filled for the configured sun: the
+    // GPU divides by N, so a resolved clear sky with empty tables would render
+    // the uniform dome and say nothing.
+    auto clear = ResolveStrict(Parse({}));
+    ASSERT_TRUE(clear.has_value()) << clear.error();
+    EXPECT_EQ(clear.value().lighting.skyDistribution, SkyDistributionId::Clear);
+    EXPECT_FLOAT_EQ(clear.value().lighting.skyAerosolOpticalDepth, 0.084f);
+    EXPECT_GT(clear.value().lighting.skyDomeLambdaStep_nm, 0.0f);
+    for (float n : clear.value().lighting.skyDomeN) EXPECT_GT(n, 0.0f);
+
+    auto uniform = ResolveStrict(Parse({.lightingKeys = "sky_distribution = \"uniform\"\n"}));
+    ASSERT_TRUE(uniform.has_value()) << uniform.error();
+    EXPECT_EQ(uniform.value().lighting.skyDistribution, SkyDistributionId::Uniform);
+
+    // A name it does not know, or an optical depth that is not one, is an
+    // error rather than a quiet fallback to either sky.
+    EXPECT_FALSE(ResolveLenient(Parse({.lightingKeys = "sky_distribution = \"overcast\"\n"}))
+                     .has_value());
+    EXPECT_FALSE(ResolveLenient(Parse({.lightingKeys = "sky_aerosol_optical_depth = -0.1\n"}))
+                     .has_value());
+}
+
 TEST_F(ConfigResolveTest, AGlobalColumnReadAsTheSkySaysSo) {
     // ASTM G-173's layout: column 3 is global tilt, the direct beam included.
     // Read as the sky without solar_lut_diffuse_is_global it lights everything

@@ -6,6 +6,7 @@
  */
 
 #include "renderer/ConfigResolve.hpp"
+#include "renderer/SkyDome.hpp"
 #include "scene/MotionSpec.hpp"
 
 #include "core/Blackbody.hpp"
@@ -764,6 +765,33 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     out.lighting.atmosphereTemperature_K = atmosphereTemperature_K;
     out.lighting.chromaR_correction = chromaR;
     out.lighting.chromaB_correction = chromaB;
+
+    // Where the visible sky's light comes from. "clear" spreads the
+    // illuminant's diffuse irradiance the way a clear atmosphere does;
+    // "uniform" keeps the flat dome every band assumed before, whose open-scene
+    // correction is exactly zero -- the gate that asserts that pins it. The
+    // irradiance is the same either way. See renderer/SkyDome.hpp.
+    const String skyDistribution = config.Get<String>("lighting.sky_distribution", "clear");
+    if (skyDistribution == "clear") {
+        out.lighting.skyDistribution = SkyDistributionId::Clear;
+    } else if (skyDistribution == "uniform") {
+        out.lighting.skyDistribution = SkyDistributionId::Uniform;
+    } else {
+        diag.Fatal("lighting.sky_distribution",
+                   "lighting.sky_distribution must be \"clear\" or \"uniform\", but is \"" +
+                       skyDistribution + "\"");
+    }
+    out.lighting.skyAerosolOpticalDepth = config.Get<f32>(
+        "lighting.sky_aerosol_optical_depth", LightingDefaults::SKY_AEROSOL_OPTICAL_DEPTH);
+    if (!(out.lighting.skyAerosolOpticalDepth >= 0.0f &&
+          out.lighting.skyAerosolOpticalDepth <= 5.0f)) {
+        diag.Fatal("lighting.sky_aerosol_optical_depth",
+                   "lighting.sky_aerosol_optical_depth must be in [0, 5] (optical depth "
+                   "at 500 nm), but is " +
+                       std::to_string(out.lighting.skyAerosolOpticalDepth));
+    }
+    FillSkyDome(out.lighting);
+
     out.enableLightSampling = config.Get<bool>("renderer.enable_light_sampling", true);
     if (!out.enableLightSampling) {
         QL_LOG_INFO("Light sampling DISABLED via config: emitters are found by "

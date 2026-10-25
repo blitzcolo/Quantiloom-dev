@@ -26,7 +26,7 @@
  * CRITICAL: This struct MUST match GPU LightingParams in common.hlsli exactly!
  * Memory layout validated by static_assert at compile time.
  *
- * @note Size: 80 bytes (16-byte aligned for GPU)
+ * @note Size: 224 bytes (16-byte aligned for GPU)
  * @note Uploaded to GPU via storage buffer (binding 2)
  * @note Any layout change requires shader update
  *
@@ -50,7 +50,7 @@ namespace quantiloom {
 
 /**
  * @struct LightingParams
- * @brief Runtime lighting parameters for GPU shaders (80 bytes, 16-byte aligned)
+ * @brief Runtime lighting parameters for GPU shaders (224 bytes, 16-byte aligned)
  *
  * Provides sun/sky illumination and atmospheric parameters for all rendering modes.
  * Uploaded to GPU storage buffer and accessed in closest hit shaders.
@@ -63,7 +63,11 @@ namespace quantiloom {
  * Offset 48: worldUnitsToMeters + atmosphereTemperature_K + chromaR_correction + chromaB_correction
  * Offset 64: enableShadowRays (u32) + enableEnvironmentMap (u32) +
  *            emissiveTriangleCount (u32) + emissiveTotalPower (f32)
- * Total: 80 bytes
+ * Offset 80: skyDistribution (u32) + skyAerosolOpticalDepth + skyDomeLambdaStart_nm +
+ *            skyDomeLambdaStep_nm
+ * Offset 96: skyDomeN[16]
+ * Offset 160: skyDomeJ[16]
+ * Total: 224 bytes
  * @endcode
  *
  * @note MUST match shader struct in common.hlsli (verified at compile time)
@@ -143,9 +147,42 @@ struct LightingParams {
     // with no way back to the triangle list.
     f32 emissiveTotalPower;         // offset 76
 
-    // The two padding floats this struct was carrying are now both spoken for.
-    // Anything further changes sizeof and therefore the SDK/Studio pairing.
-};  // Total: 80 bytes
+    // ------------------------------------------------------------------------
+    // The visible sky's distribution over direction (lighting.sky_distribution).
+    //
+    // How much light the sky sends is the illuminant's business: the diffuse
+    // curve of the solar LUT, E_sky(lambda), and nothing here changes it. What
+    // these fields decide is where that light comes from. Uniform is the dome
+    // every spectral band assumed until now -- E_sky/pi from every direction,
+    // which renders as one flat colour. Clear spreads the same irradiance,
+    // wavelength by wavelength, the way a clear atmosphere does: blue
+    // overhead, pale at the horizon, bright around the sun. See
+    // src/libQuantiloom/renderer/SkyDome.hpp for the model and its
+    // normalisation. Not to be confused with atmosphere.sky_model, which is
+    // the thermal sky's emissivity.
+    //
+    // Growing the struct past 80 bytes changes the SDK/Studio pairing, which
+    // the two already ship in step for (SdkGuard checks it at start-up).
+    // ------------------------------------------------------------------------
+
+    // SkyDistributionId::Uniform or ::Clear. Zero, so a zero-initialised
+    // struct is the uniform dome it always was, offset 80.
+    u32 skyDistribution;
+    // Aerosol optical depth at 500 nm that shapes the clear sky, offset 84.
+    // 0.084 is the atmosphere ASTM G-173 was computed for.
+    f32 skyAerosolOpticalDepth;
+    // The wavelength grid of the two tables below, offsets 88 and 92. Set by
+    // the renderer, not by the caller.
+    f32 skyDomeLambdaStart_nm;
+    f32 skyDomeLambdaStep_nm;
+    // Per-wavelength normalisation of the clear sky, set by the renderer from
+    // the sun direction and the aerosol depth (FillSkyDome); whatever a caller
+    // passes is overwritten on upload. N is the cosine-weighted integral of the
+    // unnormalised sky over the upper hemisphere, J the strength of its
+    // multiple-scattering term. Offsets 96 and 160.
+    f32 skyDomeN[16];
+    f32 skyDomeJ[16];
+};  // Total: 224 bytes
 
 // ============================================================================
 // Compile-time Validation
@@ -154,8 +191,8 @@ struct LightingParams {
 // If any fails, the struct layout has diverged from shader expectations.
 // ============================================================================
 
-static_assert(sizeof(LightingParams) == 80,
-    "LightingParams size mismatch! Expected 80 bytes to match GPU struct");
+static_assert(sizeof(LightingParams) == 224,
+    "LightingParams size mismatch! Expected 224 bytes to match GPU struct");
 
 static_assert(offsetof(LightingParams, sunDirection) == 0,
     "sunDirection offset mismatch");
@@ -185,6 +222,32 @@ static_assert(offsetof(LightingParams, emissiveTriangleCount) == 72,
     "emissiveTriangleCount offset mismatch");
 static_assert(offsetof(LightingParams, emissiveTotalPower) == 76,
     "emissiveTotalPower offset mismatch");
+static_assert(offsetof(LightingParams, skyDistribution) == 80,
+    "skyDistribution offset mismatch");
+static_assert(offsetof(LightingParams, skyAerosolOpticalDepth) == 84,
+    "skyAerosolOpticalDepth offset mismatch");
+static_assert(offsetof(LightingParams, skyDomeLambdaStart_nm) == 88,
+    "skyDomeLambdaStart_nm offset mismatch");
+static_assert(offsetof(LightingParams, skyDomeLambdaStep_nm) == 92,
+    "skyDomeLambdaStep_nm offset mismatch");
+static_assert(offsetof(LightingParams, skyDomeN) == 96,
+    "skyDomeN offset mismatch");
+static_assert(offsetof(LightingParams, skyDomeJ) == 160,
+    "skyDomeJ offset mismatch");
+
+// ============================================================================
+// Sky distributions (LightingParams::skyDistribution, lighting.sky_distribution)
+// ============================================================================
+
+namespace SkyDistributionId {
+    // E_sky/pi from every direction: one flat colour, exactly the base the
+    // analytic ambient terms assume, so an open scene's traced correction is
+    // zero to the bit.
+    constexpr u32 Uniform = 0u;
+    // The same irradiance per wavelength, distributed the way a clear
+    // atmosphere distributes it.
+    constexpr u32 Clear = 1u;
+}
 
 // ============================================================================
 // Default Values
@@ -238,6 +301,13 @@ namespace LightingDefaults {
     // white balance nobody asked for.
     constexpr f32 CHROMA_R_CORRECTION = 1.0f;
     constexpr f32 CHROMA_B_CORRECTION = 1.0f;
+
+    // A sky has a direction unless a config says otherwise.
+    constexpr u32 SKY_DISTRIBUTION = SkyDistributionId::Clear;
+    // ASTM G-173's reference atmosphere: rural aerosol, optical depth 0.084
+    // at 500 nm. The default illuminant and the default sky describe the same
+    // air.
+    constexpr f32 SKY_AEROSOL_OPTICAL_DEPTH = 0.084f;
 }
 
 // ============================================================================
@@ -275,6 +345,9 @@ inline LightingParams CreateDefaultLightingParams() {
     // No scene yet, so no emitters. Filled in when one is built.
     params.emissiveTriangleCount = 0u;
     params.emissiveTotalPower = 0.0f;
+    // The tables are the renderer's to fill on upload; zero until then.
+    params.skyDistribution = LightingDefaults::SKY_DISTRIBUTION;
+    params.skyAerosolOpticalDepth = LightingDefaults::SKY_AEROSOL_OPTICAL_DEPTH;
     return params;
 }
 

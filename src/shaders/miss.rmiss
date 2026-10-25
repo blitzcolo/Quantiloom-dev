@@ -114,6 +114,16 @@ void main(inout Payload payload) {
     if (SPEC_SPECTRAL_MODE == SPECTRAL_MODE_RGB) {
         // RGB mode: Direct RGB sky color (no spectral integration)
         payload.radiance = float4(lut.skyRadiance_rgb, 0.0);
+        // Distributed over direction like the spectral bands' sky, each
+        // channel at the wavelength the visible network uses for it.
+        if (lut.skyDistribution == SKY_DISTRIBUTION_CLEAR) {
+            const float3 skySun = SkySunDirection(lut.sunDirection);
+            const float skyAnchor = SkyDomeAnchor(lightingParams, solarSpectralLUT, skySun);
+            const float3 skyDir = normalize(WorldRayDirection());
+            payload.radiance.r *= SkyDomeFactor(lightingParams, solarSpectralLUT, 650.0, skyDir, skySun, skyAnchor);
+            payload.radiance.g *= SkyDomeFactor(lightingParams, solarSpectralLUT, 550.0, skyDir, skySun, skyAnchor);
+            payload.radiance.b *= SkyDomeFactor(lightingParams, solarSpectralLUT, 450.0, skyDir, skySun, skyAnchor);
+        }
         // Composition contract as in closesthit: the visible network's three
         // lambda slots carry R/G/B (650/550/450 nm).
         if (atmosComposite) {
@@ -178,6 +188,13 @@ void main(inout Payload payload) {
         const RgbIlluminant skyFallback =
             FetchRgbIlluminant(rgbToSpectrumTable, lut.skyRadiance_rgb);
 
+        // Which way the sky's light comes from (lighting.sky_distribution).
+        // The sun and the anchor are per ray; the factor is per wavelength and
+        // exactly 1 for a uniform sky.
+        const float3 skyDir = normalize(WorldRayDirection());
+        const float3 skySun = SkySunDirection(lut.sunDirection);
+        const float skyAnchor = SkyDomeAnchor(lightingParams, solarSpectralLUT, skySun);
+
         for (uint i = 0; i < sampleCount; ++i) {
             float lambda = heroRay ? heroLambdaAbs
                          : (carriesQuartet ? quartet[min(i, VIS_HERO_QUARTET - 1u)]
@@ -195,6 +212,8 @@ void main(inout Payload payload) {
                 // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
                 sky_radiance_lambda = RgbIlluminantAt(skyFallback, cieSample.w, lambda);
             }
+            sky_radiance_lambda *= SkyDomeFactor(lightingParams, solarSpectralLUT, lambda,
+                                                 skyDir, skySun, skyAnchor);
 
             // A primary miss composes like a primary hit: the sky at the end
             // of the ray is L_surface in the contract. A hero or quartet ray
@@ -282,6 +301,13 @@ void main(inout Payload payload) {
         } else if (hasSpectralSolarLUT) {
             float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
             radiance_spectral = sky_irr / PI;
+            // The same distribution over direction as the visible band's sky.
+            if (lut.skyDistribution == SKY_DISTRIBUTION_CLEAR) {
+                const float3 skySun = SkySunDirection(lut.sunDirection);
+                radiance_spectral *= SkyDomeFactor(
+                    lightingParams, solarSpectralLUT, lambda, normalize(WorldRayDirection()),
+                    skySun, SkyDomeAnchor(lightingParams, solarSpectralLUT, skySun));
+            }
         } else {
             // The legacy scalar is an RGB average in arbitrary units. A
             // spectral measurement with no named illuminant has no sky light.

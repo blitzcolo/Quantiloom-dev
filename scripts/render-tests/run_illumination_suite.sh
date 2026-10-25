@@ -162,7 +162,33 @@ else
     echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
     fail=1
 fi
-drop_sidecars skyequiv_vis_hero_output.exr skyequiv_vis_fused_output.exr
+
+# The same ground under the clear sky every visible scene gets by default. Its
+# light arrives from each direction in a different proportion, so the bounce
+# carries how far each one departs from the uniform base and the frame has a
+# spread -- but not a different mean: per wavelength the clear sky integrates
+# to the illuminant's own irradiance, which is all a horizontal ground can see
+# of it. A sky that adds or loses light, or a GPU shape that disagrees with the
+# normalisation the CPU tabulated for it, moves this mean.
+log=$("$CLI" assets/configs/skyequiv_vis_clear.toml 2>&1)
+if [ "$(printf '%s' "$log" | grep -c 'Saved spectral image')" != 1 ]; then
+    echo "RENDER FAILED  skyequiv_vis_clear"
+    printf '%s\n' "$log" | tail -5 >&2
+    fail=1
+else
+    printf '%-8s ' "open:vis:clear"
+    if report=$("$PY" scripts/render-tests/check_sky_equiv.py \
+                    skyequiv_vis_clear_output.exr \
+                    --reference skyequiv_vis_fused_output.exr \
+                    --reference-max-spread 0.0); then
+        echo "$report" | grep -E 'Rel error' | tr -d '\n'; echo '  PASS'
+    else
+        echo "$report" | grep -E 'Rel error|FAIL' | tr '\n' ' '; echo
+        fail=1
+    fi
+fi
+drop_sidecars skyequiv_vis_clear_output.exr skyequiv_vis_hero_output.exr \
+              skyequiv_vis_fused_output.exr
 
 # Indirect light in the visible band. The only emitter is the ceiling panel and
 # the camera cannot see it, so every lit pixel here arrived by bouncing. This

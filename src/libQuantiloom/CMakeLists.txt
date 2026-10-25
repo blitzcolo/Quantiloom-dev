@@ -150,6 +150,8 @@ add_library(quantiloom_core OBJECT
     renderer/RenderCore.hpp
     renderer/ConfigResolve.cpp
     renderer/ConfigResolve.hpp
+    renderer/SkyDome.cpp
+    renderer/SkyDome.hpp
     renderer/TimelineState.cpp
     renderer/TimelineState.hpp
     ${QL_PUBLIC_INC}/renderer/TimelineControl.hpp

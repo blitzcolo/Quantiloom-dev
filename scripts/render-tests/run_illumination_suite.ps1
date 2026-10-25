@@ -166,6 +166,20 @@ if ($visOpen) {
                                 "--reference-max-spread", "0.0") 'Rel error' 'Rel error|FAIL'
 }
 
+# The same ground under the clear sky every visible scene gets by default. Its
+# light arrives from each direction in a different proportion, so the bounce
+# carries how far each one departs from the uniform base and the frame has a
+# spread -- but not a different mean: per wavelength the clear sky integrates
+# to the illuminant's own irradiance, which is all a horizontal ground can see
+# of it. A sky that adds or loses light, or a GPU shape that disagrees with the
+# normalisation the CPU tabulated for it, moves this mean.
+if (Invoke-Render "assets/configs/skyequiv_vis_clear.toml" "skyequiv_vis_clear") {
+    Invoke-Checker "open:vis:clear" @("scripts/render-tests/check_sky_equiv.py",
+                                      "skyequiv_vis_clear_output.exr",
+                                      "--reference", "skyequiv_vis_fused_output.exr",
+                                      "--reference-max-spread", "0.0") 'Rel error' 'Rel error|FAIL'
+}
+
 # Indirect light in the visible band. The only emitter is the ceiling panel and
 # the camera cannot see it, so every lit pixel here arrived by bouncing. This
 # asserts that indirect light EXISTS and carries the wall's colour; whether

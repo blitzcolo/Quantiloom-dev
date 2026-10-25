@@ -40,15 +40,23 @@ Corr = rho(λ_b) · W_dir · ( L_in(λ_b) − L_base(λ_b) )
 
 Three consequences worth knowing before touching any of it:
 
-- **An open scene is unchanged, exactly.** Every bounce ray escapes and the miss
-  shader returns the base it is subtracted from, so `Corr` is zero to the bit —
+- **An open scene is unchanged, exactly — under a uniform sky.** Every bounce
+  ray escapes and the miss shader returns the base it is subtracted from, so
+  `Corr` is zero to the bit —
   verified in `check_sky_equiv.py` in SWIR against a closed form and in the
   visible band against the other estimator, and the reason that check has no
   tolerance for Monte Carlo noise. The visible arm asserts it as a frame whose
   every pixel is one number: with the residual zero and the sky analytic, the
   deterministic mode has nothing left to vary. Deleting an analytic term and
   letting the ray carry the whole integral would be the same in expectation and
-  far noisier.
+  far noisier. A clear sky (`[lighting] sky_distribution = "clear"`, the
+  default) is not uniform: blue overhead, pale at the horizon, bright around the
+  sun. The base stays the uniform dome and the ray carries the difference, which
+  is zero on average over the hemisphere a horizontal surface sees — the clear
+  sky integrates, wavelength by wavelength, to the same irradiance
+  (`renderer/SkyDome.hpp`) — but not per sample. So an open scene under it has
+  a spread, and the gates that assert exactness pin `sky_distribution =
+  "uniform"`; the `open:vis:clear` arm checks the clear sky's mean against them.
 - **An isothermal cavity is exact at 1 spp**, by the same argument run backwards:
   the incoming radiance *is* the base, so the furnace gate keeps working.
 - **Russian roulette is unbiased without a closure.** Killing a path leaves the

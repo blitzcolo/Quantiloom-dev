@@ -47,6 +47,10 @@ solar_lut_columns = [4, 3]
 solar_lut_diffuse_is_global = true
 sky_radiance  = [1.0, 1.0, 1.0]
 atmosphere_temperature_k = 300.0
+# The uniform dome, pinned: this arm asserts the residual is zero to the bit,
+# which holds only for the sky the analytic terms assume. The default clear sky
+# is checked against this one by skyequiv_vis_clear.toml.
+sky_distribution = "uniform"
 
 [material]
 albedo = [0.5, 0.5, 0.5]

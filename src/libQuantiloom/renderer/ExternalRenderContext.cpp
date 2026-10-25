@@ -12,6 +12,7 @@
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/ShaderBinary.hpp"
+#include "renderer/SkyDome.hpp"
 #include "renderer/SpectralUnmixer.hpp"
 #include "renderer/TemperatureTextureLoader.hpp"
 #include "renderer/RenderCore.hpp"
@@ -1887,6 +1888,11 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
 // and this is the one place every upload passes through, so the check lives here
 // rather than at each of the nine call sites.
 void ExternalRenderContext::Impl::UploadLightingParams() {
+    // The sky dome's tables follow the sun, so they are recomputed here, where
+    // every change of the sun direction ends up, rather than at the call sites
+    // that move it. Into lightingParams itself, so GetLightingParams reports
+    // the tables the GPU is actually using.
+    rendercore::FillSkyDome(lightingParams);
     LightingParams effective = lightingParams;
     if (atmosphereActive) {
         effective.atmosphereTemperature_K =

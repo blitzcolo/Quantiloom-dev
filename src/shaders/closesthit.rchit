@@ -2329,8 +2329,10 @@ void main(inout Payload payload, in HitAttributes attribs) {
     // The substitute is the dome the diffuse term already assumes: uniform
     // radiance skyRadiance. Prefiltering a uniform dome returns that radiance at
     // every roughness and direction, so this adds no assumption the diffuse side
-    // has not already made, and it is what a reflection ray would fetch -- the
-    // miss shader returns exactly lut.skyRadiance_rgb.
+    // has not already made, and it is the average of what a reflection ray
+    // would fetch -- the miss shader returns lut.skyRadiance_rgb, distributed
+    // over direction under lighting.sky_distribution = "clear" with the same
+    // hemispherical integral.
     //
     // What it cannot do is reflect the *scene*. This whole block, and the
     // skyAmbient above it, describe an unoccluded uniform dome and nothing else,
@@ -2526,6 +2528,11 @@ void main(inout Payload payload, in HitAttributes attribs) {
         // correction, interreflection as a positive one, and where the
         // assumption holds the correction is exactly zero, so an open scene
         // renders as it always did -- see scripts/render-tests/check_sky_equiv.py.
+        // Under a clear sky (lighting.sky_distribution) the dome is no longer
+        // uniform, and the same ray also carries how far the sky in the
+        // direction it took departs from the uniform base: zero-mean over the
+        // hemisphere a horizontal surface sees, because the clear sky
+        // integrates to the same irradiance, but no longer zero per sample.
         //
         // The estimator is the dispersion path's, at a wavelength sampled
         // uniformly over the band and weighted by cmf(lambda_b) * bandwidth;
@@ -2699,8 +2706,9 @@ void main(inout Payload payload, in HitAttributes attribs) {
             // sample, the origin offset and the child's mixture density all
             // pointing the right way for free, and keeps the property the whole
             // architecture rests on: in an open scene the ray escapes, the miss
-            // shader returns the base it is subtracted from, and the correction
-            // is zero to the bit. A recursive ray of its own would instead ADD
+            // shader returns the base it is subtracted from -- exactly for a
+            // uniform sky, on average over the hemisphere for a clear one -- and
+            // the correction vanishes with it. A recursive ray of its own would instead ADD
             // sky on a miss and double-count against the analytic back-dome
             // term below.
             //

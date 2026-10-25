@@ -270,6 +270,7 @@ set(TEST_IO_SOURCES
 set(TEST_RENDERER_SOURCES
     test_renderer/test_brdf_lut.cpp
     test_renderer/test_lighting_params.cpp
+    test_renderer/test_sky_dome.cpp
     test_renderer/test_acceleration_structure.cpp
     test_renderer/test_texture_manager.cpp
     test_renderer/test_render_core.cpp
