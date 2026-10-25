@@ -24,9 +24,11 @@
 #include <algorithm>
 #include <array>
 #include <utility>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <optional>
 
@@ -297,6 +299,41 @@ void BindFluorescence(const String& name, Material& mat,
                 "(full emission area {:.4g} before normalising)",
                 name, source, resolved.yield, excitationIndex, emissionIndex,
                 resolved.emissionAreaInBand);
+}
+
+// The column names a delimited spectrum file declares in its header line, or
+// nothing when it has none. The header is the last line before the first data
+// row that is not a '#' comment and that has commas in it -- the shape of ASTM
+// G-173's CSV. libRadtran output and the generated tables in assets/luts carry
+// only '#' prose, which says nothing a program should parse, and get no names.
+Vector<String> SpectrumColumnLabels(const std::filesystem::path& path) {
+    std::ifstream file(path);
+    String line;
+    String header;
+    while (std::getline(file, line)) {
+        // A UTF-8 byte order mark is not part of the first label.
+        if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
+        const auto first = line.find_first_not_of(" \t\r");
+        if (first == String::npos) continue;
+        const char c = line[first];
+        if (std::isdigit(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '+') {
+            break;  // the first data row: whatever came before it is the header
+        }
+        if (c != '#' && line.find(',') != String::npos) header = line;
+    }
+
+    Vector<String> labels;
+    size_t start = 0;
+    while (!header.empty() && start <= header.size()) {
+        const size_t comma = header.find(',', start);
+        String label = header.substr(start, comma == String::npos ? String::npos : comma - start);
+        const auto lo = label.find_first_not_of(" \t\r");
+        const auto hi = label.find_last_not_of(" \t\r");
+        labels.push_back(lo == String::npos ? String() : label.substr(lo, hi - lo + 1));
+        if (comma == String::npos) break;
+        start = comma + 1;
+    }
+    return labels;
 }
 
 }  // namespace
@@ -1957,6 +1994,59 @@ Result<ResolvedSolarLut, String> ResolveSolarLut(const SolarLutRequest& request,
                 "] nm. Evaluate() clamps, so the uncovered part is held flat at the "
                 "nearest endpoint rather than left dark -- the result will look "
                 "reasonable and mean nothing.");
+        }
+    }
+
+    // A global irradiance read as the sky. ASTM G-173 publishes no diffuse
+    // column, only a global one with the direct beam inside it, and taking
+    // that as the sky lights every surface with the sun a second time and
+    // paints every sky pixel the sun's colour. Nothing about the numbers says
+    // so -- a global column loads as smoothly as a diffuse one -- but the file's
+    // own header does, and this is the one place both readings of the keys
+    // (the config and SetSolarSpectralLUTFromSpec) pass through.
+    if (!request.diffuseIsGlobal && request.diffuseColumn >= 2 &&
+        request.pathOrEqualEnergy != "equal_energy") {
+        const std::filesystem::path path = ResolveConfigPath(request.pathOrEqualEnergy, baseDir);
+        const auto labels = SpectrumColumnLabels(path);
+        if (request.diffuseColumn <= labels.size()) {
+            const String& label = labels[request.diffuseColumn - 1];
+            String lower = label;
+            std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char ch) {
+                return static_cast<char>(std::tolower(ch));
+            });
+            if (lower.find("global") != String::npos) {
+                // How much brighter the visible sky is for it: the column as
+                // read against what is left once the direct beam is taken out.
+                // Both curves come from the same rows, so they share abscissae.
+                f64 asRead = 0.0;
+                f64 diffuse = 0.0;
+                const size_t n = std::min(sunCurve.samples.size(), skyCurve.samples.size());
+                for (size_t i = 1; i < n; ++i) {
+                    const f64 l0 = skyCurve.samples[i - 1].first;
+                    const f64 l1 = skyCurve.samples[i].first;
+                    if (l0 < 380.0 || l1 > 780.0) continue;
+                    const f64 dl = l1 - l0;
+                    asRead += 0.5 * dl * (skyCurve.samples[i - 1].second + skyCurve.samples[i].second);
+                    diffuse += 0.5 * dl *
+                        (std::max(0.0, f64(skyCurve.samples[i - 1].second) - sunCurve.samples[i - 1].second) +
+                         std::max(0.0, f64(skyCurve.samples[i].second) - sunCurve.samples[i].second));
+                }
+                char ratio[32] = "";
+                if (diffuse > 0.0) {
+                    std::snprintf(ratio, sizeof(ratio), "%.1fx", asRead / diffuse);
+                }
+                out.warnings.push_back(
+                    "  Column " + std::to_string(request.diffuseColumn) + " of " +
+                    path.filename().string() + " is labelled '" + label +
+                    "', a global irradiance that already contains the direct beam in column " +
+                    std::to_string(request.directColumn) +
+                    ". Read as the diffuse sky it counts the sun twice" +
+                    (ratio[0] != '\0' ? String(": over 380-780 nm this sky is ") + ratio +
+                                            " the diffuse part alone, and sun-coloured"
+                                      : String()) +
+                    ". Set lighting.solar_lut_diffuse_is_global = true to subtract the "
+                    "direct beam.");
+            }
         }
     }
 

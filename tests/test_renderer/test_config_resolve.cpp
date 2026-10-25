@@ -1633,6 +1633,40 @@ TEST_F(ConfigResolveTest, AnIlluminantTooNarrowForTheBandSaysSo) {
         << "a spectrum that does not reach the band must not pass silently";
 }
 
+TEST_F(ConfigResolveTest, AGlobalColumnReadAsTheSkySaysSo) {
+    // ASTM G-173's layout: column 3 is global tilt, the direct beam included.
+    // Read as the sky without solar_lut_diffuse_is_global it lights everything
+    // with the sun twice, and the only thing that says so is the header.
+    const auto spectrum = testDir / "g173_shaped.csv";
+    {
+        std::ofstream file(spectrum);
+        file << "Wvlgth nm,Etr W*m-2*nm-1,Global tilt  W*m-2*nm-1,"
+                "Direct+circumsolar W*m-2*nm-1\n";
+        for (int nm = 380; nm <= 780; nm += 10) {
+            file << nm << ",1.8,1.0,0.8\n";
+        }
+    }
+
+    SolarLutRequest request;
+    request.pathOrEqualEnergy = spectrum.string();
+    request.directColumn = 4;
+    request.diffuseColumn = 3;
+
+    auto asGlobal = ResolveSolarLut(request, "", SpectralMode::RGB);
+    ASSERT_TRUE(asGlobal.has_value()) << asGlobal.error();
+    ASSERT_EQ(asGlobal.value().warnings.size(), 1u);
+    EXPECT_NE(asGlobal.value().warnings[0].find("solar_lut_diffuse_is_global"), String::npos)
+        << asGlobal.value().warnings[0];
+    // 1.0 read against 1.0 - 0.8: five times the sky there is.
+    EXPECT_NE(asGlobal.value().warnings[0].find("5.0x"), String::npos)
+        << asGlobal.value().warnings[0];
+
+    request.diffuseIsGlobal = true;
+    auto subtracted = ResolveSolarLut(request, "", SpectralMode::RGB);
+    ASSERT_TRUE(subtracted.has_value()) << subtracted.error();
+    EXPECT_TRUE(subtracted.value().warnings.empty());
+}
+
 TEST_F(ConfigResolveTest, AnUnnamedIlluminantIsAnError) {
     SolarLutRequest request;
     EXPECT_FALSE(ResolveSolarLut(request, "", SpectralMode::RGB).has_value());
