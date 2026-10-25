@@ -52,19 +52,49 @@ struct AtmosNNHeader {
 // Axis coordinates
 // ----------------------------------------------------------------------------
 
+// The haze a ground-mode table describes is a horizontal path through the
+// boundary layer, which MODTRAN's visibility-defined aerosol models put between
+// the ground and 2 km; above it the aerosol no longer depends on the surface
+// visibility the network was given. A line of sight climbing out of the layer
+// crosses at most this much of it per unit of sin(elevation).
+static const float kAtmosHazeLayerKm = 2.0;
+
 // Continuous a coordinate for a ray: ground mode uses the hit distance
 // (converted to km), slant mode uses the view direction's cos(zenith).
 // rayDir points from camera toward the scene; hitDist is in world units.
+//
+// In ground mode an upward ray is held to the part of its path that lies in
+// the haze layer, kAtmosHazeLayerKm / sin(elevation). Without it the range
+// was the whole distance, and a primary ray that hit nothing passed the far
+// plane -- 10 km -- so every pixel of sky read the same table entry as
+// ground 10 km away along the horizon: one flat colour, the horizon haze's,
+// overhead as much as anywhere. Near the horizon the cap is longer than any
+// path in the table and nothing changes, which is what keeps the sky and the
+// most distant ground continuous there.
 float AtmosCoordA(AtmosNNHeader h, float3 rayDir, float hitDist)
 {
     if (h.pathMode == 0) {
         float rangeKm = max(hitDist * h.worldUnitsToMeters * 1e-3, 1e-4);
+        const float sinElevation = rayDir.y / max(length(rayDir), 1e-6);
+        if (sinElevation > 0.0) {
+            rangeKm = min(rangeKm, kAtmosHazeLayerKm / sinElevation);
+        }
         return log(rangeKm);
     }
     // Slant LUT is parameterized by view zenith of the DOWNWARD ray
     // (110..180 deg). World is Y-up: cos(view_zenith) = rayDir.y for a ray
     // leaving the camera (zenith measured from local up at the camera).
     return rayDir.y;
+}
+
+// Whether a primary ray that hit nothing composes through the view path. The
+// slant tables describe a camera at altitude looking DOWN (110-180 deg); a ray
+// climbing from it has no entry, and clamping it to the 110 deg one gave the
+// whole sky the haze of a path to the ground twenty degrees below the
+// horizon. Above the horizon it sees the sky as the illuminant has it.
+bool AtmosMissComposites(AtmosNNHeader h, float3 rayDir)
+{
+    return !(h.pathMode != 0 && rayDir.y > 0.0);
 }
 
 // Relative azimuth between the viewing direction and the sun's horizontal

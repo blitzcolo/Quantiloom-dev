@@ -90,7 +90,13 @@ void main(inout Payload payload) {
     // range the LUT wants. Secondary misses return raw surface radiance for
     // the parent vertex's BRDF integration and must not composite, exactly
     // as in closesthit.
-    const bool atmosComposite = (atmos.enabled != 0) && (payload.depth == 0);
+    //
+    // Not every primary miss, though: see AtmosMissComposites. A ray looking
+    // up from an airborne camera has no table to read, and AtmosCoordA keeps a
+    // ground camera's upward line of sight inside the haze layer it crosses
+    // instead of reading every sky pixel as ten kilometres of horizontal haze.
+    const bool atmosComposite = (atmos.enabled != 0) && (payload.depth == 0) &&
+                                AtmosMissComposites(atmos, WorldRayDirection());
     float atmosA = 0.0;
     float atmosAz = 0.0;
     if (atmosComposite) {
@@ -579,7 +585,16 @@ void main(inout Payload payload) {
             // of the ray goes through the view path like any other surface
             // radiance. atmosIdx was chosen above by the same rule closesthit
             // uses (sweep index, or the nearest sample for a carried lambda).
-            if (atmosComposite) {
+            //
+            // Except above the horizon when the sky IS the network's: its
+            // downwelling is already the radiance of the whole column along
+            // that line of sight, near-surface layer included, and adding the
+            // layer's path radiance again counted it twice, and made the sky
+            // warmer than the network says it is. Below the horizon the ray
+            // stands for distant ground and composes as before; toward the
+            // horizon both sides approach the air's own blackbody, so the two
+            // meet there.
+            if (atmosComposite && !(useNNLdown && cosZenith > 0.0)) {
                 L_sky = SampleAtmosTau(atmos, atmosNNData, atmosIdx, atmosA) * L_sky +
                         SampleAtmosLpath(atmos, atmosNNData, atmosIdx, atmosA, atmosAz);
             }
