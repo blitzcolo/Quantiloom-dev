@@ -410,6 +410,29 @@ target_compile_definitions(libquantiloom_tests
 target_include_directories(libquantiloom_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/app)
 
+# /MP: compile the test sources in parallel -- `cmake --build -j` alone only
+# runs whole projects side by side. The precompiled header holds what nearly
+# every test file includes: gtest, the standard library, Vulkan and GLM. Same
+# rule as quantiloom_core's: stable third-party headers only, nothing that
+# wants a macro defined before it.
+if(MSVC)
+    target_compile_options(libquantiloom_tests PRIVATE /MP)
+endif()
+target_precompile_headers(libquantiloom_tests PRIVATE
+    <gtest/gtest.h>
+    <algorithm> <array> <chrono> <cmath> <cstdint> <cstring> <filesystem>
+    <format> <fstream> <functional> <limits> <memory> <numeric> <optional>
+    <stdexcept> <string> <utility> <vector>
+)
+# Standalone mode links GTest alone, so Vulkan and GLM are not on its include
+# path -- they come with quantiloom_core.
+if(NOT QUANTILOOM_STANDALONE_TESTS)
+    target_precompile_headers(libquantiloom_tests PRIVATE
+        <vulkan/vulkan.h>
+        <glm/glm.hpp>
+    )
+endif()
+
 # The compiled shaders, beside the test binary. A test that builds a ray
 # tracing pipeline -- ApplyConfig's do -- loads them by name from the working
 # directory or the executable's, the same as the CLI does, and throws when they

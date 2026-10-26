@@ -420,14 +420,32 @@ endif()
 #          intended shape now -- e.g. GenericSensor stays public while its
 #          SensorModel base is internal -- so the warning reports the design,
 #          not a defect.
+# /MP: compile this target's sources in parallel. MSBuild's /m (what `cmake
+#      --build -j` passes) only runs projects side by side; without /MP the
+#      105 files here go through one cl.exe one after another.
 if(MSVC)
-    target_compile_options(quantiloom_core PRIVATE /W4 /EHsc /wd4251 /wd4275 /wd4819)
+    target_compile_options(quantiloom_core PRIVATE /W4 /EHsc /wd4251 /wd4275 /wd4819 /MP)
 else()
     # -fvisibility=hidden: Only export symbols explicitly marked with QL_API.
     # Static consumers are unaffected: visibility governs the dynamic symbol
     # table, not link-time resolution against the object files.
     target_compile_options(quantiloom_core PRIVATE -Wall -Wextra -Wpedantic -fvisibility=hidden)
 endif()
+
+# Precompiled header: the standard library, Vulkan and GLM, which most files
+# reach directly or through core/Log.hpp (<format>) and the renderer headers.
+# Only stable third-party headers belong here -- a first-party header in the
+# PCH would rebuild every file whenever it is touched. Headers that want a
+# macro defined before them (VMA, stb, tinygltf, <windows.h>) stay out too:
+# the PCH is force-included ahead of a file's own #defines.
+target_precompile_headers(quantiloom_core PRIVATE
+    <algorithm> <array> <atomic> <chrono> <cmath> <cstdint> <cstring>
+    <filesystem> <format> <fstream> <functional> <limits> <memory> <mutex>
+    <optional> <sstream> <stdexcept> <string> <string_view> <unordered_map>
+    <utility> <vector>
+    <vulkan/vulkan.h>
+    <glm/glm.hpp>
+)
 
 # ============================================================================
 # libQuantiloom -- the SDK artifact

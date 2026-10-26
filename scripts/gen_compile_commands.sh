@@ -9,6 +9,10 @@
 # cl.exe needs the MSVC developer environment (INCLUDE/LIB/PATH), so the whole
 # configure runs inside vcvars64.bat.
 #
+# Precompiled headers are off here: the entries would otherwise carry /Yu and
+# /Fp naming a .pch this tree never builds, and without the forced include
+# clangd still sees a file that forgot one of its own #includes.
+#
 # `--check` reports whether the existing database is stale and exits non-zero if
 # it is, without regenerating. Nothing else notices: clangd silently falls back
 # to heuristic flags for a file it cannot find, so staleness has to be asked for.
@@ -86,6 +90,7 @@ cmake.exe -B build-cdb -G Ninja ^
   -DCMAKE_C_COMPILER=cl -DCMAKE_CXX_COMPILER=cl ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_EXPORT_COMPILE_COMMANDS=ON ^
+  -DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON ^
   -DQUANTILOOM_USE_OPENUSD=ON -DUSD_ROOT=C:/openusd ^
   -DQUANTILOOM_BUILD_TESTS=ON
 exit /b %errorlevel%
