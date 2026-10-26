@@ -141,6 +141,9 @@ struct ExternalRenderContext::Impl {
     std::unique_ptr<GpuBuffer> cameraLightingParamsBuffer;
     std::unique_ptr<GpuBuffer> criBuffer;
     std::unique_ptr<GpuBuffer> solarLutBuffer;
+    /// The curves behind solarLutBuffer, kept for the camera chain. Present
+    /// exactly when an illuminant is bound, which is what HasSolarSpectralLUT
+    /// reports.
     std::optional<std::pair<SpectralCurve, SpectralCurve>> cameraSolarSources;
     std::unique_ptr<GpuBuffer> atmosHeaderBuffer;  // AtmosNNHeaderGPU (binding 17)
     std::unique_ptr<GpuBuffer> atmosDataBuffer;    // Baked LUT blob (binding 20)
@@ -836,6 +839,10 @@ struct ExternalRenderContext::Impl {
     /// replaces buffers: the deferred TLAS refit, then any queued buffer
     /// uploads, in one submission.
     void FlushPendingGpuWork();
+    /// Replace the solar LUT buffer with @p lut and re-point the descriptor at
+    /// it. Synchronous: pending uploads are flushed and the device drained
+    /// first, so the swap is safe only between submitted frames.
+    void UploadSolarLut(const SolarSpectralLUT& lut);
     /// Upload a small change so it lands with the next recorded frame. A
     /// payload too large for a command buffer keeps a synchronous path:
     /// drain the queue, write through the mapping, and on a failed wait log
@@ -1450,8 +1457,14 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // 6. Illuminant, then lighting. UploadLightingParams is the only legal
     //    writer of that buffer -- it substitutes the atmosphere's air
     //    temperature while a bake is active.
+    // A config naming no solar_lut is a scene with no illuminant spectrum, not
+    // one that keeps whichever the context last had -- a host reuses its
+    // context across documents, and the previous scene's sun used to light
+    // the next one in every spectral mode.
     if (resolved.solarSunSky) {
         SetSolarSpectralLUT(resolved.solarSunSky->first, resolved.solarSunSky->second);
+    } else {
+        ClearSolarSpectralLUT();
     }
     m_impl->lightingParams = resolved.lighting;
     // resolved.lighting is built from the config alone, so its emissive fields
@@ -3218,27 +3231,48 @@ void ExternalRenderContext::SetSolarSpectralLUT(const SpectralCurve& sunIrradian
 
     const SolarSpectralLUT lut = SolarSpectralLUT::FromCPU(sunIrradiance, skyIrradiance);
     m_impl->cameraSolarSources = std::make_pair(sunIrradiance, skyIrradiance);
-    // Replacing a descriptor-backed buffer while an earlier QVulkanWindow
-    // frame may still read it is invalid; solar edits are infrequent. Drain
-    // the upload queue first so nothing pending still names the old buffer.
-    m_impl->FlushPendingGpuWork();
-    if (m_impl->solarLutBuffer && m_impl->device != VK_NULL_HANDLE)
-        vkDeviceWaitIdle(m_impl->device);
-
-    m_impl->solarLutBuffer = std::make_unique<GpuBuffer>(
-        m_impl->contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
-        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
-    m_impl->solarLutBuffer->Upload(&lut, sizeof(SolarSpectralLUT));
-
-    if (m_impl->pipeline) {
-        m_impl->pipeline->BindSolarSpectralLUT(m_impl->solarLutBuffer.get());
-    }
-    if (m_impl->cameraConfig.enabled)
-        m_impl->cameraCapturePending = true;
+    m_impl->UploadSolarLut(lut);
     ResetAccumulation();
 
     QL_LOG_INFO("SetSolarSpectralLUT: sun {} samples, sky {} samples",
                 lut.sunIrradiance.numSamples, lut.skyIrradiance.numSamples);
+}
+
+void ExternalRenderContext::ClearSolarSpectralLUT() {
+    if (!m_impl->cameraSolarSources) {
+        return;   // nothing bound; the buffer already holds the zero LUT
+    }
+    m_impl->cameraSolarSources.reset();
+    // Zero-initialised: numSamples = 0 on both curves is "none" to every
+    // shader branch, as it is in OfflineRenderer and in CreateDummyBuffers.
+    m_impl->UploadSolarLut(SolarSpectralLUT{});
+    ResetAccumulation();
+
+    QL_LOG_INFO("ClearSolarSpectralLUT: no illuminant spectrum bound");
+}
+
+bool ExternalRenderContext::HasSolarSpectralLUT() const {
+    return m_impl->cameraSolarSources.has_value();
+}
+
+void ExternalRenderContext::Impl::UploadSolarLut(const SolarSpectralLUT& lut) {
+    // Replacing a descriptor-backed buffer while an earlier QVulkanWindow
+    // frame may still read it is invalid; solar edits are infrequent. Drain
+    // the upload queue first so nothing pending still names the old buffer.
+    FlushPendingGpuWork();
+    if (solarLutBuffer && device != VK_NULL_HANDLE)
+        vkDeviceWaitIdle(device);
+
+    solarLutBuffer = std::make_unique<GpuBuffer>(
+        contextAdapter->GetAllocator(), sizeof(SolarSpectralLUT),
+        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VMA_MEMORY_USAGE_CPU_TO_GPU);
+    solarLutBuffer->Upload(&lut, sizeof(SolarSpectralLUT));
+
+    if (pipeline) {
+        pipeline->BindSolarSpectralLUT(solarLutBuffer.get());
+    }
+    if (cameraConfig.enabled)
+        cameraCapturePending = true;
 }
 
 void ExternalRenderContext::SetCameraProjection(CameraProjection projection, f32 orthoHeight) {
@@ -5276,6 +5310,8 @@ void ExternalRenderContext::Impl::CreateDummyBuffers() {
         VMA_MEMORY_USAGE_CPU_TO_GPU
     );
     solarLutBuffer->Upload(&dummySolar, sizeof(DummySolarLUT));
+    // The buffer is the zero LUT now, whatever was bound before.
+    cameraSolarSources.reset();
 
     // Create NN atmosphere buffers. The header starts zeroed (enabled = 0,
     // atmosphere off); the data blob is preallocated at its maximum size so

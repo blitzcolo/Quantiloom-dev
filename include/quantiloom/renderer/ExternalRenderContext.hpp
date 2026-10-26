@@ -1541,7 +1541,8 @@ public:
      * One LUT for the scene rather than an indexed set, so this replaces rather than
      * appends.
      *
-     * @warning Until this is called the LUT is **zero**, and a quantitative spectral
+     * @warning Until this is called -- and again after ClearSolarSpectralLUT --
+     *          the LUT is **zero**, and a quantitative spectral
      *          mode will render black for want of an illuminant. That is deliberate:
      *          silently substituting a standard spectrum would make an unconfigured
      *          scene look plausible while reporting radiance nobody asked for.
@@ -1596,6 +1597,27 @@ public:
      */
     Result<void, String> SetSolarSpectralLUTFromSpec(const SolarLutSpec& spec,
                                                      const String& baseDir = "");
+
+    /**
+     * @brief Unbind the illuminant, back to the zero LUT of a fresh context
+     *
+     * What a scene naming no solar_lut declares: the spectral modes take no
+     * light from the sun or the sky, and a scene lit only by its own emissive
+     * materials renders as exactly that. ApplyConfig calls this for a config
+     * that names none, so a document does not inherit the illuminant of the
+     * one opened before it in the same context -- the CLI starts every render
+     * from a fresh one and never could.
+     *
+     * LightingParams is left as it is: sun_radiance and sky_radiance are the
+     * RGB path's, and a host that means them off says so there. Nothing is
+     * drained or uploaded when no illuminant is bound.
+     */
+    void ClearSolarSpectralLUT();
+
+    /// Whether an illuminant spectrum is bound: set by SetSolarSpectralLUT and
+    /// its callers, cleared by ClearSolarSpectralLUT. The test the shaders'
+    /// HasSolarSpectralLUT makes on the GPU.
+    [[nodiscard]] bool HasSolarSpectralLUT() const;
 
     /**
      * @brief Rebuild acceleration structure after scene changes

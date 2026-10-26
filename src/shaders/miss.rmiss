@@ -189,11 +189,6 @@ void main(inout Payload payload) {
         float heroRadiance = 0.0;
         float4 quadRadiance = float4(0.0, 0.0, 0.0, 0.0);
 
-        // The sky's fallback chroma does not depend on wavelength, so it is
-        // fitted once rather than at every sample.
-        const RgbIlluminant skyFallback =
-            FetchRgbIlluminant(rgbToSpectrumTable, lut.skyRadiance_rgb);
-
         // Which way the sky's light comes from (lighting.sky_distribution).
         // The sun and the anchor are per ray; the factor is per wavelength and
         // exactly 1 for a uniform sky.
@@ -215,8 +210,13 @@ void main(inout Payload payload) {
                 float sky_irr = SampleSkyIrradiance(solarSpectralLUT, lambda);
                 sky_radiance_lambda = sky_irr / PI;
             } else {
-                // Fallback: RGB → Illuminant spectrum (consistent with closesthit)
-                sky_radiance_lambda = RgbIlluminantAt(skyFallback, cieSample.w, lambda);
+                // No named illuminant, no sky light -- as in every other band
+                // here, and as closesthit's analytic base (sky4) already has
+                // it. This used to expand sky_radiance_rgb through D65, and
+                // since the bounce residual is L_in - L_base with a base of 0,
+                // that invented sky reached every surface as indirect light: a
+                // scene with its sun and sky switched off still came out lit.
+                sky_radiance_lambda = 0.0;
             }
             sky_radiance_lambda *= SkyDomeFactor(lightingParams, solarSpectralLUT, lambda,
                                                  skyDir, skySun, skyAnchor);

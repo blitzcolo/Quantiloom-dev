@@ -235,3 +235,47 @@ TEST_F(ApplyConfigTest, ApplyingTwiceIsHowADocumentIsReplayed) {
     EXPECT_TRUE(second.solarLutLoaded);
     EXPECT_EQ(context->GetAccumulatedSamples(), 0u);
 }
+
+// ============================================================================
+// Illuminant
+// ============================================================================
+
+TEST_F(ApplyConfigTest, AConfigNamingNoIlluminantDoesNotInheritThePreviousOne) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+
+    // A host keeps one context across documents. The first names a spectrum...
+    auto lit = WriteConfig("mode = \"vis_fused\"\n", "solar_lut = \"equal_energy\"\n");
+    ASSERT_TRUE(context->ApplyConfig(lit).ok());
+    ASSERT_TRUE(context->HasSolarSpectralLUT());
+
+    // ...and the next names none, which used to render under the first one's
+    // sun in every spectral mode. The CLI starts from a fresh context and never
+    // saw it.
+    const auto report = context->ApplyConfig(WriteConfig("mode = \"vis_fused\"\n"));
+    ASSERT_TRUE(report.ok()) << report.FirstError();
+    EXPECT_FALSE(report.solarLutLoaded);
+    EXPECT_FALSE(context->HasSolarSpectralLUT());
+}
+
+TEST_F(ApplyConfigTest, ClearingTheIlluminantUnbindsOneAHostSet) {
+    if (!CornellBoxAvailable()) GTEST_SKIP() << "cornell_box.gltf not in assets/models/cornell_box";
+
+    ASSERT_TRUE(context->ApplyConfig(WriteConfig("mode = \"vis_fused\"\n")).ok());
+    EXPECT_FALSE(context->HasSolarSpectralLUT());
+
+    SolarLutSpec spec;
+    spec.pathOrEqualEnergy = "equal_energy";
+    const auto set = context->SetSolarSpectralLUTFromSpec(spec);
+    ASSERT_TRUE(set.has_value()) << set.error();
+    EXPECT_TRUE(context->HasSolarSpectralLUT());
+
+    // "None" in a host's illuminant list. Before ClearSolarSpectralLUT there was
+    // no way back: SetSolarSpectralLUT refuses two empty curves and keeps the
+    // LUT it had.
+    context->ClearSolarSpectralLUT();
+    EXPECT_FALSE(context->HasSolarSpectralLUT());
+
+    // Again, with nothing bound: a no-op, not an error.
+    context->ClearSolarSpectralLUT();
+    EXPECT_FALSE(context->HasSolarSpectralLUT());
+}

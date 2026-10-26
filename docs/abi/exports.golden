@@ -43,6 +43,7 @@ public: bool quantiloom::Config::Has(class std::basic_string_view<char,struct st
 public: bool quantiloom::Config::HasSection(class std::basic_string_view<char,struct std::char_traits<char> >)const
 public: bool quantiloom::ExternalRenderContext::HasEnvironmentMap(void)const
 public: bool quantiloom::ExternalRenderContext::HasScene(void)const
+public: bool quantiloom::ExternalRenderContext::HasSolarSpectralLUT(void)const
 public: bool quantiloom::ExternalRenderContext::IsGPUSensorEnabled(void)const
 public: bool quantiloom::ExternalRenderContext::IsReady(void)const
 public: bool quantiloom::ExternalRenderContext::PresentAccumulated(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
@@ -298,6 +299,7 @@ public: virtual class quantiloom::Result<struct quantiloom::SensorOutput,class s
 public: virtual quantiloom::GenericSensor::~GenericSensor(void)
 public: void quantiloom::Config::Print(void)const
 public: void quantiloom::ExternalRenderContext::BlitDepthTo(struct VkCommandBuffer_T *,struct VkImage_T *,enum VkImageLayout,unsigned int,unsigned int)
+public: void quantiloom::ExternalRenderContext::ClearSolarSpectralLUT(void)
 public: void quantiloom::ExternalRenderContext::ClearThermalMaterials(void)
 public: void quantiloom::ExternalRenderContext::RebuildAccelerationStructure(void)
 public: void quantiloom::ExternalRenderContext::RefitAccelerationStructure(void)
