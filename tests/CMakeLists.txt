@@ -575,6 +575,17 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
     # inner project as a list. Held in a list variable and expanded unquoted,
     # the separators split it and only the first directory survived. Both
     # try_compile calls below spell the same arguments from these variables.
+    #
+    # The gate is about compiling, not linking: a TU of #includes has no main,
+    # so both calls build a static library rather than an executable. The
+    # previous value is restored before anything else in this file runs.
+    if(DEFINED CMAKE_TRY_COMPILE_TARGET_TYPE)
+        set(_ql_saved_try_compile_type "${CMAKE_TRY_COMPILE_TARGET_TYPE}")
+    else()
+        unset(_ql_saved_try_compile_type)
+    endif()
+    set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
     try_compile(QL_PUBLIC_HEADERS_NEUTRAL
         "${_ql_neutrality_dir}/neutral_build"
         SOURCES "${_ql_neutrality_dir}/neutral.cpp"
@@ -584,11 +595,6 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
         CXX_STANDARD_REQUIRED ON
         OUTPUT_VARIABLE _ql_neutral_output
     )
-    if(NOT QL_PUBLIC_HEADERS_NEUTRAL)
-        message(FATAL_ERROR
-            "Public headers outside renderer/interop/ must compile without any Vulkan "
-            "include directory.\n${_ql_neutral_output}")
-    endif()
 
     try_compile(QL_INTEROP_CONTROL_COMPILES
         "${_ql_neutrality_dir}/control_build"
@@ -599,6 +605,19 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
         CXX_STANDARD_REQUIRED ON
         OUTPUT_VARIABLE _ql_control_output
     )
+
+    if(DEFINED _ql_saved_try_compile_type)
+        set(CMAKE_TRY_COMPILE_TARGET_TYPE "${_ql_saved_try_compile_type}")
+        unset(_ql_saved_try_compile_type)
+    else()
+        unset(CMAKE_TRY_COMPILE_TARGET_TYPE)
+    endif()
+
+    if(NOT QL_PUBLIC_HEADERS_NEUTRAL)
+        message(FATAL_ERROR
+            "Public headers outside renderer/interop/ must compile without any Vulkan "
+            "include directory.\n${_ql_neutral_output}")
+    endif()
     if(QL_INTEROP_CONTROL_COMPILES)
         message(FATAL_ERROR
             "The header-neutrality gate is vacuous: renderer/interop/VulkanInterop.hpp "
