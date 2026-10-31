@@ -1,0 +1,25 @@
+# Line endings: LF in the repository and LF on checkout.
+#
+# The index is already LF throughout; what was missing is a policy. With
+# core.autocrlf unset and this file empty, git stored whatever bytes it was
+# handed, so a checkout made by one tool and edited by another drifted: 170
+# tracked files sat CRLF in one working tree while LF in the index. The same
+# tree is about to be cloned on macOS, where nothing wants CRLF -- bash refuses a
+# CRLF `set -euo pipefail` outright -- and MSVC, PowerShell and cmd.exe all read
+# LF. Quantiloom-Qt carries the same rule.
+* text=auto eol=lf
+
+# Binary, never normalised. `text=auto` already detects these from their NUL
+# bytes; naming them makes that independent of the heuristic. .gltf is JSON but
+# can embed megabytes of base64 and is treated as an asset, as in Quantiloom-Qt.
+*.bin          binary
+*.qlbin        binary
+*.safetensors  binary
+*.exr          binary
+*.png          binary
+*.glb          binary
+*.gltf         binary
+*.usdc         binary
+*.usdz         binary
+*.exe          binary
+*.EXE          binary
