@@ -13,6 +13,7 @@
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "core/ResourceLocator.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/ShaderBinary.hpp"
 #include "renderer/SkyDome.hpp"
@@ -172,6 +173,11 @@ void NoteTargetFormat(GpuTargetFormat format) {
 struct ExternalRenderContext::Impl {
     // Context adapter (provides VulkanContext interface for external handles)
     std::unique_ptr<VulkanContextAdapter> contextAdapter;
+
+    // The adopted compute RHI view of the adapter's context. Declared
+    // immediately after contextAdapter so it is destroyed right after every
+    // module that holds gpu:: objects and before the adapter itself.
+    std::unique_ptr<gpu::Device> gpuDevice;
 
     // The facade that owns this Impl. Used by internal steps that need a
     // public facade call (the camera scheduler poses the timeline through
@@ -1259,10 +1265,14 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     adapterHandles.allocator = FromGpuHandle<VmaAllocator>(params.device.vmaAllocator);
 
     try {
+        // Any module holding gpu:: objects must release the adopted device
+        // before the adapter it names is replaced.
+        gpuDevice.reset();
         contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
     } catch (const std::exception& e) {
         return Result<void, String>::Err(String("Failed to create VulkanContextAdapter: ") + e.what());
     }
+    gpuDevice = gpu::vulkan::AdoptContext(*contextAdapter);
 
     perfLogger = std::make_unique<PerformanceLogger>(*contextAdapter);
     cameraTracePerf = std::make_unique<PerformanceLogger>(*contextAdapter);
@@ -6868,7 +6878,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     const auto extent = ClaheInputExtent();
     if (!displayRangeInitAttempted) {
         displayRangeInitAttempted = true;
-        auto created = rendercore::GpuDisplayRange::Create(*contextAdapter);
+        auto created = rendercore::GpuDisplayRange::Create(*gpuDevice);
         if (created) {
             displayRange = std::move(created.value());
         } else {
@@ -6878,7 +6888,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     }
     if (displayRange) {
         auto range =
-            displayRange->Compute(*input, extent.width, extent.height, displayParams.percentileLow,
+            displayRange->Compute(gpu::vulkan::Ref(*input), extent.width, extent.height, displayParams.percentileLow,
                                   displayParams.percentileHigh);
         if (range) {
             outMin = range.value().min;

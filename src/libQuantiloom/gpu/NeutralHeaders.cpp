@@ -10,6 +10,7 @@
 #include "gpu/Resources.hpp"
 #include "gpu/ShaderLibrary.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
+#include "renderer/GpuDisplayRange.hpp"
 #include "renderer/GpuThermalStepper.hpp"
 
 #if defined(VK_VERSION_1_0)

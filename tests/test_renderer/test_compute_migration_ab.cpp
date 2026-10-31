@@ -262,14 +262,14 @@ TEST_F(ComputeMigrationAB, DisplayRange) {
     auto image = UploadRgba32f(Device(), kWidth, kHeight, rgba);
     ASSERT_TRUE(image->IsValid());
 
-    auto created = rendercore::GpuDisplayRange::Create(Device());
+    auto created = rendercore::GpuDisplayRange::Create(GpuDevice());
     ASSERT_TRUE(created.has_value()) << created.error();
     auto gpu = std::move(created.value());
 
     const std::pair<f32, f32> percentiles[] = {{1.0f, 99.0f}, {0.0f, 100.0f}, {5.0f, 95.0f}};
     std::vector<f32> windows;
     for (const auto& [low, high] : percentiles) {
-        const auto range = gpu->Compute(*image, kWidth, kHeight, low, high);
+        const auto range = gpu->Compute(gpu::vulkan::Ref(*image), kWidth, kHeight, low, high);
         ASSERT_TRUE(range.has_value()) << range.error();
         windows.push_back(range.value().min);
         windows.push_back(range.value().max);
