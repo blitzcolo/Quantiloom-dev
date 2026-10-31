@@ -1371,7 +1371,9 @@ struct VertexFrame {
     uint   materialId;
     float  heroIn;         // payload.heroLambda on entry
     float  heroSigned;     // the wavelength state this vertex answers for
-    float3 hitPos;         // ray.Origin + ray.Direction * t
+    float3 hitPos;         // the glass's ray origin, formed where the glass block formed it
+    float3 hitDT;          // the back-lobe bounce's origin: the hit point its band already held
+    float3 hitFluor;       // SINGLE: the deferred excitation's hit point
     float  t;
     float3 normal;         // the final shading normal
     float3 rayDir;
@@ -1428,7 +1430,7 @@ void DeferredFluorescence(inout VertexFrame f, uint depth) {
         f.fluorM = FluorescenceExcitationWithLight(material, f.NdotL, f.shadowFactor,
                                                    light, f.neeScaleFluor, v);
     } else {
-        f.fluorM = SampleFluorescenceExcitation(material, f.hitPos, f.normal, f.NdotL,
+        f.fluorM = SampleFluorescenceExcitation(material, f.hitFluor, f.normal, f.NdotL,
                                                 f.shadowFactor, v);
     }
     f.rng = v.rngState;
@@ -1445,7 +1447,7 @@ bool SampleBounceDT(inout VertexFrame f, uint depth, inout ChildRequest req) {
     v.heroLambda = f.heroIn;
     const float4 zero4 = float4(0.0, 0.0, 0.0, 0.0);
     ChildRequest r;
-    const bool taken = SampleBounce(f.hitPos, -f.normal, f.V, f.NdotV, f.roughness, 0.0,
+    const bool taken = SampleBounce(f.hitDT, -f.normal, f.V, f.NdotV, f.roughness, 0.0,
                                     f.wDT, zero4, zero4, f.rrDt, f.lambdaB,
                                     IsotropicFrame(), v, f.wChild, r);
     f.rng = v.rngState;
@@ -1877,7 +1879,17 @@ float4 FoldVisible(VertexFrame f) {
         }
         // The indirect correction, carrying cmf(lambda_b) and the 1/pdf that the
         // deterministic grid gets from its LAMBDA_STEP.
-        const float3 XYZ_bounce = (f.corrB.x + f.corrD.x) * f.tauB / f.pdfB * f.cmfB;
+        //
+        // Zero until a bounce was requested, and added through that variable on
+        // purpose: the product reaching the sum only by way of a join is what kept
+        // the driver from fusing it into the sum (a*b+c rounds once, a*b then +c
+        // twice), and written straight into the add it fused. The sweep's XYZ sits
+        // next to zero for a saturated colour, where one rounding more or less
+        // is a visible relative difference.
+        float3 XYZ_bounce = float3(0.0, 0.0, 0.0);
+        if ((f.ctl & (QL_CTL_BOUNCE_TAKEN | QL_CTL_DT_ENABLED)) != 0u) {
+            XYZ_bounce = (f.corrB.x + f.corrD.x) * f.tauB / f.pdfB * f.cmfB;
+        }
         XYZ_accum += XYZ_bounce;
         XYZ_accum /= CIE_Y_INTEGRAL;
         output_radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
@@ -3384,6 +3396,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             const float rrDt = max(max(wDt4.x, wDt4.y), max(wDt4.z, wDt4.w));
             if (hasDT && rrDt > 0.0) {
                 f.ctl |= QL_CTL_DT_ENABLED;
+                f.hitDT = visHitPos;
                 f.rrDt = rrDt;
             }
 
@@ -4107,6 +4120,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             // The transmitted half against the back hemisphere, as VIS_FUSED.
             if (wDt_s > 0.0) {
                 f.ctl |= QL_CTL_DT_ENABLED;
+                f.hitDT = singleHitPos;
                 f.wDT = wDt_s * ccBase;
                 f.rrDt = wDt_s * ccBase;
             }
@@ -4169,6 +4183,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         // is a stratified draw at depth 0 and a PCG draw deeper, and the order is
         // what matters), and FoldSingle adds it with the corrections, the NN
         // atmosphere composition, the validation and the clamp.
+        f.hitFluor = ray.Origin + ray.Direction * rec.t;
         f.ctl |= QL_CTL_FLUOR_DEFERRED;
         f.pre.x = radiance_spectral;
         if (atmosEnabled) {
@@ -4327,6 +4342,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         }
         if (wDt_b > 0.0) {
             f.ctl |= QL_CTL_DT_ENABLED;
+            f.hitDT = swirHitPos;
             f.wDT = wDt_b;
             f.rrDt = wDt_b;
         }
@@ -4626,6 +4642,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         }
         if (wDt_b > 0.0) {
             f.ctl |= QL_CTL_DT_ENABLED;
+            f.hitDT = nirHitPos;
             f.wDT = wDt_b;
             f.rrDt = wDt_b;
         }
@@ -5175,7 +5192,6 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
     f.materialId = materialID;
     f.heroIn = payload.heroLambda;
     f.heroSigned = heroSigned;
-    f.hitPos = ray.Origin + ray.Direction * rec.t;
     f.t = rec.t;
     f.normal = normal;
     f.rayDir = rayDir;
@@ -5985,6 +6001,9 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         (IsSingleWavelengthMode() &&
          RoutesToThermalBranch(SingleModeWavelength(payload.heroLambda)));
     if (material.transmission > 0.0 && !thermalBranch && payload.depth < MAX_PATH_DEPTH) {
+        // The glass's rays start here, formed where the glass block formed it.
+        f.hitPos = ray.Origin + ray.Direction * rec.t;
+
         // Scale transmission contribution by material.transmission factor.
         // KHR_materials_transmission puts the factor in the R channel of its
         // texture, multiplied with the scalar -- a textured pane can be clear
