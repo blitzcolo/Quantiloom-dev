@@ -17,7 +17,7 @@ namespace {
 
 class GpuVulkanTest : public VulkanDeviceTest {};
 
-std::unique_ptr<Buffer> MakeBuffer(gpu::Device& device, u64 size, BufferUsage usage, MemoryClass memory) {
+std::unique_ptr<gpu::Buffer> MakeBuffer(gpu::Device& device, u64 size, BufferUsage usage, MemoryClass memory) {
     auto created = device.CreateBuffer(BufferDesc{size, usage, memory, 0});
     EXPECT_TRUE(created.has_value()) << (created.has_value() ? "" : created.error());
     return created.has_value() ? std::move(created.value()) : nullptr;
@@ -93,7 +93,7 @@ TEST_F(GpuVulkanTest, TextureRefCarriesTheDescriptorIdentity) {
     desc.usage = TextureUsage::Storage | TextureUsage::TransferSrc | TextureUsage::TransferDst;
     auto created = device.CreateTexture(desc);
     ASSERT_TRUE(created.has_value()) << created.error();
-    const TextureRef ref = created.value()->Ref();
+    const gpu::TextureRef ref = created.value()->Ref();
     EXPECT_TRUE(ref.IsValid());
     EXPECT_EQ(ref.width, 16u);
     EXPECT_EQ(ref.layout, TextureLayoutPolicy::General);
@@ -134,7 +134,7 @@ TEST_F(GpuVulkanTest, AKernelBindsAndWritesItsGroup) {
     ASSERT_TRUE(groups.has_value()) << groups.error();
     ASSERT_EQ(groups.value().size(), 2u);
 
-    std::vector<std::unique_ptr<Buffer>> buffers;
+    std::vector<std::unique_ptr<gpu::Buffer>> buffers;
     std::vector<BindingWrite> writes;
     for (u32 slot = 0; slot < 5; ++slot) {
         buffers.push_back(MakeBuffer(device, 256, BufferUsage::Storage, MemoryClass::DeviceLocal));

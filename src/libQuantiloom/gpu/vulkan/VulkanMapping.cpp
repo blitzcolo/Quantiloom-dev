@@ -31,7 +31,9 @@ constexpr BitScope kScopes[] = {
 
 AccessScope ScopeOf(Access bits, bool asSource) {
     if (bits == Access::None) {
-        return {asSource ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0};
+        AccessScope none;
+        none.stages = asSource ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        return none;
     }
     AccessScope scope;
     for (const BitScope& entry : kScopes) {

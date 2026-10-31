@@ -32,7 +32,7 @@ Result<std::unique_ptr<BindingLayout>, String> VulkanBindingLayout::Create(VkDev
         binding.descriptorCount = slot.count;
         binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         bindings.push_back(binding);
-        flags.push_back(slot.partiallyBound ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : 0);
+        flags.push_back(static_cast<VkDescriptorBindingFlags>(slot.partiallyBound ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : 0));
         anyPartial = anyPartial || slot.partiallyBound;
     }
 

@@ -46,7 +46,7 @@ Result<std::unique_ptr<Texture>, String> VulkanDevice::CreateTexture(const Textu
         const bool cube = desc.dimension == TextureDimension::Cube;
         return std::unique_ptr<Texture>(std::make_unique<VulkanTexture>(
             GpuImage(context_.GetAllocator(), context_.GetDevice(), desc.width, desc.height, format, usage, memory,
-                     desc.mipLevels, desc.layers, cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+                     desc.mipLevels, desc.layers, static_cast<VkImageCreateFlags>(cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0),
                      cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D_ARRAY),
             desc));
     } catch (const std::exception& e) {
