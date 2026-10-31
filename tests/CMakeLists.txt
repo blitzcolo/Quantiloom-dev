@@ -625,7 +625,14 @@ if(NOT QUANTILOOM_STANDALONE_TESTS)
     endif()
     # The control must fail on vulkan.h and nothing else; failing on glm or on
     # a platform macro would make the neutral pass above meaningless too.
-    if(NOT _ql_control_output MATCHES "vulkan[/\\\\]vulkan\\.h")
+    #
+    # Match only "[/\]vulkan.h", never the full "vulkan/vulkan.h". On a Chinese
+    # Windows, MSVC prints C1083 with the file name inside UTF-8 curly quotes
+    # (E2 80 9C), CMake decodes that output as code page 936, and the quote's
+    # last byte pairs with the next one: "9C 76" becomes one CJK character, so
+    # the first 'v' disappears and the text held here reads "...ulkan/vulkan.h".
+    # The separator and the second segment survive in any UI language.
+    if(NOT _ql_control_output MATCHES "[/\\\\]vulkan\\.h")
         message(FATAL_ERROR
             "The header-neutrality control failed for a reason other than the missing "
             "vulkan/vulkan.h:\n${_ql_control_output}")
