@@ -965,9 +965,9 @@ struct ExternalRenderContext::Impl {
     /// The camera display product once an acquisition has completed, else
     /// null (the image exists before the first acquisition but holds no
     /// measurement).
-    [[nodiscard]] const GpuImage* CameraDisplayImage() const {
+    [[nodiscard]] gpu::TextureRef CameraDisplayImage() const {
         if (!cameraConfig.enabled || !cameraGpuPipeline || !cameraCaptureCompleted)
-            return nullptr;
+            return {};
         return cameraGpuPipeline->GetOutputs().display;
     }
 
@@ -983,22 +983,23 @@ struct ExternalRenderContext::Impl {
             return false;
         const auto outputs = cameraGpuPipeline->GetOutputs();
         return cameraConfig.device.detector == camera::DetectorKind::Thermal
-                   ? outputs.agcSource != nullptr
-                   : outputs.corrected != nullptr;
+                   ? outputs.agcSource.IsValid()
+                   : outputs.corrected.IsValid();
     }
 
     /// The image CLAHE reads: the camera's agcSource (infrared camera -- the
     /// pre-AGC scalar the camera chain would have tone-mapped), the corrected
     /// product for a visible camera, else the raw accumulation.
-    [[nodiscard]] const GpuImage* ClaheInputImage() const {
+    [[nodiscard]] gpu::TextureRef ClaheInputImage() const {
         if (cameraConfig.enabled && cameraGpuPipeline) {
             const auto outputs = cameraGpuPipeline->GetOutputs();
-            if (cameraConfig.device.detector == camera::DetectorKind::Thermal && outputs.agcSource)
+            if (cameraConfig.device.detector == camera::DetectorKind::Thermal &&
+                outputs.agcSource.IsValid())
                 return outputs.agcSource;
-            if (outputs.corrected)
+            if (outputs.corrected.IsValid())
                 return outputs.corrected;
         }
-        return outputImage.get();
+        return gpu::vulkan::Ref(*outputImage);
     }
 
     /// The camera config asked for CLAHE as the persistent infrared tone: the
@@ -2254,8 +2255,9 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
         const auto extent = ClaheInputExtent();
         return {displayImage->GetImage(), extent.width, extent.height};
     }
-    if (const GpuImage* cameraDisplay = CameraDisplayImage()) {
-        return {cameraDisplay->GetImage(), cameraConfig.optics.sensorWidthPx,
+    const gpu::TextureRef cameraDisplay = CameraDisplayImage();
+    if (cameraDisplay.IsValid()) {
+        return {gpu::vulkan::NativeImage(cameraDisplay), cameraConfig.optics.sensorWidthPx,
                 cameraConfig.optics.sensorHeightPx};
     }
     return {outputImage->GetImage(), width, height};
@@ -4621,8 +4623,9 @@ ExternalRenderContext::TryUpdateCameraReadoutConfig(const camera::CameraConfig& 
         m_impl->FlushPendingGpuWork();
         Result<void, String> status = Result<void, String>::Ok();
         CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
+            auto list = gpu::vulkan::Wrap(cmd);
             status = m_impl->cameraGpuPipeline->RecordReadoutReprocess(
-                cmd, m_impl->EffectiveCameraConfig());
+                list, m_impl->EffectiveCameraConfig());
         });
         if (!status) {
             m_impl->cameraConfig = std::move(previous);
@@ -4756,7 +4759,8 @@ Result<void, String> ExternalRenderContext::CheckpointCameraHistory() {
             "camera history checkpoint was not recorded");
     m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        recorded = m_impl->cameraGpuPipeline->RecordStateCheckpoint(list);
     });
     if (!recorded)
         return Result<void, String>::Err(recorded.error());
@@ -4794,7 +4798,8 @@ Result<void, String> ExternalRenderContext::RestoreCameraHistoryCheckpoint() {
     Result<void, String> restored = Result<void, String>::Ok();
     m_impl->FlushPendingGpuWork();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        restored = m_impl->cameraGpuPipeline->RestoreStateCheckpoint(record.gpu, list);
     });
     if (!restored)
         return restored;
@@ -5030,11 +5035,12 @@ Result<camera::CameraOutput, String> ExternalRenderContext::CaptureCameraProduct
                              : 1u;
     const auto outputs = m_impl->cameraGpuPipeline->GetOutputs();
 
-    const auto readProductImage = [&](const GpuImage* source) -> Result<Image, String> {
-        if (!source)
+    const auto readProductImage = [&](gpu::TextureRef source) -> Result<Image, String> {
+        if (!source.IsValid())
             return Result<Image, String>::Err("GPU camera product image is unavailable");
         const auto rgba =
-            CommandHelper::ReadbackImage(*m_impl->contextAdapter, source->GetImage(),
+            CommandHelper::ReadbackImage(*m_impl->contextAdapter,
+                                         gpu::vulkan::NativeImage(source),
                                          VK_FORMAT_R32G32B32A32_SFLOAT, width, height);
         if (rgba.size() != static_cast<size_t>(width) * height * 4u)
             return Result<Image, String>::Err("GPU camera product readback has the wrong size");
@@ -5201,21 +5207,22 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // -> outputImage. Each source carries its own extent: the CLAHE image
     // sits at the CLAHE input extent and the camera product at the physical
     // sensor array extent, which need not match the render extent.
-    const GpuImage* sourceImage = m_impl->outputImage.get();
+    gpu::TextureRef sourceImage = gpu::vulkan::Ref(*m_impl->outputImage);
     u32 sourceWidth = m_impl->width;
     u32 sourceHeight = m_impl->height;
 
     // Priority 1: CLAHE output (includes all effects)
     if ((m_impl->displayParams.enabled || m_impl->CameraClahePersistent()) &&
         m_impl->clahe && m_impl->displayImage && m_impl->ClaheInputReady()) {
-        sourceImage = m_impl->displayImage.get();
+        sourceImage = gpu::vulkan::Ref(*m_impl->displayImage);
         const auto extent = m_impl->ClaheInputExtent();
         sourceWidth = extent.width;
         sourceHeight = extent.height;
         QL_LOG_DEBUG("CaptureDisplayImage: Using displayImage (CLAHE enabled)");
     }
     // Priority 2: Camera display product (physical sensor extent)
-    else if (const GpuImage* camera = m_impl->CameraDisplayImage()) {
+    else if (const gpu::TextureRef camera = m_impl->CameraDisplayImage();
+             camera.IsValid()) {
         sourceImage = camera;
         sourceWidth = m_impl->cameraConfig.optics.sensorWidthPx;
         sourceHeight = m_impl->cameraConfig.optics.sensorHeightPx;
@@ -5229,7 +5236,7 @@ Result<Image, String> ExternalRenderContext::CaptureDisplayImage() {
     // Read back the appropriate image using CommandHelper
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *m_impl->contextAdapter,
-        sourceImage->GetImage(),
+        gpu::vulkan::NativeImage(sourceImage),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         sourceWidth,
         sourceHeight
@@ -5732,7 +5739,7 @@ Result<void, String> ExternalRenderContext::Impl::EnsureCameraResources() {
                                         : atmosHeaderBuffer.get(),
         cameraBaselineAtmosDataBuffer ? cameraBaselineAtmosDataBuffer.get()
                                       : atmosDataBuffer.get());
-    auto gpu = rendercore::GpuCameraPipeline::Create(*contextAdapter, physicalW, physicalH);
+    auto gpu = rendercore::GpuCameraPipeline::Create(*gpuDevice, physicalW, physicalH);
     if (!gpu)
         return Result<void, String>::Err(gpu.error());
     if (auto configured = gpu.value()->Configure(cameraConfig); !configured)
@@ -6015,7 +6022,8 @@ ExternalRenderContext::Impl::RecordCameraDisplayReprocess(VkCommandBuffer cmd) {
     if (!cameraGpuPipeline || cmd == VK_NULL_HANDLE)
         return Result<void, String>::Err("camera display reprocess needs the GPU camera pipeline");
     pendingUploads.Record(cmd);
-    return cameraGpuPipeline->RecordDisplayReprocess(cmd, EffectiveCameraConfig());
+    auto list = gpu::vulkan::Wrap(cmd);
+    return cameraGpuPipeline->RecordDisplayReprocess(list, EffectiveCameraConfig());
 }
 
 Result<void, String>
@@ -6027,6 +6035,7 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     // by EnsureCameraResources below is caught by the second Record before
     // the strata loop.
     pendingUploads.Record(cmd);
+    auto gpuList = gpu::vulkan::Wrap(cmd);
     if (auto ready = EnsureCameraResources(); !ready)
         return ready;
     // Settle the previous committed tick's AE/AWB feedback first. The
@@ -6243,22 +6252,26 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
     rendercore::DynamicExposureInput dynamic;
     const auto& readoutConfig = captureConfig.readout;
     const bool rolling = readoutConfig.shutter == camera::ShutterKind::Rolling;
-    dynamic.strataRate = cameraMeasurementImage.get();
-    dynamic.strataDepth = cameraMeasurementDepthImage.get();
+    dynamic.strataRate = gpu::vulkan::Ref(*cameraMeasurementImage);
+    dynamic.strataDepth = gpu::vulkan::Ref(*cameraMeasurementDepthImage);
     dynamic.layerCameras = layerCameras.data();
     dynamic.strataCount = strataCount;
     dynamic.strataLayers = rendercore::kCameraTimeStrataMax;
     dynamic.firstRowMidSeconds = cameraAcquisitionTimeSeconds;
     dynamic.exposureSeconds = readoutConfig.exposureSeconds;
     dynamic.rowDelaySeconds = rolling ? readoutConfig.rowDelaySeconds : 0.0;
-    const rendercore::GpuCameraPipeline::TimingQueries timing{cameraTimingPool, 0u};
+    const rendercore::GpuCameraPipeline::TimingQueries timing{
+        gpu::vulkan::Ref(cameraTimingPool,
+                         rendercore::GpuCameraPipeline::kTimingQueryCount),
+        0u};
     const auto readout =
         fastRgb
             ? cameraGpuPipeline->RecordFastRgbMeasurement(
-                  cmd, *cameraBaselineImage, cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
-            : cameraGpuPipeline->RecordMeasurement(cmd, *cameraMeasurementImage,
-                                                   cameraAcquisitionIndex,
-                                                   cameraAcquisitionTimeSeconds, timing, dynamic);
+                  gpuList, gpu::vulkan::Ref(*cameraBaselineImage),
+                  cameraAcquisitionIndex, cameraAcquisitionTimeSeconds)
+            : cameraGpuPipeline->RecordMeasurement(
+                  gpuList, gpu::vulkan::Ref(*cameraMeasurementImage),
+                  cameraAcquisitionIndex, cameraAcquisitionTimeSeconds, timing, dynamic);
     if (cameraFullPerf)
         cameraFullPerf->EndFrame(cmd);
     if (!readout)
@@ -6285,8 +6298,8 @@ ExternalRenderContext::Impl::RecordCameraMeasurement(VkCommandBuffer cmd,
         copy.size = 4u * sizeof(u32);
         vkCmdCopyBuffer(cmd, cameraDynamicCounterBuffer->GetHandle(),
                         cameraDynamicReadback->GetHandle(), 1, &copy);
-        cameraGpuPipeline->RecordDynamicCounterCopy(cmd, cameraDynamicReadback->GetHandle(),
-                                                    4u * sizeof(u32));
+        cameraGpuPipeline->RecordDynamicCounterCopy(
+            gpuList, gpu::vulkan::Ref(*cameraDynamicReadback), 4u * sizeof(u32));
         VkMemoryBarrier hostRead{};
         hostRead.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         hostRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6510,7 +6523,7 @@ void ExternalRenderContext::Impl::RecreateClaheDisplayImage() {
 }
 
 void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
-    const GpuImage* input = ClaheInputImage();
+    const gpu::TextureRef input = ClaheInputImage();
     const auto extent = ClaheInputExtent();
     if (!displayRangeInitAttempted) {
         displayRangeInitAttempted = true;
@@ -6524,7 +6537,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     }
     if (displayRange) {
         auto range =
-            displayRange->Compute(gpu::vulkan::Ref(*input), extent.width, extent.height, displayParams.percentileLow,
+            displayRange->Compute(input, extent.width, extent.height, displayParams.percentileLow,
                                   displayParams.percentileHigh);
         if (range) {
             outMin = range.value().min;
@@ -6538,7 +6551,7 @@ void ExternalRenderContext::Impl::ComputeImageMinMax(f32& outMin, f32& outMax) {
     // the camera is enabled, else the raw accumulation.
     std::vector<f32> pixels = CommandHelper::ReadbackImage(
         *contextAdapter,
-        input->GetImage(),
+        gpu::vulkan::NativeImage(input),
         VK_FORMAT_R32G32B32A32_SFLOAT,
         extent.width,
         extent.height
@@ -6651,7 +6664,7 @@ void ExternalRenderContext::Impl::ExecuteCLAHE(VkCommandBuffer cmd, u32 width, u
     // accumulation. Callers only run CLAHE once a camera acquisition has
     // completed, so the input product is present whenever the camera is.
     auto list = gpu::vulkan::Wrap(cmd);
-    clahe->Record(list, gpu::vulkan::Ref(*ClaheInputImage()), rendercore::ClaheRun{
+    clahe->Record(list, ClaheInputImage(), rendercore::ClaheRun{
         width, height, displayParams, cachedImageMin, cachedImageMax,
         cameraConfig.enabled ? gpu::Access::ComputeWrite : gpu::Access::RayTraceWrite});
 

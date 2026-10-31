@@ -453,7 +453,9 @@ Result<void, String> RecordCamera(VulkanContext& context, GpuCameraPipeline& pip
                                   u64 acquisitionIndex, f64 timeSeconds) {
     Result<void, String> status = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(context, [&](VkCommandBuffer cmd) {
-        status = pipeline.RecordMeasurement(cmd, measurement, acquisitionIndex, timeSeconds);
+        auto list = gpu::vulkan::Wrap(cmd);
+        status = pipeline.RecordMeasurement(list, gpu::vulkan::Ref(measurement),
+                                            acquisitionIndex, timeSeconds);
     });
     return status;
 }
@@ -526,11 +528,13 @@ void RecordReprocess(VulkanContext& device, GpuCameraPipeline& pipeline, const C
     Result<void, String> readout = Result<void, String>::Ok();
     Result<void, String> display = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(device, [&](VkCommandBuffer cmd) {
-        readout = pipeline.RecordReadoutReprocess(cmd, readoutConfig);
+        auto list = gpu::vulkan::Wrap(cmd);
+        readout = pipeline.RecordReadoutReprocess(list, readoutConfig);
     });
     ASSERT_TRUE(readout.has_value()) << readout.error();
     CommandHelper::ExecuteImmediate(device, [&](VkCommandBuffer cmd) {
-        display = pipeline.RecordDisplayReprocess(cmd, displayConfig);
+        auto list = gpu::vulkan::Wrap(cmd);
+        display = pipeline.RecordDisplayReprocess(list, displayConfig);
     });
     ASSERT_TRUE(display.has_value()) << display.error();
 }
@@ -549,7 +553,7 @@ TEST_F(ComputeMigrationAB, CameraPhoton) {
     auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(Device(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
@@ -561,7 +565,8 @@ TEST_F(ComputeMigrationAB, CameraPhoton) {
 
     Result<void, String> randomStatus = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        randomStatus = pipeline->RecordRandomVectors(cmd, 1234u, 2, NoiseClass::PhotonShot, 0);
+        auto list = gpu::vulkan::Wrap(cmd);
+        randomStatus = pipeline->RecordRandomVectors(list, 1234u, 2, NoiseClass::PhotonShot, 0);
     });
     ASSERT_TRUE(randomStatus.has_value()) << randomStatus.error();
     Check(mode_, "CameraPhoton.randomVectors",
@@ -585,7 +590,7 @@ TEST_F(ComputeMigrationAB, CameraBayerHsv) {
     auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(Device(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
@@ -612,7 +617,7 @@ TEST_F(ComputeMigrationAB, CameraThermalCheckpoint) {
     auto input = UploadMeasurement(Device(), kSize, kSize, rgba);
     ASSERT_NE(input, nullptr);
 
-    auto created = GpuCameraPipeline::Create(Device(), kSize, kSize);
+    auto created = GpuCameraPipeline::Create(GpuDevice(), kSize, kSize);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
@@ -629,7 +634,8 @@ TEST_F(ComputeMigrationAB, CameraThermalCheckpoint) {
     Result<GpuCameraPipeline::GpuCheckpoint, String> checkpoint =
         Result<GpuCameraPipeline::GpuCheckpoint, String>::Err("checkpoint was not recorded");
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        checkpoint = pipeline->RecordStateCheckpoint(cmd);
+        auto list = gpu::vulkan::Wrap(cmd);
+        checkpoint = pipeline->RecordStateCheckpoint(list);
     });
     ASSERT_TRUE(checkpoint.has_value()) << checkpoint.error();
 
@@ -691,15 +697,15 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
         frames[k].params = {0.5f, 4.0f, 0.5f + 0.01f * static_cast<f32>(k), 0.0f};
     }
 
-    auto created = GpuCameraPipeline::Create(Device(), kWidth, kHeight);
+    auto created = GpuCameraPipeline::Create(GpuDevice(), kWidth, kHeight);
     ASSERT_TRUE(created.has_value()) << created.error();
     auto pipeline = std::move(created.value());
     ASSERT_TRUE(pipeline->Configure(config).has_value());
 
     for (u64 acquisition = 0; acquisition < 2; ++acquisition) {
         DynamicExposureInput dynamic;
-        dynamic.strataRate = strataRate.get();
-        dynamic.strataDepth = strataDepth.get();
+        dynamic.strataRate = gpu::vulkan::Ref(*strataRate);
+        dynamic.strataDepth = gpu::vulkan::Ref(*strataDepth);
         dynamic.layerCameras = frames.data();
         dynamic.strataCount = count;
         dynamic.strataLayers = kLayers;
@@ -708,7 +714,9 @@ TEST_F(ComputeMigrationAB, CameraStratified) {
         dynamic.rowDelaySeconds = acquisition == 0 ? 0.0 : 0.0005;
         Result<void, String> status = Result<void, String>::Ok();
         CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            status = pipeline->RecordMeasurement(cmd, *strataRate, acquisition, 0.5, {}, dynamic);
+            auto list = gpu::vulkan::Wrap(cmd);
+            status = pipeline->RecordMeasurement(list, gpu::vulkan::Ref(*strataRate),
+                                                 acquisition, 0.5, {}, dynamic);
         });
         ASSERT_TRUE(status.has_value()) << status.error();
     }

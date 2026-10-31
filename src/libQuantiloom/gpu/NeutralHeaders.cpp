@@ -10,6 +10,7 @@
 #include "gpu/Resources.hpp"
 #include "gpu/ShaderLibrary.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
+#include "renderer/GpuCameraPipeline.hpp"
 #include "renderer/GpuClahe.hpp"
 #include "renderer/GpuDisplayRange.hpp"
 #include "renderer/GpuThermalStepper.hpp"
