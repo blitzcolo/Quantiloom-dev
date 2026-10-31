@@ -2,7 +2,7 @@
  * @file GpuSpectralReconstructor.hpp
  * @brief GPU-accelerated spectral cube reconstruction
  *
- * GpuSpectralReconstructor uses Vulkan compute shaders to parallelize
+ * GpuSpectralReconstructor uses GPU compute shaders to parallelize
  * spectral interpolation across all pixels. Each pixel's spectrum is
  * reconstructed independently, making this highly parallelizable.
  *
@@ -32,7 +32,7 @@
 namespace quantiloom {
 
 // Forward declarations
-class VulkanContext;
+namespace gpu { class Device; }
 
 // ============================================================================
 // GpuReconstructorStatus
@@ -95,7 +95,7 @@ struct GpuReconstructorConfig {
  *
  * Example usage:
  * @code
- * GpuSpectralReconstructor reconstructor(vulkanContext);
+ * GpuSpectralReconstructor reconstructor(*gpuDevice);
  *
  * auto [status, fullCube] = reconstructor.Reconstruct(
  *     sparseCube,
@@ -117,9 +117,9 @@ public:
 
     /**
      * @brief Construct GPU reconstructor
-     * @param context VulkanContext for GPU operations
+     * @param device gpu::Device for GPU operations
      */
-    explicit GpuSpectralReconstructor(VulkanContext& context);
+    explicit GpuSpectralReconstructor(gpu::Device& device);
 
     ~GpuSpectralReconstructor();
 
@@ -225,10 +225,10 @@ private:
  * Returns true if the GPU supports required features for compute-based
  * reconstruction (compute shaders, sufficient buffer sizes).
  *
- * @param context VulkanContext to check
+ * @param device gpu::Device to check
  * @return true if GPU reconstruction is supported
  */
-bool IsGpuReconstructionSupported(VulkanContext& context);
+bool IsGpuReconstructionSupported(gpu::Device& device);
 
 /**
  * @brief Estimate GPU memory required for reconstruction

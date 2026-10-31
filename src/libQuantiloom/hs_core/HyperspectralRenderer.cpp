@@ -34,6 +34,7 @@
 #include "hs_core/AdaptiveGridGenerator.hpp"
 #include "hs_core/SpectralReconstructor.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"
+#include "gpu/vulkan/VulkanBridge.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 #include "renderer/VulkanContext.hpp"
 #include "scene/Scene.hpp"
@@ -104,6 +105,7 @@ struct HyperspectralRenderer::Impl {
     std::unique_ptr<BatchRenderer> batchRenderer;
 
     // Phase 4: GPU-accelerated spectral reconstruction
+    std::unique_ptr<gpu::Device> gpuDevice;
     std::unique_ptr<GpuSpectralReconstructor> gpuReconstructor;
 
     SpectralCube result;
@@ -122,8 +124,11 @@ struct HyperspectralRenderer::Impl {
         // Create BatchRenderer instance
         batchRenderer = std::make_unique<BatchRenderer>(ctx, pipe, sc);
 
-        // Create GPU reconstructor (lazy initialization on first use)
-        gpuReconstructor = std::make_unique<GpuSpectralReconstructor>(ctx);
+        // Adopt the compute RHI view of the context, then the GPU
+        // reconstructor; gpuDevice is declared above gpuReconstructor so it
+        // outlives every gpu:: object the reconstructor holds.
+        gpuDevice = gpu::vulkan::AdoptContext(ctx);
+        gpuReconstructor = std::make_unique<GpuSpectralReconstructor>(*gpuDevice);
     }
 
     /**
@@ -309,7 +314,7 @@ HyperspectralStatus HyperspectralRenderer::Render(
         LOG_INFO("Reconstructing full spectrum from adaptive samples...");
 
         // Phase 4: Use GPU reconstruction if enabled and available
-        if (config.useGpuReconstruction && IsGpuReconstructionSupported(m_impl->context)) {
+        if (config.useGpuReconstruction && IsGpuReconstructionSupported(*m_impl->gpuDevice)) {
             LOG_INFO("Using GPU-accelerated reconstruction");
 
             GpuReconstructorConfig gpuConfig;

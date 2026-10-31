@@ -162,7 +162,7 @@ TEST_F(ComputeMigrationAB, SpectralReconstruct) {
         targets[i] = 400.0f + 500.0f * static_cast<f32>(i) / static_cast<f32>(targets.size() - 1);
     }
 
-    GpuSpectralReconstructor reconstructor(Device());
+    GpuSpectralReconstructor reconstructor(GpuDevice());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }

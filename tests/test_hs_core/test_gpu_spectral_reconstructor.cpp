@@ -451,7 +451,7 @@ std::vector<f32> Linspace(f32 first, f32 last, u32 count) {
 }  // namespace
 
 TEST_F(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
-    GpuSpectralReconstructor reconstructor(Device());
+    GpuSpectralReconstructor reconstructor(GpuDevice());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }
@@ -474,7 +474,7 @@ TEST_F(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
 }
 
 TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambda) {
-    GpuSpectralReconstructor reconstructor(Device());
+    GpuSpectralReconstructor reconstructor(GpuDevice());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }
@@ -505,7 +505,7 @@ TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambd
 }
 
 TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodTracksASmoothSpectrum) {
-    GpuSpectralReconstructor reconstructor(Device());
+    GpuSpectralReconstructor reconstructor(GpuDevice());
     if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
         GTEST_SKIP() << "spectral_reconstruct shader unavailable";
     }

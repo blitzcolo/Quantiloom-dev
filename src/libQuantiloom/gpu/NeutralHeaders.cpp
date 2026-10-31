@@ -9,6 +9,7 @@
 #include "gpu/Kernel.hpp"
 #include "gpu/Resources.hpp"
 #include "gpu/ShaderLibrary.hpp"
+#include "hs_core/GpuSpectralReconstructor.hpp"
 
 #if defined(VK_VERSION_1_0)
 #error "a gpu/ or migrated module header pulled in vulkan.h"
