@@ -196,16 +196,25 @@ TEST_F(ResourceLocatorTest, NothingFoundListsTheProbedRoots) {
 }
 
 TEST_F(ResourceLocatorTest, PublicRootOverrideRoundTrip) {
-    const fs::path root = MakeRoot("public");
+    // The public calls resolve against the digest compiled into the library,
+    // not the injected kDigest the candidate tests use, so this root carries
+    // the real one: a fake stamp is (correctly) rejected as stale.
+    const fs::path root = MakeRoot("public", quantiloom::core::CompiledShaderSetDigest());
 
     quantiloom::SetResourceRoot(root.string());
     const String resolved = quantiloom::GetResourceRoot();
+    const ResourceOrigin overridden = quantiloom::core::GetResolvedResources().origin;
     // Restore before asserting: a failed expectation must not leave an
     // override behind for the rest of the suite.
     quantiloom::SetResourceRoot("");
+    const ResourceOrigin cleared = quantiloom::core::GetResolvedResources().origin;
 
     EXPECT_EQ(fs::path(resolved), root);
-    EXPECT_TRUE(quantiloom::core::GetResolvedResources().origin != ResourceOrigin::Host);
+    EXPECT_EQ(overridden, ResourceOrigin::Host);
+    // Clearing the override drops the host root: whatever resolves next (the
+    // environment, a library root, the development fallback or nothing) is
+    // not it.
+    EXPECT_NE(cleared, ResourceOrigin::Host);
 }
 
 }  // namespace

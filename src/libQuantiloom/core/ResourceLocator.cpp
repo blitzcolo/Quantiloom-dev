@@ -179,6 +179,10 @@ void SetResourceRootOverride(const std::filesystem::path& root) {
     g_resources = ResolvedResources{};
 }
 
+String CompiledShaderSetDigest() {
+    return kShaderSetDigest;
+}
+
 const ResolvedResources& GetResolvedResources() {
     std::lock_guard lock(g_mutex);
     if (g_resolved) return g_resources;
@@ -195,7 +199,7 @@ const ResolvedResources& GetResolvedResources() {
     }
     candidates.devShaderDirs = {"src/shaders", "shaders", "../shaders"};
     candidates.devAssetDir = "assets";
-    candidates.shaderSetDigest = kShaderSetDigest;
+    candidates.shaderSetDigest = CompiledShaderSetDigest();
 
     Vector<String> log;
     g_resources = ResolveResourceCandidates(candidates, &log);

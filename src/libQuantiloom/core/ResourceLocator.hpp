@@ -51,6 +51,11 @@ struct ResourceCandidates {
 ResolvedResources ResolveResourceCandidates(const ResourceCandidates& candidates,
                                             Vector<String>* log = nullptr);
 
+/// The SHADERSET digest compiled into this library: what a root's stamp must
+/// equal. Internal (no QL_API); the generated header that holds it is private
+/// to quantiloom_core, so tests read it through here.
+String CompiledShaderSetDigest();
+
 /// Process-wide resolution, cached. SetResourceRoot() invalidates the cache.
 const ResolvedResources& GetResolvedResources();
 
