@@ -109,19 +109,17 @@ StructuredBuffer<float> thermalParameterTangent : register(t27, space0);
 // ============================================================================
 // Path Depth
 // ============================================================================
-// One counter for every kind of child ray -- refraction, reflection and the
-// environment bounce all advance payload.depth and all stop at the same gate.
-// Giving any of them its own budget would break the accounting below.
+// One counter for every kind of child ray -- refraction, reflection, the
+// environment bounce and a fusion interface's child all advance depth and all
+// stop at the same gate. Giving any of them its own budget would break the
+// accounting below.
 //
-// The pipeline is created with maxPipelineRayRecursionDepth = 10
-// (RayTracingPipeline.cpp, kMaxPipelineRayRecursionDepth), and 8 is what fits:
-//
-//   raygen -> primary                            TraceRay call 1
-//   child i, gated on depth < MAX_PATH_DEPTH     calls 2..9   (depth 1..8)
-//   the depth-8 hit spawns no child, only its shadow ray      call 10
-//
-// so a chain reaches exactly 10 and no further. Raising this constant without
-// raising the pipeline's limit is undefined behaviour, not a slow render.
+// Every ray is traced from raygen (path_driver.hlsli), so the pipeline's
+// recursion depth is 1 (RayTracingPipeline.cpp, kMaxPipelineRayRecursionDepth)
+// whatever this is. What it sizes instead is raygen's frame stack: a vertex
+// takes a child only at depth < MAX_PATH_DEPTH, so at most MAX_PATH_DEPTH
+// ancestors hold a frame. The stack is declared with this constant, and every
+// child gate must use it.
 // ============================================================================
 
 static const uint MAX_PATH_DEPTH = 8;
@@ -1333,10 +1331,9 @@ bool SampleBounce(float3 hitPos, float3 normal, float3 V, float NdotV,
 // the vertex keeps that same state), and CHAINED across the three RGB dispersion
 // rays (each starts where the previous one ended).
 //
-// The frame is wider than it needs to be while ShadeVertex still drives it from
-// the closest-hit shader: it keeps V, the bounce arguments and a few values the
-// fold could re-derive, because here it costs one stack slot per recursion level
-// and not a register budget.
+// The frame is wider than it needs to be: it keeps V, the bounce arguments and
+// a few values the fold could re-derive, a layout carried over from when the
+// closest-hit shader drove it. Each of raygen's frames pays for that width.
 
 static const uint QL_CTL_FINISHED        = 1u << 0;   // payload already final; nothing to fold
 static const uint QL_CTL_BOUNCE_TAKEN    = 1u << 1;   // the front-lobe child was requested by phase A
@@ -1350,6 +1347,7 @@ static const uint QL_CTL_ATMOS           = 1u << 8;   // NN atmosphere composes 
 static const uint QL_CTL_VOLUME          = 1u << 9;   // participating medium: f.volT, f.volS
 static const uint QL_CTL_THERMAL_TERM    = 1u << 10;  // SINGLE: the Planck term is added
 static const uint QL_CTL_REFLECTED       = 1u << 11;  // the refraction coin chose reflection
+static const uint QL_CTL_FUSION          = 1u << 12;  // a fusion interface: one child, then f.fusion's fold
 
 static const uint QL_PHASE_BOUNCE = 0u;
 static const uint QL_PHASE_DT     = 1u;
@@ -1412,6 +1410,7 @@ struct VertexFrame {
     float4 volT;           // output = output * volT + volS
     float4 volS;
     float4 outRadiance;    // the output where it is known before any child
+    FusionFold fusion;     // a fusion interface's fold, formed before its child
 };
 
 // Deferred excitation: the draws that used to follow the bounce children.
@@ -1619,7 +1618,7 @@ void CompleteTransmission(inout VertexFrame f, uint kind, PathVertex child) {
     const float worldUnitsToMeters = lut.worldUnitsToMeters;
 
     if (kind == QL_CHILD_HERO) {
-        // Scalar spectral radiance, by the contract on Payload::heroLambda.
+        // Scalar spectral radiance, by the contract on PathVertex::heroLambda.
         float L_h = child.radiance.r;
         const float lambda_h = f.lambdaH;
 
@@ -1749,7 +1748,7 @@ void CompleteTransmission(inout VertexFrame f, uint kind, PathVertex child) {
 void CompleteChild(inout VertexFrame f, uint kind, PathVertex child) {
     if (kind == QL_CHILD_BOUNCE) {
         // Spectral radiance at the wavelength or wavelengths the child was told
-        // to carry, by the contract on Payload::heroLambda. A scalar child
+        // to carry, by the contract on PathVertex::heroLambda. A scalar child
         // replicates its one answer across .rgb, so component 0 is right either
         // way.
         f.corrB = f.wChild * (child.radiance - f.base);
@@ -2062,17 +2061,19 @@ void FoldVertex(VertexFrame f, inout PathVertex payload) {
 }
 
 // Phase A: the old closest-hit body up to its first child. It fills the frame
-// and, when the front-lobe bounce is taken, the request for it; ShadeVertex
-// below drives the rest.
+// and, when the front-lobe bounce is taken, the request for it; at a fusion
+// interface it builds the interface's one child into fusionChild instead. The
+// driver (path_driver.hlsli) runs the rest.
 void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
-                  inout VertexFrame f, inout ChildRequest req) {
+                  inout VertexFrame f, inout ChildRequest req,
+                  inout PathVertex fusionChild) {
     fusionActiveMediumCount = payload.fusionMediumCount;
     [unroll]
     for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
         fusionActiveMedia[medium] = payload.fusionMedia[medium];
     // Record this ray's hit distance for the depth AOV. Only the depth-0
-    // (primary) value survives: raygen snapshots its own payload right after
-    // the primary trace, and recursive rays carry separate Payload instances.
+    // (primary) value is read: raygen takes it from the primary vertex, and
+    // every other vertex carries its own PathVertex.
     payload.primaryHitT = rec.t;
 
     // ========================================================================
@@ -2223,12 +2224,19 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             const float temperature =
                 GetSurfaceTemperatureK(material, geoInfo, rec.primitiveIndex, uv, hit, payload,
                                        true);
-            if (TraceFusionInterface(payload, material, 1 + rec.instanceIndex, hit,
-                                     worldGeometricNormal, hitBackFace, temperature,
-                                     ray, rec.t, rec.instanceIndex)) {
-                // The interface vertex traced its own child and left the
-                // payload final: there is nothing to fold.
+            const uint fusion = BeginFusionInterface(
+                payload, material, 1 + rec.instanceIndex, hit, worldGeometricNormal,
+                hitBackFace, temperature, ray, rec.t, rec.instanceIndex,
+                fusionChild, req, f.fusion);
+            if (fusion == QL_FUSION_FINAL) {
+                // Answered without a child: the payload is final, nothing to fold.
                 f.ctl |= QL_CTL_FINISHED;
+                return;
+            }
+            if (fusion == QL_FUSION_CHILD) {
+                // One child, which the driver traces and shades; only
+                // CompleteFusionInterface follows it.
+                f.ctl |= QL_CTL_FUSION;
                 return;
             }
         }
@@ -4256,7 +4264,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
             normal, NdotL, shadowFactor, payload);
 
         // A ray spawned by an environment bounce carries one wavelength and
-        // reports scalar spectral radiance; see Payload::heroLambda.
+        // reports scalar spectral radiance; see PathVertex::heroLambda.
         const bool cameraRay = SPEC_SPECTRAL_MODE == SPECTRAL_MODE_CAMERA_MEASUREMENT;
         const bool singleRay = IsSingleWavelengthMode();
         const float carriedLambda = SingleModeWavelength(payload.heroLambda);
@@ -4557,7 +4565,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         bool hasSpectralSolarLUT = HasSolarSpectralLUT(solarSpectralLUT);
 
         // A ray spawned by an environment bounce carries one wavelength and
-        // reports scalar spectral radiance; see Payload::heroLambda.
+        // reports scalar spectral radiance; see PathVertex::heroLambda.
         const bool heroRay = (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_NIR_SAMPLES;
         float heroRadiance = 0.0;
@@ -4855,7 +4863,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         // the band: the surface that spawned it sampled that wavelength and
         // weighs what comes back by it, so integrating the whole band along
         // this path would answer a question nobody asked. It reports scalar
-        // spectral radiance, by the contract on Payload::heroLambda.
+        // spectral radiance, by the contract on PathVertex::heroLambda.
         const bool heroRay = singleRay || (payload.heroLambda > 0.0);
         const uint sampleCount = heroRay ? 1u : NUM_IR_SAMPLES;
         float heroRadiance = 0.0;
@@ -4928,7 +4936,7 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
 
         // Loop over wavelengths in IR band ([loop]: keep code size bounded).
         // A hero ray runs one iteration at its own wavelength and reports a
-        // scalar; see Payload::heroLambda.
+        // scalar; see PathVertex::heroLambda.
         [loop]
         for (uint i = 0; i < sampleCount; ++i) {
             float lambda = heroRay ? carriedLambda
@@ -6039,24 +6047,6 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
         f.tw = transmissionWeight;
         f.ctl |= QL_CTL_TRANS;
     }
-}
-
-// The closest-hit entry's body. It drives a vertex through its children: phase A,
-// then each child the frame asks for -- traced from the single radiance
-// TraceRay site, QlTraceRadiance -- and the fold. Called as the closest-hit
-// shader still, so the recursion is the old one; what has changed is that it is
-// now this loop that recurses and the vertex is no longer one function.
-void ShadeVertex(HitRecord rec, RayDesc ray, inout PathVertex payload) {
-    VertexFrame f = (VertexFrame)0;
-    ChildRequest req = (ChildRequest)0;
-    ShadeVertexA(rec, ray, payload, f, req);
-    if ((f.ctl & QL_CTL_FINISHED) != 0u) {
-        return;
-    }
-    [loop] while (Advance(f, payload.depth, req)) {
-        CompleteChild(f, req.kind, QlTraceRadiance(req));
-    }
-    FoldVertex(f, payload);
 }
 
 #endif // QUANTILOOM_SHADE_VERTEX_HLSLI

@@ -19,18 +19,19 @@ namespace quantiloom {
 // ============================================================================
 // Ray Recursion Depth
 // ============================================================================
-// The deepest TraceRay chain the closest-hit shader can build. Its budget is
-// spelled out at MAX_PATH_DEPTH in src/shaders/closesthit.rchit: eight child
-// rays sharing one payload.depth counter, plus the primary ray and one shadow
-// ray at the bottom of the chain.
+// Every ray is traced from raygen: src/shaders/path_driver.hlsli walks each
+// path with a bounded frame stack, and the closest-hit and miss shaders only
+// report where a ray landed, tracing nothing. So no shader nests a TraceRay
+// inside another and the depth is 1, the minimum the specification lets a
+// device report. Path length is MAX_PATH_DEPTH in src/shaders/shade_vertex.hlsli
+// and costs frames, not recursion.
 //
-// Validated against the device below rather than clamped. Clamping would keep
-// the pipeline creating and let chains run past the limit, which is undefined
-// behaviour that surfaces as a device loss somewhere unrelated; and silently
-// shortening paths would change the physics without saying so.
+// Still validated against the device below rather than clamped: a stage that
+// traced again would need more, and running past the declared depth is
+// undefined behaviour that surfaces as a device loss somewhere unrelated.
 // ============================================================================
 
-static constexpr u32 kMaxPipelineRayRecursionDepth = 10;
+static constexpr u32 kMaxPipelineRayRecursionDepth = 1;
 
 // ============================================================================
 // Helper: Get Maximum Texture Count
@@ -232,18 +233,18 @@ RayTracingPipeline::RayTracingPipeline(
     // Cache RT properties
     m_rtProperties = m_context.GetRayTracingProperties();
 
-    // The shaders assume the full recursion chain is available. A device that
-    // offers less cannot run them at any quality setting, and the failure it
-    // would produce -- chains overrunning the pipeline's declared depth -- is
-    // undefined behaviour that surfaces as a device loss somewhere unrelated.
-    // Checked once at construction so it names itself instead.
+    // The pipeline is created with kMaxPipelineRayRecursionDepth. Every
+    // conforming ray tracing device offers at least 1, which is all the
+    // raygen-driven integrator needs, so this only trips on a device that
+    // reports less than the specification allows -- and then names itself here
+    // rather than as a device loss somewhere unrelated.
     if (m_rtProperties.maxRayRecursionDepth < kMaxPipelineRayRecursionDepth) {
         throw std::runtime_error(
             "Ray tracing device supports a recursion depth of only " +
             std::to_string(m_rtProperties.maxRayRecursionDepth) +
-            "; Quantiloom's path depth needs " +
+            "; Quantiloom traces every ray from raygen and needs " +
             std::to_string(kMaxPipelineRayRecursionDepth) +
-            " (see MAX_PATH_DEPTH in src/shaders/closesthit.rchit)");
+            " (see src/shaders/path_driver.hlsli)");
     }
 
     // Initialize dynamic texture limit based on device capabilities
@@ -400,10 +401,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[0].pImmutableSamplers = nullptr;
 
     // Binding 1: Acceleration structure (TLAS)
-    // CLOSEST_HIT visibility is required for the recursive rays traced from
-    // closesthit.rchit (thermal-IR hemisphere sampling, shadow rays);
-    // accessing the TLAS from a stage without visibility is undefined
-    // behavior and crashes the device the moment those rays are traced.
+    // Every ray is traced from raygen now (src/shaders/path_driver.hlsli), so
+    // RAYGEN is the visibility that matters; accessing the TLAS from a stage
+    // without visibility is undefined behavior and crashes the device the
+    // moment a ray is traced. CLOSEST_HIT is left over from when that stage
+    // traced its own children, and is harmless.
     bindings[1].binding = 1;
     bindings[1].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[1].descriptorCount = 1;
@@ -758,10 +760,11 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     bindings[36].stageFlags |= VK_SHADER_STAGE_MISS_BIT_KHR;
     bindings[37] = bindings[35];
     bindings[37].binding = 37;
-    // raygen shades path vertices itself (P04): the library the closest-hit and
-    // miss stages shade with is compiled into raygen as well, so every binding
-    // either of them reads, raygen reads. No binding becomes newly used by the
-    // pipeline, so what each host must write is unchanged.
+    // raygen shades every path vertex itself (P04): the library the closest-hit
+    // and miss stages used to shade with is compiled into raygen, so every
+    // binding either of them read, raygen reads. Their own stage bits stay and
+    // are harmless; no binding became newly used by the pipeline, so what each
+    // host must write is unchanged.
     for (auto& binding : bindings) {
         if ((binding.stageFlags &
              (VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR)) != 0)

@@ -339,7 +339,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
 
             if (heroRay) {
                 // Scalar spectral radiance, by the contract on
-                // Payload::heroLambda.
+                // PathVertex::heroLambda.
                 heroRadiance = sky_radiance_lambda;
                 continue;
             }
@@ -544,7 +544,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
 
             if (heroRay) {
                 // Scalar spectral radiance, by the contract on
-                // Payload::heroLambda: no trapezoid weight, no band average.
+                // PathVertex::heroLambda: no trapezoid weight, no band average.
                 heroRadiance = L_sky;
                 continue;
             }

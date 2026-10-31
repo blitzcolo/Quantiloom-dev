@@ -83,13 +83,19 @@ After compilation:
 
 ## Payload Structure
 
+raygen shades every path vertex itself (`path_driver.hlsli`), so a traced ray
+only reports where it landed. The payload (`common.hlsli`) is 128 bytes; the
+per-vertex state lives in `PathVertex`, which no ray carries.
+
 ```hlsl
 struct Payload {
-    float3 radiance;  // Accumulated radiance (W·sr⁻¹·m⁻²)
-    float3 dDdx;      // Ray direction differential (∂D/∂x)
-    float3 dDdy;      // Ray direction differential (∂D/∂y)
+    HitRecord hit;                   // 96: t (-1 on a miss), barycentrics, instance,
+                                     //     primitive and both instance 3x3s
+    uint   isShadowed;               //  4: visibility rays; shadow_miss clears it
+    uint   fusionPreviousInstance;   //  4: any-hit re-hit rejection at a
+    float3 fusionPreviousPosition;   // 12  fusion interface
+    float3 fusionPreviousNormal;     // 12
 };
-// Total: 36 bytes (optimized from 60 bytes)
 ```
 
 ## Spectral Rendering Modes

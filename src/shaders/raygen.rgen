@@ -202,8 +202,9 @@ void main() {
     // ========================================================================
     // Trace the primary ray
     // ========================================================================
-    // Initialize payload
-    Payload payload = (Payload)0;
+    // The primary vertex's state: what the recursion's primary payload used to
+    // carry in and out. The ray payload itself is only the hit record now.
+    PathVertex payload = (PathVertex)0;
     payload.fusionPathId = kFusionNoPath;
     payload.fusionMediumCount = fusionRecords.Load(kFusionInitialMediumCountWord * 4);
     [unroll] for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
@@ -224,7 +225,7 @@ void main() {
     payload.isShadowed = 0;
 
     // A primary ray carries the whole visible band. Only a dispersive
-    // refraction narrows it to one wavelength -- see Payload::heroLambda.
+    // refraction narrows it to one wavelength -- see PathVertex::heroLambda.
     payload.heroLambda = 0.0;
     uint cameraChannel = 0u;
     uint proposalChannel = 0u;
@@ -286,10 +287,9 @@ void main() {
     payload.bsdfPdf = 0.0;
 
     // Trace the primary ray and shade its path (hit group 0, miss index 0).
-    // Its vertices are shaded here, by path_driver.hlsli, as far as the bounce
-    // chain reaches; what comes back is what the primary payload carried out
-    // of the recursion.
-    payload = QlToRay(RunPath(ray, RAY_FLAG_NONE, QlFromRay(payload)));
+    // Every vertex of the path is shaded here, by path_driver.hlsli; what comes
+    // back is what the primary payload carried out of the recursion.
+    payload = RunPath(ray, RAY_FLAG_NONE, payload);
 
     // Snapshot the primary hit distance before anything else can touch the
     // payload. Written unconditionally: unlike radiance this is not averaged,

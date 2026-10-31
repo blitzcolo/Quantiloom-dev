@@ -39,14 +39,37 @@ void FusionAttenuateSegment(inout PathVertex p, float distance) {
     p.fusionContributions = p.fusionContributions * transmittance + FusionClassify(emission, p.fusionRoute);
     p.fusionResidual *= transmittance;
 }
-bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint recordIndex,
+// An interface vertex, cut at its one child the way ShadeVertexA cuts a surface
+// vertex: BeginFusionInterface is everything up to the child, and
+// CompleteFusionInterface is what followed it. What the second half reads that
+// the first half formed rides in the vertex's frame as a FusionFold.
+struct FusionFold {
+    float3 direction;     // the child ray's direction, for the interface record
+    float  weight;        // what the child's radiance and contributions scale by
+    float  coefficient;   // the interface record's branch coefficient
+    float  selfEmission;
+    float  n1, n2;
+    float  hitT;          // the segment this vertex attenuates over
+};
+
+static const uint QL_FUSION_NONE  = 0u;  // not an interface here: shade the surface
+static const uint QL_FUSION_FINAL = 1u;  // answered without a child: p is final
+static const uint QL_FUSION_CHILD = 2u;  // child, req and fold describe the one child
+
+// Returns NONE without touching p where the old body returned false. For CHILD,
+// child is the whole vertex the old body traced -- built from p, medium pushed or
+// popped -- and req carries its ray; the driver traces it and hands the answer
+// to CompleteFusionInterface.
+uint BeginFusionInterface(inout PathVertex p, MaterialData material, uint recordIndex,
                           float3 hit, float3 faceNormal, bool backFace, float temperature,
-                          RayDesc rayIn, float hitT, uint instanceIndex) {
+                          RayDesc rayIn, float hitT, uint instanceIndex,
+                          inout PathVertex child, inout ChildRequest req, out FusionFold fold) {
+    fold = (FusionFold)0;
     if (!FusionScalarTransport())
-        return false;
+        return QL_FUSION_NONE;
     const FusionTransportData interfaceData = fusionTransport[recordIndex];
     if (interfaceData.mode == 0)
-        return false;
+        return QL_FUSION_NONE;
     p.fusionTerminalDepth = p.depth;
     const float lambda = FusionLambda(p);
     float rho = interfaceData.sheetReflectance, tau = interfaceData.sheetTransmittance;
@@ -55,7 +78,7 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
     if (p.fusionMediumCount > 0)
         n1 = RefractionIOR(
             materials[fusionTransport[p.fusionMedia[p.fusionMediumCount - 1]].materialId], lambda);
-    Payload child = QlToRay(p);
+    child = p;
     child.radiance = 0;
     child.fusionContributions = 0;
     child.fusionResidual = 0;
@@ -69,7 +92,7 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
             if (p.fusionMediumCount >= kFusionMaxInitialMedia) {
                 p.fusionFlags |= kFusionFlagAmbiguousMedium;
                 p.radiance = 0;
-                return true;
+                return QL_FUSION_FINAL;
             }
             n2 = RefractionIOR(material, lambda);
             child.fusionMedia[child.fusionMediumCount++] = recordIndex;
@@ -79,7 +102,7 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
                     interfaceData.nodeId) {
                 p.fusionFlags |= kFusionFlagAmbiguousMedium;
                 p.radiance = 0;
-                return true;
+                return QL_FUSION_FINAL;
             }
             --child.fusionMediumCount;
             n2 = 1;
@@ -101,7 +124,7 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
         if (rho < 0 || tau < 0 || rho + tau > 1.00001) {
             p.fusionFlags |= kFusionFlagAmbiguousMedium;
             p.radiance = 0;
-            return true;
+            return QL_FUSION_FINAL;
         }
         selfEmission = max(0, 1 - rho - tau) * n1 * n1 * IRPlanckRadiance(temperature, lambda) +
                        BoundEmissionRadiance(spectralCurves, material, material.emissiveFactor, 1, lambda);
@@ -120,7 +143,7 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
             p.fusionFlags |= kFusionFlagZeroBranch;
             p.radiance = 0;
             p.fusionContributions = 0;
-            return true;
+            return QL_FUSION_FINAL;
         }
         if (reflected) {
             child.fusionMediumCount = p.fusionMediumCount;
@@ -141,31 +164,50 @@ bool TraceFusionInterface(inout PathVertex p, MaterialData material, uint record
         child.fusionPreviousPosition = hit;
         child.fusionPreviousNormal = backFace ? -faceNormal : faceNormal;
         child.fusionPreviousInstance = instanceIndex;
-        const FusionMediumContext context = SaveFusionMedium();
-        TraceRay(scene, RAY_FLAG_FORCE_NON_OPAQUE, 0xFF, 0, 0, 0, ray, child);
-        RestoreFusionMedium(context);
-        const float weight =
+        // Formed here from values the child cannot change; the old body formed
+        // them after its trace from the same values.
+        fold.direction = ray.Direction;
+        fold.weight =
             (p.fusionForced != 0 ? (reflected ? rho : tau) : total) *
             (interfaceData.mode == 2 && !reflected ? n1 * n1 / (n2 * n2) : 1);
-        const float coefficient =
+        fold.coefficient =
             (reflected ? rho : tau) * (interfaceData.mode == 2 && !reflected ? n1 * n1 / (n2 * n2) : 1);
-        FusionRecordRadianceTerm(p, 2, weight);
-        FusionRecordInterface(p, ray.Direction, coefficient, n1, n2);
-        p.radiance = child.radiance * weight + float4(selfEmission, selfEmission, selfEmission, 0);
-        p.fusionContributions =
-            child.fusionContributions * weight + FusionClassify(selfEmission, p.fusionRoute);
-        p.fusionResidual = child.fusionResidual * weight;
-        p.fusionFlags |= child.fusionFlags;
-        p.rngState = child.rngState;
-        p.fusionTerminalDepth = child.fusionTerminalDepth;
-    } else {
-        p.radiance = float4(selfEmission, selfEmission, selfEmission, 0);
-        p.fusionContributions = FusionClassify(selfEmission, p.fusionRoute);
-        if (total > 0)
-            p.fusionFlags |= kFusionFlagUnknownTail;
+        fold.selfEmission = selfEmission;
+        fold.n1 = n1;
+        fold.n2 = n2;
+        fold.hitT = hitT;
+        req.ray = ray;
+        req.rayFlags = RAY_FLAG_FORCE_NON_OPAQUE;
+        req.kind = QL_CHILD_FUSION;
+        req.depth = child.depth;
+        req.rng = child.rngState;
+        req.heroLambda = child.heroLambda;
+        req.bsdfPdf = child.bsdfPdf;
+        return QL_FUSION_CHILD;
     }
+    p.radiance = float4(selfEmission, selfEmission, selfEmission, 0);
+    p.fusionContributions = FusionClassify(selfEmission, p.fusionRoute);
+    if (total > 0)
+        p.fusionFlags |= kFusionFlagUnknownTail;
     FusionAttenuateSegment(p, hitT);
-    return true;
+    return QL_FUSION_FINAL;
+}
+
+// The old body after its trace, in its order: the records, the radiance and
+// contributions through the branch weight, the child's flags, stream and
+// terminal depth, then the segment this vertex was reached over.
+void CompleteFusionInterface(inout PathVertex p, FusionFold fold, PathVertex child) {
+    FusionRecordRadianceTerm(p, 2, fold.weight);
+    FusionRecordInterface(p, fold.direction, fold.coefficient, fold.n1, fold.n2);
+    p.radiance = child.radiance * fold.weight +
+                 float4(fold.selfEmission, fold.selfEmission, fold.selfEmission, 0);
+    p.fusionContributions =
+        child.fusionContributions * fold.weight + FusionClassify(fold.selfEmission, p.fusionRoute);
+    p.fusionResidual = child.fusionResidual * fold.weight;
+    p.fusionFlags |= child.fusionFlags;
+    p.rngState = child.rngState;
+    p.fusionTerminalDepth = child.fusionTerminalDepth;
+    FusionAttenuateSegment(p, fold.hitT);
 }
 #endif
 #endif

@@ -1,39 +1,25 @@
 // ============================================================================
 // Quantiloom - Closest Hit Shader
 // ============================================================================
-// The shading itself lives in shade_vertex.hlsli, callable from any stage; this
-// stage only turns the traversal's intrinsics into a HitRecord and hands the
-// ray's payload over as that vertex's state. A record-only ray belongs to a
-// vertex that raygen shades (path_driver.hlsli): it gets the record and
-// nothing else.
+// Reports where a ray landed, and nothing else: raygen shades every vertex of
+// the path itself (path_driver.hlsli). What raygen cannot query on its own --
+// the barycentrics, the instance and primitive, the hit distance and both
+// instance transforms -- comes back in the payload's HitRecord. This stage
+// traces nothing, which is what lets the pipeline's recursion depth be 1.
 // ============================================================================
 
-#include "shade_vertex.hlsli"
+#include "common.hlsli"
+#include "hit_common.hlsli"  // HitAttributes, shared with the any-hit stage
 
 [shader("closesthit")]
 void main(inout Payload payload, in HitAttributes attribs) {
-    HitRecord rec;
-    rec.t = RayTCurrent();
-    rec.bary = attribs.bary;
-    rec.instanceIndex = InstanceIndex();
-    rec.primitiveIndex = PrimitiveIndex();
-    rec.reserved = 0u;
+    payload.hit.t = RayTCurrent();
+    payload.hit.bary = attribs.bary;
+    payload.hit.instanceIndex = InstanceIndex();
+    payload.hit.primitiveIndex = PrimitiveIndex();
+    payload.hit.reserved = 0u;
     const float3x3 o2w = (float3x3)ObjectToWorld3x4();
     const float3x3 w2o = (float3x3)WorldToObject3x4();
-    rec.o2w0 = o2w[0]; rec.o2w1 = o2w[1]; rec.o2w2 = o2w[2];
-    rec.w2o0 = w2o[0]; rec.w2o1 = w2o[1]; rec.w2o2 = w2o[2];
-    if (payload.recordOnly != 0u) {
-        payload.hit = rec;
-        return;
-    }
-
-    RayDesc ray;
-    ray.Origin = WorldRayOrigin();
-    ray.Direction = WorldRayDirection();
-    ray.TMin = RayTMin();
-    ray.TMax = rec.t;
-
-    PathVertex v = QlFromRay(payload);
-    ShadeVertex(rec, ray, v);
-    payload = QlToRay(v);
+    payload.hit.o2w0 = o2w[0]; payload.hit.o2w1 = o2w[1]; payload.hit.o2w2 = o2w[2];
+    payload.hit.w2o0 = w2o[0]; payload.hit.w2o1 = w2o[1]; payload.hit.w2o2 = w2o[2];
 }

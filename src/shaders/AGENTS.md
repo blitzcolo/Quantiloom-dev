@@ -83,7 +83,7 @@ Three consequences worth knowing before touching any of it:
   behave the same way.
 
 Both factors are evaluated at the **same** sampled wavelength, carried in
-`Payload::heroLambda`. That correlation is the point of the ray — `⟨ρ⟩⟨L⟩` is not
+`PathVertex::heroLambda`. That correlation is the point of the ray — `⟨ρ⟩⟨L⟩` is not
 `⟨ρL⟩`, and a quartz cavity was 1.15% wrong when the bands sent a whole-band ray
 and multiplied by a band average. One ray either way.
 
@@ -93,16 +93,16 @@ rather than on the value:
 | `heroLambda` | the ray carries | who sets it |
 |---|---|---|
 | `0` | nothing yet: a primary ray, or a band mode's own sweep | raygen, and it is where `VIS_Hero` draws the quartet |
-| `> 0` | a quartet, `λⱼ = 400 + mod(λ_h − 400 + j·95, 380)`, four radiances out in `Payload::radiance` and no CIE weighting applied | the vertex that drew it |
+| `> 0` | a quartet, `λⱼ = 400 + mod(λ_h − 400 + j·95, 380)`, four radiances out in `PathVertex::radiance` and no CIE weighting applied | the vertex that drew it |
 | `< 0` | one wavelength `|heroLambda|`, a quartet collapsed by a dispersive interface, one scalar back | the refraction, `VIS_Hero` only |
 
 The quartet is derived from `λ_h` wherever it is needed and never stored: the
 rotation is a group action on the band, so the *set* does not depend on which
 member was drawn, and the balance heuristic's denominator collapses to one
 scalar `S = Σₖ p(λₖ)` that any vertex can recompute. That is what lets four
-wavelengths ride the payload's 44 transport bytes -- the whole `Payload` is 252,
-the other 108 being fusion-export bookkeeping every ray carries and 100 the hit
-record a raygen-shaded vertex reads back while P04 is under way (see `common.hlsli`).
+wavelengths ride a vertex's 44 transport bytes. That state lives in `PathVertex`,
+which raygen shades with; the ray payload itself is only the 128-byte hit record
+a traced ray brings back (see `common.hlsli` and `path_driver.hlsli`).
 
 **Transport is diagonal in λ, and that is an assumption rather than a
 convention.** A wavelength in is a wavelength out at each vertex, which is why
