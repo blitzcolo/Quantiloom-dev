@@ -4,7 +4,7 @@
  *
  * The orchestration: build the elements, get the view factors, pick a starting
  * state, and step to the hour asked for. What comes back is one temperature per
- * triangle, which the renderer uploads and the closest-hit shader reads in
+ * triangle, which the renderer uploads and the shading in raygen reads in
  * place of the material's own.
  *
  * The physics is in CpuCrankNicolsonStepper; the geometry is in

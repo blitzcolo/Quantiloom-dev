@@ -494,7 +494,7 @@ float3 ConvertXYZToLinearRGB(float3 XYZ) {
     // converge to the wrong answer no matter how many samples it took.
     //
     // Non-spectral callers are unaffected: the VIS_FUSED paths in
-    // closesthit.rchit and miss.rmiss both clamp output_radiance to [0, 1000]
+    // shade_vertex.hlsli and shade_miss.hlsli both clamp output_radiance to [0, 1000]
     // a few lines later, so a broadband result is bounded exactly as before.
     // Only a value that must survive further arithmetic -- one wavelength's
     // contribution, on its way to being summed with others -- reaches a caller

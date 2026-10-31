@@ -12,7 +12,7 @@ RaytracingAccelerationStructure scene : register(t1, space0);
 // shadow, sun-correction, light-sampling and medium-midpoint test in the shading
 // library goes through here. Only isShadowed is read back (shadow_miss clears
 // it), and the any-hit only looks at fusionPreviousInstance, which is the
-// no-path value InheritFusionMedium gave these rays.
+// no-path value an ordinary child carries (InheritFusionMedium).
 bool QlVisible(RayDesc ray) {
     Payload p = (Payload)0;
     p.isShadowed = 1;   // cleared by shadow_miss
@@ -24,9 +24,8 @@ bool QlVisible(RayDesc ray) {
 }
 
 // A child's vertex as its parent hands it over: the request's fields, and the
-// medium the statics fusionActiveMedia* hold, which is the parent's entry
-// medium, as it was at every TraceRay of the old recursive body.
-PathVertex QlChildVertex(ChildRequest req) {
+// medium the parent vertex is in.
+PathVertex QlChildVertex(ChildRequest req, PathVertex parent) {
     PathVertex child = (PathVertex)0;
     child.radiance    = float4(0.0, 0.0, 0.0, 0.0);
     child.isShadowed  = 0;
@@ -35,7 +34,7 @@ PathVertex QlChildVertex(ChildRequest req) {
     child.heroLambda  = req.heroLambda;
     child.primaryHitT = -1.0;
     child.bsdfPdf     = req.bsdfPdf;
-    InheritFusionMedium(child);
+    InheritFusionMedium(child, parent);
     return child;
 }
 

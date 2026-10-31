@@ -4,8 +4,9 @@
 
 namespace quantiloom::rendercore {
 
-/// The fusion record buffer: a byte-addressed blob written by raygen.rgen,
-/// closesthit.rchit and miss.rmiss and read back by OfflineRenderer /
+/// The fusion record buffer: a byte-addressed blob written by raygen.rgen and
+/// the vertex shading it runs (shade_vertex.hlsli, shade_miss.hlsli,
+/// fusion_transport.hlsli) and read back by OfflineRenderer /
 /// dataset::DecodeOpticalEndpoints / scripts/fusion_verify.py. The shader
 /// side of this layout lives in src/shaders/fusion_records.hlsli, which must
 /// carry the same names and values -- change one side, change both.

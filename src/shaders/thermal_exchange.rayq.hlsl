@@ -42,7 +42,7 @@ struct ThermalElementGpu {
 StructuredBuffer<ThermalElementGpu> elements : register(t1, space0);
 
 // instanceElementBase[instanceIndex] + primitiveIndex is the element a hit
-// landed on. The same mapping the closest-hit shader uses to find a
+// landed on. The same mapping the vertex shading uses to find a
 // temperature, so a hit here and a shade there agree about which triangle
 // they are talking about.
 StructuredBuffer<uint> instanceElementBase : register(t2, space0);

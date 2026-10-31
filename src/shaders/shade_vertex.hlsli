@@ -929,7 +929,7 @@ LightSample SampleEmissiveGeometry(float3 hitPos, inout PathVertex payload) {
     const float3 wi = toLight / dist;
 
     const float3 lightNormal = SafeNormalize(cross(tri.edge1, tri.edge2));
-    // Absolute, because emission here is two-sided: the closest-hit shader adds
+    // Absolute, because emission here is two-sided: the surface shading adds
     // a surface's emissive term whichever face was hit, so a light seen from
     // behind is lit. Taking a signed cosine would make the light sampler
     // disagree with what the BSDF side actually collects.
@@ -2067,10 +2067,6 @@ void FoldVertex(VertexFrame f, inout PathVertex payload) {
 void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
                   inout VertexFrame f, inout ChildRequest req,
                   inout PathVertex fusionChild) {
-    fusionActiveMediumCount = payload.fusionMediumCount;
-    [unroll]
-    for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
-        fusionActiveMedia[medium] = payload.fusionMedia[medium];
     // Record this ray's hit distance for the depth AOV. Only the depth-0
     // (primary) value is read: raygen takes it from the primary vertex, and
     // every other vertex carries its own PathVertex.

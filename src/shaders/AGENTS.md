@@ -46,6 +46,44 @@ there precisely because NaN happens.
 `.rgen` / `.rchit` / `.rmiss` ray tracing stages, `.comp` and `.comp.hlsl` compute,
 `.hlsli` shared headers (included, never compiled standalone).
 
+## The integrator runs in raygen
+
+Every ray is traced from raygen. `path_driver.hlsli` walks each path depth
+first with a stack of vertex frames; `closesthit.rchit` only writes the hit
+record and `miss.rmiss` only says the ray missed, so the pipeline's recursion
+depth is 1 (`kMaxPipelineRayRecursionDepth`) and the payload is a 128-byte hit
+record (`common.hlsli`). A vertex's state is a `PathVertex`, which no ray
+carries.
+
+A vertex is shaded in four pieces from `shade_vertex.hlsli`, cut where the old
+recursive body waited for a child: `ShadeVertexA` (everything up to its first
+child), `Advance` (the next child, and the draws that used to follow one),
+`CompleteChild` (a child's answer folded in) and `FoldVertex` (what followed
+the last child). A fusion interface is cut the same way
+(`BeginFusionInterface` / `CompleteFusionInterface`), and a ray that missed is
+`ShadeMiss`. Three rules keep it equal to the recursion it replaced:
+
+- **The random stream is threaded as the recursion threaded it.** A bounce
+  child's consumption is joined (the parent continues from the child's final
+  state), a transmission child's is forked (the child starts after the coin and
+  the parent keeps that state), the three RGB dispersion rays are chained, and
+  a fusion child is joined. Fixed-seed renders are how a change here is
+  checked, so a draw moved across a child shows up as a different image, not
+  as noise.
+- **Every child is gated on `depth < MAX_PATH_DEPTH`.** That bounds the frame
+  stack: the vertex at stack index i has depth i. A new kind of child takes the
+  same gate and is asked for through `Advance` or phase A. There is no
+  fallback and no other place to trace.
+- **The frame holds everything the fold reads.** The child runs in between and
+  every local is gone by the time the parent resumes, so a value phase A forms
+  and the fold needs goes into `VertexFrame`, or is re-derived from the frame
+  bit for bit. A frame is about 470 bytes and the stack is eight deep, so a
+  field added there costs raygen's stack in every mode.
+
+The driver runs a freshly shaded vertex and a resuming one through separate
+calls on purpose; folding both through one call measured slower (see the note
+in `path_driver.hlsli`).
+
 ## Indirect light is a residual, not a replacement
 
 Every spectral band keeps its analytic ambient terms — the unoccluded uniform sky
@@ -132,7 +170,7 @@ colour. VIS_FUSED reads up to five reflectances and three illuminants at each of
 32 wavelengths; fetching inside the loop would be 256 table lookups and two
 thousand buffer loads per hit. Hoisted, it is eight lookups and four flops per
 wavelength — cheaper than the three `exp()` the old Gaussian mapping cost. Every
-call site in `closesthit.rchit` and `miss.rmiss` is already arranged this way;
+call site in `shade_vertex.hlsli` and `shade_miss.hlsli` is already arranged this way;
 adding one inside a loop is the mistake to avoid.
 
 **Grey is carried, not fitted.** The `.w` of a fetched spectrum is the

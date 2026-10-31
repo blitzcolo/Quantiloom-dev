@@ -389,7 +389,7 @@ TEST(TypesTest, NumericConcept) {
 // ============================================================================
 // GetFusedBandInfo() is the single source of truth for fused-band wavelength
 // ranges on the CPU side. Values MUST match the shader constants in
-// closesthit.rchit / miss.rmiss exactly.
+// common.hlsli (SPECTRAL_<BAND>_LAMBDA_{MIN,MAX}) exactly.
 // ============================================================================
 
 TEST(TypesTest, FusedBandInfoLWIR) {

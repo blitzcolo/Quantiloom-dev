@@ -3,7 +3,7 @@
  * @brief Closed-form and quadrature checks for the four glTF material lobes
  *
  * These re-derive, in independent C++, the identities the HLSL in
- * src/shaders/{pbr.hlsli,closesthit.rchit} relies on. They cannot catch a
+ * src/shaders/{pbr.hlsli,shade_vertex.hlsli} relies on. They cannot catch a
  * transcription slip between here and there -- test_sheen_brdf.cpp can, because
  * sheen's answer is a table it can read out of the shipped shader, and these
  * are functions. What they can catch is the class of error that survives every

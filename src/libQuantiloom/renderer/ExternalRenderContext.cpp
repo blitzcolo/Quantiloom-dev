@@ -1571,7 +1571,7 @@ ConfigApplyReport ExternalRenderContext::ApplyConfig(const Config& config,
     // load anything -- it just produced a warning about a missing map on every
     // config that has none, which is most of them. An absent map is not an error.
     //
-    // RGB, because no spectral branch of closesthit.rchit samples the cubemap
+    // RGB, because no spectral branch of shade_vertex.hlsli samples the cubemap
     // (they read solar_lut and the analytic sky instead), so converting an
     // equirect into a cubemap for one is work whose result nothing reads. The
     // resolver has already set the flag to 0 for those modes and warned; this
@@ -1960,7 +1960,7 @@ bool ExternalRenderContext::Impl::UploadThermalTangent(const Vector<f32>& tangen
 // This is not cosmetic. AtmosSkyRadianceIR divides the network's zenith
 // downwelling by B(T_air) to recover an emissivity, so a T_air unrelated to
 // the bake distorts the entire horizon ramp, and the max-depth Planck
-// fallback in closesthit.rchit with it. src/app/main.cpp makes the same
+// fallback in shade_vertex.hlsli with it. src/app/main.cpp makes the same
 // substitution; without this the two front ends rendered the same scene
 // differently. The host's own value is left intact in lightingParams so it
 // returns when the atmosphere is switched off, and so GetLightingParams keeps

@@ -463,8 +463,8 @@ SetupResult OfflineRenderer::Impl::BuildScene() {
     rendercore::MountTemperatureTextures(loadedScene, configOptions.baseDir, configReport);
 
     // Merged geometry buffers, one BLAS per primitive, a TLAS over the node
-    // instances, and the per-instance offset table the closest-hit shader indexes
-    // with InstanceIndex() -- all of it derived from the scene, all of it shared
+    // instances, and the per-instance offset table the vertex shading indexes
+    // with the hit's instance -- all of it derived from the scene, all of it shared
     // with the interactive context.
     geometry = rendercore::SceneGeometry::Build(context, loadedScene);
     if (!geometry.IsValid()) {
@@ -516,7 +516,7 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
            records.size() * sizeof(rendercore::ThermalSunResponseGpu),
            [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(b); });
 
-    // Binding 27 has no partially-bound flag either, and the closest-hit shader
+    // Binding 27 has no partially-bound flag either, and the vertex shading
     // reads its step on every thermal-element hit. This path never previews a
     // parameter, so it is the same inert record on every path: step 0, then one
     // zero tangent (two floats, the size ExternalRenderContext uses for "nothing

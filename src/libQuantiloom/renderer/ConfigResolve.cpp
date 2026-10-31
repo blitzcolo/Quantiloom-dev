@@ -1173,7 +1173,7 @@ Result<ResolvedRenderConfig, String> ResolveRenderConfig(
     // [thermal]
     // ------------------------------------------------------------------
     // The surface energy balance. What it produces is a temperature per
-    // triangle, which the renderer uploads and the closest-hit shader reads in
+    // triangle, which the renderer uploads and the shading in raygen reads in
     // place of the material's own -- so a scene that enables this stops
     // needing a temperature typed into it at all.
     //

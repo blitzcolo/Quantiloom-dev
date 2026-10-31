@@ -2,7 +2,7 @@
 // Quantiloom - Volumetric Rendering Library
 // ============================================================================
 // Medium properties, Beer-Lambert transmittance and the Henyey-Greenstein
-// phase function for the single-scattering block in closesthit.rchit.
+// phase function for the single-scattering block in shade_vertex.hlsli.
 //
 // PHYSICS:
 //   σ_t(x) = σ_a(x) + σ_s(x)  (extinction = absorption + scattering)

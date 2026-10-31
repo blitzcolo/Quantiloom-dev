@@ -294,7 +294,7 @@ struct InstanceGeometryInfo {
     u32 tangentOffset;  // Offset into the merged tangent buffer, in tangents
     u32 materialId;     // Index into Scene::materials
     /// First thermal element of this instance, or 0xFFFFFFFF where no solve
-    /// ran. The closest-hit shader adds PrimitiveIndex() to it, which is the
+    /// ran. The vertex shading adds the hit's primitive index to it, which is the
     /// whole of how a triangle finds the temperature the balance gave it.
     u32 thermalElementBase;
     u32 pad;            // Pad to 32 bytes
@@ -569,7 +569,7 @@ struct MaterialGpuIndices {
 }
 
 /**
- * @brief Convert a Material into the layout the closest-hit shader reads
+ * @brief Convert a Material into the layout the shaders read
  *
  * @param wavelengthNm Wavelength the IR curves are evaluated at
  *

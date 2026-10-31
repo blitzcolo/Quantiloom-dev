@@ -44,7 +44,7 @@ namespace {
 // under 4 % of a typical texel. It does not change the mean -- the anchoring
 // below is exact at any ceiling -- only how much of the variation survives.
 //
-// MUST MATCH the decode in SampleEndmemberWeights (src/shaders/closesthit.rchit),
+// MUST MATCH the decode in SampleEndmemberWeights (src/shaders/shade_vertex.hlsli),
 // which multiplies the sampled UNORM by this number and whose fallback texel is
 // its reciprocal. Nothing checks the pair at build time. The value itself lives
 // in SpectralUnmixer.hpp so the tests share it.

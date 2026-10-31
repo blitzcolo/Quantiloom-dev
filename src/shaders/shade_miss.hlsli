@@ -23,7 +23,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
     LightingParams lut = lightingParams[0];
     AtmosNNHeader atmos = atmosNNHeader[0];
 
-    // NN atmosphere composition for a primary miss. closesthit.rchit applies
+    // NN atmosphere composition for a primary miss. shade_vertex.hlsli applies
     // L_pixel = tau * L_surface + L_path to every depth-0 hit, per wavelength
     // (or per RGB channel); a primary miss has a surface radiance too -- the
     // sky at the end of the ray -- and leaving it uncomposited opened a step
@@ -89,7 +89,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
         // ================================================================
         // VIS_FUSED mode: 32-wavelength spectral integration
         // ================================================================
-        // Consistent with closesthit.rchit VIS_FUSED implementation:
+        // Consistent with shade_vertex.hlsli's VIS_FUSED implementation:
         //   1. Sample 32 wavelengths uniformly across visible spectrum (380-780nm)
         //   2. Query spectral sky radiance at each wavelength
         //   3. Integrate via CIE XYZ color matching functions
@@ -204,18 +204,18 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
             XYZ_accum.z += sky_radiance_lambda * z_bar * LAMBDA_STEP;
         }
 
-        // Normalize XYZ for RGB input compatibility (see closesthit.rchit for details)
+        // Normalize XYZ for RGB input compatibility (see shade_vertex.hlsli for details)
         XYZ_accum /= CIE_Y_INTEGRAL;
 
         // XYZ → Linear RGB (sRGB D65)
         payload.radiance = float4(ConvertXYZToLinearRGB(XYZ_accum), 0.0);
         payload.fusionContributions = FusionClassify(payload.radiance.x, payload.fusionRoute);
 
-        // Apply chromaticity correction (consistent with closesthit)
+        // Apply chromaticity correction (consistent with shade_vertex.hlsli)
         payload.radiance.r *= lut.chromaR_correction;
         payload.radiance.b *= lut.chromaB_correction;
 
-        // After the correction, for the reason given in closesthit.rchit: it
+        // After the correction, for the reason given in shade_vertex.hlsli: it
         // scales R and B against G and would turn one scalar into three.
         if (heroRay) {
             payload.radiance = float4(heroRadiance, heroRadiance, heroRadiance, 0.0);
@@ -280,7 +280,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
         // ================================================================
         // SWIR_FUSED mode: Sky radiance integration (1000-2500nm)
         // ================================================================
-        // Must match closesthit.rchit calculation for unit consistency.
+        // Must match shade_vertex.hlsli's calculation for unit consistency.
         // SWIR is reflection-dominated; use solar/sky spectral radiance.
         // ================================================================
 
@@ -503,7 +503,7 @@ void ShadeMiss(inout PathVertex payload, RayDesc ray) {
 
             // The LUT is baked on the loop's sample points, so a sampled
             // wavelength takes the nearest index -- matching what the
-            // closest-hit shader does for the same ray.
+            // surface shading (shade_vertex.hlsli) does for the same ray.
             uint atmosIdx = cameraRay ? CameraAtmosLambdaIndex(cameraResponseTable, lambda, atmos.numLambda)
                 : singleRay ? 0u : heroRay
                 ? (uint)clamp(round((lambda - lambda_min) / lambda_step),

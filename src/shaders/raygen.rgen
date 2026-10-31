@@ -54,8 +54,8 @@ StructuredBuffer<FusionProbeRay> fusionProbeRays : register(t37, space0);
 // ============================================================================
 // PCG Seed (Wang Hash)
 // ============================================================================
-// Seeds the PCG stream that the closest-hit shader draws from past the first
-// bounce. The first bounce itself is stratified and does not touch this -- see
+// Seeds the PCG stream that the vertex shading (shade_vertex.hlsli, run from
+// here) draws from past the first bounce. The first bounce itself is stratified and does not touch this -- see
 // sampling.hlsli.
 // Reference: "Hash Functions for GPU Rendering" (Mark Jarzynski, 2020)
 // ============================================================================

@@ -648,7 +648,7 @@ def band_average_radiance(T_K: float, lambda_min_nm: float, lambda_max_nm: float
     """Band-average spectral radiance on the renderer's own quadrature.
 
     The fused thermal bands integrate `nodes` wavelengths by the trapezoid rule
-    with half-weight endpoints and divide by the band width (closesthit.rchit,
+    with half-weight endpoints and divide by the band width (shade_vertex.hlsli,
     NUM_IR_SAMPLES). Reproduced here rather than integrated exactly, because
     the number this checks is what the renderer writes -- a finer rule would
     disagree with the image by the quadrature error and call it a bug.

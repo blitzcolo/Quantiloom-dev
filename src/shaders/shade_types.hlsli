@@ -17,7 +17,7 @@ float3x3 QlWorldToObject(HitRecord hit) {
 // What a vertex asks the driver to trace next. For the kinds Advance issues,
 // the fields are exactly what the old child Payload was filled with before
 // InheritFusionMedium ran over it, so a request carries no fusion state: the
-// driver builds the child from it and supplies the medium (QlChildVertex). The
+// driver builds the child from it with the parent's medium (QlChildVertex). The
 // fusion interface's child is the exception: BeginFusionInterface builds that
 // whole vertex, medium included, and its request only carries the ray.
 static const uint QL_CHILD_BOUNCE   = 0u;  // environment bounce, front lobe

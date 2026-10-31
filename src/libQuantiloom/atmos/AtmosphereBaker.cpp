@@ -99,7 +99,7 @@ void BoxAverage(const std::vector<double>& src, const std::vector<int>& binOf,
 }  // namespace
 
 AtmosLambdaGrid RenderBandLambdaGrid(SpectralMode mode, double wavelengthNm) {
-    // Sample counts below MUST stay in sync with closesthit.rchit / miss.rmiss.
+    // Sample counts below MUST stay in sync with shade_vertex.hlsli / shade_miss.hlsli.
     //
     // The shaders index this grid by their spectral loop counter, so the grid
     // points ARE the loop's wavelengths. Rays that carry a sampled wavelength

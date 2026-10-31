@@ -125,7 +125,7 @@ sample binding 10.
   sky blue. In `paper-exp`'s 15 scenes that invented sky was 46–84% of the
   signal. The key still defaults to true; it is intent, one of four conditions,
   not the switch.
-- *RGB*, because `closesthit.rchit`'s VIS_FUSED and SINGLE branches push the
+- *RGB*, because `shade_vertex.hlsli`'s VIS_FUSED and SINGLE branches push the
   sampled RGB through `ConvertLinearRGBToIlluminantSpectrum` and use the result
   as spectral radiance density per nanometre — roughly 12× an ASTM G-173 sky.
   The same branches zero the traced specular residual (`qSpec`) when the flag is
@@ -255,7 +255,7 @@ sampled mode to the reference's quadrature error.
 
 Transport is diagonal in λ everywhere else, which is what lets four wavelengths
 share one geometric path. Fluorescence is the term that is not, and it is why
-the payload could not simply carry more wavelengths.
+a path could not simply carry more wavelengths.
 
 Rank one, which is what published data supports: an excitation shape, an
 emission shape and a quantum yield, on `MaterialDataCPU`'s three former padding
@@ -304,7 +304,7 @@ reference implementations live in `scripts/physics-audit/harness.py`.
 
 The one invariant worth knowing before touching any of it: a surface
 temperature has exactly one decode, `GetSurfaceTemperatureK` in
-`closesthit.rchit`, and all four sampling sites plus both debug views go
+`shade_vertex.hlsli`, and all four sampling sites plus both debug views go
 through it. Solver, then texture, then the material's own scalar — and, when
 the solver answered, the per-pixel sun correction below, which lives inside
 that one function precisely so that no site can forget it.

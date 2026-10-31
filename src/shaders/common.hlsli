@@ -45,7 +45,7 @@ bool IsVisMode(uint mode) {
 // Fused-Mode Integration Bands
 // ============================================================================
 // The wavelength range each *_FUSED mode integrates over. These are the single
-// definition for HLSL -- closesthit.rchit and miss.rmiss use them rather than
+// definition for HLSL -- shade_vertex.hlsli and shade_miss.hlsli use them rather than
 // repeating literals, which is how the ranges drifted out of sync before.
 //
 // MUST match GetFusedBandInfo() in core/Types.hpp, which is the authority.
@@ -369,35 +369,19 @@ struct PathVertex {
     // "uninitialised reads as the safest class" property: 0 is diffuse.
 };
 
-static uint fusionActiveMediumCount = 0;
-static uint fusionActiveMedia[kFusionMaxInitialMedia];
-struct FusionMediumContext {
-    uint count;
-    uint media[kFusionMaxInitialMedia];
-};
-FusionMediumContext SaveFusionMedium() {
-    FusionMediumContext value;
-    value.count = fusionActiveMediumCount;
-    [unroll]
-    for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
-        value.media[i] = fusionActiveMedia[i];
-    return value;
-}
-void RestoreFusionMedium(FusionMediumContext value) {
-    fusionActiveMediumCount = value.count;
-    [unroll]
-    for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
-        fusionActiveMedia[i] = value.media[i];
-}
 float3 FusionClassify(float value, uint route) {
     return route == 1   ? float3(0, value, 0)
            : route == 2 ? float3(0, 0, value)
                         : float3(value, 0, 0);
 }
-void InheritFusionMedium(inout PathVertex child) {
+// An ordinary child's fusion state: no path, no interface behind it, and the
+// medium its parent vertex is in. A vertex's medium fields are written only
+// while it is built (raygen's root, here, BeginFusionInterface's child) and
+// never while it is shaded, so the parent's are the medium it entered with.
+void InheritFusionMedium(inout PathVertex child, PathVertex parent) {
     child.fusionSegmentOffset = 0;
     child.fusionPreviousInstance = kFusionNoPath;
-    child.fusionMediumCount = fusionActiveMediumCount;
+    child.fusionMediumCount = parent.fusionMediumCount;
     child.fusionFlags = 0;
     child.fusionRoute = 0;
     child.fusionContributions = 0;
@@ -406,7 +390,7 @@ void InheritFusionMedium(inout PathVertex child) {
     child.fusionBranchMask = 0;
     [unroll]
     for (uint i = 0; i < kFusionMaxInitialMedia; ++i)
-        child.fusionMedia[i] = fusionActiveMedia[i];
+        child.fusionMedia[i] = parent.fusionMedia[i];
 }
 
 // ============================================================================
@@ -610,9 +594,9 @@ float SampleSkyIrradiance(StructuredBuffer<SolarSpectralLUT> lutBuf, float wavel
 }
 
 // Whether a spectral illuminant is bound -- either curve. The one test every
-// band branch of closesthit.rchit and miss.rmiss asks, so a surface and the
-// sky it sees agree on it. They used to ask different curves (closesthit the
-// sun's, miss the sky's), so a LUT carrying one curve lit the surfaces with
+// band branch of shade_vertex.hlsli and shade_miss.hlsli asks, so a surface and
+// the sky it sees agree on it. They used to ask different curves (the surface
+// the sun's, the sky the sky's), so a LUT carrying one curve lit the surfaces with
 // nothing while the visible sky fell back to an RGB-derived one in arbitrary
 // units, or the other way round. Each sampler returns 0 for an empty curve,
 // so a LUT with only one of them means exactly that much light.
@@ -1213,10 +1197,12 @@ struct CameraData {
 //                  That is the opposite of what randomSeed wants, which is why
 //                  they are two fields and not one.
 //
-// The range is declared for RAYGEN | CLOSEST_HIT | MISS, and all three read it
-// through this one declaration. The closest-hit shader needs sampleIndex and
+// The range is declared for every ray tracing stage and for compute
+// (RayTracingPipeline.cpp), and every stage that reads it does so through this
+// one declaration. The vertex shading raygen runs needs sampleIndex and
 // sequenceSeed because most of the stratified decisions -- wavelength, emitter,
-// bounce direction -- are made there, not here.
+// bounce direction -- are made there; the any-hit reads sampleIndex for its
+// coverage hash.
 // ============================================================================
 
 struct PushConstantsRayGen {
@@ -1485,7 +1471,7 @@ struct MaterialData {
     // Per-slot UV transforms (KHR_texture_transform)
     // ========================================================================
     // Pre-multiplied by ConvertMaterial into a 2x3 affine, applied by
-    // TransformUV in closesthit.rchit:
+    // TransformUV in hit_common.hlsli:
     //
     //   uv' = float2(m.x * uv.x + m.y * uv.y, m.z * uv.x + m.w * uv.y) + offset
     //
@@ -1595,7 +1581,7 @@ float GetIRReflectance(MaterialData mat) {
 
 // metallic and roughness are the TEXTURED values, not mat.metallicFactor and
 // mat.roughnessFactor. The visible band has always shaded from the texture
-// (closesthit.rchit computes them once as factor * metallicRoughness.bg), while
+// (shade_vertex.hlsli computes them once as factor * metallicRoughness.bg), while
 // every infrared band read the bare factors -- so a material whose texture says
 // dielectric over most of its area but whose factor is glTF's default 1.0 was a
 // dielectric in VIS and a metal in LWIR. One decode, like GetSurfaceTemperatureK.

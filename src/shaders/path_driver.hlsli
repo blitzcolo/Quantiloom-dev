@@ -31,12 +31,7 @@
 //
 // What a frame keeps beside the VertexFrame:
 //   v       the vertex's own state as phase A left it, which the fold writes
-//           its outputs into;
-//   medium  the fusion medium statics as phase A left them. A child's phase A
-//           overwrites them. The recursion never noticed, because each
-//           closest-hit invocation had its own and every trace site saved and
-//           restored them; here there is one set per path, so they are
-//           restored before the parent resumes;
+//           its outputs into, and whose medium its next child inherits;
 //   kind    the kind of the child in flight, which CompleteChild needs.
 // ============================================================================
 
@@ -44,10 +39,9 @@
 #include "shade_miss.hlsli"
 
 struct PathFrame {
-    VertexFrame         f;
-    PathVertex          v;
-    FusionMediumContext medium;
-    uint                kind;
+    VertexFrame f;
+    PathVertex  v;
+    uint        kind;
 };
 
 // Run a vertex on from where its frame stands: true when it asks for its next
@@ -96,7 +90,6 @@ PathVertex RunPath(RayDesc ray, uint rayFlags, PathVertex vin) {
                 if (asks) {
                     stack[sp].f = f;
                     stack[sp].v = vin;
-                    stack[sp].medium = SaveFusionMedium();
                     stack[sp].kind = req.kind;
                     ++sp;
                     descend = true;
@@ -114,7 +107,6 @@ PathVertex RunPath(RayDesc ray, uint rayFlags, PathVertex vin) {
                 pathDone = true;
             } else {
                 const uint top = sp - 1u;
-                RestoreFusionMedium(stack[top].medium);
                 bool asks = false;
                 if (stack[top].kind == QL_CHILD_FUSION) {
                     // An interface vertex's one child is in: fold it, and the
@@ -141,9 +133,10 @@ PathVertex RunPath(RayDesc ray, uint rayFlags, PathVertex vin) {
                 // Built whole by BeginFusionInterface, its medium included.
                 vin = fusionChild;
             } else {
-                // Built from the request, with the medium the statics hold,
-                // which is the parent's at this point.
-                vin = QlChildVertex(req);
+                // Built from the request, in its parent's medium. The parent
+                // is the frame on top: a fresh vertex was just pushed there,
+                // and a resuming one never left it.
+                vin = QlChildVertex(req, stack[sp - 1u].v);
             }
         }
     }

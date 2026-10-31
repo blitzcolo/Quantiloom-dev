@@ -39,7 +39,7 @@ struct AtmosBakeResult {
 };
 
 // The lambda grid a render band samples on the GPU. MUST mirror the loop
-// constants in closesthit.rchit / miss.rmiss exactly -- the shader indexes
+// constants in shade_vertex.hlsli / shade_miss.hlsli exactly -- the shader indexes
 // the baked LUT by loop counter.
 struct AtmosLambdaGrid {
     std::string band;              // vis/nir/swir/mwir/lwir; empty = no NN support

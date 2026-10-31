@@ -42,7 +42,7 @@ namespace quantiloom::rendercore {
 /// moment this changed.
 ///
 /// The shader has the only remaining mirror, in SampleEndmemberWeights
-/// (src/shaders/closesthit.rchit); nothing checks that pair at build time.
+/// (src/shaders/shade_vertex.hlsli); nothing checks that pair at build time.
 /// SpectralUnmixer.cpp carries the measurements behind the value.
 inline constexpr f32 kWeightScale = 6.0f;
 

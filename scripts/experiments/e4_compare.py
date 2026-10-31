@@ -41,7 +41,7 @@ import e4_dtdv_sweep as e4  # noqa: E402
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from _winpaths import require_windows_paths  # noqa: E402
 
-TANGENT_GATE_K = 0.1     # closesthit.rchit skips the correction below this
+TANGENT_GATE_K = 0.1     # shade_vertex.hlsli skips the correction below this
 EDGE_BAND_M = 2.0        # the +/- band the paper reports an RMSE over
 
 
@@ -78,7 +78,7 @@ def evaluate(divisions, reference, work, suffix=""):
 
     # The arm that traces the shadow at the hour it was cast. Its correction is
     # the same one term per carried column plus the remainder against the
-    # present sun -- exactly what closesthit.rchit sums, evaluated here so the
+    # present sun -- exactly what shade_vertex.hlsli sums, evaluated here so the
     # comparison is against the pointwise reference rather than against a
     # render.
     lag_path = work / f"elements_{divisions}_lag{suffix}.csv"

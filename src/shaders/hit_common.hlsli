@@ -1,20 +1,22 @@
 // ============================================================================
 // Quantiloom - Hit-side bindings and surface sampling
 // ============================================================================
-// What both hit-group stages need to look at a surface: the geometry indirection
-// (indices, UVs, per-instance offsets), the material buffer, the bindless
-// texture arrays, and the two helpers that turn a slot plus a UV into a texel.
+// What looking at a surface needs: the geometry indirection (indices, UVs,
+// per-instance offsets), the material buffer, the bindless texture arrays, and
+// the two helpers that turn a slot plus a UV into a texel.
 //
-// Included ONLY by closesthit.rchit and anyhit.rahit. Deliberately not folded
-// into common.hlsli, which raygen, the miss shaders and every compute shader
+// Included by the vertex shading (shade_vertex.hlsli, which raygen runs), by
+// anyhit.rahit, and by closesthit.rchit for HitAttributes alone. Deliberately
+// not folded into common.hlsli, which the miss shaders and every compute shader
 // also include -- those stages have no business declaring a bindless texture
 // array they never sample, and the descriptor set layout names the stages that
 // may reach each binding.
 //
-// Bindings 1/2/3/9/16 and up stay in closesthit.rchit: the acceleration
-// structure, lighting, positions, tangents and normals are closest-hit's alone.
-// An any-hit answers one question -- is this intersection there at all -- and
-// that question needs indices, UVs and a material, nothing more.
+// Bindings 1/2/3/9/16 and up stay with the vertex shading (shade_vertex.hlsli,
+// shade_resources.hlsli, ql_trace.hlsli): the acceleration structure, lighting,
+// positions, tangents and normals are its alone. An any-hit answers one
+// question -- is this intersection there at all -- and that question needs
+// indices, UVs and a material, nothing more.
 // ============================================================================
 
 #ifndef QUANTILOOM_HIT_COMMON_HLSLI
@@ -121,7 +123,7 @@ float2 TransformUV(MaterialData mat, int slot, float2 uv) {
 // fallback's alpha of 1 is what lets an untextured material fall through
 // unchanged.
 //
-// Note this reads the same texel the closest-hit shader's baseColor does, and
+// Note this reads the same texel the vertex shading's baseColor does, and
 // the sRGB transfer applies to RGB only -- alpha stays linear, so the two agree
 // on what the author wrote. BC7 is off in this build (build_wsl.sh passes
 // -DQUANTILOOM_USE_BC7ENC=OFF); if it is ever turned back on, its per-block

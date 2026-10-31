@@ -29,7 +29,7 @@
 namespace quantiloom::blackbody {
 
 /// Node count the fused thermal bands use. NUM_IR_SAMPLES / NUM_SWIR_SAMPLES
-/// in closesthit.rchit, which are the same number for every thermal band.
+/// in shade_vertex.hlsli and shade_miss.hlsli, the same number for every thermal band.
 inline constexpr i32 kBandNodes = 16;
 
 /// Coldest and hottest the inversion will report. Wider than any scene the

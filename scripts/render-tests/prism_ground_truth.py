@@ -2,7 +2,7 @@
 """Build a deterministic ground-truth dispersion image by sweeping SINGLE mode.
 
 SINGLE mode renders one wavelength per image and refracts at that wavelength on
-BOTH prism faces (closesthit.rchit uses camera.wavelength_nm for refraction in
+BOTH prism faces (shade_vertex.hlsli uses camera.wavelength_nm for refraction in
 every non-RGB, non-VIS_FUSED mode), so the two deviations compound the way they
 do in a real prism. Sweeping the same 32 wavelengths VIS_FUSED uses and
 combining them with the CIE observer therefore gives what VIS_FUSED *should*
@@ -50,7 +50,7 @@ CMF_CSV = ROOT / "assets/luts/CIE_xyz_1931_2deg.csv"
 TMP_CFG = ROOT / "assets/configs/_sweep_tmp.toml"
 OUT_DIR = ROOT / "renders/ground-truth"
 
-# Must match closesthit.rchit's VIS_FUSED grid exactly, or this is a reference
+# Must match shade_vertex.hlsli's VIS_FUSED grid exactly, or this is a reference
 # for a different integral.
 LAMBDA_MIN, LAMBDA_MAX, N_SAMPLES = 400.0, 780.0, 32
 CIE_Y_INTEGRAL = 106.857

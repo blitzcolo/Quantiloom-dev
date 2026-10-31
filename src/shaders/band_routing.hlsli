@@ -3,8 +3,8 @@
 // ============================================================================
 // SPECTRAL_MODE_SINGLE and SPECTRAL_MODE_CAMERA_MEASUREMENT both carry exactly
 // one wavelength per ray -- SINGLE reads it from the camera push constants, a
-// camera-measurement ray carries it in the payload's heroLambda -- and route
-// it through whichever band branch of closesthit.rchit / miss.rmiss would own
+// camera-measurement ray carries it in its vertex's heroLambda -- and route
+// it through whichever band branch of shade_vertex.hlsli / shade_miss.hlsli would own
 // a fused sweep over that wavelength. The cut points are the fused bands' own
 // edges: at or below SPECTRAL_VIS_LAMBDA_MAX the ray takes the single-visible
 // branch, at or above SPECTRAL_MWIR_LAMBDA_MIN the thermal branch, and a NIR

@@ -4,8 +4,8 @@
  *
  * The solver runs on triangles. `BuildThermalMesh` makes one element per
  * triangle, `RunSunVisibility` decides from the element's centroid whether the
- * sun reaches it, and the closest-hit shader reads one temperature per
- * `PrimitiveIndex()`. So a thermal shadow can only have edges where the mesh
+ * sun reaches it, and the vertex shading reads one temperature per hit
+ * primitive. So a thermal shadow can only have edges where the mesh
  * has edges: on a 120 m desert ground tessellated 201 x 201, that is a 0.6 m
  * triangle, and a sphere 0.7 m across casts a shadow shaped like one triangle.
  *

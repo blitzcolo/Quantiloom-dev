@@ -7,14 +7,24 @@ This directory contains HLSL ray tracing shaders for Quantiloom.
 ### Ray Tracing Pipeline
 | File | Type | Description |
 |------|------|-------------|
-| `raygen.rgen` | Ray Generation | Primary ray casting with camera transform |
-| `closesthit.rchit` | Closest Hit | PBR shading with spectral rendering |
-| `miss.rmiss` | Miss | Sky/atmosphere radiance computation |
+| `raygen.rgen` | Ray Generation | Camera ray, then the whole path: every vertex is shaded here (`path_driver.hlsli`) |
+| `closesthit.rchit` | Closest Hit | Writes the hit record -- where the ray landed -- and nothing else |
+| `anyhit.rahit` | Any Hit | Alpha coverage (MASK/BLEND) and fusion-interface re-hit rejection |
+| `miss.rmiss` | Miss | Marks the ray as missed (`hit.t = -1`) |
+| `shadow_miss.rmiss` | Miss | Clears `isShadowed` for a visibility ray |
+
+Every ray is traced from raygen, so the pipeline's recursion depth is 1.
+`src/shaders/AGENTS.md` ("The integrator runs in raygen") has the rules.
 
 ### Header Files
 | File | Description |
 |------|-------------|
-| `common.hlsli` | Shared types, spectral modes, payload structures |
+| `common.hlsli` | Shared types, spectral modes, the payload and `PathVertex` |
+| `path_driver.hlsli` | The path loop raygen runs: record traces, the frame stack, descent and fold |
+| `shade_vertex.hlsli` | Surface shading, cut at its children (`ShadeVertexA`, `Advance`, `CompleteChild`, `FoldVertex`) |
+| `shade_miss.hlsli` | Sky evaluation for a ray that missed (`ShadeMiss`) |
+| `fusion_transport.hlsli` | Fusion-export interfaces (`BeginFusionInterface` / `CompleteFusionInterface`) |
+| `ql_trace.hlsli` | The two trace sites: record rays and visibility rays |
 | `pbr.hlsli` | Cook-Torrance PBR functions (GGX, Fresnel) |
 | `blackbody.hlsli` | Planck blackbody radiation for thermal IR (C1_NM = 1.191×10²⁰) |
 | `atmosphere_nn.hlsli` | NN atmosphere LUT sampling (MODTRAN surrogate tau / L_path / L_down) |
@@ -68,18 +78,22 @@ After compilation:
 |---------|------|-------|-------------|
 | 0 | RWTexture2D | Raygen | Output image (RGBA32F) |
 | 1 | AccelerationStructure | Raygen | TLAS (scene) |
-| 2 | StructuredBuffer | ClosestHit, Miss | LightingParams (sun/sky) |
-| 3 | StructuredBuffer<float3> | ClosestHit | Vertex buffer (positions) |
-| 4 | StructuredBuffer<uint> | ClosestHit | Index buffer (triangle indices) |
-| 5 | StructuredBuffer<MaterialData> | ClosestHit | Material properties |
-| 6 | Texture2D[] | ClosestHit | Bindless texture array |
-| 7 | SamplerState[] | ClosestHit | Bindless sampler array |
-| 8 | StructuredBuffer<float2> | ClosestHit | UV coordinates |
-| 9 | StructuredBuffer<float4> | ClosestHit | Tangent vectors |
-| 10-12 | - | ClosestHit | IBL resources (cubemap, BRDF LUT) |
-| 13 | StructuredBuffer<SpectralCurveGPU> | ClosestHit | Spectral reflectance curves |
-| 14 | StructuredBuffer<ComplexRefractiveIndexGPU> | ClosestHit | Complex refractive index (n,k) |
-| 15 | StructuredBuffer<SolarSpectralLUT> | ClosestHit | Solar spectral irradiance |
+| 2 | StructuredBuffer | Raygen | LightingParams (sun/sky) |
+| 3 | StructuredBuffer<float3> | Raygen, AnyHit | Vertex buffer (positions) |
+| 4 | StructuredBuffer<uint> | Raygen, AnyHit | Index buffer (triangle indices) |
+| 5 | StructuredBuffer<MaterialData> | Raygen, AnyHit | Material properties |
+| 6 | Texture2D[] | Raygen, AnyHit | Bindless texture array |
+| 7 | SamplerState[] | Raygen, AnyHit | Bindless sampler array |
+| 8 | StructuredBuffer<float2> | Raygen, AnyHit | UV coordinates |
+| 9 | StructuredBuffer<float4> | Raygen | Tangent vectors |
+| 10-12 | - | Raygen | IBL resources (cubemap, BRDF LUT) |
+| 13 | StructuredBuffer<SpectralCurveGPU> | Raygen | Spectral reflectance curves |
+| 14 | StructuredBuffer<ComplexRefractiveIndexGPU> | Raygen | Complex refractive index (n,k) |
+| 15 | StructuredBuffer<SolarSpectralLUT> | Raygen | Solar spectral irradiance |
+
+"Stage" is who reads the binding. The layout in `RayTracingPipeline.cpp` also
+still grants the closest-hit and miss stages that read these before the
+integrator moved into raygen; the bits are harmless.
 
 ## Payload Structure
 
