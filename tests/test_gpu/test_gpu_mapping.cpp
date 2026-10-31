@@ -2,7 +2,9 @@
 
 #include "gpu/ShaderLibrary.hpp"
 #include "gpu/vulkan/VulkanMapping.hpp"
+#include "gpu/vulkan/VulkanResources.hpp"
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -145,4 +147,12 @@ TEST(GpuShaderLibraryTest, MetalLibUsesItsOwnExtension) {
     const ShaderLibrary library(ShaderFormat::MetalLib);
     const StringView names[] = {"k"};
     EXPECT_TRUE(library.LoadFrom(dir.Path(), names).has_value());
+}
+
+TEST(GpuBindingLayoutTest, RepeatedSlotsAreRejectedBeforeAnyDeviceCall) {
+    const std::array<BindingSlot, 2> slots{BindingSlot{3, BindingKind::ReadOnlyBuffer, 1, false},
+                                           BindingSlot{3, BindingKind::StorageTexture, 1, false}};
+    const auto layout = VulkanBindingLayout::Create(VK_NULL_HANDLE, BindingLayoutDesc{0, slots});
+    ASSERT_FALSE(layout.has_value());
+    EXPECT_NE(layout.error().find("slot 3"), std::string::npos);
 }

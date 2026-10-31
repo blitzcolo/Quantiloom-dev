@@ -46,7 +46,7 @@ TEST_F(GpuVulkanTest, CopyBufferRoundTripsThroughReadback) {
     const BufferCopyRegion region{0, 0, sizeof(data)};
     device.ExecuteImmediate([&](CommandList& cmd) {
         cmd.CopyBuffer(src->Ref(), dst->Ref(), std::span<const BufferCopyRegion>(&region, 1));
-        cmd.Barrier(MemoryBarrier{Access::TransferWrite, Access::HostRead});
+        cmd.Barrier(GlobalBarrier{Access::TransferWrite, Access::HostRead});
     });
 
     const auto* mapped = static_cast<const u32*>(dst->MapRead());
@@ -65,7 +65,7 @@ TEST_F(GpuVulkanTest, FillAndUpdateWriteTheBuffer) {
         cmd.FillBuffer(dst->Ref(), 0, kWholeSize, 0xAAu);
         cmd.Barrier(BufferBarrier{dst->Ref(), Access::TransferWrite, Access::TransferWrite});
         cmd.UpdateBuffer(dst->Ref(), 16, std::as_bytes(std::span<const u32>(patch)));
-        cmd.Barrier(MemoryBarrier{Access::TransferWrite, Access::HostRead});
+        cmd.Barrier(GlobalBarrier{Access::TransferWrite, Access::HostRead});
     });
 
     const auto* words = static_cast<const u32*>(dst->MapRead());

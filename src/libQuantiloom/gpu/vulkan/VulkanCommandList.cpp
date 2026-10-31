@@ -32,7 +32,7 @@ void VulkanCommandList::Barrier(const BarrierBatch& batch) {
     VkPipelineStageFlags dstStages = 0;
 
     Vector<VkMemoryBarrier> memory;
-    for (const MemoryBarrier& b : batch.memory) {
+    for (const GlobalBarrier& b : batch.memory) {
         const AccessScope src = ScopeOf(b.from, true);
         const AccessScope dst = ScopeOf(b.to, false);
         srcStages |= src.stages;

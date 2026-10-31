@@ -17,6 +17,7 @@
 #include "hs_core/SpectralReconstructor.hpp"
 #include "core/SpectralCube.hpp"
 #include <cmath>
+#include "support/VulkanTestDevice.hpp"
 
 using namespace quantiloom;
 
@@ -415,3 +416,120 @@ TEST(GpuReconstructorEdgeCaseTest, SmallNonPowerOfTwo) {
     EXPECT_GT(memory, 0u);
 }
 
+
+
+// ============================================================================
+// GPU path: runs the compute shader on the shared headless device
+// ============================================================================
+
+namespace {
+
+class GpuSpectralReconstructorGpuTest : public quantiloom::testing::VulkanDeviceTest {};
+
+SpectralCube MakeSparseCube(u32 width, u32 height, const std::vector<f32>& wavelengths) {
+    SpectralCube cube(width, height, static_cast<u32>(wavelengths.size()), wavelengths.front(), wavelengths.back());
+    cube.wavelengths = wavelengths;
+    return cube;
+}
+
+const std::vector<f32> kSourceWavelengths{400.f, 430.f, 490.f, 560.f, 600.f, 680.f, 750.f, 820.f, 900.f};
+
+const std::pair<const char*, InterpolationMethod> kMethods[] = {
+    {"Linear", InterpolationMethod::Linear},
+    {"CatmullRom", InterpolationMethod::CatmullRom},
+    {"Akima", InterpolationMethod::Akima},
+};
+
+std::vector<f32> Linspace(f32 first, f32 last, u32 count) {
+    std::vector<f32> values(count);
+    for (u32 i = 0; i < count; ++i) {
+        values[i] = first + (last - first) * static_cast<f32>(i) / static_cast<f32>(count - 1);
+    }
+    return values;
+}
+
+}  // namespace
+
+TEST_F(GpuSpectralReconstructorGpuTest, RenderedBandsAreCopiedExactly) {
+    GpuSpectralReconstructor reconstructor(Device());
+    if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
+        GTEST_SKIP() << "spectral_reconstruct shader unavailable";
+    }
+    auto sparse = MakeSparseCube(13, 7, kSourceWavelengths);
+    for (u32 b = 0; b < sparse.nbands; ++b) {
+        for (u32 y = 0; y < sparse.height; ++y) {
+            for (u32 x = 0; x < sparse.width; ++x) {
+                sparse(x, y, b) = 0.1f * static_cast<f32>(b + 1) + 0.001f * static_cast<f32>(x + y * sparse.width);
+            }
+        }
+    }
+    for (const auto& [label, method] : kMethods) {
+        GpuReconstructorConfig config;
+        config.method = method;
+        auto [status, result] = reconstructor.ReconstructCustom(sparse, kSourceWavelengths, config);
+        ASSERT_EQ(status, GpuReconstructorStatus::Success) << label;
+        ASSERT_EQ(result.data.size(), sparse.data.size()) << label;
+        EXPECT_TRUE(result.data == sparse.data) << label << ": a band that was rendered must pass through unchanged";
+    }
+}
+
+TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodReproducesAConstantAlongLambda) {
+    GpuSpectralReconstructor reconstructor(Device());
+    if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
+        GTEST_SKIP() << "spectral_reconstruct shader unavailable";
+    }
+    auto sparse = MakeSparseCube(9, 5, kSourceWavelengths);
+    for (u32 b = 0; b < sparse.nbands; ++b) {
+        for (u32 y = 0; y < sparse.height; ++y) {
+            for (u32 x = 0; x < sparse.width; ++x) {
+                sparse(x, y, b) = 0.5f + 0.01f * static_cast<f32>(x + 7 * y);
+            }
+        }
+    }
+    const auto targets = Linspace(400.0f, 900.0f, 31);
+    for (const auto& [label, method] : kMethods) {
+        GpuReconstructorConfig config;
+        config.method = method;
+        auto [status, result] = reconstructor.ReconstructCustom(sparse, targets, config);
+        ASSERT_EQ(status, GpuReconstructorStatus::Success) << label;
+        ASSERT_EQ(result.nbands, targets.size()) << label;
+        for (u32 b = 0; b < result.nbands; ++b) {
+            for (u32 y = 0; y < result.height; ++y) {
+                for (u32 x = 0; x < result.width; ++x) {
+                    EXPECT_NEAR(result(x, y, b), sparse(x, y, 0), 1e-5f)
+                        << label << " band " << b << " pixel " << x << "," << y;
+                }
+            }
+        }
+    }
+}
+
+TEST_F(GpuSpectralReconstructorGpuTest, EveryMethodTracksASmoothSpectrum) {
+    GpuSpectralReconstructor reconstructor(Device());
+    if (reconstructor.Initialize() != GpuReconstructorStatus::Success) {
+        GTEST_SKIP() << "spectral_reconstruct shader unavailable";
+    }
+    const auto spectrum = [](f32 lambda, u32 x) {
+        return 0.6f + 0.3f * std::sin(lambda / 180.0f + 0.1f * static_cast<f32>(x));
+    };
+    auto sparse = MakeSparseCube(11, 3, kSourceWavelengths);
+    for (u32 b = 0; b < sparse.nbands; ++b) {
+        for (u32 y = 0; y < sparse.height; ++y) {
+            for (u32 x = 0; x < sparse.width; ++x) sparse(x, y, b) = spectrum(kSourceWavelengths[b], x);
+        }
+    }
+    const auto targets = Linspace(400.0f, 900.0f, 40);
+    for (const auto& [label, method] : kMethods) {
+        GpuReconstructorConfig config;
+        config.method = method;
+        auto [status, result] = reconstructor.ReconstructCustom(sparse, targets, config);
+        ASSERT_EQ(status, GpuReconstructorStatus::Success) << label;
+        f32 worst = 0.0f;
+        for (u32 b = 0; b < result.nbands; ++b) {
+            for (u32 x = 0; x < result.width; ++x) {
+                worst = std::max(worst, std::abs(result(x, 0, b) - spectrum(targets[b], x)));
+            }
+        }
+        EXPECT_LT(worst, 0.03f) << label << ": worst error against the analytic spectrum";
+    }
+}

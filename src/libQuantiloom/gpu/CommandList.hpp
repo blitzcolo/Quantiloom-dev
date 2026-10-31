@@ -15,7 +15,7 @@
 
 namespace quantiloom::gpu {
 
-struct MemoryBarrier {
+struct GlobalBarrier {
     Access from = Access::None;
     Access to = Access::None;
 };
@@ -37,7 +37,7 @@ struct TextureBarrier {
 
 /// One native barrier call: stages are the OR over every entry's scopes.
 struct BarrierBatch {
-    std::span<const MemoryBarrier> memory = {};
+    std::span<const GlobalBarrier> memory = {};
     std::span<const BufferBarrier> buffers = {};
     std::span<const TextureBarrier> textures = {};
 };
@@ -65,13 +65,13 @@ public:
     template <class T>
     void PushConstants(const KernelLayout& layout, const T& block) {
         static_assert(std::is_trivially_copyable_v<T>);
-        PushConstants(layout, std::as_bytes(std::span<const T, 1>{&block, 1}));
+        PushConstants(layout, std::span<const std::byte>(reinterpret_cast<const std::byte*>(&block), sizeof(T)));
     }
     virtual void Dispatch(u32 groupsX, u32 groupsY, u32 groupsZ) = 0;
 
     virtual void Barrier(const BarrierBatch& batch) = 0;
-    void Barrier(const MemoryBarrier& b) {
-        Barrier(BarrierBatch{std::span<const MemoryBarrier>{&b, 1}, {}, {}});
+    void Barrier(const GlobalBarrier& b) {
+        Barrier(BarrierBatch{std::span<const GlobalBarrier>{&b, 1}, {}, {}});
     }
     void Barrier(const BufferBarrier& b) {
         Barrier(BarrierBatch{{}, std::span<const BufferBarrier>{&b, 1}, {}});

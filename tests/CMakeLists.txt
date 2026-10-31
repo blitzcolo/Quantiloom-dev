@@ -302,6 +302,7 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_offline_batch_scheduler.cpp
     test_renderer/test_display_range_gpu.cpp
     test_renderer/test_compute_migration_ab.cpp
+    test_renderer/test_gpu_clahe.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
@@ -699,7 +700,7 @@ add_custom_target(test_io
 
 # Run only renderer tests (non-Vulkan)
 add_custom_target(test_renderer
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*:ComputeMigrationAB.*:GpuMappingTest.*:GpuShaderLibraryTest.*:GpuVulkanTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*:ComputeMigrationAB.*:GpuClaheTest.*:GpuMappingTest.*:GpuBindingLayoutTest.*:GpuShaderLibraryTest.*:GpuVulkanTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
@@ -713,7 +714,7 @@ add_custom_target(test_postprocess
 
 # Run only hyperspectral core tests
 add_custom_target(test_hs_core
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=HyperspectralConfigTest.*:SpectralCubeIOTest.*:SpectralFeatureTypeTest.*:SpectralFeatureTest.*:SpectralAnalysisParamsTest.*:SpectralAnalysisResultTest.*:SpectralAnalyzerTest.*:AdaptiveGridInfoTest.*:ReconstructionMappingTest.*:AdaptiveGridGeneratorTest.*:InterpolationMethodTest.*:SpectralReconstructorTest.*:BatchRenderStatusTest.*:BatchRenderProgressTest.*:BatchRenderParamsTest.*:ValidateWavelengthListTest.*:SortWavelengthsTest.*:EstimateBatchTimeTest.*:BatchRendererWorkflowTest.*:BatchRendererEdgeCaseTest.*:GpuReconstructorStatusTest.*:GpuReconstructorConfigTest.*:EstimateReconstructionMemoryTest.*:HyperspectralConfigGpuTest.*:CatmullRomReferenceTest.*:LinearInterpReferenceTest.*:WavelengthGridTest.*:SpectralCubeLayoutTest.*:ComputeShaderCompatTest.*:GpuReconstructorEdgeCaseTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=HyperspectralConfigTest.*:SpectralCubeIOTest.*:SpectralFeatureTypeTest.*:SpectralFeatureTest.*:SpectralAnalysisParamsTest.*:SpectralAnalysisResultTest.*:SpectralAnalyzerTest.*:AdaptiveGridInfoTest.*:ReconstructionMappingTest.*:AdaptiveGridGeneratorTest.*:InterpolationMethodTest.*:SpectralReconstructorTest.*:BatchRenderStatusTest.*:BatchRenderProgressTest.*:BatchRenderParamsTest.*:ValidateWavelengthListTest.*:SortWavelengthsTest.*:EstimateBatchTimeTest.*:BatchRendererWorkflowTest.*:BatchRendererEdgeCaseTest.*:GpuReconstructorStatusTest.*:GpuReconstructorConfigTest.*:GpuSpectralReconstructorGpuTest.*:EstimateReconstructionMemoryTest.*:HyperspectralConfigGpuTest.*:CatmullRomReferenceTest.*:LinearInterpReferenceTest.*:WavelengthGridTest.*:SpectralCubeLayoutTest.*:ComputeShaderCompatTest.*:GpuReconstructorEdgeCaseTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )
