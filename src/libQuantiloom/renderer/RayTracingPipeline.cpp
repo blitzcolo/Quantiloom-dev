@@ -692,9 +692,12 @@ void RayTracingPipeline::CreateDescriptorSetLayout() {
     // Element 0 is the step: dp, the amount the parameter is being asked
     // "what if" about, and zero when nothing is. Element 1 + thermalElementBase
     // + PrimitiveIndex() is dT/dp for that triangle. So the shader adds
-    // tangent[1 + e] * tangent[0] to the temperature and a scene that is not
-    // previewing anything binds a single zero, which the step of zero turns
-    // off without a branch of its own.
+    // tangent[1 + e] * tangent[0] to the temperature. A host that is not
+    // previewing anything binds the inert record, two floats [0, 0]; the
+    // shader reads tangent[1 + e] only when the step is non-zero, so that
+    // record is in bounds for every element. Both hosts must bind it: the
+    // binding has no partially-bound flag, and the offline path once left it
+    // unwritten, so the shader read a descriptor left over from earlier jobs.
     //
     // The step lives here rather than in LightingParams because that struct
     // has no room left -- both its padding floats are spoken for, and growing

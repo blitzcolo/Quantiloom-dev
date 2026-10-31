@@ -257,6 +257,9 @@ struct OfflineRenderer::Impl {
     /// zero entry when no solve ran.
     std::unique_ptr<GpuBuffer> thermalTemperatureBuffer;
     std::unique_ptr<GpuBuffer> thermalSunResponseBuffer;
+    /// Binding 27, the what-if field. The offline path never previews anything,
+    /// so this is always the inert record: step 0 and one zero tangent.
+    std::unique_ptr<GpuBuffer> thermalParameterTangentBuffer;
     std::unique_ptr<GpuBuffer> materialBuffer;
     rendercore::BrdfLut brdfLut;
     rendercore::EnvironmentCubemap envMap;
@@ -512,6 +515,15 @@ void OfflineRenderer::Impl::UploadThermalResult(const thermal::ThermalResult& re
     upload(thermalSunResponseBuffer, records.data(),
            records.size() * sizeof(rendercore::ThermalSunResponseGpu),
            [this](const GpuBuffer& b) { pipeline->BindThermalSunResponseBuffer(b); });
+
+    // Binding 27 has no partially-bound flag either, and the closest-hit shader
+    // reads its step on every thermal-element hit. This path never previews a
+    // parameter, so it is the same inert record on every path: step 0, then one
+    // zero tangent (two floats, the size ExternalRenderContext uses for "nothing
+    // previewed").
+    const f32 inertTangent[2] = {0.0f, 0.0f};
+    upload(thermalParameterTangentBuffer, inertTangent, sizeof(inertTangent),
+           [this](const GpuBuffer& b) { pipeline->BindThermalTangentBuffer(b); });
 
     // Point the instances at their elements. This is the whole of how a
     // triangle in the shader finds the temperature the balance gave it.
@@ -1181,6 +1193,7 @@ SetupResult OfflineRenderer::Impl::BuildPipeline() {
     bindings.emissiveTriangles = emissiveTriangleBuffer.get();
     bindings.thermalTemperatures = thermalTemperatureBuffer.get();
     bindings.thermalSunResponse = thermalSunResponseBuffer.get();
+    bindings.thermalParameterTangent = thermalParameterTangentBuffer.get();
 
     pipeline = rendercore::CreateRayTracingPipeline(context, pipelineCache, bindings);
     pipeline->SetFusionTransport(spectra.fusionTransport);

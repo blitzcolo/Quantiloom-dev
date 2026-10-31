@@ -419,10 +419,12 @@ float GetSurfaceTemperatureK(MaterialData material, InstanceGeometryInfo geoInfo
         const float solved = thermalTemperatures[element];
         if (solved > 0.0) {
             // The what-if step, first order. Zero whenever nothing is being
-            // previewed, which is a multiply rather than a branch and costs
-            // one buffer read on a path that already makes several.
+            // previewed, and then the per-element tangent is not read: the
+            // inert record a host binds for "nothing previewed" holds no
+            // per-element entries, so reading [1 + element] would run past it.
             const float step = thermalParameterTangent[0];
-            const float whatIf = step * thermalParameterTangent[1 + element];
+            const float whatIf =
+                (step != 0.0) ? step * thermalParameterTangent[1 + element] : 0.0;
             // The sun correction is the expensive part -- one shadow ray per
             // carried column. A caller whose band cannot see thermal
             // emission anyway passes false: to a term multiplied by zero,
@@ -5450,7 +5452,12 @@ void ShadeVertexA(HitRecord rec, RayDesc ray, inout PathVertex payload,
                 float sensitivity = 0.0;
                 if (geoInfo.thermalElementBase != 0xFFFFFFFFu) {
                     const uint element = geoInfo.thermalElementBase + rec.primitiveIndex;
-                    sensitivity = thermalParameterTangent[1 + element];
+                    // The inert record ("nothing previewed") holds no
+                    // per-element entries; read only what the buffer has.
+                    uint tangentCount, tangentStride;
+                    thermalParameterTangent.GetDimensions(tangentCount, tangentStride);
+                    if (1u + element < tangentCount)
+                        sensitivity = thermalParameterTangent[1 + element];
                 }
                 debug_output = TemperatureToColor(350.0 + sensitivity * 15.0, 200.0, 500.0);
                 break;

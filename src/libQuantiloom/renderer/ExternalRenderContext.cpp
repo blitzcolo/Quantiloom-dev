@@ -1848,8 +1848,8 @@ bool ExternalRenderContext::Impl::UploadThermalSunResponse(
 /// Put a per-element tangent field and its step on binding 27.
 ///
 /// One float of step at index 0 and one tangent per element after it. Empty
-/// tangents mean nothing is being previewed, which is a single zero: the
-/// shader's multiply by the step then costs nothing and needs no branch.
+/// tangents mean nothing is being previewed, which is the inert record [0, 0]:
+/// the shader reads a per-element entry only when the step is non-zero.
 ///
 /// @return true when the buffer was reallocated, which is what tells the
 ///         caller the descriptor has to be rewritten.

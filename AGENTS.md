@@ -619,8 +619,10 @@ six numbers do not change with whether the machine has a GPU, and the state
 they describe is the trajectory's own either way.
 
 **Binding 27** carries the what-if field: a step at index 0 and one dT/dp per
-element after it, so a scene previewing nothing binds a single zero and the
-shader's multiply costs nothing and needs no branch. The step rides in the
+element after it, so a scene previewing nothing binds the inert record `[0, 0]`
+and the shader reads the per-element entry only when the step is non-zero. Both
+hosts (`ExternalRenderContext` and `OfflineRenderer`) must bind it on every
+path: the binding has no partially-bound flag. The step rides in the
 buffer rather than in `LightingParams` because that struct has no room left —
 both its padding floats are spoken for, and growing it changes the SDK/Studio
 pairing hash. Binding 26 carries its own header for the same reason.
