@@ -16,6 +16,7 @@
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
+#include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <filesystem>
@@ -40,12 +41,7 @@ protected:
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
-        params.instance = shared->GetInstance();
-        params.physicalDevice = shared->GetPhysicalDevice();
-        params.device = shared->GetDevice();
-        params.graphicsQueue = shared->GetGraphicsQueue();
-        params.graphicsQueueFamily = shared->GetGraphicsQueueFamily();
-        params.targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        params.device = quantiloom::testing::GpuHandles(*shared);
         params.width = kSize;
         params.height = kSize;
         params.pipelineCacheDir = testDir.string();
@@ -102,10 +98,12 @@ protected:
                            VK_BUFFER_USAGE_TRANSFER_DST_BIT, VMA_MEMORY_USAGE_GPU_TO_CPU);
 
         CommandHelper::ExecuteImmediate(ctx, [&](VkCommandBuffer cmd) {
-            context->RenderFrame(cmd, colorTarget.GetImage(),
-                                 VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
-            context->BlitDepthTo(cmd, depthTarget.GetImage(),
-                                 VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+            context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(colorTarget.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
+            context->BlitDepthTo(vk::Commands(cmd),
+                             vk::Target(depthTarget.GetImage(), GpuTargetFormat::R32Float, kSize, kSize,
+                                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
 
             // BlitDepthTo leaves the target SHADER_READ_ONLY; copy it out.
             // Manual barrier: CommandHelper does not know this transition.

@@ -234,6 +234,42 @@ add_custom_target(CompileShaders ALL
     COMMENT "Compiling all shaders"
 )
 
+# ----------------------------------------------------------------------------
+# SHADERSET: one digest over the exact .spv set, installed beside the shaders
+# and compiled into the library. A resource copy whose stamp does not match is
+# rejected at runtime instead of being silently rendered with (f.7).
+# ----------------------------------------------------------------------------
+set(QL_SHADER_SET_NAMES)
+foreach(SHADER_OUTPUT ${COMPILED_SHADERS})
+    get_filename_component(SHADER_NAME ${SHADER_OUTPUT} NAME)
+    list(APPEND QL_SHADER_SET_NAMES ${SHADER_NAME})
+endforeach()
+list(SORT QL_SHADER_SET_NAMES)
+set(QL_SHADER_SET_STAMP "${CMAKE_CURRENT_BINARY_DIR}/SHADERSET")
+set(QL_SHADER_SET_DIGEST_HEADER "${CMAKE_CURRENT_BINARY_DIR}/core/ShaderSetDigest.hpp")
+# A stub so the first configure always has a header to compile against; the
+# custom command below replaces it before the library is compiled.
+if(NOT EXISTS "${QL_SHADER_SET_DIGEST_HEADER}")
+    file(WRITE "${QL_SHADER_SET_DIGEST_HEADER}"
+         "#pragma once\nnamespace quantiloom::core { inline constexpr const char* kShaderSetDigest = \"\"; }\n")
+endif()
+list(JOIN QL_SHADER_SET_NAMES ";" QL_SHADER_SET_NAME_LIST)
+add_custom_command(
+    OUTPUT ${QL_SHADER_SET_STAMP} ${QL_SHADER_SET_DIGEST_HEADER}
+    COMMAND ${CMAKE_COMMAND}
+        -DSHADER_DIR=${SHADER_OUTPUT_DIR}
+        "-DNAMES=${QL_SHADER_SET_NAME_LIST}"
+        -DSTAMP=${QL_SHADER_SET_STAMP}
+        -DHEADER=${QL_SHADER_SET_DIGEST_HEADER}
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/ShaderSetStamp.cmake
+    DEPENDS ${COMPILED_SHADERS} ${CMAKE_CURRENT_SOURCE_DIR}/ShaderSetStamp.cmake
+    COMMENT "Stamping the shader set (SHADERSET)"
+    VERBATIM
+)
+add_custom_target(ShaderSetStamp DEPENDS ${QL_SHADER_SET_STAMP} ${QL_SHADER_SET_DIGEST_HEADER})
+set(QL_SHADER_SET_STAMP "${QL_SHADER_SET_STAMP}" PARENT_SCOPE)
+set(QL_SHADER_SET_DIGEST_HEADER "${QL_SHADER_SET_DIGEST_HEADER}" PARENT_SCOPE)
+
 # Portability check target, plus a manifest the build scripts read to report
 # it: which shaders were checked, and whether the metallib half ran. A failed
 # DXC or MSC step already fails the build; the manifest exists so that a

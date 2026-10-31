@@ -7,6 +7,7 @@
 #include "renderer/GpuCameraPipeline.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
+#include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <algorithm>
@@ -998,12 +999,7 @@ protected:
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
-        params.instance = shared->GetInstance();
-        params.physicalDevice = shared->GetPhysicalDevice();
-        params.device = shared->GetDevice();
-        params.graphicsQueue = shared->GetGraphicsQueue();
-        params.graphicsQueueFamily = shared->GetGraphicsQueueFamily();
-        params.targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        params.device = quantiloom::testing::GpuHandles(*shared);
         params.width = kViewportSize;
         params.height = kViewportSize;
         params.pipelineCacheDir = testDir.string();
@@ -1133,8 +1129,9 @@ protected:
 
     void DrawFrame() {
         CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(cmd, target->GetImage(), VK_IMAGE_LAYOUT_UNDEFINED,
-                                 kViewportSize, kViewportSize);
+            context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kViewportSize, kViewportSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
         });
     }
 
@@ -2794,7 +2791,7 @@ TEST_F(CameraSchedulerGpuTest, AutoExposureConvergesAcrossCommittedTicks) {
     ASSERT_TRUE(queued.has_value()) << queued.error();
     Result<void, String> recorded = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-        recorded = context->RecordQueuedCameraAcquisition(cmd);
+        recorded = context->RecordQueuedCameraAcquisition(vk::Commands(cmd));
     });
     ASSERT_TRUE(recorded.has_value()) << recorded.error();
     ASSERT_TRUE(context->CompleteQueuedCameraAcquisition().has_value());
@@ -2937,8 +2934,9 @@ TEST_F(CameraSchedulerGpuTest, ReprocessCameraDisplayRefreshesWithoutAdvancing) 
     bool presented = false;
     CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
         presented = context->ReprocessAccumulated(
-            cmd, target->GetImage(), VK_IMAGE_LAYOUT_UNDEFINED,
-            kViewportSize, kViewportSize);
+            vk::Commands(cmd),
+            vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kViewportSize, kViewportSize,
+                       VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
     });
     EXPECT_TRUE(presented);
 }

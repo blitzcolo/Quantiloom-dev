@@ -13,6 +13,7 @@
 #include "renderer/RenderDeviceImpl.hpp"
 
 #include "core/Log.hpp"
+#include "core/ResourceLocator.hpp"
 #include "renderer/RayTracingPipeline.hpp"
 
 namespace quantiloom {
@@ -36,6 +37,12 @@ RenderDevice::~RenderDevice() = default;
 Result<std::unique_ptr<RenderDevice>, String> RenderDevice::Create(
     const InitParams& params) {
     using CreateResult = Result<std::unique_ptr<RenderDevice>, String>;
+
+    // Fail before touching the device when no shader set can be found, so the
+    // error names the roots that were probed rather than a missing file.
+    if (const String resourcesError = core::ResourceNotFoundMessage(); !resourcesError.empty()) {
+        return CreateResult::Err(resourcesError);
+    }
 
     // Not make_unique: the constructor is private, and Create() being the only
     // way in is the point -- the same shape as OfflineRenderer.

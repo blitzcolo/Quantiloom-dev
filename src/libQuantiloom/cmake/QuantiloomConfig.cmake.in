@@ -11,21 +11,38 @@
 #   find_package(Quantiloom REQUIRED)
 #   target_link_libraries(MyApp PRIVATE Quantiloom::libQuantiloom)
 #
+#   find_package(Quantiloom REQUIRED COMPONENTS VulkanInterop)
+#   target_link_libraries(MyApp PRIVATE Quantiloom::VulkanInterop)
+#
 # Requirements:
-#   - Vulkan SDK (find_package(Vulkan))
 #   - glm (find_package(glm) or header-only include)
+#   - Vulkan SDK, ONLY for the VulkanInterop component: the neutral public
+#     headers carry no Vulkan type, so the base package does not ask for it.
 #
 # ============================================================================
 
 include(CMakeFindDependencyMacro)
 
 # Find required PUBLIC dependencies
-# (PRIVATE deps like spdlog, toml++, VMA are hidden - not needed by consumers)
-find_dependency(Vulkan REQUIRED)
+# (PRIVATE deps like spdlog, toml++, VMA, Vulkan are hidden - not needed by consumers)
 find_dependency(glm REQUIRED)
 
 # Include exported targets
 include("${CMAKE_CURRENT_LIST_DIR}/QuantiloomTargets.cmake")
+
+# Optional components, each in its own export set so that the base package
+# never references a backend.
+foreach(_ql_component IN LISTS Quantiloom_FIND_COMPONENTS)
+    if(_ql_component STREQUAL "VulkanInterop")
+        find_dependency(Vulkan)                            # headers only: Vulkan::Headers
+        include("${CMAKE_CURRENT_LIST_DIR}/QuantiloomVulkanInteropTargets.cmake")
+        set(Quantiloom_VulkanInterop_FOUND TRUE)
+    elseif(_ql_component STREQUAL "MetalInterop" AND APPLE)
+        include("${CMAKE_CURRENT_LIST_DIR}/QuantiloomMetalInteropTargets.cmake")
+        set(Quantiloom_MetalInterop_FOUND TRUE)
+    endif()
+endforeach()
+unset(_ql_component)
 
 # Provide version info
 set(Quantiloom_VERSION @PROJECT_VERSION@)

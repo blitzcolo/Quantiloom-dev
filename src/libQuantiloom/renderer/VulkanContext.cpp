@@ -2,6 +2,7 @@
 #include <vk_mem_alloc.h>
 
 #include "VulkanContext.hpp"
+#include "renderer/VulkanDeviceRequirements.hpp"
 #include "core/Log.hpp"
 #include <stdexcept>
 #include <set>
@@ -437,77 +438,35 @@ void VulkanContext::CreateDevice() {
     queueCreateInfo.queueCount = 1;
     queueCreateInfo.pQueuePriorities = &queuePriority;
 
-    // Required extensions for ray tracing
-    std::vector<const char*> deviceExtensions = {
-        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        VK_KHR_RAY_QUERY_EXTENSION_NAME,  // Required if shaders use RayQuery capability
-        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
-        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
-    };
-
-    // Enable Vulkan 1.3 features (conditional - only if device supports)
-    VkPhysicalDeviceVulkan13Features features13{};
-    features13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-
-    // Conditionally enable VK 1.3 features if available
-    // NOTE: These are NOT currently used (ghost features), but enabled for future-proofing
+    // The extension list and the feature chain are shared with the public
+    // vk::CreateDevice() helper (renderer/VulkanDeviceRequirements.hpp), so a
+    // windowed host and the CLI cannot drift into asking for different devices.
+    const auto& deviceExtensions = vulkan::RequiredDeviceExtensions();
     if (m_capabilities.hasVulkan13) {
         if (m_capabilities.hasSynchronization2) {
-            features13.synchronization2 = VK_TRUE;
             QL_LOG_INFO("  Enabling synchronization2 (for future use)");
         }
         if (m_capabilities.hasDynamicRendering) {
-            features13.dynamicRendering = VK_TRUE;
             QL_LOG_INFO("  Enabling dynamicRendering (for future use)");
         }
     }
-
-    // Enable Vulkan 1.2 features (MANDATORY)
-    VkPhysicalDeviceVulkan12Features features12{};
-    features12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-    features12.bufferDeviceAddress = VK_TRUE;  // MANDATORY for RT
-    features12.descriptorIndexing = VK_TRUE;
-    features12.runtimeDescriptorArray = VK_TRUE;
-    features12.descriptorBindingPartiallyBound = VK_TRUE;  // Required for PARTIALLY_BOUND_BIT
-    features12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;  // Required for NonUniformResourceIndex
-    features12.pNext = &features13;
-
-    // Log warning if descriptor indexing not fully supported
     if (!m_capabilities.hasDescriptorIndexing) {
         QL_LOG_WARN("Descriptor indexing NOT fully supported - bindless texture limit reduced to 32");
     }
 
-    // Enable Ray Tracing features
-    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
-    rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-    rtPipelineFeatures.rayTracingPipeline = VK_TRUE;
-    rtPipelineFeatures.pNext = &features12;
-
-    // Enable Ray Query features (required if shaders declare RayQueryKHR capability).
-    // Safe to enable unconditionally: IsDeviceSuitable queried the feature and
-    // rejected any device that reports it unsupported.
-    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
-    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-    rayQueryFeatures.rayQuery = VK_TRUE;
-    rayQueryFeatures.pNext = &rtPipelineFeatures;
-
-    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
-    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-    asFeatures.accelerationStructure = VK_TRUE;
-    asFeatures.pNext = &rayQueryFeatures;
-
-    // Device features
-    VkPhysicalDeviceFeatures2 deviceFeatures{};
-    deviceFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    deviceFeatures.pNext = &asFeatures;
+    // The SDK's own device enables no optional 1.0 feature, as it always has.
+    vulkan::DeviceCapabilities capabilities{};
+    capabilities.hasVulkan13 = m_capabilities.hasVulkan13;
+    capabilities.hasSynchronization2 = m_capabilities.hasSynchronization2;
+    capabilities.hasDynamicRendering = m_capabilities.hasDynamicRendering;
+    capabilities.hasDescriptorIndexing = m_capabilities.hasDescriptorIndexing;
+    vulkan::FeatureChain chain;
+    vulkan::BuildFeatureChain(chain, capabilities, VkPhysicalDeviceFeatures{});
 
     // Device creation
     VkDeviceCreateInfo createInfo{};
     createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    createInfo.pNext = &deviceFeatures;
+    createInfo.pNext = &chain.features2;
     createInfo.queueCreateInfoCount = 1;
     createInfo.pQueueCreateInfos = &queueCreateInfo;
     createInfo.enabledExtensionCount = static_cast<u32>(deviceExtensions.size());
@@ -580,118 +539,11 @@ std::vector<const char*> VulkanContext::GetRequiredValidationLayers() {
 }
 
 bool VulkanContext::IsDeviceSuitable(VkPhysicalDevice device) {
-    VkPhysicalDeviceProperties deviceProperties;
-    vkGetPhysicalDeviceProperties(device, &deviceProperties);
-
-    // Query Vulkan 1.2 features for validation
-    VkPhysicalDeviceVulkan12Features features12Query{};
-    features12Query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-
-    VkPhysicalDeviceFeatures2 features2Query{};
-    features2Query.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2Query.pNext = &features12Query;
-
-    vkGetPhysicalDeviceFeatures2(device, &features2Query);
-
-    // bufferDeviceAddress is MANDATORY for Ray Tracing (BLAS/TLAS addressing)
-    if (!features12Query.bufferDeviceAddress) {
-        QL_LOG_WARN("  Skipping {}: Missing bufferDeviceAddress (required for Ray Tracing)", deviceProperties.deviceName);
-        return false;
-    }
-
-    // Warn about integrated GPU (not blocking, just informational)
-    if (deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) {
-        QL_LOG_WARN("  Integrated GPU detected: {} (may have reduced performance)", deviceProperties.deviceName);
-    }
-
-    // Check for graphics queue
-    auto queueFamily = FindGraphicsQueueFamily(device);
-    if (!queueFamily.has_value()) {
-        QL_LOG_WARN("  Skipping {}: No suitable queue family", deviceProperties.deviceName);
-        return false;
-    }
-
-    // Check for required Ray Tracing extensions
-    u32 extensionCount = 0;
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
-    std::vector<VkExtensionProperties> availableExtensions(extensionCount);
-    vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, availableExtensions.data());
-
-    std::set<std::string> requiredExtensions = {
-        VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-        VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-        VK_KHR_RAY_QUERY_EXTENSION_NAME,
-        VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME,
-        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,
-        VK_KHR_SPIRV_1_4_EXTENSION_NAME,
-        VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME,
-    };
-
-    for (const auto&[extensionName, specVersion] : availableExtensions) {
-        requiredExtensions.erase(extensionName);
-    }
-
-    if (!requiredExtensions.empty()) {
-        QL_LOG_WARN("  Skipping {}: Missing Ray Tracing extensions:", deviceProperties.deviceName);
-        for (const auto& missing : requiredExtensions) {
-            QL_LOG_WARN("    - {}", missing);
-        }
-        return false;
-    }
-
-    // Check for Ray Tracing features
-    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rtPipelineFeatures{};
-    rtPipelineFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
-
-    VkPhysicalDeviceRayQueryFeaturesKHR rayQueryFeatures{};
-    rayQueryFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
-    rtPipelineFeatures.pNext = &rayQueryFeatures;
-
-    VkPhysicalDeviceAccelerationStructureFeaturesKHR asFeatures{};
-    asFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
-    asFeatures.pNext = &rtPipelineFeatures;
-
-    VkPhysicalDeviceFeatures2 features2{};
-    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.pNext = &asFeatures;
-
-    vkGetPhysicalDeviceFeatures2(device, &features2);
-
-    if (!asFeatures.accelerationStructure || !rtPipelineFeatures.rayTracingPipeline) {
-        QL_LOG_WARN("  Skipping {}: Ray Tracing features not supported", deviceProperties.deviceName);
-        QL_LOG_WARN("    - Acceleration Structure: {}", asFeatures.accelerationStructure ? "YES" : "NO");
-        QL_LOG_WARN("    - Ray Tracing Pipeline: {}", rtPipelineFeatures.rayTracingPipeline ? "YES" : "NO");
-        return false;
-    }
-
-    // The extension being present does not imply the feature is supported;
-    // enabling rayQuery unconditionally here used to fail vkCreateDevice on
-    // devices that expose VK_KHR_ray_query without the feature.
-    if (!rayQueryFeatures.rayQuery) {
-        QL_LOG_WARN("  Skipping {}: rayQuery feature not supported", deviceProperties.deviceName);
-        return false;
-    }
-
-    QL_LOG_INFO("  Checking {}: All requirements met", deviceProperties.deviceName);
-    return true;
+    return vulkan::IsDeviceSuitable(device);
 }
 
 Optional<u32> VulkanContext::FindGraphicsQueueFamily(VkPhysicalDevice device) {
-    u32 queueFamilyCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
-
-    std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
-
-    for (u32 i = 0; i < queueFamilyCount; ++i) {
-        // Look for graphics + compute + transfer
-        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT &&
-            queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT) {
-            return i;
-        }
-    }
-
-    return std::nullopt;
+    return vulkan::FindGraphicsQueueFamily(device);
 }
 
 } // namespace quantiloom
