@@ -228,12 +228,6 @@ if(DXC_EXECUTABLE)
     quantiloom_compile_hlsl(spectral_reconstruct spectral_reconstruct.comp.hlsl)
 endif()
 
-# Create custom target that depends on all compiled shaders
-add_custom_target(CompileShaders ALL
-    DEPENDS ${COMPILED_SHADERS}
-    COMMENT "Compiling all shaders"
-)
-
 # ----------------------------------------------------------------------------
 # SHADERSET: one digest over the exact .spv set, installed beside the shaders
 # and compiled into the library. A resource copy whose stamp does not match is
@@ -266,7 +260,23 @@ add_custom_command(
     COMMENT "Stamping the shader set (SHADERSET)"
     VERBATIM
 )
-add_custom_target(ShaderSetStamp DEPENDS ${QL_SHADER_SET_STAMP} ${QL_SHADER_SET_DIGEST_HEADER})
+
+# One target owns every rule above: the .spv compiles and the stamp over them.
+# The Visual Studio generator copies a custom command into every target of
+# this directory that depends on its output, following DEPENDS chains, so a
+# second target reaching the .spv -- even only through the stamp -- got its own
+# copy of all the DXC rules, and under -j two projects ran the same rule at
+# once (MSB8066 on ShaderSetStamp.vcxproj). Inside one target the stamp still
+# runs after the shaders it hashes, and again whenever any of them changes.
+add_custom_target(CompileShaders ALL
+    DEPENDS ${COMPILED_SHADERS} ${QL_SHADER_SET_STAMP} ${QL_SHADER_SET_DIGEST_HEADER}
+    COMMENT "Compiling all shaders"
+)
+# The name the library orders itself after. It carries no rule of its own:
+# depending on the stamp file here would copy the stamp's rule, and through it
+# every .spv rule, back into this target.
+add_custom_target(ShaderSetStamp)
+add_dependencies(ShaderSetStamp CompileShaders)
 set(QL_SHADER_SET_STAMP "${QL_SHADER_SET_STAMP}" PARENT_SCOPE)
 set(QL_SHADER_SET_DIGEST_HEADER "${QL_SHADER_SET_DIGEST_HEADER}" PARENT_SCOPE)
 
