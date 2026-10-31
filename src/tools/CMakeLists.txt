@@ -68,33 +68,8 @@ foreach(tool thermal_column_tool sensor_lab colour_lab camera_gpu_bench)
     endif()
 endforeach()
 
-add_custom_command(
-    TARGET camera_gpu_bench POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_extents.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_histogram.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_tiles.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_reduce.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_hist.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_cdf.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_demosaic.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_dynamic.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_hsv.comp.spv"
-        "$<TARGET_FILE_DIR:camera_gpu_bench>"
-    COMMENT "Copying camera shaders next to camera_gpu_bench"
-)
+# No shaders beside the benchmark: the resource locator resolves them from
+# the SDK's share/quantiloom or from the working-directory development fallback.
 add_dependencies(camera_gpu_bench CompileShaders)
 
 # quantiloom_core carries the USD loader, so anything linking it needs the USD

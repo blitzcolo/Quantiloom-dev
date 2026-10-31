@@ -23,6 +23,7 @@
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuImage.hpp"
 #include "core/Config.hpp"
+#include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <glm/gtc/matrix_transform.hpp>
@@ -167,12 +168,7 @@ protected:
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
-        params.instance = shared->GetInstance();
-        params.physicalDevice = shared->GetPhysicalDevice();
-        params.device = shared->GetDevice();
-        params.graphicsQueue = shared->GetGraphicsQueue();
-        params.graphicsQueueFamily = shared->GetGraphicsQueueFamily();
-        params.targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        params.device = quantiloom::testing::GpuHandles(*shared);
         params.width = kBenchSize;
         params.height = kBenchSize;
         params.pipelineCacheDir = tempDir.string();
@@ -199,8 +195,9 @@ protected:
     // rather than one that was queued.
     void DrawOneFrame() {
         CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(cmd, target->GetImage(), VK_IMAGE_LAYOUT_UNDEFINED,
-                                 kBenchSize, kBenchSize);
+            context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(target->GetImage(), GpuTargetFormat::Bgra8Srgb, kBenchSize, kBenchSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
         });
     }
 

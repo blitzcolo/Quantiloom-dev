@@ -1,36 +1,48 @@
 /**
  * @file ExternalRenderContext.hpp
- * @brief External Vulkan context injection API for Qt6 GUI integration
+ * @brief Rendering into GPU objects the host owns, through a backend-neutral API
  *
- * Provides ExternalRenderContext class for rendering to externally-managed
- * Vulkan surfaces (e.g., QVulkanWindow). This enables Qt6 GUI applications
- * to use libQuantiloom's ray tracing without creating their own VulkanContext.
+ * Provides ExternalRenderContext for rendering into a host-managed device and
+ * frame texture (e.g. a Qt6 QRhi viewport). The host creates the device and
+ * describes it with renderer/GpuInterop.hpp PODs; no Vulkan or Metal header
+ * is included here. The typed builders and the device factory live in
+ * renderer/interop/.
  *
  * Key features:
- * - Accepts external VkDevice, VkQueue, VkInstance handles
- * - Uses VK_KHR_dynamic_rendering for RenderPass-free integration
- * - Records commands to external VkCommandBuffer
+ * - Accepts the host's device, queue and instance as neutral handles
+ * - Records commands into the host's command buffer, outside any render pass
+ * - Writes a host-owned target image and leaves it in a caller-chosen layout
  * - Supports real-time parameter updates for interactive editing
  *
- * Usage pattern (Qt6 QVulkanWindowRenderer):
+ * Usage pattern (Qt6 QRhi, Vulkan):
  * @code
- * // In initResources():
- * ExternalRenderContext::InitParams params{};
- * params.instance = vulkanInstance->vkInstance();
- * params.physicalDevice = window->physicalDevice();
- * params.device = window->device();
- * params.graphicsQueue = window->graphicsQueue();
- * params.graphicsQueueFamily = window->graphicsQueueFamilyIndex();
- * params.targetColorFormat = window->colorFormat();
+ * // Device creation (once), through the SDK's one requirement list:
+ * vk::DeviceRequest request{};
+ * request.instance = vulkanInstance->vkInstance();
+ * request.getInstanceProcAddr = vulkanInstance->getInstanceProcAddr(...);
+ * auto device = vk::CreateDevice(request);
  *
+ * ExternalRenderContext::InitParams params{};
+ * params.device = vk::Handles(device.value(), request.instance,
+ *                             request.getInstanceProcAddr);
+ * params.width = width;
+ * params.height = height;
  * auto result = ExternalRenderContext::Create(params);
  * m_renderContext = std::move(result.value());
  *
- * // In startNextFrame():
- * m_renderContext->RenderFrame(cmd, targetImageView, width, height);
+ * // Per frame, between beginExternal()/endExternal() and outside any pass:
+ * m_renderContext->RenderFrame(
+ *     vk::Commands(nativeCommandBuffer),
+ *     vk::Target(frameImage, GpuTargetFormat::Rgba8Srgb, width, height,
+ *                frameTexture->nativeTexture().layout,
+ *                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL));
+ * frameTexture->setNativeLayout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
  * @endcode
  *
- * @note Requires Vulkan 1.3 or VK_KHR_dynamic_rendering extension
+ * @note The synchronization contract of the recording calls (first barrier
+ *       from ALL_COMMANDS/MEMORY_WRITE, last into finalLayout with
+ *       ALL_COMMANDS/MEMORY_READ|MEMORY_WRITE) is written out in
+ *       renderer/interop/VulkanInterop.hpp.
  * @note Every call must be made from one thread -- the host's render/GUI
  *       thread. The implementation carries no internal locking: parameter
  *       setters write the deferred-upload queue and some drain the device,
@@ -55,29 +67,21 @@
 #include "renderer/LightingParams.hpp"
 #include "renderer/Pick.hpp"
 #include "renderer/PixelReading.hpp"
+#include "renderer/GpuInterop.hpp"
 #include "atmos/AtmosphereNNConfig.hpp"
 #include "core/Image.hpp"
 #include "core/SpectralData.hpp"
 #include "postprocess/SensorModel.hpp"
 #include "postprocess/CameraPipeline.hpp"
 
-#include <vulkan/vulkan.h>
 #include <glm/glm.hpp>
 #include <functional>
 #include <memory>
 #include <atomic>
 
-// Forward declaration for VMA allocator (avoid including heavy VMA header)
-struct VmaAllocator_T;
-typedef VmaAllocator_T* VmaAllocator;
-
 namespace quantiloom {
 
 // Forward declarations
-class GpuBuffer;
-class GpuImage;
-class RayTracingPipeline;
-class TextureManager;
 class BLAS;
 class TLAS;
 struct ComplexRefractiveIndex;
@@ -226,15 +230,14 @@ struct CameraHistoryStatus {
 
 /**
  * @class ExternalRenderContext
- * @brief Renders to externally-managed Vulkan surfaces using dynamic rendering
+ * @brief Renders into host-owned GPU targets
  *
  * This class provides the interface for integrating libQuantiloom's spectral
- * ray tracing into external applications (Qt6, game engines, etc.) that manage
- * their own Vulkan context.
+ * ray tracing into external applications (Qt6, game engines, etc.) that own
+ * their GPU device and their presentation path.
  *
- * Unlike VulkanContext which creates its own VkInstance/VkDevice, this class
- * accepts externally-provided Vulkan handles and adapts the rendering pipeline
- * to work with them.
+ * Unlike the SDK's internal device, this class accepts externally-provided
+ * device handles and adapts the rendering pipeline to work with them.
  */
 class QL_API ExternalRenderContext {
 public:
@@ -246,25 +249,16 @@ public:
      * @struct InitParams
      * @brief Parameters for external context initialization
      *
-     * All Vulkan handles must be valid and remain valid for the lifetime
-     * of the ExternalRenderContext.
+     * The device handles must be valid and remain valid for the lifetime
+     * of the ExternalRenderContext. Fill them with vk::Handles() or
+     * mtl::Handles() from renderer/interop/.
      */
     struct InitParams {
-        VkInstance instance = VK_NULL_HANDLE;
-        VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
-        VkDevice device = VK_NULL_HANDLE;
-        VkQueue graphicsQueue = VK_NULL_HANDLE;
-        u32 graphicsQueueFamily = 0;
-
-        // Target surface format (must match Qt's swapchain format)
-        VkFormat targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        GpuDeviceHandles device;
 
         // Initial viewport size
         u32 width = 1280;
         u32 height = 720;
-
-        // Optional: VMA allocator (if nullptr, creates internal allocator)
-        VmaAllocator externalAllocator = VK_NULL_HANDLE;
 
         // Optional: Pipeline cache directory path
         // If empty, uses platform-specific default:
@@ -279,19 +273,19 @@ public:
     // ========================================================================
 
     /**
-     * @brief Create ExternalRenderContext from external Vulkan handles
+     * @brief Create ExternalRenderContext from the host's device handles
      *
-     * Validates parameters and initializes internal resources (VMA, pipeline, etc.)
-     * using the provided external Vulkan handles.
+     * Validates parameters and initializes internal resources (allocator,
+     * pipeline, etc.) on the device the host hands over.
      *
      * @param params Initialization parameters
      * @return Result containing context or error message
      *
-     * @note The external VkDevice must have been created with:
-     *       - VK_KHR_acceleration_structure
-     *       - VK_KHR_ray_tracing_pipeline
-     *       - VK_KHR_dynamic_rendering (or Vulkan 1.3)
-     *       - Buffer device address feature enabled
+     * @note A version other than kGpuInteropVersion, a backend this build
+     *       does not have, and a null required handle are each rejected with
+     *       their own message. On Vulkan the device must carry the SDK's
+     *       extensions and features; vk::CreateDevice() is the way to create
+     *       one that does.
      */
     static Result<std::unique_ptr<ExternalRenderContext>, String> Create(const InitParams& params);
 
@@ -420,28 +414,32 @@ public:
     // ========================================================================
 
     /**
-     * @brief Render frame to external command buffer
+     * @brief Render a frame into a host-owned target image
      *
-     * Records ray tracing commands to the provided command buffer, then copies
-     * the result to the target swapchain image.
+     * Records ray tracing commands into the host's command buffer, then blits
+     * the result into the target image.
      *
      * The caller is responsible for:
-     * - Beginning the command buffer
-     * - Passing the target image's CURRENT layout as @p targetLayout; this call
-     *   transitions it to TRANSFER_DST_OPTIMAL for the blit and leaves it in
-     *   PRESENT_SRC_KHR, so no transition is needed before present
+     * - Beginning the command buffer (recording state, outside any render pass)
+     * - Passing the target image's CURRENT layout as target.currentLayout;
+     *   the call transitions it to TRANSFER_DST_OPTIMAL for
+     *   the blit and leaves it in target.finalLayout
      * - Submitting the command buffer
+     *
+     * Synchronization follows the contract in renderer/interop/VulkanInterop.hpp:
+     * the first barrier on the target waits on ALL_COMMANDS / MEMORY_WRITE from
+     * the declared current layout, and the last one hands finalLayout to
+     * ALL_COMMANDS / MEMORY_READ | MEMORY_WRITE. The host's next use of the
+     * image must request exactly finalLayout.
      *
      * If recording fails (an allocation failure, a lost device) the error is
      * logged, nothing is thrown, and IsReady() turns false until a scene is
      * loaded again; later calls return without recording.
      *
-     * @param cmd Command buffer (must be in recording state)
-     * @param targetImage Target swapchain image (from QVulkanWindow::swapChainImage)
-     * @param targetLayout Current layout of target image (typically UNDEFINED or PRESENT_SRC_KHR)
-     * @param width Target width -- the extent of @p targetImage, not
-     *        necessarily what gets traced. See SetRenderScale.
-     * @param height Target height, likewise
+     * @param recording Command buffer to record into, with its backend and version
+     * @param target Target image, its format, extent and current/final layouts.
+     *        The extent is that of the target image, not necessarily what gets
+     *        traced. See SetRenderScale.
      *
      * @note For real-time preview, use low SPP (1-4)
      * @note Uses progressive accumulation if SPP > 1
@@ -449,19 +447,15 @@ public:
      *       blitted to the target, which clamps anything above 1.0 and applies
      *       the target format's transfer function -- so an sRGB target encodes
      *       and a UNORM one displays linear values uncorrected. Ask for an
-     *       sRGB format (InitParams::targetColorFormat, and on the host side
-     *       QVulkanWindow::setPreferredColorFormats). Bringing a scene into
-     *       displayable range is the scene's business:
+     *       sRGB format (GpuTargetFormat::Rgba8Srgb / Bgra8Srgb). Bringing a
+     *       scene into displayable range is the scene's business:
      *       `lighting.solar_lut_normalise` for an absolute illuminant, or the
      *       CLAHE pass for HDR and thermal content. This note said Reinhard for
      *       a long time and never was.
      */
     void RenderFrame(
-        VkCommandBuffer cmd,
-        VkImage targetImage,
-        VkImageLayout targetLayout,
-        u32 width,
-        u32 height
+        const GpuCommandRecording& recording,
+        const GpuImageTarget& target
     );
 
     /**
@@ -476,16 +470,14 @@ public:
      *
      * This is the second half of RenderFrame on its own: the same source image
      * (sensor chain, then CLAHE, then the raw accumulation), the same
-     * format-converting blit, the same PRESENT_SRC transition -- and no trace,
+     * format-converting blit, the same final-layout transition -- and no trace,
      * no post-processing re-run, and no change to the accumulation. The
      * post-processed images still hold the last frame's result, because
      * nothing has changed the accumulation since.
      *
-     * @param cmd           Command buffer to record into
-     * @param targetImage   Target swapchain image
-     * @param targetLayout  Its current layout
-     * @param width         Must equal the current target width
-     * @param height        Must equal the current target height
+     * @param recording Command buffer to record into
+     * @param target    Target image, format, extent and current/final layouts;
+     *        the extent must equal the current target extent
      * @return True when the frame was presented. False when there is nothing
      *         to show -- no context, nothing traced yet, a size that does not
      *         match the accumulation, or a render scale not yet acted on.
@@ -495,11 +487,8 @@ public:
      *         contents.
      */
     [[nodiscard]] bool PresentAccumulated(
-        VkCommandBuffer cmd,
-        VkImage targetImage,
-        VkImageLayout targetLayout,
-        u32 width,
-        u32 height
+        const GpuCommandRecording& recording,
+        const GpuImageTarget& target
     );
 
     /**
@@ -516,26 +505,21 @@ public:
      *
      * This is RenderFrame minus the trace: the sensor chain and CLAHE re-run
      * over the accumulation exactly as it stands, then the same blit and
-     * PRESENT_SRC transition. No sample is added and the accumulation is not
+     * final-layout transition. No sample is added and the accumulation is not
      * touched, so the result is what RenderFrame would have produced had the
      * new display settings been set all along.
      *
-     * @param cmd           Command buffer to record into
-     * @param targetImage   Target swapchain image
-     * @param targetLayout  Its current layout
-     * @param width         Must equal the current target width
-     * @param height        Must equal the current target height
+     * @param recording Command buffer to record into
+     * @param target    Target image, format, extent and current/final layouts;
+     *        the extent must equal the current target extent
      * @return True when the frame was presented. False for the same reasons
      *         as PresentAccumulated -- no context, nothing traced yet, a
      *         stale size or a pending scale -- and with the same obligation: nothing
      *         has been recorded, so the caller must call RenderFrame instead.
      */
     [[nodiscard]] bool ReprocessAccumulated(
-        VkCommandBuffer cmd,
-        VkImage targetImage,
-        VkImageLayout targetLayout,
-        u32 width,
-        u32 height
+        const GpuCommandRecording& recording,
+        const GpuImageTarget& target
     );
 
     /**
@@ -550,27 +534,22 @@ public:
      * Mirrors RenderFrame's contract: the caller owns the target image and
      * this method only records commands. Record it after RenderFrame in the
      * same command buffer. The target must be R32_SFLOAT with
-     * TRANSFER_DST and SAMPLED usage; it is left in
-     * VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, ready to be sampled by an
-     * overlay pass (the only intended consumer).
+     * TRANSFER_DST and SAMPLED usage; it is left in target.finalLayout,
+     * defaulting to SHADER_READ_ONLY_OPTIMAL when that is zero, ready to be
+     * sampled by an overlay pass (the only intended consumer).
      *
-     * @param cmd Command buffer (must be in recording state)
-     * @param targetImage Caller-owned R32_SFLOAT image
-     * @param targetCurrentLayout Current layout of targetImage
-     *        (VK_IMAGE_LAYOUT_UNDEFINED on first use)
-     * @param width Target width (must match RenderFrame's)
-     * @param height Target height (must match RenderFrame's)
+     * @param recording Command buffer to record into
+     * @param target    Caller-owned R32_SFLOAT image, with its current layout
+     *        (UNDEFINED on first use) and the layout to leave it in. The extent
+     *        must match RenderFrame's.
      *
-     * @note Magnified with VK_FILTER_NEAREST when the render scale is below
+     * @note Magnified with NEAREST when the render scale is below
      *       1.0, because an interpolated depth across a silhouette would be a
      *       surface that is not in the scene.
      */
     void BlitDepthTo(
-        VkCommandBuffer cmd,
-        VkImage targetImage,
-        VkImageLayout targetCurrentLayout,
-        u32 width,
-        u32 height
+        const GpuCommandRecording& recording,
+        const GpuImageTarget& target
     );
 
     /**
@@ -1058,7 +1037,7 @@ public:
     /// Records the pose at the queued time into @p cmd; never submits or
     /// waits, and does not re-solve the thermal hour.
     [[nodiscard]] Result<void, String> RecordQueuedCameraAcquisition(
-        VkCommandBuffer cmd);
+        const GpuCommandRecording& recording);
 
     /// Confirm that the recorded acquisition was submitted and completed.
     /// Products remain unavailable and a new tick cannot be queued before it.
@@ -1113,7 +1092,7 @@ public:
     /// Poses the scene at the queued acquisition time inside @p cmd, like
     /// RecordQueuedCameraAcquisition, and never submits or waits.
     [[nodiscard]] Result<void, String> RecordCameraBaseline(
-        VkCommandBuffer cmd);
+        const GpuCommandRecording& recording);
 
     /// Read the most recent physical device products after the host has
     /// completed the submitted frame. RAW/measurement/corrected/display retain

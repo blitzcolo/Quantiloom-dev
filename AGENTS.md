@@ -98,6 +98,17 @@ those resolve against the caller's cwd and skip on miss, so a wrong path reads a
 | `assets/configs/` | TOML scene configs — the CLI's only input |
 | `scripts/` | Python/PowerShell tooling (spectral baking, LUT gen, physics audit) |
 
+The SDK's runtime data installs to `<prefix>/share/quantiloom/`
+(`shaders/spirv/*.spv` + `SHADERSET`, `assets/atmos_models`, `assets/luts`),
+never to `bin/`. At runtime `core/ResourceLocator` resolves
+`SetResourceRoot()` -> `QUANTILOOM_RESOURCE_ROOT` -> `<library>/../share/quantiloom`
+-> `<library>/share/quantiloom` -> the working-directory development fallback
+(`src/shaders`, `shaders`, `../shaders`, `assets/`), and rejects a root whose
+SHADERSET stamp is not the digest the library was built with. Public headers
+are backend-neutral: Vulkan types appear only under
+`include/quantiloom/renderer/interop/`, which consumers get through
+`find_package(Quantiloom COMPONENTS VulkanInterop)`.
+
 ## Environment maps light RGB previews, and nothing else
 
 An environment map is an RGB image in arbitrary units. That is fine for a

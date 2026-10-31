@@ -7,9 +7,12 @@
 
 // VMA must be included BEFORE GpuBuffer.hpp/GpuImage.hpp to avoid enum redefinition
 #include <type_traits>
+#include <mutex>
+#include <set>
 #include <vk_mem_alloc.h>
 
 #include "renderer/ExternalRenderContext.hpp"
+#include "core/ResourceLocator.hpp"
 #include "renderer/ConfigResolve.hpp"
 #include "renderer/ShaderBinary.hpp"
 #include "renderer/SkyDome.hpp"
@@ -81,6 +84,87 @@ using core::GetDefaultCacheDirectory;
 // ============================================================================
 
 
+namespace {
+
+/// Neutral u64 handles back into the backend's own types. A dispatchable
+/// handle is a pointer, a non-dispatchable one an integer; the cast differs.
+template <typename T>
+T FromGpuHandle(GpuHandle handle) {
+    if constexpr (std::is_pointer_v<T>) {
+        return reinterpret_cast<T>(static_cast<uintptr_t>(handle));
+    } else {
+        return static_cast<T>(handle);
+    }
+}
+
+/// The recording descriptor for a command buffer the SDK itself allocated
+/// (the internal immediate-submit paths), in the same shape a host passes.
+GpuCommandRecording RecordingOf(VkCommandBuffer cmd) {
+    return {GpuBackend::Vulkan, kGpuInteropVersion,
+            static_cast<GpuHandle>(reinterpret_cast<uintptr_t>(cmd))};
+}
+
+String BackendError(GpuBackend backend) {
+    if (backend == GpuBackend::Metal) return "this SDK build has no Metal backend";
+    return "unsupported GPU backend " + std::to_string(static_cast<u32>(backend));
+}
+
+/// Empty when the recording arguments are usable by this build.
+String ValidateRecording(const GpuCommandRecording& recording) {
+    if (recording.version != kGpuInteropVersion) {
+        return "GpuCommandRecording version " + std::to_string(recording.version) +
+               " does not match this SDK's kGpuInteropVersion " +
+               std::to_string(kGpuInteropVersion) +
+               "; rebuild the host against the installed headers";
+    }
+    if (recording.backend != GpuBackend::Vulkan) return BackendError(recording.backend);
+    if (recording.commandBuffer == 0) return "GpuCommandRecording.commandBuffer is null";
+    return {};
+}
+
+String ValidateTarget(const GpuImageTarget& target, bool depthTarget) {
+    if (target.version != kGpuInteropVersion) {
+        return "GpuImageTarget version " + std::to_string(target.version) +
+               " does not match this SDK's kGpuInteropVersion " +
+               std::to_string(kGpuInteropVersion) +
+               "; rebuild the host against the installed headers";
+    }
+    if (target.backend != GpuBackend::Vulkan) return BackendError(target.backend);
+    if (target.image == 0) return "GpuImageTarget.image is null";
+    if (target.width == 0 || target.height == 0) return "GpuImageTarget extent is zero";
+    if (target.finalLayout == 0 && !depthTarget) {
+        return "GpuImageTarget.finalLayout is 0 (UNDEFINED): the target must name the "
+               "layout the SDK should leave it in";
+    }
+    if (depthTarget && target.format != GpuTargetFormat::R32Float) {
+        return "the depth AOV target must be GpuTargetFormat::R32Float";
+    }
+    if (!depthTarget && target.format == GpuTargetFormat::R32Float) {
+        return "GpuTargetFormat::R32Float is the depth AOV format, not a colour target";
+    }
+    return {};
+}
+
+/// The presenting blit is the only thing between linear radiance and the
+/// screen, so the target format's transfer function is what encodes it. A
+/// non-sRGB target displays linear values uncorrected -- about a stop and a
+/// half dark, and easy to mistake for an underexposed scene. Once per format
+/// per process, not once per frame.
+void NoteTargetFormat(GpuTargetFormat format) {
+    if (format == GpuTargetFormat::Rgba8Srgb || format == GpuTargetFormat::Bgra8Srgb) return;
+    static std::mutex warnedMutex;
+    static std::set<u32> warned;
+    std::lock_guard lock(warnedMutex);
+    if (!warned.insert(static_cast<u32>(format)).second) return;
+    QL_LOG_WARN("Target colour format {} has no sRGB encoding: the present "
+                "blit will write linear radiance uncorrected and the viewport "
+                "will read darker than an equivalent CLI render. Ask for an "
+                "sRGB target, or encode in the host's composite pass.",
+                static_cast<u32>(format));
+}
+
+}  // namespace
+
 // ============================================================================
 // ExternalRenderContext::Impl - PIMPL implementation
 // ============================================================================
@@ -101,7 +185,6 @@ struct ExternalRenderContext::Impl {
     VkDevice device = VK_NULL_HANDLE;
     VkQueue graphicsQueue = VK_NULL_HANDLE;
     u32 graphicsQueueFamily = 0;
-    VkFormat targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
 
     // Current internal render extent -- what the trace, the sensor chain,
     // CLAHE and every extent-sized image are sized to.
@@ -995,17 +1078,17 @@ struct ExternalRenderContext::Impl {
     /// changes, or the camera configuration changes the input size.
     void RecreateClaheDisplayImage();
 
-    /// Copy @p source onto the swapchain image and leave it in PRESENT_SRC.
+    /// Copy @p source onto the target image and leave it in @p targetFinalLayout.
     /// The transitions and the format-converting blit, with no tracing --
     /// which is what lets a frame be drawn without advancing the accumulation.
     /// @p srcWidth/@p srcHeight are the internal render extent, @p dstWidth/
     /// @p dstHeight the target's. They differ whenever the render scale is
     /// below 1.0, and the blit magnifies.
     void BlitToTarget(VkCommandBuffer cmd, VkImage source, VkImage targetImage,
-                      VkImageLayout targetLayout,
+                      VkImageLayout targetLayout, VkImageLayout targetFinalLayout,
                       u32 srcWidth, u32 srcHeight,
                       u32 dstWidth, u32 dstHeight,
-                      VkPipelineStageFlags sourceStage);
+                      VkPipelineStageFlags sourceStage, GpuTargetFormat targetFormat);
 
     /// Recreate every render-extent-sized resource at @p renderW x @p renderH.
     /// Waits for the GPU and resets the accumulation: nothing survives a
@@ -1081,31 +1164,39 @@ ExternalRenderContext& ExternalRenderContext::operator=(ExternalRenderContext&& 
 // ============================================================================
 
 Result<std::unique_ptr<ExternalRenderContext>, String> ExternalRenderContext::Create(const InitParams& params) {
-    // Validate parameters
-    if (params.instance == VK_NULL_HANDLE) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err("VkInstance is null");
+    using CreateResult = Result<std::unique_ptr<ExternalRenderContext>, String>;
+
+    const GpuDeviceHandles& handles = params.device;
+    if (handles.version != kGpuInteropVersion) {
+        return CreateResult::Err("GpuDeviceHandles version " + std::to_string(handles.version) +
+                                 " does not match this SDK's kGpuInteropVersion " +
+                                 std::to_string(kGpuInteropVersion) +
+                                 "; rebuild the host against the installed headers");
     }
-    if (params.physicalDevice == VK_NULL_HANDLE) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err("VkPhysicalDevice is null");
+    if (handles.backend != GpuBackend::Vulkan) {
+        return CreateResult::Err(BackendError(handles.backend));
     }
-    if (params.device == VK_NULL_HANDLE) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err("VkDevice is null");
-    }
-    if (params.graphicsQueue == VK_NULL_HANDLE) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err("VkQueue is null");
-    }
+    if (handles.instance == 0) return CreateResult::Err("GpuDeviceHandles.instance (VkInstance) is null");
+    if (handles.physicalDevice == 0) return CreateResult::Err("GpuDeviceHandles.physicalDevice (VkPhysicalDevice) is null");
+    if (handles.device == 0) return CreateResult::Err("GpuDeviceHandles.device (VkDevice) is null");
+    if (handles.queue == 0) return CreateResult::Err("GpuDeviceHandles.queue (VkQueue) is null");
     if (params.width == 0 || params.height == 0) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err("Invalid dimensions");
+        return CreateResult::Err("Invalid dimensions");
+    }
+    // Resources are resolved before any device work so that a missing or stale
+    // share/quantiloom is reported as such, with every root that was probed.
+    if (const String resourcesError = core::ResourceNotFoundMessage(); !resourcesError.empty()) {
+        return CreateResult::Err(resourcesError);
     }
 
     // Use new directly since constructor is private (make_unique can't access it)
     std::unique_ptr<ExternalRenderContext> context(new ExternalRenderContext());
     auto initResult = context->m_impl->Initialize(params);
     if (!initResult.has_value()) {
-        return Result<std::unique_ptr<ExternalRenderContext>, String>::Err(initResult.error());
+        return CreateResult::Err(initResult.error());
     }
 
-    return Result<std::unique_ptr<ExternalRenderContext>, String>(std::move(context));
+    return CreateResult(std::move(context));
 }
 
 // ============================================================================
@@ -1116,12 +1207,11 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     QL_LOG_INFO("Initializing ExternalRenderContext...");
 
     // Store external handles
-    instance = params.instance;
-    physicalDevice = params.physicalDevice;
-    device = params.device;
-    graphicsQueue = params.graphicsQueue;
-    graphicsQueueFamily = params.graphicsQueueFamily;
-    targetColorFormat = params.targetColorFormat;
+    instance = FromGpuHandle<VkInstance>(params.device.instance);
+    physicalDevice = FromGpuHandle<VkPhysicalDevice>(params.device.physicalDevice);
+    device = FromGpuHandle<VkDevice>(params.device.device);
+    graphicsQueue = FromGpuHandle<VkQueue>(params.device.queue);
+    graphicsQueueFamily = params.device.queueFamily;
     width = params.width;
     height = params.height;
     targetWidth = params.width;
@@ -1141,24 +1231,9 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
                     "reduced render scale will magnify with NEAREST");
     }
 
-    // The presenting blit is the only thing between linear radiance and the
-    // screen, so the target format's transfer function is what encodes it. A
-    // non-sRGB target displays linear values uncorrected -- about a stop and a
-    // half dark, and easy to mistake for an underexposed scene. This field was
-    // stored and never read for a long time; checking it is what it is for.
-    switch (targetColorFormat) {
-        case VK_FORMAT_B8G8R8A8_SRGB:
-        case VK_FORMAT_R8G8B8A8_SRGB:
-        case VK_FORMAT_A8B8G8R8_SRGB_PACK32:
-            break;
-        default:
-            QL_LOG_WARN("Target colour format {} has no sRGB encoding: the present "
-                        "blit will write linear radiance uncorrected and the viewport "
-                        "will read darker than an equivalent CLI render. Ask the "
-                        "windowing layer for an sRGB swapchain format.",
-                        static_cast<int>(targetColorFormat));
-            break;
-    }
+    // The sRGB warning moved to the target descriptor: the format that
+    // matters is the one being presented into, not one recorded at creation.
+    // See NoteTargetFormat, called from BlitToTarget.
 
     // Set pipeline cache path (use provided path or platform-specific default)
     if (!params.pipelineCacheDir.empty()) {
@@ -1176,12 +1251,12 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
 
     // Create VulkanContextAdapter from external handles
     VulkanContext::ExternalHandles adapterHandles{};
-    adapterHandles.instance = params.instance;
-    adapterHandles.physicalDevice = params.physicalDevice;
-    adapterHandles.device = params.device;
-    adapterHandles.graphicsQueue = params.graphicsQueue;
-    adapterHandles.graphicsQueueFamily = params.graphicsQueueFamily;
-    adapterHandles.allocator = params.externalAllocator;
+    adapterHandles.instance = instance;
+    adapterHandles.physicalDevice = physicalDevice;
+    adapterHandles.device = device;
+    adapterHandles.graphicsQueue = graphicsQueue;
+    adapterHandles.graphicsQueueFamily = graphicsQueueFamily;
+    adapterHandles.allocator = FromGpuHandle<VmaAllocator>(params.device.vmaAllocator);
 
     try {
         contextAdapter = std::make_unique<VulkanContextAdapter>(adapterHandles, true);
@@ -1197,9 +1272,9 @@ Result<void, String> ExternalRenderContext::Impl::Initialize(const InitParams& p
     VkCommandPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = params.graphicsQueueFamily;
+    poolInfo.queueFamilyIndex = graphicsQueueFamily;
 
-    VkResult result = vkCreateCommandPool(params.device, &poolInfo, nullptr, &commandPool);
+    VkResult result = vkCreateCommandPool(device, &poolInfo, nullptr, &commandPool);
     if (result != VK_SUCCESS) {
         return Result<void, String>::Err("Failed to create command pool");
     }
@@ -2018,11 +2093,23 @@ void ExternalRenderContext::Impl::UpdateAtmosphereNN() {
 }
 
 void ExternalRenderContext::RenderFrame(
-    VkCommandBuffer cmd,
-    VkImage targetImage,
-    VkImageLayout targetLayout,
-    u32 width,
-    u32 height) {
+    const GpuCommandRecording& recording,
+    const GpuImageTarget& target) {
+
+    if (const String invalid = ValidateRecording(recording); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::RenderFrame: {}", invalid);
+        return;
+    }
+    if (const String invalid = ValidateTarget(target, false); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::RenderFrame: {}", invalid);
+        return;
+    }
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
+    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
+    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
+    const u32 width = target.width;
+    const u32 height = target.height;
 
     if (!m_impl->isReady || !m_impl->pipeline) {
         QL_LOG_WARN("ExternalRenderContext::RenderFrame called but not ready");
@@ -2181,8 +2268,9 @@ void ExternalRenderContext::RenderFrame(
         const VkPipelineStageFlags srcStage = (blitSource.image == m_impl->outputImage->GetImage())
                                                   ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
                                                   : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
-        m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, blitSource.width,
-                             blitSource.height, width, height, srcStage);
+        m_impl->BlitToTarget(cmd, blitSource.image, targetImage, targetLayout, targetFinalLayout,
+                             blitSource.width, blitSource.height, width, height, srcStage,
+                             target.format);
 
         m_impl->frameIndex++;
     } catch (const std::exception& e) {
@@ -2223,10 +2311,15 @@ ExternalRenderContext::Impl::CurrentDisplaySource() const {
 void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage source,
                                                VkImage targetImage,
                                                VkImageLayout targetLayout,
+                                               VkImageLayout targetFinalLayout,
                                                u32 srcWidth, u32 srcHeight,
                                                u32 dstWidth, u32 dstHeight,
-                                               VkPipelineStageFlags sourceStage) {
-    // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL
+                                               VkPipelineStageFlags sourceStage,
+                                               GpuTargetFormat targetFormat) {
+    NoteTargetFormat(targetFormat);
+
+    // Step 1: source GENERAL -> TRANSFER_SRC_OPTIMAL, ordered against the pass
+    // that wrote it and nothing else.
     VkImageMemoryBarrier outputBarrier{};
     outputBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     outputBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
@@ -2241,8 +2334,15 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     outputBarrier.subresourceRange.layerCount = 1;
     outputBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     outputBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &outputBarrier);
 
-    // Step 2: target -> TRANSFER_DST_OPTIMAL
+    // Step 2: target -> TRANSFER_DST_OPTIMAL, from the caller-declared current
+    // layout. The host's own barrier tracker cannot see what was recorded
+    // outside it, so the source scope is deliberately everything submitted
+    // before this point. That also absorbs the write-after-read case of a
+    // compositor still sampling the previous frame's texture, which the old
+    // trace-stage-only barrier with srcAccess 0 did not.
     VkImageMemoryBarrier targetBarrier{};
     targetBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     targetBarrier.oldLayout = targetLayout;
@@ -2255,12 +2355,10 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     targetBarrier.subresourceRange.levelCount = 1;
     targetBarrier.subresourceRange.baseArrayLayer = 0;
     targetBarrier.subresourceRange.layerCount = 1;
-    targetBarrier.srcAccessMask = 0;  // Previous access unknown
+    targetBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     targetBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    VkImageMemoryBarrier barriers[2] = {outputBarrier, targetBarrier};
-    vkCmdPipelineBarrier(cmd, sourceStage, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, barriers);
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &targetBarrier);
 
     // Step 3: blit, converting R32G32B32A32_SFLOAT to the target format and
     // magnifying when the render extent is below the target's.
@@ -2295,26 +2393,40 @@ void ExternalRenderContext::Impl::BlitToTarget(VkCommandBuffer cmd, VkImage sour
     outputBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     outputBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     outputBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, sourceStage,
+                         0, 0, nullptr, 0, nullptr, 1, &outputBarrier);
 
-    // Step 5: target to PRESENT_SRC_KHR
+    // Step 5: target to the caller-chosen final layout, with a destination
+    // scope wide enough for whatever the host does next. The host's next use
+    // must request exactly this layout, so its own first barrier is a
+    // same-layout barrier rather than a transition from a stale scope.
     targetBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    targetBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    targetBarrier.newLayout = targetFinalLayout;
     targetBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    targetBarrier.dstAccessMask = 0;
-
-    barriers[0] = outputBarrier;
-    barriers[1] = targetBarrier;
+    targetBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         sourceStage | VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, barriers);
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &targetBarrier);
 }
 
 bool ExternalRenderContext::PresentAccumulated(
-    VkCommandBuffer cmd,
-    VkImage targetImage,
-    VkImageLayout targetLayout,
-    u32 width,
-    u32 height) {
+    const GpuCommandRecording& recording,
+    const GpuImageTarget& target) {
+
+    if (const String invalid = ValidateRecording(recording); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::PresentAccumulated: {}", invalid);
+        return false;
+    }
+    if (const String invalid = ValidateTarget(target, false); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::PresentAccumulated: {}", invalid);
+        return false;
+    }
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
+    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
+    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
+    const u32 width = target.width;
+    const u32 height = target.height;
 
     if (!m_impl->isReady || !m_impl->outputImage) {
         return false;
@@ -2352,19 +2464,32 @@ bool ExternalRenderContext::PresentAccumulated(
             ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout,
+    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
                          source.width, source.height, width, height,
-                         sourceStage);
+                         sourceStage, target.format);
     // Deliberately no accumulatedSamples++: that is the whole point.
     return true;
 }
 
 bool ExternalRenderContext::ReprocessAccumulated(
-    VkCommandBuffer cmd,
-    VkImage targetImage,
-    VkImageLayout targetLayout,
-    u32 width,
-    u32 height) {
+    const GpuCommandRecording& recording,
+    const GpuImageTarget& target) {
+
+    if (const String invalid = ValidateRecording(recording); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::ReprocessAccumulated: {}", invalid);
+        return false;
+    }
+    if (const String invalid = ValidateTarget(target, false); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::ReprocessAccumulated: {}", invalid);
+        return false;
+    }
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
+    const VkImageLayout targetLayout = static_cast<VkImageLayout>(target.currentLayout);
+    const VkImageLayout targetFinalLayout = static_cast<VkImageLayout>(target.finalLayout);
+    const u32 width = target.width;
+    const u32 height = target.height;
+
 
     // The same refusals as PresentAccumulated, for the same reasons, with one
     // exception: this path re-runs CLAHE below, which produces the CLAHE
@@ -2429,9 +2554,9 @@ bool ExternalRenderContext::ReprocessAccumulated(
             ? VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR
             : VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
 
-    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout,
+    m_impl->BlitToTarget(cmd, source.image, targetImage, targetLayout, targetFinalLayout,
                          source.width, source.height, width, height,
-                         sourceStage);
+                         sourceStage, target.format);
     // Like PresentAccumulated: no accumulatedSamples++.
     return true;
 }
@@ -2452,9 +2577,26 @@ Result<void, String> ExternalRenderContext::ReprocessCameraDisplay() {
     return status;
 }
 
-void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage,
-                                        VkImageLayout targetCurrentLayout,
-                                        u32 width, u32 height) {
+void ExternalRenderContext::BlitDepthTo(
+    const GpuCommandRecording& recording,
+    const GpuImageTarget& target) {
+    if (const String invalid = ValidateRecording(recording); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::BlitDepthTo: {}", invalid);
+        return;
+    }
+    if (const String invalid = ValidateTarget(target, true); !invalid.empty()) {
+        QL_LOG_ERROR("ExternalRenderContext::BlitDepthTo: {}", invalid);
+        return;
+    }
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    const VkImage targetImage = FromGpuHandle<VkImage>(target.image);
+    const VkImageLayout targetCurrentLayout = static_cast<VkImageLayout>(target.currentLayout);
+    const VkImageLayout targetFinalLayout = target.finalLayout != 0
+                                                ? static_cast<VkImageLayout>(target.finalLayout)
+                                                : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    const u32 width = target.width;
+    const u32 height = target.height;
+
     if (!m_impl->depthAovImage) {
         return;
     }
@@ -2477,8 +2619,13 @@ void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage
     srcBarrier.subresourceRange = colorRange;
     srcBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     srcBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
 
-    // Target: caller's layout -> TRANSFER_DST
+    // Target: caller's layout -> TRANSFER_DST. The same contract as the colour
+    // present: everything submitted before this point is waited on, which
+    // covers last frame's fragment reads as well as the host's own writes.
     VkImageMemoryBarrier dstBarrier{};
     dstBarrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     dstBarrier.oldLayout = targetCurrentLayout;
@@ -2487,15 +2634,11 @@ void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage
     dstBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     dstBarrier.image = targetImage;
     dstBarrier.subresourceRange = colorRange;
-    dstBarrier.srcAccessMask = 0;  // previous reads need no flush
+    dstBarrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     dstBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-
-    VkImageMemoryBarrier preBarriers[2] = {srcBarrier, dstBarrier};
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, preBarriers);
+                         0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
 
     // NEAREST on purpose: depth values must never be mixed across silhouettes.
     // That holds all the more when the render extent is below the target's and
@@ -2523,19 +2666,19 @@ void ExternalRenderContext::BlitDepthTo(VkCommandBuffer cmd, VkImage targetImage
     srcBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
     srcBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     srcBarrier.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                         0, 0, nullptr, 0, nullptr, 1, &srcBarrier);
 
-    // Target ready for sampling in the caller's overlay fragment shader
+    // Target into the caller's final layout (SHADER_READ_ONLY_OPTIMAL by
+    // default), with the same conservative destination scope as the present.
     dstBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    dstBarrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    dstBarrier.newLayout = targetFinalLayout;
     dstBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    dstBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-
-    VkImageMemoryBarrier postBarriers[2] = {srcBarrier, dstBarrier};
-    vkCmdPipelineBarrier(cmd,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR |
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-                         0, 0, nullptr, 0, nullptr, 2, postBarriers);
+    dstBarrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &dstBarrier);
 }
 
 void ExternalRenderContext::Resize(u32 width, u32 height) {
@@ -4560,8 +4703,12 @@ Result<void, String> ExternalRenderContext::QueueCameraAcquisition(u64 acquisiti
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(VkCommandBuffer cmd) {
-    if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
+Result<void, String> ExternalRenderContext::RecordQueuedCameraAcquisition(
+    const GpuCommandRecording& recording) {
+    if (const String invalid = ValidateRecording(recording); !invalid.empty())
+        return Result<void, String>::Err(invalid);
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    if (!m_impl->isReady)
         return Result<void, String>::Err(
             "camera acquisition needs a ready context and command buffer");
     if (!m_impl->cameraCapturePending)
@@ -4769,7 +4916,7 @@ Result<void, String> ExternalRenderContext::WarmUpCamera(f64 seconds) {
             return queued;
         Result<void, String> recorded = Result<void, String>::Ok();
         CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-            recorded = RecordQueuedCameraAcquisition(cmd);
+            recorded = RecordQueuedCameraAcquisition(RecordingOf(cmd));
         });
         if (!recorded)
             return recorded;
@@ -4795,7 +4942,7 @@ Result<void, String> ExternalRenderContext::AdvanceCameraTo(f64 timeSeconds) {
         return queued;
     Result<void, String> recorded = Result<void, String>::Ok();
     CommandHelper::ExecuteImmediate(*m_impl->contextAdapter, [&](VkCommandBuffer cmd) {
-        recorded = RecordQueuedCameraAcquisition(cmd);
+        recorded = RecordQueuedCameraAcquisition(RecordingOf(cmd));
     });
     if (!recorded)
         return recorded;
@@ -4807,8 +4954,12 @@ Result<void, String> ExternalRenderContext::AdvanceCameraTo(f64 timeSeconds) {
     return Result<void, String>::Ok();
 }
 
-Result<void, String> ExternalRenderContext::RecordCameraBaseline(VkCommandBuffer cmd) {
-    if (!m_impl->isReady || cmd == VK_NULL_HANDLE)
+Result<void, String> ExternalRenderContext::RecordCameraBaseline(
+    const GpuCommandRecording& recording) {
+    if (const String invalid = ValidateRecording(recording); !invalid.empty())
+        return Result<void, String>::Err(invalid);
+    const VkCommandBuffer cmd = FromGpuHandle<VkCommandBuffer>(recording.commandBuffer);
+    if (!m_impl->isReady)
         return Result<void, String>::Err(
             "camera baseline needs a ready context and command buffer");
     if (!m_impl->scene)

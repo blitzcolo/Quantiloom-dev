@@ -9,6 +9,26 @@ Sources and internal headers live here; the public headers are in
 `quantiloom_core` (OBJECT) and linked two ways — see the root `CLAUDE.md` for which
 targets take which.
 
+## Backend-neutral public API, resources in share/
+
+**Vulkan types live only under `include/quantiloom/renderer/interop/`.** The rest
+of the public surface is backend-neutral: `renderer/GpuInterop.hpp` carries the
+handles as `u64` PODs, and `renderer/interop/{Vulkan,Metal}Interop.hpp` hold the
+typed builders. `libQuantiloom` links Vulkan PRIVATE, and the installed package
+only calls `find_dependency(Vulkan)` for `COMPONENTS VulkanInterop`.
+`tests/CMakeLists.txt` try_compiles every public header outside `interop/`
+with no Vulkan include directory, so re-coupling one fails the configure.
+
+**Runtime resources install under `share/quantiloom/`** (`shaders/spirv/*.spv`
+plus a `SHADERSET` digest, `assets/atmos_models`, `assets/luts`), not into
+`bin/`. `core/ResourceLocator` resolves `SetResourceRoot()`, then
+`QUANTILOOM_RESOURCE_ROOT`, then `<library>/../share/quantiloom` and
+`<library>/share/quantiloom`, then the working-directory development fallback
+(`src/shaders`, `shaders`, `../shaders`, `assets/`). A root whose SHADERSET
+stamp differs from the compiled-in digest is rejected with both digests in the
+message -- a stale copy must never render. Only the locator finds shaders;
+there is no executable-relative search left.
+
 ## New code is internal by default
 
 `QL_API` (defined in `core/Platform.hpp`) is the SDK's contract, not a convenience

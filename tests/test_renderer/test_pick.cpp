@@ -15,6 +15,7 @@
 #include "renderer/CommandHelper.hpp"
 #include "renderer/GpuImage.hpp"
 #include "renderer/VulkanContext.hpp"
+#include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 #include "support/LogCapture.hpp"
 #include <glm/gtc/matrix_transform.hpp>
@@ -45,12 +46,7 @@ protected:
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
-        params.instance = shared->GetInstance();
-        params.physicalDevice = shared->GetPhysicalDevice();
-        params.device = shared->GetDevice();
-        params.graphicsQueue = shared->GetGraphicsQueue();
-        params.graphicsQueueFamily = shared->GetGraphicsQueueFamily();
-        params.targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        params.device = quantiloom::testing::GpuHandles(*shared);
         params.width = kSize;
         params.height = kSize;
         params.pipelineCacheDir = testDir.string();
@@ -162,7 +158,9 @@ protected:
         vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
                         0, nullptr, 0, nullptr);
-        context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+        context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
         ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
@@ -223,7 +221,9 @@ protected:
         vkCmdWaitEvents(cmd, 1, &resources.event, VK_PIPELINE_STAGE_HOST_BIT,
                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, nullptr,
                         0, nullptr, 0, nullptr);
-        context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+        context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
         ASSERT_EQ(vkEndCommandBuffer(cmd), VK_SUCCESS);
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         submit.commandBufferCount = 1;
@@ -253,7 +253,9 @@ protected:
         GpuImage target(Device().GetAllocator(), Device().GetDevice(), kSize, kSize,
             VK_FORMAT_B8G8R8A8_SRGB, VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         CommandHelper::ExecuteImmediate(Device(), [&](VkCommandBuffer cmd) {
-            context->RenderFrame(cmd, target.GetImage(), VK_IMAGE_LAYOUT_UNDEFINED, kSize, kSize);
+            context->RenderFrame(vk::Commands(cmd),
+                                 vk::Target(target.GetImage(), GpuTargetFormat::Bgra8Srgb, kSize, kSize,
+                                            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL));
         });
     }
 

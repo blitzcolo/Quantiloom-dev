@@ -14,6 +14,7 @@
 
 #include "core/Log.hpp"
 #include "core/Config.hpp"
+#include "core/Resources.hpp"
 #include "dataset/ExportSession.hpp"
 #include "dataset/FusionExportJob.hpp"
 
@@ -54,10 +55,11 @@ void PrintVersion() {
 // executable -- so requiring every scene to spell out a path to it made the
 // CLI refuse atmospheres that Studio rendered happily.
 //
-// Quantiloom-Qt has its own equivalent in QuantiloomVulkanRenderer, reading
-// the same environment variable; the two are deliberately host-side, since
-// where a host finds its assets is not the library's business.
-std::string ResolveDefaultAtmosModelPack(const char* argv0) {
+// Quantiloom-Qt has its own equivalent in its asset-path helper, reading the
+// same environment variable and then quantiloom::GetResourceRoot(); the two are
+// deliberately host-side, since where a host finds its assets is not the
+// library's business.
+std::string ResolveDefaultAtmosModelPack() {
     namespace fs = std::filesystem;
 
     std::vector<fs::path> candidates;
@@ -66,10 +68,8 @@ std::string ResolveDefaultAtmosModelPack(const char* argv0) {
         candidates.emplace_back(env);
     }
     candidates.emplace_back("assets/atmos_models");  // Run from the repo root
-    if (argv0 && *argv0) {
-        std::error_code ec;
-        const fs::path exeDir = fs::absolute(fs::path(argv0), ec).parent_path();
-        if (!ec) candidates.push_back(exeDir / "assets" / "atmos_models");
+    if (const String root = quantiloom::GetResourceRoot(); !root.empty()) {
+        candidates.emplace_back(fs::path(root) / "assets" / "atmos_models");
     }
 
     for (const fs::path& dir : candidates) {
@@ -274,7 +274,7 @@ int RunApp(int argc, char* argv[]) {
             }
         }
 
-        const int code = app::RunMcpServer(port, ResolveDefaultAtmosModelPack(argv[0]));
+        const int code = app::RunMcpServer(port, ResolveDefaultAtmosModelPack());
         Log::Shutdown();
         return code;
     }
@@ -292,7 +292,7 @@ int RunApp(int argc, char* argv[]) {
 
         app::BatchOptions options;
         options.manifestPath = argv[2];
-        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack();
 
         for (int i = 3; i < argc; ++i) {
             if (std::strcmp(argv[i], "--override") == 0 && i + 1 < argc) {
@@ -328,7 +328,7 @@ int RunApp(int argc, char* argv[]) {
 
         app::SequenceOptions options;
         options.configPath = argv[2];
-        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+        options.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack();
 
         for (int i = 3; i < argc; ++i) {
             if (std::strcmp(argv[i], "--from-tick") == 0 && i + 1 < argc) {
@@ -381,7 +381,7 @@ int RunApp(int argc, char* argv[]) {
         // in RenderJob -- shared with serve mode, so an agent's render and a
         // command-line render are the same render.
         OfflineRenderer::InitParams init;
-        init.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack(argv[0]);
+        init.atmosphereModelPackFallback = ResolveDefaultAtmosModelPack();
         // Relative asset paths inside the config resolve against the config's own
         // directory first, then against the working directory as before -- so a
         // self-contained scene folder renders from anywhere, and every config in

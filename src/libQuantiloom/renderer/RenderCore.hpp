@@ -177,7 +177,11 @@ public:
      * @brief Load or generate the LUT, upload it, and create its sampler
      *
      * @param ctx       Device to allocate on
-     * @param cachePath Binary cache, read when present and written when not
+     * @param cachePath Binary cache, read when present and written when not.
+     *        Empty means the default: the LUT shipped with the SDK
+     *        (`<root>/assets/luts/brdf_lut_512_ggx.bin`) when it is readable,
+     *        otherwise a generated table cached under the machine's cache
+     *        directory -- an installed SDK is never written into.
      * @param config    Resolution and sample count; the image follows
      *                  config.resolution rather than a hardcoded 512, which is what
      *                  both call sites did -- a changed resolution would have
@@ -185,7 +189,7 @@ public:
      * @return An invalid BrdfLut if the sampler could not be created
      */
     static BrdfLut Create(VulkanContext& ctx,
-                          const String& cachePath = "assets/luts/brdf_lut_512_ggx.bin",
+                          const String& cachePath = {},
                           const BRDFLutGenerator::Config& config = {});
 
     [[nodiscard]] bool IsValid() const { return m_sampler != VK_NULL_HANDLE; }
@@ -717,11 +721,13 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx);
 /**
  * @brief Fit (or load) the RGB -> spectrum coefficient table and upload it
  *
- * Cached to @p cachePath, defaulting beside the BRDF LUT. A miss costs a few
- * seconds of fitting, once per machine; see core/RgbToSpectrum.hpp for why the
- * table is built rather than shipped.
+ * Cached to @p cachePath. Empty means the machine's cache directory, beside
+ * the pipeline cache: fitting takes seconds and happens once per machine,
+ * and the table is derived data, not something an install should be written
+ * into. See core/RgbToSpectrum.hpp for why the table is built rather than
+ * shipped.
  */
 std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(
-    VulkanContext& ctx, const String& cachePath = "assets/luts/rgb2spec_srgb_64.bin");
+    VulkanContext& ctx, const String& cachePath = {});
 
 } // namespace quantiloom::rendercore

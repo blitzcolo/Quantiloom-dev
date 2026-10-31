@@ -109,45 +109,10 @@ if(WIN32)
     endif()
 endif()
 
-# Copy compiled shaders to the executable directory
-add_custom_command(
-    TARGET Quantiloom POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/src/shaders/raygen.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/closesthit.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/anyhit.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/miss.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/shadow_miss.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/fusion_geometry.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/spectral_reconstruct.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_histogram.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_cdf.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/clahe_apply.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_extents.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/display_range_histogram.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_psf.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_readout.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_tiles.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_reduce.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_stats_hist.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_cdf.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_demosaic.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_dynamic.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_rng_vectors.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_fast_rgb.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/camera_hsv.comp.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/pick.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/thermal_exchange.spv"
-        "${CMAKE_SOURCE_DIR}/src/shaders/thermal_step.spv"
-        "$<TARGET_FILE_DIR:Quantiloom>"
-    COMMENT "Copying shaders to executable directory"
-)
-
-# CMake ignores DEPENDS in the TARGET form of add_custom_command, so the
-# `DEPENDS CompileShaders` that used to sit in the block above did nothing.
-# It went unnoticed because CompileShaders is an ALL target and an ordinary
-# full build reaches it anyway -- but `--build build --target Quantiloom`
-# copied whatever .spv happened to be lying in the source tree.
+# Shaders are found through the resource locator, not beside the executable:
+# an installed SDK reads share/quantiloom/shaders/spirv relative to the
+# library, and a build tree uses the working-directory development fallback.
+# The dependency stays so a target-only build still compiles the shaders.
 add_dependencies(Quantiloom CompileShaders)
 
 # Install target (optional, for packaging)

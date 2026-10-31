@@ -54,6 +54,10 @@ add_library(quantiloom_core OBJECT
     core/Sha256.hpp
     core/CacheDirectory.cpp
     core/CacheDirectory.hpp
+    core/ResourceLocator.cpp
+    core/ResourceLocator.hpp
+    core/Resources.cpp
+    ${QL_PUBLIC_INC}/core/Resources.hpp
     ${QL_PUBLIC_INC}/core/Platform.hpp
     ${QL_PUBLIC_INC}/core/Types.hpp
     ${QL_PUBLIC_INC}/core/Image.hpp
@@ -171,6 +175,12 @@ add_library(quantiloom_core OBJECT
     renderer/GpuDisplayRange.hpp
     renderer/ShaderBinary.cpp
     renderer/ShaderBinary.hpp
+    renderer/VulkanDeviceRequirements.cpp
+    renderer/VulkanDeviceRequirements.hpp
+    renderer/interop/VulkanInterop.cpp
+    ${QL_PUBLIC_INC}/renderer/GpuInterop.hpp
+    ${QL_PUBLIC_INC}/renderer/interop/VulkanInterop.hpp
+    ${QL_PUBLIC_INC}/renderer/interop/MetalInterop.hpp
     renderer/CameraResponseGpu.hpp
     renderer/ThermalPreview.cpp
     renderer/ThermalPreview.hpp
@@ -289,7 +299,13 @@ add_library(quantiloom_core OBJECT
 
     # Generated files
     ${CMAKE_CURRENT_BINARY_DIR}/core/LibVersion.hpp
+    ${QL_SHADER_SET_DIGEST_HEADER}
 )
+
+# The shader-set digest is generated after the .spv are compiled, and the
+# library compiles it in so it can reject a stale resource copy at runtime.
+add_dependencies(quantiloom_core ShaderSetStamp)
+target_include_directories(quantiloom_core PRIVATE "${CMAKE_BINARY_DIR}/src/shaders")
 
 target_compile_definitions(quantiloom_core
     PUBLIC
@@ -485,7 +501,10 @@ target_include_directories(libQuantiloom
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/quantiloom>
 )
 
-target_link_libraries(libQuantiloom PUBLIC Vulkan::Vulkan)
+# Vulkan is PRIVATE: nothing in the public headers mentions a Vulkan type
+# outside renderer/interop/, so a consumer of the base package needs no Vulkan
+# SDK. The Vulkan-typed interop header is its own component below.
+target_link_libraries(libQuantiloom PRIVATE Vulkan::Vulkan)
 
 # Set library output name (remove "lib" prefix for cleaner names)
 set_target_properties(libQuantiloom PROPERTIES
@@ -499,6 +518,37 @@ set_target_properties(libQuantiloom PROPERTIES
 )
 
 message(STATUS "libQuantiloom configured successfully")
+
+# ============================================================================
+# Interop components
+# ============================================================================
+# Each backend's typed interop header is its own INTERFACE target in its OWN
+# export set, so the base package never references Vulkan. A consumer that
+# wants vk::CreateDevice asks for COMPONENTS VulkanInterop; one that only uses
+# the neutral API links Quantiloom::libQuantiloom and needs no Vulkan SDK.
+add_library(QuantiloomVulkanInterop INTERFACE)
+set_target_properties(QuantiloomVulkanInterop PROPERTIES EXPORT_NAME VulkanInterop)
+target_link_libraries(QuantiloomVulkanInterop INTERFACE libQuantiloom Vulkan::Headers)
+
+add_library(QuantiloomMetalInterop INTERFACE)
+set_target_properties(QuantiloomMetalInterop PROPERTIES EXPORT_NAME MetalInterop)
+target_link_libraries(QuantiloomMetalInterop INTERFACE libQuantiloom)
+if(APPLE)
+    target_link_libraries(QuantiloomMetalInterop INTERFACE "-framework Metal")
+endif()
+
+install(TARGETS QuantiloomVulkanInterop EXPORT QuantiloomVulkanInteropTargets)
+install(EXPORT QuantiloomVulkanInteropTargets
+    FILE QuantiloomVulkanInteropTargets.cmake
+    NAMESPACE Quantiloom::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+)
+install(TARGETS QuantiloomMetalInterop EXPORT QuantiloomMetalInteropTargets)
+install(EXPORT QuantiloomMetalInteropTargets
+    FILE QuantiloomMetalInteropTargets.cmake
+    NAMESPACE Quantiloom::
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/Quantiloom
+)
 
 # ============================================================================
 # Install Targets for find_package(Quantiloom) Support
@@ -580,20 +630,31 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/glmConfig.cmake"
 )
 
 # ============================================================================
-# Install compiled shaders (required at runtime)
+# Install compiled shaders and their set stamp (required at runtime)
 # ============================================================================
-# Shaders are compiled in src/shaders during build
+# Under share/quantiloom, beside the rest of the runtime data: the locator
+# resolves <library>/../share/quantiloom and <library>/share/quantiloom, so
+# the resources move with the library rather than with the executables.
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/src/shaders/
-    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    DESTINATION share/quantiloom/shaders/spirv
     FILES_MATCHING PATTERN "*.spv"
+)
+install(FILES ${QL_SHADER_SET_STAMP}
+    DESTINATION share/quantiloom/shaders/spirv
 )
 
 # ============================================================================
 # Install NN atmosphere model pack (required at runtime when atmosphere enabled)
 # ============================================================================
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/atmos_models
-    DESTINATION assets
+    DESTINATION share/quantiloom/assets
     FILES_MATCHING PATTERN "*.safetensors"
+)
+
+# The BRDF LUT is shipped data now, read from the resource root. Only a build
+# that cannot read it generates one, and that goes to the cache directory.
+install(FILES ${CMAKE_SOURCE_DIR}/assets/luts/brdf_lut_512_ggx.bin
+    DESTINATION share/quantiloom/assets/luts
 )
 
 # ============================================================================

@@ -6,6 +6,7 @@
 
 #include "core/Log.hpp"
 #include "renderer/ExternalRenderContext.hpp"
+#include "renderer/interop/VulkanInterop.hpp"
 #include "renderer/VulkanContext.hpp"
 
 #include <vulkan/vulkan.h>
@@ -188,13 +189,15 @@ int Benchmark(const Options& options) {
     if (!device.IsRayTracingSupported())
         throw std::runtime_error("GPU lacks Vulkan ray tracing");
     ExternalRenderContext::InitParams params;
-    params.instance = device.GetInstance();
-    params.physicalDevice = device.GetPhysicalDevice();
-    params.device = device.GetDevice();
-    params.graphicsQueue = device.GetGraphicsQueue();
-    params.graphicsQueueFamily = device.GetGraphicsQueueFamily();
-    params.externalAllocator = device.GetAllocator();
-    params.targetColorFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
+    vk::Device vkDevice{};
+    vkDevice.physicalDevice = device.GetPhysicalDevice();
+    vkDevice.device = device.GetDevice();
+    vkDevice.queueFamily = device.GetGraphicsQueueFamily();
+    vkDevice.queueIndex = 0;
+    vkDevice.queue = device.GetGraphicsQueue();
+    vkDevice.instance = device.GetInstance();
+    params.device = vk::Handles(vkDevice, device.GetInstance(), nullptr);
+    params.device.vmaAllocator = reinterpret_cast<GpuHandle>(device.GetAllocator());
     params.width = kWidth;
     params.height = kHeight;
     auto created = ExternalRenderContext::Create(params);
@@ -232,13 +235,13 @@ int Benchmark(const Options& options) {
         auto queued = renderer->QueueCameraAcquisition(index, index * period);
         if (!queued) throw std::runtime_error(queued.error());
         SubmitAndWait(device, [&](VkCommandBuffer cmd) {
-            return renderer->RecordCameraBaseline(cmd);
+            return renderer->RecordCameraBaseline(vk::Commands(cmd));
         });
         const f64 baseline = renderer->GetLastFrameTimeMs();
         if (!std::isfinite(baseline) || baseline <= 0)
             throw std::runtime_error("baseline GPU timestamp unavailable");
         SubmitAndWait(device, [&](VkCommandBuffer cmd) {
-            return renderer->RecordQueuedCameraAcquisition(cmd);
+            return renderer->RecordQueuedCameraAcquisition(vk::Commands(cmd));
         });
         auto completed = renderer->CompleteQueuedCameraAcquisition();
         if (!completed) throw std::runtime_error(completed.error());

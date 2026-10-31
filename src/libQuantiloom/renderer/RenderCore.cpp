@@ -4,6 +4,8 @@
 #include "scene/SceneMerge.hpp"
 
 #include "core/Log.hpp"
+#include "core/CacheDirectory.hpp"
+#include "core/ResourceLocator.hpp"
 #include "core/CIE_CMF_Data.hpp"
 #include "core/D65Illuminant.hpp"
 #include "core/RgbToSpectrum.hpp"
@@ -23,6 +25,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <stdexcept>
 
 namespace quantiloom::rendercore {
@@ -365,22 +368,50 @@ VkImageView BrdfLut::View() const {
     return m_image ? m_image->GetView() : VK_NULL_HANDLE;
 }
 
+namespace {
+
+/// A derived table that is missing gets generated into the machine's cache
+/// directory, beside the pipeline cache -- never into an installed SDK.
+String DefaultDerivedTablePath(const char* filename) {
+    const std::filesystem::path dir =
+        std::filesystem::path(core::GetDefaultCacheDirectory()) / "luts";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    return (dir / filename).string();
+}
+
+String DefaultBrdfLutPath() {
+    const auto& resources = core::GetResolvedResources();
+    if (resources.Found()) {
+        const std::filesystem::path shipped = resources.AssetPath("luts/brdf_lut_512_ggx.bin");
+        std::error_code ec;
+        if (std::filesystem::is_regular_file(shipped, ec)) return shipped.string();
+    }
+    return DefaultDerivedTablePath("brdf_lut_512_ggx.bin");
+}
+
+}  // namespace
+
 BrdfLut BrdfLut::Create(VulkanContext& ctx,
                         const String& cachePath,
                         const BRDFLutGenerator::Config& config) {
     QL_LOG_INFO("Creating BRDF LUT...");
 
+    // The shipped table is read-only data; a table that has to be generated
+    // goes to the machine's cache directory, never into an install.
+    const String path = cachePath.empty() ? DefaultBrdfLutPath() : cachePath;
+
     BRDFLutGenerator::Config effective = config;
     Image lut;
-    if (auto cached = BRDFLutGenerator::LoadFromBinary(cachePath, &effective)) {
-        QL_LOG_INFO("  Loaded from cache: {}", cachePath);
+    if (auto cached = BRDFLutGenerator::LoadFromBinary(path, &effective)) {
+        QL_LOG_INFO("  Loaded from cache: {}", path);
         lut = std::move(cached.value());
     } else {
         QL_LOG_INFO("  Generating {}x{} at {} samples (seconds, then cached)...",
                     effective.resolution, effective.resolution, effective.sampleCount);
         lut = BRDFLutGenerator::Generate(effective);
-        if (BRDFLutGenerator::SaveToBinary(cachePath, lut, effective)) {
-            QL_LOG_INFO("  Cached to {} for future runs", cachePath);
+        if (BRDFLutGenerator::SaveToBinary(path, lut, effective)) {
+            QL_LOG_INFO("  Cached to {} for future runs", path);
         }
     }
 
@@ -1693,6 +1724,7 @@ std::unique_ptr<GpuBuffer> CreateCieColourMatchingBuffer(VulkanContext& ctx) {
 // ============================================================================
 
 std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(VulkanContext& ctx, const String& cachePath) {
+    const String path = cachePath.empty() ? DefaultDerivedTablePath("rgb2spec_srgb_64.bin") : cachePath;
     const u32 res = kRgbToSpectrumResolution;
     const size_t nodeCount = static_cast<size_t>(3) * res * res * res;
 
@@ -1702,7 +1734,7 @@ std::unique_ptr<GpuBuffer> CreateRgbToSpectrumBuffer(VulkanContext& ctx, const S
     // one vector load, eight times per fetch.
     Vector<glm::vec4> packed(nodeCount, glm::vec4(0.0f));
 
-    auto table = RgbToSpectrumTable::LoadOrBuild(cachePath, res);
+    auto table = RgbToSpectrumTable::LoadOrBuild(path, res);
     if (table.has_value()) {
         const Vector<f32>& data = table.value().Data();
         for (size_t i = 0; i < nodeCount; ++i) {

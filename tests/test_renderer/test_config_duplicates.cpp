@@ -15,6 +15,7 @@
 
 #include "renderer/ExternalRenderContext.hpp"
 #include "renderer/VulkanContext.hpp"
+#include "support/GpuInteropTestUtils.hpp"
 #include "support/VulkanTestDevice.hpp"
 
 #include <filesystem>
@@ -39,12 +40,7 @@ protected:
         ASSERT_NE(shared, nullptr);
 
         ExternalRenderContext::InitParams params{};
-        params.instance = shared->GetInstance();
-        params.physicalDevice = shared->GetPhysicalDevice();
-        params.device = shared->GetDevice();
-        params.graphicsQueue = shared->GetGraphicsQueue();
-        params.graphicsQueueFamily = shared->GetGraphicsQueueFamily();
-        params.targetColorFormat = VK_FORMAT_B8G8R8A8_SRGB;
+        params.device = quantiloom::testing::GpuHandles(*shared);
         params.width = kSize;
         params.height = kSize;
         params.pipelineCacheDir = testDir.string();

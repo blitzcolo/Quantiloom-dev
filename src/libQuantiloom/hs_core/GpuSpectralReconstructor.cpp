@@ -9,6 +9,7 @@
 #include "renderer/VulkanContext.hpp"
 #include "renderer/GpuBuffer.hpp"
 #include "renderer/CommandHelper.hpp"
+#include "renderer/ShaderBinary.hpp"
 #include "core/Log.hpp"
 
 #include <chrono>
@@ -349,23 +350,9 @@ GpuReconstructorStatus GpuSpectralReconstructor::Initialize() {
 
     LOG_INFO("GpuSpectralReconstructor: Initializing...");
 
-    // Load shader SPIR-V
-    // Try multiple paths for shader location
-    Vector<String> shaderPaths = {
-        "shaders/spectral_reconstruct.spv",
-        "../shaders/spectral_reconstruct.spv",
-        "src/shaders/spectral_reconstruct.spv",
-        "../src/shaders/spectral_reconstruct.spv"
-    };
-
-    Vector<u32> shaderCode;
-    for (const auto& path : shaderPaths) {
-        shaderCode = m_impl->LoadShaderFile(path);
-        if (!shaderCode.empty()) {
-            LOG_DEBUG("GpuSpectralReconstructor: Loaded shader from {}", path);
-            break;
-        }
-    }
+    // The one resource locator serves every shader the SDK loads, so an
+    // installed SDK finds this even when the working directory is elsewhere.
+    const Vector<u32> shaderCode = rendercore::LoadSpirv("spectral_reconstruct.spv");
 
     if (shaderCode.empty()) {
         LOG_ERROR("GpuSpectralReconstructor: Could not find spectral_reconstruct.spv");

@@ -2,6 +2,7 @@
 #include "CommandHelper.hpp"
 #include "DeferredBufferUploads.hpp"
 #include "ShaderBinary.hpp"
+#include "core/ResourceLocator.hpp"
 #include "renderer/FusionRecordLayout.hpp"
 #include "core/Log.hpp"
 #include "core/SpectralData.hpp"
@@ -892,49 +893,25 @@ void RayTracingPipeline::LoadShaders() {
 }
 
 std::vector<u32> RayTracingPipeline::LoadSPIRV(const std::string& path) {
-    // Try multiple search paths
-    const std::vector<std::filesystem::path> searchPaths = {
-        path,  // Original path (relative to CWD or absolute)
-        rendercore::ShaderExecutableDir() / path,  // Relative to executable directory
-    };
-
-    std::ifstream file;
-    std::filesystem::path foundPath;
-
-    for (const auto& tryPath : searchPaths) {
-        file.open(tryPath, std::ios::binary | std::ios::ate);
-        if (file.is_open()) {
-            foundPath = tryPath;
-            break;
+    // One search list for every shader the SDK loads (core/ResourceLocator.hpp):
+    // an explicitly named file is honoured as given, anything else is resolved
+    // by name against the accepted resource root.
+    const std::filesystem::path given(path);
+    if (given.is_absolute() || given.has_parent_path()) {
+        std::vector<u32> direct = rendercore::ReadSpirvFile(given);
+        if (!direct.empty()) {
+            QL_LOG_DEBUG("  Loaded shader from: {}", given.string());
+            return direct;
         }
     }
 
-    if (!file.is_open()) {
+    std::vector<u32> buffer = rendercore::LoadSpirv(given.filename().string());
+    if (buffer.empty()) {
+        const String why = core::ResourceNotFoundMessage();
         throw std::runtime_error("Failed to open shader file: " + path +
-            " (searched in CWD and executable directory)");
+                                 (why.empty() ? " (not in the resolved resource root)" : " (" + why + ")"));
     }
-
-    // tellg() returns -1 on failure, and the buffer holds whole words: a size
-    // that is not a positive multiple of four is not SPIR-V, and reading it into
-    // fileSize / 4 words would write past the end of the buffer.
-    const std::streamoff signedSize = file.tellg();
-    if (signedSize < static_cast<std::streamoff>(sizeof(u32)) ||
-        signedSize % static_cast<std::streamoff>(sizeof(u32)) != 0) {
-        throw std::runtime_error("Invalid SPIR-V file (size is not a positive multiple of 4): " +
-                                 foundPath.string());
-    }
-    const size_t fileSize = static_cast<size_t>(signedSize);
-    std::vector<u32> buffer(fileSize / sizeof(u32));
-
-    file.seekg(0);
-    file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
-    if (!file) {
-        throw std::runtime_error("Failed to read SPIR-V file: " + foundPath.string());
-    }
-    file.close();
-
-    QL_LOG_DEBUG("  Loaded shader from: {}", foundPath.string());
-
+    QL_LOG_DEBUG("  Loaded shader from: {}", path);
     return buffer;
 }
 

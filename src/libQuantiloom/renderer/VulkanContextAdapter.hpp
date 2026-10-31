@@ -16,14 +16,14 @@
  *
  * Usage pattern:
  * @code
- * // In ExternalRenderContext::Initialize()
+ * // In ExternalRenderContext::Initialize(), from the neutral InitParams:
  * VulkanContext::ExternalHandles handles{};
- * handles.instance = params.instance;
- * handles.physicalDevice = params.physicalDevice;
- * handles.device = params.device;
- * handles.graphicsQueue = params.graphicsQueue;
- * handles.graphicsQueueFamily = params.graphicsQueueFamily;
- * handles.allocator = params.externalAllocator;
+ * handles.instance = instance;            // unpacked from params.device
+ * handles.physicalDevice = physicalDevice;
+ * handles.device = device;
+ * handles.graphicsQueue = graphicsQueue;
+ * handles.graphicsQueueFamily = graphicsQueueFamily;
+ * handles.allocator = FromGpuHandle<VmaAllocator>(params.device.vmaAllocator);
  *
  * m_contextAdapter = std::make_unique<VulkanContextAdapter>(handles);
  *
