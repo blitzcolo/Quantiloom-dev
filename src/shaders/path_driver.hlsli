@@ -12,57 +12,51 @@
 //
 // A ray traced from here is record-only (QlTraceRecord): closest-hit writes
 // where it landed, miss says that it missed, and the vertex is shaded here.
-// Both environment-bounce lobes are descended into the same way: the parent's
-// frame is pushed, the child is shaded, and the parent resumes once the
-// child's answer is in. Every other child -- transmission, dispersion, and the
-// fusion interface's, which phase A traces itself -- is still traced through
-// the hit stage, whose ShadeVertex shades that whole subtree recursively.
+// Every child a vertex asks for through Advance is descended into the same
+// way -- both environment-bounce lobes, the refracted or reflected ray, the
+// hero-split ray and the three RGB dispersion rays: the parent's frame is
+// pushed, the child is shaded, and the parent resumes once the child's answer
+// is in. Only the fusion interface's child, which phase A traces itself
+// (TraceFusionInterface), is still traced through the hit stage, whose
+// ShadeVertex shades that subtree recursively.
 //
 // One frame per raygen-shaded ancestor of the vertex being shaded. A vertex
-// pushes only to take a bounce, and SampleBounce takes one only at depth <
-// MAX_PATH_DEPTH. The bounce chain from the primary vertex is the only way
-// down this stack, so the vertex at index i has depth i and at most
-// MAX_PATH_DEPTH frames are live. Were that ever to stop holding, a bounce
+// pushes only to take a child, and every child Advance can ask for is gated on
+// depth < MAX_PATH_DEPTH: the bounce in SampleBounce, transmission where
+// ShadeVertexA enables it. So the vertex at index i has depth i and at most
+// MAX_PATH_DEPTH frames are live. Were that ever to stop holding, a child
 // asked for with the stack full is traced through the hit stage instead --
-// which is what happened to every bounce before, and gives the same answer.
+// which is what happened to every child before, and gives the same answer.
 //
 // What a frame keeps beside the VertexFrame:
 //   v       the vertex's own state as phase A left it, which the fold writes
 //           its outputs into;
+//   medium  the fusion medium statics as phase A left them. A child's phase A
+//           overwrites them. The recursion never noticed, because each
+//           closest-hit invocation had its own and QlTraceRadiance saved and
+//           restored them around its trace; here there is one set per path,
+//           so they are restored before the parent resumes;
 //   kind    the kind of the child in flight, which CompleteChild needs.
-//
-// The fusion medium statics are not kept: a child's phase A overwrites them
-// (the recursion never noticed, since each closest-hit invocation had its own
-// and QlTraceRadiance saved and restored them around its trace), and they are
-// put back from v before a parent resumes -- see QlRestoreMedium.
-//
-// Every vertex runs on through ONE call of QlRunVertex, whether it was just
-// shaded or is resuming after a child, so the fold and the draws after a child
-// exist once in this stage. The vertex in hand lives in locals: a frame is
-// written only when its vertex descends, and read once when it resumes.
 // ============================================================================
 
 #include "shade_vertex.hlsli"
 #include "shade_miss.hlsli"
 
 struct PathFrame {
-    VertexFrame f;
-    PathVertex  v;
-    uint        kind;
+    VertexFrame         f;
+    PathVertex          v;
+    FusionMediumContext medium;
+    uint                kind;
 };
 
-bool QlDescendsInRaygen(uint kind) {
-    return kind == QL_CHILD_BOUNCE || kind == QL_CHILD_BOUNCE_DT;
-}
-
 // Run a vertex on from where its frame stands, as ShadeVertex's loop does,
-// until it asks for a child that raygen descends into (true, with the request
-// in req) or it has folded (false, with its answer in v). Any other child is
-// traced through the hit stage and folded in on the spot.
+// until it asks for a child (true, with the request in req) or it has folded
+// (false, with its answer in v). Only a full stack -- unreachable, see above --
+// has it trace the child through the hit stage and fold it in on the spot.
 bool QlRunVertex(inout VertexFrame f, inout PathVertex v, inout ChildRequest req,
                  bool canDescend) {
     [loop] while (Advance(f, v.depth, req)) {
-        if (canDescend && QlDescendsInRaygen(req.kind)) {
+        if (canDescend) {
             return true;
         }
         CompleteChild(f, req.kind, QlTraceRadiance(req));
@@ -71,68 +65,61 @@ bool QlRunVertex(inout VertexFrame f, inout PathVertex v, inout ChildRequest req
     return false;
 }
 
-// The fusion medium statics as v's phase A set them. A vertex's medium fields
-// are written only while it is built (InheritFusionMedium, raygen's root, a
-// fusion child's copy) and never while it is shaded, so they still hold what
-// ShadeVertexA copied into the statics on entry.
-void QlRestoreMedium(PathVertex v) {
-    fusionActiveMediumCount = v.fusionMediumCount;
-    [unroll]
-    for (uint medium = 0; medium < kFusionMaxInitialMedia; ++medium)
-        fusionActiveMedia[medium] = v.fusionMedia[medium];
-}
-
 // The whole path of one primary ray: vin is what the recursion's primary
 // payload carried in, and the result is what it carried out.
+//
+// A freshly shaded vertex and a resuming one run on through separate calls of
+// QlRunVertex on purpose. One shared call (9970461) made the frame and the
+// vertex values carried around the loop from two sources, and measured slower
+// in every render with a larger raygen stack, so it was reverted.
 PathVertex RunPath(RayDesc ray, uint rayFlags, PathVertex vin) {
     PathFrame stack[MAX_PATH_DEPTH];
     uint sp = 0u;
-    PathVertex v = vin;   // the vertex in hand
     bool pathDone = false;
     [loop] while (!pathDone) {
-        // The vertex at the end of `ray`, up to its first child. The hit ray
-        // is the one the closest-hit stage reconstructs from its intrinsics.
-        // f and req are declared after the trace so that nothing of the
-        // previous vertex is live across it.
-        HitRecord rec;
-        const bool hit = QlTraceRecord(ray, rayFlags, v, rec);
-        VertexFrame f = (VertexFrame)0;
         ChildRequest req = (ChildRequest)0;
-        bool running = false;
-        if (hit) {
+        bool descend = false;
+
+        // The vertex at the end of `ray`: phase A, then on until it asks for a
+        // child or is finished. The hit ray is the one the closest-hit stage
+        // reconstructs from its intrinsics.
+        HitRecord rec;
+        if (QlTraceRecord(ray, rayFlags, vin, rec)) {
             RayDesc hitRay = ray;
             hitRay.TMax = rec.t;
-            ShadeVertexA(rec, hitRay, v, f, req);
-            running = (f.ctl & QL_CTL_FINISHED) == 0u;
+            VertexFrame f = (VertexFrame)0;
+            ShadeVertexA(rec, hitRay, vin, f, req);
+            if ((f.ctl & QL_CTL_FINISHED) == 0u) {
+                if (QlRunVertex(f, vin, req, sp < MAX_PATH_DEPTH)) {
+                    stack[sp].f = f;
+                    stack[sp].v = vin;
+                    stack[sp].medium = SaveFusionMedium();
+                    stack[sp].kind = req.kind;
+                    ++sp;
+                    descend = true;
+                }
+            }
         } else {
-            ShadeMiss(v, ray);
+            ShadeMiss(vin, ray);
         }
 
-        // Run the vertex in hand on until it asks for a bounce (push it and
-        // descend) or is finished (fold it into its parent, which becomes the
-        // vertex in hand), until the primary vertex is done.
-        bool descend = false;
+        // Unless it asked for a child, vin is now a finished vertex. Fold it
+        // into its parent, and the parent into its own, until one of them asks
+        // for another child or the primary vertex is done.
         [loop] while (!descend && !pathDone) {
-            bool asked = false;
-            if (running) {
-                asked = QlRunVertex(f, v, req, sp < MAX_PATH_DEPTH);
-            }
-            if (asked) {
-                stack[sp].f = f;
-                stack[sp].v = v;
-                stack[sp].kind = req.kind;
-                ++sp;
-                descend = true;
-            } else if (sp == 0u) {
+            if (sp == 0u) {
                 pathDone = true;
             } else {
-                --sp;
-                const PathVertex child = v;
-                f = stack[sp].f;
-                v = stack[sp].v;
-                QlRestoreMedium(v);
-                CompleteChild(f, stack[sp].kind, child);
-                running = true;
+                const uint top = sp - 1u;
+                RestoreFusionMedium(stack[top].medium);
+                CompleteChild(stack[top].f, stack[top].kind, vin);
+                if (QlRunVertex(stack[top].f, stack[top].v, req, true)) {
+                    stack[top].kind = req.kind;
+                    descend = true;
+                } else {
+                    vin = stack[top].v;
+                    sp = top;
+                }
             }
         }
 
@@ -141,10 +128,10 @@ PathVertex RunPath(RayDesc ray, uint rayFlags, PathVertex vin) {
             // the statics hold the parent's at this point.
             ray = req.ray;
             rayFlags = req.rayFlags;
-            v = QlFromRay(QlChildPayload(req));
+            vin = QlFromRay(QlChildPayload(req));
         }
     }
-    return v;
+    return vin;
 }
 
 #endif // QUANTILOOM_PATH_DRIVER_HLSLI
