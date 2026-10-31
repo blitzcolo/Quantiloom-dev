@@ -184,7 +184,7 @@ TEST_F(ComputeMigrationAB, ThermalStep) {
     using namespace quantiloom::thermal;
     using quantiloom::rendercore::GpuThermalStepper;
 
-    GpuThermalStepper stepper(Device());
+    GpuThermalStepper stepper(GpuDevice());
     if (!stepper.IsValid()) GTEST_SKIP() << "thermal_step.spv unavailable";
 
     Vector<ThermalElement> elements(2);
