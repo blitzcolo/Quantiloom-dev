@@ -301,11 +301,18 @@ set(TEST_RENDERER_SOURCES
     test_renderer/test_camera_response_gpu.cpp
     test_renderer/test_offline_batch_scheduler.cpp
     test_renderer/test_display_range_gpu.cpp
+    test_renderer/test_compute_migration_ab.cpp
 )
 
 # Shared test infrastructure (headless Vulkan device, created on first use)
 set(TEST_SUPPORT_SOURCES
     support/VulkanTestDevice.cpp
+)
+
+# Internal compute RHI (gpu/): CPU mapping tables and a GPU smoke suite
+set(TEST_GPU_SOURCES
+    test_gpu/test_gpu_mapping.cpp
+    test_gpu/test_gpu_vulkan.cpp
 )
 
 # Postprocess tests (sensor simulation, multiband fusion)
@@ -375,6 +382,7 @@ set(TEST_SPECTRAFORGE_SOURCES
 set(ALL_TEST_SOURCES
     ${TEST_MAIN_SOURCE}
     ${TEST_SUPPORT_SOURCES}
+    ${TEST_GPU_SOURCES}
     ${TEST_CORE_SOURCES}
     ${TEST_SCENE_SOURCES}
     ${TEST_IO_SOURCES}
@@ -691,7 +699,7 @@ add_custom_target(test_io
 
 # Run only renderer tests (non-Vulkan)
 add_custom_target(test_renderer
-    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*
+    COMMAND $<TARGET_FILE:libquantiloom_tests> --gtest_filter=BRDFLutGeneratorTest.*:LightingParamsTest.*:AccelerationStructureTest.*:ComputeMigrationAB.*:GpuMappingTest.*:GpuShaderLibraryTest.*:GpuVulkanTest.*
     DEPENDS libquantiloom_tests
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
 )

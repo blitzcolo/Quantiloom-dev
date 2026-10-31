@@ -29,6 +29,10 @@ namespace quantiloom {
 class VulkanContext;
 }
 
+namespace quantiloom::gpu {
+class Device;
+}
+
 namespace quantiloom::testing {
 
 /// The shared headless context, or nullptr when this machine cannot provide one.
@@ -37,6 +41,9 @@ VulkanContext* SharedVulkanDevice();
 
 /// Why SharedVulkanDevice() returned nullptr. Empty before the first attempt.
 const std::string& VulkanDeviceUnavailableReason();
+
+/// The shared gpu::Device adopted over SharedVulkanDevice(), or nullptr without a context.
+gpu::Device* SharedGpuDevice();
 
 /// Destroy the shared context. Called from the test main's environment teardown,
 /// which runs before logging shuts down -- the destructor logs.
@@ -59,6 +66,9 @@ protected:
 
     /// Valid for the body of any case that reached it -- SetUp skipped otherwise.
     [[nodiscard]] VulkanContext& Device() const;
+
+    /// The compute RHI view of the same context.
+    [[nodiscard]] gpu::Device& GpuDevice() const;
 };
 
 } // namespace quantiloom::testing
