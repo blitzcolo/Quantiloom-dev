@@ -16,6 +16,8 @@
 #include "support/FacadeScene.hpp"
 #include "support/VulkanTestDevice.hpp"
 
+#include "gpu/vulkan/VulkanBridge.hpp"
+
 #include "core/Sha256.hpp"
 #include "core/SpectralCube.hpp"
 #include "hs_core/GpuSpectralReconstructor.hpp"

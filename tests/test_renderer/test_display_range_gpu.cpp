@@ -434,7 +434,7 @@ TEST_F(DisplayRangeGpuTest, DISABLED_BenchmarkGpuHistogramAgainstFullImageReadba
 
             const auto gpuStart = std::chrono::steady_clock::now();
             const auto computed = gpu->Compute(
-                *image, bench.width, bench.height, 1.0f, 99.0f);
+                gpu::vulkan::Ref(*image), bench.width, bench.height, 1.0f, 99.0f);
             const auto gpuEnd = std::chrono::steady_clock::now();
             ASSERT_TRUE(computed.has_value()) << computed.error();
             EXPECT_EQ(computed.value().min, cpu.min);
