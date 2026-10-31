@@ -173,6 +173,8 @@ add_library(quantiloom_core OBJECT
     renderer/GpuCameraPipeline.hpp
     renderer/GpuDisplayRange.cpp
     renderer/GpuDisplayRange.hpp
+    renderer/GpuClahe.cpp
+    renderer/GpuClahe.hpp
     renderer/ShaderBinary.cpp
     renderer/ShaderBinary.hpp
     # Internal compute RHI -- no QL_API, nothing installed (gpu/AGENTS.md)

@@ -162,29 +162,29 @@ struct GpuThermalStepper::Impl {
             {13, gpu::BindingKind::ReadWriteBuffer, 1, false},
         };
 
-        auto bindingLayout = device.CreateBindingLayout(
+        auto bindingLayoutResult = device.CreateBindingLayout(
             gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
-        if (!bindingLayout.has_value()) return false;
+        if (!bindingLayoutResult.has_value()) return false;
 
-        const gpu::BindingLayout* spaces[] = {bindingLayout.value().get()};
-        auto kernelLayout = device.CreateKernelLayout(gpu::KernelLayoutDesc{
+        const gpu::BindingLayout* spaces[] = {bindingLayoutResult.value().get()};
+        auto kernelLayoutResult = device.CreateKernelLayout(gpu::KernelLayoutDesc{
             std::span<const gpu::BindingLayout* const>(spaces), sizeof(StepPushConstants)});
-        if (!kernelLayout.has_value()) return false;
+        if (!kernelLayoutResult.has_value()) return false;
 
-        auto kernel = device.CreateComputeKernel(
-            gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayout.value().get()});
-        if (!kernel.has_value()) return false;
+        auto kernelResult = device.CreateComputeKernel(
+            gpu::ComputeKernelDesc{&shaders.value()[0], kernelLayoutResult.value().get()});
+        if (!kernelResult.has_value()) return false;
 
-        auto pool = device.CreateBindGroupPool(*bindingLayout.value(), 1);
-        if (!pool.has_value()) return false;
+        auto poolResult = device.CreateBindGroupPool(*bindingLayoutResult.value(), 1);
+        if (!poolResult.has_value()) return false;
 
-        auto groups = pool.value()->Allocate(1);
+        auto groups = poolResult.value()->Allocate(1);
         if (!groups.has_value()) return false;
 
-        this->bindingLayout = std::move(bindingLayout.value());
-        this->kernelLayout = std::move(kernelLayout.value());
-        this->kernel = std::move(kernel.value());
-        this->pool = std::move(pool.value());
+        this->bindingLayout = std::move(bindingLayoutResult.value());
+        this->kernelLayout = std::move(kernelLayoutResult.value());
+        this->kernel = std::move(kernelResult.value());
+        this->pool = std::move(poolResult.value());
         bindGroup = groups.value()[0];
         return true;
     }
