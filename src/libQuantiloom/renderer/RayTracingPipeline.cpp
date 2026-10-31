@@ -42,6 +42,41 @@ static u32 GetMaxTexturesForDevice(const VulkanContext& ctx) {
     return ctx.GetCapabilities().hasDescriptorIndexing ? 1024 : 32;
 }
 
+// What the driver says each group needs on the ray tracing stack, and what the
+// pipeline is therefore given when nothing calls
+// vkCmdSetRayTracingPipelineStackSizeKHR (nothing here does). The default is
+// the specification's own formula over the recursion depth the pipeline was
+// created with, so a deeper recursion multiplies the closest-hit's share and a
+// heavier raygen adds once. Logged per variant because the numbers depend on
+// the specialisation constants the variant was compiled with.
+static void LogPipelineStackSizes(VkDevice device, VkPipeline pipeline, u32 spectralMode,
+                                  u32 recursionDepth) {
+    const auto vkGetRayTracingShaderGroupStackSizeKHR =
+        reinterpret_cast<PFN_vkGetRayTracingShaderGroupStackSizeKHR>(
+            vkGetDeviceProcAddr(device, "vkGetRayTracingShaderGroupStackSizeKHR"));
+    if (!vkGetRayTracingShaderGroupStackSizeKHR) {
+        QL_LOG_WARN("  Ray tracing stack sizes: vkGetRayTracingShaderGroupStackSizeKHR unavailable");
+        return;
+    }
+    const auto size = [&](u32 group, VkShaderGroupShaderKHR shader) {
+        return static_cast<u64>(
+            vkGetRayTracingShaderGroupStackSizeKHR(device, pipeline, group, shader));
+    };
+    const u64 rgen = size(0, VK_SHADER_GROUP_SHADER_GENERAL_KHR);
+    const u64 chit = size(1, VK_SHADER_GROUP_SHADER_CLOSEST_HIT_KHR);
+    const u64 ahit = size(1, VK_SHADER_GROUP_SHADER_ANY_HIT_KHR);
+    const u64 miss = std::max(size(2, VK_SHADER_GROUP_SHADER_GENERAL_KHR),
+                              size(3, VK_SHADER_GROUP_SHADER_GENERAL_KHR));
+    const u64 depth = recursionDepth;
+    const u64 deepest = std::max(chit, miss);
+    const u64 pipelineDefault =
+        rgen + std::min<u64>(1, depth) * std::max(deepest, ahit) +
+        (depth > 0 ? depth - 1 : 0) * deepest;
+    QL_LOG_INFO("  Ray tracing stack sizes (mode {}): raygen {} B, closest-hit {} B, any-hit {} B, "
+                "miss {} B; pipeline default at recursion depth {}: {} B",
+                spectralMode, rgen, chit, ahit, miss, recursionDepth, pipelineDefault);
+}
+
 static void WriteStorageImage(VkDevice device, VkDescriptorSet set, u32 binding,
                               const GpuImage& image) {
     VkDescriptorImageInfo info{};
@@ -1080,6 +1115,8 @@ RayTracingPipeline::PipelineVariant RayTracingPipeline::CreatePipelineVariant(co
         throw std::runtime_error("Failed to get ray tracing shader group handles (VkResult " +
                                  std::to_string(static_cast<int>(handlesResult)) + ")");
     }
+    LogPipelineStackSizes(device, variant.pipeline, spec.spectralMode,
+                          kMaxPipelineRayRecursionDepth);
 
     std::vector<u8> sbtData(sbtSize, 0);
     std::memcpy(sbtData.data(), handleData.data() + handleSize * 0, handleSize);
