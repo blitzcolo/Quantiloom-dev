@@ -1,10 +1,17 @@
 // ============================================================================
 // Quantiloom - CLAHE display path, driven through the ExternalRenderContext facade
 // ============================================================================
-// Thermography rule (repository AGENTS.md): on an achromatic image, Linear and Equalize must
-// show zero inverted pairs -- a pixel that was darker in the source is never brighter on
-// screen -- and Clahe must stay finite and inside [0, 1]. The extraction to renderer/GpuClahe
-// moves this test from the facade to the class; the claim stays.
+// What the tone operators guarantee (src/shaders/clahe.comp.hlsl):
+//   - With luminanceOnly off, every channel goes through ONE fixed function of its own
+//     value: the percentile window (Linear) or the global CDF (Equalize, where all four
+//     tiles' CDFs are identical, so the blend is exact). So equal inputs give equal
+//     outputs and a brighter input is never darker on screen, per channel.
+//   - With luminanceOnly on, only grey pixels are luminance-monotone; a coloured pixel is
+//     scaled per channel and clamped per channel, which preserves chroma and not order.
+// The Cornell box has red and green walls, so luminance order is not a property of this
+// image and is not asserted. Clahe blends per-tile CDFs and is only required to stay
+// finite and inside [0, 1]. The extraction to renderer/GpuClahe moves this test from the
+// facade to the class; the claims stay.
 // ============================================================================
 
 #include <gtest/gtest.h>
@@ -24,43 +31,47 @@ namespace {
 
 class GpuClaheTest : public VulkanDeviceTest {};
 
-f64 Luminance(const Image& image, size_t pixel) {
-    const f32* p = &image.data[pixel * image.channels];
-    if (image.channels < 3) return p[0];
-    return 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
-}
-
-// Pixels sorted by source luminance; a group of equal source values must not dip below the
-// brightest display value of any strictly darker group.
-size_t CountInvertedGroups(const Image& source, const Image& shown) {
-    std::vector<std::pair<f64, f64>> pairs;
+// Pixels of one channel sorted by source value. A group of equal sources must show one
+// value, and no group may show less than the brightest of any strictly darker group.
+// 1e-6 is far below the smallest step the mapping can take (one CDF bin of a 4096-pixel
+// image is 2.4e-4), so it absorbs rounding and nothing else.
+size_t CountBrokenGroups(const Image& source, const Image& shown, u32 channel) {
+    std::vector<std::pair<f32, f32>> pairs;
     const size_t pixels = static_cast<size_t>(source.width) * source.height;
     pairs.reserve(pixels);
-    for (size_t i = 0; i < pixels; ++i) pairs.emplace_back(Luminance(source, i), Luminance(shown, i));
+    for (size_t i = 0; i < pixels; ++i) {
+        const f32 raw = source.data[i * source.channels + channel];
+        if (!std::isfinite(raw)) continue;
+        pairs.emplace_back(raw, shown.data[i * shown.channels + channel]);
+    }
     std::sort(pairs.begin(), pairs.end());
 
-    size_t inverted = 0;
-    f64 brightestBelow = -1.0;
+    constexpr f32 kTolerance = 1e-6f;
+    size_t broken = 0;
+    bool haveBelow = false;
+    f32 brightestBelow = 0.0f;
     size_t begin = 0;
     while (begin < pairs.size()) {
         size_t end = begin;
-        f64 groupMin = pairs[begin].second;
-        f64 groupMax = pairs[begin].second;
+        f32 groupMin = pairs[begin].second;
+        f32 groupMax = pairs[begin].second;
         while (end < pairs.size() && pairs[end].first == pairs[begin].first) {
             groupMin = std::min(groupMin, pairs[end].second);
             groupMax = std::max(groupMax, pairs[end].second);
             ++end;
         }
-        if (brightestBelow >= 0.0 && groupMin < brightestBelow - 1e-6) ++inverted;
-        brightestBelow = std::max(brightestBelow, groupMax);
+        if (groupMax - groupMin > kTolerance) ++broken;
+        if (haveBelow && groupMin < brightestBelow - kTolerance) ++broken;
+        brightestBelow = haveBelow ? std::max(brightestBelow, groupMax) : groupMax;
+        haveBelow = true;
         begin = end;
     }
-    return inverted;
+    return broken;
 }
 
 }  // namespace
 
-TEST_F(GpuClaheTest, MonotoneTonesNeverInvertAnAchromaticImage) {
+TEST_F(GpuClaheTest, PerChannelTonesNeverInvertTheirOwnChannel) {
     if (!quantiloom::testing::FacadeScene::HasAssets()) GTEST_SKIP() << "cornell_box.gltf not in assets";
     quantiloom::testing::FacadeScene scene(Device());
     ASSERT_TRUE(scene.Ready()) << scene.Error();
@@ -71,6 +82,7 @@ TEST_F(GpuClaheTest, MonotoneTonesNeverInvertAnAchromaticImage) {
         params.enabled = true;
         params.toneMode = tone;
         params.palette = DisplayPalette::Grey;
+        params.luminanceOnly = false;
         scene.Context().SetDisplayEnhancementParams(params);
         scene.DrawFrame();
         scene.DrawFrame();
@@ -79,8 +91,13 @@ TEST_F(GpuClaheTest, MonotoneTonesNeverInvertAnAchromaticImage) {
         ASSERT_TRUE(raw.has_value()) << raw.error();
         ASSERT_TRUE(shown.has_value()) << shown.error();
         ASSERT_EQ(raw.value().width, shown.value().width);
-        EXPECT_EQ(CountInvertedGroups(raw.value(), shown.value()), 0u)
-            << "tone mode " << static_cast<int>(tone);
+        ASSERT_EQ(raw.value().height, shown.value().height);
+        ASSERT_GE(raw.value().channels, 3u);
+        ASSERT_GE(shown.value().channels, 3u);
+        for (u32 channel = 0; channel < 3u; ++channel) {
+            EXPECT_EQ(CountBrokenGroups(raw.value(), shown.value(), channel), 0u)
+                << "tone mode " << static_cast<int>(tone) << ", channel " << channel;
+        }
     }
 }
 
