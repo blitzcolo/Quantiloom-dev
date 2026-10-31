@@ -23,7 +23,8 @@
 
 // Use ByteAddressBuffer for vertex/normal to avoid float3 stride alignment issues
 // StructuredBuffer<float3> may use 16-byte stride on some drivers, causing out-of-bounds reads
-ByteAddressBuffer vertexBuffer : register(t3, space0);    // Vertex positions (12 bytes each)
+// Binding 3 (vertex positions, 12 bytes each) is declared in ql_trace.hlsli,
+// whose inline coverage test reads it too.
 // Bindings 4/5/6/7/8 (indices, materials, textures, samplers, UVs) live in
 // hit_common.hlsli, shared with the any-hit stage.
 StructuredBuffer<float4> tangentBuffer : register(t9, space0);   // Tangent vectors (optional)

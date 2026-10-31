@@ -111,6 +111,9 @@ if(QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE)
     list(APPEND DXC_RT_FLAGS -D QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE=1)
     list(APPEND DXC_COMP_FLAGS -D QUANTILOOM_UNSTRATIFIED_FIRST_BOUNCE=1)
 endif()
+# raygen traces inline (RayQuery), which needs lib_6_5; the other stages keep lib_6_3.
+set(DXC_RTQ_FLAGS ${DXC_RT_FLAGS})
+list(TRANSFORM DXC_RTQ_FLAGS REPLACE "^lib_6_3$" "lib_6_5")
 # Inline ray query needs SM 6.5; everything else stays on the byte-stable 6.0
 set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 
@@ -124,7 +127,7 @@ set(DXC_RQ_FLAGS   -spirv -T cs_6_5  -fspv-target-env=vulkan1.2 -E main)
 # an unchanged configure still costs nothing.
 set(SHADER_FLAGS_STAMP "${CMAKE_CURRENT_BINARY_DIR}/shader_flags.stamp")
 file(CONFIGURE OUTPUT "${SHADER_FLAGS_STAMP}"
-     CONTENT "RT=${DXC_RT_FLAGS}\nCOMP=${DXC_COMP_FLAGS}\nRQ=${DXC_RQ_FLAGS}\nMSC=${QUANTILOOM_MSC_FLAGS}\n")
+     CONTENT "RT=${DXC_RT_FLAGS}\nRTQ=${DXC_RTQ_FLAGS}\nCOMP=${DXC_COMP_FLAGS}\nRQ=${DXC_RQ_FLAGS}\nMSC=${QUANTILOOM_MSC_FLAGS}\n")
 
 set(COMPILED_SHADERS)
 
@@ -138,6 +141,8 @@ function(quantiloom_compile_hlsl OUT_NAME SRC_NAME)
         set(FLAGS ${DXC_RQ_FLAGS})
     elseif(${SRC_NAME} MATCHES "\\.comp\\.hlsl$")
         set(FLAGS ${DXC_COMP_FLAGS})
+    elseif(${SRC_NAME} STREQUAL "raygen.rgen")
+        set(FLAGS ${DXC_RTQ_FLAGS})
     else()
         set(FLAGS ${DXC_RT_FLAGS})
     endif()

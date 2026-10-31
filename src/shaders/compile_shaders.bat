@@ -49,7 +49,7 @@ echo       OK src/shaders/fusion_geometry.spv created
 
 REM Compile raygen shader
 echo [2/26] Compiling raygen.rgen...
-dxc %FLAGS% -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
+dxc %FLAGS:lib_6_3=lib_6_5% -Fo src/shaders/raygen.spv src/shaders/raygen.rgen
 if %ERRORLEVEL% NEQ 0 (
     echo       X Failed to compile raygen.rgen
     pause

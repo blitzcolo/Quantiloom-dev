@@ -50,7 +50,7 @@ compile "[1/26] Compiling fusion_geometry.rayq..." \
 echo "      OK src/shaders/fusion_geometry.spv created"
 
 compile "[2/26] Compiling raygen.rgen..." \
-    dxc $FLAGS -Fo src/shaders/raygen.spv src/shaders/raygen.rgen || exit 1
+    dxc ${FLAGS/lib_6_3/lib_6_5} -Fo src/shaders/raygen.spv src/shaders/raygen.rgen || exit 1
 echo "      OK src/shaders/raygen.spv created"
 
 compile "[3/26] Compiling closesthit.rchit..." \
