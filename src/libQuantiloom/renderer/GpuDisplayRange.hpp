@@ -5,6 +5,10 @@
 
 #include <memory>
 
+namespace quantiloom::gpu {
+class Device;
+}
+
 namespace quantiloom::rendercore {
 
 /// Percentile window computed from an RGBA32F image's finite RGB pixels.

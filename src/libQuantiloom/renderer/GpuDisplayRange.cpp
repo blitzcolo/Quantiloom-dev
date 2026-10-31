@@ -76,35 +76,35 @@ struct GpuDisplayRange::Impl {
             {1, gpu::BindingKind::ReadWriteBuffer, 1, false},
             {2, gpu::BindingKind::ReadWriteBuffer, 1, false},
         };
-        auto bindingLayout = device.CreateBindingLayout(
+        auto layoutResult = device.CreateBindingLayout(
             gpu::BindingLayoutDesc{0, std::span<const gpu::BindingSlot>(kSlots)});
-        if (!bindingLayout.has_value())
+        if (!layoutResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range descriptor layout");
 
-        const gpu::BindingLayout* spaces[] = {bindingLayout.value().get()};
-        auto kernelLayout = device.CreateKernelLayout(gpu::KernelLayoutDesc{
+        const gpu::BindingLayout* spaces[] = {layoutResult.value().get()};
+        auto kernelLayoutResult = device.CreateKernelLayout(gpu::KernelLayoutDesc{
             std::span<const gpu::BindingLayout* const>(spaces), sizeof(DisplayRangePush)});
-        if (!kernelLayout.has_value())
+        if (!kernelLayoutResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range pipeline layout");
 
-        auto extentsKernel = device.CreateComputeKernel(gpu::ComputeKernelDesc{
-            &shaders.value()[0], kernelLayout.value().get()});
-        if (!extentsKernel.has_value())
+        auto extentsResult = device.CreateComputeKernel(gpu::ComputeKernelDesc{
+            &shaders.value()[0], kernelLayoutResult.value().get()});
+        if (!extentsResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range compute pipelines");
-        auto histogramKernel = device.CreateComputeKernel(gpu::ComputeKernelDesc{
-            &shaders.value()[1], kernelLayout.value().get()});
-        if (!histogramKernel.has_value())
+        auto histogramResult = device.CreateComputeKernel(gpu::ComputeKernelDesc{
+            &shaders.value()[1], kernelLayoutResult.value().get()});
+        if (!histogramResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range compute pipelines");
 
-        auto pool = device.CreateBindGroupPool(*bindingLayout.value(), 1);
-        if (!pool.has_value())
+        auto poolResult = device.CreateBindGroupPool(*layoutResult.value(), 1);
+        if (!poolResult.has_value())
             return Result<void, String>::Err(
                 "cannot create display-range descriptor pool");
-        auto groups = pool.value()->Allocate(1);
+        auto groups = poolResult.value()->Allocate(1);
         if (!groups.has_value())
             return Result<void, String>::Err(
                 "cannot allocate display-range descriptor set");
@@ -112,38 +112,38 @@ struct GpuDisplayRange::Impl {
         const u64 scratchBytes = kScratchWords * sizeof(u32);
         const u64 histogramBytes =
             static_cast<u64>(GpuDisplayRange::kHistogramBins) * sizeof(u32);
-        auto scratch = device.CreateBuffer(gpu::BufferDesc{
+        auto scratchResult = device.CreateBuffer(gpu::BufferDesc{
             scratchBytes,
             gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
                 gpu::BufferUsage::TransferSrc,
             gpu::MemoryClass::DeviceLocal, 0});
-        auto histogram = device.CreateBuffer(gpu::BufferDesc{
+        auto histogramBufferResult = device.CreateBuffer(gpu::BufferDesc{
             histogramBytes,
             gpu::BufferUsage::Storage | gpu::BufferUsage::TransferDst |
                 gpu::BufferUsage::TransferSrc,
             gpu::MemoryClass::DeviceLocal, 0});
-        auto scratchReadback = device.CreateBuffer(gpu::BufferDesc{
+        auto readbackResult = device.CreateBuffer(gpu::BufferDesc{
             scratchBytes, gpu::BufferUsage::TransferDst, gpu::MemoryClass::Readback, 0});
-        if (!scratch.has_value() || !histogram.has_value() ||
-            !scratchReadback.has_value())
+        if (!scratchResult.has_value() || !histogramBufferResult.has_value() ||
+            !readbackResult.has_value())
             return Result<void, String>::Err("cannot allocate display-range buffers");
 
         const gpu::BindingWrite staticWrites[] = {
             gpu::BindingWrite::Buffer(1, gpu::BindingKind::ReadWriteBuffer,
-                                      scratch.value()->Ref()),
+                                      scratchResult.value()->Ref()),
             gpu::BindingWrite::Buffer(2, gpu::BindingKind::ReadWriteBuffer,
-                                      histogram.value()->Ref()),
+                                      histogramBufferResult.value()->Ref()),
         };
 
-        this->bindingLayout = std::move(bindingLayout.value());
-        this->kernelLayout = std::move(kernelLayout.value());
-        this->extentsKernel = std::move(extentsKernel.value());
-        this->histogramKernel = std::move(histogramKernel.value());
-        this->pool = std::move(pool.value());
+        this->bindingLayout = std::move(layoutResult.value());
+        this->kernelLayout = std::move(kernelLayoutResult.value());
+        this->extentsKernel = std::move(extentsResult.value());
+        this->histogramKernel = std::move(histogramResult.value());
+        this->pool = std::move(poolResult.value());
         group = groups.value()[0];
-        this->scratch = std::move(scratch.value());
-        this->histogram = std::move(histogram.value());
-        this->scratchReadback = std::move(scratchReadback.value());
+        this->scratch = std::move(scratchResult.value());
+        this->histogram = std::move(histogramBufferResult.value());
+        this->scratchReadback = std::move(readbackResult.value());
 
         // Bindings 1 and 2 are written once here; binding 0 (the input view)
         // is rewritten on every Compute.
